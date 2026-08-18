@@ -1,0 +1,17 @@
+# mini me runtime/local secrets
+.env
+*.env
+!*.env.example
+.minime/
+*.pem
+*.key
+
+# Python
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# local runtime/logs
+logs/

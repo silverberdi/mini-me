@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "result_class",
+    "provider",
+    "role"
+  ],
+  "properties": {
+    "result_class": {
+      "enum": [
+        "success",
+        "transient_error",
+        "quota_limit",
+        "rate_limit",
+        "auth_error",
+        "timeout",
+        "malformed_output",
+        "cancelled",
+        "policy_denied",
+        "unsafe_binding",
+        "unknown_error"
+      ]
+    },
+    "provider": {
+      "type": "string"
+    },
+    "model": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "role": {
+      "type": "string"
+    },
+    "retry_after": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "capacity_reset_at": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "summary": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

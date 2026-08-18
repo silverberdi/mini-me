@@ -1,0 +1,90 @@
+server:
+  bind_host: 127.0.0.1
+  bind_port: 8787
+
+database:
+  url_env: MINIME_DATABASE_URL
+
+paths:
+  repos_root: /var/lib/minime/repos
+  worktrees_root: /var/lib/minime/worktrees
+  runtime_root: /var/lib/minime/runtime
+
+scheduler:
+  max_global_jobs: 1
+  mode: RUN
+  one_active_implementation_per_project: true
+  max_review_rounds: 2
+
+providers:
+  codex:
+    type: cli
+    command: codex
+    enabled: true
+    roles: [implementer, reviewer]
+  antigravity:
+    type: cli
+    command: agy
+    enabled: true
+    roles: [implementer, reviewer]
+  deepseek:
+    type: openai-compatible-direct
+    base_url: https://api.deepseek.com
+    api_key_env: DEEPSEEK_API_KEY
+    roles: [auditor]
+  qwen-local:
+    type: openai-compatible
+    enabled: false
+    base_url: http://127.0.0.1:11434/v1
+    roles: [helper]
+    paid: false
+  openrouter:
+    type: openai-compatible
+    enabled: false
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    paid: true
+    mode: drain-only
+    budget:
+      daily_usd: 0
+      monthly_usd: 0
+    drain:
+      implementer_models:
+        - qwen/qwen3-coder
+      reviewer_models: []  # MUST be configured; same model as substantive implementer is forbidden.
+      require_distinct_review_model: true
+
+github:
+  account_scope: personal
+  owner: REPLACE_ME
+  app_id_env: MINIME_GITHUB_APP_ID
+  installation_id_env: MINIME_GITHUB_INSTALLATION_ID
+  private_key_path_env: MINIME_GITHUB_PRIVATE_KEY_PATH
+  global_project_number: null
+
+security:
+  redact_secrets: true
+  autonomous_merge: false
+  allow_paid_fallback_by_default: false
+
+projects:
+  mini-me:
+    enabled: true
+    repository: REPLACE_ME/mini-me
+    base_branch: main
+    openspec_path: openspec
+    implementer: codex
+    reviewer: antigravity
+    checks: []  # Filled by Foundation implementation once project tooling exists.
+    external_providers_allowed: [codex, antigravity, deepseek]
+    openrouter_drain_allowed: false
+    deployment:
+      preview:
+        required_for_ui_changes: true
+        strategy: compose
+        ui_url: null
+        compose_file: null
+      production:
+        deploy_after_merge: true
+        compose_file: null
+        rollback_requires_human: true

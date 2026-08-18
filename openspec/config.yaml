@@ -1,0 +1,56 @@
+schema: spec-driven
+
+context: |
+  Product: mini me.
+  Purpose: personal single-installation Linux orchestrator for spec-driven software development across multiple repositories.
+  Source-of-truth boundaries: GitHub Projects/Issues = portfolio/work visibility; OpenSpec = behavior/design/tasks; PostgreSQL = runtime state/events/evidence/metrics; Git = code/candidate evidence; host secret files = credentials.
+  Stack direction: Python 3.12+, FastAPI, Pydantic v2, PostgreSQL, SQLAlchemy 2.x, Alembic, asyncio subprocesses, pytest, Ruff; Textual TUI later; containerized previews/deployments.
+  Primary agents: Codex and Antigravity in complementary implementer/reviewer roles configured per project. DeepSeek Direct is independent read-only auditor. OpenRouter is paid drain-only fallback; it never starts new READY work when both subscription primaries are exhausted. Same model may not substantively implement and authoritatively review the same candidate. Qwen does not review Qwen.
+  Human authority: final product judgment, UI validation, merge, material ambiguity, policy/budget override and rollback.
+  Repository identity: execution derives only from validated durable project binding; never infer repo from titles/labels/Project fields.
+  Deployment: container-first. Human validation is for UI and must be guided by explicit scenarios. Validation is bound to candidate head SHA + base SHA and immutable image digest where applicable.
+  Delivery rule: only the active OpenSpec change may be implemented. Future roadmap work must not be implemented early.
+
+rules:
+  proposal:
+    - State the independently verifiable user/operator value and why this stage is now.
+    - Declare dependencies and explicitly identify non-goals/future stages to prevent scope creep.
+    - Identify whether the change affects UI and therefore requires human validation scenarios.
+    - Identify security, provider-cost, repository-binding and deployment impact where applicable.
+  specs:
+    - Write observable SHALL/SHALL NOT requirements with concrete scenarios for critical paths and denial/failure behavior.
+    - Never encode runtime retry/quota/process state into OpenSpec as mutable operational data.
+    - For UI human validation, specify what the human tests, prerequisites, steps and expected visible outcomes.
+    - Include explicit safety requirements for repository identity, secrets, paid fallback, candidate identity or production data when affected.
+  design:
+    - Resolve implementation-shaping architecture decisions; do not leave the executor to invent them.
+    - Preserve daemon/core ownership of orchestration; clients do not invoke providers/Git/deployment directly.
+    - PostgreSQL is the only operational DB and schema changes use Alembic migrations.
+    - Prefer idempotent/reconcilable external side effects and durable evidence before/after them.
+    - Explain rollback/recovery implications for deployment or migration changes.
+  tasks:
+    - Keep tasks small, ordered, testable and attributable to this change only.
+    - Every task must have a verifiable completion signal; include acceptance/failure-injection tasks.
+    - Do not add tasks from future roadmap stages merely because they are convenient.
+  apply:
+    - Read AGENTS.md and all referenced canonical docs before editing.
+    - Work only in the assigned repository/worktree and active change.
+    - Stop on material ambiguity rather than inventing behavior, architecture, cost policy or repo identity.
+    - Run focused tests/checks as work progresses and preserve evidence.
+    - Never merge, weaken policy, expose secrets or bypass mandatory human validation.
+  verify:
+    - Verify observable specs, deterministic tests/checks, denial/failure scenarios, scope discipline and canonical architecture constraints.
+    - Treat repository mismatch, same-model self-review, paid fallback policy violation, secret leakage and stale human validation as blocking defects.
+    - Report evidence gaps explicitly; do not infer PASS from an agent claim.
+
+operations:
+  apply:
+    guidance:
+      - Use the active change tasks as execution order but specs as behavioral authority.
+      - Keep changes focused and reversible.
+  archive:
+    guidance:
+      - Archive only after mini me Definition of Done conditions applicable to the stage are satisfied and closure evidence exists.
+
+githubCopilot:
+  cloudAgent: false
