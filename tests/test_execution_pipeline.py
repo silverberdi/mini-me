@@ -9,6 +9,7 @@ import pytest
 
 from minime.domain.enums import ChangeStatus, EventType, JobStatus, ReadinessState
 from minime.domain.models import Change, Project
+from minime.services.deepseek_auditor_runner import MockAuditorRunner
 from minime.services.execution_pipeline import ExecutionPipelineService
 from minime.services.implementer_runner import MockImplementerRunner
 from minime.services.reviewer_runner import MockReviewerRunner
@@ -154,6 +155,9 @@ async def test_execution_pipeline_success_records_evidence_and_cleans_worktree(
             stdout=[
                 '```json\n{"verdict": "READY_TO_MERGE", "summary": "All good", "findings": []}\n```'
             ]
+        ),
+        auditor_runner=MockAuditorRunner(
+            output=['{"risk": "low", "summary": "No material risk.", "findings": []}']
         ),
         worktree_manager=worktrees,
     )

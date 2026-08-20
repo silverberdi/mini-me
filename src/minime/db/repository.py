@@ -6,6 +6,8 @@ from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
 from minime.db.models import (
+    AuditFindingModel,
+    AuditModel,
     ChangeModel,
     CheckResultModel,
     EventModel,
@@ -18,6 +20,9 @@ from minime.db.models import (
     ReviewModel,
 )
 from minime.domain.enums import (
+    AuditFindingSeverity,
+    AuditRiskLevel,
+    AuditStatus,
     ChangeStatus,
     EventType,
     FindingSeverity,
@@ -28,6 +33,8 @@ from minime.domain.enums import (
     ReviewVerdict,
 )
 from minime.domain.interfaces import (
+    AuditFindingRepositoryInterface,
+    AuditRepositoryInterface,
     ChangeRepositoryInterface,
     CheckResultRepositoryInterface,
     EventRepositoryInterface,
@@ -41,6 +48,8 @@ from minime.domain.interfaces import (
     ReviewRepositoryInterface,
 )
 from minime.domain.models import (
+    AuditFinding,
+    AuditRecord,
     Change,
     CheckResult,
     Event,
@@ -199,6 +208,41 @@ def review_model_to_domain(model: ReviewModel) -> Review:
         summary=model.summary,
         error_message=model.error_message,
         findings=[review_finding_model_to_domain(f) for f in (model.findings or [])],
+        created_at=model.created_at,
+        updated_at=model.updated_at,
+    )
+
+
+def audit_finding_model_to_domain(model: AuditFindingModel) -> AuditFinding:
+    return AuditFinding(
+        finding_id=model.id,
+        audit_id=model.audit_id,
+        severity=AuditFindingSeverity(model.severity),
+        category=model.category,
+        message=model.message,
+        file=model.file,
+        location=model.location,
+        created_at=model.created_at,
+    )
+
+
+def audit_model_to_domain(model: AuditModel) -> AuditRecord:
+    return AuditRecord(
+        audit_id=model.id,
+        job_id=model.job_id,
+        project_id=model.project_id,
+        change_name=model.change_name,
+        provider=model.provider,
+        model=model.model,
+        candidate_sha=model.candidate_sha,
+        base_sha=model.base_sha,
+        review_id=model.review_id,
+        review_verdict=ReviewVerdict(model.review_verdict) if model.review_verdict else None,
+        status=AuditStatus(model.status),
+        risk=AuditRiskLevel(model.risk) if model.risk else None,
+        summary=model.summary,
+        error_message=model.error_message,
+        findings=[audit_finding_model_to_domain(f) for f in (model.findings or [])],
         created_at=model.created_at,
         updated_at=model.updated_at,
     )
@@ -446,12 +490,19 @@ class PostgresJobRepository(JobRepositoryInterface):
         },
         JobStatus.CHECKS_FAILED: set(),
         JobStatus.REVIEW_RUNNING: {
-            JobStatus.READY_TO_MERGE,
+            JobStatus.AUDIT_RUNNING,
             JobStatus.CHANGES_REQUIRED,
             JobStatus.FAILED,
             JobStatus.CANCELLED,
         },
+        JobStatus.AUDIT_RUNNING: {
+            JobStatus.READY_TO_MERGE,
+            JobStatus.AUDIT_BLOCKED,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+        },
         JobStatus.READY_TO_MERGE: set(),
+        JobStatus.AUDIT_BLOCKED: set(),
         JobStatus.CHANGES_REQUIRED: set(),
         JobStatus.FAILED: set(),
         JobStatus.CANCELLED: set(),
@@ -691,6 +742,140 @@ class PostgresReviewFindingRepository(ReviewFindingRepositoryInterface):
         return [review_finding_model_to_domain(m) for m in models]
 
 
+class PostgresAuditRepository(AuditRepositoryInterface):
+    _valid_transitions: dict[AuditStatus, set[AuditStatus]] = {
+        AuditStatus.AUDIT_PENDING: {
+            AuditStatus.AUDIT_RUNNING,
+            AuditStatus.AUDIT_FAILED,
+            AuditStatus.AUDIT_TIMED_OUT,
+        },
+        AuditStatus.AUDIT_RUNNING: {
+            AuditStatus.AUDIT_COMPLETED,
+            AuditStatus.AUDIT_BLOCKED,
+            AuditStatus.AUDIT_FAILED,
+            AuditStatus.AUDIT_TIMED_OUT,
+        },
+        AuditStatus.AUDIT_COMPLETED: set(),
+        AuditStatus.AUDIT_BLOCKED: set(),
+        AuditStatus.AUDIT_FAILED: set(),
+        AuditStatus.AUDIT_TIMED_OUT: set(),
+    }
+
+    def __init__(self, session: Session):
+        self.session = session
+
+    def save(self, audit: AuditRecord) -> None:
+        existing = self.session.get(AuditModel, audit.audit_id)
+        if existing:
+            existing.status = audit.status.value
+            existing.risk = audit.risk.value if audit.risk else None
+            existing.summary = audit.summary
+            existing.error_message = audit.error_message
+            existing.updated_at = audit.updated_at
+        else:
+            self.session.add(
+                AuditModel(
+                    id=audit.audit_id,
+                    job_id=audit.job_id,
+                    project_id=audit.project_id,
+                    change_name=audit.change_name,
+                    provider=audit.provider,
+                    model=audit.model,
+                    candidate_sha=audit.candidate_sha,
+                    base_sha=audit.base_sha,
+                    review_id=audit.review_id,
+                    review_verdict=audit.review_verdict.value
+                    if audit.review_verdict
+                    else None,
+                    status=audit.status.value,
+                    risk=audit.risk.value if audit.risk else None,
+                    summary=audit.summary,
+                    error_message=audit.error_message,
+                    created_at=audit.created_at,
+                    updated_at=audit.updated_at,
+                )
+            )
+
+    def get_by_id(self, audit_id: str) -> AuditRecord | None:
+        model = self.session.get(AuditModel, audit_id)
+        return audit_model_to_domain(model) if model else None
+
+    def get_by_job_id(self, job_id: str) -> AuditRecord | None:
+        stmt = (
+            select(AuditModel)
+            .where(AuditModel.job_id == job_id)
+            .order_by(desc(AuditModel.created_at))
+            .limit(1)
+        )
+        model = self.session.scalars(stmt).first()
+        return audit_model_to_domain(model) if model else None
+
+    def list_by_project(self, project_id: str, limit: int = 100) -> list[AuditRecord]:
+        stmt = (
+            select(AuditModel)
+            .where(AuditModel.project_id == project_id)
+            .order_by(desc(AuditModel.created_at))
+            .limit(limit)
+        )
+        models = self.session.scalars(stmt).all()
+        return [audit_model_to_domain(m) for m in models]
+
+    def transition(
+        self,
+        audit_id: str,
+        new_status: str,
+        risk: str | None = None,
+        summary: str | None = None,
+        error_message: str | None = None,
+    ) -> AuditRecord:
+        model = self.session.get(AuditModel, audit_id)
+        if not model:
+            raise ValueError(f"Audit '{audit_id}' not found.")
+        current = AuditStatus(model.status)
+        target = AuditStatus(new_status)
+        if target not in self._valid_transitions[current]:
+            raise ValueError(
+                f"Invalid audit status transition: {current.value} -> {target.value}."
+            )
+        model.status = target.value
+        if risk:
+            model.risk = AuditRiskLevel(risk).value
+        if summary is not None:
+            model.summary = summary
+        if error_message is not None:
+            model.error_message = error_message
+        model.updated_at = utc_now()
+        return audit_model_to_domain(model)
+
+
+class PostgresAuditFindingRepository(AuditFindingRepositoryInterface):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def save(self, finding: AuditFinding) -> None:
+        self.session.add(
+            AuditFindingModel(
+                id=finding.finding_id,
+                audit_id=finding.audit_id,
+                severity=finding.severity.value,
+                category=finding.category,
+                message=finding.message,
+                file=finding.file,
+                location=finding.location,
+                created_at=finding.created_at,
+            )
+        )
+
+    def list_by_audit(self, audit_id: str) -> list[AuditFinding]:
+        stmt = (
+            select(AuditFindingModel)
+            .where(AuditFindingModel.audit_id == audit_id)
+            .order_by(AuditFindingModel.created_at)
+        )
+        models = self.session.scalars(stmt).all()
+        return [audit_finding_model_to_domain(m) for m in models]
+
+
 class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
     """Encapsulates a database session for atomic operations across repositories."""
 
@@ -706,10 +891,11 @@ class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.check_results = PostgresCheckResultRepository(session)
         self.reviews = PostgresReviewRepository(session)
         self.review_findings = PostgresReviewFindingRepository(session)
+        self.audits = PostgresAuditRepository(session)
+        self.audit_findings = PostgresAuditFindingRepository(session)
 
     def commit(self) -> None:
         self.session.commit()
 
     def rollback(self) -> None:
         self.session.rollback()
-

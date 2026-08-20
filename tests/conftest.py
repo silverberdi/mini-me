@@ -6,8 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from minime.domain.enums import JobStatus, ReviewStatus, ReviewVerdict
+from minime.domain.enums import AuditRiskLevel, AuditStatus, JobStatus, ReviewStatus, ReviewVerdict
 from minime.domain.interfaces import (
+    AuditFindingRepositoryInterface,
+    AuditRepositoryInterface,
     ChangeRepositoryInterface,
     CheckResultRepositoryInterface,
     EventRepositoryInterface,
@@ -21,6 +23,8 @@ from minime.domain.interfaces import (
     ReviewRepositoryInterface,
 )
 from minime.domain.models import (
+    AuditFinding,
+    AuditRecord,
     Change,
     CheckResult,
     Event,
@@ -167,12 +171,19 @@ class InMemoryJobRepository(JobRepositoryInterface):
         },
         JobStatus.CHECKS_FAILED: set(),
         JobStatus.REVIEW_RUNNING: {
-            JobStatus.READY_TO_MERGE,
+            JobStatus.AUDIT_RUNNING,
             JobStatus.CHANGES_REQUIRED,
             JobStatus.FAILED,
             JobStatus.CANCELLED,
         },
+        JobStatus.AUDIT_RUNNING: {
+            JobStatus.READY_TO_MERGE,
+            JobStatus.AUDIT_BLOCKED,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+        },
         JobStatus.READY_TO_MERGE: set(),
+        JobStatus.AUDIT_BLOCKED: set(),
         JobStatus.CHANGES_REQUIRED: set(),
         JobStatus.FAILED: set(),
         JobStatus.CANCELLED: set(),
@@ -304,6 +315,84 @@ class InMemoryReviewFindingRepository(ReviewFindingRepositoryInterface):
         return [f.model_copy(deep=True) for f in self._store if f.review_id == review_id]
 
 
+class InMemoryAuditRepository(AuditRepositoryInterface):
+    _valid_transitions: dict[AuditStatus, set[AuditStatus]] = {
+        AuditStatus.AUDIT_PENDING: {
+            AuditStatus.AUDIT_RUNNING,
+            AuditStatus.AUDIT_FAILED,
+            AuditStatus.AUDIT_TIMED_OUT,
+        },
+        AuditStatus.AUDIT_RUNNING: {
+            AuditStatus.AUDIT_COMPLETED,
+            AuditStatus.AUDIT_BLOCKED,
+            AuditStatus.AUDIT_FAILED,
+            AuditStatus.AUDIT_TIMED_OUT,
+        },
+        AuditStatus.AUDIT_COMPLETED: set(),
+        AuditStatus.AUDIT_BLOCKED: set(),
+        AuditStatus.AUDIT_FAILED: set(),
+        AuditStatus.AUDIT_TIMED_OUT: set(),
+    }
+
+    def __init__(self):
+        self._store: dict[str, AuditRecord] = {}
+
+    def save(self, audit: AuditRecord) -> None:
+        self._store[audit.audit_id] = audit.model_copy(deep=True)
+
+    def get_by_id(self, audit_id: str) -> AuditRecord | None:
+        audit = self._store.get(audit_id)
+        return audit.model_copy(deep=True) if audit else None
+
+    def get_by_job_id(self, job_id: str) -> AuditRecord | None:
+        audits = [a for a in self._store.values() if a.job_id == job_id]
+        audits.sort(key=lambda a: a.created_at, reverse=True)
+        return audits[0].model_copy(deep=True) if audits else None
+
+    def list_by_project(self, project_id: str, limit: int = 100) -> list[AuditRecord]:
+        audits = [a for a in self._store.values() if a.project_id == project_id]
+        audits.sort(key=lambda a: a.created_at, reverse=True)
+        return [a.model_copy(deep=True) for a in audits[:limit]]
+
+    def transition(
+        self,
+        audit_id: str,
+        new_status: str,
+        risk: str | None = None,
+        summary: str | None = None,
+        error_message: str | None = None,
+    ) -> AuditRecord:
+        audit = self._store.get(audit_id)
+        if not audit:
+            raise ValueError(f"Audit '{audit_id}' not found.")
+        target = AuditStatus(new_status)
+        if target not in self._valid_transitions[audit.status]:
+            raise ValueError(
+                f"Invalid audit status transition: {audit.status.value} -> {target.value}."
+            )
+        update_dict: dict[str, object] = {"status": target}
+        if risk:
+            update_dict["risk"] = AuditRiskLevel(risk)
+        if summary is not None:
+            update_dict["summary"] = summary
+        if error_message is not None:
+            update_dict["error_message"] = error_message
+        updated = audit.model_copy(update=update_dict)
+        self._store[audit_id] = updated
+        return updated.model_copy(deep=True)
+
+
+class InMemoryAuditFindingRepository(AuditFindingRepositoryInterface):
+    def __init__(self):
+        self._store: list[AuditFinding] = []
+
+    def save(self, finding: AuditFinding) -> None:
+        self._store.append(finding.model_copy(deep=True))
+
+    def list_by_audit(self, audit_id: str) -> list[AuditFinding]:
+        return [f.model_copy(deep=True) for f in self._store if f.audit_id == audit_id]
+
+
 class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
     def __init__(self):
         self.projects = InMemoryProjectRepository()
@@ -316,6 +405,8 @@ class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.check_results = InMemoryCheckResultRepository()
         self.reviews = InMemoryReviewRepository()
         self.review_findings = InMemoryReviewFindingRepository()
+        self.audits = InMemoryAuditRepository()
+        self.audit_findings = InMemoryAuditFindingRepository()
         self.committed = False
         self.rolled_back = False
 
