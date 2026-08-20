@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from minime.domain.enums import (
     ChangeStatus,
     EventType,
+    JobStatus,
     ProjectStatus,
     ReadinessState,
 )
@@ -127,3 +128,41 @@ class MetricFact(BaseModel):
     fact_value: float | None = None
     details: dict[str, Any] = Field(default_factory=dict)
     recorded_at: datetime = Field(default_factory=utc_now)
+
+
+class Job(BaseModel):
+    """Durable execution job state for an implementation pipeline run."""
+
+    job_id: str = Field(default_factory=generate_uuid)
+    project_id: str
+    change_name: str
+    status: JobStatus = JobStatus.QUEUED
+    implementer_role: str
+    candidate_sha: str | None = None
+    base_sha: str | None = None
+    error_message: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class JobLog(BaseModel):
+    """Redacted job output or system log line."""
+
+    log_id: str = Field(default_factory=generate_uuid)
+    job_id: str
+    stream: str
+    message: str
+    timestamp: datetime = Field(default_factory=utc_now)
+
+
+class CheckResult(BaseModel):
+    """Evidence record for a deterministic check command."""
+
+    result_id: str = Field(default_factory=generate_uuid)
+    job_id: str
+    check_name: str
+    command: str
+    exit_code: int
+    duration_ms: int
+    output_snippet: str
+    created_at: datetime = Field(default_factory=utc_now)

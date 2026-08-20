@@ -7,7 +7,10 @@ from typing import Any
 
 from minime.domain.models import (
     Change,
+    CheckResult,
     Event,
+    Job,
+    JobLog,
     MetricFact,
     Project,
     ProjectBinding,
@@ -77,6 +80,36 @@ class MetricFactRepositoryInterface(ABC):
         metric_name: str | None = None,
         limit: int = 100,
     ) -> list[MetricFact]: ...
+
+
+class JobRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, job: Job) -> None: ...
+
+    @abstractmethod
+    def get_by_id(self, job_id: str) -> Job | None: ...
+
+    @abstractmethod
+    def list_by_project(self, project_id: str, limit: int = 100) -> list[Job]: ...
+
+    @abstractmethod
+    def transition(self, job_id: str, new_status: str, error_message: str | None = None) -> Job: ...
+
+
+class JobLogRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, log: JobLog) -> None: ...
+
+    @abstractmethod
+    def list_by_job(self, job_id: str, limit: int = 500) -> list[JobLog]: ...
+
+
+class CheckResultRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, result: CheckResult) -> None: ...
+
+    @abstractmethod
+    def list_by_job(self, job_id: str) -> list[CheckResult]: ...
 
 
 class PersistenceUnitOfWork(ABC):
