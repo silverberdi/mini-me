@@ -6,6 +6,8 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 from minime.domain.models import (
+    AuditFinding,
+    AuditRecord,
     Change,
     CheckResult,
     Event,
@@ -146,6 +148,38 @@ class ReviewFindingRepositoryInterface(ABC):
     def list_by_review(self, review_id: str) -> list[ReviewFinding]: ...
 
 
+class AuditRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, audit: AuditRecord) -> None: ...
+
+    @abstractmethod
+    def get_by_id(self, audit_id: str) -> AuditRecord | None: ...
+
+    @abstractmethod
+    def get_by_job_id(self, job_id: str) -> AuditRecord | None: ...
+
+    @abstractmethod
+    def list_by_project(self, project_id: str, limit: int = 100) -> list[AuditRecord]: ...
+
+    @abstractmethod
+    def transition(
+        self,
+        audit_id: str,
+        new_status: str,
+        risk: str | None = None,
+        summary: str | None = None,
+        error_message: str | None = None,
+    ) -> AuditRecord: ...
+
+
+class AuditFindingRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, finding: AuditFinding) -> None: ...
+
+    @abstractmethod
+    def list_by_audit(self, audit_id: str) -> list[AuditFinding]: ...
+
+
 class PersistenceUnitOfWork(ABC):
     """Transactional persistence boundary: atomically persists state changes and emitted events."""
 
@@ -159,6 +193,8 @@ class PersistenceUnitOfWork(ABC):
     check_results: CheckResultRepositoryInterface
     reviews: ReviewRepositoryInterface
     review_findings: ReviewFindingRepositoryInterface
+    audits: AuditRepositoryInterface
+    audit_findings: AuditFindingRepositoryInterface
 
     @abstractmethod
     def commit(self) -> None: ...

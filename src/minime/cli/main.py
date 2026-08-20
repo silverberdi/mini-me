@@ -287,12 +287,18 @@ def jobs_list_cmd(
             for job in jobs:
                 checks = uow.check_results.list_by_job(job.job_id)
                 check_summary = ",".join(f"{c.check_name}:{c.exit_code}" for c in checks) or "-"
-                review = uow.reviews.get_by_job_id(job.job_id)
-                verdict_summary = f"verdict={review.verdict.value}" if review and review.verdict else f"review={review.status.value}" if review else ""
-                typer.echo(
-                    f"{job.job_id}  {job.change_name}  {job.status.value}  "
-                    f"candidate={job.candidate_sha or '-'}  checks={check_summary}  {verdict_summary}".strip()
-                )
+            review = uow.reviews.get_by_job_id(job.job_id)
+            verdict_summary = f"verdict={review.verdict.value}" if review and review.verdict else f"review={review.status.value}" if review else ""
+            audit = uow.audits.get_by_job_id(job.job_id)
+            audit_summary = (
+                f"audit={audit.status.value}/risk={audit.risk.value if audit.risk else '-'}"
+                if audit
+                else ""
+            )
+            typer.echo(
+                f"{job.job_id}  {job.change_name}  {job.status.value}  "
+                f"candidate={job.candidate_sha or '-'}  checks={check_summary}  {verdict_summary}  {audit_summary}".strip()
+            )
     except Exception as e:
         typer.secho(f"Error listing jobs: {e}", fg=typer.colors.RED)
         raise typer.Exit(code=1)
@@ -414,6 +420,65 @@ def jobs_review_cmd(
                 typer.echo("\nNo findings recorded.")
     except Exception as e:
         typer.secho(f"Error showing review: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
+@jobs_app.command("audit")
+def jobs_audit_cmd(
+    job_id: str = typer.Argument(..., help="Execution job identifier"),
+    json_output: bool = typer.Option(False, "--json", help="Output audit details as JSON"),
+) -> None:
+    """Show DeepSeek Direct audit details and findings for an execution job."""
+    try:
+        with db_manager.session() as session:
+            uow = PostgresPersistenceUnitOfWork(session)
+            audit = uow.audits.get_by_job_id(job_id)
+            if not audit:
+                typer.secho(f"No audit found for job '{job_id}'.", fg=typer.colors.RED)
+                raise typer.Exit(code=1)
+            findings = uow.audit_findings.list_by_audit(audit.audit_id)
+            payload = {
+                "audit": audit.model_dump(),
+                "findings": [f.model_dump() for f in findings],
+            }
+            if json_output:
+                typer.echo(json.dumps(payload, indent=2, default=str))
+                return
+
+            typer.echo(f"Audit ID: {audit.audit_id}")
+            typer.echo(f"Job ID: {audit.job_id}")
+            typer.echo(f"Project: {audit.project_id}")
+            typer.echo(f"Change: {audit.change_name}")
+            typer.echo(f"Provider: {audit.provider}")
+            typer.echo(f"Model: {audit.model}")
+            typer.echo(f"Status: {audit.status.value}")
+            typer.echo(f"Risk: {audit.risk.value if audit.risk else 'None'}")
+            if audit.summary:
+                typer.echo(f"Summary: {audit.summary}")
+            if audit.error_message:
+                typer.secho(f"Error: {audit.error_message}", fg=typer.colors.RED)
+            typer.echo(f"Candidate SHA: {audit.candidate_sha}")
+            typer.echo(f"Base SHA: {audit.base_sha}")
+
+            if findings:
+                typer.secho(f"\nFindings ({len(findings)}):", fg=typer.colors.YELLOW, bold=True)
+                for f in findings:
+                    sev_color = (
+                        typer.colors.RED
+                        if f.severity.value in {"high", "critical"}
+                        else typer.colors.YELLOW
+                    )
+                    loc = f"{f.file or 'general'} {f.location or ''}".strip()
+                    typer.secho(
+                        f"  • [{f.severity.value}] {f.category}: {loc}",
+                        fg=sev_color,
+                        bold=True,
+                    )
+                    typer.echo(f"    {f.message}")
+            else:
+                typer.echo("\nNo findings recorded.")
+    except Exception as e:
+        typer.secho(f"Error showing audit: {e}", fg=typer.colors.RED)
         raise typer.Exit(code=1)
 
 

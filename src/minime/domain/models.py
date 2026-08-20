@@ -9,6 +9,9 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from minime.domain.enums import (
+    AuditFindingSeverity,
+    AuditRiskLevel,
+    AuditStatus,
     ChangeStatus,
     EventType,
     FindingSeverity,
@@ -218,3 +221,59 @@ class ReviewVerdictPayload(BaseModel):
     summary: str = ""
     findings: list[ReviewFindingPayload] = Field(default_factory=list)
 
+
+class AuditFinding(BaseModel):
+    """Structured finding emitted by DeepSeek Direct audit."""
+
+    finding_id: str = Field(default_factory=generate_uuid)
+    audit_id: str
+    severity: AuditFindingSeverity
+    category: str
+    message: str
+    file: str | None = None
+    location: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class AuditRecord(BaseModel):
+    """Durable DeepSeek Direct audit lifecycle record."""
+
+    audit_id: str = Field(default_factory=generate_uuid)
+    job_id: str
+    project_id: str
+    change_name: str
+    provider: str = "deepseek"
+    model: str = "deepseek-chat"
+    candidate_sha: str
+    base_sha: str
+    review_id: str | None = None
+    review_verdict: ReviewVerdict | None = None
+    status: AuditStatus = AuditStatus.AUDIT_PENDING
+    risk: AuditRiskLevel | None = None
+    summary: str | None = None
+    error_message: str | None = None
+    findings: list[AuditFinding] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class AuditFindingPayload(BaseModel):
+    """Finding item in DeepSeek audit result schema."""
+
+    severity: AuditFindingSeverity
+    category: str
+    message: str
+    file: str | None = None
+    location: str | None = None
+
+    model_config = {"extra": "forbid"}
+
+
+class AuditResult(BaseModel):
+    """Strict DeepSeek audit result payload."""
+
+    risk: AuditRiskLevel
+    findings: list[AuditFindingPayload] = Field(default_factory=list)
+    summary: str
+
+    model_config = {"extra": "forbid"}

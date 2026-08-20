@@ -12,6 +12,7 @@ from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.db.session import db_manager
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import Change, Job, JobLog, Project
+from minime.logging import redact_secrets
 from minime.services.execution_pipeline import ExecutionPipelineService
 from minime.services.project_service import ProjectService
 from minime.services.readiness_service import ReadinessService
@@ -252,9 +253,56 @@ def get_job_review(job_id: str, uow: UowDep) -> dict[str, Any]:
     }
 
 
+@app.get("/jobs/{job_id}/audit")
+def get_job_audit(job_id: str, uow: UowDep) -> dict[str, Any]:
+    job = uow.jobs.get_by_id(job_id)
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"Job '{job_id}' not found"
+        )
+    audit = uow.audits.get_by_job_id(job_id)
+    if not audit:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No audit found for job '{job_id}'",
+        )
+    findings = uow.audit_findings.list_by_audit(audit.audit_id)
+    return {
+        "audit_id": audit.audit_id,
+        "job_id": audit.job_id,
+        "project_id": audit.project_id,
+        "change_name": audit.change_name,
+        "provider": audit.provider,
+        "model": audit.model,
+        "candidate_sha": audit.candidate_sha,
+        "base_sha": audit.base_sha,
+        "review_id": audit.review_id,
+        "review_verdict": audit.review_verdict.value if audit.review_verdict else None,
+        "status": audit.status.value,
+        "risk": audit.risk.value if audit.risk else None,
+        "summary": redact_secrets(audit.summary or "") if audit.summary else None,
+        "error_message": redact_secrets(audit.error_message or "") if audit.error_message else None,
+        "created_at": audit.created_at.isoformat(),
+        "updated_at": audit.updated_at.isoformat(),
+        "findings": [
+            {
+                "finding_id": f.finding_id,
+                "severity": f.severity.value,
+                "category": f.category,
+                "message": redact_secrets(f.message),
+                "file": f.file,
+                "location": f.location,
+                "created_at": f.created_at.isoformat(),
+            }
+            for f in findings
+        ],
+    }
+
+
 def _job_summary(uow: PersistenceUnitOfWork, job: Job) -> dict[str, Any]:
     checks = uow.check_results.list_by_job(job.job_id)
     review = uow.reviews.get_by_job_id(job.job_id)
+    audit = uow.audits.get_by_job_id(job.job_id)
     return {
         "job_id": job.job_id,
         "project_id": job.project_id,
@@ -284,5 +332,12 @@ def _job_summary(uow: PersistenceUnitOfWork, job: Job) -> dict[str, Any]:
         }
         if review
         else None,
+        "audit": {
+            "audit_id": audit.audit_id,
+            "status": audit.status.value,
+            "risk": audit.risk.value if audit.risk else None,
+            "summary": redact_secrets(audit.summary or "") if audit.summary else None,
+        }
+        if audit
+        else None,
     }
-

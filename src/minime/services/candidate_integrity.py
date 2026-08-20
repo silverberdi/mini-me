@@ -5,6 +5,9 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from minime.domain.enums import ReviewStatus, ReviewVerdict
+from minime.domain.models import CheckResult, Job, Review
+
 
 def resolve_base_branch_sha(
     repo_path: Path,
@@ -175,3 +178,69 @@ def validate_post_review_integrity(
         return False, f"Post-review integrity error: {exc}"
 
     return True, None
+
+
+def verify_pre_audit(
+    worktree_path: Path,
+    job: Job,
+    review: Review | None,
+    checks_results: list[CheckResult],
+    base_branch: str,
+    repo_root_path: Path | None = None,
+) -> tuple[bool, str | None]:
+    """Verify DeepSeek audit eligibility and candidate/review/check SHA binding."""
+    if not review:
+        return False, "Pre-audit failure: complementary review evidence is missing."
+    if review.status != ReviewStatus.REVIEW_COMPLETED:
+        return False, f"Pre-audit failure: review status is {review.status.value}."
+    if review.verdict != ReviewVerdict.READY_TO_MERGE:
+        return False, f"Pre-audit failure: review verdict is {review.verdict}."
+    if review.candidate_sha != job.candidate_sha or review.base_sha != job.base_sha:
+        return (
+            False,
+            "Pre-audit failure: review candidate/base SHA does not match job candidate/base SHA.",
+        )
+    if not checks_results or any(c.exit_code != 0 for c in checks_results):
+        return False, "Pre-audit failure: successful deterministic check evidence is missing."
+
+    ok, err = validate_pre_review_integrity(
+        worktree_path=worktree_path,
+        expected_candidate_sha=job.candidate_sha,
+        expected_base_sha=job.base_sha,
+        base_branch=base_branch,
+        repo_root_path=repo_root_path,
+        checks_passed=True,
+    )
+    if not ok:
+        return ok, err
+
+    try:
+        status_proc = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=str(worktree_path),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if status_proc.returncode != 0:
+            return (
+                False,
+                f"Pre-audit integrity error running git status: {status_proc.stderr.strip()}",
+            )
+        if status_proc.stdout.strip():
+            return (
+                False,
+                f"Pre-audit failure: candidate worktree has uncommitted changes: {status_proc.stdout.strip()[:200]}",
+            )
+    except Exception as exc:
+        return False, f"Pre-audit integrity error: {exc}"
+
+    return True, None
+
+
+def verify_post_audit(
+    worktree_path: Path,
+    expected_candidate_sha: str,
+) -> tuple[bool, str | None]:
+    """Verify candidate worktree remained untouched after DeepSeek audit."""
+    return validate_post_review_integrity(worktree_path, expected_candidate_sha)

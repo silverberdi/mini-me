@@ -5,6 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from minime.domain.enums import (
+    AuditFindingSeverity,
+    AuditRiskLevel,
+    AuditStatus,
     EventType,
     JobStatus,
     ReadinessState,
@@ -13,6 +16,8 @@ from minime.domain.enums import (
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
+    AuditFinding,
+    AuditRecord,
     Event,
     Job,
     JobLog,
@@ -22,12 +27,20 @@ from minime.domain.models import (
     ReviewFinding,
     utc_now,
 )
+from minime.services.audit_verdict_parser import parse_audit_result
 from minime.services.candidate_integrity import (
     validate_post_review_integrity,
     validate_pre_review_integrity,
+    verify_post_audit,
+    verify_pre_audit,
 )
 from minime.services.checks_runner import ChecksRunner
 from minime.services.complementary_policy import validate_complementary_pair
+from minime.services.deepseek_auditor_runner import (
+    AuditorRunnerInterface,
+    DeepSeekAuditorRunner,
+    build_audit_prompt,
+)
 from minime.services.implementer_runner import (
     ImplementerRunnerInterface,
     runner_for_implementer,
@@ -48,7 +61,9 @@ EVENT_BY_STATUS = {
     JobStatus.CHECKS_PASSED: EventType.JOB_CHECKS_PASSED,
     JobStatus.CHECKS_FAILED: EventType.JOB_CHECKS_FAILED,
     JobStatus.REVIEW_RUNNING: EventType.JOB_REVIEW_RUNNING,
+    JobStatus.AUDIT_RUNNING: EventType.JOB_AUDIT_RUNNING,
     JobStatus.READY_TO_MERGE: EventType.JOB_READY_TO_MERGE,
+    JobStatus.AUDIT_BLOCKED: EventType.JOB_AUDIT_BLOCKED,
     JobStatus.CHANGES_REQUIRED: EventType.JOB_CHANGES_REQUIRED,
     JobStatus.FAILED: EventType.JOB_FAILED,
     JobStatus.CANCELLED: EventType.JOB_CANCELLED,
@@ -64,6 +79,7 @@ class ExecutionPipelineService:
         project_root: str | Path,
         implementer_runner: ImplementerRunnerInterface | None = None,
         reviewer_runner: ReviewerRunnerInterface | None = None,
+        auditor_runner: AuditorRunnerInterface | None = None,
         worktree_manager: WorktreeManager | None = None,
         reviewer_view_manager: ReviewerViewManager | None = None,
         checks_runner: ChecksRunner | None = None,
@@ -75,6 +91,7 @@ class ExecutionPipelineService:
         self.project_root = Path(project_root)
         self.implementer_runner = implementer_runner
         self.reviewer_runner = reviewer_runner
+        self.auditor_runner = auditor_runner
         self.worktree_manager = worktree_manager or WorktreeManager(self.project_root)
         self.reviewer_view_manager = (
             reviewer_view_manager or ReviewerViewManager(self.project_root)
@@ -358,7 +375,13 @@ class ExecutionPipelineService:
                     summary=verdict_payload.summary,
                 )
                 self.uow.commit()
-                self._transition(job, JobStatus.READY_TO_MERGE)
+                job = await self._run_audit_stage(
+                    job=job,
+                    project=project,
+                    worktree_path=worktree.path,
+                    check_run_results=check_run_results,
+                    review_id=review.review_id,
+                )
             elif verdict_payload.verdict == ReviewVerdict.CHANGES_REQUIRED:
                 self.uow.reviews.transition(
                     review.review_id,
@@ -383,6 +406,7 @@ class ExecutionPipelineService:
             if latest.status not in {
                 JobStatus.CHECKS_FAILED,
                 JobStatus.READY_TO_MERGE,
+                JobStatus.AUDIT_BLOCKED,
                 JobStatus.CHANGES_REQUIRED,
                 JobStatus.FAILED,
                 JobStatus.CANCELLED,
@@ -396,6 +420,7 @@ class ExecutionPipelineService:
             latest = self._require_job(job.job_id)
             if latest.status in {
                 JobStatus.READY_TO_MERGE,
+                JobStatus.AUDIT_BLOCKED,
                 JobStatus.CHANGES_REQUIRED,
                 JobStatus.CHECKS_FAILED,
                 JobStatus.FAILED,
@@ -418,6 +443,219 @@ class ExecutionPipelineService:
                 )
                 self.uow.commit()
         return self._require_job(job.job_id)
+
+    async def _run_audit_stage(
+        self,
+        job: Job,
+        project: Project,
+        worktree_path: Path,
+        check_run_results: list,
+        review_id: str,
+    ) -> Job:
+        review = self.uow.reviews.get_by_id(review_id)
+        review_findings = (
+            self.uow.review_findings.list_by_review(review_id) if review else []
+        )
+        pre_ok, pre_err = verify_pre_audit(
+            worktree_path=worktree_path,
+            job=job,
+            review=review,
+            checks_results=check_run_results,
+            base_branch=project.base_branch,
+            repo_root_path=self.project_root,
+        )
+        if not pre_ok:
+            self._save_event(EventType.CANDIDATE_SHA_MISMATCH, job, {"error": pre_err})
+            raise RuntimeError(pre_err or "Pre-audit integrity failure.")
+
+        job = self._transition(job, JobStatus.AUDIT_RUNNING)
+        audit = AuditRecord(
+            job_id=job.job_id,
+            project_id=job.project_id,
+            change_name=job.change_name,
+            candidate_sha=job.candidate_sha or "",
+            base_sha=job.base_sha or "",
+            review_id=review.review_id if review else None,
+            review_verdict=review.verdict if review else None,
+            status=AuditStatus.AUDIT_RUNNING,
+        )
+        self.uow.audits.save(audit)
+        self.uow.commit()
+
+        audit_view_created = False
+        try:
+            audit_view = self.reviewer_view_manager.create_readonly_view(
+                worktree_path, f"audit-{job.job_id}"
+            )
+            audit_view_created = True
+            prompt = build_audit_prompt(
+                project=project,
+                change_name=job.change_name,
+                job_id=job.job_id,
+                audit_id=audit.audit_id,
+                candidate_sha=job.candidate_sha or "",
+                base_sha=job.base_sha or "",
+                audit_view_path=audit_view,
+                checks_results=check_run_results,
+                review=review,
+                review_findings=review_findings,
+            )
+            runner = self.auditor_runner or DeepSeekAuditorRunner()
+            result = await runner.run(
+                audit_view,
+                prompt,
+                timeout_seconds=self.reviewer_timeout_seconds,
+            )
+            for line in result.output:
+                self._log(job.job_id, "audit", line)
+            self.uow.metrics.save(
+                MetricFact(
+                    metric_name="audit_duration_ms",
+                    project_id=job.project_id,
+                    change_id=job.change_name,
+                    duration_ms=result.duration_ms,
+                    details={
+                        "job_id": job.job_id,
+                        "audit_id": audit.audit_id,
+                        "provider": result.provider,
+                        "model": result.model,
+                    },
+                )
+            )
+
+            if result.timed_out:
+                self.uow.audits.transition(
+                    audit.audit_id,
+                    AuditStatus.AUDIT_TIMED_OUT.value,
+                    error_message=result.error_message
+                    or f"DeepSeek audit timed out after {self.reviewer_timeout_seconds} seconds.",
+                )
+                self._save_event(
+                    EventType.AUDIT_TIMEOUT,
+                    job,
+                    {"audit_id": audit.audit_id, "provider": "deepseek"},
+                )
+                self.uow.commit()
+                raise RuntimeError("DeepSeek audit timed out.")
+
+            if result.exit_code != 0:
+                err = result.error_message or f"DeepSeek audit failed with code {result.exit_code}."
+                self.uow.audits.transition(
+                    audit.audit_id,
+                    AuditStatus.AUDIT_FAILED.value,
+                    error_message=err,
+                )
+                self._save_event(
+                    EventType.JOB_AUDIT_FAILED,
+                    job,
+                    {"audit_id": audit.audit_id, "error": err},
+                )
+                self.uow.commit()
+                raise RuntimeError(err)
+
+            post_ok, post_err = verify_post_audit(worktree_path, job.candidate_sha or "")
+            if not post_ok:
+                self.uow.audits.transition(
+                    audit.audit_id,
+                    AuditStatus.AUDIT_FAILED.value,
+                    error_message=post_err,
+                )
+                self._save_event(
+                    EventType.UNAUTHORIZED_AUDITOR_MUTATION,
+                    job,
+                    {"audit_id": audit.audit_id, "error": post_err},
+                )
+                self.uow.commit()
+                raise RuntimeError(post_err or "Post-audit mutation detected.")
+
+            try:
+                audit_result = parse_audit_result(result.output)
+            except Exception as exc:
+                err = f"Malformed audit output: {exc}"
+                self.uow.audits.transition(
+                    audit.audit_id,
+                    AuditStatus.AUDIT_FAILED.value,
+                    error_message=err,
+                )
+                self._save_event(
+                    EventType.AUDIT_MALFORMED_OUTPUT,
+                    job,
+                    {"audit_id": audit.audit_id, "error": err},
+                )
+                self.uow.commit()
+                raise RuntimeError(err) from exc
+
+            has_blocking_finding = any(
+                f.severity
+                in {AuditFindingSeverity.HIGH, AuditFindingSeverity.CRITICAL}
+                for f in audit_result.findings
+            )
+            blocking = audit_result.risk in {
+                AuditRiskLevel.HIGH,
+                AuditRiskLevel.CRITICAL,
+            } or has_blocking_finding
+            audit_status = (
+                AuditStatus.AUDIT_BLOCKED if blocking else AuditStatus.AUDIT_COMPLETED
+            )
+            self.uow.audits.transition(
+                audit.audit_id,
+                audit_status.value,
+                risk=audit_result.risk.value,
+                summary=audit_result.summary,
+            )
+            for item in audit_result.findings:
+                self.uow.audit_findings.save(
+                    AuditFinding(
+                        audit_id=audit.audit_id,
+                        severity=item.severity,
+                        category=item.category,
+                        message=item.message,
+                        file=item.file,
+                        location=item.location,
+                    )
+                )
+            event_type = (
+                EventType.JOB_AUDIT_BLOCKED
+                if blocking
+                else EventType.JOB_AUDIT_COMPLETED
+            )
+            self._save_event(
+                event_type,
+                job,
+                {
+                    "audit_id": audit.audit_id,
+                    "risk": audit_result.risk.value,
+                    "findings": len(audit_result.findings),
+                },
+            )
+            self.uow.commit()
+            return self._transition(
+                job, JobStatus.AUDIT_BLOCKED if blocking else JobStatus.READY_TO_MERGE
+            )
+        except Exception as exc:
+            latest_audit = self.uow.audits.get_by_id(audit.audit_id)
+            if latest_audit and latest_audit.status not in {
+                AuditStatus.AUDIT_COMPLETED,
+                AuditStatus.AUDIT_BLOCKED,
+                AuditStatus.AUDIT_FAILED,
+                AuditStatus.AUDIT_TIMED_OUT,
+            }:
+                err = str(exc)
+                self.uow.audits.transition(
+                    audit.audit_id,
+                    AuditStatus.AUDIT_FAILED.value,
+                    error_message=err,
+                )
+                self._save_event(
+                    EventType.JOB_AUDIT_FAILED,
+                    job,
+                    {"audit_id": audit.audit_id, "error": err},
+                )
+                self.uow.commit()
+            raise
+        finally:
+            if audit_view_created:
+                self.reviewer_view_manager.cleanup_readonly_view(f"audit-{job.job_id}")
 
     def _require_project(self, project_id: str) -> Project:
         project = self.uow.projects.get_by_id(project_id)

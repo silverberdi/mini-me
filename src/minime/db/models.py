@@ -177,6 +177,12 @@ class JobModel(Base):
     check_results: Mapped[list[CheckResultModel]] = relationship(
         "CheckResultModel", back_populates="job", cascade="all, delete-orphan"
     )
+    reviews: Mapped[list[ReviewModel]] = relationship(
+        "ReviewModel", back_populates="job", cascade="all, delete-orphan"
+    )
+    audits: Mapped[list[AuditModel]] = relationship(
+        "AuditModel", back_populates="job", cascade="all, delete-orphan"
+    )
 
 
 class JobLogModel(Base):
@@ -212,10 +218,6 @@ class CheckResultModel(Base):
     )
 
     job: Mapped[JobModel] = relationship("JobModel", back_populates="check_results")
-    reviews: Mapped[list[ReviewModel]] = relationship(
-        "ReviewModel", back_populates="job", cascade="all, delete-orphan"
-    )
-
 
 class ReviewModel(Base):
     __tablename__ = "reviews"
@@ -265,3 +267,57 @@ class ReviewFindingModel(Base):
 
     review: Mapped[ReviewModel] = relationship("ReviewModel", back_populates="findings")
 
+
+class AuditModel(Base):
+    __tablename__ = "audits"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    change_name: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    provider: Mapped[str] = mapped_column(String(64), default="deepseek", nullable=False)
+    model: Mapped[str] = mapped_column(String(128), default="deepseek-chat", nullable=False)
+    candidate_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    base_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    review_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("reviews.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    review_verdict: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    risk: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+    job: Mapped[JobModel] = relationship("JobModel", back_populates="audits")
+    findings: Mapped[list[AuditFindingModel]] = relationship(
+        "AuditFindingModel", back_populates="audit", cascade="all, delete-orphan"
+    )
+
+
+class AuditFindingModel(Base):
+    __tablename__ = "audit_findings"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    audit_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("audits.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    severity: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    category: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    file: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    location: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+
+    audit: Mapped[AuditModel] = relationship("AuditModel", back_populates="findings")

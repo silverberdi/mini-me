@@ -30,6 +30,7 @@ from minime.services.candidate_integrity import (
     validate_pre_review_integrity,
 )
 from minime.services.complementary_policy import validate_complementary_pair
+from minime.services.deepseek_auditor_runner import MockAuditorRunner
 from minime.services.execution_pipeline import ExecutionPipelineService
 from minime.services.implementer_runner import MockImplementerRunner
 from minime.services.review_verdict_parser import (
@@ -675,6 +676,9 @@ async def test_review_pipeline_ready_to_merge_flow(in_memory_uow, tmp_path):
                 '```json\n{"verdict": "READY_TO_MERGE", "summary": "All good", "findings": []}\n```'
             ]
         ),
+        auditor_runner=MockAuditorRunner(
+            output=['{"risk": "low", "summary": "No material risk.", "findings": []}']
+        ),
         worktree_manager=GitFakeWorktreeManager(tmp_path),
     )
 
@@ -797,6 +801,9 @@ async def test_review_pipeline_secret_redaction(in_memory_uow, tmp_path):
                 "Reviewing apiKey=secret_live_key_999",
                 '```json\n{"verdict": "READY_TO_MERGE", "summary": "ok", "findings": []}\n```',
             ]
+        ),
+        auditor_runner=MockAuditorRunner(
+            output=['{"risk": "low", "summary": "No material risk.", "findings": []}']
         ),
         worktree_manager=GitFakeWorktreeManager(tmp_path),
     )
