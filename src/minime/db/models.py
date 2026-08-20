@@ -60,6 +60,9 @@ class ProjectModel(Base):
     bindings: Mapped[list[ProjectBindingModel]] = relationship(
         "ProjectBindingModel", back_populates="project", cascade="all, delete-orphan"
     )
+    jobs: Mapped[list[JobModel]] = relationship(
+        "JobModel", back_populates="project", cascade="all, delete-orphan"
+    )
 
 
 class ProjectBindingModel(Base):
@@ -145,3 +148,67 @@ class MetricFactModel(Base):
     recorded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False, index=True
     )
+
+
+class JobModel(Base):
+    __tablename__ = "jobs"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    change_name: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    implementer_role: Mapped[str] = mapped_column(String(64), nullable=False)
+    candidate_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    base_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+    project: Mapped[ProjectModel] = relationship("ProjectModel", back_populates="jobs")
+    logs: Mapped[list[JobLogModel]] = relationship(
+        "JobLogModel", back_populates="job", cascade="all, delete-orphan"
+    )
+    check_results: Mapped[list[CheckResultModel]] = relationship(
+        "CheckResultModel", back_populates="job", cascade="all, delete-orphan"
+    )
+
+
+class JobLogModel(Base):
+    __tablename__ = "job_logs"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    stream: Mapped[str] = mapped_column(String(16), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+
+    job: Mapped[JobModel] = relationship("JobModel", back_populates="logs")
+
+
+class CheckResultModel(Base):
+    __tablename__ = "check_results"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    check_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    command: Mapped[str] = mapped_column(Text, nullable=False)
+    exit_code: Mapped[int] = mapped_column(Integer, nullable=False)
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    output_snippet: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+
+    job: Mapped[JobModel] = relationship("JobModel", back_populates="check_results")

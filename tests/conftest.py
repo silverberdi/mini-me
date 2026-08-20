@@ -6,9 +6,13 @@ from pathlib import Path
 
 import pytest
 
+from minime.domain.enums import JobStatus
 from minime.domain.interfaces import (
     ChangeRepositoryInterface,
+    CheckResultRepositoryInterface,
     EventRepositoryInterface,
+    JobLogRepositoryInterface,
+    JobRepositoryInterface,
     MetricFactRepositoryInterface,
     PersistenceUnitOfWork,
     ProjectBindingRepositoryInterface,
@@ -16,7 +20,10 @@ from minime.domain.interfaces import (
 )
 from minime.domain.models import (
     Change,
+    CheckResult,
     Event,
+    Job,
+    JobLog,
     MetricFact,
     Project,
     ProjectBinding,
@@ -139,6 +146,72 @@ class InMemoryMetricFactRepository(MetricFactRepositoryInterface):
         return [f.model_copy(deep=True) for f in reversed(res[-limit:])]
 
 
+class InMemoryJobRepository(JobRepositoryInterface):
+    _valid_transitions: dict[JobStatus, set[JobStatus]] = {
+        JobStatus.QUEUED: {JobStatus.RUNNING, JobStatus.CANCELLED, JobStatus.FAILED},
+        JobStatus.RUNNING: {JobStatus.CHECKS_RUNNING, JobStatus.FAILED, JobStatus.CANCELLED},
+        JobStatus.CHECKS_RUNNING: {
+            JobStatus.CHECKS_PASSED,
+            JobStatus.CHECKS_FAILED,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+        },
+        JobStatus.CHECKS_PASSED: set(),
+        JobStatus.CHECKS_FAILED: set(),
+        JobStatus.FAILED: set(),
+        JobStatus.CANCELLED: set(),
+    }
+
+    def __init__(self):
+        self._store: dict[str, Job] = {}
+
+    def save(self, job: Job) -> None:
+        self._store[job.job_id] = job.model_copy(deep=True)
+
+    def get_by_id(self, job_id: str) -> Job | None:
+        job = self._store.get(job_id)
+        return job.model_copy(deep=True) if job else None
+
+    def list_by_project(self, project_id: str, limit: int = 100) -> list[Job]:
+        jobs = [j for j in self._store.values() if j.project_id == project_id]
+        jobs.sort(key=lambda j: j.created_at, reverse=True)
+        return [j.model_copy(deep=True) for j in jobs[:limit]]
+
+    def transition(self, job_id: str, new_status: str, error_message: str | None = None) -> Job:
+        job = self._store.get(job_id)
+        if not job:
+            raise ValueError(f"Job '{job_id}' not found.")
+        target = JobStatus(new_status)
+        if target not in self._valid_transitions[job.status]:
+            raise ValueError(f"Invalid job status transition: {job.status.value} -> {target.value}.")
+        updated = job.model_copy(update={"status": target, "error_message": error_message})
+        self._store[job_id] = updated
+        return updated.model_copy(deep=True)
+
+
+class InMemoryJobLogRepository(JobLogRepositoryInterface):
+    def __init__(self):
+        self._store: list[JobLog] = []
+
+    def save(self, log: JobLog) -> None:
+        self._store.append(log.model_copy(deep=True))
+
+    def list_by_job(self, job_id: str, limit: int = 500) -> list[JobLog]:
+        logs = [log for log in self._store if log.job_id == job_id]
+        return [log.model_copy(deep=True) for log in logs[:limit]]
+
+
+class InMemoryCheckResultRepository(CheckResultRepositoryInterface):
+    def __init__(self):
+        self._store: list[CheckResult] = []
+
+    def save(self, result: CheckResult) -> None:
+        self._store.append(result.model_copy(deep=True))
+
+    def list_by_job(self, job_id: str) -> list[CheckResult]:
+        return [r.model_copy(deep=True) for r in self._store if r.job_id == job_id]
+
+
 class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
     def __init__(self):
         self.projects = InMemoryProjectRepository()
@@ -146,6 +219,9 @@ class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.bindings = InMemoryProjectBindingRepository()
         self.events = InMemoryEventRepository()
         self.metrics = InMemoryMetricFactRepository()
+        self.jobs = InMemoryJobRepository()
+        self.job_logs = InMemoryJobLogRepository()
+        self.check_results = InMemoryCheckResultRepository()
         self.committed = False
         self.rolled_back = False
 
@@ -179,4 +255,3 @@ def create_isolated_openspec_change(
     specs_dir.mkdir(parents=True, exist_ok=True)
     (specs_dir / "spec.md").write_text(spec_content, encoding="utf-8")
     return change_dir
-

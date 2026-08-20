@@ -10,7 +10,8 @@ from pydantic import BaseModel, Field
 from minime.adapters.openspec import OpenSpecAdapter
 from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.db.session import db_manager
-from minime.domain.models import Change, Project
+from minime.domain.models import Change, Job, JobLog, Project
+from minime.services.execution_pipeline import ExecutionPipelineService
 from minime.services.project_service import ProjectService
 from minime.services.readiness_service import ReadinessService
 from minime.services.status_service import StatusService
@@ -50,6 +51,11 @@ class ProjectCreateRequest(BaseModel):
     openrouter_drain_allowed: bool = False
     deployment_preview: dict[str, Any] = Field(default_factory=dict)
     deployment_production: dict[str, Any] = Field(default_factory=dict)
+
+
+class JobRunRequest(BaseModel):
+    change_name: str
+    project_root: str = "."
 
 
 @app.get("/health")
@@ -167,3 +173,62 @@ def evaluate_readiness(
         current_active_change=current_active_change,
     )
     return eval_result.model_dump()
+
+
+@app.post("/projects/{project_id}/jobs", status_code=status.HTTP_202_ACCEPTED)
+async def run_project_job(
+    project_id: str,
+    req: JobRunRequest,
+    uow: UowDep,
+) -> Job:
+    try:
+        service = ExecutionPipelineService(uow, project_root=req.project_root)
+        return await service.run_job(project_id, req.change_name)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@app.get("/projects/{project_id}/jobs")
+def list_project_jobs(project_id: str, uow: UowDep) -> list[dict[str, Any]]:
+    jobs = uow.jobs.list_by_project(project_id)
+    return [_job_summary(uow, job) for job in jobs]
+
+
+@app.get("/jobs/{job_id}")
+def get_job(job_id: str, uow: UowDep) -> dict[str, Any]:
+    job = uow.jobs.get_by_id(job_id)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Job '{job_id}' not found")
+    return _job_summary(uow, job)
+
+
+@app.get("/jobs/{job_id}/logs")
+def get_job_logs(job_id: str, uow: UowDep) -> list[JobLog]:
+    if not uow.jobs.get_by_id(job_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Job '{job_id}' not found")
+    return uow.job_logs.list_by_job(job_id)
+
+
+def _job_summary(uow: PostgresPersistenceUnitOfWork, job: Job) -> dict[str, Any]:
+    checks = uow.check_results.list_by_job(job.job_id)
+    return {
+        "job_id": job.job_id,
+        "project_id": job.project_id,
+        "change_name": job.change_name,
+        "status": job.status.value,
+        "implementer": job.implementer_role,
+        "candidate_sha": job.candidate_sha,
+        "base_sha": job.base_sha,
+        "error_message": job.error_message,
+        "created_at": job.created_at.isoformat(),
+        "updated_at": job.updated_at.isoformat(),
+        "checks": [
+            {
+                "check_name": c.check_name,
+                "command": c.command,
+                "exit_code": c.exit_code,
+                "duration_ms": c.duration_ms,
+            }
+            for c in checks
+        ],
+    }

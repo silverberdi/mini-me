@@ -7,7 +7,7 @@ from conftest import create_isolated_openspec_change
 from minime.api.app import app, get_uow
 from minime.cli.main import app as cli_app
 from minime.domain.enums import ReadinessState
-from minime.domain.models import Change, Project
+from minime.domain.models import Change, CheckResult, Job, JobLog, Project
 from minime.services.status_service import StatusService
 
 runner = CliRunner()
@@ -83,6 +83,46 @@ def test_fastapi_endpoints(in_memory_uow, tmp_path):
     app.dependency_overrides.clear()
 
 
+def test_fastapi_job_observability_endpoints(in_memory_uow):
+    app.dependency_overrides[get_uow] = lambda: in_memory_uow
+    client = TestClient(app)
+
+    job = Job(
+        job_id="job-1",
+        project_id="mini-me",
+        change_name="002-implementation-pipeline",
+        implementer_role="codex",
+        candidate_sha="abc123",
+    )
+    in_memory_uow.jobs.save(job)
+    in_memory_uow.job_logs.save(JobLog(job_id="job-1", stream="stdout", message="ok"))
+    in_memory_uow.check_results.save(
+        CheckResult(
+            job_id="job-1",
+            check_name="pytest",
+            command="pytest",
+            exit_code=0,
+            duration_ms=12,
+            output_snippet="passed",
+        )
+    )
+
+    res = client.get("/projects/mini-me/jobs")
+    assert res.status_code == 200
+    assert res.json()[0]["job_id"] == "job-1"
+    assert res.json()[0]["checks"][0]["check_name"] == "pytest"
+
+    res = client.get("/jobs/job-1")
+    assert res.status_code == 200
+    assert res.json()["candidate_sha"] == "abc123"
+
+    res = client.get("/jobs/job-1/logs")
+    assert res.status_code == 200
+    assert res.json()[0]["message"] == "ok"
+
+    app.dependency_overrides.clear()
+
+
 def test_cli_help():
     result = runner.invoke(cli_app, ["--help"])
     assert result.exit_code == 0
@@ -91,3 +131,5 @@ def test_cli_help():
     assert "project" in result.stdout
     assert "discover" in result.stdout
     assert "readiness" in result.stdout
+    assert "run" in result.stdout
+    assert "jobs" in result.stdout

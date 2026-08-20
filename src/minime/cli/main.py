@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import typer
@@ -11,6 +12,7 @@ from minime.adapters.openspec import OpenSpecAdapter
 from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.db.session import db_manager
 from minime.logging import configure_logging, get_logger
+from minime.services.execution_pipeline import ExecutionPipelineService
 from minime.services.project_service import ProjectService
 from minime.services.readiness_service import ReadinessService
 from minime.services.status_service import StatusService
@@ -21,7 +23,9 @@ app = typer.Typer(
     add_completion=False,
 )
 project_app = typer.Typer(help="Manage registered projects.")
+jobs_app = typer.Typer(help="Inspect execution jobs.")
 app.add_typer(project_app, name="project")
+app.add_typer(jobs_app, name="jobs")
 
 logger = get_logger("cli")
 
@@ -237,6 +241,102 @@ def readiness_cmd(
 
     except Exception as e:
         typer.secho(f"Readiness check failed: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
+@app.command("run")
+def run_cmd(
+    project_id: str = typer.Argument(..., help="Project identifier"),
+    change_name: str = typer.Argument(..., help="OpenSpec change name"),
+    project_root: str = typer.Option(".", "--path", "-p", help="Filesystem path to project root"),
+) -> None:
+    """Run a READY OpenSpec implementation job and stream final status."""
+    try:
+        with db_manager.session() as session:
+            uow = PostgresPersistenceUnitOfWork(session)
+            service = ExecutionPipelineService(uow, project_root=project_root)
+            job = asyncio.run(service.run_job(project_id, change_name))
+            typer.echo(f"Job: {job.job_id}")
+            typer.echo(f"Status: {job.status.value}")
+            if job.candidate_sha:
+                typer.echo(f"Candidate SHA: {job.candidate_sha}")
+            if job.error_message:
+                typer.echo(f"Error: {job.error_message}")
+    except Exception as e:
+        typer.secho(f"Run failed: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
+@jobs_app.command("list")
+def jobs_list_cmd(
+    project_id: str = typer.Argument(..., help="Project identifier"),
+    json_output: bool = typer.Option(False, "--json", help="Output jobs as JSON"),
+) -> None:
+    """List execution jobs for a project."""
+    try:
+        with db_manager.session() as session:
+            uow = PostgresPersistenceUnitOfWork(session)
+            jobs = uow.jobs.list_by_project(project_id)
+            if json_output:
+                typer.echo(json.dumps([j.model_dump() for j in jobs], indent=2, default=str))
+                return
+            if not jobs:
+                typer.echo("No jobs found.")
+                return
+            for job in jobs:
+                checks = uow.check_results.list_by_job(job.job_id)
+                check_summary = ",".join(f"{c.check_name}:{c.exit_code}" for c in checks) or "-"
+                typer.echo(
+                    f"{job.job_id}  {job.change_name}  {job.status.value}  "
+                    f"candidate={job.candidate_sha or '-'}  checks={check_summary}"
+                )
+    except Exception as e:
+        typer.secho(f"Error listing jobs: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
+@jobs_app.command("show")
+def jobs_show_cmd(
+    job_id: str = typer.Argument(..., help="Execution job identifier"),
+    logs: bool = typer.Option(False, "--logs", help="Include redacted job logs"),
+    json_output: bool = typer.Option(False, "--json", help="Output job as JSON"),
+) -> None:
+    """Show execution job details."""
+    try:
+        with db_manager.session() as session:
+            uow = PostgresPersistenceUnitOfWork(session)
+            job = uow.jobs.get_by_id(job_id)
+            if not job:
+                typer.secho(f"Job '{job_id}' not found.", fg=typer.colors.RED)
+                raise typer.Exit(code=1)
+            check_results = uow.check_results.list_by_job(job_id)
+            payload = {
+                "job": job.model_dump(),
+                "checks": [c.model_dump() for c in check_results],
+                "logs": [log.model_dump() for log in uow.job_logs.list_by_job(job_id)] if logs else [],
+            }
+            if json_output:
+                typer.echo(json.dumps(payload, indent=2, default=str))
+                return
+            typer.echo(f"Job: {job.job_id}")
+            typer.echo(f"Project: {job.project_id}")
+            typer.echo(f"Change: {job.change_name}")
+            typer.echo(f"Status: {job.status.value}")
+            typer.echo(f"Implementer: {job.implementer_role}")
+            typer.echo(f"Base SHA: {job.base_sha or '-'}")
+            typer.echo(f"Candidate SHA: {job.candidate_sha or '-'}")
+            if job.error_message:
+                typer.echo(f"Error: {job.error_message}")
+            if check_results:
+                typer.echo("Checks:")
+                for check in check_results:
+                    typer.echo(f"  {check.check_name}: exit={check.exit_code} ({check.duration_ms}ms)")
+            if logs:
+                typer.echo("Logs:")
+                for log in payload["logs"]:
+                    typer.echo(f"  [{log['stream']}] {log['message']}")
+    except Exception as e:
+        typer.secho(f"Error showing job: {e}", fg=typer.colors.RED)
         raise typer.Exit(code=1)
 
 

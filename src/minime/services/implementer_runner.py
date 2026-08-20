@@ -1,0 +1,92 @@
+"""Primary implementer process runners."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import signal
+from dataclasses import dataclass
+from pathlib import Path
+
+from minime.logging import redact_secrets
+
+
+@dataclass(frozen=True)
+class ImplementerResult:
+    exit_code: int
+    timed_out: bool
+    stdout: list[str]
+    stderr: list[str]
+    duration_ms: int
+
+
+class ImplementerRunnerInterface:
+    async def run(self, worktree_path: Path, prompt_context: str, timeout_seconds: int) -> ImplementerResult:
+        raise NotImplementedError
+
+
+class CliImplementerRunner(ImplementerRunnerInterface):
+    def __init__(self, command: list[str]):
+        self.command = command
+
+    async def run(self, worktree_path: Path, prompt_context: str, timeout_seconds: int) -> ImplementerResult:
+        start = asyncio.get_running_loop().time()
+        proc = await asyncio.create_subprocess_exec(
+            *self.command,
+            cwd=str(worktree_path),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        timed_out = False
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(prompt_context.encode()),
+                timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            timed_out = True
+            os.killpg(proc.pid, signal.SIGTERM)
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=5)
+            except asyncio.TimeoutError:
+                os.killpg(proc.pid, signal.SIGKILL)
+                stdout, stderr = await proc.communicate()
+        duration_ms = int((asyncio.get_running_loop().time() - start) * 1000)
+        return ImplementerResult(
+            exit_code=proc.returncode if proc.returncode is not None else -1,
+            timed_out=timed_out,
+            stdout=[redact_secrets(line) for line in stdout.decode(errors="replace").splitlines()],
+            stderr=[redact_secrets(line) for line in stderr.decode(errors="replace").splitlines()],
+            duration_ms=duration_ms,
+        )
+
+
+class MockImplementerRunner(ImplementerRunnerInterface):
+    def __init__(
+        self,
+        exit_code: int = 0,
+        stdout: list[str] | None = None,
+        stderr: list[str] | None = None,
+        timed_out: bool = False,
+    ):
+        self.exit_code = exit_code
+        self.stdout = stdout or []
+        self.stderr = stderr or []
+        self.timed_out = timed_out
+
+    async def run(self, worktree_path: Path, prompt_context: str, timeout_seconds: int) -> ImplementerResult:
+        del worktree_path, prompt_context, timeout_seconds
+        return ImplementerResult(
+            exit_code=self.exit_code,
+            timed_out=self.timed_out,
+            stdout=[redact_secrets(line) for line in self.stdout],
+            stderr=[redact_secrets(line) for line in self.stderr],
+            duration_ms=1,
+        )
+
+
+def runner_for_implementer(implementer: str) -> ImplementerRunnerInterface:
+    command = "codex" if implementer.lower() == "codex" else "agy"
+    return CliImplementerRunner([command])

@@ -7,7 +7,10 @@ from sqlalchemy.orm import Session
 
 from minime.db.models import (
     ChangeModel,
+    CheckResultModel,
     EventModel,
+    JobLogModel,
+    JobModel,
     MetricFactModel,
     ProjectBindingModel,
     ProjectModel,
@@ -15,12 +18,16 @@ from minime.db.models import (
 from minime.domain.enums import (
     ChangeStatus,
     EventType,
+    JobStatus,
     ProjectStatus,
     ReadinessState,
 )
 from minime.domain.interfaces import (
     ChangeRepositoryInterface,
+    CheckResultRepositoryInterface,
     EventRepositoryInterface,
+    JobLogRepositoryInterface,
+    JobRepositoryInterface,
     MetricFactRepositoryInterface,
     PersistenceUnitOfWork,
     ProjectBindingRepositoryInterface,
@@ -28,10 +35,14 @@ from minime.domain.interfaces import (
 )
 from minime.domain.models import (
     Change,
+    CheckResult,
     Event,
+    Job,
+    JobLog,
     MetricFact,
     Project,
     ProjectBinding,
+    utc_now,
 )
 
 
@@ -112,6 +123,44 @@ def fact_model_to_domain(model: MetricFactModel) -> MetricFact:
         fact_value=model.fact_value,
         details=model.details or {},
         recorded_at=model.recorded_at,
+    )
+
+
+def job_model_to_domain(model: JobModel) -> Job:
+    return Job(
+        job_id=model.id,
+        project_id=model.project_id,
+        change_name=model.change_name,
+        status=JobStatus(model.status),
+        implementer_role=model.implementer_role,
+        candidate_sha=model.candidate_sha,
+        base_sha=model.base_sha,
+        error_message=model.error_message,
+        created_at=model.created_at,
+        updated_at=model.updated_at,
+    )
+
+
+def job_log_model_to_domain(model: JobLogModel) -> JobLog:
+    return JobLog(
+        log_id=model.id,
+        job_id=model.job_id,
+        stream=model.stream,
+        message=model.message,
+        timestamp=model.timestamp,
+    )
+
+
+def check_result_model_to_domain(model: CheckResultModel) -> CheckResult:
+    return CheckResult(
+        result_id=model.id,
+        job_id=model.job_id,
+        check_name=model.check_name,
+        command=model.command,
+        exit_code=model.exit_code,
+        duration_ms=model.duration_ms,
+        output_snippet=model.output_snippet,
+        created_at=model.created_at,
     )
 
 
@@ -339,6 +388,131 @@ class PostgresMetricFactRepository(MetricFactRepositoryInterface):
         return [fact_model_to_domain(m) for m in models]
 
 
+class PostgresJobRepository(JobRepositoryInterface):
+    _valid_transitions: dict[JobStatus, set[JobStatus]] = {
+        JobStatus.QUEUED: {JobStatus.RUNNING, JobStatus.CANCELLED, JobStatus.FAILED},
+        JobStatus.RUNNING: {JobStatus.CHECKS_RUNNING, JobStatus.FAILED, JobStatus.CANCELLED},
+        JobStatus.CHECKS_RUNNING: {
+            JobStatus.CHECKS_PASSED,
+            JobStatus.CHECKS_FAILED,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+        },
+        JobStatus.CHECKS_PASSED: set(),
+        JobStatus.CHECKS_FAILED: set(),
+        JobStatus.FAILED: set(),
+        JobStatus.CANCELLED: set(),
+    }
+
+    def __init__(self, session: Session):
+        self.session = session
+
+    def save(self, job: Job) -> None:
+        existing = self.session.get(JobModel, job.job_id)
+        if existing:
+            existing.status = job.status.value
+            existing.implementer_role = job.implementer_role
+            existing.candidate_sha = job.candidate_sha
+            existing.base_sha = job.base_sha
+            existing.error_message = job.error_message
+            existing.updated_at = job.updated_at
+        else:
+            model = JobModel(
+                id=job.job_id,
+                project_id=job.project_id,
+                change_name=job.change_name,
+                status=job.status.value,
+                implementer_role=job.implementer_role,
+                candidate_sha=job.candidate_sha,
+                base_sha=job.base_sha,
+                error_message=job.error_message,
+                created_at=job.created_at,
+                updated_at=job.updated_at,
+            )
+            self.session.add(model)
+
+    def get_by_id(self, job_id: str) -> Job | None:
+        model = self.session.get(JobModel, job_id)
+        return job_model_to_domain(model) if model else None
+
+    def list_by_project(self, project_id: str, limit: int = 100) -> list[Job]:
+        stmt = (
+            select(JobModel)
+            .where(JobModel.project_id == project_id)
+            .order_by(desc(JobModel.created_at))
+            .limit(limit)
+        )
+        models = self.session.scalars(stmt).all()
+        return [job_model_to_domain(m) for m in models]
+
+    def transition(self, job_id: str, new_status: str, error_message: str | None = None) -> Job:
+        model = self.session.get(JobModel, job_id)
+        if not model:
+            raise ValueError(f"Job '{job_id}' not found.")
+        current = JobStatus(model.status)
+        target = JobStatus(new_status)
+        if target not in self._valid_transitions[current]:
+            raise ValueError(f"Invalid job status transition: {current.value} -> {target.value}.")
+        model.status = target.value
+        model.error_message = error_message
+        model.updated_at = utc_now()
+        return job_model_to_domain(model)
+
+
+class PostgresJobLogRepository(JobLogRepositoryInterface):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def save(self, log: JobLog) -> None:
+        self.session.add(
+            JobLogModel(
+                id=log.log_id,
+                job_id=log.job_id,
+                stream=log.stream,
+                message=log.message,
+                timestamp=log.timestamp,
+            )
+        )
+
+    def list_by_job(self, job_id: str, limit: int = 500) -> list[JobLog]:
+        stmt = (
+            select(JobLogModel)
+            .where(JobLogModel.job_id == job_id)
+            .order_by(JobLogModel.timestamp)
+            .limit(limit)
+        )
+        models = self.session.scalars(stmt).all()
+        return [job_log_model_to_domain(m) for m in models]
+
+
+class PostgresCheckResultRepository(CheckResultRepositoryInterface):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def save(self, result: CheckResult) -> None:
+        self.session.add(
+            CheckResultModel(
+                id=result.result_id,
+                job_id=result.job_id,
+                check_name=result.check_name,
+                command=result.command,
+                exit_code=result.exit_code,
+                duration_ms=result.duration_ms,
+                output_snippet=result.output_snippet,
+                created_at=result.created_at,
+            )
+        )
+
+    def list_by_job(self, job_id: str) -> list[CheckResult]:
+        stmt = (
+            select(CheckResultModel)
+            .where(CheckResultModel.job_id == job_id)
+            .order_by(CheckResultModel.created_at)
+        )
+        models = self.session.scalars(stmt).all()
+        return [check_result_model_to_domain(m) for m in models]
+
+
 class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
     """Encapsulates a database session for atomic operations across repositories."""
 
@@ -349,6 +523,9 @@ class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.bindings = PostgresProjectBindingRepository(session)
         self.events = PostgresEventRepository(session)
         self.metrics = PostgresMetricFactRepository(session)
+        self.jobs = PostgresJobRepository(session)
+        self.job_logs = PostgresJobLogRepository(session)
+        self.check_results = PostgresCheckResultRepository(session)
 
     def commit(self) -> None:
         self.session.commit()
