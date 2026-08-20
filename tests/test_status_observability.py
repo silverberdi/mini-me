@@ -3,6 +3,7 @@
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
+from conftest import create_isolated_openspec_change
 from minime.api.app import app, get_uow
 from minime.cli.main import app as cli_app
 from minime.domain.enums import ReadinessState
@@ -26,7 +27,7 @@ def test_status_service(in_memory_uow):
     change = Change(
         change_id="c-001",
         project_id="mini-me",
-        name="001-foundation",
+        name="synthetic-change",
         last_readiness_status=ReadinessState.READY,
     )
     in_memory_uow.changes.save(change)
@@ -34,11 +35,13 @@ def test_status_service(in_memory_uow):
     status_data = service.get_system_status()
     assert status_data["projects_count"] == 1
     assert status_data["projects"][0]["project_id"] == "mini-me"
-    assert status_data["projects"][0]["changes"][0]["name"] == "001-foundation"
+    assert status_data["projects"][0]["changes"][0]["name"] == "synthetic-change"
     assert status_data["projects"][0]["changes"][0]["readiness"] == "READY"
 
 
-def test_fastapi_endpoints(in_memory_uow):
+def test_fastapi_endpoints(in_memory_uow, tmp_path):
+    create_isolated_openspec_change(tmp_path, "synthetic-change")
+
     # Override get_uow dependency with in_memory_uow
     app.dependency_overrides[get_uow] = lambda: in_memory_uow
     client = TestClient(app)
@@ -73,7 +76,7 @@ def test_fastapi_endpoints(in_memory_uow):
     assert res.json()["display_name"] == "API Test Project"
 
     # Discover changes
-    res = client.post("/projects/test-api-proj/discover?project_root=.")
+    res = client.post(f"/projects/test-api-proj/discover?project_root={tmp_path}")
     assert res.status_code == 200
 
     # Clean up dependency override

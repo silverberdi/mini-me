@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from minime.domain.interfaces import (
@@ -157,3 +159,24 @@ class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
 @pytest.fixture
 def in_memory_uow() -> InMemoryPersistenceUnitOfWork:
     return InMemoryPersistenceUnitOfWork()
+
+
+def create_isolated_openspec_change(
+    root: Path,
+    change_name: str = "synthetic-change",
+    proposal_content: str = "# Proposal\n",
+    tasks_content: str = "# Tasks\n",
+    design_content: str = "# Design\n",
+    spec_content: str = "# Spec\n",
+) -> Path:
+    """Helper to create a fully isolated OpenSpec change directory with valid standard artifacts."""
+    change_dir = root / "openspec" / "changes" / change_name
+    change_dir.mkdir(parents=True, exist_ok=True)
+    (change_dir / "proposal.md").write_text(proposal_content, encoding="utf-8")
+    (change_dir / "tasks.md").write_text(tasks_content, encoding="utf-8")
+    (change_dir / "design.md").write_text(design_content, encoding="utf-8")
+    specs_dir = change_dir / "specs" / "feature"
+    specs_dir.mkdir(parents=True, exist_ok=True)
+    (specs_dir / "spec.md").write_text(spec_content, encoding="utf-8")
+    return change_dir
+

@@ -2,6 +2,7 @@
 
 import pytest
 
+from conftest import create_isolated_openspec_change
 from minime.adapters.github import GitHubAdapter
 from minime.domain.enums import EventType, ReadinessState
 from minime.domain.models import ProjectBinding
@@ -9,7 +10,9 @@ from minime.services.project_service import ProjectService
 from minime.services.readiness_service import ReadinessService
 
 
-def test_github_work_binding_repository_mismatch(in_memory_uow):
+def test_github_work_binding_repository_mismatch(in_memory_uow, tmp_path):
+    create_isolated_openspec_change(tmp_path, "synthetic-change")
+
     service = ProjectService(in_memory_uow)
     service.register_project(
         project_id="proj-a",
@@ -24,7 +27,7 @@ def test_github_work_binding_repository_mismatch(in_memory_uow):
         project_id="proj-a",
         repository="org/repo-a",
         github_issue_number=42,
-        openspec_change_name="001-foundation",
+        openspec_change_name="synthetic-change",
     )
     in_memory_uow.bindings.save(binding)
 
@@ -33,8 +36,8 @@ def test_github_work_binding_repository_mismatch(in_memory_uow):
     # When an external presentation/issue claims repository B, readiness fails
     eval_result = readiness_service.evaluate_change_readiness(
         project_id="proj-a",
-        change_name="001-foundation",
-        project_root=".",
+        change_name="synthetic-change",
+        project_root=str(tmp_path),
         github_repo="org/repo-b",
     )
 
@@ -42,8 +45,10 @@ def test_github_work_binding_repository_mismatch(in_memory_uow):
     assert any("Repository mismatch" in r for r in eval_result.unmet_reasons)
 
 
-def test_github_issue_number_mandatory_for_ready(in_memory_uow):
+def test_github_issue_number_mandatory_for_ready(in_memory_uow, tmp_path):
     """Proves: Durable ProjectBinding with github_issue_number=None blocks READY with structured reason."""
+    create_isolated_openspec_change(tmp_path, "synthetic-change")
+
     service = ProjectService(in_memory_uow)
     service.register_project(
         project_id="proj-a",
@@ -60,15 +65,15 @@ def test_github_issue_number_mandatory_for_ready(in_memory_uow):
         project_id="proj-a",
         repository="silverberdi/mini-me",
         github_issue_number=None,
-        openspec_change_name="001-foundation",
+        openspec_change_name="synthetic-change",
     )
     in_memory_uow.bindings.save(binding)
 
     readiness_service = ReadinessService(in_memory_uow)
     eval_result = readiness_service.evaluate_change_readiness(
         project_id="proj-a",
-        change_name="001-foundation",
-        project_root=".",
+        change_name="synthetic-change",
+        project_root=str(tmp_path),
     )
 
     assert eval_result.is_ready is False
@@ -81,8 +86,8 @@ def test_github_issue_number_mandatory_for_ready(in_memory_uow):
 
     eval_result2 = readiness_service.evaluate_change_readiness(
         project_id="proj-a",
-        change_name="001-foundation",
-        project_root=".",
+        change_name="synthetic-change",
+        project_root=str(tmp_path),
     )
     assert eval_result2.is_ready is True
     assert eval_result2.status == ReadinessState.READY
@@ -95,7 +100,7 @@ def test_duplicate_binding_rejected(in_memory_uow):
         project_id="proj-dup",
         repository="org/repo",
         github_issue_number=1,
-        openspec_change_name="001-foundation",
+        openspec_change_name="synthetic-change",
     )
     in_memory_uow.bindings.save(binding1)
 
@@ -104,7 +109,7 @@ def test_duplicate_binding_rejected(in_memory_uow):
         project_id="proj-dup",
         repository="org/repo",
         github_issue_number=2,
-        openspec_change_name="001-foundation",
+        openspec_change_name="synthetic-change",
     )
     with pytest.raises(ValueError, match="Unique constraint violation"):
         in_memory_uow.bindings.save(binding2)
@@ -116,7 +121,7 @@ def test_github_sync_failure_and_reconciliation(in_memory_uow):
     # Transient sync failure
     failure_event = adapter.record_sync_failure(
         project_id="proj-a",
-        change_id="001-foundation",
+        change_id="synthetic-change",
         operation="sync_issues",
         error_message="GitHub API rate limit exceeded (503)",
     )
@@ -130,7 +135,7 @@ def test_github_sync_failure_and_reconciliation(in_memory_uow):
     # Reconciled event
     reconciled_event = adapter.record_sync_reconciled(
         project_id="proj-a",
-        change_id="001-foundation",
+        change_id="synthetic-change",
         operation="sync_issues",
         details={"status": "all_issues_synced"},
     )

@@ -1,9 +1,8 @@
 """Acceptance scenarios for 001-foundation OpenSpec capabilities."""
 
-from pathlib import Path
-
 import pytest
 
+from conftest import create_isolated_openspec_change
 from minime.adapters.github import GitHubAdapter
 from minime.adapters.openspec import OpenSpecAdapter
 from minime.config import DatabaseConfig
@@ -53,7 +52,7 @@ def test_acceptance_postgres_daemon_restart(in_memory_uow):
     change = Change(
         change_id="change-001",
         project_id="mini-me",
-        name="001-foundation",
+        name="synthetic-change",
         status=ChangeStatus.READY,
     )
     in_memory_uow.changes.save(change)
@@ -62,7 +61,7 @@ def test_acceptance_postgres_daemon_restart(in_memory_uow):
         event_id="evt-001",
         event_type=EventType.CHANGE_DISCOVERED,
         project_id="mini-me",
-        change_id="001-foundation",
+        change_id="synthetic-change",
         payload={"schema": "spec-driven"},
     )
     in_memory_uow.events.save(event)
@@ -73,11 +72,11 @@ def test_acceptance_postgres_daemon_restart(in_memory_uow):
     assert restored_proj is not None
     assert restored_proj.repository == "silverberdi/mini-me"
 
-    restored_change = in_memory_uow.changes.get_by_name("mini-me", "001-foundation")
+    restored_change = in_memory_uow.changes.get_by_name("mini-me", "synthetic-change")
     assert restored_change is not None
     assert restored_change.status == ChangeStatus.READY
 
-    events = in_memory_uow.events.list_events(project_id="mini-me", change_id="001-foundation")
+    events = in_memory_uow.events.list_events(project_id="mini-me", change_id="synthetic-change")
     assert len(events) == 1
     assert events[0].event_type == EventType.CHANGE_DISCOVERED
 
@@ -137,8 +136,10 @@ def test_acceptance_complementary_roles_policy(in_memory_uow):
 # --- Capability: repository-binding ---
 
 
-def test_acceptance_presentation_metadata_never_authorizes_repo_change(in_memory_uow):
+def test_acceptance_presentation_metadata_never_authorizes_repo_change(in_memory_uow, tmp_path):
     """Scenario: Presentation metadata names another project."""
+    create_isolated_openspec_change(tmp_path, "synthetic-change")
+
     service = ProjectService(in_memory_uow)
     service.register_project(
         project_id="proj-a",
@@ -152,7 +153,7 @@ def test_acceptance_presentation_metadata_never_authorizes_repo_change(in_memory
         project_id="proj-a",
         repository="org/repo-a",
         github_issue_number=42,
-        openspec_change_name="001-foundation",
+        openspec_change_name="synthetic-change",
     )
     in_memory_uow.bindings.save(binding)
 
@@ -160,16 +161,18 @@ def test_acceptance_presentation_metadata_never_authorizes_repo_change(in_memory
     readiness_service = ReadinessService(in_memory_uow)
     eval_result = readiness_service.evaluate_change_readiness(
         project_id="proj-a",
-        change_name="001-foundation",
-        project_root=".",
+        change_name="synthetic-change",
+        project_root=str(tmp_path),
         github_repo="org/repo-b",
     )
     assert eval_result.is_ready is False
     assert any("Repository mismatch" in r for r in eval_result.unmet_reasons)
 
 
-def test_acceptance_missing_binding_blocks_readiness(in_memory_uow):
+def test_acceptance_missing_binding_blocks_readiness(in_memory_uow, tmp_path):
     """Scenario: Registered project lacks a durable ProjectBinding."""
+    create_isolated_openspec_change(tmp_path, "synthetic-change")
+
     service = ProjectService(in_memory_uow)
     service.register_project(
         project_id="proj-a",
@@ -181,15 +184,17 @@ def test_acceptance_missing_binding_blocks_readiness(in_memory_uow):
     readiness_service = ReadinessService(in_memory_uow)
     eval_result = readiness_service.evaluate_change_readiness(
         project_id="proj-a",
-        change_name="001-foundation",
-        project_root=".",
+        change_name="synthetic-change",
+        project_root=str(tmp_path),
     )
     assert eval_result.is_ready is False
     assert any("Missing durable project binding" in r for r in eval_result.unmet_reasons)
 
 
-def test_acceptance_binding_mismatch_blocks_readiness(in_memory_uow):
+def test_acceptance_binding_mismatch_blocks_readiness(in_memory_uow, tmp_path):
     """Scenario: Issue points at another repository."""
+    create_isolated_openspec_change(tmp_path, "synthetic-change")
+
     service = ProjectService(in_memory_uow)
     service.register_project(
         project_id="proj-a",
@@ -202,15 +207,15 @@ def test_acceptance_binding_mismatch_blocks_readiness(in_memory_uow):
         project_id="proj-a",
         repository="org/repo-b",  # Mismatch with registered repo-a
         github_issue_number=42,
-        openspec_change_name="001-foundation",
+        openspec_change_name="synthetic-change",
     )
     in_memory_uow.bindings.save(binding)
 
     readiness_service = ReadinessService(in_memory_uow)
     eval_result = readiness_service.evaluate_change_readiness(
         project_id="proj-a",
-        change_name="001-foundation",
-        project_root=".",
+        change_name="synthetic-change",
+        project_root=str(tmp_path),
     )
     assert eval_result.is_ready is False
     assert any("Repository mismatch" in r for r in eval_result.unmet_reasons)
@@ -219,8 +224,11 @@ def test_acceptance_binding_mismatch_blocks_readiness(in_memory_uow):
 # --- Capability: openspec-readiness ---
 
 
-def test_acceptance_active_openspec_discovery(in_memory_uow):
+def test_acceptance_active_openspec_discovery(in_memory_uow, tmp_path):
     """Scenario: Registered project contains an active change."""
+    create_isolated_openspec_change(tmp_path, "synthetic-change-one")
+    create_isolated_openspec_change(tmp_path, "synthetic-change-two")
+
     project = Project(
         project_id="mini-me",
         display_name="mini me",
@@ -231,14 +239,17 @@ def test_acceptance_active_openspec_discovery(in_memory_uow):
     in_memory_uow.projects.save(project)
 
     adapter = OpenSpecAdapter()
-    changes = adapter.discover_changes(project, project_root=".")
-    assert len(changes) >= 1
-    assert any(c.name == "001-foundation" for c in changes)
+    changes = adapter.discover_changes(project, project_root=str(tmp_path))
+    assert len(changes) == 2
+    names = [c.name for c in changes]
+    assert "synthetic-change-one" in names
+    assert "synthetic-change-two" in names
 
 
-def test_acceptance_runtime_state_outside_openspec(in_memory_uow):
+def test_acceptance_runtime_state_outside_openspec(in_memory_uow, tmp_path):
     """Scenario: Runtime status changes without modifying OpenSpec."""
-    proposal_path = Path("openspec/changes/001-foundation/proposal.md")
+    change_dir = create_isolated_openspec_change(tmp_path, "synthetic-change")
+    proposal_path = change_dir / "proposal.md"
     initial_content = proposal_path.read_text(encoding="utf-8")
 
     project = Project(
@@ -254,22 +265,24 @@ def test_acceptance_runtime_state_outside_openspec(in_memory_uow):
         project_id="mini-me",
         repository="silverberdi/mini-me",
         github_issue_number=1,
-        openspec_change_name="001-foundation",
+        openspec_change_name="synthetic-change",
     )
     in_memory_uow.bindings.save(binding)
 
     readiness_service = ReadinessService(in_memory_uow)
     eval_result = readiness_service.evaluate_change_readiness(
         project_id="mini-me",
-        change_name="001-foundation",
-        project_root=".",
+        change_name="synthetic-change",
+        project_root=str(tmp_path),
     )
     assert eval_result.is_ready is True
     assert proposal_path.read_text(encoding="utf-8") == initial_content
 
 
-def test_acceptance_roadmap_gating(in_memory_uow):
+def test_acceptance_roadmap_gating(in_memory_uow, tmp_path):
     """Scenario: Future roadmap change exists on disk while prior stage is active."""
+    create_isolated_openspec_change(tmp_path, "future-stage-change")
+
     project = Project(
         project_id="mini-me",
         display_name="mini me",
@@ -283,16 +296,16 @@ def test_acceptance_roadmap_gating(in_memory_uow):
         project_id="mini-me",
         repository="silverberdi/mini-me",
         github_issue_number=1,
-        openspec_change_name="003-provider-pipeline",
+        openspec_change_name="future-stage-change",
     )
     in_memory_uow.bindings.save(binding)
 
     readiness_service = ReadinessService(in_memory_uow)
     eval_result = readiness_service.evaluate_change_readiness(
         project_id="mini-me",
-        change_name="003-provider-pipeline",
-        project_root=".",
-        current_active_change="001-foundation",
+        change_name="future-stage-change",
+        project_root=str(tmp_path),
+        current_active_change="active-stage-change",
     )
     assert eval_result.is_ready is False
     assert any("Roadmap gating" in r for r in eval_result.unmet_reasons)
@@ -301,8 +314,10 @@ def test_acceptance_roadmap_gating(in_memory_uow):
 # --- Capability: github-work-binding ---
 
 
-def test_acceptance_github_issue_mandatory_for_readiness(in_memory_uow):
+def test_acceptance_github_issue_mandatory_for_readiness(in_memory_uow, tmp_path):
     """Scenario: Persist GitHub work identifiers without display-name authority; issue number is mandatory."""
+    create_isolated_openspec_change(tmp_path, "synthetic-change")
+
     service = ProjectService(in_memory_uow)
     service.register_project(
         project_id="mini-me",
@@ -318,15 +333,15 @@ def test_acceptance_github_issue_mandatory_for_readiness(in_memory_uow):
         project_id="mini-me",
         repository="silverberdi/mini-me",
         github_issue_number=None,
-        openspec_change_name="001-foundation",
+        openspec_change_name="synthetic-change",
     )
     in_memory_uow.bindings.save(binding)
 
     readiness_service = ReadinessService(in_memory_uow)
     eval_result = readiness_service.evaluate_change_readiness(
         project_id="mini-me",
-        change_name="001-foundation",
-        project_root=".",
+        change_name="synthetic-change",
+        project_root=str(tmp_path),
     )
     assert eval_result.is_ready is False
     assert any("Missing GitHub Issue binding" in r for r in eval_result.unmet_reasons)
@@ -337,7 +352,7 @@ def test_acceptance_github_outage_reconcilable(in_memory_uow):
     adapter = GitHubAdapter()
     failure_evt = adapter.record_sync_failure(
         project_id="mini-me",
-        change_id="001-foundation",
+        change_id="synthetic-change",
         operation="sync_issues",
         error_message="GitHub service unavailable (503)",
     )
@@ -350,7 +365,7 @@ def test_acceptance_github_outage_reconcilable(in_memory_uow):
     # Reconcile
     reconciled_evt = adapter.record_sync_reconciled(
         project_id="mini-me",
-        change_id="001-foundation",
+        change_id="synthetic-change",
         operation="sync_issues",
     )
     in_memory_uow.events.save(reconciled_evt)
@@ -383,10 +398,10 @@ def test_acceptance_status_surface(in_memory_uow):
 
 def test_acceptance_structured_correlation_and_redaction():
     """Scenario: Operation emits diagnostic evidence with stable correlation IDs and secret redaction."""
-    set_correlation_context(project_id="mini-me", change_id="001-foundation", operation_id="op-101")
+    set_correlation_context(project_id="mini-me", change_id="synthetic-change", operation_id="op-101")
     ctx = get_correlation_context()
     assert ctx["project_id"] == "mini-me"
-    assert ctx["change_id"] == "001-foundation"
+    assert ctx["change_id"] == "synthetic-change"
     assert ctx["operation_id"] == "op-101"
 
     text = "Secret: postgresql://user:pass1234@localhost/db and token=secret_token_abc"
@@ -403,7 +418,7 @@ def test_acceptance_metrics_facts_retention(in_memory_uow):
     fact1 = MetricFact(
         metric_name="readiness_evaluation",
         project_id="mini-me",
-        change_id="001-foundation",
+        change_id="synthetic-change",
         fact_value=0.0,
         details={"is_ready": False, "unmet_reasons": ["missing design.md"]},
     )
@@ -412,13 +427,13 @@ def test_acceptance_metrics_facts_retention(in_memory_uow):
     fact2 = MetricFact(
         metric_name="readiness_evaluation",
         project_id="mini-me",
-        change_id="001-foundation",
+        change_id="synthetic-change",
         fact_value=1.0,
         details={"is_ready": True, "unmet_reasons": []},
     )
     in_memory_uow.metrics.save(fact2)
 
-    facts = in_memory_uow.metrics.list_facts(project_id="mini-me", change_id="001-foundation")
+    facts = in_memory_uow.metrics.list_facts(project_id="mini-me", change_id="synthetic-change")
     assert len(facts) == 2
     assert facts[0].fact_value == 1.0  # Most recent first
     assert facts[1].fact_value == 0.0

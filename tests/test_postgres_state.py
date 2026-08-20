@@ -57,7 +57,7 @@ def test_restart_persistence_simulation(in_memory_uow):
     change = Change(
         change_id="change-001",
         project_id="mini-me",
-        name="001-foundation",
+        name="synthetic-change",
         status=ChangeStatus.READY,
         last_readiness_status=ReadinessState.READY,
     )
@@ -67,7 +67,7 @@ def test_restart_persistence_simulation(in_memory_uow):
         event_id="evt-1",
         event_type=EventType.PROJECT_REGISTERED,
         project_id="mini-me",
-        change_id="001-foundation",
+        change_id="synthetic-change",
         payload={"action": "registered"},
         timestamp=now,
     )
@@ -80,7 +80,7 @@ def test_restart_persistence_simulation(in_memory_uow):
     assert restored_project.display_name == "mini me"
     assert restored_project.repository == "owner/mini-me"
 
-    restored_change = in_memory_uow.changes.get_by_name("mini-me", "001-foundation")
+    restored_change = in_memory_uow.changes.get_by_name("mini-me", "synthetic-change")
     assert restored_change is not None
     assert restored_change.last_readiness_status == ReadinessState.READY
 
