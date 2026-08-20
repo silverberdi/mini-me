@@ -75,7 +75,11 @@ projects:
     openspec_path: openspec
     implementer: codex
     reviewer: antigravity
-    checks: []  # Filled by Foundation implementation once project tooling exists.
+    checks:
+      - name: ruff
+        command: ruff check .
+      - name: test
+        command: pytest
     external_providers_allowed: [codex, antigravity, deepseek]
     openrouter_drain_allowed: false
     deployment:
