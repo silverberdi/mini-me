@@ -19,6 +19,8 @@ def test_models_metadata_tables():
     assert "jobs" in tables
     assert "job_logs" in tables
     assert "check_results" in tables
+    assert "reviews" in tables
+    assert "review_findings" in tables
     # Verify uniqueness constraint on project_bindings (project_id, openspec_change_name)
     pb_table = tables["project_bindings"]
     constraint_names = {c.name for c in pb_table.constraints}
@@ -45,6 +47,8 @@ def test_alembic_offline_postgres_migration():
     assert "CREATE TABLE jobs" in sql
     assert "CREATE TABLE job_logs" in sql
     assert "CREATE TABLE check_results" in sql
+    assert "CREATE TABLE reviews" in sql
+    assert "CREATE TABLE review_findings" in sql
     assert "TIMESTAMP WITH TIME ZONE" in sql
 
 

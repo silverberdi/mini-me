@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from minime.adapters.openspec import OpenSpecAdapter
 from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.db.session import db_manager
+from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import Change, Job, JobLog, Project
 from minime.services.execution_pipeline import ExecutionPipelineService
 from minime.services.project_service import ProjectService
@@ -209,8 +210,51 @@ def get_job_logs(job_id: str, uow: UowDep) -> list[JobLog]:
     return uow.job_logs.list_by_job(job_id)
 
 
-def _job_summary(uow: PostgresPersistenceUnitOfWork, job: Job) -> dict[str, Any]:
+@app.get("/jobs/{job_id}/review")
+def get_job_review(job_id: str, uow: UowDep) -> dict[str, Any]:
+    job = uow.jobs.get_by_id(job_id)
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"Job '{job_id}' not found"
+        )
+    review = uow.reviews.get_by_job_id(job_id)
+    if not review:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No review found for job '{job_id}'",
+        )
+    findings = uow.review_findings.list_by_review(review.review_id)
+    return {
+        "review_id": review.review_id,
+        "job_id": review.job_id,
+        "project_id": review.project_id,
+        "change_name": review.change_name,
+        "reviewer": review.reviewer_role,
+        "candidate_sha": review.candidate_sha,
+        "base_sha": review.base_sha,
+        "status": review.status.value,
+        "verdict": review.verdict.value if review.verdict else None,
+        "summary": review.summary,
+        "error_message": review.error_message,
+        "created_at": review.created_at.isoformat(),
+        "updated_at": review.updated_at.isoformat(),
+        "findings": [
+            {
+                "finding_id": f.finding_id,
+                "severity": f.severity.value,
+                "location": f.location,
+                "violated_requirement": f.violated_requirement,
+                "expected_correction": f.expected_correction,
+                "created_at": f.created_at.isoformat(),
+            }
+            for f in findings
+        ],
+    }
+
+
+def _job_summary(uow: PersistenceUnitOfWork, job: Job) -> dict[str, Any]:
     checks = uow.check_results.list_by_job(job.job_id)
+    review = uow.reviews.get_by_job_id(job.job_id)
     return {
         "job_id": job.job_id,
         "project_id": job.project_id,
@@ -231,4 +275,14 @@ def _job_summary(uow: PostgresPersistenceUnitOfWork, job: Job) -> dict[str, Any]
             }
             for c in checks
         ],
+        "review": {
+            "review_id": review.review_id,
+            "reviewer": review.reviewer_role,
+            "status": review.status.value,
+            "verdict": review.verdict.value if review.verdict else None,
+            "summary": review.summary,
+        }
+        if review
+        else None,
     }
+

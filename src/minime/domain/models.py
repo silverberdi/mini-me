@@ -11,9 +11,12 @@ from pydantic import BaseModel, Field
 from minime.domain.enums import (
     ChangeStatus,
     EventType,
+    FindingSeverity,
     JobStatus,
     ProjectStatus,
     ReadinessState,
+    ReviewStatus,
+    ReviewVerdict,
 )
 
 
@@ -166,3 +169,52 @@ class CheckResult(BaseModel):
     duration_ms: int
     output_snippet: str
     created_at: datetime = Field(default_factory=utc_now)
+
+
+class ReviewFinding(BaseModel):
+    """Structured finding emitted by a complementary reviewer."""
+
+    finding_id: str = Field(default_factory=generate_uuid)
+    review_id: str
+    severity: FindingSeverity
+    location: str | None = None
+    violated_requirement: str
+    expected_correction: str
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class Review(BaseModel):
+    """Durable review state record for an implementation candidate."""
+
+    review_id: str = Field(default_factory=generate_uuid)
+    job_id: str
+    project_id: str
+    change_name: str
+    reviewer_role: str
+    candidate_sha: str
+    base_sha: str
+    status: ReviewStatus = ReviewStatus.REVIEW_PENDING
+    verdict: ReviewVerdict | None = None
+    summary: str | None = None
+    error_message: str | None = None
+    findings: list[ReviewFinding] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class ReviewFindingPayload(BaseModel):
+    """Finding item within structured reviewer payload."""
+
+    severity: FindingSeverity
+    location: str | None = None
+    violated_requirement: str
+    expected_correction: str
+
+
+class ReviewVerdictPayload(BaseModel):
+    """Structured payload contract required from complementary reviewer."""
+
+    verdict: ReviewVerdict
+    summary: str = ""
+    findings: list[ReviewFindingPayload] = Field(default_factory=list)
+

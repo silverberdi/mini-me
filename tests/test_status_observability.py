@@ -90,7 +90,7 @@ def test_fastapi_job_observability_endpoints(in_memory_uow):
     job = Job(
         job_id="job-1",
         project_id="mini-me",
-        change_name="002-implementation-pipeline",
+        change_name="synthetic-job-change",
         implementer_role="codex",
         candidate_sha="abc123",
     )
