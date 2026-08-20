@@ -14,13 +14,18 @@ from minime.db.models import (
     MetricFactModel,
     ProjectBindingModel,
     ProjectModel,
+    ReviewFindingModel,
+    ReviewModel,
 )
 from minime.domain.enums import (
     ChangeStatus,
     EventType,
+    FindingSeverity,
     JobStatus,
     ProjectStatus,
     ReadinessState,
+    ReviewStatus,
+    ReviewVerdict,
 )
 from minime.domain.interfaces import (
     ChangeRepositoryInterface,
@@ -32,6 +37,8 @@ from minime.domain.interfaces import (
     PersistenceUnitOfWork,
     ProjectBindingRepositoryInterface,
     ProjectRepositoryInterface,
+    ReviewFindingRepositoryInterface,
+    ReviewRepositoryInterface,
 )
 from minime.domain.models import (
     Change,
@@ -42,6 +49,8 @@ from minime.domain.models import (
     MetricFact,
     Project,
     ProjectBinding,
+    Review,
+    ReviewFinding,
     utc_now,
 )
 
@@ -162,6 +171,38 @@ def check_result_model_to_domain(model: CheckResultModel) -> CheckResult:
         output_snippet=model.output_snippet,
         created_at=model.created_at,
     )
+
+
+def review_finding_model_to_domain(model: ReviewFindingModel) -> ReviewFinding:
+    return ReviewFinding(
+        finding_id=model.id,
+        review_id=model.review_id,
+        severity=FindingSeverity(model.severity),
+        location=model.location,
+        violated_requirement=model.violated_requirement,
+        expected_correction=model.expected_correction,
+        created_at=model.created_at,
+    )
+
+
+def review_model_to_domain(model: ReviewModel) -> Review:
+    return Review(
+        review_id=model.id,
+        job_id=model.job_id,
+        project_id=model.project_id,
+        change_name=model.change_name,
+        reviewer_role=model.reviewer_role,
+        candidate_sha=model.candidate_sha,
+        base_sha=model.base_sha,
+        status=ReviewStatus(model.status),
+        verdict=ReviewVerdict(model.verdict) if model.verdict else None,
+        summary=model.summary,
+        error_message=model.error_message,
+        findings=[review_finding_model_to_domain(f) for f in (model.findings or [])],
+        created_at=model.created_at,
+        updated_at=model.updated_at,
+    )
+
 
 
 class PostgresProjectRepository(ProjectRepositoryInterface):
@@ -398,8 +439,20 @@ class PostgresJobRepository(JobRepositoryInterface):
             JobStatus.FAILED,
             JobStatus.CANCELLED,
         },
-        JobStatus.CHECKS_PASSED: set(),
+        JobStatus.CHECKS_PASSED: {
+            JobStatus.REVIEW_RUNNING,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+        },
         JobStatus.CHECKS_FAILED: set(),
+        JobStatus.REVIEW_RUNNING: {
+            JobStatus.READY_TO_MERGE,
+            JobStatus.CHANGES_REQUIRED,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+        },
+        JobStatus.READY_TO_MERGE: set(),
+        JobStatus.CHANGES_REQUIRED: set(),
         JobStatus.FAILED: set(),
         JobStatus.CANCELLED: set(),
     }
@@ -513,6 +566,131 @@ class PostgresCheckResultRepository(CheckResultRepositoryInterface):
         return [check_result_model_to_domain(m) for m in models]
 
 
+class PostgresReviewRepository(ReviewRepositoryInterface):
+    _valid_transitions: dict[ReviewStatus, set[ReviewStatus]] = {
+        ReviewStatus.REVIEW_PENDING: {
+            ReviewStatus.REVIEW_RUNNING,
+            ReviewStatus.REVIEW_FAILED,
+            ReviewStatus.REVIEW_TIMED_OUT,
+        },
+        ReviewStatus.REVIEW_RUNNING: {
+            ReviewStatus.REVIEW_COMPLETED,
+            ReviewStatus.REVIEW_FAILED,
+            ReviewStatus.REVIEW_TIMED_OUT,
+        },
+        ReviewStatus.REVIEW_COMPLETED: set(),
+        ReviewStatus.REVIEW_FAILED: set(),
+        ReviewStatus.REVIEW_TIMED_OUT: set(),
+    }
+
+    def __init__(self, session: Session):
+        self.session = session
+
+    def save(self, review: Review) -> None:
+        existing = self.session.get(ReviewModel, review.review_id)
+        if existing:
+            existing.status = review.status.value
+            existing.verdict = review.verdict.value if review.verdict else None
+            existing.summary = review.summary
+            existing.error_message = review.error_message
+            existing.updated_at = review.updated_at
+        else:
+            model = ReviewModel(
+                id=review.review_id,
+                job_id=review.job_id,
+                project_id=review.project_id,
+                change_name=review.change_name,
+                reviewer_role=review.reviewer_role,
+                candidate_sha=review.candidate_sha,
+                base_sha=review.base_sha,
+                status=review.status.value,
+                verdict=review.verdict.value if review.verdict else None,
+                summary=review.summary,
+                error_message=review.error_message,
+                created_at=review.created_at,
+                updated_at=review.updated_at,
+            )
+            self.session.add(model)
+
+    def get_by_id(self, review_id: str) -> Review | None:
+        model = self.session.get(ReviewModel, review_id)
+        return review_model_to_domain(model) if model else None
+
+    def get_by_job_id(self, job_id: str) -> Review | None:
+        stmt = (
+            select(ReviewModel)
+            .where(ReviewModel.job_id == job_id)
+            .order_by(desc(ReviewModel.created_at))
+            .limit(1)
+        )
+        model = self.session.scalars(stmt).first()
+        return review_model_to_domain(model) if model else None
+
+    def list_by_project(self, project_id: str, limit: int = 100) -> list[Review]:
+        stmt = (
+            select(ReviewModel)
+            .where(ReviewModel.project_id == project_id)
+            .order_by(desc(ReviewModel.created_at))
+            .limit(limit)
+        )
+        models = self.session.scalars(stmt).all()
+        return [review_model_to_domain(m) for m in models]
+
+    def transition(
+        self,
+        review_id: str,
+        new_status: str,
+        verdict: str | None = None,
+        summary: str | None = None,
+        error_message: str | None = None,
+    ) -> Review:
+        model = self.session.get(ReviewModel, review_id)
+        if not model:
+            raise ValueError(f"Review '{review_id}' not found.")
+        current = ReviewStatus(model.status)
+        target = ReviewStatus(new_status)
+        if target not in self._valid_transitions[current]:
+            raise ValueError(
+                f"Invalid review status transition: {current.value} -> {target.value}."
+            )
+        model.status = target.value
+        if verdict:
+            model.verdict = ReviewVerdict(verdict).value
+        if summary is not None:
+            model.summary = summary
+        if error_message is not None:
+            model.error_message = error_message
+        model.updated_at = utc_now()
+        return review_model_to_domain(model)
+
+
+class PostgresReviewFindingRepository(ReviewFindingRepositoryInterface):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def save(self, finding: ReviewFinding) -> None:
+        self.session.add(
+            ReviewFindingModel(
+                id=finding.finding_id,
+                review_id=finding.review_id,
+                severity=finding.severity.value,
+                location=finding.location,
+                violated_requirement=finding.violated_requirement,
+                expected_correction=finding.expected_correction,
+                created_at=finding.created_at,
+            )
+        )
+
+    def list_by_review(self, review_id: str) -> list[ReviewFinding]:
+        stmt = (
+            select(ReviewFindingModel)
+            .where(ReviewFindingModel.review_id == review_id)
+            .order_by(ReviewFindingModel.created_at)
+        )
+        models = self.session.scalars(stmt).all()
+        return [review_finding_model_to_domain(m) for m in models]
+
+
 class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
     """Encapsulates a database session for atomic operations across repositories."""
 
@@ -526,9 +704,12 @@ class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.jobs = PostgresJobRepository(session)
         self.job_logs = PostgresJobLogRepository(session)
         self.check_results = PostgresCheckResultRepository(session)
+        self.reviews = PostgresReviewRepository(session)
+        self.review_findings = PostgresReviewFindingRepository(session)
 
     def commit(self) -> None:
         self.session.commit()
 
     def rollback(self) -> None:
         self.session.rollback()
+

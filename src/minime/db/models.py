@@ -212,3 +212,56 @@ class CheckResultModel(Base):
     )
 
     job: Mapped[JobModel] = relationship("JobModel", back_populates="check_results")
+    reviews: Mapped[list[ReviewModel]] = relationship(
+        "ReviewModel", back_populates="job", cascade="all, delete-orphan"
+    )
+
+
+class ReviewModel(Base):
+    __tablename__ = "reviews"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    change_name: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    reviewer_role: Mapped[str] = mapped_column(String(64), nullable=False)
+    candidate_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    base_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    verdict: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+    job: Mapped[JobModel] = relationship("JobModel", back_populates="reviews")
+    findings: Mapped[list[ReviewFindingModel]] = relationship(
+        "ReviewFindingModel", back_populates="review", cascade="all, delete-orphan"
+    )
+
+
+class ReviewFindingModel(Base):
+    __tablename__ = "review_findings"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    review_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("reviews.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    severity: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    location: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    violated_requirement: Mapped[str] = mapped_column(Text, nullable=False)
+    expected_correction: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+
+    review: Mapped[ReviewModel] = relationship("ReviewModel", back_populates="findings")
+

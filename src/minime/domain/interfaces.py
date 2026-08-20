@@ -14,6 +14,8 @@ from minime.domain.models import (
     MetricFact,
     Project,
     ProjectBinding,
+    Review,
+    ReviewFinding,
 )
 
 
@@ -112,14 +114,58 @@ class CheckResultRepositoryInterface(ABC):
     def list_by_job(self, job_id: str) -> list[CheckResult]: ...
 
 
+class ReviewRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, review: Review) -> None: ...
+
+    @abstractmethod
+    def get_by_id(self, review_id: str) -> Review | None: ...
+
+    @abstractmethod
+    def get_by_job_id(self, job_id: str) -> Review | None: ...
+
+    @abstractmethod
+    def list_by_project(self, project_id: str, limit: int = 100) -> list[Review]: ...
+
+    @abstractmethod
+    def transition(
+        self,
+        review_id: str,
+        new_status: str,
+        verdict: str | None = None,
+        summary: str | None = None,
+        error_message: str | None = None,
+    ) -> Review: ...
+
+
+class ReviewFindingRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, finding: ReviewFinding) -> None: ...
+
+    @abstractmethod
+    def list_by_review(self, review_id: str) -> list[ReviewFinding]: ...
+
+
 class PersistenceUnitOfWork(ABC):
     """Transactional persistence boundary: atomically persists state changes and emitted events."""
+
+    projects: ProjectRepositoryInterface
+    changes: ChangeRepositoryInterface
+    bindings: ProjectBindingRepositoryInterface
+    events: EventRepositoryInterface
+    metrics: MetricFactRepositoryInterface
+    jobs: JobRepositoryInterface
+    job_logs: JobLogRepositoryInterface
+    check_results: CheckResultRepositoryInterface
+    reviews: ReviewRepositoryInterface
+    review_findings: ReviewFindingRepositoryInterface
 
     @abstractmethod
     def commit(self) -> None: ...
 
     @abstractmethod
     def rollback(self) -> None: ...
+
 
 
 class OpenSpecAdapterInterface(ABC):

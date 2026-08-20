@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from minime.domain.enums import JobStatus
+from minime.domain.enums import JobStatus, ReviewStatus, ReviewVerdict
 from minime.domain.interfaces import (
     ChangeRepositoryInterface,
     CheckResultRepositoryInterface,
@@ -17,6 +17,8 @@ from minime.domain.interfaces import (
     PersistenceUnitOfWork,
     ProjectBindingRepositoryInterface,
     ProjectRepositoryInterface,
+    ReviewFindingRepositoryInterface,
+    ReviewRepositoryInterface,
 )
 from minime.domain.models import (
     Change,
@@ -27,6 +29,8 @@ from minime.domain.models import (
     MetricFact,
     Project,
     ProjectBinding,
+    Review,
+    ReviewFinding,
 )
 
 
@@ -156,8 +160,20 @@ class InMemoryJobRepository(JobRepositoryInterface):
             JobStatus.FAILED,
             JobStatus.CANCELLED,
         },
-        JobStatus.CHECKS_PASSED: set(),
+        JobStatus.CHECKS_PASSED: {
+            JobStatus.REVIEW_RUNNING,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+        },
         JobStatus.CHECKS_FAILED: set(),
+        JobStatus.REVIEW_RUNNING: {
+            JobStatus.READY_TO_MERGE,
+            JobStatus.CHANGES_REQUIRED,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+        },
+        JobStatus.READY_TO_MERGE: set(),
+        JobStatus.CHANGES_REQUIRED: set(),
         JobStatus.FAILED: set(),
         JobStatus.CANCELLED: set(),
     }
@@ -212,6 +228,82 @@ class InMemoryCheckResultRepository(CheckResultRepositoryInterface):
         return [r.model_copy(deep=True) for r in self._store if r.job_id == job_id]
 
 
+class InMemoryReviewRepository(ReviewRepositoryInterface):
+    _valid_transitions: dict[ReviewStatus, set[ReviewStatus]] = {
+        ReviewStatus.REVIEW_PENDING: {
+            ReviewStatus.REVIEW_RUNNING,
+            ReviewStatus.REVIEW_FAILED,
+            ReviewStatus.REVIEW_TIMED_OUT,
+        },
+        ReviewStatus.REVIEW_RUNNING: {
+            ReviewStatus.REVIEW_COMPLETED,
+            ReviewStatus.REVIEW_FAILED,
+            ReviewStatus.REVIEW_TIMED_OUT,
+        },
+        ReviewStatus.REVIEW_COMPLETED: set(),
+        ReviewStatus.REVIEW_FAILED: set(),
+        ReviewStatus.REVIEW_TIMED_OUT: set(),
+    }
+
+    def __init__(self):
+        self._store: dict[str, Review] = {}
+
+    def save(self, review: Review) -> None:
+        self._store[review.review_id] = review.model_copy(deep=True)
+
+    def get_by_id(self, review_id: str) -> Review | None:
+        rev = self._store.get(review_id)
+        return rev.model_copy(deep=True) if rev else None
+
+    def get_by_job_id(self, job_id: str) -> Review | None:
+        reviews = [r for r in self._store.values() if r.job_id == job_id]
+        reviews.sort(key=lambda r: r.created_at, reverse=True)
+        return reviews[0].model_copy(deep=True) if reviews else None
+
+    def list_by_project(self, project_id: str, limit: int = 100) -> list[Review]:
+        reviews = [r for r in self._store.values() if r.project_id == project_id]
+        reviews.sort(key=lambda r: r.created_at, reverse=True)
+        return [r.model_copy(deep=True) for r in reviews[:limit]]
+
+    def transition(
+        self,
+        review_id: str,
+        new_status: str,
+        verdict: str | None = None,
+        summary: str | None = None,
+        error_message: str | None = None,
+    ) -> Review:
+        rev = self._store.get(review_id)
+        if not rev:
+            raise ValueError(f"Review '{review_id}' not found.")
+        target = ReviewStatus(new_status)
+        if target not in self._valid_transitions[rev.status]:
+            raise ValueError(
+                f"Invalid review status transition: {rev.status.value} -> {target.value}."
+            )
+        update_dict: dict[str, object] = {"status": target}
+        if verdict:
+            update_dict["verdict"] = ReviewVerdict(verdict)
+        if summary is not None:
+            update_dict["summary"] = summary
+        if error_message is not None:
+            update_dict["error_message"] = error_message
+        updated = rev.model_copy(update=update_dict)
+        self._store[review_id] = updated
+        return updated.model_copy(deep=True)
+
+
+class InMemoryReviewFindingRepository(ReviewFindingRepositoryInterface):
+    def __init__(self):
+        self._store: list[ReviewFinding] = []
+
+    def save(self, finding: ReviewFinding) -> None:
+        self._store.append(finding.model_copy(deep=True))
+
+    def list_by_review(self, review_id: str) -> list[ReviewFinding]:
+        return [f.model_copy(deep=True) for f in self._store if f.review_id == review_id]
+
+
 class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
     def __init__(self):
         self.projects = InMemoryProjectRepository()
@@ -222,6 +314,8 @@ class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.jobs = InMemoryJobRepository()
         self.job_logs = InMemoryJobLogRepository()
         self.check_results = InMemoryCheckResultRepository()
+        self.reviews = InMemoryReviewRepository()
+        self.review_findings = InMemoryReviewFindingRepository()
         self.committed = False
         self.rolled_back = False
 
@@ -230,6 +324,7 @@ class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
 
     def rollback(self) -> None:
         self.rolled_back = True
+
 
 
 @pytest.fixture

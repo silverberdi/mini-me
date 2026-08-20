@@ -11,6 +11,7 @@ import uvicorn
 from minime.adapters.openspec import OpenSpecAdapter
 from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.db.session import db_manager
+from minime.domain.enums import ReviewVerdict
 from minime.logging import configure_logging, get_logger
 from minime.services.execution_pipeline import ExecutionPipelineService
 from minime.services.project_service import ProjectService
@@ -286,9 +287,11 @@ def jobs_list_cmd(
             for job in jobs:
                 checks = uow.check_results.list_by_job(job.job_id)
                 check_summary = ",".join(f"{c.check_name}:{c.exit_code}" for c in checks) or "-"
+                review = uow.reviews.get_by_job_id(job.job_id)
+                verdict_summary = f"verdict={review.verdict.value}" if review and review.verdict else f"review={review.status.value}" if review else ""
                 typer.echo(
                     f"{job.job_id}  {job.change_name}  {job.status.value}  "
-                    f"candidate={job.candidate_sha or '-'}  checks={check_summary}"
+                    f"candidate={job.candidate_sha or '-'}  checks={check_summary}  {verdict_summary}".strip()
                 )
     except Exception as e:
         typer.secho(f"Error listing jobs: {e}", fg=typer.colors.RED)
@@ -310,9 +313,13 @@ def jobs_show_cmd(
                 typer.secho(f"Job '{job_id}' not found.", fg=typer.colors.RED)
                 raise typer.Exit(code=1)
             check_results = uow.check_results.list_by_job(job_id)
+            review = uow.reviews.get_by_job_id(job_id)
+            findings = uow.review_findings.list_by_review(review.review_id) if review else []
             payload = {
                 "job": job.model_dump(),
                 "checks": [c.model_dump() for c in check_results],
+                "review": review.model_dump() if review else None,
+                "findings": [f.model_dump() for f in findings],
                 "logs": [log.model_dump() for log in uow.job_logs.list_by_job(job_id)] if logs else [],
             }
             if json_output:
@@ -331,6 +338,16 @@ def jobs_show_cmd(
                 typer.echo("Checks:")
                 for check in check_results:
                     typer.echo(f"  {check.check_name}: exit={check.exit_code} ({check.duration_ms}ms)")
+            if review:
+                typer.echo("Review:")
+                typer.echo(f"  Reviewer: {review.reviewer_role}")
+                typer.echo(f"  Status: {review.status.value}")
+                if review.verdict:
+                    typer.echo(f"  Verdict: {review.verdict.value}")
+                if review.summary:
+                    typer.echo(f"  Summary: {review.summary}")
+                if findings:
+                    typer.echo(f"  Findings: {len(findings)} finding(s)")
             if logs:
                 typer.echo("Logs:")
                 for log in payload["logs"]:
@@ -338,6 +355,67 @@ def jobs_show_cmd(
     except Exception as e:
         typer.secho(f"Error showing job: {e}", fg=typer.colors.RED)
         raise typer.Exit(code=1)
+
+
+@jobs_app.command("review")
+def jobs_review_cmd(
+    job_id: str = typer.Argument(..., help="Execution job identifier"),
+    json_output: bool = typer.Option(False, "--json", help="Output review details as JSON"),
+) -> None:
+    """Show complementary review details and findings for an execution job."""
+    try:
+        with db_manager.session() as session:
+            uow = PostgresPersistenceUnitOfWork(session)
+            review = uow.reviews.get_by_job_id(job_id)
+            if not review:
+                typer.secho(f"No review found for job '{job_id}'.", fg=typer.colors.RED)
+                raise typer.Exit(code=1)
+            findings = uow.review_findings.list_by_review(review.review_id)
+            payload = {
+                "review": review.model_dump(),
+                "findings": [f.model_dump() for f in findings],
+            }
+            if json_output:
+                typer.echo(json.dumps(payload, indent=2, default=str))
+                return
+
+            typer.echo(f"Review ID: {review.review_id}")
+            typer.echo(f"Job ID: {review.job_id}")
+            typer.echo(f"Project: {review.project_id}")
+            typer.echo(f"Change: {review.change_name}")
+            typer.echo(f"Reviewer: {review.reviewer_role}")
+            typer.echo(f"Status: {review.status.value}")
+            verdict_str = review.verdict.value if review.verdict else "None"
+            v_color = (
+                typer.colors.GREEN
+                if review.verdict == ReviewVerdict.READY_TO_MERGE
+                else typer.colors.RED
+            )
+            typer.secho(f"Verdict: {verdict_str}", fg=v_color, bold=True)
+            if review.summary:
+                typer.echo(f"Summary: {review.summary}")
+            if review.error_message:
+                typer.secho(f"Error: {review.error_message}", fg=typer.colors.RED)
+            typer.echo(f"Candidate SHA: {review.candidate_sha}")
+            typer.echo(f"Base SHA: {review.base_sha}")
+
+            if findings:
+                typer.secho(f"\nFindings ({len(findings)}):", fg=typer.colors.YELLOW, bold=True)
+                for f in findings:
+                    sev_color = (
+                        typer.colors.RED
+                        if f.severity == "BLOCKER" or f.severity.value == "BLOCKER"
+                        else typer.colors.YELLOW
+                    )
+                    typer.secho(f"  • [{f.severity.value}] {f.location or 'general'}", fg=sev_color, bold=True)
+                    typer.echo(f"    Violated: {f.violated_requirement}")
+                    typer.echo(f"    Correction: {f.expected_correction}")
+            else:
+                typer.echo("\nNo findings recorded.")
+    except Exception as e:
+        typer.secho(f"Error showing review: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
 
 
 @app.command("serve")
