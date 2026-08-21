@@ -104,6 +104,34 @@ class ReadinessService:
             checks.append(ReadinessCheck(name="complementary_roles", passed=False, reason=reason))
             unmet_reasons.append(reason)
 
+        # 3b. Primary pair capacity availability (005 complete-pair admission gating)
+        if project.implementer and project.reviewer:
+            from minime.services.provider_health_service import ProviderHealthService
+
+            health_service = ProviderHealthService(self.uow)
+            try:
+                pair_avail, pair_reason = health_service.is_pair_available(
+                    project.implementer, project.reviewer
+                )
+                if not pair_avail:
+                    reason = f"Primary pair capacity shortage: {pair_reason}."
+                    checks.append(ReadinessCheck(name="primary_capacity", passed=False, reason=reason))
+                    unmet_reasons.append(reason)
+                else:
+                    checks.append(
+                        ReadinessCheck(
+                            name="primary_capacity",
+                            passed=True,
+                            details={
+                                "implementer": project.implementer,
+                                "reviewer": project.reviewer,
+                                "status": "available",
+                            },
+                        )
+                    )
+            except Exception as e:
+                logger.warning(f"Capacity check error: {e}")
+
         # 4. Durable ProjectBinding & GitHub Issue validation (execution authorization)
         try:
             binding = self.uow.bindings.get_by_project_and_change(project_id, change_name)

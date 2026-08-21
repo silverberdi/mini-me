@@ -11,10 +11,12 @@ import uvicorn
 from minime.adapters.openspec import OpenSpecAdapter
 from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.db.session import db_manager
-from minime.domain.enums import ReviewVerdict
+from minime.domain.enums import ProviderHealthStatus, ReviewVerdict, SchedulerMode
 from minime.logging import configure_logging, get_logger
+from minime.services.capacity_lifecycle_service import CapacityLifecycleService
 from minime.services.execution_pipeline import ExecutionPipelineService
 from minime.services.project_service import ProjectService
+from minime.services.provider_health_service import ProviderHealthService
 from minime.services.readiness_service import ReadinessService
 from minime.services.status_service import StatusService
 
@@ -25,8 +27,13 @@ app = typer.Typer(
 )
 project_app = typer.Typer(help="Manage registered projects.")
 jobs_app = typer.Typer(help="Inspect execution jobs.")
+scheduler_app = typer.Typer(help="Inspect scheduler capacity mode and admission status.")
+providers_app = typer.Typer(help="Inspect primary provider health and capacity windows.")
+
 app.add_typer(project_app, name="project")
 app.add_typer(jobs_app, name="jobs")
+app.add_typer(scheduler_app, name="scheduler")
+app.add_typer(providers_app, name="providers")
 
 logger = get_logger("cli")
 
@@ -481,6 +488,82 @@ def jobs_audit_cmd(
         typer.secho(f"Error showing audit: {e}", fg=typer.colors.RED)
         raise typer.Exit(code=1)
 
+
+
+@scheduler_app.command("status")
+def scheduler_status_cmd(
+    project_id: str = typer.Option(None, "--project-id", "-p", help="Filter by registered project"),
+    json_output: bool = typer.Option(False, "--json", help="Output scheduler status as JSON"),
+) -> None:
+    """Show current scheduler mode (RUN, DRAIN, WAIT) and admission eligibility."""
+    try:
+        with db_manager.session() as session:
+            uow = PostgresPersistenceUnitOfWork(session)
+            lifecycle = CapacityLifecycleService(uow)
+            sched_status = lifecycle.get_scheduler_status(project_id=project_id)
+
+            if json_output:
+                typer.echo(json.dumps(sched_status.model_dump(), indent=2, default=str))
+                return
+
+            mode_color = {
+                SchedulerMode.RUN: typer.colors.GREEN,
+                SchedulerMode.DRAIN: typer.colors.YELLOW,
+                SchedulerMode.WAIT: typer.colors.RED,
+            }.get(sched_status.mode, typer.colors.WHITE)
+
+            typer.secho("=== mini me Scheduler Status ===", fg=typer.colors.CYAN, bold=True)
+            typer.secho(f"Mode: {sched_status.mode.value}", fg=mode_color, bold=True)
+            typer.echo(f"Admission Allowed: {'YES' if sched_status.admission_allowed else 'NO'}")
+            typer.echo(f"Primary Capacity Available: {'YES' if sched_status.primary_capacity_available else 'NO'}")
+            typer.echo(f"Active Jobs: {sched_status.active_jobs_count}")
+            if sched_status.reason:
+                typer.echo(f"Reason: {sched_status.reason}")
+            typer.echo(f"Last Evaluated: {sched_status.updated_at.isoformat()}")
+
+    except Exception as e:
+        typer.secho(f"Error fetching scheduler status: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
+@providers_app.command("health")
+def providers_health_cmd(
+    json_output: bool = typer.Option(False, "--json", help="Output provider health as JSON"),
+) -> None:
+    """Show health, availability, and exhaustion state for primary providers (Codex and Antigravity)."""
+    try:
+        with db_manager.session() as session:
+            uow = PostgresPersistenceUnitOfWork(session)
+            service = ProviderHealthService(uow)
+            health_list = service.list_all_health()
+
+            if json_output:
+                typer.echo(json.dumps([h.model_dump() for h in health_list], indent=2, default=str))
+                return
+
+            typer.secho("=== Primary Provider Health ===", fg=typer.colors.CYAN, bold=True)
+            for h in health_list:
+                h_color = {
+                    ProviderHealthStatus.AVAILABLE: typer.colors.GREEN,
+                    ProviderHealthStatus.EXHAUSTED: typer.colors.RED,
+                    ProviderHealthStatus.TEMPORARILY_UNAVAILABLE: typer.colors.YELLOW,
+                    ProviderHealthStatus.DEGRADED: typer.colors.YELLOW,
+                }.get(h.status, typer.colors.WHITE)
+
+                typer.secho(f"\nProvider: {h.provider.upper()}", fg=typer.colors.CYAN, bold=True)
+                typer.secho(f"  Status: {h.status.value}", fg=h_color, bold=True)
+                typer.echo(f"  Consecutive Failures: {h.consecutive_failures}")
+                if h.last_error_summary:
+                    typer.secho(f"  Last Error: {h.last_error_summary}", fg=typer.colors.YELLOW)
+                if h.capacity_reset_at:
+                    typer.echo(f"  Expected Reset: {h.capacity_reset_at.isoformat()}")
+                if h.retry_after_seconds:
+                    typer.echo(f"  Retry After: {h.retry_after_seconds}s")
+                typer.echo(f"  Updated At: {h.updated_at.isoformat()}")
+
+    except Exception as e:
+        typer.secho(f"Error fetching provider health: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
 
 
 @app.command("serve")
