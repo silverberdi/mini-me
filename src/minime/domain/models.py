@@ -9,17 +9,24 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from minime.domain.enums import (
+    PRIMARY_PROVIDERS,
     AuditFindingSeverity,
     AuditRiskLevel,
     AuditStatus,
+    CapacitySignalSource,
     ChangeStatus,
     EventType,
     FindingSeverity,
+    GitOperationStatus,
     JobStatus,
+    LockSafetyStatus,
     ProjectStatus,
+    ProviderHealthStatus,
+    ProviderResultClass,
     ReadinessState,
     ReviewStatus,
     ReviewVerdict,
+    SchedulerMode,
 )
 
 
@@ -147,8 +154,106 @@ class Job(BaseModel):
     candidate_sha: str | None = None
     base_sha: str | None = None
     error_message: str | None = None
+    waiting_provider: str | None = None
+    capacity_block_reason: str | None = None
+    recovery_blocked_reason: str | None = None
+    expected_reset_at: datetime | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+
+
+class NormalizedProviderResult(BaseModel):
+    """Normalized provider result conforming to schemas/provider-result.schema.json."""
+
+    result_class: ProviderResultClass
+    provider: str
+    role: str
+    model: str | None = None
+    retry_after: str | None = None
+    capacity_reset_at: datetime | None = None
+    summary: str | None = None
+    raw_output: str | None = None
+
+
+class ProviderHealth(BaseModel):
+    """Durable primary provider health and availability record."""
+
+    health_id: str = Field(default_factory=generate_uuid)
+    provider: str
+    model: str | None = None
+    status: ProviderHealthStatus = ProviderHealthStatus.AVAILABLE
+    consecutive_failures: int = 0
+    last_result_class: ProviderResultClass | None = None
+    last_error_summary: str | None = None
+    last_success_at: datetime | None = None
+    last_failure_at: datetime | None = None
+    updated_at: datetime = Field(default_factory=utc_now)
+
+    def validate_primary(self) -> None:
+        """Enforce that only primary providers (Codex, Antigravity) are tracked."""
+        if self.provider not in PRIMARY_PROVIDERS:
+            raise ValueError(
+                f"Invalid primary provider '{self.provider}'. "
+                f"005 capacity tracking is restricted strictly to {PRIMARY_PROVIDERS}."
+            )
+
+
+class CapacityWindow(BaseModel):
+    """Durable record of quota exhaustion and reset window."""
+
+    window_id: str = Field(default_factory=generate_uuid)
+    provider: str
+    model: str | None = None
+    quota_exhausted_at: datetime = Field(default_factory=utc_now)
+    capacity_reset_at: datetime | None = None
+    retry_after_seconds: int | None = None
+    source_signal: CapacitySignalSource = CapacitySignalSource.UNKNOWN
+    created_at: datetime = Field(default_factory=utc_now)
+
+    def validate_primary(self) -> None:
+        """Enforce that only primary providers (Codex, Antigravity) are tracked."""
+        if self.provider not in PRIMARY_PROVIDERS:
+            raise ValueError(
+                f"Invalid primary provider '{self.provider}'. "
+                f"005 capacity windows are restricted strictly to {PRIMARY_PROVIDERS}."
+            )
+
+
+class SchedulerStatus(BaseModel):
+    """Runtime status of the scheduler and capacity gating."""
+
+    mode: SchedulerMode
+    admission_allowed: bool
+    active_jobs_count: int
+    primary_capacity_available: bool
+    reason: str | None = None
+    recovery_state: str | None = None
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class LockInspectionResult(BaseModel):
+    """Result of safe Git lock ownership and boundary inspection."""
+
+    verdict: LockSafetyStatus
+    lock_path: str
+    reason: str
+    owning_pid: int | None = None
+    operation_id: str | None = None
+    inspected_at: datetime = Field(default_factory=utc_now)
+
+
+class GitOperation(BaseModel):
+    """Durable record of a Git operation launched by mini me."""
+
+    operation_id: str = Field(default_factory=generate_uuid)
+    job_id: str
+    project_id: str
+    worktree_path: str
+    operation_type: str
+    pid: int | None = None
+    status: GitOperationStatus = GitOperationStatus.RUNNING
+    started_at: datetime = Field(default_factory=utc_now)
+    completed_at: datetime | None = None
 
 
 class JobLog(BaseModel):

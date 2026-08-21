@@ -2,32 +2,42 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
 from minime.db.models import (
     AuditFindingModel,
     AuditModel,
+    CapacityWindowModel,
     ChangeModel,
     CheckResultModel,
     EventModel,
+    GitOperationModel,
     JobLogModel,
     JobModel,
     MetricFactModel,
     ProjectBindingModel,
     ProjectModel,
+    ProviderHealthModel,
     ReviewFindingModel,
     ReviewModel,
 )
 from minime.domain.enums import (
+    PRIMARY_PROVIDERS,
     AuditFindingSeverity,
     AuditRiskLevel,
     AuditStatus,
+    CapacitySignalSource,
     ChangeStatus,
     EventType,
     FindingSeverity,
+    GitOperationStatus,
     JobStatus,
     ProjectStatus,
+    ProviderHealthStatus,
+    ProviderResultClass,
     ReadinessState,
     ReviewStatus,
     ReviewVerdict,
@@ -35,29 +45,35 @@ from minime.domain.enums import (
 from minime.domain.interfaces import (
     AuditFindingRepositoryInterface,
     AuditRepositoryInterface,
+    CapacityWindowRepositoryInterface,
     ChangeRepositoryInterface,
     CheckResultRepositoryInterface,
     EventRepositoryInterface,
+    GitOperationRepositoryInterface,
     JobLogRepositoryInterface,
     JobRepositoryInterface,
     MetricFactRepositoryInterface,
     PersistenceUnitOfWork,
     ProjectBindingRepositoryInterface,
     ProjectRepositoryInterface,
+    ProviderHealthRepositoryInterface,
     ReviewFindingRepositoryInterface,
     ReviewRepositoryInterface,
 )
 from minime.domain.models import (
     AuditFinding,
     AuditRecord,
+    CapacityWindow,
     Change,
     CheckResult,
     Event,
+    GitOperation,
     Job,
     JobLog,
     MetricFact,
     Project,
     ProjectBinding,
+    ProviderHealth,
     Review,
     ReviewFinding,
     utc_now,
@@ -154,8 +170,58 @@ def job_model_to_domain(model: JobModel) -> Job:
         candidate_sha=model.candidate_sha,
         base_sha=model.base_sha,
         error_message=model.error_message,
+        waiting_provider=model.waiting_provider,
+        capacity_block_reason=model.capacity_block_reason,
+        recovery_blocked_reason=model.recovery_blocked_reason,
+        expected_reset_at=model.expected_reset_at,
         created_at=model.created_at,
         updated_at=model.updated_at,
+    )
+
+
+def provider_health_model_to_domain(model: ProviderHealthModel) -> ProviderHealth:
+    return ProviderHealth(
+        health_id=model.id,
+        provider=model.provider,
+        model=model.model,
+        status=ProviderHealthStatus(model.status),
+        consecutive_failures=model.consecutive_failures,
+        last_result_class=ProviderResultClass(model.last_result_class)
+        if model.last_result_class
+        else None,
+        last_error_summary=model.last_error_summary,
+        last_success_at=model.last_success_at,
+        last_failure_at=model.last_failure_at,
+        updated_at=model.updated_at,
+    )
+
+
+def capacity_window_model_to_domain(model: CapacityWindowModel) -> CapacityWindow:
+    return CapacityWindow(
+        window_id=model.id,
+        provider=model.provider,
+        model=model.model,
+        quota_exhausted_at=model.quota_exhausted_at,
+        capacity_reset_at=model.capacity_reset_at,
+        retry_after_seconds=model.retry_after_seconds,
+        source_signal=CapacitySignalSource(model.source_signal)
+        if model.source_signal
+        else CapacitySignalSource.UNKNOWN,
+        created_at=model.created_at,
+    )
+
+
+def git_operation_model_to_domain(model: GitOperationModel) -> GitOperation:
+    return GitOperation(
+        operation_id=model.id,
+        job_id=model.job_id,
+        project_id=model.project_id,
+        worktree_path=model.worktree_path,
+        operation_type=model.operation_type,
+        pid=model.pid,
+        status=GitOperationStatus(model.status),
+        started_at=model.started_at,
+        completed_at=model.completed_at,
     )
 
 
@@ -475,16 +541,32 @@ class PostgresMetricFactRepository(MetricFactRepositoryInterface):
 
 class PostgresJobRepository(JobRepositoryInterface):
     _valid_transitions: dict[JobStatus, set[JobStatus]] = {
-        JobStatus.QUEUED: {JobStatus.RUNNING, JobStatus.CANCELLED, JobStatus.FAILED},
-        JobStatus.RUNNING: {JobStatus.CHECKS_RUNNING, JobStatus.FAILED, JobStatus.CANCELLED},
+        JobStatus.QUEUED: {
+            JobStatus.RUNNING,
+            JobStatus.WAITING_CAPACITY,
+            JobStatus.CANCELLED,
+            JobStatus.FAILED,
+        },
+        JobStatus.RUNNING: {
+            JobStatus.CHECKS_RUNNING,
+            JobStatus.QUEUED,
+            JobStatus.WAITING_CAPACITY,
+            JobStatus.RECOVERY_BLOCKED,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+        },
         JobStatus.CHECKS_RUNNING: {
             JobStatus.CHECKS_PASSED,
             JobStatus.CHECKS_FAILED,
+            JobStatus.QUEUED,
+            JobStatus.WAITING_CAPACITY,
+            JobStatus.RECOVERY_BLOCKED,
             JobStatus.FAILED,
             JobStatus.CANCELLED,
         },
         JobStatus.CHECKS_PASSED: {
             JobStatus.REVIEW_RUNNING,
+            JobStatus.WAITING_CAPACITY,
             JobStatus.FAILED,
             JobStatus.CANCELLED,
         },
@@ -492,12 +574,36 @@ class PostgresJobRepository(JobRepositoryInterface):
         JobStatus.REVIEW_RUNNING: {
             JobStatus.AUDIT_RUNNING,
             JobStatus.CHANGES_REQUIRED,
+            JobStatus.CHECKS_PASSED,
+            JobStatus.QUEUED,
+            JobStatus.WAITING_CAPACITY,
+            JobStatus.RECOVERY_BLOCKED,
             JobStatus.FAILED,
             JobStatus.CANCELLED,
         },
         JobStatus.AUDIT_RUNNING: {
             JobStatus.READY_TO_MERGE,
             JobStatus.AUDIT_BLOCKED,
+            JobStatus.CHECKS_PASSED,
+            JobStatus.QUEUED,
+            JobStatus.WAITING_CAPACITY,
+            JobStatus.RECOVERY_BLOCKED,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+        },
+        JobStatus.WAITING_CAPACITY: {
+            JobStatus.RUNNING,
+            JobStatus.CHECKS_RUNNING,
+            JobStatus.REVIEW_RUNNING,
+            JobStatus.AUDIT_RUNNING,
+            JobStatus.RECOVERY_BLOCKED,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+        },
+        JobStatus.RECOVERY_BLOCKED: {
+            JobStatus.WAITING_CAPACITY,
+            JobStatus.RUNNING,
+            JobStatus.REVIEW_RUNNING,
             JobStatus.FAILED,
             JobStatus.CANCELLED,
         },
@@ -519,6 +625,10 @@ class PostgresJobRepository(JobRepositoryInterface):
             existing.candidate_sha = job.candidate_sha
             existing.base_sha = job.base_sha
             existing.error_message = job.error_message
+            existing.waiting_provider = job.waiting_provider
+            existing.capacity_block_reason = job.capacity_block_reason
+            existing.recovery_blocked_reason = job.recovery_blocked_reason
+            existing.expected_reset_at = job.expected_reset_at
             existing.updated_at = job.updated_at
         else:
             model = JobModel(
@@ -530,6 +640,10 @@ class PostgresJobRepository(JobRepositoryInterface):
                 candidate_sha=job.candidate_sha,
                 base_sha=job.base_sha,
                 error_message=job.error_message,
+                waiting_provider=job.waiting_provider,
+                capacity_block_reason=job.capacity_block_reason,
+                recovery_blocked_reason=job.recovery_blocked_reason,
+                expected_reset_at=job.expected_reset_at,
                 created_at=job.created_at,
                 updated_at=job.updated_at,
             )
@@ -549,6 +663,25 @@ class PostgresJobRepository(JobRepositoryInterface):
         models = self.session.scalars(stmt).all()
         return [job_model_to_domain(m) for m in models]
 
+    def list_active_jobs(self) -> list[Job]:
+        active_statuses = [
+            JobStatus.QUEUED.value,
+            JobStatus.RUNNING.value,
+            JobStatus.CHECKS_RUNNING.value,
+            JobStatus.CHECKS_PASSED.value,
+            JobStatus.REVIEW_RUNNING.value,
+            JobStatus.AUDIT_RUNNING.value,
+            JobStatus.WAITING_CAPACITY.value,
+            JobStatus.RECOVERY_BLOCKED.value,
+        ]
+        stmt = (
+            select(JobModel)
+            .where(JobModel.status.in_(active_statuses))
+            .order_by(JobModel.created_at)
+        )
+        models = self.session.scalars(stmt).all()
+        return [job_model_to_domain(m) for m in models]
+
     def transition(self, job_id: str, new_status: str, error_message: str | None = None) -> Job:
         model = self.session.get(JobModel, job_id)
         if not model:
@@ -559,6 +692,40 @@ class PostgresJobRepository(JobRepositoryInterface):
             raise ValueError(f"Invalid job status transition: {current.value} -> {target.value}.")
         model.status = target.value
         model.error_message = error_message
+        model.updated_at = utc_now()
+        return job_model_to_domain(model)
+
+    def set_waiting_capacity(
+        self,
+        job_id: str,
+        waiting_provider: str,
+        reason: str,
+        expected_reset_at: datetime | None = None,
+    ) -> Job:
+        model = self.session.get(JobModel, job_id)
+        if not model:
+            raise ValueError(f"Job '{job_id}' not found.")
+        current = JobStatus(model.status)
+        target = JobStatus.WAITING_CAPACITY
+        if target not in self._valid_transitions[current]:
+            raise ValueError(f"Invalid job status transition: {current.value} -> {target.value}.")
+        model.status = target.value
+        model.waiting_provider = waiting_provider
+        model.capacity_block_reason = reason
+        model.expected_reset_at = expected_reset_at
+        model.updated_at = utc_now()
+        return job_model_to_domain(model)
+
+    def set_recovery_blocked(self, job_id: str, reason: str) -> Job:
+        model = self.session.get(JobModel, job_id)
+        if not model:
+            raise ValueError(f"Job '{job_id}' not found.")
+        current = JobStatus(model.status)
+        target = JobStatus.RECOVERY_BLOCKED
+        if target not in self._valid_transitions[current]:
+            raise ValueError(f"Invalid job status transition: {current.value} -> {target.value}.")
+        model.status = target.value
+        model.recovery_blocked_reason = reason
         model.updated_at = utc_now()
         return job_model_to_domain(model)
 
@@ -876,6 +1043,232 @@ class PostgresAuditFindingRepository(AuditFindingRepositoryInterface):
         return [audit_finding_model_to_domain(m) for m in models]
 
 
+class PostgresProviderHealthRepository(ProviderHealthRepositoryInterface):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def _validate_primary_provider(self, provider: str) -> None:
+        if provider not in PRIMARY_PROVIDERS:
+            raise ValueError(
+                f"Invalid primary provider '{provider}'. "
+                f"005 capacity tracking is restricted strictly to {PRIMARY_PROVIDERS}."
+            )
+
+    def save(self, health: ProviderHealth) -> None:
+        health.validate_primary()
+        existing = self.session.scalars(
+            select(ProviderHealthModel).where(ProviderHealthModel.provider == health.provider)
+        ).first()
+        if existing:
+            existing.model = health.model
+            existing.status = health.status.value
+            existing.consecutive_failures = health.consecutive_failures
+            existing.last_result_class = (
+                health.last_result_class.value if health.last_result_class else None
+            )
+            existing.last_error_summary = health.last_error_summary
+            existing.last_success_at = health.last_success_at
+            existing.last_failure_at = health.last_failure_at
+            existing.updated_at = health.updated_at
+        else:
+            model = ProviderHealthModel(
+                id=health.health_id,
+                provider=health.provider,
+                model=health.model,
+                status=health.status.value,
+                consecutive_failures=health.consecutive_failures,
+                last_result_class=health.last_result_class.value
+                if health.last_result_class
+                else None,
+                last_error_summary=health.last_error_summary,
+                last_success_at=health.last_success_at,
+                last_failure_at=health.last_failure_at,
+                updated_at=health.updated_at,
+            )
+            self.session.add(model)
+
+    def get_by_provider(self, provider: str) -> ProviderHealth | None:
+        self._validate_primary_provider(provider)
+        stmt = select(ProviderHealthModel).where(ProviderHealthModel.provider == provider)
+        model = self.session.scalars(stmt).first()
+        return provider_health_model_to_domain(model) if model else None
+
+    def list_all(self) -> list[ProviderHealth]:
+        stmt = select(ProviderHealthModel).order_by(ProviderHealthModel.provider)
+        models = self.session.scalars(stmt).all()
+        return [provider_health_model_to_domain(m) for m in models]
+
+    def update_health(
+        self,
+        provider: str,
+        status: str,
+        result_class: str | None = None,
+        error_summary: str | None = None,
+        consecutive_failures: int | None = None,
+    ) -> ProviderHealth:
+        self._validate_primary_provider(provider)
+        model = self.session.scalars(
+            select(ProviderHealthModel).where(ProviderHealthModel.provider == provider)
+        ).first()
+        now = utc_now()
+        target_status = ProviderHealthStatus(status)
+        target_result_class = ProviderResultClass(result_class) if result_class else None
+
+        if not model:
+            init_failures = (
+                consecutive_failures
+                if consecutive_failures is not None
+                else (0 if target_status == ProviderHealthStatus.AVAILABLE else 1)
+            )
+            model = ProviderHealthModel(
+                id=f"ph-{provider}",
+                provider=provider,
+                status=target_status.value,
+                consecutive_failures=init_failures,
+                last_result_class=target_result_class.value if target_result_class else None,
+                last_error_summary=error_summary,
+                last_success_at=now if target_status == ProviderHealthStatus.AVAILABLE else None,
+                last_failure_at=now if target_status != ProviderHealthStatus.AVAILABLE else None,
+                updated_at=now,
+            )
+            self.session.add(model)
+        else:
+            model.status = target_status.value
+            if target_result_class:
+                model.last_result_class = target_result_class.value
+            if error_summary is not None:
+                model.last_error_summary = error_summary
+            if consecutive_failures is not None:
+                model.consecutive_failures = consecutive_failures
+            elif target_status == ProviderHealthStatus.AVAILABLE:
+                model.consecutive_failures = 0
+            else:
+                model.consecutive_failures += 1
+
+            if target_status == ProviderHealthStatus.AVAILABLE and target_result_class == ProviderResultClass.SUCCESS:
+                model.last_success_at = now
+            elif target_result_class and target_result_class != ProviderResultClass.SUCCESS:
+                model.last_failure_at = now
+
+            model.updated_at = now
+
+        return provider_health_model_to_domain(model)
+
+
+class PostgresCapacityWindowRepository(CapacityWindowRepositoryInterface):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def _validate_primary_provider(self, provider: str) -> None:
+        if provider not in PRIMARY_PROVIDERS:
+            raise ValueError(
+                f"Invalid primary provider '{provider}'. "
+                f"005 capacity windows are restricted strictly to {PRIMARY_PROVIDERS}."
+            )
+
+    def save(self, window: CapacityWindow) -> None:
+        window.validate_primary()
+        model = CapacityWindowModel(
+            id=window.window_id,
+            provider=window.provider,
+            model=window.model,
+            quota_exhausted_at=window.quota_exhausted_at,
+            capacity_reset_at=window.capacity_reset_at,
+            retry_after_seconds=window.retry_after_seconds,
+            source_signal=window.source_signal.value,
+            created_at=window.created_at,
+        )
+        self.session.add(model)
+
+    def get_latest_for_provider(self, provider: str) -> CapacityWindow | None:
+        self._validate_primary_provider(provider)
+        stmt = (
+            select(CapacityWindowModel)
+            .where(CapacityWindowModel.provider == provider)
+            .order_by(desc(CapacityWindowModel.quota_exhausted_at))
+            .limit(1)
+        )
+        model = self.session.scalars(stmt).first()
+        return capacity_window_model_to_domain(model) if model else None
+
+    def list_by_provider(self, provider: str, limit: int = 50) -> list[CapacityWindow]:
+        self._validate_primary_provider(provider)
+        stmt = (
+            select(CapacityWindowModel)
+            .where(CapacityWindowModel.provider == provider)
+            .order_by(desc(CapacityWindowModel.quota_exhausted_at))
+            .limit(limit)
+        )
+        models = self.session.scalars(stmt).all()
+        return [capacity_window_model_to_domain(m) for m in models]
+
+
+class PostgresGitOperationRepository(GitOperationRepositoryInterface):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def save(self, operation: GitOperation) -> None:
+        existing = self.session.get(GitOperationModel, operation.operation_id)
+        if existing:
+            existing.job_id = operation.job_id
+            existing.project_id = operation.project_id
+            existing.worktree_path = operation.worktree_path
+            existing.operation_type = operation.operation_type
+            existing.pid = operation.pid
+            existing.status = operation.status.value
+            existing.started_at = operation.started_at
+            existing.completed_at = operation.completed_at
+        else:
+            model = GitOperationModel(
+                id=operation.operation_id,
+                job_id=operation.job_id,
+                project_id=operation.project_id,
+                worktree_path=operation.worktree_path,
+                operation_type=operation.operation_type,
+                pid=operation.pid,
+                status=operation.status.value,
+                started_at=operation.started_at,
+                completed_at=operation.completed_at,
+            )
+            self.session.add(model)
+
+    def get_by_id(self, operation_id: str) -> GitOperation | None:
+        model = self.session.get(GitOperationModel, operation_id)
+        return git_operation_model_to_domain(model) if model else None
+
+    def list_by_job(self, job_id: str) -> list[GitOperation]:
+        stmt = (
+            select(GitOperationModel)
+            .where(GitOperationModel.job_id == job_id)
+            .order_by(desc(GitOperationModel.started_at))
+        )
+        models = self.session.scalars(stmt).all()
+        return [git_operation_model_to_domain(m) for m in models]
+
+    def list_by_worktree(self, worktree_path: str) -> list[GitOperation]:
+        stmt = (
+            select(GitOperationModel)
+            .where(GitOperationModel.worktree_path == worktree_path)
+            .order_by(desc(GitOperationModel.started_at))
+        )
+        models = self.session.scalars(stmt).all()
+        return [git_operation_model_to_domain(m) for m in models]
+
+    def update_status(
+        self,
+        operation_id: str,
+        status: GitOperationStatus,
+        completed_at: datetime | None = None,
+    ) -> GitOperation | None:
+        model = self.session.get(GitOperationModel, operation_id)
+        if not model:
+            return None
+        model.status = status.value
+        if completed_at:
+            model.completed_at = completed_at
+        return git_operation_model_to_domain(model)
+
+
 class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
     """Encapsulates a database session for atomic operations across repositories."""
 
@@ -893,6 +1286,9 @@ class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.review_findings = PostgresReviewFindingRepository(session)
         self.audits = PostgresAuditRepository(session)
         self.audit_findings = PostgresAuditFindingRepository(session)
+        self.provider_health = PostgresProviderHealthRepository(session)
+        self.capacity_windows = PostgresCapacityWindowRepository(session)
+        self.git_operations = PostgresGitOperationRepository(session)
 
     def commit(self) -> None:
         self.session.commit()

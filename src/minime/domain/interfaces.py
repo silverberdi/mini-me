@@ -3,19 +3,24 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from datetime import datetime
 from typing import Any
 
+from minime.domain.enums import GitOperationStatus
 from minime.domain.models import (
     AuditFinding,
     AuditRecord,
+    CapacityWindow,
     Change,
     CheckResult,
     Event,
+    GitOperation,
     Job,
     JobLog,
     MetricFact,
     Project,
     ProjectBinding,
+    ProviderHealth,
     Review,
     ReviewFinding,
 )
@@ -97,7 +102,22 @@ class JobRepositoryInterface(ABC):
     def list_by_project(self, project_id: str, limit: int = 100) -> list[Job]: ...
 
     @abstractmethod
+    def list_active_jobs(self) -> list[Job]: ...
+
+    @abstractmethod
     def transition(self, job_id: str, new_status: str, error_message: str | None = None) -> Job: ...
+
+    @abstractmethod
+    def set_waiting_capacity(
+        self,
+        job_id: str,
+        waiting_provider: str,
+        reason: str,
+        expected_reset_at: datetime | None = None,
+    ) -> Job: ...
+
+    @abstractmethod
+    def set_recovery_blocked(self, job_id: str, reason: str) -> Job: ...
 
 
 class JobLogRepositoryInterface(ABC):
@@ -180,6 +200,67 @@ class AuditFindingRepositoryInterface(ABC):
     def list_by_audit(self, audit_id: str) -> list[AuditFinding]: ...
 
 
+class ProviderHealthRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, health: ProviderHealth) -> None: ...
+
+    @abstractmethod
+    def get_by_provider(self, provider: str) -> ProviderHealth | None: ...
+
+    @abstractmethod
+    def list_all(self) -> list[ProviderHealth]: ...
+
+    @abstractmethod
+    def update_health(
+        self,
+        provider: str,
+        status: str,
+        result_class: str | None = None,
+        error_summary: str | None = None,
+        consecutive_failures: int | None = None,
+    ) -> ProviderHealth: ...
+
+
+class CapacityWindowRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, window: CapacityWindow) -> None: ...
+
+    @abstractmethod
+    def get_latest_for_provider(self, provider: str) -> CapacityWindow | None: ...
+
+    @abstractmethod
+    def list_by_provider(self, provider: str, limit: int = 50) -> list[CapacityWindow]: ...
+
+
+class GitOperationRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, operation: GitOperation) -> None: ...
+
+    @abstractmethod
+    def get_by_id(self, operation_id: str) -> GitOperation | None: ...
+
+    @abstractmethod
+    def list_by_job(self, job_id: str) -> list[GitOperation]: ...
+
+    @abstractmethod
+    def list_by_worktree(self, worktree_path: str) -> list[GitOperation]: ...
+
+    @abstractmethod
+    def update_status(
+        self,
+        operation_id: str,
+        status: GitOperationStatus,
+        completed_at: datetime | None = None,
+    ) -> GitOperation | None: ...
+
+
+class FallbackPolicyInterface(ABC):
+    """Abstract fallback policy seam for future drain provider execution (006)."""
+
+    @abstractmethod
+    def is_fallback_eligible(self, project_id: str, job: Job, role: str) -> bool: ...
+
+
 class PersistenceUnitOfWork(ABC):
     """Transactional persistence boundary: atomically persists state changes and emitted events."""
 
@@ -195,6 +276,9 @@ class PersistenceUnitOfWork(ABC):
     review_findings: ReviewFindingRepositoryInterface
     audits: AuditRepositoryInterface
     audit_findings: AuditFindingRepositoryInterface
+    provider_health: ProviderHealthRepositoryInterface
+    capacity_windows: CapacityWindowRepositoryInterface
+    git_operations: GitOperationRepositoryInterface
 
     @abstractmethod
     def commit(self) -> None: ...

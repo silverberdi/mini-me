@@ -2,39 +2,57 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 
-from minime.domain.enums import AuditRiskLevel, AuditStatus, JobStatus, ReviewStatus, ReviewVerdict
+from minime.domain.enums import (
+    PRIMARY_PROVIDERS,
+    AuditRiskLevel,
+    AuditStatus,
+    GitOperationStatus,
+    JobStatus,
+    ProviderHealthStatus,
+    ProviderResultClass,
+    ReviewStatus,
+    ReviewVerdict,
+)
 from minime.domain.interfaces import (
     AuditFindingRepositoryInterface,
     AuditRepositoryInterface,
+    CapacityWindowRepositoryInterface,
     ChangeRepositoryInterface,
     CheckResultRepositoryInterface,
     EventRepositoryInterface,
+    GitOperationRepositoryInterface,
     JobLogRepositoryInterface,
     JobRepositoryInterface,
     MetricFactRepositoryInterface,
     PersistenceUnitOfWork,
     ProjectBindingRepositoryInterface,
     ProjectRepositoryInterface,
+    ProviderHealthRepositoryInterface,
     ReviewFindingRepositoryInterface,
     ReviewRepositoryInterface,
 )
 from minime.domain.models import (
     AuditFinding,
     AuditRecord,
+    CapacityWindow,
     Change,
     CheckResult,
     Event,
+    GitOperation,
     Job,
     JobLog,
     MetricFact,
     Project,
     ProjectBinding,
+    ProviderHealth,
     Review,
     ReviewFinding,
+    utc_now,
 )
 
 
@@ -156,16 +174,32 @@ class InMemoryMetricFactRepository(MetricFactRepositoryInterface):
 
 class InMemoryJobRepository(JobRepositoryInterface):
     _valid_transitions: dict[JobStatus, set[JobStatus]] = {
-        JobStatus.QUEUED: {JobStatus.RUNNING, JobStatus.CANCELLED, JobStatus.FAILED},
-        JobStatus.RUNNING: {JobStatus.CHECKS_RUNNING, JobStatus.FAILED, JobStatus.CANCELLED},
+        JobStatus.QUEUED: {
+            JobStatus.RUNNING,
+            JobStatus.WAITING_CAPACITY,
+            JobStatus.CANCELLED,
+            JobStatus.FAILED,
+        },
+        JobStatus.RUNNING: {
+            JobStatus.CHECKS_RUNNING,
+            JobStatus.QUEUED,
+            JobStatus.WAITING_CAPACITY,
+            JobStatus.RECOVERY_BLOCKED,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+        },
         JobStatus.CHECKS_RUNNING: {
             JobStatus.CHECKS_PASSED,
             JobStatus.CHECKS_FAILED,
+            JobStatus.QUEUED,
+            JobStatus.WAITING_CAPACITY,
+            JobStatus.RECOVERY_BLOCKED,
             JobStatus.FAILED,
             JobStatus.CANCELLED,
         },
         JobStatus.CHECKS_PASSED: {
             JobStatus.REVIEW_RUNNING,
+            JobStatus.WAITING_CAPACITY,
             JobStatus.FAILED,
             JobStatus.CANCELLED,
         },
@@ -173,12 +207,36 @@ class InMemoryJobRepository(JobRepositoryInterface):
         JobStatus.REVIEW_RUNNING: {
             JobStatus.AUDIT_RUNNING,
             JobStatus.CHANGES_REQUIRED,
+            JobStatus.CHECKS_PASSED,
+            JobStatus.QUEUED,
+            JobStatus.WAITING_CAPACITY,
+            JobStatus.RECOVERY_BLOCKED,
             JobStatus.FAILED,
             JobStatus.CANCELLED,
         },
         JobStatus.AUDIT_RUNNING: {
             JobStatus.READY_TO_MERGE,
             JobStatus.AUDIT_BLOCKED,
+            JobStatus.CHECKS_PASSED,
+            JobStatus.QUEUED,
+            JobStatus.WAITING_CAPACITY,
+            JobStatus.RECOVERY_BLOCKED,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+        },
+        JobStatus.WAITING_CAPACITY: {
+            JobStatus.RUNNING,
+            JobStatus.CHECKS_RUNNING,
+            JobStatus.REVIEW_RUNNING,
+            JobStatus.AUDIT_RUNNING,
+            JobStatus.RECOVERY_BLOCKED,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+        },
+        JobStatus.RECOVERY_BLOCKED: {
+            JobStatus.WAITING_CAPACITY,
+            JobStatus.RUNNING,
+            JobStatus.REVIEW_RUNNING,
             JobStatus.FAILED,
             JobStatus.CANCELLED,
         },
@@ -204,6 +262,21 @@ class InMemoryJobRepository(JobRepositoryInterface):
         jobs.sort(key=lambda j: j.created_at, reverse=True)
         return [j.model_copy(deep=True) for j in jobs[:limit]]
 
+    def list_active_jobs(self) -> list[Job]:
+        active_statuses = {
+            JobStatus.QUEUED,
+            JobStatus.RUNNING,
+            JobStatus.CHECKS_RUNNING,
+            JobStatus.CHECKS_PASSED,
+            JobStatus.REVIEW_RUNNING,
+            JobStatus.AUDIT_RUNNING,
+            JobStatus.WAITING_CAPACITY,
+            JobStatus.RECOVERY_BLOCKED,
+        }
+        jobs = [j for j in self._store.values() if j.status in active_statuses]
+        jobs.sort(key=lambda j: j.created_at)
+        return [j.model_copy(deep=True) for j in jobs]
+
     def transition(self, job_id: str, new_status: str, error_message: str | None = None) -> Job:
         job = self._store.get(job_id)
         if not job:
@@ -212,6 +285,46 @@ class InMemoryJobRepository(JobRepositoryInterface):
         if target not in self._valid_transitions[job.status]:
             raise ValueError(f"Invalid job status transition: {job.status.value} -> {target.value}.")
         updated = job.model_copy(update={"status": target, "error_message": error_message})
+        self._store[job_id] = updated
+        return updated.model_copy(deep=True)
+
+    def set_waiting_capacity(
+        self,
+        job_id: str,
+        waiting_provider: str,
+        reason: str,
+        expected_reset_at: datetime | None = None,
+    ) -> Job:
+        job = self._store.get(job_id)
+        if not job:
+            raise ValueError(f"Job '{job_id}' not found.")
+        target = JobStatus.WAITING_CAPACITY
+        if target not in self._valid_transitions[job.status]:
+            raise ValueError(f"Invalid job status transition: {job.status.value} -> {target.value}.")
+        updated = job.model_copy(
+            update={
+                "status": target,
+                "waiting_provider": waiting_provider,
+                "capacity_block_reason": reason,
+                "expected_reset_at": expected_reset_at,
+            }
+        )
+        self._store[job_id] = updated
+        return updated.model_copy(deep=True)
+
+    def set_recovery_blocked(self, job_id: str, reason: str) -> Job:
+        job = self._store.get(job_id)
+        if not job:
+            raise ValueError(f"Job '{job_id}' not found.")
+        target = JobStatus.RECOVERY_BLOCKED
+        if target not in self._valid_transitions[job.status]:
+            raise ValueError(f"Invalid job status transition: {job.status.value} -> {target.value}.")
+        updated = job.model_copy(
+            update={
+                "status": target,
+                "recovery_blocked_reason": reason,
+            }
+        )
         self._store[job_id] = updated
         return updated.model_copy(deep=True)
 
@@ -393,6 +506,153 @@ class InMemoryAuditFindingRepository(AuditFindingRepositoryInterface):
         return [f.model_copy(deep=True) for f in self._store if f.audit_id == audit_id]
 
 
+class InMemoryProviderHealthRepository(ProviderHealthRepositoryInterface):
+    def __init__(self):
+        self._store: dict[str, ProviderHealth] = {}
+
+    def _validate_primary_provider(self, provider: str) -> None:
+        if provider not in PRIMARY_PROVIDERS:
+            raise ValueError(
+                f"Invalid primary provider '{provider}'. "
+                f"005 capacity tracking is restricted strictly to {PRIMARY_PROVIDERS}."
+            )
+
+    def save(self, health: ProviderHealth) -> None:
+        health.validate_primary()
+        self._store[health.provider] = health.model_copy(deep=True)
+
+    def get_by_provider(self, provider: str) -> ProviderHealth | None:
+        self._validate_primary_provider(provider)
+        h = self._store.get(provider)
+        return h.model_copy(deep=True) if h else None
+
+    def list_all(self) -> list[ProviderHealth]:
+        return [h.model_copy(deep=True) for h in self._store.values()]
+
+    def update_health(
+        self,
+        provider: str,
+        status: str,
+        result_class: str | None = None,
+        error_summary: str | None = None,
+        consecutive_failures: int | None = None,
+    ) -> ProviderHealth:
+        self._validate_primary_provider(provider)
+        now = utc_now()
+        target_status = ProviderHealthStatus(status)
+        target_result_class = ProviderResultClass(result_class) if result_class else None
+        h = self._store.get(provider)
+
+        if not h:
+            init_failures = (
+                consecutive_failures
+                if consecutive_failures is not None
+                else (0 if target_status == ProviderHealthStatus.AVAILABLE else 1)
+            )
+            h = ProviderHealth(
+                health_id=f"ph-{provider}",
+                provider=provider,
+                status=target_status,
+                consecutive_failures=init_failures,
+                last_result_class=target_result_class,
+                last_error_summary=error_summary,
+                last_success_at=now if target_status == ProviderHealthStatus.AVAILABLE else None,
+                last_failure_at=now if target_status != ProviderHealthStatus.AVAILABLE else None,
+                updated_at=now,
+            )
+        else:
+            if consecutive_failures is not None:
+                consecutive = consecutive_failures
+            elif target_status == ProviderHealthStatus.AVAILABLE:
+                consecutive = 0
+            else:
+                consecutive = h.consecutive_failures + 1
+
+            succ_at = h.last_success_at
+            fail_at = h.last_failure_at
+            if target_status == ProviderHealthStatus.AVAILABLE and target_result_class == ProviderResultClass.SUCCESS:
+                succ_at = now
+            elif target_result_class and target_result_class != ProviderResultClass.SUCCESS:
+                fail_at = now
+
+            h = h.model_copy(
+                update={
+                    "status": target_status,
+                    "consecutive_failures": consecutive,
+                    "last_result_class": target_result_class or h.last_result_class,
+                    "last_error_summary": error_summary if error_summary is not None else h.last_error_summary,
+                    "last_success_at": succ_at,
+                    "last_failure_at": fail_at,
+                    "updated_at": now,
+                }
+            )
+        self._store[provider] = h
+        return h.model_copy(deep=True)
+
+
+class InMemoryCapacityWindowRepository(CapacityWindowRepositoryInterface):
+    def __init__(self):
+        self._store: list[CapacityWindow] = []
+
+    def _validate_primary_provider(self, provider: str) -> None:
+        if provider not in PRIMARY_PROVIDERS:
+            raise ValueError(
+                f"Invalid primary provider '{provider}'. "
+                f"005 capacity windows are restricted strictly to {PRIMARY_PROVIDERS}."
+            )
+
+    def save(self, window: CapacityWindow) -> None:
+        window.validate_primary()
+        self._store.append(window.model_copy(deep=True))
+
+    def get_latest_for_provider(self, provider: str) -> CapacityWindow | None:
+        self._validate_primary_provider(provider)
+        windows = [w for w in self._store if w.provider == provider]
+        windows.sort(key=lambda w: w.quota_exhausted_at, reverse=True)
+        return windows[0].model_copy(deep=True) if windows else None
+
+    def list_by_provider(self, provider: str, limit: int = 50) -> list[CapacityWindow]:
+        self._validate_primary_provider(provider)
+        windows = [w for w in self._store if w.provider == provider]
+        windows.sort(key=lambda w: w.quota_exhausted_at, reverse=True)
+        return [w.model_copy(deep=True) for w in windows[:limit]]
+
+
+class InMemoryGitOperationRepository(GitOperationRepositoryInterface):
+    def __init__(self):
+        self._store: dict[str, GitOperation] = {}
+
+    def save(self, operation: GitOperation) -> None:
+        self._store[operation.operation_id] = operation.model_copy(deep=True)
+
+    def get_by_id(self, operation_id: str) -> GitOperation | None:
+        op = self._store.get(operation_id)
+        return op.model_copy(deep=True) if op else None
+
+    def list_by_job(self, job_id: str) -> list[GitOperation]:
+        ops = [op for op in self._store.values() if op.job_id == job_id]
+        ops.sort(key=lambda op: op.started_at, reverse=True)
+        return [op.model_copy(deep=True) for op in ops]
+
+    def list_by_worktree(self, worktree_path: str) -> list[GitOperation]:
+        ops = [op for op in self._store.values() if op.worktree_path == worktree_path]
+        ops.sort(key=lambda op: op.started_at, reverse=True)
+        return [op.model_copy(deep=True) for op in ops]
+
+    def update_status(
+        self,
+        operation_id: str,
+        status: GitOperationStatus,
+        completed_at: datetime | None = None,
+    ) -> GitOperation | None:
+        op = self._store.get(operation_id)
+        if not op:
+            return None
+        updated = op.model_copy(update={"status": status, "completed_at": completed_at})
+        self._store[operation_id] = updated
+        return updated.model_copy(deep=True)
+
+
 class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
     def __init__(self):
         self.projects = InMemoryProjectRepository()
@@ -407,6 +667,9 @@ class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.review_findings = InMemoryReviewFindingRepository()
         self.audits = InMemoryAuditRepository()
         self.audit_findings = InMemoryAuditFindingRepository()
+        self.provider_health = InMemoryProviderHealthRepository()
+        self.capacity_windows = InMemoryCapacityWindowRepository()
+        self.git_operations = InMemoryGitOperationRepository()
         self.committed = False
         self.rolled_back = False
 

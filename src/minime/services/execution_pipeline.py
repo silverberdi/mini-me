@@ -10,6 +10,8 @@ from minime.domain.enums import (
     AuditStatus,
     EventType,
     JobStatus,
+    ProviderHealthStatus,
+    ProviderResultClass,
     ReadinessState,
     ReviewStatus,
     ReviewVerdict,
@@ -34,6 +36,7 @@ from minime.services.candidate_integrity import (
     verify_post_audit,
     verify_pre_audit,
 )
+from minime.services.capacity_lifecycle_service import CapacityLifecycleService
 from minime.services.checks_runner import ChecksRunner
 from minime.services.complementary_policy import validate_complementary_pair
 from minime.services.deepseek_auditor_runner import (
@@ -46,6 +49,8 @@ from minime.services.implementer_runner import (
     runner_for_implementer,
 )
 from minime.services.openspec_tasks import OpenSpecTaskTracker
+from minime.services.provider_health_service import ProviderHealthService
+from minime.services.provider_outcome_parser import ProviderOutcomeParser
 from minime.services.review_verdict_parser import parse_review_verdict
 from minime.services.reviewer_contract import build_reviewer_prompt
 from minime.services.reviewer_runner import (
@@ -56,6 +61,7 @@ from minime.services.reviewer_view import ReviewerViewManager
 from minime.services.worktree_manager import WorktreeManager
 
 EVENT_BY_STATUS = {
+    JobStatus.QUEUED: EventType.JOB_QUEUED,
     JobStatus.RUNNING: EventType.JOB_RUNNING,
     JobStatus.CHECKS_RUNNING: EventType.JOB_CHECKS_RUNNING,
     JobStatus.CHECKS_PASSED: EventType.JOB_CHECKS_PASSED,
@@ -65,6 +71,8 @@ EVENT_BY_STATUS = {
     JobStatus.READY_TO_MERGE: EventType.JOB_READY_TO_MERGE,
     JobStatus.AUDIT_BLOCKED: EventType.JOB_AUDIT_BLOCKED,
     JobStatus.CHANGES_REQUIRED: EventType.JOB_CHANGES_REQUIRED,
+    JobStatus.WAITING_CAPACITY: EventType.JOB_WAITING_CAPACITY,
+    JobStatus.RECOVERY_BLOCKED: EventType.RECOVERY_BLOCKED,
     JobStatus.FAILED: EventType.JOB_FAILED,
     JobStatus.CANCELLED: EventType.JOB_CANCELLED,
 }
@@ -84,6 +92,8 @@ class ExecutionPipelineService:
         reviewer_view_manager: ReviewerViewManager | None = None,
         checks_runner: ChecksRunner | None = None,
         task_tracker: OpenSpecTaskTracker | None = None,
+        health_service: ProviderHealthService | None = None,
+        lifecycle_service: CapacityLifecycleService | None = None,
         implementer_timeout_seconds: int = 3600,
         reviewer_timeout_seconds: int = 3600,
     ):
@@ -92,12 +102,18 @@ class ExecutionPipelineService:
         self.implementer_runner = implementer_runner
         self.reviewer_runner = reviewer_runner
         self.auditor_runner = auditor_runner
-        self.worktree_manager = worktree_manager or WorktreeManager(self.project_root)
+        self.worktree_manager = worktree_manager or WorktreeManager(
+            self.project_root, uow=self.uow
+        )
         self.reviewer_view_manager = (
             reviewer_view_manager or ReviewerViewManager(self.project_root)
         )
         self.checks_runner = checks_runner or ChecksRunner()
         self.task_tracker = task_tracker or OpenSpecTaskTracker(self.project_root)
+        self.health_service = health_service or ProviderHealthService(self.uow)
+        self.lifecycle_service = lifecycle_service or CapacityLifecycleService(
+            self.uow, health_service=self.health_service
+        )
         self.implementer_timeout_seconds = implementer_timeout_seconds
         self.reviewer_timeout_seconds = reviewer_timeout_seconds
 
@@ -108,6 +124,10 @@ class ExecutionPipelineService:
             raise ValueError(
                 f"Change '{change_name}' for project '{project_id}' is not READY."
             )
+        can_admit, admit_err = self.lifecycle_service.can_admit_change(project_id)
+        if not can_admit:
+            raise ValueError(f"Cannot admit change '{change_name}': {admit_err}")
+
         job = Job(
             project_id=project_id,
             change_name=change_name,
@@ -134,10 +154,34 @@ class ExecutionPipelineService:
         phase_started = utc_now()
         check_run_results = []
         try:
+            # Check implementer capacity availability before creating worktree / starting implementer
+            imp_health = self.health_service.get_health(project.implementer)
+            if imp_health.status != ProviderHealthStatus.AVAILABLE:
+                job = self.uow.jobs.set_waiting_capacity(
+                    job.job_id,
+                    project.implementer,
+                    f"Primary implementer '{project.implementer}' is {imp_health.status.value}",
+                )
+                self._save_event(
+                    EventType.JOB_WAITING_CAPACITY,
+                    job,
+                    {"waiting_provider": project.implementer, "status": imp_health.status.value},
+                )
+                self.uow.commit()
+                return job
+
             job = self._transition(job, JobStatus.RUNNING)
-            worktree = await self.worktree_manager.create_worktree(
-                job.job_id, job.change_name, project.base_branch
-            )
+            try:
+                worktree = await self.worktree_manager.create_worktree(
+                    job.job_id,
+                    job.change_name,
+                    project.base_branch,
+                    project_id=project.project_id,
+                )
+            except TypeError:
+                worktree = await self.worktree_manager.create_worktree(
+                    job.job_id, job.change_name, project.base_branch
+                )
             worktree_created = True
             job.base_sha = worktree.base_sha
             self.uow.jobs.save(job)
@@ -169,6 +213,42 @@ class ExecutionPipelineService:
                     details={"job_id": job.job_id},
                 )
             )
+
+            # Record implementer outcome
+            imp_outcome = ProviderOutcomeParser.parse_runner_output(
+                provider=project.implementer,
+                role="implementer",
+                model=None,
+                exit_code=result.exit_code,
+                timed_out=result.timed_out,
+                stdout_lines=result.stdout,
+                stderr_lines=result.stderr,
+            )
+            self.health_service.record_outcome(imp_outcome)
+
+            if imp_outcome.result_class in {
+                ProviderResultClass.QUOTA_LIMIT,
+                ProviderResultClass.RATE_LIMIT,
+            }:
+                job = self.uow.jobs.set_waiting_capacity(
+                    job.job_id,
+                    project.implementer,
+                    imp_outcome.summary or f"Capacity exhausted on {project.implementer}",
+                    imp_outcome.capacity_reset_at,
+                )
+                self._save_event(
+                    EventType.JOB_WAITING_CAPACITY,
+                    job,
+                    {
+                        "waiting_provider": project.implementer,
+                        "reset_at": imp_outcome.capacity_reset_at.isoformat()
+                        if imp_outcome.capacity_reset_at
+                        else None,
+                    },
+                )
+                self.uow.commit()
+                return job
+
             if result.timed_out:
                 self._save_event(
                     EventType.JOB_TIMEOUT,
@@ -236,6 +316,22 @@ class ExecutionPipelineService:
                     },
                 )
                 raise RuntimeError(pair_err or "Invalid complementary pair.")
+
+            # 1b. Check reviewer capacity availability
+            rev_health = self.health_service.get_health(project.reviewer)
+            if rev_health.status != ProviderHealthStatus.AVAILABLE:
+                job = self.uow.jobs.set_waiting_capacity(
+                    job.job_id,
+                    project.reviewer,
+                    f"Primary reviewer '{project.reviewer}' is {rev_health.status.value}",
+                )
+                self._save_event(
+                    EventType.JOB_WAITING_CAPACITY,
+                    job,
+                    {"waiting_provider": project.reviewer, "status": rev_health.status.value},
+                )
+                self.uow.commit()
+                return job
 
             # 2. Pre-review candidate integrity and base SHA validation
             valid_pre, pre_err = validate_pre_review_integrity(
@@ -306,6 +402,51 @@ class ExecutionPipelineService:
                 )
             )
 
+            # Check for domain verdict validity first
+            domain_verdict_valid = False
+            verdict_payload = None
+            try:
+                verdict_payload = parse_review_verdict(review_result.stdout)
+                domain_verdict_valid = True
+            except Exception:
+                pass
+
+            # Record reviewer outcome
+            rev_outcome = ProviderOutcomeParser.parse_runner_output(
+                provider=project.reviewer,
+                role="reviewer",
+                model=None,
+                exit_code=review_result.exit_code,
+                timed_out=review_result.timed_out,
+                stdout_lines=review_result.stdout,
+                stderr_lines=review_result.stderr,
+                domain_verdict_valid=domain_verdict_valid,
+            )
+            self.health_service.record_outcome(rev_outcome)
+
+            if rev_outcome.result_class in {
+                ProviderResultClass.QUOTA_LIMIT,
+                ProviderResultClass.RATE_LIMIT,
+            }:
+                job = self.uow.jobs.set_waiting_capacity(
+                    job.job_id,
+                    project.reviewer,
+                    rev_outcome.summary or f"Capacity exhausted on {project.reviewer}",
+                    rev_outcome.capacity_reset_at,
+                )
+                self._save_event(
+                    EventType.JOB_WAITING_CAPACITY,
+                    job,
+                    {
+                        "waiting_provider": project.reviewer,
+                        "reset_at": rev_outcome.capacity_reset_at.isoformat()
+                        if rev_outcome.capacity_reset_at
+                        else None,
+                    },
+                )
+                self.uow.commit()
+                return job
+
             if review_result.timed_out:
                 self.uow.reviews.transition(
                     review.review_id,
@@ -348,23 +489,24 @@ class ExecutionPipelineService:
                 self.uow.commit()
                 raise RuntimeError(post_err or "Post-review mutation detected.")
 
-            # 7. Parse structured review verdict strictly
-            try:
-                verdict_payload = parse_review_verdict(review_result.stdout)
-            except Exception as parse_exc:
-                parse_err = f"Malformed review output: {parse_exc}"
-                self.uow.reviews.transition(
-                    review.review_id,
-                    ReviewStatus.REVIEW_FAILED.value,
-                    error_message=parse_err,
-                )
-                self._save_event(
-                    EventType.MALFORMED_REVIEW_OUTPUT,
-                    job,
-                    {"error": parse_err},
-                )
-                self.uow.commit()
-                raise RuntimeError(parse_err) from parse_exc
+            # 7. Parse structured review verdict strictly if not already parsed
+            if not verdict_payload:
+                try:
+                    verdict_payload = parse_review_verdict(review_result.stdout)
+                except Exception as parse_exc:
+                    parse_err = f"Malformed review output: {parse_exc}"
+                    self.uow.reviews.transition(
+                        review.review_id,
+                        ReviewStatus.REVIEW_FAILED.value,
+                        error_message=parse_err,
+                    )
+                    self._save_event(
+                        EventType.MALFORMED_REVIEW_OUTPUT,
+                        job,
+                        {"error": parse_err},
+                    )
+                    self.uow.commit()
+                    raise RuntimeError(parse_err) from parse_exc
 
             # 8. Apply verdict transition
             if verdict_payload.verdict == ReviewVerdict.READY_TO_MERGE:
@@ -408,6 +550,8 @@ class ExecutionPipelineService:
                 JobStatus.READY_TO_MERGE,
                 JobStatus.AUDIT_BLOCKED,
                 JobStatus.CHANGES_REQUIRED,
+                JobStatus.WAITING_CAPACITY,
+                JobStatus.RECOVERY_BLOCKED,
                 JobStatus.FAILED,
                 JobStatus.CANCELLED,
             }:
@@ -416,7 +560,12 @@ class ExecutionPipelineService:
             if readonly_view_created:
                 self.reviewer_view_manager.cleanup_readonly_view(job.job_id)
             if worktree_created:
-                await self.worktree_manager.cleanup_worktree(job.job_id)
+                try:
+                    await self.worktree_manager.cleanup_worktree(
+                        job.job_id, project_id=job.project_id
+                    )
+                except TypeError:
+                    await self.worktree_manager.cleanup_worktree(job.job_id)
             latest = self._require_job(job.job_id)
             if latest.status in {
                 JobStatus.READY_TO_MERGE,

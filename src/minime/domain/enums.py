@@ -42,8 +42,66 @@ class JobStatus(str, Enum):
     READY_TO_MERGE = "READY_TO_MERGE"
     AUDIT_BLOCKED = "AUDIT_BLOCKED"
     CHANGES_REQUIRED = "CHANGES_REQUIRED"
+    WAITING_CAPACITY = "WAITING_CAPACITY"
+    RECOVERY_BLOCKED = "RECOVERY_BLOCKED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
+
+
+class PrimaryProvider(str, Enum):
+    CODEX = "codex"
+    ANTIGRAVITY = "antigravity"
+
+
+PRIMARY_PROVIDERS: set[str] = {PrimaryProvider.CODEX.value, PrimaryProvider.ANTIGRAVITY.value}
+
+
+class SchedulerMode(str, Enum):
+    RUN = "RUN"
+    DRAIN = "DRAIN"
+    WAIT = "WAIT"
+
+
+class ProviderHealthStatus(str, Enum):
+    AVAILABLE = "available"
+    TEMPORARILY_UNAVAILABLE = "temporarily_unavailable"
+    EXHAUSTED = "exhausted"
+    DEGRADED = "degraded"
+
+
+class ProviderResultClass(str, Enum):
+    SUCCESS = "success"
+    TRANSIENT_ERROR = "transient_error"
+    QUOTA_LIMIT = "quota_limit"
+    RATE_LIMIT = "rate_limit"
+    AUTH_ERROR = "auth_error"
+    TIMEOUT = "timeout"
+    MALFORMED_OUTPUT = "malformed_output"
+    CANCELLED = "cancelled"
+    POLICY_DENIED = "policy_denied"
+    UNSAFE_BINDING = "unsafe_binding"
+    UNKNOWN_ERROR = "unknown_error"
+
+
+class CapacitySignalSource(str, Enum):
+    HEADER_RETRY_AFTER = "header_retry_after"
+    RESPONSE_BODY_TIMESTAMP = "response_body_timestamp"
+    UNKNOWN = "unknown"
+
+
+class LockSafetyStatus(str, Enum):
+    SAFE_ORPHANED = "SAFE_ORPHANED"
+    ACTIVE_OWNER = "ACTIVE_OWNER"
+    UNCERTAIN = "UNCERTAIN"
+    EXTERNAL_OR_INVALID = "EXTERNAL_OR_INVALID"
+
+
+class GitOperationStatus(str, Enum):
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    INTERRUPTED = "INTERRUPTED"
+    RECOVERED = "RECOVERED"
 
 
 class ReviewStatus(str, Enum):
@@ -109,6 +167,7 @@ class EventType(str, Enum):
     JOB_AUDIT_FAILED = "JOB_AUDIT_FAILED"
     JOB_READY_TO_MERGE = "JOB_READY_TO_MERGE"
     JOB_CHANGES_REQUIRED = "JOB_CHANGES_REQUIRED"
+    JOB_WAITING_CAPACITY = "JOB_WAITING_CAPACITY"
     JOB_FAILED = "JOB_FAILED"
     JOB_CANCELLED = "JOB_CANCELLED"
     JOB_TIMEOUT = "JOB_TIMEOUT"
@@ -121,3 +180,13 @@ class EventType(str, Enum):
     UNAUTHORIZED_AUDITOR_MUTATION = "UNAUTHORIZED_AUDITOR_MUTATION"
     MALFORMED_REVIEW_OUTPUT = "MALFORMED_REVIEW_OUTPUT"
     AUDIT_MALFORMED_OUTPUT = "AUDIT_MALFORMED_OUTPUT"
+    SCHEDULER_MODE_CHANGED = "SCHEDULER_MODE_CHANGED"
+    PRIMARY_CAPACITY_EXHAUSTED = "PRIMARY_CAPACITY_EXHAUSTED"
+    PRIMARY_CAPACITY_RECOVERED = "PRIMARY_CAPACITY_RECOVERED"
+    PROVIDER_HEALTH_UPDATED = "PROVIDER_HEALTH_UPDATED"
+    PROVIDER_PROBE_FAILED = "PROVIDER_PROBE_FAILED"
+    DAEMON_RESTARTED = "DAEMON_RESTARTED"
+    JOB_INTERRUPTED = "JOB_INTERRUPTED"
+    JOB_RECOVERED = "JOB_RECOVERED"
+    WORKTREE_LOCK_RECOVERED = "WORKTREE_LOCK_RECOVERED"
+    RECOVERY_BLOCKED = "RECOVERY_BLOCKED"

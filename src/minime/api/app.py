@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+from contextlib import asynccontextmanager
 from typing import Annotated, Any, Generator
 
 from fastapi import Depends, FastAPI, HTTPException, status
@@ -11,17 +13,41 @@ from minime.adapters.openspec import OpenSpecAdapter
 from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.db.session import db_manager
 from minime.domain.interfaces import PersistenceUnitOfWork
-from minime.domain.models import Change, Job, JobLog, Project
+from minime.domain.models import Change, Job, JobLog, Project, ProviderHealth, SchedulerStatus
 from minime.logging import redact_secrets
+from minime.services.capacity_lifecycle_service import CapacityLifecycleService
 from minime.services.execution_pipeline import ExecutionPipelineService
 from minime.services.project_service import ProjectService
+from minime.services.provider_health_service import ProviderHealthService
 from minime.services.readiness_service import ReadinessService
+from minime.services.restart_recovery_service import RestartRecoveryService
 from minime.services.status_service import StatusService
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: reconcile active jobs and clean abandoned locks
+    sess = db_manager.sessionmaker()
+    try:
+        uow = PostgresPersistenceUnitOfWork(sess)
+        recovery_service = RestartRecoveryService(uow, project_root=".")
+        reconciled = recovery_service.reconcile_on_startup()
+        if reconciled:
+            logger.info(f"Reconciled {len(reconciled)} jobs on startup.")
+    except Exception as exc:
+        logger.warning(f"Error during startup reconciliation: {exc}")
+    finally:
+        sess.close()
+    yield
+
 
 app = FastAPI(
     title="mini me API",
     version="0.1.0",
     description="Control plane and operational status API for mini me.",
+    lifespan=lifespan,
 )
 
 
@@ -78,6 +104,18 @@ def get_health() -> dict[str, Any]:
 def get_status(uow: UowDep) -> dict[str, Any]:
     service = StatusService(uow)
     return service.get_system_status()
+
+
+@app.get("/scheduler/status")
+def get_scheduler_status(uow: UowDep) -> SchedulerStatus:
+    service = CapacityLifecycleService(uow)
+    return service.get_scheduler_status()
+
+
+@app.get("/providers/health")
+def get_providers_health(uow: UowDep) -> list[ProviderHealth]:
+    service = ProviderHealthService(uow)
+    return service.list_all_health()
 
 
 @app.get("/projects")
@@ -311,6 +349,10 @@ def _job_summary(uow: PersistenceUnitOfWork, job: Job) -> dict[str, Any]:
         "implementer": job.implementer_role,
         "candidate_sha": job.candidate_sha,
         "base_sha": job.base_sha,
+        "waiting_provider": job.waiting_provider,
+        "capacity_block_reason": job.capacity_block_reason,
+        "recovery_blocked_reason": job.recovery_blocked_reason,
+        "expected_reset_at": job.expected_reset_at.isoformat() if job.expected_reset_at else None,
         "error_message": job.error_message,
         "created_at": job.created_at.isoformat(),
         "updated_at": job.updated_at.isoformat(),

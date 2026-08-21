@@ -163,6 +163,12 @@ class JobModel(Base):
     candidate_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
     base_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    waiting_provider: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    capacity_block_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    recovery_blocked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expected_reset_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False, index=True
     )
@@ -183,6 +189,56 @@ class JobModel(Base):
     audits: Mapped[list[AuditModel]] = relationship(
         "AuditModel", back_populates="job", cascade="all, delete-orphan"
     )
+
+
+class ProviderHealthModel(Base):
+    __tablename__ = "provider_health"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="available", nullable=False, index=True)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_result_class: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    last_error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_failure_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+
+class CapacityWindowModel(Base):
+    __tablename__ = "capacity_windows"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    quota_exhausted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+    capacity_reset_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    retry_after_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_signal: Mapped[str] = mapped_column(String(64), default="unknown", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+
+
+class GitOperationModel(Base):
+    __tablename__ = "git_operations"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    project_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    worktree_path: Mapped[str] = mapped_column(String(512), nullable=False, index=True)
+    operation_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="RUNNING", nullable=False, index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class JobLogModel(Base):
