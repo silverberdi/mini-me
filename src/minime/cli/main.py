@@ -13,6 +13,7 @@ from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.db.session import db_manager
 from minime.domain.enums import ProviderHealthStatus, ReviewVerdict, SchedulerMode
 from minime.logging import configure_logging, get_logger
+from minime.services.budget_service import BudgetService
 from minime.services.capacity_lifecycle_service import CapacityLifecycleService
 from minime.services.execution_pipeline import ExecutionPipelineService
 from minime.services.project_service import ProjectService
@@ -29,11 +30,13 @@ project_app = typer.Typer(help="Manage registered projects.")
 jobs_app = typer.Typer(help="Inspect execution jobs.")
 scheduler_app = typer.Typer(help="Inspect scheduler capacity mode and admission status.")
 providers_app = typer.Typer(help="Inspect primary provider health and capacity windows.")
+budget_app = typer.Typer(help="Inspect OpenRouter budget usage and policy state.")
 
 app.add_typer(project_app, name="project")
 app.add_typer(jobs_app, name="jobs")
 app.add_typer(scheduler_app, name="scheduler")
 app.add_typer(providers_app, name="providers")
+app.add_typer(budget_app, name="budget")
 
 logger = get_logger("cli")
 
@@ -563,6 +566,104 @@ def providers_health_cmd(
 
     except Exception as e:
         typer.secho(f"Error fetching provider health: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
+@budget_app.command("status")
+def budget_status_cmd(
+    project_id: str = typer.Option(None, "--project-id", "-p", help="Filter by project"),
+    json_output: bool = typer.Option(False, "--json", help="Output budget status as JSON"),
+) -> None:
+    """Show OpenRouter budget consumption against caps, headroom, and breach state."""
+    try:
+        with db_manager.session() as session:
+            uow = PostgresPersistenceUnitOfWork(session)
+            service = BudgetService(uow)
+            if not project_id:
+                projects = uow.projects.list_all()
+                project_id = projects[0].project_id if projects else ""
+            policy = uow.budget_policies.get_for_update(project_id) if project_id else None
+            if not policy:
+                typer.echo("No OpenRouter budget policy found.")
+                return
+            headroom = service._compute_headroom(project_id, policy)
+            reservations = uow.budget_reservations.list_by_project(project_id)
+            ledger_entries = uow.budget_ledger.list_by_project(project_id)
+            payload = {
+                "project_id": project_id,
+                "policy": policy.model_dump(),
+                "headroom": headroom.__dict__,
+                "reservations": [r.model_dump() for r in reservations],
+                "ledger_count": len(ledger_entries),
+            }
+            if json_output:
+                typer.echo(json.dumps(payload, indent=2, default=str))
+                return
+
+            typer.secho("=== OpenRouter Budget Status ===", fg=typer.colors.CYAN, bold=True)
+            typer.echo(f"Project: {project_id}")
+            typer.echo(f"Enabled: {'YES' if policy.enabled else 'NO'}")
+            breach_color = typer.colors.RED if policy.is_breached else typer.colors.GREEN
+            typer.secho(f"Policy Breach: {'BREACH DETECTED (LOCKED)' if policy.is_breached else 'HEALTHY'}", fg=breach_color, bold=True)
+            typer.echo(f"Daily Cap: ${policy.daily_cap_usd:.2f} {policy.currency}")
+            typer.echo(f"Monthly Cap: ${policy.monthly_cap_usd:.2f} {policy.currency}")
+            typer.echo(f"Committed Spend Today (UTC): ${headroom.committed_today_usd:.4f}")
+            typer.echo(f"Committed Spend Month (UTC): ${headroom.committed_month_usd:.4f}")
+            typer.echo(f"Active Reservations (Today): ${headroom.reserved_today_usd:.4f}")
+            typer.echo(f"Active Reservations (Month): ${headroom.reserved_month_usd:.4f}")
+            if headroom.unresolved_usd > 0:
+                typer.secho(f"Unresolved Encumbrance (All-Time): ${headroom.unresolved_usd:.4f}", fg=typer.colors.YELLOW)
+            typer.secho(f"Daily Headroom: ${headroom.daily_headroom_usd:.4f}", fg=typer.colors.GREEN if headroom.daily_headroom_usd > 0 else typer.colors.RED)
+            typer.secho(f"Monthly Headroom: ${headroom.monthly_headroom_usd:.4f}", fg=typer.colors.GREEN if headroom.monthly_headroom_usd > 0 else typer.colors.RED)
+    except Exception as e:
+        typer.secho(f"Error fetching budget status: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
+@providers_app.command("openrouter")
+def providers_openrouter_cmd(
+    project_id: str = typer.Option(None, "--project-id", "-p", help="Filter by project"),
+    json_output: bool = typer.Option(False, "--json", help="Output OpenRouter status as JSON"),
+) -> None:
+    """Show OpenRouter fallback status, allowed models, and policy configuration."""
+    try:
+        with db_manager.session() as session:
+            uow = PostgresPersistenceUnitOfWork(session)
+            service = BudgetService(uow)
+            if not project_id:
+                projects = uow.projects.list_all()
+                project_id = projects[0].project_id if projects else ""
+            policy = uow.budget_policies.get_for_update(project_id) if project_id else None
+            headroom = service._compute_headroom(project_id, policy) if policy else None
+            payload = {
+                "project_id": project_id,
+                "policy": policy.model_dump() if policy else None,
+                "headroom": headroom.__dict__ if headroom else None,
+                "allowed_models": {
+                    "implementer": ["anthropic/claude-3.5-sonnet", "qwen/qwen-2.5-coder-32b-instruct"],
+                    "reviewer": ["openai/gpt-4o", "meta-llama/llama-3.3-70b-instruct", "mistralai/mistral-large"],
+                },
+            }
+            if json_output:
+                typer.echo(json.dumps(payload, indent=2, default=str))
+                return
+
+            typer.secho("=== OpenRouter Fallback Status ===", fg=typer.colors.CYAN, bold=True)
+            if not policy:
+                typer.echo("No policy configured.")
+            else:
+                typer.echo(f"Project: {project_id}")
+                typer.echo(f"Enabled: {'YES' if policy.enabled else 'NO'}")
+                breach_color = typer.colors.RED if policy.is_breached else typer.colors.GREEN
+                typer.secho(f"Breached: {'YES' if policy.is_breached else 'NO'}", fg=breach_color)
+                if headroom:
+                    typer.echo(f"Daily Headroom: ${headroom.daily_headroom_usd:.4f}")
+                    typer.echo(f"Monthly Headroom: ${headroom.monthly_headroom_usd:.4f}")
+                typer.echo("\nConfigured Canonical Models:")
+                typer.echo("  Implementer: anthropic/claude-3.5-sonnet, qwen/qwen-2.5-coder-32b-instruct")
+                typer.echo("  Reviewer: openai/gpt-4o, meta-llama/llama-3.3-70b-instruct, mistralai/mistral-large")
+    except Exception as e:
+        typer.secho(f"Error fetching OpenRouter status: {e}", fg=typer.colors.RED)
         raise typer.Exit(code=1)
 
 

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from minime.domain.enums import (
     PRIMARY_PROVIDERS,
@@ -160,6 +161,65 @@ class Job(BaseModel):
     expected_reset_at: datetime | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+
+
+class OpenRouterBudgetPolicy(BaseModel):
+    project_id: str
+    enabled: bool = False
+    daily_cap_usd: Decimal = Field(default_factory=lambda: Decimal("0.0"))
+    monthly_cap_usd: Decimal = Field(default_factory=lambda: Decimal("0.0"))
+    currency: str = "USD"
+    policy_version: int = 1
+    is_breached: bool = False
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class OpenRouterPricingSnapshot(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    snapshot_id: str = Field(alias="id")
+    canonical_model_identity: str
+    routed_model_identity: str
+    prompt_price_per_token: Decimal
+    output_price_per_token: Decimal
+    additional_cost_per_request: Decimal = Field(default_factory=lambda: Decimal("0.0"))
+    currency: str = "USD"
+    source: str = "openrouter_catalog_api"
+    observed_at: datetime = Field(default_factory=utc_now)
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class BudgetReservation(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    reservation_id: str = Field(default_factory=generate_uuid, alias="id")
+    project_id: str
+    job_id: str
+    change_id: str
+    role: str
+    canonical_model_identity: str
+    reserved_amount_usd: Decimal
+    status: str
+    pricing_snapshot_id: str
+    correlation_id: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class BudgetLedgerEntry(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    entry_id: str = Field(default_factory=generate_uuid, alias="id")
+    reservation_id: str | None = None
+    project_id: str
+    job_id: str
+    change_id: str
+    provider: str = "openrouter"
+    role: str
+    canonical_model_identity: str
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+    amount_usd: Decimal
+    entry_type: str
+    created_at: datetime = Field(default_factory=utc_now)
 
 
 class NormalizedProviderResult(BaseModel):

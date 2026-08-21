@@ -39,6 +39,8 @@ from minime.domain.interfaces import (
 from minime.domain.models import (
     AuditFinding,
     AuditRecord,
+    BudgetLedgerEntry,
+    BudgetReservation,
     CapacityWindow,
     Change,
     CheckResult,
@@ -47,6 +49,8 @@ from minime.domain.models import (
     Job,
     JobLog,
     MetricFact,
+    OpenRouterBudgetPolicy,
+    OpenRouterPricingSnapshot,
     Project,
     ProjectBinding,
     ProviderHealth,
@@ -653,6 +657,56 @@ class InMemoryGitOperationRepository(GitOperationRepositoryInterface):
         return updated.model_copy(deep=True)
 
 
+class InMemoryOpenRouterBudgetPolicyRepository:
+    def __init__(self):
+        self._store: dict[str, OpenRouterBudgetPolicy] = {}
+
+    def get_for_update(self, project_id: str) -> OpenRouterBudgetPolicy | None:
+        policy = self._store.get(project_id)
+        return policy.model_copy(deep=True) if policy else None
+
+    def save(self, policy: OpenRouterBudgetPolicy) -> None:
+        self._store[policy.project_id] = policy.model_copy(deep=True)
+
+
+class InMemoryOpenRouterPricingSnapshotRepository:
+    def __init__(self):
+        self._store: dict[str, OpenRouterPricingSnapshot] = {}
+
+    def save(self, snapshot: OpenRouterPricingSnapshot) -> None:
+        self._store[snapshot.snapshot_id] = snapshot.model_copy(deep=True)
+
+    def get_by_id(self, snapshot_id: str) -> OpenRouterPricingSnapshot | None:
+        snapshot = self._store.get(snapshot_id)
+        return snapshot.model_copy(deep=True) if snapshot else None
+
+
+class InMemoryBudgetReservationRepository:
+    def __init__(self):
+        self._store: dict[str, BudgetReservation] = {}
+
+    def save(self, reservation: BudgetReservation) -> None:
+        self._store[reservation.reservation_id] = reservation.model_copy(deep=True)
+
+    def get_by_id(self, reservation_id: str) -> BudgetReservation | None:
+        reservation = self._store.get(reservation_id)
+        return reservation.model_copy(deep=True) if reservation else None
+
+    def list_by_project(self, project_id: str) -> list[BudgetReservation]:
+        return [r.model_copy(deep=True) for r in self._store.values() if r.project_id == project_id]
+
+
+class InMemoryBudgetLedgerRepository:
+    def __init__(self):
+        self._store: list[BudgetLedgerEntry] = []
+
+    def save(self, entry: BudgetLedgerEntry) -> None:
+        self._store.append(entry.model_copy(deep=True))
+
+    def list_by_project(self, project_id: str) -> list[BudgetLedgerEntry]:
+        return [e.model_copy(deep=True) for e in self._store if e.project_id == project_id]
+
+
 class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
     def __init__(self):
         self.projects = InMemoryProjectRepository()
@@ -670,6 +724,10 @@ class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.provider_health = InMemoryProviderHealthRepository()
         self.capacity_windows = InMemoryCapacityWindowRepository()
         self.git_operations = InMemoryGitOperationRepository()
+        self.budget_policies = InMemoryOpenRouterBudgetPolicyRepository()
+        self.pricing_snapshots = InMemoryOpenRouterPricingSnapshotRepository()
+        self.budget_reservations = InMemoryBudgetReservationRepository()
+        self.budget_ledger = InMemoryBudgetLedgerRepository()
         self.committed = False
         self.rolled_back = False
 

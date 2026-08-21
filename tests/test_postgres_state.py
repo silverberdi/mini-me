@@ -26,6 +26,10 @@ def test_models_metadata_tables():
     assert "provider_health" in tables
     assert "capacity_windows" in tables
     assert "git_operations" in tables
+    assert "openrouter_budget_policies" in tables
+    assert "openrouter_pricing_snapshots" in tables
+    assert "budget_reservations" in tables
+    assert "budget_ledger" in tables
     # Verify uniqueness constraint on project_bindings (project_id, openspec_change_name)
     pb_table = tables["project_bindings"]
     constraint_names = {c.name for c in pb_table.constraints}
@@ -59,6 +63,11 @@ def test_alembic_offline_postgres_migration():
     assert "CREATE TABLE provider_health" in sql
     assert "CREATE TABLE capacity_windows" in sql
     assert "CREATE TABLE git_operations" in sql
+    assert "CREATE TABLE openrouter_budget_policies" in sql
+    assert "CREATE TABLE openrouter_pricing_snapshots" in sql
+    assert "CREATE TABLE budget_reservations" in sql
+    assert "CREATE TABLE budget_ledger" in sql
+    assert "NUMERIC" in sql
     assert "waiting_provider" in sql
     assert "TIMESTAMP WITH TIME ZONE" in sql
 
