@@ -66,6 +66,7 @@ from minime.domain.interfaces import (
     ReviewRepositoryInterface,
 )
 from minime.domain.models import (
+    AUTHORITATIVE_PRICING_SOURCES,
     AuditFinding,
     AuditRecord,
     BudgetLedgerEntry,
@@ -1418,6 +1419,30 @@ class PostgresOpenRouterPricingSnapshotRepository:
     def get_by_id(self, snapshot_id: str) -> OpenRouterPricingSnapshot | None:
         model = self.session.get(OpenRouterPricingSnapshotModel, snapshot_id)
         return pricing_snapshot_model_to_domain(model) if model else None
+
+    def get_latest_verified_for_model(
+        self, routed_model: str, canonical_name: str | None = None
+    ) -> OpenRouterPricingSnapshot | None:
+        stmt = (
+            select(OpenRouterPricingSnapshotModel)
+            .where(
+                OpenRouterPricingSnapshotModel.routed_model_identity == routed_model,
+                OpenRouterPricingSnapshotModel.source.in_(AUTHORITATIVE_PRICING_SOURCES),
+            )
+            .order_by(OpenRouterPricingSnapshotModel.observed_at.desc(), OpenRouterPricingSnapshotModel.created_at.desc())
+        )
+        if canonical_name:
+            stmt = stmt.where(OpenRouterPricingSnapshotModel.canonical_model_identity == canonical_name)
+        model = self.session.scalars(stmt).first()
+        return pricing_snapshot_model_to_domain(model) if model else None
+
+    def list_by_model(self, routed_model: str) -> list[OpenRouterPricingSnapshot]:
+        stmt = (
+            select(OpenRouterPricingSnapshotModel)
+            .where(OpenRouterPricingSnapshotModel.routed_model_identity == routed_model)
+            .order_by(OpenRouterPricingSnapshotModel.observed_at.desc())
+        )
+        return [pricing_snapshot_model_to_domain(m) for m in self.session.scalars(stmt).all()]
 
 
 class PostgresBudgetReservationRepository:

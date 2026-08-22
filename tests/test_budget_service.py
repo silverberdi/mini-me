@@ -35,16 +35,19 @@ def _snapshot(
     prompt_price: str = "0.001",
     output_price: str = "0.002",
     additional: str = "0.5",
+    canonical_model_identity: str = "qwen:qwen3-coder",
+    routed_model_identity: str = "qwen/qwen3-coder",
+    source: str = "openrouter_catalog_api",
 ) -> OpenRouterPricingSnapshot:
     return OpenRouterPricingSnapshot(
         snapshot_id=snapshot_id,
-        canonical_model_identity="qwen:qwen3-coder",
-        routed_model_identity="qwen/qwen3-coder",
+        canonical_model_identity=canonical_model_identity,
+        routed_model_identity=routed_model_identity,
         prompt_price_per_token=Decimal(prompt_price),
         output_price_per_token=Decimal(output_price),
         additional_cost_per_request=Decimal(additional),
         currency="USD",
-        source="openrouter_catalog_api",
+        source=source,
         observed_at=datetime(2026, 8, 21, tzinfo=UTC),
         created_at=datetime(2026, 8, 21, tzinfo=UTC),
     )
@@ -451,7 +454,11 @@ def test_get_token_usage_breakdown(in_memory_uow):
         change_id="change-1",
         role="implementer",
         canonical_model_identity="anthropic:claude-3.5-sonnet",
-        pricing_snapshot=_snapshot(),
+        pricing_snapshot=_snapshot(
+            snapshot_id="snap-claude",
+            canonical_model_identity="anthropic:claude-3.5-sonnet",
+            routed_model_identity="anthropic/claude-3.5-sonnet",
+        ),
         prompt_token_upper_bound=100,
         max_output_tokens=100,
     )
@@ -469,7 +476,11 @@ def test_get_token_usage_breakdown(in_memory_uow):
         change_id="change-2",
         role="reviewer",
         canonical_model_identity="openai:gpt-4o",
-        pricing_snapshot=_snapshot(),
+        pricing_snapshot=_snapshot(
+            snapshot_id="snap-gpt4o",
+            canonical_model_identity="openai:gpt-4o",
+            routed_model_identity="openai/gpt-4o",
+        ),
         prompt_token_upper_bound=100,
         max_output_tokens=100,
     )
@@ -523,3 +534,165 @@ async def test_concurrent_reservations_serialization(in_memory_uow):
     assert len(successes) == 1
     assert len(denials) == 3
     assert all(d == "budget_denial" for d in denials)
+
+
+def test_reserve_budget_denies_unverified_source(in_memory_uow):
+    in_memory_uow.budget_policies.save(_policy(daily_cap="100.00", monthly_cap="1000.00"))
+    service = BudgetService(in_memory_uow)
+
+    unverified_sources = ["pinned_default", "heuristic", "inferred", "unknown", ""]
+    for src in unverified_sources:
+        snap = _snapshot(source=src)
+        res, reason, _ = service.reserve_budget(
+            project_id="mini-me",
+            job_id=f"job-unverified-{src}",
+            change_id="change-1",
+            role="reviewer",
+            canonical_model_identity="qwen:qwen3-coder",
+            pricing_snapshot=snap,
+            prompt_token_upper_bound=100,
+            max_output_tokens=100,
+        )
+        assert res is None, f"Expected denial for unverified source '{src}'"
+        assert reason == "PRICING_UNVERIFIED"
+
+
+def test_reserve_budget_denies_missing_snapshot(in_memory_uow):
+    in_memory_uow.budget_policies.save(_policy(daily_cap="100.00", monthly_cap="1000.00"))
+    service = BudgetService(in_memory_uow)
+    res, reason, _ = service.reserve_budget(
+        project_id="mini-me",
+        job_id="job-missing-snap",
+        change_id="change-1",
+        role="reviewer",
+        canonical_model_identity="qwen:qwen3-coder",
+        pricing_snapshot=None,
+        prompt_token_upper_bound=100,
+        max_output_tokens=100,
+    )
+    assert res is None
+    assert reason == "PRICING_SNAPSHOT_MISSING"
+
+
+def test_reserve_budget_denies_canonical_model_mismatch(in_memory_uow):
+    in_memory_uow.budget_policies.save(_policy(daily_cap="100.00", monthly_cap="1000.00"))
+    service = BudgetService(in_memory_uow)
+    snap = _snapshot(canonical_model_identity="anthropic:claude-3.5-sonnet")
+    res, reason, _ = service.reserve_budget(
+        project_id="mini-me",
+        job_id="job-mismatch",
+        change_id="change-1",
+        role="reviewer",
+        canonical_model_identity="mistral:mistral-large",
+        pricing_snapshot=snap,
+        prompt_token_upper_bound=100,
+        max_output_tokens=100,
+    )
+    assert res is None
+    assert reason == "PRICING_MODEL_MISMATCH"
+
+
+def test_conservative_maximum_cost_calculation(in_memory_uow):
+    in_memory_uow.budget_policies.save(_policy(daily_cap="100.00", monthly_cap="1000.00"))
+    service = BudgetService(in_memory_uow)
+    snap = _snapshot(
+        prompt_price="0.000002",
+        output_price="0.000006",
+        additional="0.001",
+        canonical_model_identity="mistral:mistral-large",
+        routed_model_identity="mistralai/mistral-large",
+        source="openrouter_catalog_verified",
+    )
+    prompt_upper = 10000
+    max_output = 4096
+
+    res, reason, _ = service.reserve_budget(
+        project_id="mini-me",
+        job_id="job-mistral",
+        change_id="change-1",
+        role="reviewer",
+        canonical_model_identity="mistral:mistral-large",
+        pricing_snapshot=snap,
+        prompt_token_upper_bound=prompt_upper,
+        max_output_tokens=max_output,
+    )
+    assert res is not None
+    assert reason is None
+    expected_cost = Decimal(prompt_upper) * Decimal("0.000002") + Decimal(max_output) * Decimal("0.000006") + Decimal("0.001")
+    assert res.reserved_amount_usd == expected_cost
+    assert res.reserved_amount_usd == Decimal("0.045576")
+
+
+def test_all_default_allowed_models_fail_closed_without_verified_snapshot(in_memory_uow):
+    in_memory_uow.budget_policies.save(_policy(daily_cap="100.00", monthly_cap="1000.00"))
+    service = BudgetService(in_memory_uow)
+
+    default_models = [
+        ("anthropic/claude-3.5-sonnet", "anthropic:claude-3.5-sonnet"),
+        ("openai/gpt-4o", "openai:gpt-4o"),
+        ("meta-llama/llama-3.3-70b-instruct", "meta:llama-3.3-70b-instruct"),
+        ("mistralai/mistral-large", "mistral:mistral-large"),
+    ]
+
+    for routed_model, canonical_id in default_models:
+        # 1. No snapshot supplied -> Denied
+        res, reason, _ = service.reserve_budget(
+            project_id="mini-me",
+            job_id=f"job-no-snap-{routed_model.replace('/', '-')}",
+            change_id="change-1",
+            role="reviewer",
+            canonical_model_identity=canonical_id,
+            pricing_snapshot=None,
+            prompt_token_upper_bound=1000,
+            max_output_tokens=1000,
+        )
+        assert res is None
+        assert reason == "PRICING_SNAPSHOT_MISSING"
+
+        # 2. Pinned default unverified snapshot -> Denied
+        unverified_snap = OpenRouterPricingSnapshot(
+            snapshot_id=f"snap-unverified-{routed_model.replace('/', '-')}",
+            canonical_model_identity=canonical_id,
+            routed_model_identity=routed_model,
+            prompt_price_per_token=Decimal("0.000001"),
+            output_price_per_token=Decimal("0.000002"),
+            source="pinned_default",
+            observed_at=datetime(2026, 8, 21, tzinfo=UTC),
+        )
+        res, reason, _ = service.reserve_budget(
+            project_id="mini-me",
+            job_id=f"job-unverified-{routed_model.replace('/', '-')}",
+            change_id="change-1",
+            role="reviewer",
+            canonical_model_identity=canonical_id,
+            pricing_snapshot=unverified_snap,
+            prompt_token_upper_bound=1000,
+            max_output_tokens=1000,
+        )
+        assert res is None
+        assert reason == "PRICING_UNVERIFIED"
+
+        # 3. Verified exact snapshot -> Succeeded
+        verified_snap = OpenRouterPricingSnapshot(
+            snapshot_id=f"snap-verified-{routed_model.replace('/', '-')}",
+            canonical_model_identity=canonical_id,
+            routed_model_identity=routed_model,
+            prompt_price_per_token=Decimal("0.000002"),
+            output_price_per_token=Decimal("0.000006"),
+            source="openrouter_catalog_verified",
+            observed_at=datetime(2026, 8, 21, tzinfo=UTC),
+        )
+        res, reason, _ = service.reserve_budget(
+            project_id="mini-me",
+            job_id=f"job-verified-{routed_model.replace('/', '-')}",
+            change_id="change-1",
+            role="reviewer",
+            canonical_model_identity=canonical_id,
+            pricing_snapshot=verified_snap,
+            prompt_token_upper_bound=1000,
+            max_output_tokens=1000,
+        )
+        assert res is not None
+        assert reason is None
+        assert res.reserved_amount_usd == Decimal("0.008")
+

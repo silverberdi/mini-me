@@ -10,7 +10,11 @@ from typing import Any
 import httpx
 
 from minime.domain.enums import ProviderResultClass
-from minime.domain.models import NormalizedProviderResult, OpenRouterPricingSnapshot
+from minime.domain.models import (
+    AUTHORITATIVE_PRICING_SOURCES,
+    NormalizedProviderResult,
+    OpenRouterPricingSnapshot,
+)
 from minime.logging import redact_secrets
 
 
@@ -39,22 +43,25 @@ class OpenRouterAdapter:
     def verify_authorization_envelope(self, request: OpenRouterRequest) -> tuple[bool, str | None]:
         """Defense-in-depth verification of execution envelope against authorized pricing snapshot."""
         if not request.pricing_snapshot or not request.pricing_snapshot.snapshot_id:
-            return False, "Missing or invalid pricing snapshot binding"
+            return False, "PRICING_SNAPSHOT_MISSING: Missing or invalid pricing snapshot binding"
 
         snapshot = request.pricing_snapshot
+        if not getattr(snapshot, "is_verified", False) and snapshot.source not in AUTHORITATIVE_PRICING_SOURCES:
+            return False, f"PRICING_UNVERIFIED: Pricing snapshot '{snapshot.snapshot_id}' source '{snapshot.source}' is not authoritative"
+
         snapshot_id = request.pricing_snapshot_id or snapshot.snapshot_id
         if snapshot_id != snapshot.snapshot_id:
-            return False, f"Pricing snapshot id mismatch: '{snapshot_id}' vs snapshot '{snapshot.snapshot_id}'"
+            return False, f"PRICING_MODEL_MISMATCH: Pricing snapshot id mismatch: '{snapshot_id}' vs snapshot '{snapshot.snapshot_id}'"
 
         if request.model != snapshot.routed_model_identity:
             return False, (
-                f"Dispatched model '{request.model}' does not match authorized "
+                f"PRICING_MODEL_MISMATCH: Dispatched model '{request.model}' does not match authorized "
                 f"snapshot routed model '{snapshot.routed_model_identity}'"
             )
 
         if request.canonical_model_identity != snapshot.canonical_model_identity:
             return False, (
-                f"Canonical model identity '{request.canonical_model_identity}' does not match "
+                f"PRICING_MODEL_MISMATCH: Canonical model identity '{request.canonical_model_identity}' does not match "
                 f"authorized snapshot canonical identity '{snapshot.canonical_model_identity}'"
             )
 

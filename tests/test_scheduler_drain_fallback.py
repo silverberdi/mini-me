@@ -26,6 +26,7 @@ from minime.domain.models import (
     Job,
     NormalizedProviderResult,
     OpenRouterBudgetPolicy,
+    OpenRouterPricingSnapshot,
     Project,
     ProviderHealth,
 )
@@ -161,6 +162,7 @@ def test_10_point_eligibility_evaluator_all_pass():
         reserved_today_usd=Decimal("0.00"),
         reserved_month_usd=Decimal("0.00"),
         unresolved_usd=Decimal("0.00"),
+        unresolved_count=0,
         daily_headroom_usd=Decimal("10.00"),
         monthly_headroom_usd=Decimal("25.00"),
     )
@@ -273,11 +275,55 @@ def test_openrouter_never_admits_new_ready_changes(in_memory_uow):
     assert "admission of new READY work is blocked" in reason
 
 
+def _seed_verified_snapshots(uow):
+    snapshots = [
+        OpenRouterPricingSnapshot(
+            snapshot_id="snap-claude",
+            canonical_model_identity="anthropic:claude-3.5-sonnet",
+            routed_model_identity="anthropic/claude-3.5-sonnet",
+            prompt_price_per_token=Decimal("0.000003"),
+            output_price_per_token=Decimal("0.000015"),
+            source="openrouter_catalog_verified",
+            observed_at=datetime(2026, 8, 21, tzinfo=UTC),
+        ),
+        OpenRouterPricingSnapshot(
+            snapshot_id="snap-gpt4o",
+            canonical_model_identity="openai:gpt-4o",
+            routed_model_identity="openai/gpt-4o",
+            prompt_price_per_token=Decimal("0.0000025"),
+            output_price_per_token=Decimal("0.000010"),
+            source="openrouter_catalog_verified",
+            observed_at=datetime(2026, 8, 21, tzinfo=UTC),
+        ),
+        OpenRouterPricingSnapshot(
+            snapshot_id="snap-llama",
+            canonical_model_identity="meta:llama-3.3-70b-instruct",
+            routed_model_identity="meta-llama/llama-3.3-70b-instruct",
+            prompt_price_per_token=Decimal("0.00000010"),
+            output_price_per_token=Decimal("0.00000032"),
+            source="openrouter_catalog_verified",
+            observed_at=datetime(2026, 8, 21, tzinfo=UTC),
+        ),
+        OpenRouterPricingSnapshot(
+            snapshot_id="snap-mistral",
+            canonical_model_identity="mistral:mistral-large",
+            routed_model_identity="mistralai/mistral-large",
+            prompt_price_per_token=Decimal("0.000002"),
+            output_price_per_token=Decimal("0.000006"),
+            source="openrouter_catalog_verified",
+            observed_at=datetime(2026, 8, 21, tzinfo=UTC),
+        ),
+    ]
+    for s in snapshots:
+        uow.pricing_snapshots.save(s)
+
+
 @pytest.mark.asyncio
 async def test_fallback_implementer_execution_flow(in_memory_uow, tmp_path):
     project = _project()
     in_memory_uow.projects.save(project)
     in_memory_uow.budget_policies.save(_policy())
+    _seed_verified_snapshots(in_memory_uow)
 
     # Both primary providers are exhausted
     in_memory_uow.provider_health.save(ProviderHealth(provider="codex", status=ProviderHealthStatus.EXHAUSTED))
@@ -363,6 +409,7 @@ async def test_fallback_reviewer_model_independence(in_memory_uow, tmp_path):
     project = _project()
     in_memory_uow.projects.save(project)
     in_memory_uow.budget_policies.save(_policy())
+    _seed_verified_snapshots(in_memory_uow)
 
     in_memory_uow.provider_health.save(ProviderHealth(provider="codex", status=ProviderHealthStatus.EXHAUSTED))
     in_memory_uow.provider_health.save(ProviderHealth(provider="antigravity", status=ProviderHealthStatus.EXHAUSTED))
@@ -434,6 +481,7 @@ async def test_fallback_reviewer_model_collision_fails_closed(in_memory_uow, tmp
     project = _project()
     in_memory_uow.projects.save(project)
     in_memory_uow.budget_policies.save(_policy())
+    _seed_verified_snapshots(in_memory_uow)
 
     in_memory_uow.provider_health.save(ProviderHealth(provider="codex", status=ProviderHealthStatus.EXHAUSTED))
     in_memory_uow.provider_health.save(ProviderHealth(provider="antigravity", status=ProviderHealthStatus.EXHAUSTED))
@@ -482,6 +530,7 @@ async def test_atomic_reservation_denial_prevents_http_dispatch(in_memory_uow, t
     in_memory_uow.projects.save(project)
     # Budget policy daily cap $0.00 -> will deny reservation
     in_memory_uow.budget_policies.save(_policy(daily_cap=0.0, monthly_cap=0.0))
+    _seed_verified_snapshots(in_memory_uow)
 
     in_memory_uow.provider_health.save(ProviderHealth(provider="codex", status=ProviderHealthStatus.EXHAUSTED))
     in_memory_uow.provider_health.save(ProviderHealth(provider="antigravity", status=ProviderHealthStatus.EXHAUSTED))
@@ -509,3 +558,120 @@ async def test_atomic_reservation_denial_prevents_http_dispatch(in_memory_uow, t
     # Reservation denied -> ZERO HTTP requests must be dispatched!
     assert len(mock_adapter.calls) == 0
     assert result_job.status == JobStatus.WAITING_CAPACITY
+
+
+@pytest.mark.asyncio
+async def test_missing_verified_pricing_snapshot_denies_fallback_with_zero_http(in_memory_uow, tmp_path):
+    """Prove that fallback is denied and 0 HTTP requests are made when no verified snapshot exists in DB."""
+    project = _project()
+    in_memory_uow.projects.save(project)
+    in_memory_uow.budget_policies.save(_policy(daily_cap=100.0, monthly_cap=1000.0))
+    # Deliberately DO NOT seed verified snapshots in in_memory_uow!
+
+    in_memory_uow.provider_health.save(ProviderHealth(provider="codex", status=ProviderHealthStatus.EXHAUSTED))
+    in_memory_uow.provider_health.save(ProviderHealth(provider="antigravity", status=ProviderHealthStatus.EXHAUSTED))
+
+    change_name = "no-snap-change"
+    _setup_openspec_change(tmp_path, change_name)
+    change = Change(
+        project_id=project.project_id,
+        name=change_name,
+        status=ChangeStatus.IN_PROGRESS,
+        last_readiness_status=ReadinessState.READY,
+    )
+    in_memory_uow.changes.save(change)
+
+    job = Job(
+        project_id=project.project_id,
+        change_name=change_name,
+        implementer_role=project.implementer,
+        status=JobStatus.RUNNING,
+    )
+    in_memory_uow.jobs.save(job)
+    in_memory_uow.commit()
+
+    mock_adapter = MockOpenRouterAdapter()
+    pipeline = ExecutionPipelineService(
+        uow=in_memory_uow,
+        project_root=tmp_path,
+        worktree_manager=GitFakeWorktreeManager(tmp_path),
+        openrouter_adapter=mock_adapter,
+        auditor_runner=MockAuditorRunner(),
+    )
+
+    result_job = await pipeline.execute_queued_job(job.job_id)
+
+    # 1. Zero HTTP dispatched
+    assert len(mock_adapter.calls) == 0
+
+    # 2. Job paused in WAITING_CAPACITY
+    assert result_job.status == JobStatus.WAITING_CAPACITY
+    assert "PRICING_SNAPSHOT_MISSING" in result_job.capacity_block_reason
+
+    # 3. Fallback denied event recorded
+    events = in_memory_uow.events.list_events(project_id=project.project_id)
+    denial_events = [e for e in events if e.event_type == EventType.FALLBACK_DENIED]
+    assert len(denial_events) == 1
+    assert denial_events[0].payload["reason"] == "PRICING_SNAPSHOT_MISSING"
+
+
+@pytest.mark.asyncio
+async def test_unverified_pinned_default_snapshot_in_db_denies_fallback_with_zero_http(in_memory_uow, tmp_path):
+    """Prove that legacy/unverified 'pinned_default' snapshots in DB cannot authorize spend."""
+    project = _project()
+    in_memory_uow.projects.save(project)
+    in_memory_uow.budget_policies.save(_policy(daily_cap=100.0, monthly_cap=1000.0))
+
+    # Save an unverified pinned_default snapshot
+    in_memory_uow.pricing_snapshots.save(
+        OpenRouterPricingSnapshot(
+            snapshot_id="openrouter:anthropic/claude-3.5-sonnet:pinned",
+            canonical_model_identity="anthropic:claude-3.5-sonnet",
+            routed_model_identity="anthropic/claude-3.5-sonnet",
+            prompt_price_per_token=Decimal("0.0000005"),
+            output_price_per_token=Decimal("0.0000015"),
+            source="pinned_default",  # UNVERIFIED
+            observed_at=datetime(2026, 8, 21, tzinfo=UTC),
+        )
+    )
+
+    in_memory_uow.provider_health.save(ProviderHealth(provider="codex", status=ProviderHealthStatus.EXHAUSTED))
+    in_memory_uow.provider_health.save(ProviderHealth(provider="antigravity", status=ProviderHealthStatus.EXHAUSTED))
+
+    change_name = "pinned-snap-change"
+    _setup_openspec_change(tmp_path, change_name)
+    change = Change(
+        project_id=project.project_id,
+        name=change_name,
+        status=ChangeStatus.IN_PROGRESS,
+        last_readiness_status=ReadinessState.READY,
+    )
+    in_memory_uow.changes.save(change)
+
+    job = Job(
+        project_id=project.project_id,
+        change_name=change_name,
+        implementer_role=project.implementer,
+        status=JobStatus.RUNNING,
+    )
+    in_memory_uow.jobs.save(job)
+    in_memory_uow.commit()
+
+    mock_adapter = MockOpenRouterAdapter()
+    pipeline = ExecutionPipelineService(
+        uow=in_memory_uow,
+        project_root=tmp_path,
+        worktree_manager=GitFakeWorktreeManager(tmp_path),
+        openrouter_adapter=mock_adapter,
+        auditor_runner=MockAuditorRunner(),
+    )
+
+    result_job = await pipeline.execute_queued_job(job.job_id)
+
+    # 1. Zero HTTP dispatched
+    assert len(mock_adapter.calls) == 0
+
+    # 2. Job paused in WAITING_CAPACITY because pinned_default cannot authorize spend
+    assert result_job.status == JobStatus.WAITING_CAPACITY
+    assert "PRICING_SNAPSHOT_MISSING" in result_job.capacity_block_reason
+

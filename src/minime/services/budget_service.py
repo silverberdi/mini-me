@@ -28,6 +28,7 @@ class BudgetHeadroom:
     reserved_today_usd: Decimal
     reserved_month_usd: Decimal
     unresolved_usd: Decimal
+    unresolved_count: int
     daily_headroom_usd: Decimal
     monthly_headroom_usd: Decimal
 
@@ -99,7 +100,13 @@ class BudgetService:
             return None, "policy_denied", None
 
         if not pricing_snapshot:
-            return None, "policy_denied", None
+            return None, "PRICING_SNAPSHOT_MISSING", None
+
+        if not getattr(pricing_snapshot, "is_verified", False):
+            return None, "PRICING_UNVERIFIED", None
+
+        if pricing_snapshot.canonical_model_identity != canonical_model_identity:
+            return None, "PRICING_MODEL_MISMATCH", None
 
         if prompt_token_upper_bound <= 0 or max_output_tokens <= 0:
             return None, "policy_denied", None
@@ -337,14 +344,14 @@ class BudgetService:
             Decimal("0"),
         )
         # All-time UNRESOLVED reservations across all past dates
+        unresolved_rows = [
+            r for r in reservation_rows if r.status == "UNRESOLVED"
+        ]
         unresolved_dec = sum(
-            (
-                r.reserved_amount_usd
-                for r in reservation_rows
-                if r.status == "UNRESOLVED"
-            ),
+            (r.reserved_amount_usd for r in unresolved_rows),
             Decimal("0"),
         )
+        unresolved_count = len(unresolved_rows)
 
         daily_cap_dec = policy.daily_cap_usd
         monthly_cap_dec = policy.monthly_cap_usd
@@ -360,6 +367,7 @@ class BudgetService:
             reserved_today_usd=reserved_today_dec,
             reserved_month_usd=reserved_month_dec,
             unresolved_usd=unresolved_dec,
+            unresolved_count=unresolved_count,
             daily_headroom_usd=daily_headroom_dec,
             monthly_headroom_usd=monthly_headroom_dec,
         )

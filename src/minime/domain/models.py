@@ -174,6 +174,13 @@ class OpenRouterBudgetPolicy(BaseModel):
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+AUTHORITATIVE_PRICING_SOURCES: frozenset[str] = frozenset({
+    "operator_verified",
+    "openrouter_catalog_verified",
+    "openrouter_catalog_api",
+})
+
+
 class OpenRouterPricingSnapshot(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     snapshot_id: str = Field(alias="id")
@@ -186,6 +193,10 @@ class OpenRouterPricingSnapshot(BaseModel):
     source: str = "openrouter_catalog_api"
     observed_at: datetime = Field(default_factory=utc_now)
     created_at: datetime = Field(default_factory=utc_now)
+
+    @property
+    def is_verified(self) -> bool:
+        return self.source in AUTHORITATIVE_PRICING_SOURCES
 
 
 class BudgetReservation(BaseModel):

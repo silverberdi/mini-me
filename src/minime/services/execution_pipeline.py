@@ -27,7 +27,6 @@ from minime.domain.models import (
     Job,
     JobLog,
     MetricFact,
-    OpenRouterPricingSnapshot,
     Project,
     Review,
     ReviewFinding,
@@ -273,7 +272,27 @@ class ExecutionPipelineService:
                 # OpenRouter fallback implementer path
                 canonical_imp = self.independence_policy.registry.normalize(fallback_implementer_model)
                 canonical_name = canonical_imp.canonical_name if canonical_imp else fallback_implementer_model
-                snapshot = self._ensure_pricing_snapshot(fallback_implementer_model, canonical_name)
+                snapshot = self.uow.pricing_snapshots.get_latest_verified_for_model(
+                    fallback_implementer_model, canonical_name
+                )
+                if not snapshot:
+                    self._save_event(
+                        EventType.FALLBACK_DENIED,
+                        job,
+                        {"role": "implementer", "reason": "PRICING_SNAPSHOT_MISSING", "model": fallback_implementer_model},
+                    )
+                    job = self.uow.jobs.set_waiting_capacity(
+                        job.job_id,
+                        "openrouter",
+                        f"Fallback denied: No verified pricing snapshot for model '{fallback_implementer_model}' (PRICING_SNAPSHOT_MISSING)",
+                    )
+                    self._save_event(
+                        EventType.JOB_WAITING_CAPACITY,
+                        job,
+                        {"waiting_provider": "openrouter", "status": "pricing_unverified"},
+                    )
+                    self.uow.commit()
+                    return job
 
                 prompt_upper = max(len(prompt_context.split()) * 2, 2000)
                 max_output = 4096
@@ -638,7 +657,33 @@ class ExecutionPipelineService:
 
             if reviewer_fallback_used and selected_reviewer_model and rev_identity:
                 # OpenRouter fallback reviewer execution
-                snapshot = self._ensure_pricing_snapshot(selected_reviewer_model, rev_identity.canonical_name)
+                snapshot = self.uow.pricing_snapshots.get_latest_verified_for_model(
+                    selected_reviewer_model, rev_identity.canonical_name
+                )
+                if not snapshot:
+                    self._save_event(
+                        EventType.FALLBACK_DENIED,
+                        job,
+                        {"role": "reviewer", "reason": "PRICING_SNAPSHOT_MISSING", "model": selected_reviewer_model},
+                    )
+                    self.uow.reviews.transition(
+                        review.review_id,
+                        ReviewStatus.REVIEW_FAILED.value,
+                        error_message=f"Fallback reviewer denied: No verified pricing snapshot for model '{selected_reviewer_model}' (PRICING_SNAPSHOT_MISSING)",
+                    )
+                    job = self.uow.jobs.set_waiting_capacity(
+                        job.job_id,
+                        "openrouter",
+                        f"Fallback reviewer denied: No verified pricing snapshot for model '{selected_reviewer_model}' (PRICING_SNAPSHOT_MISSING)",
+                    )
+                    self._save_event(
+                        EventType.JOB_WAITING_CAPACITY,
+                        job,
+                        {"waiting_provider": "openrouter", "status": "pricing_unverified"},
+                    )
+                    self.uow.commit()
+                    return job
+
                 prompt_upper = max(len(review_prompt.split()) * 2, 2000)
                 max_output = 4096
 
@@ -1195,39 +1240,6 @@ class ExecutionPipelineService:
         codex_unavail = codex_h is not None and codex_h.status != ProviderHealthStatus.AVAILABLE
         agy_unavail = agy_h is not None and agy_h.status != ProviderHealthStatus.AVAILABLE
         return codex_unavail and agy_unavail
-
-    def _ensure_pricing_snapshot(self, model: str, canonical_name: str) -> OpenRouterPricingSnapshot:
-        """Retrieve existing or create pinned default pricing snapshot for model."""
-        snapshot_id = f"openrouter:{model}:pinned"
-        existing = self.uow.pricing_snapshots.get_by_id(snapshot_id)
-        if existing:
-            return existing
-
-        # Default standard token prices if not already persisted
-        if "claude" in model:
-            prompt_price = 0.000003  # $3/M
-            output_price = 0.000015  # $15/M
-        elif "gpt-4o" in model:
-            prompt_price = 0.0000025  # $2.50/M
-            output_price = 0.000010  # $10/M
-        else:
-            prompt_price = 0.0000005  # $0.50/M
-            output_price = 0.0000015  # $1.50/M
-
-        snapshot = OpenRouterPricingSnapshot(
-            id=snapshot_id,
-            canonical_model_identity=canonical_name,
-            routed_model_identity=model,
-            prompt_price_per_token=prompt_price,
-            output_price_per_token=output_price,
-            additional_cost_per_request=0.0,
-            currency="USD",
-            source="pinned_default",
-            observed_at=utc_now(),
-            created_at=utc_now(),
-        )
-        self.uow.pricing_snapshots.save(snapshot)
-        return snapshot
 
     def _require_project(self, project_id: str) -> Project:
         project = self.uow.projects.get_by_id(project_id)

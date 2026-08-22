@@ -612,7 +612,10 @@ def budget_status_cmd(
             typer.echo(f"Active Reservations (Today): ${headroom.reserved_today_usd:.4f}")
             typer.echo(f"Active Reservations (Month): ${headroom.reserved_month_usd:.4f}")
             if headroom.unresolved_usd > 0:
-                typer.secho(f"Unresolved Encumbrance (All-Time): ${headroom.unresolved_usd:.4f}", fg=typer.colors.YELLOW)
+                typer.secho(
+                    f"Unresolved Encumbrance (All-Time): ${headroom.unresolved_usd:.4f} ({headroom.unresolved_count} unresolved)",
+                    fg=typer.colors.YELLOW,
+                )
             typer.secho(f"Daily Headroom: ${headroom.daily_headroom_usd:.4f}", fg=typer.colors.GREEN if headroom.daily_headroom_usd > 0 else typer.colors.RED)
             typer.secho(f"Monthly Headroom: ${headroom.monthly_headroom_usd:.4f}", fg=typer.colors.GREEN if headroom.monthly_headroom_usd > 0 else typer.colors.RED)
     except Exception as e:

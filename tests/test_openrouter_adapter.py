@@ -319,6 +319,48 @@ async def test_auth_error_normalization_and_redaction():
 
 
 @pytest.mark.asyncio
+async def test_unverified_pricing_snapshot_denies_dispatch():
+    snapshot = OpenRouterPricingSnapshot(
+        snapshot_id="snap-unverified",
+        canonical_model_identity="anthropic:claude-3.5-sonnet",
+        routed_model_identity="anthropic/claude-3.5-sonnet",
+        prompt_price_per_token=Decimal("0.000003"),
+        output_price_per_token=Decimal("0.000015"),
+        source="pinned_default",  # UNVERIFIED
+    )
+    adapter = OpenRouterAdapter()
+    req = OpenRouterRequest(
+        model="anthropic/claude-3.5-sonnet",
+        canonical_model_identity="anthropic:claude-3.5-sonnet",
+        prompt="hello",
+        max_output_tokens=100,
+        authorized_max_output_tokens=100,
+        api_key="sk-or-test-key-12345",
+        pricing_snapshot=snapshot,
+    )
+    result, _ = await adapter.execute(req)
+    assert result.result_class == ProviderResultClass.POLICY_DENIED
+    assert "PRICING_UNVERIFIED" in result.summary
+
+
+@pytest.mark.asyncio
+async def test_missing_pricing_snapshot_denies_dispatch():
+    adapter = OpenRouterAdapter()
+    req = OpenRouterRequest(
+        model="anthropic/claude-3.5-sonnet",
+        canonical_model_identity="anthropic:claude-3.5-sonnet",
+        prompt="hello",
+        max_output_tokens=100,
+        authorized_max_output_tokens=100,
+        api_key="sk-or-test-key-12345",
+        pricing_snapshot=None,
+    )
+    result, _ = await adapter.execute(req)
+    assert result.result_class == ProviderResultClass.POLICY_DENIED
+    assert "PRICING_SNAPSHOT_MISSING" in result.summary
+
+
+@pytest.mark.asyncio
 async def test_mock_adapter():
     snapshot = _valid_snapshot()
     mock_adapter = MockOpenRouterAdapter()

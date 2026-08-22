@@ -144,6 +144,8 @@ def get_budget_usage(uow: UowDep, project_id: str | None = None) -> dict[str, An
         "project_id": project_id,
         "policy": policy.model_dump(),
         "headroom": headroom.__dict__,
+        "unresolved_settlements_count": headroom.unresolved_count,
+        "unresolved_settlements_usd": headroom.unresolved_usd,
         "reservations": reservations,
         "ledger": ledger,
         "token_usage_by_model": token_usage,

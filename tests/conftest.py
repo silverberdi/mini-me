@@ -37,6 +37,7 @@ from minime.domain.interfaces import (
     ReviewRepositoryInterface,
 )
 from minime.domain.models import (
+    AUTHORITATIVE_PRICING_SOURCES,
     AuditFinding,
     AuditRecord,
     BudgetLedgerEntry,
@@ -679,6 +680,27 @@ class InMemoryOpenRouterPricingSnapshotRepository:
     def get_by_id(self, snapshot_id: str) -> OpenRouterPricingSnapshot | None:
         snapshot = self._store.get(snapshot_id)
         return snapshot.model_copy(deep=True) if snapshot else None
+
+    def get_latest_verified_for_model(
+        self, routed_model: str, canonical_name: str | None = None
+    ) -> OpenRouterPricingSnapshot | None:
+        matching = [
+            s for s in self._store.values()
+            if s.routed_model_identity == routed_model
+            and s.source in AUTHORITATIVE_PRICING_SOURCES
+            and (canonical_name is None or s.canonical_model_identity == canonical_name)
+        ]
+        if not matching:
+            return None
+        matching.sort(key=lambda x: (x.observed_at, x.created_at), reverse=True)
+        return matching[0].model_copy(deep=True)
+
+    def list_by_model(self, routed_model: str) -> list[OpenRouterPricingSnapshot]:
+        return [
+            s.model_copy(deep=True)
+            for s in self._store.values()
+            if s.routed_model_identity == routed_model
+        ]
 
 
 class InMemoryBudgetReservationRepository:
