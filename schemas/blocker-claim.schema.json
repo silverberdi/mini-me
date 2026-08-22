@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "blocker_type"
+  ],
+  "properties": {
+    "blocker_type": {
+      "type": "string"
+    },
+    "affected_requirement": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "failing_invariant": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "evidence": {
+      "type": [
+        "object",
+        "string",
+        "null"
+      ]
+    },
+    "attempted_remediation": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "rationale": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "is_agent_solvable": {
+      "type": "boolean",
+      "default": true
+    },
+    "normalized_reason_code": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

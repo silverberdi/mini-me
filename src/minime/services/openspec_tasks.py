@@ -29,6 +29,8 @@ class OpenSpecTaskTracker:
 
     def parse_tasks(self, openspec_path: str, change_name: str) -> list[OpenSpecTask]:
         path = self.tasks_path(openspec_path, change_name)
+        if not path.exists():
+            return []
         current_section: str | None = None
         tasks: list[OpenSpecTask] = []
         for line in path.read_text(encoding="utf-8").splitlines():

@@ -432,7 +432,10 @@ def test_matching_operation_pid_mismatch_fails_closed(in_memory_uow, tmp_path):
 
     assert len(reconciled) == 1
     assert reconciled[0].status == JobStatus.RECOVERY_BLOCKED
-    assert "does not match recorded mini me operation pid" in reconciled[0].recovery_blocked_reason.lower()
+    assert (
+        "does not match recorded mini me operation pid"
+        in reconciled[0].recovery_blocked_reason.lower()
+    )
     assert lock_file.exists()
 
 
@@ -590,6 +593,7 @@ def test_malformed_or_empty_lock_retained(in_memory_uow, tmp_path):
 @pytest.mark.asyncio
 async def test_git_operation_persistence_failure_prevents_subprocess_launch(tmp_path):
     """C11. GitOperation persistence failure before subprocess prevents subprocess launch."""
+
     class FailingGitOpRepo:
         def save(self, op):
             raise RuntimeError("Database connection failure")
@@ -597,6 +601,7 @@ async def test_git_operation_persistence_failure_prevents_subprocess_launch(tmp_
     class FailingUoW:
         def __init__(self):
             self.git_operations = FailingGitOpRepo()
+
         def commit(self):
             pass
 
@@ -616,7 +621,9 @@ async def test_git_operation_persistence_failure_prevents_subprocess_launch(tmp_
 
 
 @pytest.mark.asyncio
-async def test_operation_created_with_exact_managed_worktree_path_before_launch(in_memory_uow, tmp_path):
+async def test_operation_created_with_exact_managed_worktree_path_before_launch(
+    in_memory_uow, tmp_path
+):
     """C12. GitOperation is saved with exact managed worktree path prior to launching Git subprocess."""
     manager = WorktreeManager(project_root=tmp_path, uow=in_memory_uow)
     job_id = "job-persist-order"

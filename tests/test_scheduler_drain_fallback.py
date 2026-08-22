@@ -77,7 +77,9 @@ class GitFakeWorktreeManager:
             check=True,
             capture_output=True,
         )
-        subprocess.run(["git", "branch", "-M", "main"], cwd=str(path), check=True, capture_output=True)
+        subprocess.run(
+            ["git", "branch", "-M", "main"], cwd=str(path), check=True, capture_output=True
+        )
         subprocess.run(
             ["git", "update-ref", "refs/remotes/origin/main", "HEAD"],
             cwd=str(path),
@@ -93,9 +95,7 @@ class GitFakeWorktreeManager:
         )
         head_sha = proc.stdout.strip()
         self.created_paths[job_id] = path
-        return WorktreeInfo(
-            path=path, branch_name=f"minime/test-{job_id}", base_sha=head_sha
-        )
+        return WorktreeInfo(path=path, branch_name=f"minime/test-{job_id}", base_sha=head_sha)
 
     async def current_sha(self, worktree_path: str | Path) -> str:
         proc = subprocess.run(
@@ -136,7 +136,12 @@ def _project(project_id: str = "mini-me", drain_allowed: bool = True) -> Project
     )
 
 
-def _policy(project_id: str = "mini-me", enabled: bool = True, daily_cap: str = "10.00", monthly_cap: str = "25.00") -> OpenRouterBudgetPolicy:
+def _policy(
+    project_id: str = "mini-me",
+    enabled: bool = True,
+    daily_cap: str = "10.00",
+    monthly_cap: str = "25.00",
+) -> OpenRouterBudgetPolicy:
     return OpenRouterBudgetPolicy(
         project_id=project_id,
         enabled=enabled,
@@ -151,7 +156,12 @@ def _policy(project_id: str = "mini-me", enabled: bool = True, daily_cap: str = 
 
 def test_10_point_eligibility_evaluator_all_pass():
     evaluator = OpenRouterEligibilityEvaluator()
-    job = Job(project_id="mini-me", change_name="change-1", implementer_role="codex", status=JobStatus.RUNNING)
+    job = Job(
+        project_id="mini-me",
+        change_name="change-1",
+        implementer_role="codex",
+        status=JobStatus.RUNNING,
+    )
     project = _project()
     policy = _policy()
     headroom = BudgetHeadroom(
@@ -191,7 +201,12 @@ def test_10_point_eligibility_evaluator_all_pass():
 
 def test_10_point_eligibility_evaluator_fails_on_run_mode():
     evaluator = OpenRouterEligibilityEvaluator()
-    job = Job(project_id="mini-me", change_name="change-1", implementer_role="codex", status=JobStatus.RUNNING)
+    job = Job(
+        project_id="mini-me",
+        change_name="change-1",
+        implementer_role="codex",
+        status=JobStatus.RUNNING,
+    )
     primary_health = [
         ProviderHealth(provider="codex", status=ProviderHealthStatus.EXHAUSTED),
         ProviderHealth(provider="antigravity", status=ProviderHealthStatus.EXHAUSTED),
@@ -212,7 +227,12 @@ def test_10_point_eligibility_evaluator_fails_on_run_mode():
 
 def test_10_point_eligibility_evaluator_fails_on_single_primary_exhaustion():
     evaluator = OpenRouterEligibilityEvaluator()
-    job = Job(project_id="mini-me", change_name="change-1", implementer_role="codex", status=JobStatus.RUNNING)
+    job = Job(
+        project_id="mini-me",
+        change_name="change-1",
+        implementer_role="codex",
+        status=JobStatus.RUNNING,
+    )
     primary_health = [
         ProviderHealth(provider="codex", status=ProviderHealthStatus.EXHAUSTED),
         ProviderHealth(provider="antigravity", status=ProviderHealthStatus.AVAILABLE),
@@ -233,7 +253,12 @@ def test_10_point_eligibility_evaluator_fails_on_single_primary_exhaustion():
 
 def test_10_point_eligibility_evaluator_fails_on_new_ready_change():
     evaluator = OpenRouterEligibilityEvaluator()
-    job = Job(project_id="mini-me", change_name="change-1", implementer_role="codex", status=JobStatus.QUEUED)
+    job = Job(
+        project_id="mini-me",
+        change_name="change-1",
+        implementer_role="codex",
+        status=JobStatus.QUEUED,
+    )
     primary_health = [
         ProviderHealth(provider="codex", status=ProviderHealthStatus.EXHAUSTED),
         ProviderHealth(provider="antigravity", status=ProviderHealthStatus.EXHAUSTED),
@@ -258,8 +283,12 @@ def test_openrouter_never_admits_new_ready_changes(in_memory_uow):
     in_memory_uow.budget_policies.save(_policy())
 
     # Exhaust both primary providers
-    in_memory_uow.provider_health.save(ProviderHealth(provider="codex", status=ProviderHealthStatus.EXHAUSTED))
-    in_memory_uow.provider_health.save(ProviderHealth(provider="antigravity", status=ProviderHealthStatus.EXHAUSTED))
+    in_memory_uow.provider_health.save(
+        ProviderHealth(provider="codex", status=ProviderHealthStatus.EXHAUSTED)
+    )
+    in_memory_uow.provider_health.save(
+        ProviderHealth(provider="antigravity", status=ProviderHealthStatus.EXHAUSTED)
+    )
 
     change = Change(
         project_id=project.project_id,
@@ -326,8 +355,12 @@ async def test_fallback_implementer_execution_flow(in_memory_uow, tmp_path):
     _seed_verified_snapshots(in_memory_uow)
 
     # Both primary providers are exhausted
-    in_memory_uow.provider_health.save(ProviderHealth(provider="codex", status=ProviderHealthStatus.EXHAUSTED))
-    in_memory_uow.provider_health.save(ProviderHealth(provider="antigravity", status=ProviderHealthStatus.EXHAUSTED))
+    in_memory_uow.provider_health.save(
+        ProviderHealth(provider="codex", status=ProviderHealthStatus.EXHAUSTED)
+    )
+    in_memory_uow.provider_health.save(
+        ProviderHealth(provider="antigravity", status=ProviderHealthStatus.EXHAUSTED)
+    )
 
     change_name = "in-flight-change"
     _setup_openspec_change(tmp_path, change_name)
@@ -356,13 +389,20 @@ async def test_fallback_implementer_execution_flow(in_memory_uow, tmp_path):
             role="fallback",
             model="anthropic/claude-3.5-sonnet",
             summary="Implementation verified.",
-            raw_output=json.dumps({
-                "verdict": "READY_TO_MERGE",
-                "summary": "Implementation verified.",
-                "findings": [],
-            }),
+            raw_output=json.dumps(
+                {
+                    "verdict": "READY_TO_MERGE",
+                    "summary": "Implementation verified.",
+                    "findings": [],
+                }
+            ),
         ),
-        canned_meta={"prompt_tokens": 500, "completion_tokens": 200, "total_tokens": 700, "actual_cost_usd": 0.005},
+        canned_meta={
+            "prompt_tokens": 500,
+            "completion_tokens": 200,
+            "total_tokens": 700,
+            "actual_cost_usd": 0.005,
+        },
     )
 
     pipeline = ExecutionPipelineService(
@@ -370,11 +410,17 @@ async def test_fallback_implementer_execution_flow(in_memory_uow, tmp_path):
         project_root=tmp_path,
         worktree_manager=GitFakeWorktreeManager(tmp_path),
         openrouter_adapter=mock_openrouter,
-        auditor_runner=MockAuditorRunner(output=[json.dumps({"risk": "low", "summary": "Audit passed cleanly", "findings": []})]),
+        auditor_runner=MockAuditorRunner(
+            output=[json.dumps({"risk": "low", "summary": "Audit passed cleanly", "findings": []})]
+        ),
     )
 
     result_job = await pipeline.execute_queued_job(job.job_id)
-    assert result_job.status in {JobStatus.READY_TO_MERGE, JobStatus.AUDIT_BLOCKED, JobStatus.CHANGES_REQUIRED}
+    assert result_job.status in {
+        JobStatus.READY_TO_MERGE,
+        JobStatus.AUDIT_BLOCKED,
+        JobStatus.CHANGES_REQUIRED,
+    }
 
     # 1. OpenRouter adapter was called
     assert len(mock_openrouter.calls) >= 1
@@ -411,8 +457,12 @@ async def test_fallback_reviewer_model_independence(in_memory_uow, tmp_path):
     in_memory_uow.budget_policies.save(_policy())
     _seed_verified_snapshots(in_memory_uow)
 
-    in_memory_uow.provider_health.save(ProviderHealth(provider="codex", status=ProviderHealthStatus.EXHAUSTED))
-    in_memory_uow.provider_health.save(ProviderHealth(provider="antigravity", status=ProviderHealthStatus.EXHAUSTED))
+    in_memory_uow.provider_health.save(
+        ProviderHealth(provider="codex", status=ProviderHealthStatus.EXHAUSTED)
+    )
+    in_memory_uow.provider_health.save(
+        ProviderHealth(provider="antigravity", status=ProviderHealthStatus.EXHAUSTED)
+    )
 
     change_name = "review-fallback-change"
     _setup_openspec_change(tmp_path, change_name)
@@ -435,11 +485,13 @@ async def test_fallback_reviewer_model_independence(in_memory_uow, tmp_path):
     in_memory_uow.commit()
 
     # Provide OpenRouter mock that returns a valid review verdict
-    canned_review_output = json.dumps({
-        "verdict": "READY_TO_MERGE",
-        "summary": "Implementation verified independent.",
-        "findings": [],
-    })
+    canned_review_output = json.dumps(
+        {
+            "verdict": "READY_TO_MERGE",
+            "summary": "Implementation verified independent.",
+            "findings": [],
+        }
+    )
     mock_openrouter = MockOpenRouterAdapter(
         canned_result=NormalizedProviderResult(
             result_class=ProviderResultClass.SUCCESS,
@@ -449,7 +501,12 @@ async def test_fallback_reviewer_model_independence(in_memory_uow, tmp_path):
             raw_output=canned_review_output,
             summary="Review completed",
         ),
-        canned_meta={"prompt_tokens": 400, "completion_tokens": 50, "total_tokens": 450, "actual_cost_usd": 0.002},
+        canned_meta={
+            "prompt_tokens": 400,
+            "completion_tokens": 50,
+            "total_tokens": 450,
+            "actual_cost_usd": 0.002,
+        },
     )
 
     pipeline = ExecutionPipelineService(
@@ -457,7 +514,9 @@ async def test_fallback_reviewer_model_independence(in_memory_uow, tmp_path):
         project_root=tmp_path,
         worktree_manager=GitFakeWorktreeManager(tmp_path),
         openrouter_adapter=mock_openrouter,
-        auditor_runner=MockAuditorRunner(output=[json.dumps({"risk": "low", "summary": "Audit passed cleanly", "findings": []})]),
+        auditor_runner=MockAuditorRunner(
+            output=[json.dumps({"risk": "low", "summary": "Audit passed cleanly", "findings": []})]
+        ),
     )
 
     result_job = await pipeline.execute_queued_job(job.job_id)
@@ -483,8 +542,12 @@ async def test_fallback_reviewer_model_collision_fails_closed(in_memory_uow, tmp
     in_memory_uow.budget_policies.save(_policy())
     _seed_verified_snapshots(in_memory_uow)
 
-    in_memory_uow.provider_health.save(ProviderHealth(provider="codex", status=ProviderHealthStatus.EXHAUSTED))
-    in_memory_uow.provider_health.save(ProviderHealth(provider="antigravity", status=ProviderHealthStatus.EXHAUSTED))
+    in_memory_uow.provider_health.save(
+        ProviderHealth(provider="codex", status=ProviderHealthStatus.EXHAUSTED)
+    )
+    in_memory_uow.provider_health.save(
+        ProviderHealth(provider="antigravity", status=ProviderHealthStatus.EXHAUSTED)
+    )
 
     change_name = "collision-change"
     _setup_openspec_change(tmp_path, change_name)
@@ -515,7 +578,10 @@ async def test_fallback_reviewer_model_collision_fails_closed(in_memory_uow, tmp
     )
     # Restrict allowed reviewer models to same family as implementer default (e.g. anthropic)
     pipeline.default_implementer_model = "anthropic/claude-3.5-sonnet"
-    pipeline.allowed_reviewer_models = ["anthropic/claude-3.5-haiku", "anthropic/claude-3.5-sonnet:beta"]
+    pipeline.allowed_reviewer_models = [
+        "anthropic/claude-3.5-haiku",
+        "anthropic/claude-3.5-sonnet:beta",
+    ]
 
     result_job = await pipeline.execute_queued_job(job.job_id)
 
@@ -532,8 +598,12 @@ async def test_atomic_reservation_denial_prevents_http_dispatch(in_memory_uow, t
     in_memory_uow.budget_policies.save(_policy(daily_cap=0.0, monthly_cap=0.0))
     _seed_verified_snapshots(in_memory_uow)
 
-    in_memory_uow.provider_health.save(ProviderHealth(provider="codex", status=ProviderHealthStatus.EXHAUSTED))
-    in_memory_uow.provider_health.save(ProviderHealth(provider="antigravity", status=ProviderHealthStatus.EXHAUSTED))
+    in_memory_uow.provider_health.save(
+        ProviderHealth(provider="codex", status=ProviderHealthStatus.EXHAUSTED)
+    )
+    in_memory_uow.provider_health.save(
+        ProviderHealth(provider="antigravity", status=ProviderHealthStatus.EXHAUSTED)
+    )
 
     job = Job(
         project_id=project.project_id,
@@ -561,15 +631,21 @@ async def test_atomic_reservation_denial_prevents_http_dispatch(in_memory_uow, t
 
 
 @pytest.mark.asyncio
-async def test_missing_verified_pricing_snapshot_denies_fallback_with_zero_http(in_memory_uow, tmp_path):
+async def test_missing_verified_pricing_snapshot_denies_fallback_with_zero_http(
+    in_memory_uow, tmp_path
+):
     """Prove that fallback is denied and 0 HTTP requests are made when no verified snapshot exists in DB."""
     project = _project()
     in_memory_uow.projects.save(project)
     in_memory_uow.budget_policies.save(_policy(daily_cap=100.0, monthly_cap=1000.0))
     # Deliberately DO NOT seed verified snapshots in in_memory_uow!
 
-    in_memory_uow.provider_health.save(ProviderHealth(provider="codex", status=ProviderHealthStatus.EXHAUSTED))
-    in_memory_uow.provider_health.save(ProviderHealth(provider="antigravity", status=ProviderHealthStatus.EXHAUSTED))
+    in_memory_uow.provider_health.save(
+        ProviderHealth(provider="codex", status=ProviderHealthStatus.EXHAUSTED)
+    )
+    in_memory_uow.provider_health.save(
+        ProviderHealth(provider="antigravity", status=ProviderHealthStatus.EXHAUSTED)
+    )
 
     change_name = "no-snap-change"
     _setup_openspec_change(tmp_path, change_name)
@@ -616,7 +692,9 @@ async def test_missing_verified_pricing_snapshot_denies_fallback_with_zero_http(
 
 
 @pytest.mark.asyncio
-async def test_unverified_pinned_default_snapshot_in_db_denies_fallback_with_zero_http(in_memory_uow, tmp_path):
+async def test_unverified_pinned_default_snapshot_in_db_denies_fallback_with_zero_http(
+    in_memory_uow, tmp_path
+):
     """Prove that legacy/unverified 'pinned_default' snapshots in DB cannot authorize spend."""
     project = _project()
     in_memory_uow.projects.save(project)
@@ -635,8 +713,12 @@ async def test_unverified_pinned_default_snapshot_in_db_denies_fallback_with_zer
         )
     )
 
-    in_memory_uow.provider_health.save(ProviderHealth(provider="codex", status=ProviderHealthStatus.EXHAUSTED))
-    in_memory_uow.provider_health.save(ProviderHealth(provider="antigravity", status=ProviderHealthStatus.EXHAUSTED))
+    in_memory_uow.provider_health.save(
+        ProviderHealth(provider="codex", status=ProviderHealthStatus.EXHAUSTED)
+    )
+    in_memory_uow.provider_health.save(
+        ProviderHealth(provider="antigravity", status=ProviderHealthStatus.EXHAUSTED)
+    )
 
     change_name = "pinned-snap-change"
     _setup_openspec_change(tmp_path, change_name)

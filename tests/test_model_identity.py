@@ -90,7 +90,9 @@ def test_distinct_models_allowed_when_both_proven():
     assert ok is True
     assert reason is None
 
-    ok2, reason2 = policy.validate("qwen/qwen-2.5-coder-32b-instruct", "meta-llama/llama-3.3-70b-instruct")
+    ok2, reason2 = policy.validate(
+        "qwen/qwen-2.5-coder-32b-instruct", "meta-llama/llama-3.3-70b-instruct"
+    )
     assert ok2 is True
     assert reason2 is None
 
@@ -99,8 +101,8 @@ def test_select_independent_reviewer():
     policy = ModelIndependencePolicy()
     allowed = [
         "qwen/qwen-2.5-72b-instruct",  # same family as qwen3-coder -> should be skipped
-        "qwen/qwen3-coder-plus",        # same model alias -> should be skipped
-        "openai/gpt-4o",                # distinct -> should be selected
+        "qwen/qwen3-coder-plus",  # same model alias -> should be skipped
+        "openai/gpt-4o",  # distinct -> should be selected
         "meta-llama/llama-3.3-70b-instruct",
     ]
     selected, identity = policy.select_independent_reviewer("qwen/qwen3-coder", allowed)

@@ -59,7 +59,9 @@ class FakeWorktreeManager:
             check=True,
             capture_output=True,
         )
-        subprocess.run(["git", "branch", "-M", "main"], cwd=str(path), check=True, capture_output=True)
+        subprocess.run(
+            ["git", "branch", "-M", "main"], cwd=str(path), check=True, capture_output=True
+        )
         subprocess.run(
             ["git", "update-ref", "refs/remotes/origin/main", "HEAD"],
             cwd=str(path),
@@ -75,9 +77,7 @@ class FakeWorktreeManager:
         )
         head_sha = proc.stdout.strip()
         self.created_paths[job_id] = path
-        return WorktreeInfo(
-            path=path, branch_name=f"minime/test-{job_id}", base_sha=head_sha
-        )
+        return WorktreeInfo(path=path, branch_name=f"minime/test-{job_id}", base_sha=head_sha)
 
     async def current_sha(self, worktree_path: str | Path) -> str:
         proc = subprocess.run(
@@ -121,8 +121,7 @@ def seed_ready_change(
         openspec_path="openspec",
         implementer=implementer,
         reviewer=reviewer,
-        checks=checks
-        or [{"name": "ok", "command": f"{sys.executable} -c 'print(123)'"}],
+        checks=checks or [{"name": "ok", "command": f"{sys.executable} -c 'print(123)'"}],
     )
     change = Change(
         project_id="mini-me",
@@ -135,7 +134,9 @@ def seed_ready_change(
 
 
 @pytest.mark.asyncio
-async def test_implementer_quota_exhaustion_transitions_to_waiting_capacity(in_memory_uow, tmp_path):
+async def test_implementer_quota_exhaustion_transitions_to_waiting_capacity(
+    in_memory_uow, tmp_path
+):
     """Verify that an implementer quota exhaustion transitions job to WAITING_CAPACITY without failing."""
     change_name = "005-feature"
     seed_ready_change(
@@ -199,8 +200,11 @@ async def test_reviewer_rate_limit_transitions_to_waiting_capacity(in_memory_uow
     )
 
     class MockChecksRunner(ChecksRunner):
-        async def run(self, job_id: str, checks: list[dict], worktree_path: Path) -> ChecksRunResult:
+        async def run(
+            self, job_id: str, checks: list[dict], worktree_path: Path
+        ) -> ChecksRunResult:
             from minime.domain.models import CheckResult
+
             res = CheckResult(
                 job_id=job_id,
                 check_name="unit_tests",
@@ -232,7 +236,9 @@ async def test_reviewer_rate_limit_transitions_to_waiting_capacity(in_memory_uow
 
 
 @pytest.mark.asyncio
-async def test_pairing_invariants_prevent_self_review_and_reviewer_replacement(in_memory_uow, tmp_path):
+async def test_pairing_invariants_prevent_self_review_and_reviewer_replacement(
+    in_memory_uow, tmp_path
+):
     """Verify that self-review policy violations reject job immediately."""
     change_name = "005-feature-3"
     seed_ready_change(

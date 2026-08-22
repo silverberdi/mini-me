@@ -85,8 +85,14 @@ class RestartRecoveryService:
 
     def _reconcile_job(self, job: Job, recovery_cycle_id: str) -> Job:
         """Reconcile a single non-terminal job."""
+        if job.status == JobStatus.NEEDS_HUMAN:
+            logger.info(f"Job '{job.job_id}' is NEEDS_HUMAN; retaining state for human review.")
+            return job
+
         if job.status == JobStatus.RECOVERY_BLOCKED:
-            logger.info(f"Job '{job.job_id}' is RECOVERY_BLOCKED; retaining state for human inspection.")
+            logger.info(
+                f"Job '{job.job_id}' is RECOVERY_BLOCKED; retaining state for human inspection."
+            )
             return job
 
         if job.status == JobStatus.WAITING_CAPACITY:

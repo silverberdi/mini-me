@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 
-def validate_complementary_pair(
-    implementer: str, reviewer: str
-) -> tuple[bool, str | None]:
+def validate_complementary_pair(implementer: str, reviewer: str) -> tuple[bool, str | None]:
     """Validate that the implementer and reviewer conform to complementary primary pairing."""
     imp = implementer.strip().lower()
     rev = reviewer.strip().lower()

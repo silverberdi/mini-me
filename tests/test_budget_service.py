@@ -618,7 +618,11 @@ def test_conservative_maximum_cost_calculation(in_memory_uow):
     )
     assert res is not None
     assert reason is None
-    expected_cost = Decimal(prompt_upper) * Decimal("0.000002") + Decimal(max_output) * Decimal("0.000006") + Decimal("0.001")
+    expected_cost = (
+        Decimal(prompt_upper) * Decimal("0.000002")
+        + Decimal(max_output) * Decimal("0.000006")
+        + Decimal("0.001")
+    )
     assert res.reserved_amount_usd == expected_cost
     assert res.reserved_amount_usd == Decimal("0.045576")
 

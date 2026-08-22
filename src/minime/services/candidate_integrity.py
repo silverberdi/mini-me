@@ -103,9 +103,7 @@ def validate_pre_review_integrity(
 
     # 2. Validate base SHA against registered remote tracking base branch ref (origin/<base_branch>)
     ref_lookup_path = (
-        repo_root_path
-        if (repo_root_path and (repo_root_path / ".git").exists())
-        else worktree_path
+        repo_root_path if (repo_root_path and (repo_root_path / ".git").exists()) else worktree_path
     )
     resolved_base_sha, base_err = resolve_base_branch_sha(ref_lookup_path, base_branch)
     if not resolved_base_sha:

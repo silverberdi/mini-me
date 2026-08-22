@@ -61,14 +61,8 @@ class CliReviewerRunner(ReviewerRunnerInterface):
         return ReviewerResult(
             exit_code=proc.returncode if proc.returncode is not None else -1,
             timed_out=timed_out,
-            stdout=[
-                redact_secrets(line)
-                for line in stdout.decode(errors="replace").splitlines()
-            ],
-            stderr=[
-                redact_secrets(line)
-                for line in stderr.decode(errors="replace").splitlines()
-            ],
+            stdout=[redact_secrets(line) for line in stdout.decode(errors="replace").splitlines()],
+            stderr=[redact_secrets(line) for line in stderr.decode(errors="replace").splitlines()],
             duration_ms=duration_ms,
         )
 

@@ -21,11 +21,17 @@ from minime.domain.enums import (
 from minime.domain.interfaces import (
     AuditFindingRepositoryInterface,
     AuditRepositoryInterface,
+    BlockerClaimRepositoryInterface,
+    CandidateAuthorshipRepositoryInterface,
+    CandidateManifestRepositoryInterface,
     CapacityWindowRepositoryInterface,
     ChangeRepositoryInterface,
     CheckResultRepositoryInterface,
     EventRepositoryInterface,
+    EvidenceDiagnosticRepositoryInterface,
     GitOperationRepositoryInterface,
+    JobAttemptRepositoryInterface,
+    JobHandoffRepositoryInterface,
     JobLogRepositoryInterface,
     JobRepositoryInterface,
     MetricFactRepositoryInterface,
@@ -40,14 +46,20 @@ from minime.domain.models import (
     AUTHORITATIVE_PRICING_SOURCES,
     AuditFinding,
     AuditRecord,
+    BlockerClaim,
     BudgetLedgerEntry,
     BudgetReservation,
+    CandidateAuthorship,
+    CandidateManifest,
     CapacityWindow,
     Change,
     CheckResult,
     Event,
+    EvidenceDiagnostic,
     GitOperation,
     Job,
+    JobAttempt,
+    JobHandoff,
     JobLog,
     MetricFact,
     OpenRouterBudgetPolicy,
@@ -186,10 +198,12 @@ class InMemoryJobRepository(JobRepositoryInterface):
             JobStatus.FAILED,
         },
         JobStatus.RUNNING: {
+            JobStatus.RUNNING,
             JobStatus.CHECKS_RUNNING,
             JobStatus.QUEUED,
             JobStatus.WAITING_CAPACITY,
             JobStatus.RECOVERY_BLOCKED,
+            JobStatus.NEEDS_HUMAN,
             JobStatus.FAILED,
             JobStatus.CANCELLED,
         },
@@ -199,12 +213,14 @@ class InMemoryJobRepository(JobRepositoryInterface):
             JobStatus.QUEUED,
             JobStatus.WAITING_CAPACITY,
             JobStatus.RECOVERY_BLOCKED,
+            JobStatus.NEEDS_HUMAN,
             JobStatus.FAILED,
             JobStatus.CANCELLED,
         },
         JobStatus.CHECKS_PASSED: {
             JobStatus.REVIEW_RUNNING,
             JobStatus.WAITING_CAPACITY,
+            JobStatus.NEEDS_HUMAN,
             JobStatus.FAILED,
             JobStatus.CANCELLED,
         },
@@ -216,6 +232,7 @@ class InMemoryJobRepository(JobRepositoryInterface):
             JobStatus.QUEUED,
             JobStatus.WAITING_CAPACITY,
             JobStatus.RECOVERY_BLOCKED,
+            JobStatus.NEEDS_HUMAN,
             JobStatus.FAILED,
             JobStatus.CANCELLED,
         },
@@ -226,6 +243,7 @@ class InMemoryJobRepository(JobRepositoryInterface):
             JobStatus.QUEUED,
             JobStatus.WAITING_CAPACITY,
             JobStatus.RECOVERY_BLOCKED,
+            JobStatus.NEEDS_HUMAN,
             JobStatus.FAILED,
             JobStatus.CANCELLED,
         },
@@ -235,6 +253,7 @@ class InMemoryJobRepository(JobRepositoryInterface):
             JobStatus.REVIEW_RUNNING,
             JobStatus.AUDIT_RUNNING,
             JobStatus.RECOVERY_BLOCKED,
+            JobStatus.NEEDS_HUMAN,
             JobStatus.FAILED,
             JobStatus.CANCELLED,
         },
@@ -242,9 +261,11 @@ class InMemoryJobRepository(JobRepositoryInterface):
             JobStatus.WAITING_CAPACITY,
             JobStatus.RUNNING,
             JobStatus.REVIEW_RUNNING,
+            JobStatus.NEEDS_HUMAN,
             JobStatus.FAILED,
             JobStatus.CANCELLED,
         },
+        JobStatus.NEEDS_HUMAN: set(),
         JobStatus.READY_TO_MERGE: set(),
         JobStatus.AUDIT_BLOCKED: set(),
         JobStatus.CHANGES_REQUIRED: set(),
@@ -288,7 +309,9 @@ class InMemoryJobRepository(JobRepositoryInterface):
             raise ValueError(f"Job '{job_id}' not found.")
         target = JobStatus(new_status)
         if target not in self._valid_transitions[job.status]:
-            raise ValueError(f"Invalid job status transition: {job.status.value} -> {target.value}.")
+            raise ValueError(
+                f"Invalid job status transition: {job.status.value} -> {target.value}."
+            )
         updated = job.model_copy(update={"status": target, "error_message": error_message})
         self._store[job_id] = updated
         return updated.model_copy(deep=True)
@@ -305,7 +328,9 @@ class InMemoryJobRepository(JobRepositoryInterface):
             raise ValueError(f"Job '{job_id}' not found.")
         target = JobStatus.WAITING_CAPACITY
         if target not in self._valid_transitions[job.status]:
-            raise ValueError(f"Invalid job status transition: {job.status.value} -> {target.value}.")
+            raise ValueError(
+                f"Invalid job status transition: {job.status.value} -> {target.value}."
+            )
         updated = job.model_copy(
             update={
                 "status": target,
@@ -323,7 +348,9 @@ class InMemoryJobRepository(JobRepositoryInterface):
             raise ValueError(f"Job '{job_id}' not found.")
         target = JobStatus.RECOVERY_BLOCKED
         if target not in self._valid_transitions[job.status]:
-            raise ValueError(f"Invalid job status transition: {job.status.value} -> {target.value}.")
+            raise ValueError(
+                f"Invalid job status transition: {job.status.value} -> {target.value}."
+            )
         updated = job.model_copy(
             update={
                 "status": target,
@@ -575,7 +602,10 @@ class InMemoryProviderHealthRepository(ProviderHealthRepositoryInterface):
 
             succ_at = h.last_success_at
             fail_at = h.last_failure_at
-            if target_status == ProviderHealthStatus.AVAILABLE and target_result_class == ProviderResultClass.SUCCESS:
+            if (
+                target_status == ProviderHealthStatus.AVAILABLE
+                and target_result_class == ProviderResultClass.SUCCESS
+            ):
                 succ_at = now
             elif target_result_class and target_result_class != ProviderResultClass.SUCCESS:
                 fail_at = now
@@ -585,7 +615,9 @@ class InMemoryProviderHealthRepository(ProviderHealthRepositoryInterface):
                     "status": target_status,
                     "consecutive_failures": consecutive,
                     "last_result_class": target_result_class or h.last_result_class,
-                    "last_error_summary": error_summary if error_summary is not None else h.last_error_summary,
+                    "last_error_summary": error_summary
+                    if error_summary is not None
+                    else h.last_error_summary,
                     "last_success_at": succ_at,
                     "last_failure_at": fail_at,
                     "updated_at": now,
@@ -685,7 +717,8 @@ class InMemoryOpenRouterPricingSnapshotRepository:
         self, routed_model: str, canonical_name: str | None = None
     ) -> OpenRouterPricingSnapshot | None:
         matching = [
-            s for s in self._store.values()
+            s
+            for s in self._store.values()
             if s.routed_model_identity == routed_model
             and s.source in AUTHORITATIVE_PRICING_SOURCES
             and (canonical_name is None or s.canonical_model_identity == canonical_name)
@@ -729,6 +762,138 @@ class InMemoryBudgetLedgerRepository:
         return [e.model_copy(deep=True) for e in self._store if e.project_id == project_id]
 
 
+class InMemoryJobAttemptRepository(JobAttemptRepositoryInterface):
+    def __init__(self):
+        self._store: dict[str, JobAttempt] = {}
+
+    def save(self, attempt: JobAttempt) -> None:
+        self._store[attempt.attempt_id] = attempt.model_copy(deep=True)
+
+    def get_by_id(self, attempt_id: str) -> JobAttempt | None:
+        att = self._store.get(attempt_id)
+        return att.model_copy(deep=True) if att else None
+
+    def list_by_job(self, job_id: str) -> list[JobAttempt]:
+        attempts = [a for a in self._store.values() if a.job_id == job_id]
+        attempts.sort(key=lambda a: a.attempt_number)
+        return [a.model_copy(deep=True) for a in attempts]
+
+    def get_latest_attempt(self, job_id: str) -> JobAttempt | None:
+        attempts = self.list_by_job(job_id)
+        return attempts[-1] if attempts else None
+
+
+class InMemoryBlockerClaimRepository(BlockerClaimRepositoryInterface):
+    def __init__(self):
+        self._store: dict[str, BlockerClaim] = {}
+
+    def save(self, claim: BlockerClaim) -> None:
+        self._store[claim.claim_id] = claim.model_copy(deep=True)
+
+    def get_by_id(self, claim_id: str) -> BlockerClaim | None:
+        c = self._store.get(claim_id)
+        return c.model_copy(deep=True) if c else None
+
+    def list_by_job(self, job_id: str) -> list[BlockerClaim]:
+        return [c.model_copy(deep=True) for c in self._store.values() if c.job_id == job_id]
+
+    def list_by_attempt(self, attempt_id: str) -> list[BlockerClaim]:
+        return [c.model_copy(deep=True) for c in self._store.values() if c.attempt_id == attempt_id]
+
+
+class InMemoryJobHandoffRepository(JobHandoffRepositoryInterface):
+    def __init__(self):
+        self._store: dict[str, JobHandoff] = {}
+
+    def save(self, handoff: JobHandoff) -> None:
+        self._store[handoff.handoff_id] = handoff.model_copy(deep=True)
+
+    def get_by_id(self, handoff_id: str) -> JobHandoff | None:
+        h = self._store.get(handoff_id)
+        return h.model_copy(deep=True) if h else None
+
+    def list_by_job(self, job_id: str) -> list[JobHandoff]:
+        handoffs = [h for h in self._store.values() if h.job_id == job_id]
+        handoffs.sort(key=lambda h: h.created_at)
+        return [h.model_copy(deep=True) for h in handoffs]
+
+    def get_latest_handoff(self, job_id: str) -> JobHandoff | None:
+        handoffs = self.list_by_job(job_id)
+        return handoffs[-1] if handoffs else None
+
+    def get_pending_handoff_for_attempt(
+        self, job_id: str, to_attempt_number: int
+    ) -> JobHandoff | None:
+        for h in self._store.values():
+            if (
+                h.job_id == job_id
+                and h.to_attempt_number == to_attempt_number
+                and not h.is_consumed
+            ):
+                return h.model_copy(deep=True)
+        return None
+
+
+class InMemoryCandidateManifestRepository(CandidateManifestRepositoryInterface):
+    def __init__(self):
+        self._store: dict[str, CandidateManifest] = {}
+
+    def save(self, manifest: CandidateManifest) -> None:
+        self._store[manifest.manifest_id] = manifest.model_copy(deep=True)
+
+    def get_by_id(self, manifest_id: str) -> CandidateManifest | None:
+        m = self._store.get(manifest_id)
+        return m.model_copy(deep=True) if m else None
+
+    def get_latest_manifest(self, job_id: str) -> CandidateManifest | None:
+        manifests = [m for m in self._store.values() if m.job_id == job_id]
+        if not manifests:
+            return None
+        manifests.sort(key=lambda m: m.created_at, reverse=True)
+        return manifests[0].model_copy(deep=True)
+
+    def get_by_candidate_sha(self, job_id: str, candidate_sha: str) -> CandidateManifest | None:
+        for m in self._store.values():
+            if m.job_id == job_id and m.candidate_sha == candidate_sha:
+                return m.model_copy(deep=True)
+        return None
+
+
+class InMemoryCandidateAuthorshipRepository(CandidateAuthorshipRepositoryInterface):
+    def __init__(self):
+        self._store: dict[str, CandidateAuthorship] = {}
+
+    def save(self, authorship: CandidateAuthorship) -> None:
+        self._store[authorship.authorship_id] = authorship.model_copy(deep=True)
+
+    def list_by_job(self, job_id: str) -> list[CandidateAuthorship]:
+        return [a.model_copy(deep=True) for a in self._store.values() if a.job_id == job_id]
+
+    def get_for_file(self, job_id: str, file_path: str) -> CandidateAuthorship | None:
+        for a in self._store.values():
+            if a.job_id == job_id and a.file_path == file_path:
+                return a.model_copy(deep=True)
+        return None
+
+
+class InMemoryEvidenceDiagnosticRepository(EvidenceDiagnosticRepositoryInterface):
+    def __init__(self):
+        self._store: dict[str, EvidenceDiagnostic] = {}
+
+    def save(self, diagnostic: EvidenceDiagnostic) -> None:
+        self._store[diagnostic.diagnostic_id] = diagnostic.model_copy(deep=True)
+
+    def get_by_id(self, diagnostic_id: str) -> EvidenceDiagnostic | None:
+        d = self._store.get(diagnostic_id)
+        return d.model_copy(deep=True) if d else None
+
+    def list_by_job(self, job_id: str) -> list[EvidenceDiagnostic]:
+        return [d.model_copy(deep=True) for d in self._store.values() if d.job_id == job_id]
+
+    def list_by_attempt(self, attempt_id: str) -> list[EvidenceDiagnostic]:
+        return [d.model_copy(deep=True) for d in self._store.values() if d.attempt_id == attempt_id]
+
+
 class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
     def __init__(self):
         self.projects = InMemoryProjectRepository()
@@ -750,6 +915,12 @@ class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.pricing_snapshots = InMemoryOpenRouterPricingSnapshotRepository()
         self.budget_reservations = InMemoryBudgetReservationRepository()
         self.budget_ledger = InMemoryBudgetLedgerRepository()
+        self.job_attempts = InMemoryJobAttemptRepository()
+        self.blocker_claims = InMemoryBlockerClaimRepository()
+        self.job_handoffs = InMemoryJobHandoffRepository()
+        self.candidate_manifests = InMemoryCandidateManifestRepository()
+        self.candidate_authorships = InMemoryCandidateAuthorshipRepository()
+        self.evidence_diagnostics = InMemoryEvidenceDiagnosticRepository()
         self.committed = False
         self.rolled_back = False
 
@@ -758,7 +929,6 @@ class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
 
     def rollback(self) -> None:
         self.rolled_back = True
-
 
 
 @pytest.fixture

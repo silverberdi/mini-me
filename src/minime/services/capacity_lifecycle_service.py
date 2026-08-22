@@ -95,7 +95,9 @@ class CapacityLifecycleService:
                 mode_reason = f"Primary capacity unavailable ({reason}); draining in-flight work."
             else:
                 mode = SchedulerMode.WAIT
-                mode_reason = f"Primary capacity unavailable ({reason}); waiting for capacity recovery."
+                mode_reason = (
+                    f"Primary capacity unavailable ({reason}); waiting for capacity recovery."
+                )
 
         # Emit mode change event if changed
         if self._last_mode is not None and self._last_mode != mode:

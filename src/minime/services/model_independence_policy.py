@@ -11,7 +11,9 @@ class ModelIndependencePolicy:
     def __init__(self, registry: CanonicalModelRegistry | None = None) -> None:
         self.registry = registry or CanonicalModelRegistry()
 
-    def validate(self, implementer_model: str | None, reviewer_model: str | None) -> tuple[bool, str | None]:
+    def validate(
+        self, implementer_model: str | None, reviewer_model: str | None
+    ) -> tuple[bool, str | None]:
         """Validate that reviewer model is strictly distinct from implementer model by canonical identity and family."""
         ok, reason, _, _ = self.registry.is_independent(implementer_model, reviewer_model)
         return ok, reason

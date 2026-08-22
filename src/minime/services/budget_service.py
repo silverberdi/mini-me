@@ -50,8 +50,14 @@ class BudgetService:
         is_breached: bool = False,
     ) -> OpenRouterBudgetPolicy:
         """Synchronize budget policy from configuration while preserving runtime breach state."""
-        daily_dec = daily_cap_usd if isinstance(daily_cap_usd, Decimal) else Decimal(str(daily_cap_usd))
-        monthly_dec = monthly_cap_usd if isinstance(monthly_cap_usd, Decimal) else Decimal(str(monthly_cap_usd))
+        daily_dec = (
+            daily_cap_usd if isinstance(daily_cap_usd, Decimal) else Decimal(str(daily_cap_usd))
+        )
+        monthly_dec = (
+            monthly_cap_usd
+            if isinstance(monthly_cap_usd, Decimal)
+            else Decimal(str(monthly_cap_usd))
+        )
 
         existing = self.uow.budget_policies.get_for_update(project_id)
         effective_is_breached = (existing.is_breached if existing else False) or is_breached
@@ -68,7 +74,9 @@ class BudgetService:
         self.uow.budget_policies.save(policy)
         return policy
 
-    def get_headroom(self, project_id: str) -> tuple[OpenRouterBudgetPolicy | None, BudgetHeadroom | None]:
+    def get_headroom(
+        self, project_id: str
+    ) -> tuple[OpenRouterBudgetPolicy | None, BudgetHeadroom | None]:
         """Compute and return current headroom for a project."""
         policy = self.uow.budget_policies.get_for_update(project_id)
         if not policy:
@@ -118,7 +126,10 @@ class BudgetService:
         max_cost_dec = prompt_cost + output_cost + add_cost
 
         headroom = self._compute_headroom(project_id, policy)
-        if max_cost_dec > headroom.daily_headroom_usd or max_cost_dec > headroom.monthly_headroom_usd:
+        if (
+            max_cost_dec > headroom.daily_headroom_usd
+            or max_cost_dec > headroom.monthly_headroom_usd
+        ):
             self.uow.events.save(
                 Event(
                     event_type=EventType.BUDGET_CAP_EXCEEDED,
@@ -180,7 +191,11 @@ class BudgetService:
         if not reservation:
             return None
 
-        actual_dec = actual_cost_usd if isinstance(actual_cost_usd, Decimal) else Decimal(str(actual_cost_usd))
+        actual_dec = (
+            actual_cost_usd
+            if isinstance(actual_cost_usd, Decimal)
+            else Decimal(str(actual_cost_usd))
+        )
 
         # Check for settlement breach (actual > reserved)
         if actual_dec > reservation.reserved_amount_usd:
@@ -279,7 +294,9 @@ class BudgetService:
         self.uow.budget_reservations.save(reservation)
         return reservation
 
-    def release_reservation(self, reservation_id: str, reason: str = "cancelled") -> BudgetReservation | None:
+    def release_reservation(
+        self, reservation_id: str, reason: str = "cancelled"
+    ) -> BudgetReservation | None:
         """Release a reservation before HTTP dispatch (e.g. pricing changed or cancelled)."""
         reservation = self.uow.budget_reservations.get_by_id(reservation_id)
         if not reservation:
@@ -344,9 +361,7 @@ class BudgetService:
             Decimal("0"),
         )
         # All-time UNRESOLVED reservations across all past dates
-        unresolved_rows = [
-            r for r in reservation_rows if r.status == "UNRESOLVED"
-        ]
+        unresolved_rows = [r for r in reservation_rows if r.status == "UNRESOLVED"]
         unresolved_dec = sum(
             (r.reserved_amount_usd for r in unresolved_rows),
             Decimal("0"),
@@ -356,8 +371,12 @@ class BudgetService:
         daily_cap_dec = policy.daily_cap_usd
         monthly_cap_dec = policy.monthly_cap_usd
 
-        daily_headroom_dec = daily_cap_dec - committed_today_dec - reserved_today_dec - unresolved_dec
-        monthly_headroom_dec = monthly_cap_dec - committed_month_dec - reserved_month_dec - unresolved_dec
+        daily_headroom_dec = (
+            daily_cap_dec - committed_today_dec - reserved_today_dec - unresolved_dec
+        )
+        monthly_headroom_dec = (
+            monthly_cap_dec - committed_month_dec - reserved_month_dec - unresolved_dec
+        )
 
         return BudgetHeadroom(
             daily_cap_usd=daily_cap_dec,

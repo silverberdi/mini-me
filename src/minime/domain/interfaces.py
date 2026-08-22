@@ -10,14 +10,20 @@ from minime.domain.enums import GitOperationStatus
 from minime.domain.models import (
     AuditFinding,
     AuditRecord,
+    BlockerClaim,
     BudgetLedgerEntry,
     BudgetReservation,
+    CandidateAuthorship,
+    CandidateManifest,
     CapacityWindow,
     Change,
     CheckResult,
     Event,
+    EvidenceDiagnostic,
     GitOperation,
     Job,
+    JobAttempt,
+    JobHandoff,
     JobLog,
     MetricFact,
     OpenRouterBudgetPolicy,
@@ -300,6 +306,81 @@ class FallbackPolicyInterface(ABC):
     def is_fallback_eligible(self, project_id: str, job: Job, role: str) -> bool: ...
 
 
+class JobAttemptRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, attempt: JobAttempt) -> None: ...
+
+    @abstractmethod
+    def get_by_id(self, attempt_id: str) -> JobAttempt | None: ...
+
+    @abstractmethod
+    def list_by_job(self, job_id: str) -> list[JobAttempt]: ...
+
+    @abstractmethod
+    def get_latest_attempt(self, job_id: str) -> JobAttempt | None: ...
+
+
+class BlockerClaimRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, claim: BlockerClaim) -> None: ...
+
+    @abstractmethod
+    def get_by_id(self, claim_id: str) -> BlockerClaim | None: ...
+
+    @abstractmethod
+    def list_by_job(self, job_id: str) -> list[BlockerClaim]: ...
+
+    @abstractmethod
+    def list_by_attempt(self, attempt_id: str) -> list[BlockerClaim]: ...
+
+
+class JobHandoffRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, handoff: JobHandoff) -> None: ...
+
+    @abstractmethod
+    def get_by_id(self, handoff_id: str) -> JobHandoff | None: ...
+
+    @abstractmethod
+    def get_latest_handoff(self, job_id: str) -> JobHandoff | None: ...
+
+    @abstractmethod
+    def list_by_job(self, job_id: str) -> list[JobHandoff]: ...
+
+
+class CandidateManifestRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, manifest: CandidateManifest) -> None: ...
+
+    @abstractmethod
+    def get_by_id(self, manifest_id: str) -> CandidateManifest | None: ...
+
+    @abstractmethod
+    def get_by_candidate_sha(self, job_id: str, candidate_sha: str) -> CandidateManifest | None: ...
+
+    @abstractmethod
+    def get_latest_manifest(self, job_id: str) -> CandidateManifest | None: ...
+
+
+class CandidateAuthorshipRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, authorship: CandidateAuthorship) -> None: ...
+
+    @abstractmethod
+    def list_by_job(self, job_id: str) -> list[CandidateAuthorship]: ...
+
+
+class EvidenceDiagnosticRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, diagnostic: EvidenceDiagnostic) -> None: ...
+
+    @abstractmethod
+    def list_by_job(self, job_id: str) -> list[EvidenceDiagnostic]: ...
+
+    @abstractmethod
+    def list_by_attempt(self, attempt_id: str) -> list[EvidenceDiagnostic]: ...
+
+
 class PersistenceUnitOfWork(ABC):
     """Transactional persistence boundary: atomically persists state changes and emitted events."""
 
@@ -322,13 +403,18 @@ class PersistenceUnitOfWork(ABC):
     pricing_snapshots: OpenRouterPricingSnapshotRepositoryInterface
     budget_reservations: BudgetReservationRepositoryInterface
     budget_ledger: BudgetLedgerRepositoryInterface
+    job_attempts: JobAttemptRepositoryInterface
+    blocker_claims: BlockerClaimRepositoryInterface
+    job_handoffs: JobHandoffRepositoryInterface
+    candidate_manifests: CandidateManifestRepositoryInterface
+    candidate_authorships: CandidateAuthorshipRepositoryInterface
+    evidence_diagnostics: EvidenceDiagnosticRepositoryInterface
 
     @abstractmethod
     def commit(self) -> None: ...
 
     @abstractmethod
     def rollback(self) -> None: ...
-
 
 
 class OpenSpecAdapterInterface(ABC):

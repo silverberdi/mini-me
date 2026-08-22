@@ -81,7 +81,19 @@ def _ensure_pg_server() -> str | None:
         time.sleep(0.5)
         if psql.exists():
             subprocess.run(
-                [str(psql), "-h", "localhost", "-p", "54333", "-U", "testuser", "-d", "postgres", "-c", "CREATE DATABASE minime_test;"],
+                [
+                    str(psql),
+                    "-h",
+                    "localhost",
+                    "-p",
+                    "54333",
+                    "-U",
+                    "testuser",
+                    "-d",
+                    "postgres",
+                    "-c",
+                    "CREATE DATABASE minime_test;",
+                ],
                 check=False,
                 capture_output=True,
             )
@@ -140,8 +152,18 @@ def _seed_test_project_and_snapshot(
     with session_factory() as session:
         uow = PostgresPersistenceUnitOfWork(session)
         # 2. Jobs
-        job_a = Job(job_id=f"job-{project_id}-a", project_id=project_id, change_name="change-a", implementer_role="codex")
-        job_b = Job(job_id=f"job-{project_id}-b", project_id=project_id, change_name="change-b", implementer_role="codex")
+        job_a = Job(
+            job_id=f"job-{project_id}-a",
+            project_id=project_id,
+            change_name="change-a",
+            implementer_role="codex",
+        )
+        job_b = Job(
+            job_id=f"job-{project_id}-b",
+            project_id=project_id,
+            change_name="change-b",
+            implementer_role="codex",
+        )
         uow.jobs.save(job_a)
         uow.jobs.save(job_b)
 
@@ -281,7 +303,9 @@ def test_postgres_daily_cap_race_serialization(pg_session_factory: sessionmaker[
     with pg_session_factory() as verify_session:
         verify_uow = PostgresPersistenceUnitOfWork(verify_session)
         persisted_reservations = verify_uow.budget_reservations.list_by_project(project_id)
-        assert len(persisted_reservations) == 1, "Only one reservation must be persisted in PostgreSQL"
+        assert len(persisted_reservations) == 1, (
+            "Only one reservation must be persisted in PostgreSQL"
+        )
         assert persisted_reservations[0].reserved_amount_usd == Decimal("0.750000")
         assert persisted_reservations[0].status == "RESERVED"
 
@@ -389,7 +413,9 @@ def test_postgres_monthly_cap_race_serialization(pg_session_factory: sessionmake
         assert headroom.monthly_headroom_usd == Decimal("0.250000")
 
 
-def test_postgres_multi_worker_contention_no_oversubscription(pg_session_factory: sessionmaker[Session]):
+def test_postgres_multi_worker_contention_no_oversubscription(
+    pg_session_factory: sessionmaker[Session],
+):
     """Prove that 5 concurrent threads racing simultaneously cannot oversubscribe the daily cap in PostgreSQL."""
     project_id = "test-multi-worker"
     num_workers = 5
@@ -405,11 +431,18 @@ def test_postgres_multi_worker_contention_no_oversubscription(pg_session_factory
     with pg_session_factory() as session:
         uow = PostgresPersistenceUnitOfWork(session)
         for i in range(num_workers):
-            uow.jobs.save(Job(job_id=f"job-{project_id}-{i}", project_id=project_id, change_name=f"change-{i}", implementer_role="codex"))
+            uow.jobs.save(
+                Job(
+                    job_id=f"job-{project_id}-{i}",
+                    project_id=project_id,
+                    change_name=f"change-{i}",
+                    implementer_role="codex",
+                )
+            )
         uow.commit()
 
     barrier = threading.Barrier(num_workers)
-    results: list[tuple[bool, str | None]] = [ (False, None) ] * num_workers
+    results: list[tuple[bool, str | None]] = [(False, None)] * num_workers
 
     def worker(worker_id: int):
         barrier.wait()
@@ -429,7 +462,9 @@ def test_postgres_multi_worker_contention_no_oversubscription(pg_session_factory
             uow.commit()
             results[worker_id] = (res is not None, reason)
 
-    threads = [threading.Thread(target=worker, args=(i,), name=f"worker-{i}") for i in range(num_workers)]
+    threads = [
+        threading.Thread(target=worker, args=(i,), name=f"worker-{i}") for i in range(num_workers)
+    ]
     for t in threads:
         t.start()
     for t in threads:
@@ -449,4 +484,3 @@ def test_postgres_multi_worker_contention_no_oversubscription(pg_session_factory
         reservations = verify_uow.budget_reservations.list_by_project(project_id)
         assert len(reservations) == 1
         assert reservations[0].reserved_amount_usd == Decimal("0.750000")
-

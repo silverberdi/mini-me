@@ -67,7 +67,9 @@ class GitFakeWorktreeManager:
             shutil.copytree(self.root / "openspec", path / "openspec")
         subprocess.run(["git", "init"], cwd=str(path), check=True, capture_output=True)
         subprocess.run(["git", "config", "user.name", "Test"], cwd=str(path), check=True)
-        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(path), check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"], cwd=str(path), check=True
+        )
         subprocess.run(["git", "add", "."], cwd=str(path), check=True, capture_output=True)
         subprocess.run(
             ["git", "commit", "--allow-empty", "-m", "init"],
@@ -172,7 +174,9 @@ async def test_deepseek_runner_direct_endpoint_and_secret_redaction(monkeypatch)
     with pytest.raises(ValueError, match="DeepSeek"):
         await runner.run(Path("."), "prompt", 1)
 
-    missing = DeepSeekAuditorRunner(api_key="", endpoint="https://api.deepseek.com/chat/completions")
+    missing = DeepSeekAuditorRunner(
+        api_key="", endpoint="https://api.deepseek.com/chat/completions"
+    )
     result = await missing.run(Path("."), "prompt", 1)
     assert result.exit_code == 1
     assert "DEEPSEEK_API_KEY" in (result.error_message or "")
@@ -353,8 +357,7 @@ async def test_audit_timeout_malformed_symlink_and_mutation_fail_safely(in_memor
     assert job.status == JobStatus.FAILED
     events = in_memory_uow.events.list_events(project_id="audit-project")
     assert any(
-        e.event_type
-        in {EventType.CANDIDATE_SHA_MISMATCH, EventType.UNAUTHORIZED_REVIEWER_MUTATION}
+        e.event_type in {EventType.CANDIDATE_SHA_MISMATCH, EventType.UNAUTHORIZED_REVIEWER_MUTATION}
         for e in events
     )
 
@@ -424,7 +427,9 @@ def test_api_and_cli_audit_observability(in_memory_uow, monkeypatch):
         yield None
 
     monkeypatch.setattr("minime.cli.main.db_manager.session", mock_session)
-    monkeypatch.setattr("minime.cli.main.PostgresPersistenceUnitOfWork", lambda session: in_memory_uow)
+    monkeypatch.setattr(
+        "minime.cli.main.PostgresPersistenceUnitOfWork", lambda session: in_memory_uow
+    )
     result = CliRunner().invoke(cli_app, ["jobs", "audit", "job-audit"])
     assert result.exit_code == 0
     assert "Audit ID: audit-1" in result.output

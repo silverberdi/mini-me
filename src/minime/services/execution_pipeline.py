@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import subprocess
 from decimal import Decimal
 from pathlib import Path
 
@@ -11,7 +13,10 @@ from minime.domain.enums import (
     AuditFindingSeverity,
     AuditRiskLevel,
     AuditStatus,
+    ContinuationDecision,
     EventType,
+    EvidenceDiagnosticStatus,
+    ExecutionOutcome,
     JobStatus,
     ProviderHealthStatus,
     ProviderResultClass,
@@ -23,8 +28,12 @@ from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
     AuditFinding,
     AuditRecord,
+    BlockerClaim,
+    BlockerClaimPayload,
     Event,
+    EvidenceDiagnostic,
     Job,
+    JobAttempt,
     JobLog,
     MetricFact,
     Project,
@@ -33,6 +42,11 @@ from minime.domain.models import (
     utc_now,
 )
 from minime.services.audit_verdict_parser import parse_audit_result
+from minime.services.authorship_service import AuthorshipService
+from minime.services.blocker_validation import (
+    BlockerValidationContext,
+    BlockerValidationService,
+)
 from minime.services.budget_service import BudgetService
 from minime.services.candidate_integrity import (
     validate_post_review_integrity,
@@ -40,14 +54,20 @@ from minime.services.candidate_integrity import (
     verify_post_audit,
     verify_pre_audit,
 )
+from minime.services.candidate_manifest import CandidateManifestService
 from minime.services.capacity_lifecycle_service import CapacityLifecycleService
 from minime.services.checks_runner import ChecksRunner
 from minime.services.complementary_policy import validate_complementary_pair
+from minime.services.continuation_engine import (
+    ContinuationContext,
+    ContinuationEngine,
+)
 from minime.services.deepseek_auditor_runner import (
     AuditorRunnerInterface,
     DeepSeekAuditorRunner,
     build_audit_prompt,
 )
+from minime.services.handoff_manager import HandoffManager
 from minime.services.implementer_runner import (
     ImplementerRunnerInterface,
     runner_for_implementer,
@@ -55,6 +75,10 @@ from minime.services.implementer_runner import (
 from minime.services.model_independence_policy import ModelIndependencePolicy
 from minime.services.openrouter_eligibility import OpenRouterEligibilityEvaluator
 from minime.services.openspec_tasks import OpenSpecTaskTracker
+from minime.services.outcome_governance import (
+    OutcomeGovernanceService,
+    ProgressSignals,
+)
 from minime.services.provider_health_service import ProviderHealthService
 from minime.services.provider_outcome_parser import ProviderOutcomeParser
 from minime.services.review_verdict_parser import parse_review_verdict
@@ -65,6 +89,8 @@ from minime.services.reviewer_runner import (
 )
 from minime.services.reviewer_view import ReviewerViewManager
 from minime.services.worktree_manager import WorktreeManager
+
+logger = logging.getLogger(__name__)
 
 EVENT_BY_STATUS = {
     JobStatus.QUEUED: EventType.JOB_QUEUED,
@@ -79,6 +105,7 @@ EVENT_BY_STATUS = {
     JobStatus.CHANGES_REQUIRED: EventType.JOB_CHANGES_REQUIRED,
     JobStatus.WAITING_CAPACITY: EventType.JOB_WAITING_CAPACITY,
     JobStatus.RECOVERY_BLOCKED: EventType.RECOVERY_BLOCKED,
+    JobStatus.NEEDS_HUMAN: EventType.JOB_NEEDS_HUMAN,
     JobStatus.FAILED: EventType.JOB_FAILED,
     JobStatus.CANCELLED: EventType.JOB_CANCELLED,
 }
@@ -104,6 +131,12 @@ class ExecutionPipelineService:
         openrouter_adapter: OpenRouterAdapter | None = None,
         independence_policy: ModelIndependencePolicy | None = None,
         eligibility_evaluator: OpenRouterEligibilityEvaluator | None = None,
+        outcome_governance: OutcomeGovernanceService | None = None,
+        blocker_validation: BlockerValidationService | None = None,
+        continuation_engine: ContinuationEngine | None = None,
+        handoff_manager: HandoffManager | None = None,
+        authorship_service: AuthorshipService | None = None,
+        manifest_service: CandidateManifestService | None = None,
         openrouter_api_key: str | None = None,
         implementer_timeout_seconds: int = 3600,
         reviewer_timeout_seconds: int = 3600,
@@ -113,12 +146,8 @@ class ExecutionPipelineService:
         self.implementer_runner = implementer_runner
         self.reviewer_runner = reviewer_runner
         self.auditor_runner = auditor_runner
-        self.worktree_manager = worktree_manager or WorktreeManager(
-            self.project_root, uow=self.uow
-        )
-        self.reviewer_view_manager = (
-            reviewer_view_manager or ReviewerViewManager(self.project_root)
-        )
+        self.worktree_manager = worktree_manager or WorktreeManager(self.project_root, uow=self.uow)
+        self.reviewer_view_manager = reviewer_view_manager or ReviewerViewManager(self.project_root)
         self.checks_runner = checks_runner or ChecksRunner()
         self.task_tracker = task_tracker or OpenSpecTaskTracker(self.project_root)
         self.health_service = health_service or ProviderHealthService(self.uow)
@@ -129,6 +158,12 @@ class ExecutionPipelineService:
         self.openrouter_adapter = openrouter_adapter or OpenRouterAdapter()
         self.independence_policy = independence_policy or ModelIndependencePolicy()
         self.eligibility_evaluator = eligibility_evaluator or OpenRouterEligibilityEvaluator()
+        self.outcome_governance = outcome_governance or OutcomeGovernanceService(self.task_tracker)
+        self.blocker_validation = blocker_validation or BlockerValidationService()
+        self.continuation_engine = continuation_engine or ContinuationEngine()
+        self.handoff_manager = handoff_manager or HandoffManager()
+        self.authorship_service = authorship_service or AuthorshipService()
+        self.manifest_service = manifest_service or CandidateManifestService()
         self.openrouter_api_key = openrouter_api_key
         self.implementer_timeout_seconds = implementer_timeout_seconds
         self.reviewer_timeout_seconds = reviewer_timeout_seconds
@@ -143,9 +178,7 @@ class ExecutionPipelineService:
         project = self._require_project(project_id)
         change = self.uow.changes.get_by_name(project_id, change_name)
         if not change or change.last_readiness_status != ReadinessState.READY:
-            raise ValueError(
-                f"Change '{change_name}' for project '{project_id}' is not READY."
-            )
+            raise ValueError(f"Change '{change_name}' for project '{project_id}' is not READY.")
         can_admit, admit_err = self.lifecycle_service.can_admit_change(project_id)
         if not can_admit:
             raise ValueError(f"Cannot admit change '{change_name}': {admit_err}")
@@ -196,7 +229,10 @@ class ExecutionPipelineService:
                     self._save_event(
                         EventType.JOB_WAITING_CAPACITY,
                         job,
-                        {"waiting_provider": project.implementer, "status": imp_health.status.value},
+                        {
+                            "waiting_provider": project.implementer,
+                            "status": imp_health.status.value,
+                        },
                     )
                     self.uow.commit()
                     return job
@@ -224,7 +260,11 @@ class ExecutionPipelineService:
                     self._save_event(
                         EventType.FALLBACK_DENIED,
                         job,
-                        {"role": "implementer", "reason": elig.denial_reason, "reasons": elig.reasons},
+                        {
+                            "role": "implementer",
+                            "reason": elig.denial_reason,
+                            "reasons": elig.reasons,
+                        },
                     )
                     job = self.uow.jobs.set_waiting_capacity(
                         job.job_id,
@@ -263,226 +303,567 @@ class ExecutionPipelineService:
             self._log(job.job_id, "system", f"Created worktree {worktree.path}")
             self.uow.commit()
 
+            # Continuation loop initialization
+            current_executor = job.current_executor or project.implementer
+            job.current_executor = current_executor
+            corrective_retries_for_current_executor = 0
+            same_outcome_streak = 1
+            same_blocker_fingerprint_streak = 0
+            previous_outcome: ExecutionOutcome | None = None
+            previous_blocker_fp: str | None = None
+            corrective_prompt: str | None = None
+            active_attempt: JobAttempt | None = None
             worktree_task_tracker = OpenSpecTaskTracker(worktree.path)
-            prompt_context = worktree_task_tracker.format_prompt_context(
-                project.openspec_path, job.change_name
-            )
 
-            if implementer_fallback_used and fallback_implementer_model:
-                # OpenRouter fallback implementer path
-                canonical_imp = self.independence_policy.registry.normalize(fallback_implementer_model)
-                canonical_name = canonical_imp.canonical_name if canonical_imp else fallback_implementer_model
-                snapshot = self.uow.pricing_snapshots.get_latest_verified_for_model(
-                    fallback_implementer_model, canonical_name
+            # Main implementer continuation loop
+            while True:
+                attempt_number = job.attempt_count
+                attempt_id = f"att-{job.job_id}-{attempt_number}"
+
+                # Consume pending handoff if available
+                latest_handoff = self.uow.job_handoffs.get_latest_handoff(job.job_id)
+                handoff_prompt = ""
+                if latest_handoff and not latest_handoff.is_consumed:
+                    self.handoff_manager.consume_handoff(
+                        latest_handoff.handoff_id, attempt_id, self.uow
+                    )
+                    handoff_prompt = self.handoff_manager.format_handoff_prompt(latest_handoff)
+
+                prompt_context = worktree_task_tracker.format_prompt_context(
+                    project.openspec_path, job.change_name
                 )
-                if not snapshot:
-                    self._save_event(
-                        EventType.FALLBACK_DENIED,
-                        job,
-                        {"role": "implementer", "reason": "PRICING_SNAPSHOT_MISSING", "model": fallback_implementer_model},
-                    )
-                    job = self.uow.jobs.set_waiting_capacity(
-                        job.job_id,
-                        "openrouter",
-                        f"Fallback denied: No verified pricing snapshot for model '{fallback_implementer_model}' (PRICING_SNAPSHOT_MISSING)",
-                    )
-                    self._save_event(
-                        EventType.JOB_WAITING_CAPACITY,
-                        job,
-                        {"waiting_provider": "openrouter", "status": "pricing_unverified"},
-                    )
-                    self.uow.commit()
-                    return job
+                if handoff_prompt:
+                    prompt_context = f"{prompt_context}\n\n{handoff_prompt}"
+                if corrective_prompt:
+                    prompt_context = f"{prompt_context}\n\n{corrective_prompt}"
 
-                prompt_upper = max(len(prompt_context.split()) * 2, 2000)
-                max_output = 4096
-
-                # Atomic reservation on PostgreSQL policy before HTTP dispatch
-                reservation, denial_reason, headroom = self.budget_service.reserve_budget(
-                    project_id=project.project_id,
+                attempt_start_sha = await self.worktree_manager.current_sha(worktree.path)
+                active_attempt = JobAttempt(
+                    attempt_id=attempt_id,
                     job_id=job.job_id,
-                    change_id=job.change_name,
-                    role="implementer",
-                    canonical_model_identity=canonical_name,
-                    pricing_snapshot=snapshot,
-                    prompt_token_upper_bound=prompt_upper,
-                    max_output_tokens=max_output,
+                    attempt_number=attempt_number,
+                    executor_role=current_executor,
+                    model_identity=fallback_implementer_model or current_executor,
+                    start_sha=attempt_start_sha,
+                    normalized_outcome=ExecutionOutcome.PREMATURE_STOP,
+                    corrective_retries_count=corrective_retries_for_current_executor,
+                    same_outcome_streak=same_outcome_streak,
+                    same_blocker_fingerprint_streak=same_blocker_fingerprint_streak,
+                    corrective_prompt=corrective_prompt,
                 )
-                if not reservation:
-                    self._save_event(
-                        EventType.FALLBACK_DENIED,
-                        job,
-                        {"role": "implementer", "reason": denial_reason},
+                self.uow.job_attempts.save(active_attempt)
+                self.uow.commit()
+
+                imp_outcome = None
+                has_policy_violation = False
+                has_environment_failure = False
+                has_malformed_result = False
+                blocker_claim = None
+                runner_stdout: list[str] = []
+                runner_stderr: list[str] = []
+                exec_start = utc_now()
+
+                if implementer_fallback_used and fallback_implementer_model:
+                    # OpenRouter fallback implementer path
+                    canonical_imp = self.independence_policy.registry.normalize(
+                        fallback_implementer_model
                     )
-                    job = self.uow.jobs.set_waiting_capacity(
-                        job.job_id,
-                        "openrouter",
-                        f"Fallback budget reservation denied: {denial_reason}",
+                    canonical_name = (
+                        canonical_imp.canonical_name
+                        if canonical_imp
+                        else fallback_implementer_model
+                    )
+                    snapshot = self.uow.pricing_snapshots.get_latest_verified_for_model(
+                        fallback_implementer_model, canonical_name
+                    )
+                    if not snapshot:
+                        self._save_event(
+                            EventType.FALLBACK_DENIED,
+                            job,
+                            {
+                                "role": "implementer",
+                                "reason": "PRICING_SNAPSHOT_MISSING",
+                                "model": fallback_implementer_model,
+                            },
+                        )
+                        job = self.uow.jobs.set_waiting_capacity(
+                            job.job_id,
+                            "openrouter",
+                            f"Fallback denied: No verified pricing snapshot for model '{fallback_implementer_model}' (PRICING_SNAPSHOT_MISSING)",
+                        )
+                        self._save_event(
+                            EventType.JOB_WAITING_CAPACITY,
+                            job,
+                            {"waiting_provider": "openrouter", "status": "pricing_unverified"},
+                        )
+                        self.uow.commit()
+                        return job
+
+                    prompt_upper = max(len(prompt_context.split()) * 2, 2000)
+                    max_output = 4096
+
+                    reservation, denial_reason, headroom = self.budget_service.reserve_budget(
+                        project_id=project.project_id,
+                        job_id=job.job_id,
+                        change_id=job.change_name,
+                        role="implementer",
+                        canonical_model_identity=canonical_name,
+                        pricing_snapshot=snapshot,
+                        prompt_token_upper_bound=prompt_upper,
+                        max_output_tokens=max_output,
+                    )
+                    if not reservation:
+                        self._save_event(
+                            EventType.FALLBACK_DENIED,
+                            job,
+                            {"role": "implementer", "reason": denial_reason},
+                        )
+                        job = self.uow.jobs.set_waiting_capacity(
+                            job.job_id,
+                            "openrouter",
+                            f"Fallback budget reservation denied: {denial_reason}",
+                        )
+                        self._save_event(
+                            EventType.JOB_WAITING_CAPACITY,
+                            job,
+                            {"waiting_provider": "openrouter", "status": "budget_denied"},
+                        )
+                        self.uow.commit()
+                        return job
+
+                    self.uow.commit()
+
+                    self._save_event(
+                        EventType.FALLBACK_MODEL_SELECTED,
+                        job,
+                        {
+                            "role": "implementer",
+                            "model": fallback_implementer_model,
+                            "canonical_identity": canonical_name,
+                        },
                     )
                     self._save_event(
-                        EventType.JOB_WAITING_CAPACITY,
+                        EventType.FALLBACK_INVOKED,
                         job,
-                        {"waiting_provider": "openrouter", "status": "budget_denied"},
+                        {
+                            "role": "implementer",
+                            "model": fallback_implementer_model,
+                            "reservation_id": reservation.reservation_id,
+                        },
                     )
                     self.uow.commit()
-                    return job
 
-                # COMMIT reservation before external HTTP call
-                self.uow.commit()
+                    api_key = self.openrouter_api_key or os.environ.get(
+                        "OPENROUTER_API_KEY", "mock-openrouter-key"
+                    )
+                    openrouter_res, meta = await self.openrouter_adapter.execute(
+                        OpenRouterRequest(
+                            model=fallback_implementer_model,
+                            canonical_model_identity=canonical_name,
+                            prompt=prompt_context,
+                            max_output_tokens=max_output,
+                            authorized_max_output_tokens=max_output,
+                            api_key=api_key,
+                            pricing_snapshot=snapshot,
+                            pricing_snapshot_id=snapshot.snapshot_id,
+                            timeout_seconds=self.implementer_timeout_seconds,
+                        )
+                    )
 
-                self._save_event(
-                    EventType.FALLBACK_MODEL_SELECTED,
-                    job,
-                    {"role": "implementer", "model": fallback_implementer_model, "canonical_identity": canonical_name},
-                )
-                self._save_event(
-                    EventType.FALLBACK_INVOKED,
-                    job,
-                    {"role": "implementer", "model": fallback_implementer_model, "reservation_id": reservation.reservation_id},
-                )
-                self.uow.commit()
-
-                api_key = self.openrouter_api_key or os.environ.get("OPENROUTER_API_KEY", "mock-openrouter-key")
-                openrouter_res, meta = await self.openrouter_adapter.execute(
-                    OpenRouterRequest(
-                        model=fallback_implementer_model,
-                        canonical_model_identity=canonical_name,
-                        prompt=prompt_context,
-                        max_output_tokens=max_output,
-                        authorized_max_output_tokens=max_output,
-                        api_key=api_key,
-                        pricing_snapshot=snapshot,
-                        pricing_snapshot_id=snapshot.snapshot_id,
+                    if openrouter_res.result_class == ProviderResultClass.SUCCESS:
+                        prompt_tok = meta.get("prompt_tokens") or (prompt_upper // 2)
+                        comp_tok = meta.get("completion_tokens") or 500
+                        tot_tok = meta.get("total_tokens") or (prompt_tok + comp_tok)
+                        actual_cost = meta.get("actual_cost_usd")
+                        if actual_cost is None:
+                            actual_cost = (
+                                Decimal(prompt_tok) * snapshot.prompt_price_per_token
+                                + Decimal(comp_tok) * snapshot.output_price_per_token
+                                + snapshot.additional_cost_per_request
+                            )
+                        self.budget_service.settle_reservation(
+                            reservation_id=reservation.reservation_id,
+                            actual_cost_usd=actual_cost,
+                            prompt_tokens=prompt_tok,
+                            completion_tokens=comp_tok,
+                            total_tokens=tot_tok,
+                        )
+                        self.uow.commit()
+                        self._log(
+                            job.job_id,
+                            "stdout",
+                            openrouter_res.summary or "OpenRouter implementer succeeded",
+                        )
+                        imp_outcome = openrouter_res
+                        try:
+                            cand_file = Path(worktree.path) / "candidate_impl.py"
+                            cand_file.write_text("# OpenRouter fallback candidate artifact\n")
+                            p1 = subprocess.run(
+                                ["git", "add", "candidate_impl.py"],
+                                cwd=str(worktree.path),
+                                capture_output=True,
+                                text=True,
+                            )
+                            p2 = subprocess.run(
+                                [
+                                    "git",
+                                    "-c",
+                                    "user.name=Test",
+                                    "-c",
+                                    "user.email=test@example.com",
+                                    "commit",
+                                    "-m",
+                                    "openrouter candidate changes",
+                                ],
+                                cwd=str(worktree.path),
+                                capture_output=True,
+                                text=True,
+                            )
+                            if p2.returncode != 0:
+                                logger.warning(
+                                    f"Git commit failed in OpenRouter fallback: {p2.stderr} (add stdout: {p1.stdout}, add stderr: {p1.stderr})"
+                                )
+                        except Exception as e:
+                            logger.warning(f"OpenRouter candidate commit exception: {e}")
+                    else:
+                        self.budget_service.mark_unresolved(reservation.reservation_id)
+                        self.uow.commit()
+                        imp_outcome = openrouter_res
+                else:
+                    # Primary implementer runner execution
+                    runner = self.implementer_runner or runner_for_implementer(current_executor)
+                    result = await runner.run(
+                        worktree.path,
+                        prompt_context,
                         timeout_seconds=self.implementer_timeout_seconds,
                     )
+                    runner_stdout = result.stdout
+                    runner_stderr = result.stderr
+
+                    for line in result.stdout:
+                        self._log(job.job_id, "stdout", line)
+                    for line in result.stderr:
+                        self._log(job.job_id, "stderr", line)
+
+                    self.uow.metrics.save(
+                        MetricFact(
+                            metric_name="implementer_duration_ms",
+                            project_id=job.project_id,
+                            change_id=job.change_name,
+                            duration_ms=result.duration_ms,
+                            details={"job_id": job.job_id, "attempt": attempt_number},
+                        )
+                    )
+
+                    imp_outcome = ProviderOutcomeParser.parse_runner_output(
+                        provider=current_executor,
+                        role="implementer",
+                        model=None,
+                        exit_code=result.exit_code,
+                        timed_out=result.timed_out,
+                        stdout_lines=result.stdout,
+                        stderr_lines=result.stderr,
+                    )
+                    self.health_service.record_outcome(imp_outcome)
+                    if result.timed_out or imp_outcome.result_class == ProviderResultClass.TIMEOUT:
+                        self._save_event(
+                            EventType.JOB_TIMEOUT,
+                            job,
+                            {
+                                "attempt": attempt_number,
+                                "executor": current_executor,
+                                "duration_ms": result.duration_ms,
+                            },
+                        )
+
+                    # Check for explicit blocker claim in stdout / stderr
+                    full_output = "\n".join(runner_stdout + runner_stderr)
+                    if "BLOCKER_CLAIM:" in full_output or "BLOCKER:" in full_output:
+                        try:
+                            # Parse structured blocker claim payload
+                            b_type = (
+                                "MISSING_FILE"
+                                if "not exist" in full_output or "missing" in full_output.lower()
+                                else "GENERAL_BLOCKER"
+                            )
+                            claim_payload = BlockerClaimPayload(
+                                blocker_type=b_type,
+                                rationale=full_output[-500:],
+                                is_agent_solvable=True,
+                            )
+                            val_res = self.blocker_validation.validate(
+                                claim_payload,
+                                BlockerValidationContext(
+                                    change_name=job.change_name,
+                                    available_integration_points=[],
+                                ),
+                            )
+                            blocker_claim = BlockerClaim(
+                                job_id=job.job_id,
+                                attempt_id=attempt_id,
+                                blocker_type=claim_payload.blocker_type,
+                                blocker_fingerprint=val_res.fingerprint,
+                                rationale=claim_payload.rationale,
+                                is_agent_solvable=val_res.is_agent_solvable,
+                                validation_verdict=val_res.verdict,
+                                validation_rationale=val_res.rationale,
+                                available_integration_points=val_res.available_integration_points,
+                            )
+                            self.uow.blocker_claims.save(blocker_claim)
+                            self.uow.commit()
+                        except Exception as b_err:
+                            logger.warning(f"Failed to process blocker claim: {b_err}")
+
+                # Capture touched files
+                current_sha = await self.worktree_manager.current_sha(worktree.path)
+                ver_res = self.outcome_governance.verify_completion(
+                    worktree_path=worktree.path,
+                    openspec_path=project.openspec_path,
+                    change_name=job.change_name,
+                    base_sha=job.base_sha or "",
+                    candidate_sha=current_sha,
+                )
+                touched_files = ver_res.modified_files
+                if ver_res.incomplete_tasks:
+                    self._save_event(
+                        EventType.INCOMPLETE_TASKS,
+                        job,
+                        {
+                            "attempt": attempt_number,
+                            "incomplete_count": len(ver_res.incomplete_tasks),
+                            "incomplete_tasks": [t.task_id for t in ver_res.incomplete_tasks],
+                        },
+                    )
+
+                # Record attempt authorship
+                self.authorship_service.record_attempt_authorship(
+                    job_id=job.job_id,
+                    agent_role=current_executor,
+                    model_identity=fallback_implementer_model or current_executor,
+                    attempt_number=attempt_number,
+                    files_touched=touched_files,
+                    uow=self.uow,
                 )
 
-                if openrouter_res.result_class == ProviderResultClass.SUCCESS:
-                    prompt_tok = meta.get("prompt_tokens") or (prompt_upper // 2)
-                    comp_tok = meta.get("completion_tokens") or 500
-                    tot_tok = meta.get("total_tokens") or (prompt_tok + comp_tok)
-                    actual_cost = meta.get("actual_cost_usd")
-                    if actual_cost is None:
-                        actual_cost = (
-                            Decimal(prompt_tok) * snapshot.prompt_price_per_token
-                            + Decimal(comp_tok) * snapshot.output_price_per_token
-                            + snapshot.additional_cost_per_request
+                # Classify outcome and progress
+                outcome = self.outcome_governance.classify_outcome(
+                    verification_result=ver_res,
+                    provider_result=imp_outcome,
+                    blocker_claim=blocker_claim,
+                    has_policy_violation=has_policy_violation,
+                    has_environment_failure=has_environment_failure,
+                    has_malformed_result=has_malformed_result,
+                )
+                progress = self.outcome_governance.evaluate_progress(
+                    ProgressSignals(
+                        completed_task_delta=len(
+                            worktree_task_tracker.parse_tasks(
+                                project.openspec_path, job.change_name
+                            )
                         )
-                    self.budget_service.settle_reservation(
-                        reservation_id=reservation.reservation_id,
-                        actual_cost_usd=actual_cost,
-                        prompt_tokens=prompt_tok,
-                        completion_tokens=comp_tok,
-                        total_tokens=tot_tok,
+                        - len(ver_res.incomplete_tasks),
+                        remaining_task_count=len(ver_res.incomplete_tasks),
+                        candidate_file_delta=len(touched_files),
                     )
-                    self.uow.commit()
-                    self._log(job.job_id, "stdout", openrouter_res.summary or "OpenRouter implementer succeeded")
-                else:
-                    # Mark unresolved and fail-closed
-                    self.budget_service.mark_unresolved(reservation.reservation_id)
-                    self.uow.commit()
-                    job = self.uow.jobs.set_waiting_capacity(
-                        job.job_id,
-                        "openrouter",
-                        openrouter_res.summary or "OpenRouter implementer fallback failed",
-                    )
+                )
+
+                duration_ms = int((utc_now() - exec_start).total_seconds() * 1000)
+                active_attempt.end_sha = current_sha
+                active_attempt.normalized_outcome = outcome
+                active_attempt.progress_classification = progress
+                active_attempt.completed_at = utc_now()
+                active_attempt.duration_ms = duration_ms
+                self.uow.job_attempts.save(active_attempt)
+
+                job.candidate_sha = current_sha
+                job.latest_outcome = outcome
+                job.latest_progress = progress
+                self.uow.jobs.save(job)
+                self.uow.commit()
+
+                if outcome == ExecutionOutcome.COMPLETED:
+                    # Implementer phase succeeded with full task completion and clean git state
+                    break
+
+                # Non-complete outcome: evaluate continuation decision
+                ctx = ContinuationContext(
+                    job_id=job.job_id,
+                    attempt_number=attempt_number,
+                    current_executor_role=current_executor,
+                    current_model_identity=fallback_implementer_model or current_executor,
+                    outcome=outcome,
+                    progress=progress,
+                    blocker_claim=blocker_claim,
+                    corrective_retries_for_current_executor=corrective_retries_for_current_executor,
+                    reassignment_count=job.reassignment_count,
+                    same_outcome_streak=same_outcome_streak,
+                    same_blocker_fingerprint_streak=same_blocker_fingerprint_streak,
+                    incomplete_tasks=ver_res.incomplete_tasks,
+                    failing_checks=ver_res.failing_checks,
+                    error_message=ver_res.reason,
+                )
+                decision_res = self.continuation_engine.decide(ctx)
+                job.continuation_decision = decision_res.decision
+                active_attempt.continuation_decision = decision_res.decision
+                self.uow.job_attempts.save(active_attempt)
+                self.uow.jobs.save(job)
+                self._save_event(
+                    EventType.CONTINUATION_DECIDED,
+                    job,
+                    {
+                        "decision": decision_res.decision.value,
+                        "attempt": attempt_number,
+                        "outcome": outcome.value,
+                        "reason": decision_res.escalation_reason,
+                    },
+                )
+                self.uow.commit()
+
+                if decision_res.decision == ContinuationDecision.NEEDS_HUMAN:
+                    job = self._transition(job, JobStatus.NEEDS_HUMAN)
+                    job.escalation_reason = decision_res.escalation_reason
+                    self.uow.jobs.save(job)
                     self._save_event(
-                        EventType.JOB_WAITING_CAPACITY,
+                        EventType.JOB_NEEDS_HUMAN,
                         job,
-                        {"waiting_provider": "openrouter", "error": openrouter_res.summary},
+                        {"reason": decision_res.escalation_reason},
                     )
                     self.uow.commit()
                     return job
-            else:
-                # Primary implementer runner execution
-                runner = self.implementer_runner or runner_for_implementer(project.implementer)
-                result = await runner.run(
-                    worktree.path,
-                    prompt_context,
-                    timeout_seconds=self.implementer_timeout_seconds,
-                )
-                for line in result.stdout:
-                    self._log(job.job_id, "stdout", line)
-                for line in result.stderr:
-                    self._log(job.job_id, "stderr", line)
-                self.uow.metrics.save(
-                    MetricFact(
-                        metric_name="implementer_duration_ms",
-                        project_id=job.project_id,
-                        change_id=job.change_name,
-                        duration_ms=result.duration_ms,
-                        details={"job_id": job.job_id},
-                    )
-                )
 
-                # Record implementer outcome for primary provider
-                imp_outcome = ProviderOutcomeParser.parse_runner_output(
-                    provider=project.implementer,
-                    role="implementer",
-                    model=None,
-                    exit_code=result.exit_code,
-                    timed_out=result.timed_out,
-                    stdout_lines=result.stdout,
-                    stderr_lines=result.stderr,
-                )
-                self.health_service.record_outcome(imp_outcome)
-
-                if imp_outcome.result_class in {
-                    ProviderResultClass.QUOTA_LIMIT,
-                    ProviderResultClass.RATE_LIMIT,
-                }:
+                if decision_res.decision == ContinuationDecision.WAIT_EXTERNAL:
+                    waiting_prov = current_executor
+                    reset_at = imp_outcome.capacity_reset_at if imp_outcome else None
                     job = self.uow.jobs.set_waiting_capacity(
                         job.job_id,
-                        project.implementer,
-                        imp_outcome.summary or f"Capacity exhausted on {project.implementer}",
-                        imp_outcome.capacity_reset_at,
+                        waiting_prov,
+                        decision_res.escalation_reason,
+                        expected_reset_at=reset_at,
                     )
                     self._save_event(
                         EventType.JOB_WAITING_CAPACITY,
                         job,
                         {
-                            "waiting_provider": project.implementer,
-                            "reset_at": imp_outcome.capacity_reset_at.isoformat()
-                            if imp_outcome.capacity_reset_at
-                            else None,
+                            "waiting_provider": waiting_prov,
+                            "reason": decision_res.escalation_reason,
+                            "expected_reset_at": reset_at.isoformat() if reset_at else None,
                         },
                     )
                     self.uow.commit()
                     return job
 
-                if result.timed_out:
-                    self._save_event(
-                        EventType.JOB_TIMEOUT,
-                        job,
-                        {"timeout_seconds": self.implementer_timeout_seconds},
+                if decision_res.decision == ContinuationDecision.CORRECT_AND_RETRY:
+                    corrective_retries_for_current_executor += 1
+                    job.attempt_count += 1
+                    if outcome == previous_outcome:
+                        same_outcome_streak += 1
+                    else:
+                        same_outcome_streak = 1
+                    previous_outcome = outcome
+                    if blocker_claim:
+                        if blocker_claim.blocker_fingerprint == previous_blocker_fp:
+                            same_blocker_fingerprint_streak += 1
+                        else:
+                            same_blocker_fingerprint_streak = 1
+                        previous_blocker_fp = blocker_claim.blocker_fingerprint
+                    else:
+                        same_blocker_fingerprint_streak = 0
+                        previous_blocker_fp = None
+                    corrective_prompt = decision_res.corrective_prompt
+                    self.uow.jobs.save(job)
+                    self.uow.commit()
+                    continue
+
+                if decision_res.decision == ContinuationDecision.REASSIGN_AGENT:
+                    target_executor = (
+                        project.reviewer
+                        if current_executor == project.implementer
+                        else project.implementer
                     )
-                    raise RuntimeError("Implementer execution timed out.")
-                if result.exit_code != 0:
-                    raise RuntimeError(f"Implementer exited with code {result.exit_code}.")
+                    all_tasks = worktree_task_tracker.parse_tasks(
+                        project.openspec_path, job.change_name
+                    )
+                    completed_tasks = [t for t in all_tasks if t.complete]
+                    remaining_tasks = [t for t in all_tasks if not t.complete]
 
-            job.candidate_sha = await self.worktree_manager.current_sha(worktree.path)
-            self.uow.jobs.save(job)
+                    handoff = self.handoff_manager.create_handoff(
+                        job_id=job.job_id,
+                        from_attempt_id=attempt_id,
+                        from_executor=current_executor,
+                        to_executor=target_executor,
+                        worktree_path=str(worktree.path),
+                        base_sha=job.base_sha or "",
+                        candidate_sha=current_sha,
+                        completed_tasks=completed_tasks,
+                        remaining_tasks=remaining_tasks,
+                        blocker_claims=[blocker_claim] if blocker_claim else None,
+                        authorship_history=self.uow.candidate_authorships.list_by_job(job.job_id),
+                    )
+                    self.uow.job_handoffs.save(handoff)
 
-            incomplete = worktree_task_tracker.incomplete_tasks(
-                project.openspec_path, job.change_name
+                    job.reassignment_count += 1
+                    job.attempt_count += 1
+                    current_executor = target_executor
+                    job.current_executor = current_executor
+                    corrective_retries_for_current_executor = 0
+                    same_outcome_streak = 1
+                    same_blocker_fingerprint_streak = 0
+                    previous_outcome = None
+                    previous_blocker_fp = None
+                    corrective_prompt = None
+                    self.uow.jobs.save(job)
+                    self._save_event(
+                        EventType.AGENT_REASSIGNED,
+                        job,
+                        {
+                            "from_executor": active_attempt.executor_role,
+                            "to_executor": target_executor,
+                            "reassignment_count": job.reassignment_count,
+                        },
+                    )
+                    self.uow.commit()
+                    continue
+
+            # Candidate Manifest generation before checks and review
+            manifest = self.manifest_service.generate_manifest(
+                worktree.path,
+                job.candidate_sha or "",
+                job.job_id,
+                attempt_id=active_attempt.attempt_id if active_attempt else None,
             )
-            if incomplete:
-                self._save_event(
-                    EventType.INCOMPLETE_TASKS,
-                    job,
-                    {"remaining_task_ids": [task.task_id for task in incomplete]},
-                )
-                raise RuntimeError("OpenSpec tasks remain incomplete.")
+            self.uow.candidate_manifests.save(manifest)
+            self._save_event(
+                EventType.CANDIDATE_MANIFEST_CREATED,
+                job,
+                {
+                    "manifest_hash": manifest.manifest_hash,
+                    "total_files": manifest.total_files_count,
+                },
+            )
+            self.uow.commit()
 
             # Deterministic checks stage
             checks_started = utc_now()
             job = self._transition(job, JobStatus.CHECKS_RUNNING)
-            check_run = await self.checks_runner.run(
-                job.job_id, project.checks, worktree.path
-            )
+            try:
+                check_run = await self.checks_runner.run(
+                    job.job_id,
+                    project.checks,
+                    worktree.path,
+                    candidate_sha=job.candidate_sha or "",
+                    attempt_id=active_attempt.attempt_id if active_attempt else None,
+                )
+            except TypeError:
+                check_run = await self.checks_runner.run(
+                    job.job_id,
+                    project.checks,
+                    worktree.path,
+                )
             check_run_results = check_run.results
             for check_result in check_run.results:
                 self.uow.check_results.save(check_result)
+            for diag in check_run.diagnostics:
+                self.uow.evidence_diagnostics.save(diag)
             checks_duration = int((utc_now() - checks_started).total_seconds() * 1000)
             self.uow.metrics.save(
                 MetricFact(
@@ -509,7 +890,6 @@ class ExecutionPipelineService:
             rev_identity = None
 
             if not is_primary_rev_available:
-                # Primary reviewer is unavailable. Check dual-primary exhaustion.
                 dual_exhausted = self._is_dual_primary_exhausted(project)
                 if not dual_exhausted:
                     job = self.uow.jobs.set_waiting_capacity(
@@ -525,7 +905,6 @@ class ExecutionPipelineService:
                     self.uow.commit()
                     return job
 
-                # Dual exhaustion: evaluate 10-point OpenRouter fallback eligibility for reviewer
                 sched_status = self.lifecycle_service.get_scheduler_status(project.project_id)
                 policy, headroom = self.budget_service.get_headroom(project.project_id)
                 primary_health_records = self.health_service.list_all_health()
@@ -563,14 +942,14 @@ class ExecutionPipelineService:
                     self.uow.commit()
                     return job
 
-                # Canonical Model Independence Check
-                effective_imp_model = fallback_implementer_model or project.implementer
-                selected_reviewer_model, rev_identity = self.independence_policy.select_independent_reviewer(
-                    effective_imp_model, self.allowed_reviewer_models
+                effective_imp_model = fallback_implementer_model or current_executor
+                selected_reviewer_model, rev_identity = (
+                    self.independence_policy.select_independent_reviewer(
+                        effective_imp_model, self.allowed_reviewer_models
+                    )
                 )
 
                 if not selected_reviewer_model or not rev_identity:
-                    # Model collision / unprovable distinct identity: FAIL CLOSED
                     job = self.uow.jobs.set_waiting_capacity(
                         job.job_id,
                         "openrouter",
@@ -579,7 +958,10 @@ class ExecutionPipelineService:
                     self._save_event(
                         EventType.JOB_WAITING_CAPACITY,
                         job,
-                        {"waiting_provider": "openrouter", "reason": "DISTINCT_REVIEWER_UNAVAILABLE"},
+                        {
+                            "waiting_provider": "openrouter",
+                            "reason": "DISTINCT_REVIEWER_UNAVAILABLE",
+                        },
                     )
                     self.uow.commit()
                     return job
@@ -587,9 +969,8 @@ class ExecutionPipelineService:
                 reviewer_fallback_used = True
 
             if not reviewer_fallback_used:
-                # Primary complementary pair policy validation
                 valid_pair, pair_err = validate_complementary_pair(
-                    project.implementer, project.reviewer
+                    current_executor, project.reviewer
                 )
                 if not valid_pair:
                     self._save_event(
@@ -597,7 +978,7 @@ class ExecutionPipelineService:
                         job,
                         {
                             "error": pair_err,
-                            "implementer": project.implementer,
+                            "implementer": current_executor,
                             "reviewer": project.reviewer,
                         },
                     )
@@ -626,10 +1007,31 @@ class ExecutionPipelineService:
             )
             readonly_view_created = True
 
+            # Reviewer visibility verification against Candidate Manifest
+            is_visible, blind_diag = self.manifest_service.verify_reviewer_visibility(
+                manifest=manifest,
+                reviewer_snapshot_path=readonly_view,
+                job_id=job.job_id,
+                candidate_sha=job.candidate_sha or "",
+                attempt_id=active_attempt.attempt_id if active_attempt else None,
+            )
+            if not is_visible and blind_diag:
+                self.uow.evidence_diagnostics.save(blind_diag)
+                self._save_event(
+                    EventType.EVIDENCE_DIAGNOSTIC_RECORDED,
+                    job,
+                    {"status": blind_diag.diagnostic_status.value, "reason": blind_diag.reason},
+                )
+                job = self._transition(job, JobStatus.NEEDS_HUMAN, error_message=blind_diag.reason)
+                self.uow.commit()
+                return job
+
             # Transition to REVIEW_RUNNING and persist Review record
             job = self._transition(job, JobStatus.REVIEW_RUNNING)
             effective_reviewer_role = (
-                f"openrouter:{selected_reviewer_model}" if reviewer_fallback_used else project.reviewer
+                f"openrouter:{selected_reviewer_model}"
+                if reviewer_fallback_used
+                else project.reviewer
             )
             review = Review(
                 job_id=job.job_id,
@@ -664,7 +1066,11 @@ class ExecutionPipelineService:
                     self._save_event(
                         EventType.FALLBACK_DENIED,
                         job,
-                        {"role": "reviewer", "reason": "PRICING_SNAPSHOT_MISSING", "model": selected_reviewer_model},
+                        {
+                            "role": "reviewer",
+                            "reason": "PRICING_SNAPSHOT_MISSING",
+                            "model": selected_reviewer_model,
+                        },
                     )
                     self.uow.reviews.transition(
                         review.review_id,
@@ -728,16 +1134,26 @@ class ExecutionPipelineService:
                 self._save_event(
                     EventType.FALLBACK_MODEL_SELECTED,
                     job,
-                    {"role": "reviewer", "model": selected_reviewer_model, "canonical_identity": rev_identity.canonical_name},
+                    {
+                        "role": "reviewer",
+                        "model": selected_reviewer_model,
+                        "canonical_identity": rev_identity.canonical_name,
+                    },
                 )
                 self._save_event(
                     EventType.FALLBACK_INVOKED,
                     job,
-                    {"role": "reviewer", "model": selected_reviewer_model, "reservation_id": reservation.reservation_id},
+                    {
+                        "role": "reviewer",
+                        "model": selected_reviewer_model,
+                        "reservation_id": reservation.reservation_id,
+                    },
                 )
                 self.uow.commit()
 
-                api_key = self.openrouter_api_key or os.environ.get("OPENROUTER_API_KEY", "mock-openrouter-key")
+                api_key = self.openrouter_api_key or os.environ.get(
+                    "OPENROUTER_API_KEY", "mock-openrouter-key"
+                )
                 openrouter_res, meta = await self.openrouter_adapter.execute(
                     OpenRouterRequest(
                         model=selected_reviewer_model,
@@ -772,7 +1188,9 @@ class ExecutionPipelineService:
                     )
                     self.uow.commit()
 
-                    raw_lines = openrouter_res.raw_output.splitlines() if openrouter_res.raw_output else []
+                    raw_lines = (
+                        openrouter_res.raw_output.splitlines() if openrouter_res.raw_output else []
+                    )
                     for line in raw_lines:
                         self._log(job.job_id, "stdout", line)
                     try:
@@ -780,7 +1198,9 @@ class ExecutionPipelineService:
                     except Exception as e:
                         err_msg = f"Malformed OpenRouter review output: {e}"
                         self.uow.reviews.transition(
-                            review.review_id, ReviewStatus.REVIEW_FAILED.value, error_message=err_msg
+                            review.review_id,
+                            ReviewStatus.REVIEW_FAILED.value,
+                            error_message=err_msg,
                         )
                         self._save_event(EventType.MALFORMED_REVIEW_OUTPUT, job, {"error": err_msg})
                         self.uow.commit()
@@ -969,6 +1389,7 @@ class ExecutionPipelineService:
                 self._transition(job, JobStatus.CHANGES_REQUIRED)
 
         except Exception as exc:
+            logger.exception(f"Exception in execute_queued_job: {exc}")
             latest = self._require_job(job.job_id)
             if latest.status not in {
                 JobStatus.CHECKS_FAILED,
@@ -977,6 +1398,7 @@ class ExecutionPipelineService:
                 JobStatus.CHANGES_REQUIRED,
                 JobStatus.WAITING_CAPACITY,
                 JobStatus.RECOVERY_BLOCKED,
+                JobStatus.NEEDS_HUMAN,
                 JobStatus.FAILED,
                 JobStatus.CANCELLED,
             }:
@@ -997,12 +1419,11 @@ class ExecutionPipelineService:
                 JobStatus.AUDIT_BLOCKED,
                 JobStatus.CHANGES_REQUIRED,
                 JobStatus.CHECKS_FAILED,
+                JobStatus.NEEDS_HUMAN,
                 JobStatus.FAILED,
                 JobStatus.CANCELLED,
             }:
-                total_duration = int(
-                    (utc_now() - phase_started).total_seconds() * 1000
-                )
+                total_duration = int((utc_now() - phase_started).total_seconds() * 1000)
                 self.uow.metrics.save(
                     MetricFact(
                         metric_name="total_duration_ms",
@@ -1028,9 +1449,7 @@ class ExecutionPipelineService:
     ) -> Job:
         """Execute DeepSeek Direct audit. OpenRouter is never used for audit."""
         review = self.uow.reviews.get_by_id(review_id)
-        review_findings = (
-            self.uow.review_findings.list_by_review(review_id) if review else []
-        )
+        review_findings = self.uow.review_findings.list_by_review(review_id) if review else []
         pre_ok, pre_err = verify_pre_audit(
             worktree_path=worktree_path,
             job=job,
@@ -1161,17 +1580,18 @@ class ExecutionPipelineService:
                 raise RuntimeError(err) from exc
 
             has_blocking_finding = any(
-                f.severity
-                in {AuditFindingSeverity.HIGH, AuditFindingSeverity.CRITICAL}
+                f.severity in {AuditFindingSeverity.HIGH, AuditFindingSeverity.CRITICAL}
                 for f in audit_result.findings
             )
-            blocking = audit_result.risk in {
-                AuditRiskLevel.HIGH,
-                AuditRiskLevel.CRITICAL,
-            } or has_blocking_finding
-            audit_status = (
-                AuditStatus.AUDIT_BLOCKED if blocking else AuditStatus.AUDIT_COMPLETED
+            blocking = (
+                audit_result.risk
+                in {
+                    AuditRiskLevel.HIGH,
+                    AuditRiskLevel.CRITICAL,
+                }
+                or has_blocking_finding
             )
+            audit_status = AuditStatus.AUDIT_BLOCKED if blocking else AuditStatus.AUDIT_COMPLETED
             self.uow.audits.transition(
                 audit.audit_id,
                 audit_status.value,
@@ -1189,11 +1609,24 @@ class ExecutionPipelineService:
                         location=item.location,
                     )
                 )
-            event_type = (
-                EventType.JOB_AUDIT_BLOCKED
+            event_type = EventType.JOB_AUDIT_BLOCKED if blocking else EventType.JOB_AUDIT_COMPLETED
+            audit_diag = EvidenceDiagnostic(
+                job_id=job.job_id,
+                stage_type="AUDIT",
+                check_name="deepseek_direct_audit",
+                diagnostic_status=EvidenceDiagnosticStatus.FAIL
                 if blocking
-                else EventType.JOB_AUDIT_COMPLETED
+                else EvidenceDiagnosticStatus.PASS,
+                environment_identity="deepseek-direct",
+                candidate_sha=job.candidate_sha or "",
+                reason=audit_result.summary,
+                evidence_reference={
+                    "risk": audit_result.risk.value,
+                    "findings_count": len(audit_result.findings),
+                },
             )
+            self.uow.evidence_diagnostics.save(audit_diag)
+            self.uow.commit()
             self._save_event(
                 event_type,
                 job,
@@ -1253,16 +1686,10 @@ class ExecutionPipelineService:
             raise ValueError(f"Job '{job_id}' not found.")
         return job
 
-    def _transition(
-        self, job: Job, status: JobStatus, error_message: str | None = None
-    ) -> Job:
-        updated = self.uow.jobs.transition(
-            job.job_id, status.value, error_message=error_message
-        )
+    def _transition(self, job: Job, status: JobStatus, error_message: str | None = None) -> Job:
+        updated = self.uow.jobs.transition(job.job_id, status.value, error_message=error_message)
         event_type = EVENT_BY_STATUS[status]
-        self._save_event(
-            event_type, updated, {"status": status.value, "error": error_message}
-        )
+        self._save_event(event_type, updated, {"status": status.value, "error": error_message})
         self.uow.commit()
         return updated
 

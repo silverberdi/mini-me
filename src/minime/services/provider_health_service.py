@@ -252,7 +252,9 @@ class ProviderHealthService:
                 probe_success = False
 
             if probe_success:
-                logger.info(f"Availability probe for {provider} SUCCEEDED. Transitioning to AVAILABLE.")
+                logger.info(
+                    f"Availability probe for {provider} SUCCEEDED. Transitioning to AVAILABLE."
+                )
                 self.uow.provider_health.update_health(
                     provider=provider,
                     status=ProviderHealthStatus.AVAILABLE.value,
@@ -273,7 +275,9 @@ class ProviderHealthService:
                 self.uow.commit()
                 return True
             else:
-                logger.warning(f"Availability probe for {provider} FAILED. Provider remains unavailable.")
+                logger.warning(
+                    f"Availability probe for {provider} FAILED. Provider remains unavailable."
+                )
                 self.uow.events.save(
                     Event(
                         event_type=EventType.PROVIDER_PROBE_FAILED,
