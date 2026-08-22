@@ -674,4 +674,3 @@ async def test_unverified_pinned_default_snapshot_in_db_denies_fallback_with_zer
     # 2. Job paused in WAITING_CAPACITY because pinned_default cannot authorize spend
     assert result_job.status == JobStatus.WAITING_CAPACITY
     assert "PRICING_SNAPSHOT_MISSING" in result_job.capacity_block_reason
-

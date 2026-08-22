@@ -695,4 +695,3 @@ def test_all_default_allowed_models_fail_closed_without_verified_snapshot(in_mem
         assert res is not None
         assert reason is None
         assert res.reserved_amount_usd == Decimal("0.008")
-
