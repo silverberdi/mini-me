@@ -10,6 +10,8 @@ from minime.domain.enums import GitOperationStatus
 from minime.domain.models import (
     AuditFinding,
     AuditRecord,
+    BudgetLedgerEntry,
+    BudgetReservation,
     CapacityWindow,
     Change,
     CheckResult,
@@ -18,6 +20,8 @@ from minime.domain.models import (
     Job,
     JobLog,
     MetricFact,
+    OpenRouterBudgetPolicy,
+    OpenRouterPricingSnapshot,
     Project,
     ProjectBinding,
     ProviderHealth,
@@ -254,6 +258,41 @@ class GitOperationRepositoryInterface(ABC):
     ) -> GitOperation | None: ...
 
 
+class OpenRouterBudgetPolicyRepositoryInterface(ABC):
+    @abstractmethod
+    def get_for_update(self, project_id: str) -> OpenRouterBudgetPolicy | None: ...
+
+    @abstractmethod
+    def save(self, policy: OpenRouterBudgetPolicy) -> None: ...
+
+
+class OpenRouterPricingSnapshotRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, snapshot: OpenRouterPricingSnapshot) -> None: ...
+
+    @abstractmethod
+    def get_by_id(self, snapshot_id: str) -> OpenRouterPricingSnapshot | None: ...
+
+
+class BudgetReservationRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, reservation: BudgetReservation) -> None: ...
+
+    @abstractmethod
+    def get_by_id(self, reservation_id: str) -> BudgetReservation | None: ...
+
+    @abstractmethod
+    def list_by_project(self, project_id: str) -> list[BudgetReservation]: ...
+
+
+class BudgetLedgerRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, entry: BudgetLedgerEntry) -> None: ...
+
+    @abstractmethod
+    def list_by_project(self, project_id: str) -> list[BudgetLedgerEntry]: ...
+
+
 class FallbackPolicyInterface(ABC):
     """Abstract fallback policy seam for future drain provider execution (006)."""
 
@@ -279,6 +318,10 @@ class PersistenceUnitOfWork(ABC):
     provider_health: ProviderHealthRepositoryInterface
     capacity_windows: CapacityWindowRepositoryInterface
     git_operations: GitOperationRepositoryInterface
+    budget_policies: OpenRouterBudgetPolicyRepositoryInterface
+    pricing_snapshots: OpenRouterPricingSnapshotRepositoryInterface
+    budget_reservations: BudgetReservationRepositoryInterface
+    budget_ledger: BudgetLedgerRepositoryInterface
 
     @abstractmethod
     def commit(self) -> None: ...

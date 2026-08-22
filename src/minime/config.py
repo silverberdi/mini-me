@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +67,23 @@ class ProviderConfig(BaseModel):
     drain: dict[str, Any] = Field(default_factory=dict)
 
 
+class BudgetConfig(BaseModel):
+    enabled: bool = False
+    daily_cap_usd: Decimal = Field(default_factory=lambda: Decimal("0.0"))
+    monthly_cap_usd: Decimal = Field(default_factory=lambda: Decimal("0.0"))
+    currency: str = "USD"
+    policy_version: int = 1
+
+
+class OpenRouterConfig(BaseModel):
+    enabled: bool = False
+    api_key_env: str = "OPENROUTER_API_KEY"
+    base_url: str = "https://openrouter.ai/api/v1"
+    model: str | None = None
+    fallback_models: list[str] = Field(default_factory=list)
+    budget: BudgetConfig = Field(default_factory=BudgetConfig)
+
+
 class GitHubConfig(BaseModel):
     account_scope: str = "personal"
     owner: str = ""
@@ -122,6 +140,7 @@ class AppConfig(BaseModel):
     paths: PathsConfig = Field(default_factory=PathsConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     providers: dict[str, ProviderConfig] = Field(default_factory=dict)
+    openrouter: OpenRouterConfig = Field(default_factory=OpenRouterConfig)
     github: GitHubConfig = Field(default_factory=GitHubConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     projects: dict[str, ProjectConfig] = Field(default_factory=dict)

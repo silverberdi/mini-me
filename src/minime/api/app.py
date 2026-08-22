@@ -15,6 +15,7 @@ from minime.db.session import db_manager
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import Change, Job, JobLog, Project, ProviderHealth, SchedulerStatus
 from minime.logging import redact_secrets
+from minime.services.budget_service import BudgetService
 from minime.services.capacity_lifecycle_service import CapacityLifecycleService
 from minime.services.execution_pipeline import ExecutionPipelineService
 from minime.services.project_service import ProjectService
@@ -116,6 +117,75 @@ def get_scheduler_status(uow: UowDep) -> SchedulerStatus:
 def get_providers_health(uow: UowDep) -> list[ProviderHealth]:
     service = ProviderHealthService(uow)
     return service.list_all_health()
+
+
+@app.get("/budget/usage")
+@app.get("/projects/{project_id}/budget")
+def get_budget_usage(uow: UowDep, project_id: str | None = None) -> dict[str, Any]:
+    service = BudgetService(uow)
+    if not project_id:
+        projects = uow.projects.list_all()
+        project_id = projects[0].project_id if projects else ""
+    policy = uow.budget_policies.get_for_update(project_id) if project_id else None
+    if not policy:
+        return {
+            "project_id": project_id,
+            "policy": None,
+            "headroom": None,
+            "reservations": [],
+            "ledger": [],
+            "token_usage_by_model": {},
+        }
+    headroom = service._compute_headroom(project_id, policy)
+    reservations = [r.model_dump() for r in uow.budget_reservations.list_by_project(project_id)]
+    ledger = [e.model_dump() for e in uow.budget_ledger.list_by_project(project_id)]
+    token_usage = service.get_token_usage_breakdown(project_id)
+    return {
+        "project_id": project_id,
+        "policy": policy.model_dump(),
+        "headroom": headroom.__dict__,
+        "unresolved_settlements_count": headroom.unresolved_count,
+        "unresolved_settlements_usd": headroom.unresolved_usd,
+        "reservations": reservations,
+        "ledger": ledger,
+        "token_usage_by_model": token_usage,
+    }
+
+
+@app.get("/providers/openrouter/status")
+def get_openrouter_status(uow: UowDep, project_id: str | None = None) -> dict[str, Any]:
+    service = BudgetService(uow)
+    if not project_id:
+        projects = uow.projects.list_all()
+        project_id = projects[0].project_id if projects else ""
+    policy = uow.budget_policies.get_for_update(project_id) if project_id else None
+    if not policy:
+        return {
+            "project_id": project_id,
+            "enabled": False,
+            "is_breached": False,
+            "policy": None,
+            "headroom": None,
+            "allowed_models": {
+                "implementer": ["anthropic/claude-3.5-sonnet", "qwen/qwen-2.5-coder-32b-instruct"],
+                "reviewer": ["openai/gpt-4o", "meta-llama/llama-3.3-70b-instruct", "mistralai/mistral-large"],
+            },
+        }
+    headroom = service._compute_headroom(project_id, policy)
+    return {
+        "project_id": project_id,
+        "enabled": policy.enabled,
+        "is_breached": policy.is_breached,
+        "daily_cap_usd": policy.daily_cap_usd,
+        "monthly_cap_usd": policy.monthly_cap_usd,
+        "currency": policy.currency,
+        "policy_version": policy.policy_version,
+        "headroom": headroom.__dict__,
+        "allowed_models": {
+            "implementer": ["anthropic/claude-3.5-sonnet", "qwen/qwen-2.5-coder-32b-instruct"],
+            "reviewer": ["openai/gpt-4o", "meta-llama/llama-3.3-70b-instruct", "mistralai/mistral-large"],
+        },
+    }
 
 
 @app.get("/projects")

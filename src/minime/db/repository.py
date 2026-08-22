@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
@@ -10,6 +11,8 @@ from sqlalchemy.orm import Session
 from minime.db.models import (
     AuditFindingModel,
     AuditModel,
+    BudgetLedgerModel,
+    BudgetReservationModel,
     CapacityWindowModel,
     ChangeModel,
     CheckResultModel,
@@ -18,6 +21,8 @@ from minime.db.models import (
     JobLogModel,
     JobModel,
     MetricFactModel,
+    OpenRouterBudgetPolicyModel,
+    OpenRouterPricingSnapshotModel,
     ProjectBindingModel,
     ProjectModel,
     ProviderHealthModel,
@@ -61,8 +66,11 @@ from minime.domain.interfaces import (
     ReviewRepositoryInterface,
 )
 from minime.domain.models import (
+    AUTHORITATIVE_PRICING_SOURCES,
     AuditFinding,
     AuditRecord,
+    BudgetLedgerEntry,
+    BudgetReservation,
     CapacityWindow,
     Change,
     CheckResult,
@@ -71,6 +79,8 @@ from minime.domain.models import (
     Job,
     JobLog,
     MetricFact,
+    OpenRouterBudgetPolicy,
+    OpenRouterPricingSnapshot,
     Project,
     ProjectBinding,
     ProviderHealth,
@@ -78,6 +88,18 @@ from minime.domain.models import (
     ReviewFinding,
     utc_now,
 )
+
+
+def _decimal_to_float(value: Decimal | float | None) -> float | None:
+    return float(value) if value is not None else None
+
+
+def _to_decimal(value: Decimal | float | str | int | None, default: str = "0.0") -> Decimal:
+    if value is None:
+        return Decimal(default)
+    if isinstance(value, Decimal):
+        return value
+    return Decimal(str(value))
 
 
 def project_model_to_domain(model: ProjectModel) -> Project:
@@ -311,6 +333,72 @@ def audit_model_to_domain(model: AuditModel) -> AuditRecord:
         findings=[audit_finding_model_to_domain(f) for f in (model.findings or [])],
         created_at=model.created_at,
         updated_at=model.updated_at,
+    )
+
+
+def budget_policy_model_to_domain(model: OpenRouterBudgetPolicyModel) -> OpenRouterBudgetPolicy:
+    return OpenRouterBudgetPolicy(
+        project_id=model.project_id,
+        enabled=model.enabled,
+        daily_cap_usd=_to_decimal(model.daily_cap_usd),
+        monthly_cap_usd=_to_decimal(model.monthly_cap_usd),
+        currency=model.currency,
+        policy_version=model.policy_version,
+        is_breached=model.is_breached,
+        updated_at=model.updated_at,
+    )
+
+
+def pricing_snapshot_model_to_domain(
+    model: OpenRouterPricingSnapshotModel,
+) -> OpenRouterPricingSnapshot:
+    return OpenRouterPricingSnapshot(
+        snapshot_id=model.id,
+        canonical_model_identity=model.canonical_model_identity,
+        routed_model_identity=model.routed_model_identity,
+        prompt_price_per_token=_to_decimal(model.prompt_price_per_token),
+        output_price_per_token=_to_decimal(model.output_price_per_token),
+        additional_cost_per_request=_to_decimal(model.additional_cost_per_request),
+        currency=model.currency,
+        source=model.source,
+        observed_at=model.observed_at,
+        created_at=model.created_at,
+    )
+
+
+def budget_reservation_model_to_domain(model: BudgetReservationModel) -> BudgetReservation:
+    return BudgetReservation(
+        reservation_id=model.id,
+        project_id=model.project_id,
+        job_id=model.job_id,
+        change_id=model.change_id,
+        role=model.role,
+        canonical_model_identity=model.canonical_model_identity,
+        reserved_amount_usd=_to_decimal(model.reserved_amount_usd),
+        status=model.status,
+        pricing_snapshot_id=model.pricing_snapshot_id,
+        correlation_id=model.correlation_id,
+        created_at=model.created_at,
+        updated_at=model.updated_at,
+    )
+
+
+def budget_ledger_model_to_domain(model: BudgetLedgerModel) -> BudgetLedgerEntry:
+    return BudgetLedgerEntry(
+        entry_id=model.id,
+        reservation_id=model.reservation_id,
+        project_id=model.project_id,
+        job_id=model.job_id,
+        change_id=model.change_id,
+        provider=model.provider,
+        role=model.role,
+        canonical_model_identity=model.canonical_model_identity,
+        prompt_tokens=model.prompt_tokens,
+        completion_tokens=model.completion_tokens,
+        total_tokens=model.total_tokens,
+        amount_usd=_to_decimal(model.amount_usd),
+        entry_type=model.entry_type,
+        created_at=model.created_at,
     )
 
 
@@ -1269,6 +1357,167 @@ class PostgresGitOperationRepository(GitOperationRepositoryInterface):
         return git_operation_model_to_domain(model)
 
 
+class PostgresOpenRouterBudgetPolicyRepository:
+    def __init__(self, session: Session):
+        self.session = session
+
+    def get_for_update(self, project_id: str) -> OpenRouterBudgetPolicy | None:
+        model = self.session.scalars(
+            select(OpenRouterBudgetPolicyModel)
+            .where(OpenRouterBudgetPolicyModel.project_id == project_id)
+            .with_for_update()
+        ).first()
+        return budget_policy_model_to_domain(model) if model else None
+
+    def save(self, policy: OpenRouterBudgetPolicy) -> None:
+        existing = self.session.get(OpenRouterBudgetPolicyModel, policy.project_id)
+        if existing:
+            existing.enabled = policy.enabled
+            existing.daily_cap_usd = policy.daily_cap_usd
+            existing.monthly_cap_usd = policy.monthly_cap_usd
+            existing.currency = policy.currency
+            existing.policy_version = policy.policy_version
+            existing.is_breached = policy.is_breached
+            existing.updated_at = policy.updated_at
+            return
+        self.session.add(
+            OpenRouterBudgetPolicyModel(
+                project_id=policy.project_id,
+                enabled=policy.enabled,
+                daily_cap_usd=policy.daily_cap_usd,
+                monthly_cap_usd=policy.monthly_cap_usd,
+                currency=policy.currency,
+                policy_version=policy.policy_version,
+                is_breached=policy.is_breached,
+                updated_at=policy.updated_at,
+            )
+        )
+
+
+class PostgresOpenRouterPricingSnapshotRepository:
+    def __init__(self, session: Session):
+        self.session = session
+
+    def save(self, snapshot: OpenRouterPricingSnapshot) -> None:
+        if self.session.get(OpenRouterPricingSnapshotModel, snapshot.snapshot_id):
+            return
+        self.session.add(
+            OpenRouterPricingSnapshotModel(
+                id=snapshot.snapshot_id,
+                canonical_model_identity=snapshot.canonical_model_identity,
+                routed_model_identity=snapshot.routed_model_identity,
+                prompt_price_per_token=snapshot.prompt_price_per_token,
+                output_price_per_token=snapshot.output_price_per_token,
+                additional_cost_per_request=snapshot.additional_cost_per_request,
+                currency=snapshot.currency,
+                source=snapshot.source,
+                observed_at=snapshot.observed_at,
+                created_at=snapshot.created_at,
+            )
+        )
+
+    def get_by_id(self, snapshot_id: str) -> OpenRouterPricingSnapshot | None:
+        model = self.session.get(OpenRouterPricingSnapshotModel, snapshot_id)
+        return pricing_snapshot_model_to_domain(model) if model else None
+
+    def get_latest_verified_for_model(
+        self, routed_model: str, canonical_name: str | None = None
+    ) -> OpenRouterPricingSnapshot | None:
+        stmt = (
+            select(OpenRouterPricingSnapshotModel)
+            .where(
+                OpenRouterPricingSnapshotModel.routed_model_identity == routed_model,
+                OpenRouterPricingSnapshotModel.source.in_(AUTHORITATIVE_PRICING_SOURCES),
+            )
+            .order_by(OpenRouterPricingSnapshotModel.observed_at.desc(), OpenRouterPricingSnapshotModel.created_at.desc())
+        )
+        if canonical_name:
+            stmt = stmt.where(OpenRouterPricingSnapshotModel.canonical_model_identity == canonical_name)
+        model = self.session.scalars(stmt).first()
+        return pricing_snapshot_model_to_domain(model) if model else None
+
+    def list_by_model(self, routed_model: str) -> list[OpenRouterPricingSnapshot]:
+        stmt = (
+            select(OpenRouterPricingSnapshotModel)
+            .where(OpenRouterPricingSnapshotModel.routed_model_identity == routed_model)
+            .order_by(OpenRouterPricingSnapshotModel.observed_at.desc())
+        )
+        return [pricing_snapshot_model_to_domain(m) for m in self.session.scalars(stmt).all()]
+
+
+class PostgresBudgetReservationRepository:
+    def __init__(self, session: Session):
+        self.session = session
+
+    def save(self, reservation: BudgetReservation) -> None:
+        existing = self.session.get(BudgetReservationModel, reservation.reservation_id)
+        if existing:
+            existing.status = reservation.status
+            existing.updated_at = reservation.updated_at
+            return
+        self.session.add(
+            BudgetReservationModel(
+                id=reservation.reservation_id,
+                project_id=reservation.project_id,
+                job_id=reservation.job_id,
+                change_id=reservation.change_id,
+                role=reservation.role,
+                canonical_model_identity=reservation.canonical_model_identity,
+                reserved_amount_usd=reservation.reserved_amount_usd,
+                status=reservation.status,
+                pricing_snapshot_id=reservation.pricing_snapshot_id,
+                correlation_id=reservation.correlation_id,
+                created_at=reservation.created_at,
+                updated_at=reservation.updated_at,
+            )
+        )
+
+    def get_by_id(self, reservation_id: str) -> BudgetReservation | None:
+        model = self.session.get(BudgetReservationModel, reservation_id)
+        return budget_reservation_model_to_domain(model) if model else None
+
+    def list_by_project(self, project_id: str) -> list[BudgetReservation]:
+        return [
+            budget_reservation_model_to_domain(m)
+            for m in self.session.scalars(
+                select(BudgetReservationModel).where(BudgetReservationModel.project_id == project_id)
+            ).all()
+        ]
+
+
+class PostgresBudgetLedgerRepository:
+    def __init__(self, session: Session):
+        self.session = session
+
+    def save(self, entry: BudgetLedgerEntry) -> None:
+        self.session.add(
+            BudgetLedgerModel(
+                id=entry.entry_id,
+                reservation_id=entry.reservation_id,
+                project_id=entry.project_id,
+                job_id=entry.job_id,
+                change_id=entry.change_id,
+                provider=entry.provider,
+                role=entry.role,
+                canonical_model_identity=entry.canonical_model_identity,
+                prompt_tokens=entry.prompt_tokens,
+                completion_tokens=entry.completion_tokens,
+                total_tokens=entry.total_tokens,
+                amount_usd=entry.amount_usd,
+                entry_type=entry.entry_type,
+                created_at=entry.created_at,
+            )
+        )
+
+    def list_by_project(self, project_id: str) -> list[BudgetLedgerEntry]:
+        return [
+            budget_ledger_model_to_domain(m)
+            for m in self.session.scalars(
+                select(BudgetLedgerModel).where(BudgetLedgerModel.project_id == project_id)
+            ).all()
+        ]
+
+
 class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
     """Encapsulates a database session for atomic operations across repositories."""
 
@@ -1289,6 +1538,10 @@ class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.provider_health = PostgresProviderHealthRepository(session)
         self.capacity_windows = PostgresCapacityWindowRepository(session)
         self.git_operations = PostgresGitOperationRepository(session)
+        self.budget_policies = PostgresOpenRouterBudgetPolicyRepository(session)
+        self.pricing_snapshots = PostgresOpenRouterPricingSnapshotRepository(session)
+        self.budget_reservations = PostgresBudgetReservationRepository(session)
+        self.budget_ledger = PostgresBudgetLedgerRepository(session)
 
     def commit(self) -> None:
         self.session.commit()

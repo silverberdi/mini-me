@@ -1,9 +1,12 @@
-"""Execution pipeline orchestration for implementation and complementary review jobs."""
+"""Execution pipeline orchestration for implementation, complementary review, and budgeted drain fallback."""
 
 from __future__ import annotations
 
+import os
+from decimal import Decimal
 from pathlib import Path
 
+from minime.adapters.openrouter_adapter import OpenRouterAdapter, OpenRouterRequest
 from minime.domain.enums import (
     AuditFindingSeverity,
     AuditRiskLevel,
@@ -30,6 +33,7 @@ from minime.domain.models import (
     utc_now,
 )
 from minime.services.audit_verdict_parser import parse_audit_result
+from minime.services.budget_service import BudgetService
 from minime.services.candidate_integrity import (
     validate_post_review_integrity,
     validate_pre_review_integrity,
@@ -48,6 +52,8 @@ from minime.services.implementer_runner import (
     ImplementerRunnerInterface,
     runner_for_implementer,
 )
+from minime.services.model_independence_policy import ModelIndependencePolicy
+from minime.services.openrouter_eligibility import OpenRouterEligibilityEvaluator
 from minime.services.openspec_tasks import OpenSpecTaskTracker
 from minime.services.provider_health_service import ProviderHealthService
 from minime.services.provider_outcome_parser import ProviderOutcomeParser
@@ -79,7 +85,7 @@ EVENT_BY_STATUS = {
 
 
 class ExecutionPipelineService:
-    """Coordinates job state, isolated workspace, implementer execution, checks, and complementary review."""
+    """Coordinates job state, isolated workspace, implementer execution, checks, complementary review, and fallback."""
 
     def __init__(
         self,
@@ -94,6 +100,11 @@ class ExecutionPipelineService:
         task_tracker: OpenSpecTaskTracker | None = None,
         health_service: ProviderHealthService | None = None,
         lifecycle_service: CapacityLifecycleService | None = None,
+        budget_service: BudgetService | None = None,
+        openrouter_adapter: OpenRouterAdapter | None = None,
+        independence_policy: ModelIndependencePolicy | None = None,
+        eligibility_evaluator: OpenRouterEligibilityEvaluator | None = None,
+        openrouter_api_key: str | None = None,
         implementer_timeout_seconds: int = 3600,
         reviewer_timeout_seconds: int = 3600,
     ):
@@ -114,8 +125,19 @@ class ExecutionPipelineService:
         self.lifecycle_service = lifecycle_service or CapacityLifecycleService(
             self.uow, health_service=self.health_service
         )
+        self.budget_service = budget_service or BudgetService(self.uow)
+        self.openrouter_adapter = openrouter_adapter or OpenRouterAdapter()
+        self.independence_policy = independence_policy or ModelIndependencePolicy()
+        self.eligibility_evaluator = eligibility_evaluator or OpenRouterEligibilityEvaluator()
+        self.openrouter_api_key = openrouter_api_key
         self.implementer_timeout_seconds = implementer_timeout_seconds
         self.reviewer_timeout_seconds = reviewer_timeout_seconds
+        self.default_implementer_model = "anthropic/claude-3.5-sonnet"
+        self.allowed_reviewer_models = [
+            "openai/gpt-4o",
+            "meta-llama/llama-3.3-70b-instruct",
+            "mistralai/mistral-large",
+        ]
 
     def queue_job(self, project_id: str, change_name: str) -> Job:
         project = self._require_project(project_id)
@@ -153,24 +175,77 @@ class ExecutionPipelineService:
         readonly_view_created = False
         phase_started = utc_now()
         check_run_results = []
+        implementer_fallback_used = False
+        fallback_implementer_model: str | None = None
+
         try:
             # Check implementer capacity availability before creating worktree / starting implementer
             imp_health = self.health_service.get_health(project.implementer)
-            if imp_health.status != ProviderHealthStatus.AVAILABLE:
-                job = self.uow.jobs.set_waiting_capacity(
-                    job.job_id,
-                    project.implementer,
-                    f"Primary implementer '{project.implementer}' is {imp_health.status.value}",
-                )
-                self._save_event(
-                    EventType.JOB_WAITING_CAPACITY,
-                    job,
-                    {"waiting_provider": project.implementer, "status": imp_health.status.value},
-                )
-                self.uow.commit()
-                return job
+            is_primary_imp_available = imp_health.status == ProviderHealthStatus.AVAILABLE
 
-            job = self._transition(job, JobStatus.RUNNING)
+            if not is_primary_imp_available:
+                # Primary implementer is exhausted / unavailable. Check for OpenRouter fallback eligibility.
+                dual_exhausted = self._is_dual_primary_exhausted(project)
+                if not dual_exhausted:
+                    # Single primary exhaustion: DRAIN rules prohibit fallback when other primary is available
+                    job = self.uow.jobs.set_waiting_capacity(
+                        job.job_id,
+                        project.implementer,
+                        f"Primary implementer '{project.implementer}' is {imp_health.status.value}",
+                    )
+                    self._save_event(
+                        EventType.JOB_WAITING_CAPACITY,
+                        job,
+                        {"waiting_provider": project.implementer, "status": imp_health.status.value},
+                    )
+                    self.uow.commit()
+                    return job
+
+                # Dual-primary exhaustion: Evaluate 10-point OpenRouter fallback eligibility
+                sched_status = self.lifecycle_service.get_scheduler_status(project.project_id)
+                policy, headroom = self.budget_service.get_headroom(project.project_id)
+                primary_health_records = self.health_service.list_all_health()
+
+                elig = self.eligibility_evaluator.evaluate_10_points(
+                    scheduler_mode=sched_status.mode,
+                    job=job,
+                    role="implementer",
+                    is_new_ready_change=False,
+                    primary_health_records=primary_health_records,
+                    project=project,
+                    policy=policy,
+                    headroom=headroom,
+                    model_identity_valid=True,
+                    candidate_integrity_valid=True,
+                    pipeline_invariants_valid=True,
+                )
+
+                if not elig.eligible:
+                    self._save_event(
+                        EventType.FALLBACK_DENIED,
+                        job,
+                        {"role": "implementer", "reason": elig.denial_reason, "reasons": elig.reasons},
+                    )
+                    job = self.uow.jobs.set_waiting_capacity(
+                        job.job_id,
+                        "openrouter",
+                        f"OpenRouter fallback ineligible: {elig.denial_reason}",
+                    )
+                    self._save_event(
+                        EventType.JOB_WAITING_CAPACITY,
+                        job,
+                        {"waiting_provider": "openrouter", "status": "fallback_ineligible"},
+                    )
+                    self.uow.commit()
+                    return job
+
+                # Fallback is eligible for implementer!
+                implementer_fallback_used = True
+                fallback_implementer_model = self.default_implementer_model
+
+            # Transition to RUNNING if not already in RUNNING status
+            if job.status != JobStatus.RUNNING:
+                job = self._transition(job, JobStatus.RUNNING)
             try:
                 worktree = await self.worktree_manager.create_worktree(
                     job.job_id,
@@ -192,72 +267,198 @@ class ExecutionPipelineService:
             prompt_context = worktree_task_tracker.format_prompt_context(
                 project.openspec_path, job.change_name
             )
-            runner = self.implementer_runner or runner_for_implementer(
-                project.implementer
-            )
-            result = await runner.run(
-                worktree.path,
-                prompt_context,
-                timeout_seconds=self.implementer_timeout_seconds,
-            )
-            for line in result.stdout:
-                self._log(job.job_id, "stdout", line)
-            for line in result.stderr:
-                self._log(job.job_id, "stderr", line)
-            self.uow.metrics.save(
-                MetricFact(
-                    metric_name="implementer_duration_ms",
-                    project_id=job.project_id,
-                    change_id=job.change_name,
-                    duration_ms=result.duration_ms,
-                    details={"job_id": job.job_id},
+
+            if implementer_fallback_used and fallback_implementer_model:
+                # OpenRouter fallback implementer path
+                canonical_imp = self.independence_policy.registry.normalize(fallback_implementer_model)
+                canonical_name = canonical_imp.canonical_name if canonical_imp else fallback_implementer_model
+                snapshot = self.uow.pricing_snapshots.get_latest_verified_for_model(
+                    fallback_implementer_model, canonical_name
                 )
-            )
+                if not snapshot:
+                    self._save_event(
+                        EventType.FALLBACK_DENIED,
+                        job,
+                        {"role": "implementer", "reason": "PRICING_SNAPSHOT_MISSING", "model": fallback_implementer_model},
+                    )
+                    job = self.uow.jobs.set_waiting_capacity(
+                        job.job_id,
+                        "openrouter",
+                        f"Fallback denied: No verified pricing snapshot for model '{fallback_implementer_model}' (PRICING_SNAPSHOT_MISSING)",
+                    )
+                    self._save_event(
+                        EventType.JOB_WAITING_CAPACITY,
+                        job,
+                        {"waiting_provider": "openrouter", "status": "pricing_unverified"},
+                    )
+                    self.uow.commit()
+                    return job
 
-            # Record implementer outcome
-            imp_outcome = ProviderOutcomeParser.parse_runner_output(
-                provider=project.implementer,
-                role="implementer",
-                model=None,
-                exit_code=result.exit_code,
-                timed_out=result.timed_out,
-                stdout_lines=result.stdout,
-                stderr_lines=result.stderr,
-            )
-            self.health_service.record_outcome(imp_outcome)
+                prompt_upper = max(len(prompt_context.split()) * 2, 2000)
+                max_output = 4096
 
-            if imp_outcome.result_class in {
-                ProviderResultClass.QUOTA_LIMIT,
-                ProviderResultClass.RATE_LIMIT,
-            }:
-                job = self.uow.jobs.set_waiting_capacity(
-                    job.job_id,
-                    project.implementer,
-                    imp_outcome.summary or f"Capacity exhausted on {project.implementer}",
-                    imp_outcome.capacity_reset_at,
+                # Atomic reservation on PostgreSQL policy before HTTP dispatch
+                reservation, denial_reason, headroom = self.budget_service.reserve_budget(
+                    project_id=project.project_id,
+                    job_id=job.job_id,
+                    change_id=job.change_name,
+                    role="implementer",
+                    canonical_model_identity=canonical_name,
+                    pricing_snapshot=snapshot,
+                    prompt_token_upper_bound=prompt_upper,
+                    max_output_tokens=max_output,
+                )
+                if not reservation:
+                    self._save_event(
+                        EventType.FALLBACK_DENIED,
+                        job,
+                        {"role": "implementer", "reason": denial_reason},
+                    )
+                    job = self.uow.jobs.set_waiting_capacity(
+                        job.job_id,
+                        "openrouter",
+                        f"Fallback budget reservation denied: {denial_reason}",
+                    )
+                    self._save_event(
+                        EventType.JOB_WAITING_CAPACITY,
+                        job,
+                        {"waiting_provider": "openrouter", "status": "budget_denied"},
+                    )
+                    self.uow.commit()
+                    return job
+
+                # COMMIT reservation before external HTTP call
+                self.uow.commit()
+
+                self._save_event(
+                    EventType.FALLBACK_MODEL_SELECTED,
+                    job,
+                    {"role": "implementer", "model": fallback_implementer_model, "canonical_identity": canonical_name},
                 )
                 self._save_event(
-                    EventType.JOB_WAITING_CAPACITY,
+                    EventType.FALLBACK_INVOKED,
                     job,
-                    {
-                        "waiting_provider": project.implementer,
-                        "reset_at": imp_outcome.capacity_reset_at.isoformat()
-                        if imp_outcome.capacity_reset_at
-                        else None,
-                    },
+                    {"role": "implementer", "model": fallback_implementer_model, "reservation_id": reservation.reservation_id},
                 )
                 self.uow.commit()
-                return job
 
-            if result.timed_out:
-                self._save_event(
-                    EventType.JOB_TIMEOUT,
-                    job,
-                    {"timeout_seconds": self.implementer_timeout_seconds},
+                api_key = self.openrouter_api_key or os.environ.get("OPENROUTER_API_KEY", "mock-openrouter-key")
+                openrouter_res, meta = await self.openrouter_adapter.execute(
+                    OpenRouterRequest(
+                        model=fallback_implementer_model,
+                        canonical_model_identity=canonical_name,
+                        prompt=prompt_context,
+                        max_output_tokens=max_output,
+                        authorized_max_output_tokens=max_output,
+                        api_key=api_key,
+                        pricing_snapshot=snapshot,
+                        pricing_snapshot_id=snapshot.snapshot_id,
+                        timeout_seconds=self.implementer_timeout_seconds,
+                    )
                 )
-                raise RuntimeError("Implementer execution timed out.")
-            if result.exit_code != 0:
-                raise RuntimeError(f"Implementer exited with code {result.exit_code}.")
+
+                if openrouter_res.result_class == ProviderResultClass.SUCCESS:
+                    prompt_tok = meta.get("prompt_tokens") or (prompt_upper // 2)
+                    comp_tok = meta.get("completion_tokens") or 500
+                    tot_tok = meta.get("total_tokens") or (prompt_tok + comp_tok)
+                    actual_cost = meta.get("actual_cost_usd")
+                    if actual_cost is None:
+                        actual_cost = (
+                            Decimal(prompt_tok) * snapshot.prompt_price_per_token
+                            + Decimal(comp_tok) * snapshot.output_price_per_token
+                            + snapshot.additional_cost_per_request
+                        )
+                    self.budget_service.settle_reservation(
+                        reservation_id=reservation.reservation_id,
+                        actual_cost_usd=actual_cost,
+                        prompt_tokens=prompt_tok,
+                        completion_tokens=comp_tok,
+                        total_tokens=tot_tok,
+                    )
+                    self.uow.commit()
+                    self._log(job.job_id, "stdout", openrouter_res.summary or "OpenRouter implementer succeeded")
+                else:
+                    # Mark unresolved and fail-closed
+                    self.budget_service.mark_unresolved(reservation.reservation_id)
+                    self.uow.commit()
+                    job = self.uow.jobs.set_waiting_capacity(
+                        job.job_id,
+                        "openrouter",
+                        openrouter_res.summary or "OpenRouter implementer fallback failed",
+                    )
+                    self._save_event(
+                        EventType.JOB_WAITING_CAPACITY,
+                        job,
+                        {"waiting_provider": "openrouter", "error": openrouter_res.summary},
+                    )
+                    self.uow.commit()
+                    return job
+            else:
+                # Primary implementer runner execution
+                runner = self.implementer_runner or runner_for_implementer(project.implementer)
+                result = await runner.run(
+                    worktree.path,
+                    prompt_context,
+                    timeout_seconds=self.implementer_timeout_seconds,
+                )
+                for line in result.stdout:
+                    self._log(job.job_id, "stdout", line)
+                for line in result.stderr:
+                    self._log(job.job_id, "stderr", line)
+                self.uow.metrics.save(
+                    MetricFact(
+                        metric_name="implementer_duration_ms",
+                        project_id=job.project_id,
+                        change_id=job.change_name,
+                        duration_ms=result.duration_ms,
+                        details={"job_id": job.job_id},
+                    )
+                )
+
+                # Record implementer outcome for primary provider
+                imp_outcome = ProviderOutcomeParser.parse_runner_output(
+                    provider=project.implementer,
+                    role="implementer",
+                    model=None,
+                    exit_code=result.exit_code,
+                    timed_out=result.timed_out,
+                    stdout_lines=result.stdout,
+                    stderr_lines=result.stderr,
+                )
+                self.health_service.record_outcome(imp_outcome)
+
+                if imp_outcome.result_class in {
+                    ProviderResultClass.QUOTA_LIMIT,
+                    ProviderResultClass.RATE_LIMIT,
+                }:
+                    job = self.uow.jobs.set_waiting_capacity(
+                        job.job_id,
+                        project.implementer,
+                        imp_outcome.summary or f"Capacity exhausted on {project.implementer}",
+                        imp_outcome.capacity_reset_at,
+                    )
+                    self._save_event(
+                        EventType.JOB_WAITING_CAPACITY,
+                        job,
+                        {
+                            "waiting_provider": project.implementer,
+                            "reset_at": imp_outcome.capacity_reset_at.isoformat()
+                            if imp_outcome.capacity_reset_at
+                            else None,
+                        },
+                    )
+                    self.uow.commit()
+                    return job
+
+                if result.timed_out:
+                    self._save_event(
+                        EventType.JOB_TIMEOUT,
+                        job,
+                        {"timeout_seconds": self.implementer_timeout_seconds},
+                    )
+                    raise RuntimeError("Implementer execution timed out.")
+                if result.exit_code != 0:
+                    raise RuntimeError(f"Implementer exited with code {result.exit_code}.")
 
             job.candidate_sha = await self.worktree_manager.current_sha(worktree.path)
             self.uow.jobs.save(job)
@@ -301,39 +502,108 @@ class ExecutionPipelineService:
             job = self._transition(job, JobStatus.CHECKS_PASSED)
 
             # Complementary review stage
-            # 1. Policy validation
-            valid_pair, pair_err = validate_complementary_pair(
-                project.implementer, project.reviewer
-            )
-            if not valid_pair:
-                self._save_event(
-                    EventType.REVIEW_POLICY_VIOLATION,
-                    job,
-                    {
-                        "error": pair_err,
-                        "implementer": project.implementer,
-                        "reviewer": project.reviewer,
-                    },
-                )
-                raise RuntimeError(pair_err or "Invalid complementary pair.")
-
-            # 1b. Check reviewer capacity availability
             rev_health = self.health_service.get_health(project.reviewer)
-            if rev_health.status != ProviderHealthStatus.AVAILABLE:
-                job = self.uow.jobs.set_waiting_capacity(
-                    job.job_id,
-                    project.reviewer,
-                    f"Primary reviewer '{project.reviewer}' is {rev_health.status.value}",
-                )
-                self._save_event(
-                    EventType.JOB_WAITING_CAPACITY,
-                    job,
-                    {"waiting_provider": project.reviewer, "status": rev_health.status.value},
-                )
-                self.uow.commit()
-                return job
+            is_primary_rev_available = rev_health.status == ProviderHealthStatus.AVAILABLE
+            reviewer_fallback_used = False
+            selected_reviewer_model: str | None = None
+            rev_identity = None
 
-            # 2. Pre-review candidate integrity and base SHA validation
+            if not is_primary_rev_available:
+                # Primary reviewer is unavailable. Check dual-primary exhaustion.
+                dual_exhausted = self._is_dual_primary_exhausted(project)
+                if not dual_exhausted:
+                    job = self.uow.jobs.set_waiting_capacity(
+                        job.job_id,
+                        project.reviewer,
+                        f"Primary reviewer '{project.reviewer}' is {rev_health.status.value}",
+                    )
+                    self._save_event(
+                        EventType.JOB_WAITING_CAPACITY,
+                        job,
+                        {"waiting_provider": project.reviewer, "status": rev_health.status.value},
+                    )
+                    self.uow.commit()
+                    return job
+
+                # Dual exhaustion: evaluate 10-point OpenRouter fallback eligibility for reviewer
+                sched_status = self.lifecycle_service.get_scheduler_status(project.project_id)
+                policy, headroom = self.budget_service.get_headroom(project.project_id)
+                primary_health_records = self.health_service.list_all_health()
+
+                elig = self.eligibility_evaluator.evaluate_10_points(
+                    scheduler_mode=sched_status.mode,
+                    job=job,
+                    role="reviewer",
+                    is_new_ready_change=False,
+                    primary_health_records=primary_health_records,
+                    project=project,
+                    policy=policy,
+                    headroom=headroom,
+                    model_identity_valid=True,
+                    candidate_integrity_valid=True,
+                    pipeline_invariants_valid=True,
+                )
+
+                if not elig.eligible:
+                    self._save_event(
+                        EventType.FALLBACK_DENIED,
+                        job,
+                        {"role": "reviewer", "reason": elig.denial_reason, "reasons": elig.reasons},
+                    )
+                    job = self.uow.jobs.set_waiting_capacity(
+                        job.job_id,
+                        "openrouter",
+                        f"OpenRouter fallback ineligible: {elig.denial_reason}",
+                    )
+                    self._save_event(
+                        EventType.JOB_WAITING_CAPACITY,
+                        job,
+                        {"waiting_provider": "openrouter", "status": "fallback_ineligible"},
+                    )
+                    self.uow.commit()
+                    return job
+
+                # Canonical Model Independence Check
+                effective_imp_model = fallback_implementer_model or project.implementer
+                selected_reviewer_model, rev_identity = self.independence_policy.select_independent_reviewer(
+                    effective_imp_model, self.allowed_reviewer_models
+                )
+
+                if not selected_reviewer_model or not rev_identity:
+                    # Model collision / unprovable distinct identity: FAIL CLOSED
+                    job = self.uow.jobs.set_waiting_capacity(
+                        job.job_id,
+                        "openrouter",
+                        "DISTINCT_REVIEWER_UNAVAILABLE",
+                    )
+                    self._save_event(
+                        EventType.JOB_WAITING_CAPACITY,
+                        job,
+                        {"waiting_provider": "openrouter", "reason": "DISTINCT_REVIEWER_UNAVAILABLE"},
+                    )
+                    self.uow.commit()
+                    return job
+
+                reviewer_fallback_used = True
+
+            if not reviewer_fallback_used:
+                # Primary complementary pair policy validation
+                valid_pair, pair_err = validate_complementary_pair(
+                    project.implementer, project.reviewer
+                )
+                if not valid_pair:
+                    self._save_event(
+                        EventType.REVIEW_POLICY_VIOLATION,
+                        job,
+                        {
+                            "error": pair_err,
+                            "implementer": project.implementer,
+                            "reviewer": project.reviewer,
+                        },
+                    )
+                    raise RuntimeError(pair_err or "Invalid complementary pair.")
+
+            # Pre-review candidate integrity validation
             valid_pre, pre_err = validate_pre_review_integrity(
                 worktree.path,
                 job.candidate_sha,
@@ -350,19 +620,22 @@ class ExecutionPipelineService:
                 )
                 raise RuntimeError(pre_err or "Pre-review candidate integrity failure.")
 
-            # 3. Create isolated read-only reviewer workspace snapshot
+            # Create isolated read-only reviewer workspace snapshot
             readonly_view = self.reviewer_view_manager.create_readonly_view(
                 worktree.path, job.job_id
             )
             readonly_view_created = True
 
-            # 4. Transition to REVIEW_RUNNING and persist Review record
+            # Transition to REVIEW_RUNNING and persist Review record
             job = self._transition(job, JobStatus.REVIEW_RUNNING)
+            effective_reviewer_role = (
+                f"openrouter:{selected_reviewer_model}" if reviewer_fallback_used else project.reviewer
+            )
             review = Review(
                 job_id=job.job_id,
                 project_id=job.project_id,
                 change_name=job.change_name,
-                reviewer_role=project.reviewer,
+                reviewer_role=effective_reviewer_role,
                 candidate_sha=job.candidate_sha or "",
                 base_sha=job.base_sha or "",
                 status=ReviewStatus.REVIEW_RUNNING,
@@ -370,7 +643,6 @@ class ExecutionPipelineService:
             self.uow.reviews.save(review)
             self.uow.commit()
 
-            # 5. Build prompt and execute reviewer runner inside read-only view
             review_prompt = build_reviewer_prompt(
                 project=project,
                 change_name=job.change_name,
@@ -380,98 +652,251 @@ class ExecutionPipelineService:
                 candidate_worktree_path=readonly_view,
                 checks_results=check_run_results,
             )
-            reviewer = self.reviewer_runner or runner_for_reviewer(project.reviewer)
-            review_result = await reviewer.run(
-                readonly_view,
-                review_prompt,
-                timeout_seconds=self.reviewer_timeout_seconds,
-            )
 
-            for line in review_result.stdout:
-                self._log(job.job_id, "stdout", line)
-            for line in review_result.stderr:
-                self._log(job.job_id, "stderr", line)
-
-            self.uow.metrics.save(
-                MetricFact(
-                    metric_name="review_duration_ms",
-                    project_id=job.project_id,
-                    change_id=job.change_name,
-                    duration_ms=review_result.duration_ms,
-                    details={"job_id": job.job_id, "reviewer": project.reviewer},
-                )
-            )
-
-            # Check for domain verdict validity first
-            domain_verdict_valid = False
             verdict_payload = None
-            try:
-                verdict_payload = parse_review_verdict(review_result.stdout)
-                domain_verdict_valid = True
-            except Exception:
-                pass
 
-            # Record reviewer outcome
-            rev_outcome = ProviderOutcomeParser.parse_runner_output(
-                provider=project.reviewer,
-                role="reviewer",
-                model=None,
-                exit_code=review_result.exit_code,
-                timed_out=review_result.timed_out,
-                stdout_lines=review_result.stdout,
-                stderr_lines=review_result.stderr,
-                domain_verdict_valid=domain_verdict_valid,
-            )
-            self.health_service.record_outcome(rev_outcome)
+            if reviewer_fallback_used and selected_reviewer_model and rev_identity:
+                # OpenRouter fallback reviewer execution
+                snapshot = self.uow.pricing_snapshots.get_latest_verified_for_model(
+                    selected_reviewer_model, rev_identity.canonical_name
+                )
+                if not snapshot:
+                    self._save_event(
+                        EventType.FALLBACK_DENIED,
+                        job,
+                        {"role": "reviewer", "reason": "PRICING_SNAPSHOT_MISSING", "model": selected_reviewer_model},
+                    )
+                    self.uow.reviews.transition(
+                        review.review_id,
+                        ReviewStatus.REVIEW_FAILED.value,
+                        error_message=f"Fallback reviewer denied: No verified pricing snapshot for model '{selected_reviewer_model}' (PRICING_SNAPSHOT_MISSING)",
+                    )
+                    job = self.uow.jobs.set_waiting_capacity(
+                        job.job_id,
+                        "openrouter",
+                        f"Fallback reviewer denied: No verified pricing snapshot for model '{selected_reviewer_model}' (PRICING_SNAPSHOT_MISSING)",
+                    )
+                    self._save_event(
+                        EventType.JOB_WAITING_CAPACITY,
+                        job,
+                        {"waiting_provider": "openrouter", "status": "pricing_unverified"},
+                    )
+                    self.uow.commit()
+                    return job
 
-            if rev_outcome.result_class in {
-                ProviderResultClass.QUOTA_LIMIT,
-                ProviderResultClass.RATE_LIMIT,
-            }:
-                job = self.uow.jobs.set_waiting_capacity(
-                    job.job_id,
-                    project.reviewer,
-                    rev_outcome.summary or f"Capacity exhausted on {project.reviewer}",
-                    rev_outcome.capacity_reset_at,
+                prompt_upper = max(len(review_prompt.split()) * 2, 2000)
+                max_output = 4096
+
+                # Atomic reservation on PostgreSQL policy before HTTP dispatch
+                reservation, denial_reason, headroom = self.budget_service.reserve_budget(
+                    project_id=project.project_id,
+                    job_id=job.job_id,
+                    change_id=job.change_name,
+                    role="reviewer",
+                    canonical_model_identity=rev_identity.canonical_name,
+                    pricing_snapshot=snapshot,
+                    prompt_token_upper_bound=prompt_upper,
+                    max_output_tokens=max_output,
+                )
+                if not reservation:
+                    self._save_event(
+                        EventType.FALLBACK_DENIED,
+                        job,
+                        {"role": "reviewer", "reason": denial_reason},
+                    )
+                    self.uow.reviews.transition(
+                        review.review_id,
+                        ReviewStatus.REVIEW_FAILED.value,
+                        error_message=f"Budget reservation denied: {denial_reason}",
+                    )
+                    job = self.uow.jobs.set_waiting_capacity(
+                        job.job_id,
+                        "openrouter",
+                        f"Fallback budget reservation denied: {denial_reason}",
+                    )
+                    self._save_event(
+                        EventType.JOB_WAITING_CAPACITY,
+                        job,
+                        {"waiting_provider": "openrouter", "status": "budget_denied"},
+                    )
+                    self.uow.commit()
+                    return job
+
+                # COMMIT reservation before external HTTP call
+                self.uow.commit()
+
+                self._save_event(
+                    EventType.FALLBACK_MODEL_SELECTED,
+                    job,
+                    {"role": "reviewer", "model": selected_reviewer_model, "canonical_identity": rev_identity.canonical_name},
                 )
                 self._save_event(
-                    EventType.JOB_WAITING_CAPACITY,
+                    EventType.FALLBACK_INVOKED,
                     job,
-                    {
-                        "waiting_provider": project.reviewer,
-                        "reset_at": rev_outcome.capacity_reset_at.isoformat()
-                        if rev_outcome.capacity_reset_at
-                        else None,
-                    },
+                    {"role": "reviewer", "model": selected_reviewer_model, "reservation_id": reservation.reservation_id},
                 )
                 self.uow.commit()
-                return job
 
-            if review_result.timed_out:
-                self.uow.reviews.transition(
-                    review.review_id,
-                    ReviewStatus.REVIEW_TIMED_OUT.value,
-                    error_message=f"Reviewer execution timed out after {self.reviewer_timeout_seconds} seconds.",
+                api_key = self.openrouter_api_key or os.environ.get("OPENROUTER_API_KEY", "mock-openrouter-key")
+                openrouter_res, meta = await self.openrouter_adapter.execute(
+                    OpenRouterRequest(
+                        model=selected_reviewer_model,
+                        canonical_model_identity=rev_identity.canonical_name,
+                        prompt=review_prompt,
+                        max_output_tokens=max_output,
+                        authorized_max_output_tokens=max_output,
+                        api_key=api_key,
+                        pricing_snapshot=snapshot,
+                        pricing_snapshot_id=snapshot.snapshot_id,
+                        timeout_seconds=self.reviewer_timeout_seconds,
+                    )
                 )
-                self._save_event(
-                    EventType.REVIEW_TIMEOUT,
-                    job,
-                    {"timeout_seconds": self.reviewer_timeout_seconds},
-                )
-                self.uow.commit()
-                raise RuntimeError("Reviewer execution timed out.")
 
-            if review_result.exit_code != 0:
-                err_msg = f"Reviewer process exited with code {review_result.exit_code}."
-                self.uow.reviews.transition(
-                    review.review_id,
-                    ReviewStatus.REVIEW_FAILED.value,
-                    error_message=err_msg,
-                )
-                self.uow.commit()
-                raise RuntimeError(err_msg)
+                if openrouter_res.result_class == ProviderResultClass.SUCCESS:
+                    prompt_tok = meta.get("prompt_tokens") or (prompt_upper // 2)
+                    comp_tok = meta.get("completion_tokens") or 500
+                    tot_tok = meta.get("total_tokens") or (prompt_tok + comp_tok)
+                    actual_cost = meta.get("actual_cost_usd")
+                    if actual_cost is None:
+                        actual_cost = (
+                            Decimal(prompt_tok) * snapshot.prompt_price_per_token
+                            + Decimal(comp_tok) * snapshot.output_price_per_token
+                            + snapshot.additional_cost_per_request
+                        )
+                    self.budget_service.settle_reservation(
+                        reservation_id=reservation.reservation_id,
+                        actual_cost_usd=actual_cost,
+                        prompt_tokens=prompt_tok,
+                        completion_tokens=comp_tok,
+                        total_tokens=tot_tok,
+                    )
+                    self.uow.commit()
 
-            # 6. Post-review non-mutation integrity validation on original worktree
+                    raw_lines = openrouter_res.raw_output.splitlines() if openrouter_res.raw_output else []
+                    for line in raw_lines:
+                        self._log(job.job_id, "stdout", line)
+                    try:
+                        verdict_payload = parse_review_verdict(raw_lines)
+                    except Exception as e:
+                        err_msg = f"Malformed OpenRouter review output: {e}"
+                        self.uow.reviews.transition(
+                            review.review_id, ReviewStatus.REVIEW_FAILED.value, error_message=err_msg
+                        )
+                        self._save_event(EventType.MALFORMED_REVIEW_OUTPUT, job, {"error": err_msg})
+                        self.uow.commit()
+                        raise RuntimeError(err_msg) from e
+                else:
+                    # Mark unresolved and pause job
+                    self.budget_service.mark_unresolved(reservation.reservation_id)
+                    self.uow.reviews.transition(
+                        review.review_id,
+                        ReviewStatus.REVIEW_FAILED.value,
+                        error_message=openrouter_res.summary,
+                    )
+                    self.uow.commit()
+                    job = self.uow.jobs.set_waiting_capacity(
+                        job.job_id,
+                        "openrouter",
+                        openrouter_res.summary or "OpenRouter reviewer fallback failed",
+                    )
+                    self._save_event(
+                        EventType.JOB_WAITING_CAPACITY,
+                        job,
+                        {"waiting_provider": "openrouter", "error": openrouter_res.summary},
+                    )
+                    self.uow.commit()
+                    return job
+            else:
+                # Primary reviewer runner execution
+                reviewer = self.reviewer_runner or runner_for_reviewer(project.reviewer)
+                review_result = await reviewer.run(
+                    readonly_view,
+                    review_prompt,
+                    timeout_seconds=self.reviewer_timeout_seconds,
+                )
+
+                for line in review_result.stdout:
+                    self._log(job.job_id, "stdout", line)
+                for line in review_result.stderr:
+                    self._log(job.job_id, "stderr", line)
+
+                self.uow.metrics.save(
+                    MetricFact(
+                        metric_name="review_duration_ms",
+                        project_id=job.project_id,
+                        change_id=job.change_name,
+                        duration_ms=review_result.duration_ms,
+                        details={"job_id": job.job_id, "reviewer": project.reviewer},
+                    )
+                )
+
+                domain_verdict_valid = False
+                try:
+                    verdict_payload = parse_review_verdict(review_result.stdout)
+                    domain_verdict_valid = True
+                except Exception:
+                    pass
+
+                rev_outcome = ProviderOutcomeParser.parse_runner_output(
+                    provider=project.reviewer,
+                    role="reviewer",
+                    model=None,
+                    exit_code=review_result.exit_code,
+                    timed_out=review_result.timed_out,
+                    stdout_lines=review_result.stdout,
+                    stderr_lines=review_result.stderr,
+                    domain_verdict_valid=domain_verdict_valid,
+                )
+                self.health_service.record_outcome(rev_outcome)
+
+                if rev_outcome.result_class in {
+                    ProviderResultClass.QUOTA_LIMIT,
+                    ProviderResultClass.RATE_LIMIT,
+                }:
+                    job = self.uow.jobs.set_waiting_capacity(
+                        job.job_id,
+                        project.reviewer,
+                        rev_outcome.summary or f"Capacity exhausted on {project.reviewer}",
+                        rev_outcome.capacity_reset_at,
+                    )
+                    self._save_event(
+                        EventType.JOB_WAITING_CAPACITY,
+                        job,
+                        {
+                            "waiting_provider": project.reviewer,
+                            "reset_at": rev_outcome.capacity_reset_at.isoformat()
+                            if rev_outcome.capacity_reset_at
+                            else None,
+                        },
+                    )
+                    self.uow.commit()
+                    return job
+
+                if review_result.timed_out:
+                    self.uow.reviews.transition(
+                        review.review_id,
+                        ReviewStatus.REVIEW_TIMED_OUT.value,
+                        error_message=f"Reviewer execution timed out after {self.reviewer_timeout_seconds} seconds.",
+                    )
+                    self._save_event(
+                        EventType.REVIEW_TIMEOUT,
+                        job,
+                        {"timeout_seconds": self.reviewer_timeout_seconds},
+                    )
+                    self.uow.commit()
+                    raise RuntimeError("Reviewer execution timed out.")
+
+                if review_result.exit_code != 0:
+                    err_msg = f"Reviewer process exited with code {review_result.exit_code}."
+                    self.uow.reviews.transition(
+                        review.review_id,
+                        ReviewStatus.REVIEW_FAILED.value,
+                        error_message=err_msg,
+                    )
+                    self.uow.commit()
+                    raise RuntimeError(err_msg)
+
+            # Post-review non-mutation integrity validation on original worktree
             valid_post, post_err = validate_post_review_integrity(
                 worktree.path, job.candidate_sha or ""
             )
@@ -489,7 +914,7 @@ class ExecutionPipelineService:
                 self.uow.commit()
                 raise RuntimeError(post_err or "Post-review mutation detected.")
 
-            # 7. Parse structured review verdict strictly if not already parsed
+            # Parse structured review verdict strictly if not already parsed
             if not verdict_payload:
                 try:
                     verdict_payload = parse_review_verdict(review_result.stdout)
@@ -508,7 +933,7 @@ class ExecutionPipelineService:
                     self.uow.commit()
                     raise RuntimeError(parse_err) from parse_exc
 
-            # 8. Apply verdict transition
+            # Apply review verdict transition
             if verdict_payload.verdict == ReviewVerdict.READY_TO_MERGE:
                 self.uow.reviews.transition(
                     review.review_id,
@@ -601,6 +1026,7 @@ class ExecutionPipelineService:
         check_run_results: list,
         review_id: str,
     ) -> Job:
+        """Execute DeepSeek Direct audit. OpenRouter is never used for audit."""
         review = self.uow.reviews.get_by_id(review_id)
         review_findings = (
             self.uow.review_findings.list_by_review(review_id) if review else []
@@ -805,6 +1231,15 @@ class ExecutionPipelineService:
         finally:
             if audit_view_created:
                 self.reviewer_view_manager.cleanup_readonly_view(f"audit-{job.job_id}")
+
+    def _is_dual_primary_exhausted(self, project: Project) -> bool:
+        """Check if both primary providers (Codex and Antigravity) are exhausted / unavailable."""
+        all_health = self.health_service.list_all_health()
+        codex_h = next((h for h in all_health if h.provider == "codex"), None)
+        agy_h = next((h for h in all_health if h.provider == "antigravity"), None)
+        codex_unavail = codex_h is not None and codex_h.status != ProviderHealthStatus.AVAILABLE
+        agy_unavail = agy_h is not None and agy_h.status != ProviderHealthStatus.AVAILABLE
+        return codex_unavail and agy_unavail
 
     def _require_project(self, project_id: str) -> Project:
         project = self.uow.projects.get_by_id(project_id)

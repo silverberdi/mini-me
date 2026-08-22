@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
@@ -12,6 +13,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -377,3 +379,89 @@ class AuditFindingModel(Base):
     )
 
     audit: Mapped[AuditModel] = relationship("AuditModel", back_populates="findings")
+
+
+class OpenRouterBudgetPolicyModel(Base):
+    __tablename__ = "openrouter_budget_policies"
+
+    project_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    daily_cap_usd: Mapped[Decimal] = mapped_column(Numeric(10, 6), nullable=False)
+    monthly_cap_usd: Mapped[Decimal] = mapped_column(Numeric(10, 6), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), default="USD", nullable=False)
+    policy_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    is_breached: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+
+class OpenRouterPricingSnapshotModel(Base):
+    __tablename__ = "openrouter_pricing_snapshots"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    canonical_model_identity: Mapped[str] = mapped_column(String(128), nullable=False)
+    routed_model_identity: Mapped[str] = mapped_column(String(128), nullable=False)
+    prompt_price_per_token: Mapped[Decimal] = mapped_column(Numeric(14, 10), nullable=False)
+    output_price_per_token: Mapped[Decimal] = mapped_column(Numeric(14, 10), nullable=False)
+    additional_cost_per_request: Mapped[Decimal] = mapped_column(
+        Numeric(10, 6), default=Decimal("0.0"), nullable=False
+    )
+    currency: Mapped[str] = mapped_column(String(3), default="USD", nullable=False)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
+class BudgetReservationModel(Base):
+    __tablename__ = "budget_reservations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    job_id: Mapped[str] = mapped_column(String(64), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False)
+    change_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    role: Mapped[str] = mapped_column(String(32), nullable=False)
+    canonical_model_identity: Mapped[str] = mapped_column(String(128), nullable=False)
+    reserved_amount_usd: Mapped[Decimal] = mapped_column(Numeric(10, 6), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    pricing_snapshot_id: Mapped[str] = mapped_column(
+        String(128), ForeignKey("openrouter_pricing_snapshots.id", ondelete="RESTRICT"), nullable=False
+    )
+    correlation_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+
+class BudgetLedgerModel(Base):
+    __tablename__ = "budget_ledger"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    reservation_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("budget_reservations.id", ondelete="SET NULL"), nullable=True
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    job_id: Mapped[str] = mapped_column(String(64), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False)
+    change_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    provider: Mapped[str] = mapped_column(String(32), default="openrouter", nullable=False)
+    role: Mapped[str] = mapped_column(String(32), nullable=False)
+    canonical_model_identity: Mapped[str] = mapped_column(String(128), nullable=False)
+    prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    amount_usd: Mapped[Decimal] = mapped_column(Numeric(10, 6), nullable=False)
+    entry_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
