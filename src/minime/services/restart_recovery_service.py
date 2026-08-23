@@ -85,6 +85,15 @@ class RestartRecoveryService:
 
     def _reconcile_job(self, job: Job, recovery_cycle_id: str) -> Job:
         """Reconcile a single non-terminal job."""
+        # 1. Check for unconsumed pending handoff to preserve executor continuity across restart
+        pending_handoff = next(
+            (h for h in self.uow.job_handoffs.list_by_job(job.job_id) if not h.is_consumed),
+            None,
+        )
+        if pending_handoff:
+            job.current_executor = pending_handoff.to_executor
+            self.uow.jobs.save(job)
+
         if job.status == JobStatus.NEEDS_HUMAN:
             logger.info(f"Job '{job.job_id}' is NEEDS_HUMAN; retaining state for human review.")
             return job

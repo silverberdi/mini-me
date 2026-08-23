@@ -35,6 +35,9 @@ class ContinuationContext:
     incomplete_tasks: list[OpenSpecTask] = field(default_factory=list)
     failing_checks: list[CheckResult] = field(default_factory=list)
     error_message: str | None = None
+    alternative_executor_eligible: bool = True
+    target_executor_role: str | None = None
+    target_model_identity: str | None = None
     details: dict[str, Any] = field(default_factory=dict)
 
 
@@ -64,6 +67,28 @@ class ContinuationEngine:
         self.max_reassignments = max_reassignments_per_job
         self.max_same_outcome_streak = max_same_outcome_streak
         self.max_same_false_blocker_streak = max_same_false_blocker_streak
+
+    def _reassign_or_escalate(
+        self, ctx: ContinuationContext, reason: str
+    ) -> ContinuationDecisionResult:
+        """Apply Rule K: reassign only if ceiling available and alternative is structurally eligible."""
+        if ctx.reassignment_count >= self.max_reassignments:
+            return ContinuationDecisionResult(
+                decision=ContinuationDecision.NEEDS_HUMAN,
+                escalation_reason=f"Maximum reassignment limit ({self.max_reassignments}) reached: {reason}",
+            )
+        if not ctx.alternative_executor_eligible:
+            return ContinuationDecisionResult(
+                decision=ContinuationDecision.NEEDS_HUMAN,
+                escalation_reason=f"Alternative executor ineligible or not configured under policy: {reason}",
+            )
+        return ContinuationDecisionResult(
+            decision=ContinuationDecision.REASSIGN_AGENT,
+            should_handoff=True,
+            target_executor_role=ctx.target_executor_role,
+            target_model_identity=ctx.target_model_identity,
+            escalation_reason=reason,
+        )
 
     def decide(self, ctx: ContinuationContext) -> ContinuationDecisionResult:
         """Evaluate continuation state and deterministically choose the next action."""
@@ -99,30 +124,17 @@ class ContinuationEngine:
 
         # 5. Provider Failure (unrecoverable provider error / auth error)
         if outcome == ExecutionOutcome.PROVIDER_FAILURE:
-            if ctx.reassignment_count < self.max_reassignments:
-                return ContinuationDecisionResult(
-                    decision=ContinuationDecision.REASSIGN_AGENT,
-                    should_handoff=True,
-                    escalation_reason="Provider failure occurred; reassigning to alternative executor.",
-                )
-            return ContinuationDecisionResult(
-                decision=ContinuationDecision.NEEDS_HUMAN,
-                escalation_reason=f"Provider failures exceeded maximum reassignment limit ({self.max_reassignments}).",
+            return self._reassign_or_escalate(
+                ctx, "Provider failure occurred; reassigning to alternative executor."
             )
 
         # 6. False Blocker
         if outcome == ExecutionOutcome.FALSE_BLOCKER:
             # Check false blocker streak
             if ctx.same_blocker_fingerprint_streak >= self.max_same_false_blocker_streak:
-                if ctx.reassignment_count < self.max_reassignments:
-                    return ContinuationDecisionResult(
-                        decision=ContinuationDecision.REASSIGN_AGENT,
-                        should_handoff=True,
-                        escalation_reason=f"Repeated false blocker streak ({ctx.same_blocker_fingerprint_streak}) reached threshold; reassigning executor.",
-                    )
-                return ContinuationDecisionResult(
-                    decision=ContinuationDecision.NEEDS_HUMAN,
-                    escalation_reason=f"Repeated false blocker streak exceeded ceiling ({self.max_same_false_blocker_streak}) and reassignment limit reached.",
+                return self._reassign_or_escalate(
+                    ctx,
+                    f"Repeated false blocker streak ({ctx.same_blocker_fingerprint_streak}) reached threshold; reassigning executor.",
                 )
 
             # Try corrective retry if within executor budget
@@ -139,30 +151,16 @@ class ContinuationEngine:
                 )
 
             # Reassign if retries exhausted
-            if ctx.reassignment_count < self.max_reassignments:
-                return ContinuationDecisionResult(
-                    decision=ContinuationDecision.REASSIGN_AGENT,
-                    should_handoff=True,
-                    escalation_reason="Corrective retry limit reached on false blocker; reassigning executor.",
-                )
-
-            return ContinuationDecisionResult(
-                decision=ContinuationDecision.NEEDS_HUMAN,
-                escalation_reason="False blocker persisted after exhausting all corrective retries and reassignments.",
+            return self._reassign_or_escalate(
+                ctx, "Corrective retry limit reached on false blocker; reassigning executor."
             )
 
         # 7. Premature Stop
         if outcome == ExecutionOutcome.PREMATURE_STOP:
             if ctx.same_outcome_streak >= self.max_same_outcome_streak:
-                if ctx.reassignment_count < self.max_reassignments:
-                    return ContinuationDecisionResult(
-                        decision=ContinuationDecision.REASSIGN_AGENT,
-                        should_handoff=True,
-                        escalation_reason=f"Repeated premature stops ({ctx.same_outcome_streak}) reached limit; reassigning executor.",
-                    )
-                return ContinuationDecisionResult(
-                    decision=ContinuationDecision.NEEDS_HUMAN,
-                    escalation_reason="Premature stops persisted past all retry and reassignment limits.",
+                return self._reassign_or_escalate(
+                    ctx,
+                    f"Repeated premature stops ({ctx.same_outcome_streak}) reached limit; reassigning executor.",
                 )
 
             if ctx.corrective_retries_for_current_executor < self.max_corrective_retries:
@@ -176,30 +174,15 @@ class ContinuationEngine:
                     corrective_prompt=prompt,
                 )
 
-            if ctx.reassignment_count < self.max_reassignments:
-                return ContinuationDecisionResult(
-                    decision=ContinuationDecision.REASSIGN_AGENT,
-                    should_handoff=True,
-                    escalation_reason="Executor exhausted retries without completing tasks; reassigning.",
-                )
-
-            return ContinuationDecisionResult(
-                decision=ContinuationDecision.NEEDS_HUMAN,
-                escalation_reason="Incomplete tasks remain after exhausting all corrective retries and reassignments.",
+            return self._reassign_or_escalate(
+                ctx, "Executor exhausted retries without completing tasks; reassigning."
             )
 
         # 8. Changes Required (failing deterministic checks)
         if outcome == ExecutionOutcome.CHANGES_REQUIRED:
             if ctx.same_outcome_streak >= self.max_same_outcome_streak:
-                if ctx.reassignment_count < self.max_reassignments:
-                    return ContinuationDecisionResult(
-                        decision=ContinuationDecision.REASSIGN_AGENT,
-                        should_handoff=True,
-                        escalation_reason="Persistent failing checks; reassigning executor.",
-                    )
-                return ContinuationDecisionResult(
-                    decision=ContinuationDecision.NEEDS_HUMAN,
-                    escalation_reason="Deterministic checks failing persistently after maximum reassignments.",
+                return self._reassign_or_escalate(
+                    ctx, "Persistent failing checks; reassigning executor."
                 )
 
             if ctx.corrective_retries_for_current_executor < self.max_corrective_retries:
@@ -213,16 +196,8 @@ class ContinuationEngine:
                     corrective_prompt=prompt,
                 )
 
-            if ctx.reassignment_count < self.max_reassignments:
-                return ContinuationDecisionResult(
-                    decision=ContinuationDecision.REASSIGN_AGENT,
-                    should_handoff=True,
-                    escalation_reason="Corrective retry limit reached for check failures; reassigning executor.",
-                )
-
-            return ContinuationDecisionResult(
-                decision=ContinuationDecision.NEEDS_HUMAN,
-                escalation_reason="Failing checks could not be resolved within allowed attempts.",
+            return self._reassign_or_escalate(
+                ctx, "Corrective retry limit reached for check failures; reassigning executor."
             )
 
         # 9. No Progress
@@ -231,15 +206,8 @@ class ContinuationEngine:
                 ctx.same_outcome_streak >= self.max_same_outcome_streak
                 or ctx.corrective_retries_for_current_executor >= self.max_corrective_retries
             ):
-                if ctx.reassignment_count < self.max_reassignments:
-                    return ContinuationDecisionResult(
-                        decision=ContinuationDecision.REASSIGN_AGENT,
-                        should_handoff=True,
-                        escalation_reason="Executor made zero progress; reassigning executor.",
-                    )
-                return ContinuationDecisionResult(
-                    decision=ContinuationDecision.NEEDS_HUMAN,
-                    escalation_reason="No progress made across maximum attempts and reassignments.",
+                return self._reassign_or_escalate(
+                    ctx, "Executor made zero progress; reassigning executor."
                 )
 
             return ContinuationDecisionResult(
@@ -254,14 +222,6 @@ class ContinuationEngine:
                 corrective_prompt="CORRECTIVE GUIDANCE: Execution resulted in malformed or insufficient evidence. Please retry with valid output format.",
             )
 
-        if ctx.reassignment_count < self.max_reassignments:
-            return ContinuationDecisionResult(
-                decision=ContinuationDecision.REASSIGN_AGENT,
-                should_handoff=True,
-                escalation_reason="Malformed execution results exceeded retry threshold; reassigning.",
-            )
-
-        return ContinuationDecisionResult(
-            decision=ContinuationDecision.NEEDS_HUMAN,
-            escalation_reason="Execution failed to produce valid verifiable output within limits.",
+        return self._reassign_or_escalate(
+            ctx, "Malformed execution results exceeded retry threshold; reassigning."
         )

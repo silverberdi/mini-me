@@ -187,6 +187,7 @@ class ExecutionPipelineService:
             project_id=project_id,
             change_name=change_name,
             implementer_role=project.implementer,
+            current_executor=project.implementer,
         )
         self.uow.jobs.save(job)
         self._save_event(
@@ -212,8 +213,9 @@ class ExecutionPipelineService:
         fallback_implementer_model: str | None = None
 
         try:
-            # Check implementer capacity availability before creating worktree / starting implementer
-            imp_health = self.health_service.get_health(project.implementer)
+            # Check effective executor capacity availability before creating worktree / starting implementer
+            effective_implementer = job.current_executor or project.implementer
+            imp_health = self.health_service.get_health(effective_implementer)
             is_primary_imp_available = imp_health.status == ProviderHealthStatus.AVAILABLE
 
             if not is_primary_imp_available:
@@ -223,14 +225,14 @@ class ExecutionPipelineService:
                     # Single primary exhaustion: DRAIN rules prohibit fallback when other primary is available
                     job = self.uow.jobs.set_waiting_capacity(
                         job.job_id,
-                        project.implementer,
-                        f"Primary implementer '{project.implementer}' is {imp_health.status.value}",
+                        effective_implementer,
+                        f"Primary implementer '{effective_implementer}' is {imp_health.status.value}",
                     )
                     self._save_event(
                         EventType.JOB_WAITING_CAPACITY,
                         job,
                         {
-                            "waiting_provider": project.implementer,
+                            "waiting_provider": effective_implementer,
                             "status": imp_health.status.value,
                         },
                     )
@@ -303,9 +305,20 @@ class ExecutionPipelineService:
             self._log(job.job_id, "system", f"Created worktree {worktree.path}")
             self.uow.commit()
 
-            # Continuation loop initialization
-            current_executor = job.current_executor or project.implementer
+            # Continuation loop initialization & state reconstruction from durable PostgreSQL truth
+            pending_handoff = next(
+                (h for h in self.uow.job_handoffs.list_by_job(job.job_id) if not h.is_consumed),
+                None,
+            )
+            if pending_handoff:
+                current_executor = pending_handoff.to_executor
+            else:
+                current_executor = job.current_executor or project.implementer
             job.current_executor = current_executor
+
+            past_attempts = self.uow.job_attempts.list_by_job(job.job_id)
+            past_attempts.sort(key=lambda a: a.attempt_number)
+
             corrective_retries_for_current_executor = 0
             same_outcome_streak = 1
             same_blocker_fingerprint_streak = 0
@@ -314,6 +327,36 @@ class ExecutionPipelineService:
             corrective_prompt: str | None = None
             active_attempt: JobAttempt | None = None
             worktree_task_tracker = OpenSpecTaskTracker(worktree.path)
+
+            if past_attempts:
+                last_att = past_attempts[-1]
+                cur_exec_attempts = []
+                for a in reversed(past_attempts):
+                    if a.executor_role == current_executor:
+                        cur_exec_attempts.append(a)
+                    else:
+                        break
+                cur_exec_attempts.reverse()
+
+                corrective_retries_for_current_executor = sum(
+                    1
+                    for a in cur_exec_attempts
+                    if a.continuation_decision == ContinuationDecision.CORRECT_AND_RETRY
+                )
+                same_outcome_streak = last_att.same_outcome_streak or 1
+                same_blocker_fingerprint_streak = last_att.same_blocker_fingerprint_streak or 0
+                previous_outcome = last_att.normalized_outcome
+                if last_att.continuation_decision == ContinuationDecision.CORRECT_AND_RETRY:
+                    corrective_prompt = last_att.corrective_prompt
+
+                latest_blockers = self.uow.blocker_claims.list_by_job(job.job_id)
+                if latest_blockers:
+                    previous_blocker_fp = latest_blockers[-1].blocker_fingerprint
+
+                if last_att.completed_at is None:
+                    job.attempt_count = last_att.attempt_number
+                else:
+                    job.attempt_count = max(job.attempt_count, len(past_attempts) + 1)
 
             # Main implementer continuation loop
             while True:
@@ -685,6 +728,31 @@ class ExecutionPipelineService:
                     # Implementer phase succeeded with full task completion and clean git state
                     break
 
+                # Evaluate alternative executor candidate and Rule K eligibility
+                target_executor = (
+                    project.reviewer
+                    if current_executor == project.implementer
+                    else project.implementer
+                )
+                alt_eligible = False
+                target_model_id = None
+
+                if target_executor and target_executor != current_executor:
+                    is_pair_valid, _ = validate_complementary_pair(
+                        target_executor, current_executor
+                    )
+                    if is_pair_valid:
+                        alt_eligible = True
+                        target_model_id = target_executor
+
+                        # Model independence check if fallback implementer was used
+                        if fallback_implementer_model:
+                            is_indep, _ = self.independence_policy.validate(
+                                fallback_implementer_model, target_model_id
+                            )
+                            if not is_indep:
+                                alt_eligible = False
+
                 # Non-complete outcome: evaluate continuation decision
                 ctx = ContinuationContext(
                     job_id=job.job_id,
@@ -701,6 +769,9 @@ class ExecutionPipelineService:
                     incomplete_tasks=ver_res.incomplete_tasks,
                     failing_checks=ver_res.failing_checks,
                     error_message=ver_res.reason,
+                    alternative_executor_eligible=alt_eligible,
+                    target_executor_role=target_executor if alt_eligible else None,
+                    target_model_identity=target_model_id if alt_eligible else None,
                 )
                 decision_res = self.continuation_engine.decide(ctx)
                 job.continuation_decision = decision_res.decision
@@ -775,7 +846,7 @@ class ExecutionPipelineService:
                     continue
 
                 if decision_res.decision == ContinuationDecision.REASSIGN_AGENT:
-                    target_executor = (
+                    target_executor = decision_res.target_executor_role or (
                         project.reviewer
                         if current_executor == project.implementer
                         else project.implementer
@@ -822,6 +893,75 @@ class ExecutionPipelineService:
                         },
                     )
                     self.uow.commit()
+
+                    # Check target executor capacity availability under canonical 005/006 lifecycle
+                    target_health = self.health_service.get_health(target_executor)
+                    if target_health.status != ProviderHealthStatus.AVAILABLE:
+                        dual_exhausted = self._is_dual_primary_exhausted(project)
+                        if not dual_exhausted:
+                            job = self.uow.jobs.set_waiting_capacity(
+                                job.job_id,
+                                target_executor,
+                                f"Reassigned target provider '{target_executor}' is {target_health.status.value}",
+                            )
+                            self._save_event(
+                                EventType.JOB_WAITING_CAPACITY,
+                                job,
+                                {
+                                    "waiting_provider": target_executor,
+                                    "status": target_health.status.value,
+                                },
+                            )
+                            self.uow.commit()
+                            return job
+
+                        # Dual-primary exhaustion: Evaluate 10-point OpenRouter fallback eligibility for in-flight work
+                        sched_status = self.lifecycle_service.get_scheduler_status(
+                            project.project_id
+                        )
+                        policy, headroom = self.budget_service.get_headroom(project.project_id)
+                        primary_health_records = self.health_service.list_all_health()
+
+                        elig = self.eligibility_evaluator.evaluate_10_points(
+                            scheduler_mode=sched_status.mode,
+                            job=job,
+                            role="implementer",
+                            is_new_ready_change=False,
+                            primary_health_records=primary_health_records,
+                            project=project,
+                            policy=policy,
+                            headroom=headroom,
+                            model_identity_valid=True,
+                            candidate_integrity_valid=True,
+                            pipeline_invariants_valid=True,
+                        )
+
+                        if not elig.eligible:
+                            self._save_event(
+                                EventType.FALLBACK_DENIED,
+                                job,
+                                {
+                                    "role": "implementer",
+                                    "reason": elig.denial_reason,
+                                    "reasons": elig.reasons,
+                                },
+                            )
+                            job = self.uow.jobs.set_waiting_capacity(
+                                job.job_id,
+                                "openrouter",
+                                f"OpenRouter fallback ineligible: {elig.denial_reason}",
+                            )
+                            self._save_event(
+                                EventType.JOB_WAITING_CAPACITY,
+                                job,
+                                {"waiting_provider": "openrouter", "status": "fallback_ineligible"},
+                            )
+                            self.uow.commit()
+                            return job
+
+                        implementer_fallback_used = True
+                        fallback_implementer_model = self.default_implementer_model
+
                     continue
 
             # Candidate Manifest generation before checks and review
@@ -882,8 +1022,11 @@ class ExecutionPipelineService:
 
             job = self._transition(job, JobStatus.CHECKS_PASSED)
 
-            # Complementary review stage
-            rev_health = self.health_service.get_health(project.reviewer)
+            # Complementary review stage with effective reviewer based on current executor
+            effective_reviewer = (
+                project.implementer if current_executor == project.reviewer else project.reviewer
+            )
+            rev_health = self.health_service.get_health(effective_reviewer)
             is_primary_rev_available = rev_health.status == ProviderHealthStatus.AVAILABLE
             reviewer_fallback_used = False
             selected_reviewer_model: str | None = None
@@ -894,13 +1037,13 @@ class ExecutionPipelineService:
                 if not dual_exhausted:
                     job = self.uow.jobs.set_waiting_capacity(
                         job.job_id,
-                        project.reviewer,
-                        f"Primary reviewer '{project.reviewer}' is {rev_health.status.value}",
+                        effective_reviewer,
+                        f"Primary reviewer '{effective_reviewer}' is {rev_health.status.value}",
                     )
                     self._save_event(
                         EventType.JOB_WAITING_CAPACITY,
                         job,
-                        {"waiting_provider": project.reviewer, "status": rev_health.status.value},
+                        {"waiting_provider": effective_reviewer, "status": rev_health.status.value},
                     )
                     self.uow.commit()
                     return job
@@ -970,7 +1113,7 @@ class ExecutionPipelineService:
 
             if not reviewer_fallback_used:
                 valid_pair, pair_err = validate_complementary_pair(
-                    current_executor, project.reviewer
+                    current_executor, effective_reviewer
                 )
                 if not valid_pair:
                     self._save_event(
@@ -979,7 +1122,7 @@ class ExecutionPipelineService:
                         {
                             "error": pair_err,
                             "implementer": current_executor,
-                            "reviewer": project.reviewer,
+                            "reviewer": effective_reviewer,
                         },
                     )
                     raise RuntimeError(pair_err or "Invalid complementary pair.")
@@ -1213,22 +1356,22 @@ class ExecutionPipelineService:
                         ReviewStatus.REVIEW_FAILED.value,
                         error_message=openrouter_res.summary,
                     )
-                    self.uow.commit()
-                    job = self.uow.jobs.set_waiting_capacity(
-                        job.job_id,
-                        "openrouter",
-                        openrouter_res.summary or "OpenRouter reviewer fallback failed",
-                    )
+                    self.health_service.record_outcome(openrouter_res)
                     self._save_event(
                         EventType.JOB_WAITING_CAPACITY,
                         job,
                         {"waiting_provider": "openrouter", "error": openrouter_res.summary},
                     )
                     self.uow.commit()
+                    job = self.uow.jobs.set_waiting_capacity(
+                        job.job_id,
+                        "openrouter",
+                        openrouter_res.summary or "OpenRouter reviewer fallback failed",
+                    )
                     return job
             else:
                 # Primary reviewer runner execution
-                reviewer = self.reviewer_runner or runner_for_reviewer(project.reviewer)
+                reviewer = self.reviewer_runner or runner_for_reviewer(effective_reviewer)
                 review_result = await reviewer.run(
                     readonly_view,
                     review_prompt,
@@ -1246,7 +1389,7 @@ class ExecutionPipelineService:
                         project_id=job.project_id,
                         change_id=job.change_name,
                         duration_ms=review_result.duration_ms,
-                        details={"job_id": job.job_id, "reviewer": project.reviewer},
+                        details={"job_id": job.job_id, "reviewer": effective_reviewer},
                     )
                 )
 
@@ -1258,7 +1401,7 @@ class ExecutionPipelineService:
                     pass
 
                 rev_outcome = ProviderOutcomeParser.parse_runner_output(
-                    provider=project.reviewer,
+                    provider=effective_reviewer,
                     role="reviewer",
                     model=None,
                     exit_code=review_result.exit_code,
@@ -1275,15 +1418,15 @@ class ExecutionPipelineService:
                 }:
                     job = self.uow.jobs.set_waiting_capacity(
                         job.job_id,
-                        project.reviewer,
-                        rev_outcome.summary or f"Capacity exhausted on {project.reviewer}",
+                        effective_reviewer,
+                        rev_outcome.summary or f"Capacity exhausted on {effective_reviewer}",
                         rev_outcome.capacity_reset_at,
                     )
                     self._save_event(
                         EventType.JOB_WAITING_CAPACITY,
                         job,
                         {
-                            "waiting_provider": project.reviewer,
+                            "waiting_provider": effective_reviewer,
                             "reset_at": rev_outcome.capacity_reset_at.isoformat()
                             if rev_outcome.capacity_reset_at
                             else None,

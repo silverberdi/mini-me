@@ -1,7 +1,3 @@
-"""Tests for blocker validation service, fingerprinting, and continuation engine."""
-
-from __future__ import annotations
-
 from minime.domain.enums import (
     BlockerValidationVerdict,
     ContinuationDecision,
@@ -190,3 +186,145 @@ def test_continuation_engine_failing_checks_guidance():
     res = engine.decide(ctx)
     assert res.decision == ContinuationDecision.CORRECT_AND_RETRY
     assert "AssertionError: expected 1 got 2" in (res.corrective_prompt or "")
+
+
+# ---------------------------------------------------------------------------
+# Rule K (Alternative Executor Eligibility Gate) Tests
+# ---------------------------------------------------------------------------
+
+
+def test_rule_k_alternative_eligible_allows_reassign():
+    engine = ContinuationEngine(max_reassignments_per_job=2)
+    ctx = ContinuationContext(
+        job_id="j1",
+        attempt_number=2,
+        current_executor_role="codex",
+        current_model_identity="codex-default",
+        outcome=ExecutionOutcome.NO_PROGRESS,
+        same_outcome_streak=2,
+        reassignment_count=0,
+        alternative_executor_eligible=True,
+        target_executor_role="antigravity",
+        target_model_identity="antigravity",
+    )
+    res = engine.decide(ctx)
+    assert res.decision == ContinuationDecision.REASSIGN_AGENT
+    assert res.should_handoff is True
+    assert res.target_executor_role == "antigravity"
+
+
+def test_rule_k_no_alternative_configured_escalates_to_needs_human():
+    engine = ContinuationEngine(max_reassignments_per_job=2)
+    ctx = ContinuationContext(
+        job_id="j1",
+        attempt_number=2,
+        current_executor_role="codex",
+        current_model_identity="codex-default",
+        outcome=ExecutionOutcome.NO_PROGRESS,
+        same_outcome_streak=2,
+        reassignment_count=0,
+        alternative_executor_eligible=False,  # No alternative configured in project pairing
+    )
+    res = engine.decide(ctx)
+    assert res.decision == ContinuationDecision.NEEDS_HUMAN
+    assert "Alternative executor ineligible" in (res.escalation_reason or "")
+
+
+def test_rule_k_alternative_same_executor_or_prohibited_model_escalates():
+    engine = ContinuationEngine(max_reassignments_per_job=2)
+    ctx = ContinuationContext(
+        job_id="j1",
+        attempt_number=2,
+        current_executor_role="codex",
+        current_model_identity="codex-default",
+        outcome=ExecutionOutcome.FALSE_BLOCKER,
+        same_blocker_fingerprint_streak=2,
+        reassignment_count=0,
+        alternative_executor_eligible=False,  # Prohibited model / self-reassignment
+    )
+    res = engine.decide(ctx)
+    assert res.decision == ContinuationDecision.NEEDS_HUMAN
+    assert "Alternative executor ineligible" in (res.escalation_reason or "")
+
+
+def test_rule_k_reassignment_ceiling_available_but_ineligible_escalates():
+    engine = ContinuationEngine(max_reassignments_per_job=3)
+    ctx = ContinuationContext(
+        job_id="j1",
+        attempt_number=1,
+        current_executor_role="codex",
+        current_model_identity="codex-default",
+        outcome=ExecutionOutcome.PREMATURE_STOP,
+        same_outcome_streak=2,
+        reassignment_count=1,  # 1 < 3 ceiling available
+        alternative_executor_eligible=False,
+    )
+    res = engine.decide(ctx)
+    assert res.decision == ContinuationDecision.NEEDS_HUMAN
+    assert "Alternative executor ineligible" in (res.escalation_reason or "")
+
+
+def test_rule_k_all_reassignment_branches_respect_eligibility_gate():
+    engine = ContinuationEngine(max_corrective_retries_per_executor=1, max_reassignments_per_job=2)
+    outcomes = [
+        ExecutionOutcome.PREMATURE_STOP,
+        ExecutionOutcome.FALSE_BLOCKER,
+        ExecutionOutcome.CHANGES_REQUIRED,
+        ExecutionOutcome.NO_PROGRESS,
+        ExecutionOutcome.PROVIDER_FAILURE,
+    ]
+
+    for outcome in outcomes:
+        # Eligible alternative -> REASSIGN_AGENT
+        ctx_eligible = ContinuationContext(
+            job_id="j1",
+            attempt_number=2,
+            current_executor_role="codex",
+            current_model_identity="codex",
+            outcome=outcome,
+            corrective_retries_for_current_executor=2,  # exhausted
+            same_outcome_streak=2,
+            same_blocker_fingerprint_streak=2,
+            reassignment_count=0,
+            alternative_executor_eligible=True,
+            target_executor_role="antigravity",
+        )
+        res_eligible = engine.decide(ctx_eligible)
+        assert res_eligible.decision == ContinuationDecision.REASSIGN_AGENT, f"Failed for {outcome}"
+        assert res_eligible.should_handoff is True
+        assert res_eligible.target_executor_role == "antigravity"
+
+        # Ineligible alternative -> NEEDS_HUMAN
+        ctx_ineligible = ContinuationContext(
+            job_id="j1",
+            attempt_number=2,
+            current_executor_role="codex",
+            current_model_identity="codex",
+            outcome=outcome,
+            corrective_retries_for_current_executor=2,
+            same_outcome_streak=2,
+            same_blocker_fingerprint_streak=2,
+            reassignment_count=0,
+            alternative_executor_eligible=False,
+        )
+        res_ineligible = engine.decide(ctx_ineligible)
+        assert res_ineligible.decision == ContinuationDecision.NEEDS_HUMAN, f"Failed for {outcome}"
+
+
+def test_rule_k_ceiling_reached_escalates_to_needs_human():
+    """When reassignment ceiling is exhausted, continuation engine escalates to NEEDS_HUMAN."""
+    engine = ContinuationEngine(max_reassignments_per_job=2)
+    ctx = ContinuationContext(
+        job_id="j1",
+        attempt_number=3,
+        current_executor_role="codex",
+        current_model_identity="codex",
+        outcome=ExecutionOutcome.PREMATURE_STOP,
+        same_outcome_streak=2,
+        reassignment_count=2,  # ceiling reached
+        alternative_executor_eligible=True,
+        target_executor_role="antigravity",
+    )
+    res = engine.decide(ctx)
+    assert res.decision == ContinuationDecision.NEEDS_HUMAN
+    assert "Maximum reassignment limit" in (res.escalation_reason or "")
