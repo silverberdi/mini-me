@@ -398,7 +398,9 @@ def test_acceptance_status_surface(in_memory_uow):
 
 def test_acceptance_structured_correlation_and_redaction():
     """Scenario: Operation emits diagnostic evidence with stable correlation IDs and secret redaction."""
-    set_correlation_context(project_id="mini-me", change_id="synthetic-change", operation_id="op-101")
+    set_correlation_context(
+        project_id="mini-me", change_id="synthetic-change", operation_id="op-101"
+    )
     ctx = get_correlation_context()
     assert ctx["project_id"] == "mini-me"
     assert ctx["change_id"] == "synthetic-change"

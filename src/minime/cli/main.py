@@ -298,7 +298,13 @@ def jobs_list_cmd(
                 checks = uow.check_results.list_by_job(job.job_id)
                 check_summary = ",".join(f"{c.check_name}:{c.exit_code}" for c in checks) or "-"
             review = uow.reviews.get_by_job_id(job.job_id)
-            verdict_summary = f"verdict={review.verdict.value}" if review and review.verdict else f"review={review.status.value}" if review else ""
+            verdict_summary = (
+                f"verdict={review.verdict.value}"
+                if review and review.verdict
+                else f"review={review.status.value}"
+                if review
+                else ""
+            )
             audit = uow.audits.get_by_job_id(job.job_id)
             audit_summary = (
                 f"audit={audit.status.value}/risk={audit.risk.value if audit.risk else '-'}"
@@ -331,12 +337,23 @@ def jobs_show_cmd(
             check_results = uow.check_results.list_by_job(job_id)
             review = uow.reviews.get_by_job_id(job_id)
             findings = uow.review_findings.list_by_review(review.review_id) if review else []
+            attempts = uow.job_attempts.list_by_job(job_id)
+            handoffs = uow.job_handoffs.list_by_job(job_id)
+            manifest = uow.candidate_manifests.get_latest_manifest(job_id)
+            diagnostics = uow.evidence_diagnostics.list_by_job(job_id)
+
             payload = {
                 "job": job.model_dump(),
+                "attempts": [a.model_dump() for a in attempts],
+                "handoffs": [h.model_dump() for h in handoffs],
+                "manifest": manifest.model_dump() if manifest else None,
+                "diagnostics": [d.model_dump() for d in diagnostics],
                 "checks": [c.model_dump() for c in check_results],
                 "review": review.model_dump() if review else None,
                 "findings": [f.model_dump() for f in findings],
-                "logs": [log.model_dump() for log in uow.job_logs.list_by_job(job_id)] if logs else [],
+                "logs": [log.model_dump() for log in uow.job_logs.list_by_job(job_id)]
+                if logs
+                else [],
             }
             if json_output:
                 typer.echo(json.dumps(payload, indent=2, default=str))
@@ -346,14 +363,40 @@ def jobs_show_cmd(
             typer.echo(f"Change: {job.change_name}")
             typer.echo(f"Status: {job.status.value}")
             typer.echo(f"Implementer: {job.implementer_role}")
+            typer.echo(f"Current Executor: {job.current_executor or job.implementer_role}")
+            typer.echo(f"Attempt Count: {job.attempt_count}")
+            typer.echo(f"Reassignments: {job.reassignment_count}")
+            typer.echo(f"Mixed Authorship: {job.is_mixed_authorship}")
+            if job.latest_outcome:
+                typer.echo(f"Latest Outcome: {job.latest_outcome.value}")
+            if job.latest_progress:
+                typer.echo(f"Latest Progress: {job.latest_progress.value}")
+            if job.continuation_decision:
+                typer.echo(f"Continuation Decision: {job.continuation_decision.value}")
+            if job.escalation_reason:
+                typer.secho(
+                    f"Escalation Reason: {job.escalation_reason}", fg=typer.colors.RED, bold=True
+                )
             typer.echo(f"Base SHA: {job.base_sha or '-'}")
             typer.echo(f"Candidate SHA: {job.candidate_sha or '-'}")
+            if manifest:
+                typer.echo(
+                    f"Manifest Hash: {manifest.manifest_hash} ({manifest.total_files_count} files)"
+                )
             if job.error_message:
                 typer.echo(f"Error: {job.error_message}")
+            if attempts:
+                typer.echo(f"Attempts ({len(attempts)}):")
+                for att in attempts:
+                    typer.echo(
+                        f"  • Attempt #{att.attempt_number} [{att.executor_role}] -> Outcome: {att.normalized_outcome.value} ({att.duration_ms or 0}ms)"
+                    )
             if check_results:
                 typer.echo("Checks:")
                 for check in check_results:
-                    typer.echo(f"  {check.check_name}: exit={check.exit_code} ({check.duration_ms}ms)")
+                    typer.echo(
+                        f"  {check.check_name}: exit={check.exit_code} ({check.duration_ms}ms)"
+                    )
             if review:
                 typer.echo("Review:")
                 typer.echo(f"  Reviewer: {review.reviewer_role}")
@@ -370,6 +413,65 @@ def jobs_show_cmd(
                     typer.echo(f"  [{log['stream']}] {log['message']}")
     except Exception as e:
         typer.secho(f"Error showing job: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
+@jobs_app.command("attempts")
+def jobs_attempts_cmd(
+    job_id: str = typer.Argument(..., help="Execution job identifier"),
+    json_output: bool = typer.Option(False, "--json", help="Output attempts as JSON"),
+) -> None:
+    """Show execution attempts history for a job."""
+    try:
+        with db_manager.session() as session:
+            uow = PostgresPersistenceUnitOfWork(session)
+            job = uow.jobs.get_by_id(job_id)
+            if not job:
+                typer.secho(f"Job '{job_id}' not found.", fg=typer.colors.RED)
+                raise typer.Exit(code=1)
+            attempts = uow.job_attempts.list_by_job(job_id)
+            if json_output:
+                typer.echo(json.dumps([a.model_dump() for a in attempts], indent=2, default=str))
+                return
+            typer.secho(f"=== Attempts for Job {job_id} ===", fg=typer.colors.CYAN, bold=True)
+            for a in attempts:
+                typer.echo(
+                    f"Attempt #{a.attempt_number}: Executor={a.executor_role} Model={a.model_identity} "
+                    f"Outcome={a.normalized_outcome.value} Progress={a.progress_classification.value if a.progress_classification else '-'} "
+                    f"Duration={a.duration_ms or 0}ms"
+                )
+                if a.corrective_prompt:
+                    typer.echo(f"  Corrective Prompt: {a.corrective_prompt[:100]}...")
+    except Exception as e:
+        typer.secho(f"Error showing attempts: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
+@jobs_app.command("handoffs")
+def jobs_handoffs_cmd(
+    job_id: str = typer.Argument(..., help="Execution job identifier"),
+    json_output: bool = typer.Option(False, "--json", help="Output handoffs as JSON"),
+) -> None:
+    """Show handoff records for reassigned attempts in a job."""
+    try:
+        with db_manager.session() as session:
+            uow = PostgresPersistenceUnitOfWork(session)
+            job = uow.jobs.get_by_id(job_id)
+            if not job:
+                typer.secho(f"Job '{job_id}' not found.", fg=typer.colors.RED)
+                raise typer.Exit(code=1)
+            handoffs = uow.job_handoffs.list_by_job(job_id)
+            if json_output:
+                typer.echo(json.dumps([h.model_dump() for h in handoffs], indent=2, default=str))
+                return
+            typer.secho(f"=== Handoffs for Job {job_id} ===", fg=typer.colors.CYAN, bold=True)
+            for h in handoffs:
+                consumed = f"Consumed by {h.consumed_by_attempt_id}" if h.is_consumed else "Pending"
+                typer.echo(
+                    f"Handoff {h.handoff_id}: From={h.from_executor} To={h.to_executor} [{consumed}]"
+                )
+    except Exception as e:
+        typer.secho(f"Error showing handoffs: {e}", fg=typer.colors.RED)
         raise typer.Exit(code=1)
 
 
@@ -423,7 +525,11 @@ def jobs_review_cmd(
                         if f.severity == "BLOCKER" or f.severity.value == "BLOCKER"
                         else typer.colors.YELLOW
                     )
-                    typer.secho(f"  • [{f.severity.value}] {f.location or 'general'}", fg=sev_color, bold=True)
+                    typer.secho(
+                        f"  • [{f.severity.value}] {f.location or 'general'}",
+                        fg=sev_color,
+                        bold=True,
+                    )
                     typer.echo(f"    Violated: {f.violated_requirement}")
                     typer.echo(f"    Correction: {f.expected_correction}")
             else:
@@ -492,7 +598,6 @@ def jobs_audit_cmd(
         raise typer.Exit(code=1)
 
 
-
 @scheduler_app.command("status")
 def scheduler_status_cmd(
     project_id: str = typer.Option(None, "--project-id", "-p", help="Filter by registered project"),
@@ -518,7 +623,9 @@ def scheduler_status_cmd(
             typer.secho("=== mini me Scheduler Status ===", fg=typer.colors.CYAN, bold=True)
             typer.secho(f"Mode: {sched_status.mode.value}", fg=mode_color, bold=True)
             typer.echo(f"Admission Allowed: {'YES' if sched_status.admission_allowed else 'NO'}")
-            typer.echo(f"Primary Capacity Available: {'YES' if sched_status.primary_capacity_available else 'NO'}")
+            typer.echo(
+                f"Primary Capacity Available: {'YES' if sched_status.primary_capacity_available else 'NO'}"
+            )
             typer.echo(f"Active Jobs: {sched_status.active_jobs_count}")
             if sched_status.reason:
                 typer.echo(f"Reason: {sched_status.reason}")
@@ -604,7 +711,11 @@ def budget_status_cmd(
             typer.echo(f"Project: {project_id}")
             typer.echo(f"Enabled: {'YES' if policy.enabled else 'NO'}")
             breach_color = typer.colors.RED if policy.is_breached else typer.colors.GREEN
-            typer.secho(f"Policy Breach: {'BREACH DETECTED (LOCKED)' if policy.is_breached else 'HEALTHY'}", fg=breach_color, bold=True)
+            typer.secho(
+                f"Policy Breach: {'BREACH DETECTED (LOCKED)' if policy.is_breached else 'HEALTHY'}",
+                fg=breach_color,
+                bold=True,
+            )
             typer.echo(f"Daily Cap: ${policy.daily_cap_usd:.2f} {policy.currency}")
             typer.echo(f"Monthly Cap: ${policy.monthly_cap_usd:.2f} {policy.currency}")
             typer.echo(f"Committed Spend Today (UTC): ${headroom.committed_today_usd:.4f}")
@@ -616,8 +727,14 @@ def budget_status_cmd(
                     f"Unresolved Encumbrance (All-Time): ${headroom.unresolved_usd:.4f} ({headroom.unresolved_count} unresolved)",
                     fg=typer.colors.YELLOW,
                 )
-            typer.secho(f"Daily Headroom: ${headroom.daily_headroom_usd:.4f}", fg=typer.colors.GREEN if headroom.daily_headroom_usd > 0 else typer.colors.RED)
-            typer.secho(f"Monthly Headroom: ${headroom.monthly_headroom_usd:.4f}", fg=typer.colors.GREEN if headroom.monthly_headroom_usd > 0 else typer.colors.RED)
+            typer.secho(
+                f"Daily Headroom: ${headroom.daily_headroom_usd:.4f}",
+                fg=typer.colors.GREEN if headroom.daily_headroom_usd > 0 else typer.colors.RED,
+            )
+            typer.secho(
+                f"Monthly Headroom: ${headroom.monthly_headroom_usd:.4f}",
+                fg=typer.colors.GREEN if headroom.monthly_headroom_usd > 0 else typer.colors.RED,
+            )
     except Exception as e:
         typer.secho(f"Error fetching budget status: {e}", fg=typer.colors.RED)
         raise typer.Exit(code=1)
@@ -643,8 +760,15 @@ def providers_openrouter_cmd(
                 "policy": policy.model_dump() if policy else None,
                 "headroom": headroom.__dict__ if headroom else None,
                 "allowed_models": {
-                    "implementer": ["anthropic/claude-3.5-sonnet", "qwen/qwen-2.5-coder-32b-instruct"],
-                    "reviewer": ["openai/gpt-4o", "meta-llama/llama-3.3-70b-instruct", "mistralai/mistral-large"],
+                    "implementer": [
+                        "anthropic/claude-3.5-sonnet",
+                        "qwen/qwen-2.5-coder-32b-instruct",
+                    ],
+                    "reviewer": [
+                        "openai/gpt-4o",
+                        "meta-llama/llama-3.3-70b-instruct",
+                        "mistralai/mistral-large",
+                    ],
                 },
             }
             if json_output:
@@ -663,8 +787,12 @@ def providers_openrouter_cmd(
                     typer.echo(f"Daily Headroom: ${headroom.daily_headroom_usd:.4f}")
                     typer.echo(f"Monthly Headroom: ${headroom.monthly_headroom_usd:.4f}")
                 typer.echo("\nConfigured Canonical Models:")
-                typer.echo("  Implementer: anthropic/claude-3.5-sonnet, qwen/qwen-2.5-coder-32b-instruct")
-                typer.echo("  Reviewer: openai/gpt-4o, meta-llama/llama-3.3-70b-instruct, mistralai/mistral-large")
+                typer.echo(
+                    "  Implementer: anthropic/claude-3.5-sonnet, qwen/qwen-2.5-coder-32b-instruct"
+                )
+                typer.echo(
+                    "  Reviewer: openai/gpt-4o, meta-llama/llama-3.3-70b-instruct, mistralai/mistral-large"
+                )
     except Exception as e:
         typer.secho(f"Error fetching OpenRouter status: {e}", fg=typer.colors.RED)
         raise typer.Exit(code=1)

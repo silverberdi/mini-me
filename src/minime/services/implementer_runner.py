@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import signal
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 from minime.logging import redact_secrets
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -21,7 +25,9 @@ class ImplementerResult:
 
 
 class ImplementerRunnerInterface:
-    async def run(self, worktree_path: Path, prompt_context: str, timeout_seconds: int) -> ImplementerResult:
+    async def run(
+        self, worktree_path: Path, prompt_context: str, timeout_seconds: int
+    ) -> ImplementerResult:
         raise NotImplementedError
 
 
@@ -29,7 +35,9 @@ class CliImplementerRunner(ImplementerRunnerInterface):
     def __init__(self, command: list[str]):
         self.command = command
 
-    async def run(self, worktree_path: Path, prompt_context: str, timeout_seconds: int) -> ImplementerResult:
+    async def run(
+        self, worktree_path: Path, prompt_context: str, timeout_seconds: int
+    ) -> ImplementerResult:
         start = asyncio.get_running_loop().time()
         proc = await asyncio.create_subprocess_exec(
             *self.command,
@@ -76,8 +84,41 @@ class MockImplementerRunner(ImplementerRunnerInterface):
         self.stderr = stderr or []
         self.timed_out = timed_out
 
-    async def run(self, worktree_path: Path, prompt_context: str, timeout_seconds: int) -> ImplementerResult:
-        del worktree_path, prompt_context, timeout_seconds
+    async def run(
+        self, worktree_path: Path, prompt_context: str, timeout_seconds: int
+    ) -> ImplementerResult:
+        del prompt_context, timeout_seconds
+        if self.exit_code == 0 and not self.timed_out:
+            try:
+                candidate_file = Path(worktree_path) / "candidate_impl.py"
+                candidate_file.write_text("# Candidate implementation artifact\n")
+                p1 = subprocess.run(
+                    ["git", "add", "candidate_impl.py"],
+                    cwd=str(worktree_path),
+                    capture_output=True,
+                    text=True,
+                )
+                p2 = subprocess.run(
+                    [
+                        "git",
+                        "-c",
+                        "user.name=Test",
+                        "-c",
+                        "user.email=test@example.com",
+                        "commit",
+                        "-m",
+                        "candidate changes",
+                    ],
+                    cwd=str(worktree_path),
+                    capture_output=True,
+                    text=True,
+                )
+                if p2.returncode != 0:
+                    logger.warning(
+                        f"Git commit failed in MockImplementerRunner: {p2.stderr} (add stdout: {p1.stdout}, add stderr: {p1.stderr})"
+                    )
+            except Exception as e:
+                logger.warning(f"MockImplementerRunner exception: {e}")
         return ImplementerResult(
             exit_code=self.exit_code,
             timed_out=self.timed_out,

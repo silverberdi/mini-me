@@ -201,4 +201,3 @@ def test_git_operation_repository_operations(in_memory_uow):
     assert updated is not None
     assert updated.status == GitOperationStatus.COMPLETED
     assert updated.completed_at is not None
-

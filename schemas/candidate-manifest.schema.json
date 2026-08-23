@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "candidate_sha",
+    "tracked_files",
+    "staged_files",
+    "untracked_files",
+    "deleted_files",
+    "total_files_count",
+    "manifest_hash"
+  ],
+  "properties": {
+    "candidate_sha": {
+      "type": "string"
+    },
+    "tracked_files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path"],
+        "properties": {
+          "path": { "type": "string" },
+          "size_bytes": { "type": "integer" },
+          "sha256": { "type": "string" }
+        }
+      }
+    },
+    "staged_files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path"],
+        "properties": {
+          "path": { "type": "string" },
+          "size_bytes": { "type": "integer" },
+          "sha256": { "type": "string" }
+        }
+      }
+    },
+    "untracked_files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path"],
+        "properties": {
+          "path": { "type": "string" },
+          "size_bytes": { "type": "integer" },
+          "sha256": { "type": "string" }
+        }
+      }
+    },
+    "deleted_files": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "total_files_count": {
+      "type": "integer"
+    },
+    "manifest_hash": {
+      "type": "string"
+    }
+  }
+}

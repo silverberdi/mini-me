@@ -11,13 +11,19 @@ from sqlalchemy.orm import Session
 from minime.db.models import (
     AuditFindingModel,
     AuditModel,
+    BlockerClaimModel,
     BudgetLedgerModel,
     BudgetReservationModel,
+    CandidateAuthorshipModel,
+    CandidateManifestModel,
     CapacityWindowModel,
     ChangeModel,
     CheckResultModel,
     EventModel,
+    EvidenceDiagnosticModel,
     GitOperationModel,
+    JobAttemptModel,
+    JobHandoffModel,
     JobLogModel,
     JobModel,
     MetricFactModel,
@@ -34,12 +40,17 @@ from minime.domain.enums import (
     AuditFindingSeverity,
     AuditRiskLevel,
     AuditStatus,
+    BlockerValidationVerdict,
     CapacitySignalSource,
     ChangeStatus,
+    ContinuationDecision,
     EventType,
+    EvidenceDiagnosticStatus,
+    ExecutionOutcome,
     FindingSeverity,
     GitOperationStatus,
     JobStatus,
+    ProgressClassification,
     ProjectStatus,
     ProviderHealthStatus,
     ProviderResultClass,
@@ -50,14 +61,24 @@ from minime.domain.enums import (
 from minime.domain.interfaces import (
     AuditFindingRepositoryInterface,
     AuditRepositoryInterface,
+    BlockerClaimRepositoryInterface,
+    BudgetLedgerRepositoryInterface,
+    BudgetReservationRepositoryInterface,
+    CandidateAuthorshipRepositoryInterface,
+    CandidateManifestRepositoryInterface,
     CapacityWindowRepositoryInterface,
     ChangeRepositoryInterface,
     CheckResultRepositoryInterface,
     EventRepositoryInterface,
+    EvidenceDiagnosticRepositoryInterface,
     GitOperationRepositoryInterface,
+    JobAttemptRepositoryInterface,
+    JobHandoffRepositoryInterface,
     JobLogRepositoryInterface,
     JobRepositoryInterface,
     MetricFactRepositoryInterface,
+    OpenRouterBudgetPolicyRepositoryInterface,
+    OpenRouterPricingSnapshotRepositoryInterface,
     PersistenceUnitOfWork,
     ProjectBindingRepositoryInterface,
     ProjectRepositoryInterface,
@@ -69,14 +90,20 @@ from minime.domain.models import (
     AUTHORITATIVE_PRICING_SOURCES,
     AuditFinding,
     AuditRecord,
+    BlockerClaim,
     BudgetLedgerEntry,
     BudgetReservation,
+    CandidateAuthorship,
+    CandidateManifest,
     CapacityWindow,
     Change,
     CheckResult,
     Event,
+    EvidenceDiagnostic,
     GitOperation,
     Job,
+    JobAttempt,
+    JobHandoff,
     JobLog,
     MetricFact,
     OpenRouterBudgetPolicy,
@@ -196,8 +223,137 @@ def job_model_to_domain(model: JobModel) -> Job:
         capacity_block_reason=model.capacity_block_reason,
         recovery_blocked_reason=model.recovery_blocked_reason,
         expected_reset_at=model.expected_reset_at,
+        attempt_count=model.attempt_count,
+        reassignment_count=model.reassignment_count,
+        current_executor=model.current_executor,
+        latest_outcome=ExecutionOutcome(model.latest_outcome) if model.latest_outcome else None,
+        latest_progress=ProgressClassification(model.latest_progress)
+        if model.latest_progress
+        else None,
+        continuation_decision=ContinuationDecision(model.continuation_decision)
+        if model.continuation_decision
+        else None,
+        is_mixed_authorship=model.is_mixed_authorship,
+        escalation_reason=model.escalation_reason,
         created_at=model.created_at,
         updated_at=model.updated_at,
+    )
+
+
+def job_attempt_model_to_domain(model: JobAttemptModel) -> JobAttempt:
+    return JobAttempt(
+        attempt_id=model.id,
+        job_id=model.job_id,
+        attempt_number=model.attempt_number,
+        executor_role=model.executor_role,
+        model_identity=model.model_identity,
+        start_sha=model.start_sha,
+        end_sha=model.end_sha,
+        normalized_outcome=ExecutionOutcome(model.normalized_outcome),
+        progress_classification=ProgressClassification(model.progress_classification)
+        if model.progress_classification
+        else None,
+        continuation_decision=ContinuationDecision(model.continuation_decision)
+        if model.continuation_decision
+        else None,
+        corrective_retries_count=model.corrective_retries_count,
+        same_outcome_streak=model.same_outcome_streak,
+        same_blocker_fingerprint_streak=model.same_blocker_fingerprint_streak,
+        started_at=model.started_at,
+        completed_at=model.completed_at,
+        duration_ms=model.duration_ms,
+        corrective_prompt=model.corrective_prompt,
+        error_details=model.error_details or {},
+        created_at=model.created_at,
+    )
+
+
+def blocker_claim_model_to_domain(model: BlockerClaimModel) -> BlockerClaim:
+    return BlockerClaim(
+        claim_id=model.id,
+        job_id=model.job_id,
+        attempt_id=model.attempt_id,
+        blocker_type=model.blocker_type,
+        blocker_fingerprint=model.blocker_fingerprint,
+        affected_requirement=model.affected_requirement,
+        failing_invariant=model.failing_invariant,
+        evidence=model.evidence or {},
+        attempted_remediation=model.attempted_remediation,
+        rationale=model.rationale,
+        is_agent_solvable=model.is_agent_solvable,
+        validation_verdict=BlockerValidationVerdict(model.validation_verdict),
+        validation_rationale=model.validation_rationale,
+        available_integration_points=model.available_integration_points or [],
+        created_at=model.created_at,
+    )
+
+
+def job_handoff_model_to_domain(model: JobHandoffModel) -> JobHandoff:
+    return JobHandoff(
+        handoff_id=model.id,
+        job_id=model.job_id,
+        from_attempt_id=model.from_attempt_id,
+        to_attempt_id=model.to_attempt_id,
+        from_executor=model.from_executor,
+        to_executor=model.to_executor,
+        worktree_path=model.worktree_path,
+        base_sha=model.base_sha,
+        candidate_sha=model.candidate_sha,
+        completed_tasks=model.completed_tasks or [],
+        remaining_tasks=model.remaining_tasks or [],
+        manifest_summary=model.manifest_summary or {},
+        checks_summary=model.checks_summary or {},
+        blockers_summary=model.blockers_summary or {},
+        architectural_notes=model.architectural_notes or {},
+        do_not_redo_guidance=model.do_not_redo_guidance or [],
+        authorship_history=model.authorship_history or [],
+        is_consumed=model.is_consumed,
+        created_at=model.created_at,
+    )
+
+
+def candidate_manifest_model_to_domain(model: CandidateManifestModel) -> CandidateManifest:
+    return CandidateManifest(
+        manifest_id=model.id,
+        job_id=model.job_id,
+        attempt_id=model.attempt_id,
+        candidate_sha=model.candidate_sha,
+        tracked_files=model.tracked_files or [],
+        staged_files=model.staged_files or [],
+        untracked_files=model.untracked_files or [],
+        deleted_files=model.deleted_files or [],
+        total_files_count=model.total_files_count,
+        manifest_hash=model.manifest_hash,
+        created_at=model.created_at,
+    )
+
+
+def candidate_authorship_model_to_domain(model: CandidateAuthorshipModel) -> CandidateAuthorship:
+    return CandidateAuthorship(
+        authorship_id=model.id,
+        job_id=model.job_id,
+        agent_role=model.agent_role,
+        model_identity=model.model_identity,
+        attempt_number=model.attempt_number,
+        files_touched=model.files_touched or [],
+        is_primary_author=model.is_primary_author,
+        created_at=model.created_at,
+    )
+
+
+def evidence_diagnostic_model_to_domain(model: EvidenceDiagnosticModel) -> EvidenceDiagnostic:
+    return EvidenceDiagnostic(
+        diagnostic_id=model.id,
+        job_id=model.job_id,
+        attempt_id=model.attempt_id,
+        stage_type=model.stage_type,
+        check_name=model.check_name,
+        diagnostic_status=EvidenceDiagnosticStatus(model.diagnostic_status),
+        environment_identity=model.environment_identity,
+        candidate_sha=model.candidate_sha,
+        reason=model.reason,
+        evidence_reference=model.evidence_reference or {},
+        created_at=model.created_at,
     )
 
 
@@ -400,7 +556,6 @@ def budget_ledger_model_to_domain(model: BudgetLedgerModel) -> BudgetLedgerEntry
         entry_type=model.entry_type,
         created_at=model.created_at,
     )
-
 
 
 class PostgresProjectRepository(ProjectRepositoryInterface):
@@ -628,37 +783,48 @@ class PostgresMetricFactRepository(MetricFactRepositoryInterface):
 
 
 class PostgresJobRepository(JobRepositoryInterface):
-    _valid_transitions: dict[JobStatus, set[JobStatus]] = {
+    VALID_TRANSITIONS: dict[JobStatus, set[JobStatus]] = {
         JobStatus.QUEUED: {
             JobStatus.RUNNING,
             JobStatus.WAITING_CAPACITY,
-            JobStatus.CANCELLED,
+            JobStatus.NEEDS_HUMAN,
             JobStatus.FAILED,
+            JobStatus.CANCELLED,
         },
         JobStatus.RUNNING: {
             JobStatus.CHECKS_RUNNING,
+            JobStatus.RUNNING,  # multi-attempt continuation loops
             JobStatus.QUEUED,
             JobStatus.WAITING_CAPACITY,
             JobStatus.RECOVERY_BLOCKED,
+            JobStatus.NEEDS_HUMAN,
             JobStatus.FAILED,
             JobStatus.CANCELLED,
         },
         JobStatus.CHECKS_RUNNING: {
             JobStatus.CHECKS_PASSED,
             JobStatus.CHECKS_FAILED,
+            JobStatus.RUNNING,
             JobStatus.QUEUED,
             JobStatus.WAITING_CAPACITY,
             JobStatus.RECOVERY_BLOCKED,
+            JobStatus.NEEDS_HUMAN,
             JobStatus.FAILED,
             JobStatus.CANCELLED,
         },
         JobStatus.CHECKS_PASSED: {
             JobStatus.REVIEW_RUNNING,
             JobStatus.WAITING_CAPACITY,
+            JobStatus.NEEDS_HUMAN,
             JobStatus.FAILED,
             JobStatus.CANCELLED,
         },
-        JobStatus.CHECKS_FAILED: set(),
+        JobStatus.CHECKS_FAILED: {
+            JobStatus.RUNNING,
+            JobStatus.NEEDS_HUMAN,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+        },
         JobStatus.REVIEW_RUNNING: {
             JobStatus.AUDIT_RUNNING,
             JobStatus.CHANGES_REQUIRED,
@@ -666,6 +832,7 @@ class PostgresJobRepository(JobRepositoryInterface):
             JobStatus.QUEUED,
             JobStatus.WAITING_CAPACITY,
             JobStatus.RECOVERY_BLOCKED,
+            JobStatus.NEEDS_HUMAN,
             JobStatus.FAILED,
             JobStatus.CANCELLED,
         },
@@ -676,6 +843,7 @@ class PostgresJobRepository(JobRepositoryInterface):
             JobStatus.QUEUED,
             JobStatus.WAITING_CAPACITY,
             JobStatus.RECOVERY_BLOCKED,
+            JobStatus.NEEDS_HUMAN,
             JobStatus.FAILED,
             JobStatus.CANCELLED,
         },
@@ -685,6 +853,7 @@ class PostgresJobRepository(JobRepositoryInterface):
             JobStatus.REVIEW_RUNNING,
             JobStatus.AUDIT_RUNNING,
             JobStatus.RECOVERY_BLOCKED,
+            JobStatus.NEEDS_HUMAN,
             JobStatus.FAILED,
             JobStatus.CANCELLED,
         },
@@ -692,12 +861,23 @@ class PostgresJobRepository(JobRepositoryInterface):
             JobStatus.WAITING_CAPACITY,
             JobStatus.RUNNING,
             JobStatus.REVIEW_RUNNING,
+            JobStatus.NEEDS_HUMAN,
             JobStatus.FAILED,
             JobStatus.CANCELLED,
         },
         JobStatus.READY_TO_MERGE: set(),
         JobStatus.AUDIT_BLOCKED: set(),
-        JobStatus.CHANGES_REQUIRED: set(),
+        JobStatus.CHANGES_REQUIRED: {
+            JobStatus.RUNNING,
+            JobStatus.NEEDS_HUMAN,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+        },
+        JobStatus.NEEDS_HUMAN: {
+            JobStatus.RUNNING,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+        },
         JobStatus.FAILED: set(),
         JobStatus.CANCELLED: set(),
     }
@@ -717,6 +897,16 @@ class PostgresJobRepository(JobRepositoryInterface):
             existing.capacity_block_reason = job.capacity_block_reason
             existing.recovery_blocked_reason = job.recovery_blocked_reason
             existing.expected_reset_at = job.expected_reset_at
+            existing.attempt_count = job.attempt_count
+            existing.reassignment_count = job.reassignment_count
+            existing.current_executor = job.current_executor
+            existing.latest_outcome = job.latest_outcome.value if job.latest_outcome else None
+            existing.latest_progress = job.latest_progress.value if job.latest_progress else None
+            existing.continuation_decision = (
+                job.continuation_decision.value if job.continuation_decision else None
+            )
+            existing.is_mixed_authorship = job.is_mixed_authorship
+            existing.escalation_reason = job.escalation_reason
             existing.updated_at = job.updated_at
         else:
             model = JobModel(
@@ -732,6 +922,16 @@ class PostgresJobRepository(JobRepositoryInterface):
                 capacity_block_reason=job.capacity_block_reason,
                 recovery_blocked_reason=job.recovery_blocked_reason,
                 expected_reset_at=job.expected_reset_at,
+                attempt_count=job.attempt_count,
+                reassignment_count=job.reassignment_count,
+                current_executor=job.current_executor,
+                latest_outcome=job.latest_outcome.value if job.latest_outcome else None,
+                latest_progress=job.latest_progress.value if job.latest_progress else None,
+                continuation_decision=(
+                    job.continuation_decision.value if job.continuation_decision else None
+                ),
+                is_mixed_authorship=job.is_mixed_authorship,
+                escalation_reason=job.escalation_reason,
                 created_at=job.created_at,
                 updated_at=job.updated_at,
             )
@@ -1039,9 +1239,7 @@ class PostgresAuditRepository(AuditRepositoryInterface):
                     candidate_sha=audit.candidate_sha,
                     base_sha=audit.base_sha,
                     review_id=audit.review_id,
-                    review_verdict=audit.review_verdict.value
-                    if audit.review_verdict
-                    else None,
+                    review_verdict=audit.review_verdict.value if audit.review_verdict else None,
                     status=audit.status.value,
                     risk=audit.risk.value if audit.risk else None,
                     summary=audit.summary,
@@ -1089,9 +1287,7 @@ class PostgresAuditRepository(AuditRepositoryInterface):
         current = AuditStatus(model.status)
         target = AuditStatus(new_status)
         if target not in self._valid_transitions[current]:
-            raise ValueError(
-                f"Invalid audit status transition: {current.value} -> {target.value}."
-            )
+            raise ValueError(f"Invalid audit status transition: {current.value} -> {target.value}.")
         model.status = target.value
         if risk:
             model.risk = AuditRiskLevel(risk).value
@@ -1233,7 +1429,10 @@ class PostgresProviderHealthRepository(ProviderHealthRepositoryInterface):
             else:
                 model.consecutive_failures += 1
 
-            if target_status == ProviderHealthStatus.AVAILABLE and target_result_class == ProviderResultClass.SUCCESS:
+            if (
+                target_status == ProviderHealthStatus.AVAILABLE
+                and target_result_class == ProviderResultClass.SUCCESS
+            ):
                 model.last_success_at = now
             elif target_result_class and target_result_class != ProviderResultClass.SUCCESS:
                 model.last_failure_at = now
@@ -1357,7 +1556,7 @@ class PostgresGitOperationRepository(GitOperationRepositoryInterface):
         return git_operation_model_to_domain(model)
 
 
-class PostgresOpenRouterBudgetPolicyRepository:
+class PostgresOpenRouterBudgetPolicyRepository(OpenRouterBudgetPolicyRepositoryInterface):
     def __init__(self, session: Session):
         self.session = session
 
@@ -1393,8 +1592,12 @@ class PostgresOpenRouterBudgetPolicyRepository:
             )
         )
 
+    def get_by_project(self, project_id: str) -> OpenRouterBudgetPolicy | None:
+        model = self.session.get(OpenRouterBudgetPolicyModel, project_id)
+        return budget_policy_model_to_domain(model) if model else None
 
-class PostgresOpenRouterPricingSnapshotRepository:
+
+class PostgresOpenRouterPricingSnapshotRepository(OpenRouterPricingSnapshotRepositoryInterface):
     def __init__(self, session: Session):
         self.session = session
 
@@ -1429,10 +1632,15 @@ class PostgresOpenRouterPricingSnapshotRepository:
                 OpenRouterPricingSnapshotModel.routed_model_identity == routed_model,
                 OpenRouterPricingSnapshotModel.source.in_(AUTHORITATIVE_PRICING_SOURCES),
             )
-            .order_by(OpenRouterPricingSnapshotModel.observed_at.desc(), OpenRouterPricingSnapshotModel.created_at.desc())
+            .order_by(
+                OpenRouterPricingSnapshotModel.observed_at.desc(),
+                OpenRouterPricingSnapshotModel.created_at.desc(),
+            )
         )
         if canonical_name:
-            stmt = stmt.where(OpenRouterPricingSnapshotModel.canonical_model_identity == canonical_name)
+            stmt = stmt.where(
+                OpenRouterPricingSnapshotModel.canonical_model_identity == canonical_name
+            )
         model = self.session.scalars(stmt).first()
         return pricing_snapshot_model_to_domain(model) if model else None
 
@@ -1445,7 +1653,7 @@ class PostgresOpenRouterPricingSnapshotRepository:
         return [pricing_snapshot_model_to_domain(m) for m in self.session.scalars(stmt).all()]
 
 
-class PostgresBudgetReservationRepository:
+class PostgresBudgetReservationRepository(BudgetReservationRepositoryInterface):
     def __init__(self, session: Session):
         self.session = session
 
@@ -1480,12 +1688,14 @@ class PostgresBudgetReservationRepository:
         return [
             budget_reservation_model_to_domain(m)
             for m in self.session.scalars(
-                select(BudgetReservationModel).where(BudgetReservationModel.project_id == project_id)
+                select(BudgetReservationModel).where(
+                    BudgetReservationModel.project_id == project_id
+                )
             ).all()
         ]
 
 
-class PostgresBudgetLedgerRepository:
+class PostgresBudgetLedgerRepository(BudgetLedgerRepositoryInterface):
     def __init__(self, session: Session):
         self.session = session
 
@@ -1518,6 +1728,329 @@ class PostgresBudgetLedgerRepository:
         ]
 
 
+class PostgresJobAttemptRepository(JobAttemptRepositoryInterface):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def save(self, attempt: JobAttempt) -> None:
+        existing = self.session.get(JobAttemptModel, attempt.attempt_id)
+        if existing:
+            existing.start_sha = attempt.start_sha
+            existing.end_sha = attempt.end_sha
+            existing.normalized_outcome = attempt.normalized_outcome.value
+            existing.progress_classification = (
+                attempt.progress_classification.value if attempt.progress_classification else None
+            )
+            existing.continuation_decision = (
+                attempt.continuation_decision.value if attempt.continuation_decision else None
+            )
+            existing.corrective_retries_count = attempt.corrective_retries_count
+            existing.same_outcome_streak = attempt.same_outcome_streak
+            existing.same_blocker_fingerprint_streak = attempt.same_blocker_fingerprint_streak
+            existing.completed_at = attempt.completed_at
+            existing.duration_ms = attempt.duration_ms
+            existing.corrective_prompt = attempt.corrective_prompt
+            existing.error_details = attempt.error_details
+        else:
+            self.session.add(
+                JobAttemptModel(
+                    id=attempt.attempt_id,
+                    job_id=attempt.job_id,
+                    attempt_number=attempt.attempt_number,
+                    executor_role=attempt.executor_role,
+                    model_identity=attempt.model_identity,
+                    start_sha=attempt.start_sha,
+                    end_sha=attempt.end_sha,
+                    normalized_outcome=attempt.normalized_outcome.value,
+                    progress_classification=(
+                        attempt.progress_classification.value
+                        if attempt.progress_classification
+                        else None
+                    ),
+                    continuation_decision=(
+                        attempt.continuation_decision.value
+                        if attempt.continuation_decision
+                        else None
+                    ),
+                    corrective_retries_count=attempt.corrective_retries_count,
+                    same_outcome_streak=attempt.same_outcome_streak,
+                    same_blocker_fingerprint_streak=attempt.same_blocker_fingerprint_streak,
+                    started_at=attempt.started_at,
+                    completed_at=attempt.completed_at,
+                    duration_ms=attempt.duration_ms,
+                    corrective_prompt=attempt.corrective_prompt,
+                    error_details=attempt.error_details,
+                    created_at=attempt.created_at,
+                )
+            )
+
+    def get_by_id(self, attempt_id: str) -> JobAttempt | None:
+        model = self.session.get(JobAttemptModel, attempt_id)
+        return job_attempt_model_to_domain(model) if model else None
+
+    def list_by_job(self, job_id: str) -> list[JobAttempt]:
+        stmt = (
+            select(JobAttemptModel)
+            .where(JobAttemptModel.job_id == job_id)
+            .order_by(JobAttemptModel.attempt_number.asc())
+        )
+        return [job_attempt_model_to_domain(m) for m in self.session.scalars(stmt).all()]
+
+    def get_latest_attempt(self, job_id: str) -> JobAttempt | None:
+        stmt = (
+            select(JobAttemptModel)
+            .where(JobAttemptModel.job_id == job_id)
+            .order_by(JobAttemptModel.attempt_number.desc())
+            .limit(1)
+        )
+        model = self.session.scalars(stmt).first()
+        return job_attempt_model_to_domain(model) if model else None
+
+
+class PostgresBlockerClaimRepository(BlockerClaimRepositoryInterface):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def save(self, claim: BlockerClaim) -> None:
+        existing = self.session.get(BlockerClaimModel, claim.claim_id)
+        if existing:
+            existing.validation_verdict = claim.validation_verdict.value
+            existing.validation_rationale = claim.validation_rationale
+            existing.available_integration_points = claim.available_integration_points
+        else:
+            self.session.add(
+                BlockerClaimModel(
+                    id=claim.claim_id,
+                    job_id=claim.job_id,
+                    attempt_id=claim.attempt_id,
+                    blocker_type=claim.blocker_type,
+                    blocker_fingerprint=claim.blocker_fingerprint,
+                    affected_requirement=claim.affected_requirement,
+                    failing_invariant=claim.failing_invariant,
+                    evidence=claim.evidence,
+                    attempted_remediation=claim.attempted_remediation,
+                    rationale=claim.rationale,
+                    is_agent_solvable=claim.is_agent_solvable,
+                    validation_verdict=claim.validation_verdict.value,
+                    validation_rationale=claim.validation_rationale,
+                    available_integration_points=claim.available_integration_points,
+                    created_at=claim.created_at,
+                )
+            )
+
+    def get_by_id(self, claim_id: str) -> BlockerClaim | None:
+        model = self.session.get(BlockerClaimModel, claim_id)
+        return blocker_claim_model_to_domain(model) if model else None
+
+    def list_by_job(self, job_id: str) -> list[BlockerClaim]:
+        stmt = (
+            select(BlockerClaimModel)
+            .where(BlockerClaimModel.job_id == job_id)
+            .order_by(BlockerClaimModel.created_at.asc())
+        )
+        return [blocker_claim_model_to_domain(m) for m in self.session.scalars(stmt).all()]
+
+    def list_by_attempt(self, attempt_id: str) -> list[BlockerClaim]:
+        stmt = (
+            select(BlockerClaimModel)
+            .where(BlockerClaimModel.attempt_id == attempt_id)
+            .order_by(BlockerClaimModel.created_at.asc())
+        )
+        return [blocker_claim_model_to_domain(m) for m in self.session.scalars(stmt).all()]
+
+
+class PostgresJobHandoffRepository(JobHandoffRepositoryInterface):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def save(self, handoff: JobHandoff) -> None:
+        existing = self.session.get(JobHandoffModel, handoff.handoff_id)
+        if existing:
+            existing.to_attempt_id = handoff.to_attempt_id
+            existing.is_consumed = handoff.is_consumed
+        else:
+            self.session.add(
+                JobHandoffModel(
+                    id=handoff.handoff_id,
+                    job_id=handoff.job_id,
+                    from_attempt_id=handoff.from_attempt_id,
+                    to_attempt_id=handoff.to_attempt_id,
+                    from_executor=handoff.from_executor,
+                    to_executor=handoff.to_executor,
+                    worktree_path=handoff.worktree_path,
+                    base_sha=handoff.base_sha,
+                    candidate_sha=handoff.candidate_sha,
+                    completed_tasks=handoff.completed_tasks,
+                    remaining_tasks=handoff.remaining_tasks,
+                    manifest_summary=handoff.manifest_summary,
+                    checks_summary=handoff.checks_summary,
+                    blockers_summary=handoff.blockers_summary,
+                    architectural_notes=handoff.architectural_notes,
+                    do_not_redo_guidance=handoff.do_not_redo_guidance,
+                    authorship_history=handoff.authorship_history,
+                    is_consumed=handoff.is_consumed,
+                    created_at=handoff.created_at,
+                )
+            )
+
+    def get_by_id(self, handoff_id: str) -> JobHandoff | None:
+        model = self.session.get(JobHandoffModel, handoff_id)
+        return job_handoff_model_to_domain(model) if model else None
+
+    def get_latest_handoff(self, job_id: str) -> JobHandoff | None:
+        stmt = (
+            select(JobHandoffModel)
+            .where(JobHandoffModel.job_id == job_id)
+            .order_by(JobHandoffModel.created_at.desc())
+            .limit(1)
+        )
+        model = self.session.scalars(stmt).first()
+        return job_handoff_model_to_domain(model) if model else None
+
+    def list_by_job(self, job_id: str) -> list[JobHandoff]:
+        stmt = (
+            select(JobHandoffModel)
+            .where(JobHandoffModel.job_id == job_id)
+            .order_by(JobHandoffModel.created_at.asc())
+        )
+        return [job_handoff_model_to_domain(m) for m in self.session.scalars(stmt).all()]
+
+
+class PostgresCandidateManifestRepository(CandidateManifestRepositoryInterface):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def save(self, manifest: CandidateManifest) -> None:
+        existing = self.session.get(CandidateManifestModel, manifest.manifest_id)
+        if existing:
+            existing.attempt_id = manifest.attempt_id
+            existing.tracked_files = manifest.tracked_files
+            existing.staged_files = manifest.staged_files
+            existing.untracked_files = manifest.untracked_files
+            existing.deleted_files = manifest.deleted_files
+            existing.total_files_count = manifest.total_files_count
+            existing.manifest_hash = manifest.manifest_hash
+        else:
+            self.session.add(
+                CandidateManifestModel(
+                    id=manifest.manifest_id,
+                    job_id=manifest.job_id,
+                    attempt_id=manifest.attempt_id,
+                    candidate_sha=manifest.candidate_sha,
+                    tracked_files=manifest.tracked_files,
+                    staged_files=manifest.staged_files,
+                    untracked_files=manifest.untracked_files,
+                    deleted_files=manifest.deleted_files,
+                    total_files_count=manifest.total_files_count,
+                    manifest_hash=manifest.manifest_hash,
+                    created_at=manifest.created_at,
+                )
+            )
+
+    def get_by_id(self, manifest_id: str) -> CandidateManifest | None:
+        model = self.session.get(CandidateManifestModel, manifest_id)
+        return candidate_manifest_model_to_domain(model) if model else None
+
+    def get_by_candidate_sha(self, job_id: str, candidate_sha: str) -> CandidateManifest | None:
+        stmt = (
+            select(CandidateManifestModel)
+            .where(
+                CandidateManifestModel.job_id == job_id,
+                CandidateManifestModel.candidate_sha == candidate_sha,
+            )
+            .order_by(CandidateManifestModel.created_at.desc())
+            .limit(1)
+        )
+        model = self.session.scalars(stmt).first()
+        return candidate_manifest_model_to_domain(model) if model else None
+
+    def get_latest_manifest(self, job_id: str) -> CandidateManifest | None:
+        stmt = (
+            select(CandidateManifestModel)
+            .where(CandidateManifestModel.job_id == job_id)
+            .order_by(CandidateManifestModel.created_at.desc())
+            .limit(1)
+        )
+        model = self.session.scalars(stmt).first()
+        return candidate_manifest_model_to_domain(model) if model else None
+
+
+class PostgresCandidateAuthorshipRepository(CandidateAuthorshipRepositoryInterface):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def save(self, authorship: CandidateAuthorship) -> None:
+        existing = self.session.get(CandidateAuthorshipModel, authorship.authorship_id)
+        if existing:
+            existing.files_touched = authorship.files_touched
+            existing.is_primary_author = authorship.is_primary_author
+        else:
+            self.session.add(
+                CandidateAuthorshipModel(
+                    id=authorship.authorship_id,
+                    job_id=authorship.job_id,
+                    agent_role=authorship.agent_role,
+                    model_identity=authorship.model_identity,
+                    attempt_number=authorship.attempt_number,
+                    files_touched=authorship.files_touched,
+                    is_primary_author=authorship.is_primary_author,
+                    created_at=authorship.created_at,
+                )
+            )
+
+    def list_by_job(self, job_id: str) -> list[CandidateAuthorship]:
+        stmt = (
+            select(CandidateAuthorshipModel)
+            .where(CandidateAuthorshipModel.job_id == job_id)
+            .order_by(CandidateAuthorshipModel.attempt_number.asc())
+        )
+        return [candidate_authorship_model_to_domain(m) for m in self.session.scalars(stmt).all()]
+
+
+class PostgresEvidenceDiagnosticRepository(EvidenceDiagnosticRepositoryInterface):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def save(self, diagnostic: EvidenceDiagnostic) -> None:
+        existing = self.session.get(EvidenceDiagnosticModel, diagnostic.diagnostic_id)
+        if existing:
+            existing.diagnostic_status = diagnostic.diagnostic_status.value
+            existing.reason = diagnostic.reason
+            existing.evidence_reference = diagnostic.evidence_reference
+        else:
+            self.session.add(
+                EvidenceDiagnosticModel(
+                    id=diagnostic.diagnostic_id,
+                    job_id=diagnostic.job_id,
+                    attempt_id=diagnostic.attempt_id,
+                    stage_type=diagnostic.stage_type,
+                    check_name=diagnostic.check_name,
+                    diagnostic_status=diagnostic.diagnostic_status.value,
+                    environment_identity=diagnostic.environment_identity,
+                    candidate_sha=diagnostic.candidate_sha,
+                    reason=diagnostic.reason,
+                    evidence_reference=diagnostic.evidence_reference,
+                    created_at=diagnostic.created_at,
+                )
+            )
+
+    def list_by_job(self, job_id: str) -> list[EvidenceDiagnostic]:
+        stmt = (
+            select(EvidenceDiagnosticModel)
+            .where(EvidenceDiagnosticModel.job_id == job_id)
+            .order_by(EvidenceDiagnosticModel.created_at.asc())
+        )
+        return [evidence_diagnostic_model_to_domain(m) for m in self.session.scalars(stmt).all()]
+
+    def list_by_attempt(self, attempt_id: str) -> list[EvidenceDiagnostic]:
+        stmt = (
+            select(EvidenceDiagnosticModel)
+            .where(EvidenceDiagnosticModel.attempt_id == attempt_id)
+            .order_by(EvidenceDiagnosticModel.created_at.asc())
+        )
+        return [evidence_diagnostic_model_to_domain(m) for m in self.session.scalars(stmt).all()]
+
+
 class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
     """Encapsulates a database session for atomic operations across repositories."""
 
@@ -1542,6 +2075,12 @@ class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.pricing_snapshots = PostgresOpenRouterPricingSnapshotRepository(session)
         self.budget_reservations = PostgresBudgetReservationRepository(session)
         self.budget_ledger = PostgresBudgetLedgerRepository(session)
+        self.job_attempts = PostgresJobAttemptRepository(session)
+        self.blocker_claims = PostgresBlockerClaimRepository(session)
+        self.job_handoffs = PostgresJobHandoffRepository(session)
+        self.candidate_manifests = PostgresCandidateManifestRepository(session)
+        self.candidate_authorships = PostgresCandidateAuthorshipRepository(session)
+        self.evidence_diagnostics = PostgresEvidenceDiagnosticRepository(session)
 
     def commit(self) -> None:
         self.session.commit()

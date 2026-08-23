@@ -168,7 +168,11 @@ def get_openrouter_status(uow: UowDep, project_id: str | None = None) -> dict[st
             "headroom": None,
             "allowed_models": {
                 "implementer": ["anthropic/claude-3.5-sonnet", "qwen/qwen-2.5-coder-32b-instruct"],
-                "reviewer": ["openai/gpt-4o", "meta-llama/llama-3.3-70b-instruct", "mistralai/mistral-large"],
+                "reviewer": [
+                    "openai/gpt-4o",
+                    "meta-llama/llama-3.3-70b-instruct",
+                    "mistralai/mistral-large",
+                ],
             },
         }
     headroom = service._compute_headroom(project_id, policy)
@@ -183,7 +187,11 @@ def get_openrouter_status(uow: UowDep, project_id: str | None = None) -> dict[st
         "headroom": headroom.__dict__,
         "allowed_models": {
             "implementer": ["anthropic/claude-3.5-sonnet", "qwen/qwen-2.5-coder-32b-instruct"],
-            "reviewer": ["openai/gpt-4o", "meta-llama/llama-3.3-70b-instruct", "mistralai/mistral-large"],
+            "reviewer": [
+                "openai/gpt-4o",
+                "meta-llama/llama-3.3-70b-instruct",
+                "mistralai/mistral-large",
+            ],
         },
     }
 
@@ -308,14 +316,18 @@ def list_project_jobs(project_id: str, uow: UowDep) -> list[dict[str, Any]]:
 def get_job(job_id: str, uow: UowDep) -> dict[str, Any]:
     job = uow.jobs.get_by_id(job_id)
     if not job:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Job '{job_id}' not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"Job '{job_id}' not found"
+        )
     return _job_summary(uow, job)
 
 
 @app.get("/jobs/{job_id}/logs")
 def get_job_logs(job_id: str, uow: UowDep) -> list[JobLog]:
     if not uow.jobs.get_by_id(job_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Job '{job_id}' not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"Job '{job_id}' not found"
+        )
     return uow.job_logs.list_by_job(job_id)
 
 
@@ -407,16 +419,84 @@ def get_job_audit(job_id: str, uow: UowDep) -> dict[str, Any]:
     }
 
 
+@app.get("/jobs/{job_id}/attempts")
+def get_job_attempts(job_id: str, uow: UowDep) -> list[dict[str, Any]]:
+    if not uow.jobs.get_by_id(job_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"Job '{job_id}' not found"
+        )
+    attempts = uow.job_attempts.list_by_job(job_id)
+    return [a.model_dump() for a in attempts]
+
+
+@app.get("/jobs/{job_id}/blockers")
+def get_job_blockers(job_id: str, uow: UowDep) -> list[dict[str, Any]]:
+    if not uow.jobs.get_by_id(job_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"Job '{job_id}' not found"
+        )
+    claims = uow.blocker_claims.list_by_job(job_id)
+    return [c.model_dump() for c in claims]
+
+
+@app.get("/jobs/{job_id}/handoffs")
+def get_job_handoffs(job_id: str, uow: UowDep) -> list[dict[str, Any]]:
+    if not uow.jobs.get_by_id(job_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"Job '{job_id}' not found"
+        )
+    handoffs = uow.job_handoffs.list_by_job(job_id)
+    return [h.model_dump() for h in handoffs]
+
+
+@app.get("/jobs/{job_id}/manifest")
+def get_job_manifest(job_id: str, uow: UowDep) -> dict[str, Any]:
+    if not uow.jobs.get_by_id(job_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"Job '{job_id}' not found"
+        )
+    manifest = uow.candidate_manifests.get_latest_manifest(job_id)
+    if not manifest:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No candidate manifest found for job '{job_id}'",
+        )
+    return manifest.model_dump()
+
+
+@app.get("/jobs/{job_id}/diagnostics")
+def get_job_diagnostics(job_id: str, uow: UowDep) -> list[dict[str, Any]]:
+    if not uow.jobs.get_by_id(job_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"Job '{job_id}' not found"
+        )
+    diags = uow.evidence_diagnostics.list_by_job(job_id)
+    return [d.model_dump() for d in diags]
+
+
 def _job_summary(uow: PersistenceUnitOfWork, job: Job) -> dict[str, Any]:
     checks = uow.check_results.list_by_job(job.job_id)
     review = uow.reviews.get_by_job_id(job.job_id)
     audit = uow.audits.get_by_job_id(job.job_id)
+    attempts = uow.job_attempts.list_by_job(job.job_id)
+    manifest = uow.candidate_manifests.get_latest_manifest(job.job_id)
+    diagnostics = uow.evidence_diagnostics.list_by_job(job.job_id)
     return {
         "job_id": job.job_id,
         "project_id": job.project_id,
         "change_name": job.change_name,
         "status": job.status.value,
         "implementer": job.implementer_role,
+        "current_executor": job.current_executor,
+        "attempt_count": job.attempt_count,
+        "reassignment_count": job.reassignment_count,
+        "is_mixed_authorship": job.is_mixed_authorship,
+        "latest_outcome": job.latest_outcome.value if job.latest_outcome else None,
+        "latest_progress": job.latest_progress.value if job.latest_progress else None,
+        "continuation_decision": job.continuation_decision.value
+        if job.continuation_decision
+        else None,
+        "escalation_reason": job.escalation_reason,
         "candidate_sha": job.candidate_sha,
         "base_sha": job.base_sha,
         "waiting_provider": job.waiting_provider,
@@ -426,6 +506,9 @@ def _job_summary(uow: PersistenceUnitOfWork, job: Job) -> dict[str, Any]:
         "error_message": job.error_message,
         "created_at": job.created_at.isoformat(),
         "updated_at": job.updated_at.isoformat(),
+        "attempts_count": len(attempts),
+        "manifest_hash": manifest.manifest_hash if manifest else None,
+        "diagnostics_count": len(diagnostics),
         "checks": [
             {
                 "check_name": c.check_name,

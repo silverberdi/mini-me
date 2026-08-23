@@ -115,4 +115,3 @@ def test_budget_api_breach_indicator(in_memory_uow):
     assert res.status_code == 200
     data = res.json()
     assert data["is_breached"] is True
-

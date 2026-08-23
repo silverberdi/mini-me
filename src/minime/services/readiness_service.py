@@ -115,7 +115,9 @@ class ReadinessService:
                 )
                 if not pair_avail:
                     reason = f"Primary pair capacity shortage: {pair_reason}."
-                    checks.append(ReadinessCheck(name="primary_capacity", passed=False, reason=reason))
+                    checks.append(
+                        ReadinessCheck(name="primary_capacity", passed=False, reason=reason)
+                    )
                     unmet_reasons.append(reason)
                 else:
                     checks.append(
@@ -137,7 +139,9 @@ class ReadinessService:
             binding = self.uow.bindings.get_by_project_and_change(project_id, change_name)
         except ValueError as e:
             reason = f"Ambiguous project bindings: {e}"
-            checks.append(ReadinessCheck(name="durable_project_binding", passed=False, reason=reason))
+            checks.append(
+                ReadinessCheck(name="durable_project_binding", passed=False, reason=reason)
+            )
             unmet_reasons.append(reason)
             binding = None
             is_ambiguous = True
@@ -150,7 +154,9 @@ class ReadinessService:
                     f"Missing durable project binding: no validated ProjectBinding exists "
                     f"for project '{project_id}' and change '{change_name}'."
                 )
-                checks.append(ReadinessCheck(name="durable_project_binding", passed=False, reason=reason))
+                checks.append(
+                    ReadinessCheck(name="durable_project_binding", passed=False, reason=reason)
+                )
                 unmet_reasons.append(reason)
             elif not binding.is_valid:
                 reasons_str = (
@@ -159,28 +165,36 @@ class ReadinessService:
                     else "binding marked invalid"
                 )
                 reason = f"Invalid project binding: {reasons_str}."
-                checks.append(ReadinessCheck(name="durable_project_binding", passed=False, reason=reason))
+                checks.append(
+                    ReadinessCheck(name="durable_project_binding", passed=False, reason=reason)
+                )
                 unmet_reasons.append(reason)
             elif binding.repository != project.repository:
                 reason = (
                     f"Repository mismatch: ProjectBinding repository '{binding.repository}' "
                     f"does not match registered project repository '{project.repository}'."
                 )
-                checks.append(ReadinessCheck(name="durable_project_binding", passed=False, reason=reason))
+                checks.append(
+                    ReadinessCheck(name="durable_project_binding", passed=False, reason=reason)
+                )
                 unmet_reasons.append(reason)
             elif github_repo and github_repo != project.repository:
                 reason = (
                     f"Repository mismatch: work item repository '{github_repo}' "
                     f"does not match registered project repository '{project.repository}'."
                 )
-                checks.append(ReadinessCheck(name="durable_project_binding", passed=False, reason=reason))
+                checks.append(
+                    ReadinessCheck(name="durable_project_binding", passed=False, reason=reason)
+                )
                 unmet_reasons.append(reason)
             elif binding.github_issue_number is None and github_issue is None:
                 reason = (
                     f"Missing GitHub Issue binding: ProjectBinding for project '{project_id}' "
                     f"and change '{change_name}' has no associated GitHub Issue number."
                 )
-                checks.append(ReadinessCheck(name="durable_project_binding", passed=False, reason=reason))
+                checks.append(
+                    ReadinessCheck(name="durable_project_binding", passed=False, reason=reason)
+                )
                 unmet_reasons.append(reason)
             else:
                 effective_issue = github_issue or binding.github_issue_number

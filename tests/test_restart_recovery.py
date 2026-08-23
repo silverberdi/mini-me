@@ -432,7 +432,10 @@ def test_matching_operation_pid_mismatch_fails_closed(in_memory_uow, tmp_path):
 
     assert len(reconciled) == 1
     assert reconciled[0].status == JobStatus.RECOVERY_BLOCKED
-    assert "does not match recorded mini me operation pid" in reconciled[0].recovery_blocked_reason.lower()
+    assert (
+        "does not match recorded mini me operation pid"
+        in reconciled[0].recovery_blocked_reason.lower()
+    )
     assert lock_file.exists()
 
 
@@ -590,6 +593,7 @@ def test_malformed_or_empty_lock_retained(in_memory_uow, tmp_path):
 @pytest.mark.asyncio
 async def test_git_operation_persistence_failure_prevents_subprocess_launch(tmp_path):
     """C11. GitOperation persistence failure before subprocess prevents subprocess launch."""
+
     class FailingGitOpRepo:
         def save(self, op):
             raise RuntimeError("Database connection failure")
@@ -597,6 +601,7 @@ async def test_git_operation_persistence_failure_prevents_subprocess_launch(tmp_
     class FailingUoW:
         def __init__(self):
             self.git_operations = FailingGitOpRepo()
+
         def commit(self):
             pass
 
@@ -616,7 +621,9 @@ async def test_git_operation_persistence_failure_prevents_subprocess_launch(tmp_
 
 
 @pytest.mark.asyncio
-async def test_operation_created_with_exact_managed_worktree_path_before_launch(in_memory_uow, tmp_path):
+async def test_operation_created_with_exact_managed_worktree_path_before_launch(
+    in_memory_uow, tmp_path
+):
     """C12. GitOperation is saved with exact managed worktree path prior to launching Git subprocess."""
     manager = WorktreeManager(project_root=tmp_path, uow=in_memory_uow)
     job_id = "job-persist-order"
@@ -683,3 +690,79 @@ def test_pid_none_crash_window_remains_fail_closed_on_restart(in_memory_uow, tmp
     assert len(reconciled) == 1
     assert reconciled[0].status == JobStatus.RECOVERY_BLOCKED
     assert lock_file.exists()
+
+
+# ---------------------------------------------------------------------------
+# 007 Continuation Governance Restart Recovery Tests (MEDIUM-1)
+# ---------------------------------------------------------------------------
+
+
+def test_restart_preserves_needs_human_unchanged(in_memory_uow, tmp_path):
+    """NEEDS_HUMAN jobs remain strictly in NEEDS_HUMAN status across restart."""
+    job = Job(
+        job_id="job-nh-1",
+        project_id="mini-me",
+        change_name="007-nh",
+        implementer_role="codex",
+        current_executor="codex",
+        status=JobStatus.NEEDS_HUMAN,
+        escalation_reason="Validated real blocker",
+    )
+    in_memory_uow.jobs.save(job)
+
+    service = RestartRecoveryService(in_memory_uow, project_root=tmp_path)
+    service.reconcile_on_startup()
+
+    # Reconciled job remains in NEEDS_HUMAN unchanged
+    persisted = in_memory_uow.jobs.get_by_id("job-nh-1")
+    assert persisted is not None
+    assert persisted.status == JobStatus.NEEDS_HUMAN
+    assert persisted.escalation_reason == "Validated real blocker"
+
+    # Explicit direct reconciliation test
+    rec = service._reconcile_job(job, "cycle-1")
+    assert rec.status == JobStatus.NEEDS_HUMAN
+    assert rec.escalation_reason == "Validated real blocker"
+
+
+def test_restart_resumes_pending_unconsumed_handoff(in_memory_uow, tmp_path):
+    """Pending unconsumed handoff preserves target executor on restart without duplicate handoffs."""
+    from minime.domain.models import JobHandoff
+
+    job = Job(
+        job_id="job-handoff-1",
+        project_id="mini-me",
+        change_name="007-handoff",
+        implementer_role="codex",
+        current_executor="codex",
+        status=JobStatus.RUNNING,
+        reassignment_count=1,
+    )
+    in_memory_uow.jobs.save(job)
+
+    handoff = JobHandoff(
+        handoff_id="handoff-1",
+        job_id="job-handoff-1",
+        from_attempt_id="att-1",
+        from_executor="codex",
+        to_executor="antigravity",
+        worktree_path=str(tmp_path / "worktree"),
+        base_sha="base123",
+        candidate_sha="cand123",
+        is_consumed=False,
+    )
+    in_memory_uow.job_handoffs.save(handoff)
+
+    service = RestartRecoveryService(in_memory_uow, project_root=tmp_path)
+    reconciled = service.reconcile_on_startup()
+
+    assert len(reconciled) == 1
+    assert reconciled[0].status == JobStatus.QUEUED
+    assert reconciled[0].current_executor == "antigravity"
+    assert reconciled[0].reassignment_count == 1
+
+    # Verify no duplicate handoffs were created
+    all_handoffs = in_memory_uow.job_handoffs.list_by_job("job-handoff-1")
+    assert len(all_handoffs) == 1
+    assert all_handoffs[0].handoff_id == "handoff-1"
+    assert all_handoffs[0].is_consumed is False

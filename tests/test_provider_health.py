@@ -159,7 +159,9 @@ async def test_provider_health_service_probing_lifecycle(in_memory_uow):
     assert service.get_health("antigravity").status == ProviderHealthStatus.EXHAUSTED
 
     probe_failed_events = [
-        e for e in in_memory_uow.events.list_events() if e.event_type == EventType.PROVIDER_PROBE_FAILED
+        e
+        for e in in_memory_uow.events.list_events()
+        if e.event_type == EventType.PROVIDER_PROBE_FAILED
     ]
     assert len(probe_failed_events) == 1
 

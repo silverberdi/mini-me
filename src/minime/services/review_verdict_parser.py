@@ -45,9 +45,7 @@ def parse_review_verdict(raw_output: str | list[str]) -> ReviewVerdictPayload:
         candidate_strings = [m.group(0).strip() for m in brace_pattern.finditer(text)]
 
     if not candidate_strings:
-        raise MalformedReviewOutputError(
-            "No structured JSON payload found in reviewer output."
-        )
+        raise MalformedReviewOutputError("No structured JSON payload found in reviewer output.")
 
     valid_payloads: list[ReviewVerdictPayload] = []
     malformed_verdict_attempts: list[str] = []
@@ -69,11 +67,21 @@ def parse_review_verdict(raw_output: str | list[str]) -> ReviewVerdictPayload:
             # Validate finding fields
             for finding in payload.findings:
                 if not finding.violated_requirement or not finding.violated_requirement.strip():
-                    raise MalformedReviewOutputError("Finding missing required violated_requirement.")
+                    raise MalformedReviewOutputError(
+                        "Finding missing required violated_requirement."
+                    )
                 if not finding.expected_correction or not finding.expected_correction.strip():
-                    raise MalformedReviewOutputError("Finding missing required expected_correction.")
-                if finding.severity not in {FindingSeverity.BLOCKER, FindingSeverity.MAJOR, FindingSeverity.MINOR}:
-                    raise MalformedReviewOutputError(f"Finding has unsupported severity: {finding.severity}")
+                    raise MalformedReviewOutputError(
+                        "Finding missing required expected_correction."
+                    )
+                if finding.severity not in {
+                    FindingSeverity.BLOCKER,
+                    FindingSeverity.MAJOR,
+                    FindingSeverity.MINOR,
+                }:
+                    raise MalformedReviewOutputError(
+                        f"Finding has unsupported severity: {finding.severity}"
+                    )
 
             # Validate logical consistency
             if payload.verdict == ReviewVerdict.READY_TO_MERGE:
@@ -100,9 +108,7 @@ def parse_review_verdict(raw_output: str | list[str]) -> ReviewVerdictPayload:
             raise MalformedReviewOutputError(
                 f"Failed to parse valid structured review verdict: {malformed_verdict_attempts[0]}"
             )
-        raise MalformedReviewOutputError(
-            "No structured verdict payload found in reviewer output."
-        )
+        raise MalformedReviewOutputError("No structured verdict payload found in reviewer output.")
 
     if len(valid_payloads) > 1:
         raise MalformedReviewOutputError(

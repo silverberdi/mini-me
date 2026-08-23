@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "stage_type",
+    "diagnostic_status",
+    "environment_identity",
+    "candidate_sha"
+  ],
+  "properties": {
+    "stage_type": {
+      "type": "string"
+    },
+    "check_name": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "diagnostic_status": {
+      "enum": [
+        "PASS",
+        "FAIL",
+        "SKIPPED_BY_POLICY",
+        "ENVIRONMENT_UNAVAILABLE",
+        "EVIDENCE_NOT_REPRODUCIBLE",
+        "REVIEW_ENVIRONMENT_INVALID"
+      ]
+    },
+    "environment_identity": {
+      "type": "string"
+    },
+    "candidate_sha": {
+      "type": "string"
+    },
+    "reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "evidence_reference": {
+      "type": "object"
+    }
+  }
+}

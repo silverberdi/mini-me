@@ -31,7 +31,12 @@ async def test_exact_authorized_route_allows_dispatch():
     snapshot = _valid_snapshot()
     response_payload = {
         "choices": [{"message": {"role": "assistant", "content": "OK"}}],
-        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15, "cost": "0.000105"},
+        "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+            "cost": "0.000105",
+        },
     }
 
     def handler(request: httpx.Request) -> httpx.Response:

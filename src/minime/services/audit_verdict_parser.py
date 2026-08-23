@@ -23,7 +23,9 @@ def parse_audit_result(raw_output: str | list[str]) -> AuditResult:
     Allows a single optional markdown code fence wrapping the entire payload.
     Does not scan prose for JSON fragments or accept multiple payloads.
     """
-    text = "\n".join(raw_output).strip() if isinstance(raw_output, list) else str(raw_output).strip()
+    text = (
+        "\n".join(raw_output).strip() if isinstance(raw_output, list) else str(raw_output).strip()
+    )
     if not text:
         raise MalformedAuditOutputError("Audit output is empty.")
 

@@ -55,21 +55,35 @@ class OpenRouterEligibilityEvaluator:
             JobStatus.REVIEW_RUNNING,
             JobStatus.WAITING_CAPACITY,
         }
-        check_2 = (job.status in in_flight_statuses, f"Job '{job.job_id}' is not in an active in-flight status")
+        check_2 = (
+            job.status in in_flight_statuses,
+            f"Job '{job.job_id}' is not in an active in-flight status",
+        )
 
         # 3. Blocked on implementer or reviewer stage
-        check_3 = (role in {"implementer", "reviewer"}, f"Role '{role}' is not eligible for fallback")
+        check_3 = (
+            role in {"implementer", "reviewer"},
+            f"Role '{role}' is not eligible for fallback",
+        )
 
         # 4. No new READY work admitted
-        check_4 = (not is_new_ready_change, "Cannot admit new READY change into OpenRouter fallback")
+        check_4 = (
+            not is_new_ready_change,
+            "Cannot admit new READY change into OpenRouter fallback",
+        )
 
         # 5. Dual-primary exhaustion verified
         codex_health = next((h for h in primary_health_records if h.provider == "codex"), None)
         agy_health = next((h for h in primary_health_records if h.provider == "antigravity"), None)
-        codex_unavail = codex_health is not None and codex_health.status != ProviderHealthStatus.AVAILABLE
+        codex_unavail = (
+            codex_health is not None and codex_health.status != ProviderHealthStatus.AVAILABLE
+        )
         agy_unavail = agy_health is not None and agy_health.status != ProviderHealthStatus.AVAILABLE
         dual_exhausted = codex_unavail and agy_unavail
-        check_5 = (dual_exhausted, "Dual-primary exhaustion is not verified (both Codex and Antigravity must be unavailable)")
+        check_5 = (
+            dual_exhausted,
+            "Dual-primary exhaustion is not verified (both Codex and Antigravity must be unavailable)",
+        )
 
         # 6. Fallback explicitly enabled and policy not breached
         enabled = (
@@ -95,7 +109,10 @@ class OpenRouterEligibilityEvaluator:
         check_8 = (model_identity_valid, "Valid distinct canonical model identity is unavailable")
 
         # 9. Valid candidate identity bindings
-        check_9 = (candidate_integrity_valid, "Candidate integrity or worktree binding validation failed")
+        check_9 = (
+            candidate_integrity_valid,
+            "Candidate integrity or worktree binding validation failed",
+        )
 
         # 10. Pipeline invariants preserved
         check_10 = (pipeline_invariants_valid, "Pipeline invariants are not preserved")

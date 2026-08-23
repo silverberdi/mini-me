@@ -70,7 +70,9 @@ class ProjectModel(Base):
 class ProjectBindingModel(Base):
     __tablename__ = "project_bindings"
     __table_args__ = (
-        UniqueConstraint("project_id", "openspec_change_name", name="uq_project_bindings_project_change"),
+        UniqueConstraint(
+            "project_id", "openspec_change_name", name="uq_project_bindings_project_change"
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -171,6 +173,14 @@ class JobModel(Base):
     expected_reset_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
     )
+    attempt_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    reassignment_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    current_executor: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    latest_outcome: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    latest_progress: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    continuation_decision: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    is_mixed_authorship: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    escalation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False, index=True
     )
@@ -191,6 +201,197 @@ class JobModel(Base):
     audits: Mapped[list[AuditModel]] = relationship(
         "AuditModel", back_populates="job", cascade="all, delete-orphan"
     )
+    attempts: Mapped[list[JobAttemptModel]] = relationship(
+        "JobAttemptModel", back_populates="job", cascade="all, delete-orphan"
+    )
+    blocker_claims: Mapped[list[BlockerClaimModel]] = relationship(
+        "BlockerClaimModel", back_populates="job", cascade="all, delete-orphan"
+    )
+    handoffs: Mapped[list[JobHandoffModel]] = relationship(
+        "JobHandoffModel", back_populates="job", cascade="all, delete-orphan"
+    )
+    manifests: Mapped[list[CandidateManifestModel]] = relationship(
+        "CandidateManifestModel", back_populates="job", cascade="all, delete-orphan"
+    )
+    authorships: Mapped[list[CandidateAuthorshipModel]] = relationship(
+        "CandidateAuthorshipModel", back_populates="job", cascade="all, delete-orphan"
+    )
+    diagnostics: Mapped[list[EvidenceDiagnosticModel]] = relationship(
+        "EvidenceDiagnosticModel", back_populates="job", cascade="all, delete-orphan"
+    )
+
+
+class JobAttemptModel(Base):
+    __tablename__ = "job_attempts"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    executor_role: Mapped[str] = mapped_column(String(64), nullable=False)
+    model_identity: Mapped[str] = mapped_column(String(128), nullable=False)
+    start_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    end_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    normalized_outcome: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    progress_classification: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    continuation_decision: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    corrective_retries_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    same_outcome_streak: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    same_blocker_fingerprint_streak: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    corrective_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+
+    job: Mapped[JobModel] = relationship("JobModel", back_populates="attempts")
+    blocker_claims: Mapped[list[BlockerClaimModel]] = relationship(
+        "BlockerClaimModel", back_populates="attempt", cascade="all, delete-orphan"
+    )
+
+
+class BlockerClaimModel(Base):
+    __tablename__ = "blocker_claims"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    attempt_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("job_attempts.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    blocker_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    blocker_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    affected_requirement: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    failing_invariant: Mapped[str | None] = mapped_column(Text, nullable=True)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    attempted_remediation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_agent_solvable: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    validation_verdict: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    validation_rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
+    available_integration_points: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON, default=list, nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+
+    job: Mapped[JobModel] = relationship("JobModel", back_populates="blocker_claims")
+    attempt: Mapped[JobAttemptModel] = relationship(
+        "JobAttemptModel", back_populates="blocker_claims"
+    )
+
+
+class JobHandoffModel(Base):
+    __tablename__ = "job_handoffs"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    from_attempt_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("job_attempts.id", ondelete="CASCADE"), nullable=False
+    )
+    to_attempt_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("job_attempts.id", ondelete="SET NULL"), nullable=True
+    )
+    from_executor: Mapped[str] = mapped_column(String(64), nullable=False)
+    to_executor: Mapped[str] = mapped_column(String(64), nullable=False)
+    worktree_path: Mapped[str] = mapped_column(String(512), nullable=False)
+    base_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    candidate_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    completed_tasks: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    remaining_tasks: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    manifest_summary: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    checks_summary: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    blockers_summary: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    architectural_notes: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    do_not_redo_guidance: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    authorship_history: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON, default=list, nullable=False
+    )
+    is_consumed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+
+    job: Mapped[JobModel] = relationship("JobModel", back_populates="handoffs")
+
+
+class CandidateManifestModel(Base):
+    __tablename__ = "candidate_manifests"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    attempt_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("job_attempts.id", ondelete="SET NULL"), nullable=True
+    )
+    candidate_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    tracked_files: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    staged_files: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    untracked_files: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON, default=list, nullable=False
+    )
+    deleted_files: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    total_files_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    manifest_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+
+    job: Mapped[JobModel] = relationship("JobModel", back_populates="manifests")
+
+
+class CandidateAuthorshipModel(Base):
+    __tablename__ = "candidate_authorships"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    agent_role: Mapped[str] = mapped_column(String(64), nullable=False)
+    model_identity: Mapped[str] = mapped_column(String(128), nullable=False)
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    files_touched: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    is_primary_author: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+
+    job: Mapped[JobModel] = relationship("JobModel", back_populates="authorships")
+
+
+class EvidenceDiagnosticModel(Base):
+    __tablename__ = "evidence_diagnostics"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    attempt_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("job_attempts.id", ondelete="SET NULL"), nullable=True
+    )
+    stage_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    check_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    diagnostic_status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    environment_identity: Mapped[str] = mapped_column(String(128), nullable=False)
+    candidate_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    evidence_reference: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+
+    job: Mapped[JobModel] = relationship("JobModel", back_populates="diagnostics")
 
 
 class ProviderHealthModel(Base):
@@ -239,7 +440,9 @@ class GitOperationModel(Base):
     operation_type: Mapped[str] = mapped_column(String(64), nullable=False)
     pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="RUNNING", nullable=False, index=True)
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
@@ -276,6 +479,7 @@ class CheckResultModel(Base):
     )
 
     job: Mapped[JobModel] = relationship("JobModel", back_populates="check_results")
+
 
 class ReviewModel(Base):
     __tablename__ = "reviews"
@@ -424,14 +628,18 @@ class BudgetReservationModel(Base):
     project_id: Mapped[str] = mapped_column(
         String(64), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    job_id: Mapped[str] = mapped_column(String(64), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False)
+    job_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False
+    )
     change_id: Mapped[str] = mapped_column(String(128), nullable=False)
     role: Mapped[str] = mapped_column(String(32), nullable=False)
     canonical_model_identity: Mapped[str] = mapped_column(String(128), nullable=False)
     reserved_amount_usd: Mapped[Decimal] = mapped_column(Numeric(10, 6), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     pricing_snapshot_id: Mapped[str] = mapped_column(
-        String(128), ForeignKey("openrouter_pricing_snapshots.id", ondelete="RESTRICT"), nullable=False
+        String(128),
+        ForeignKey("openrouter_pricing_snapshots.id", ondelete="RESTRICT"),
+        nullable=False,
     )
     correlation_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -452,7 +660,9 @@ class BudgetLedgerModel(Base):
     project_id: Mapped[str] = mapped_column(
         String(64), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    job_id: Mapped[str] = mapped_column(String(64), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False)
+    job_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False
+    )
     change_id: Mapped[str] = mapped_column(String(128), nullable=False)
     provider: Mapped[str] = mapped_column(String(32), default="openrouter", nullable=False)
     role: Mapped[str] = mapped_column(String(32), nullable=False)

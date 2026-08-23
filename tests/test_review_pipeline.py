@@ -80,7 +80,9 @@ class GitFakeWorktreeManager:
             check=True,
             capture_output=True,
         )
-        subprocess.run(["git", "branch", "-M", "main"], cwd=str(path), check=True, capture_output=True)
+        subprocess.run(
+            ["git", "branch", "-M", "main"], cwd=str(path), check=True, capture_output=True
+        )
         subprocess.run(
             ["git", "update-ref", "refs/remotes/origin/main", "HEAD"],
             cwd=str(path),
@@ -96,9 +98,7 @@ class GitFakeWorktreeManager:
         )
         head_sha = proc.stdout.strip()
         self.created_paths[job_id] = path
-        return WorktreeInfo(
-            path=path, branch_name=f"minime/test-{job_id}", base_sha=head_sha
-        )
+        return WorktreeInfo(path=path, branch_name=f"minime/test-{job_id}", base_sha=head_sha)
 
     async def current_sha(self, worktree_path: str | Path) -> str:
         proc = subprocess.run(
@@ -127,9 +127,7 @@ def setup_project_and_change(
     (change_dir / "tasks.md").write_text("# Tasks\n- [x] 1.1 Done\n", encoding="utf-8")
     (change_dir / "design.md").write_text("# Design\n", encoding="utf-8")
     (change_dir / "specs" / "feature").mkdir(parents=True, exist_ok=True)
-    (change_dir / "specs" / "feature" / "spec.md").write_text(
-        "# Spec\n", encoding="utf-8"
-    )
+    (change_dir / "specs" / "feature" / "spec.md").write_text("# Spec\n", encoding="utf-8")
 
     project = Project(
         project_id="review-test-project",
@@ -277,15 +275,34 @@ def test_base_sha_origin_main_matching_allowed(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init"], cwd=str(repo), check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=str(repo), check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(repo), check=True, capture_output=True)
-    subprocess.run(["git", "commit", "--allow-empty", "-m", "init"], cwd=str(repo), check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=str(repo), check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "init"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
     subprocess.run(["git", "branch", "-M", "main"], cwd=str(repo), check=True, capture_output=True)
-    proc = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo), check=True, capture_output=True, text=True)
+    proc = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=str(repo), check=True, capture_output=True, text=True
+    )
     base_sha = proc.stdout.strip()
 
     # Set origin/main
-    subprocess.run(["git", "update-ref", "refs/remotes/origin/main", base_sha], cwd=str(repo), check=True, capture_output=True)
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/main", base_sha],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
 
     ok, err = validate_pre_review_integrity(
         worktree_path=repo,
@@ -303,18 +320,44 @@ def test_base_sha_local_main_stale_origin_main_correct_allowed(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init"], cwd=str(repo), check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=str(repo), check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(repo), check=True, capture_output=True)
-    subprocess.run(["git", "commit", "--allow-empty", "-m", "commit 1"], cwd=str(repo), check=True, capture_output=True)
-    proc1 = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo), check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=str(repo), check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "commit 1"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
+    proc1 = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=str(repo), check=True, capture_output=True, text=True
+    )
     sha1 = proc1.stdout.strip()
     subprocess.run(["git", "branch", "-M", "main"], cwd=str(repo), check=True, capture_output=True)
 
     # Make a second commit for origin/main
-    subprocess.run(["git", "commit", "--allow-empty", "-m", "commit 2"], cwd=str(repo), check=True, capture_output=True)
-    proc2 = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo), check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "commit 2"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
+    proc2 = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=str(repo), check=True, capture_output=True, text=True
+    )
     sha2 = proc2.stdout.strip()
-    subprocess.run(["git", "update-ref", "refs/remotes/origin/main", sha2], cwd=str(repo), check=True, capture_output=True)
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/main", sha2],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
 
     # Reset local main back to sha1 (stale local main)
     subprocess.run(["git", "reset", "--hard", sha1], cwd=str(repo), check=True, capture_output=True)
@@ -336,17 +379,43 @@ def test_base_sha_local_main_only_blocked_when_origin_main_differs(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init"], cwd=str(repo), check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=str(repo), check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(repo), check=True, capture_output=True)
-    subprocess.run(["git", "commit", "--allow-empty", "-m", "commit 1"], cwd=str(repo), check=True, capture_output=True)
-    proc1 = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo), check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=str(repo), check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "commit 1"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
+    proc1 = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=str(repo), check=True, capture_output=True, text=True
+    )
     sha1 = proc1.stdout.strip()
     subprocess.run(["git", "branch", "-M", "main"], cwd=str(repo), check=True, capture_output=True)
 
-    subprocess.run(["git", "commit", "--allow-empty", "-m", "commit 2"], cwd=str(repo), check=True, capture_output=True)
-    proc2 = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo), check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "commit 2"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
+    proc2 = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=str(repo), check=True, capture_output=True, text=True
+    )
     sha2 = proc2.stdout.strip()
-    subprocess.run(["git", "update-ref", "refs/remotes/origin/main", sha2], cwd=str(repo), check=True, capture_output=True)
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/main", sha2],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
 
     # If expected_base_sha matches only local main (sha1), it MUST be blocked because origin/main (sha2) is authoritative
     ok, err = validate_pre_review_integrity(
@@ -365,10 +434,24 @@ def test_base_sha_missing_origin_main_fails_closed(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init"], cwd=str(repo), check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=str(repo), check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(repo), check=True, capture_output=True)
-    subprocess.run(["git", "commit", "--allow-empty", "-m", "init"], cwd=str(repo), check=True, capture_output=True)
-    proc = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo), check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=str(repo), check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "init"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
+    proc = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=str(repo), check=True, capture_output=True, text=True
+    )
     current_sha = proc.stdout.strip()
 
     # No origin/main created
@@ -402,10 +485,24 @@ def test_post_review_integrity_direct(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init"], cwd=str(repo), check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=str(repo), check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(repo), check=True, capture_output=True)
-    subprocess.run(["git", "commit", "--allow-empty", "-m", "init"], cwd=str(repo), check=True, capture_output=True)
-    proc = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo), check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=str(repo), check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "init"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
+    proc = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=str(repo), check=True, capture_output=True, text=True
+    )
     current_sha = proc.stdout.strip()
 
     # Clean
@@ -771,9 +868,7 @@ async def test_review_pipeline_malformed_output_fails_safely(in_memory_uow, tmp_
         in_memory_uow,
         project_root=tmp_path,
         implementer_runner=MockImplementerRunner(),
-        reviewer_runner=MockReviewerRunner(
-            stdout=["Invalid output without json payload"]
-        ),
+        reviewer_runner=MockReviewerRunner(stdout=["Invalid output without json payload"]),
         worktree_manager=GitFakeWorktreeManager(tmp_path),
     )
 
@@ -874,7 +969,9 @@ def test_cli_jobs_review_command(in_memory_uow, monkeypatch):
         yield None
 
     monkeypatch.setattr("minime.cli.main.db_manager.session", mock_session)
-    monkeypatch.setattr("minime.cli.main.PostgresPersistenceUnitOfWork", lambda session: in_memory_uow)
+    monkeypatch.setattr(
+        "minime.cli.main.PostgresPersistenceUnitOfWork", lambda session: in_memory_uow
+    )
 
     job = Job(
         job_id="job-cli",

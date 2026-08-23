@@ -36,7 +36,9 @@ class OpenRouterRequest:
 class OpenRouterAdapter:
     """Async HTTP adapter for OpenRouter with strict pinned routing, envelope authorization, and secret redaction."""
 
-    def __init__(self, base_url: str = "https://openrouter.ai/api/v1", default_timeout: float = 60.0) -> None:
+    def __init__(
+        self, base_url: str = "https://openrouter.ai/api/v1", default_timeout: float = 60.0
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.default_timeout = default_timeout
 
@@ -46,12 +48,21 @@ class OpenRouterAdapter:
             return False, "PRICING_SNAPSHOT_MISSING: Missing or invalid pricing snapshot binding"
 
         snapshot = request.pricing_snapshot
-        if not getattr(snapshot, "is_verified", False) and snapshot.source not in AUTHORITATIVE_PRICING_SOURCES:
-            return False, f"PRICING_UNVERIFIED: Pricing snapshot '{snapshot.snapshot_id}' source '{snapshot.source}' is not authoritative"
+        if (
+            not getattr(snapshot, "is_verified", False)
+            and snapshot.source not in AUTHORITATIVE_PRICING_SOURCES
+        ):
+            return (
+                False,
+                f"PRICING_UNVERIFIED: Pricing snapshot '{snapshot.snapshot_id}' source '{snapshot.source}' is not authoritative",
+            )
 
         snapshot_id = request.pricing_snapshot_id or snapshot.snapshot_id
         if snapshot_id != snapshot.snapshot_id:
-            return False, f"PRICING_MODEL_MISMATCH: Pricing snapshot id mismatch: '{snapshot_id}' vs snapshot '{snapshot.snapshot_id}'"
+            return (
+                False,
+                f"PRICING_MODEL_MISMATCH: Pricing snapshot id mismatch: '{snapshot_id}' vs snapshot '{snapshot.snapshot_id}'",
+            )
 
         if request.model != snapshot.routed_model_identity:
             return False, (
@@ -65,10 +76,17 @@ class OpenRouterAdapter:
                 f"authorized snapshot canonical identity '{snapshot.canonical_model_identity}'"
             )
 
-        if request.model.startswith("openrouter/auto") or ":auto" in request.model or request.model == "auto":
+        if (
+            request.model.startswith("openrouter/auto")
+            or ":auto" in request.model
+            or request.model == "auto"
+        ):
             return False, "Auto-routing endpoints are strictly prohibited; pinned route required"
 
-        if ":auto" in snapshot.routed_model_identity or snapshot.routed_model_identity == "openrouter/auto":
+        if (
+            ":auto" in snapshot.routed_model_identity
+            or snapshot.routed_model_identity == "openrouter/auto"
+        ):
             return False, "Snapshot routed model contains auto-routing; pinned route required"
 
         if request.max_output_tokens <= 0:
@@ -95,7 +113,9 @@ class OpenRouterAdapter:
         if not valid:
             return self._denied(reason or "Envelope authorization failed")
 
-        timeout_sec = request.timeout_seconds if request.timeout_seconds > 0 else self.default_timeout
+        timeout_sec = (
+            request.timeout_seconds if request.timeout_seconds > 0 else self.default_timeout
+        )
         endpoint_url = f"{self.base_url}/chat/completions"
 
         messages: list[dict[str, str]] = []
@@ -117,11 +137,17 @@ class OpenRouterAdapter:
             "X-Title": "mini-me",
         }
 
-        snapshot_id = request.pricing_snapshot.snapshot_id if request.pricing_snapshot else (request.pricing_snapshot_id or "")
+        snapshot_id = (
+            request.pricing_snapshot.snapshot_id
+            if request.pricing_snapshot
+            else (request.pricing_snapshot_id or "")
+        )
 
         try:
             if client is not None:
-                response = await client.post(endpoint_url, json=payload, headers=headers, timeout=timeout_sec)
+                response = await client.post(
+                    endpoint_url, json=payload, headers=headers, timeout=timeout_sec
+                )
             else:
                 async with httpx.AsyncClient(timeout=timeout_sec) as http_client:
                     response = await http_client.post(endpoint_url, json=payload, headers=headers)
@@ -169,7 +195,11 @@ class OpenRouterAdapter:
     ) -> tuple[NormalizedProviderResult, dict[str, Any]]:
         status_code = response.status_code
         retry_after = response.headers.get("retry-after") or response.headers.get("Retry-After")
-        snapshot_id = request.pricing_snapshot.snapshot_id if request.pricing_snapshot else (request.pricing_snapshot_id or "")
+        snapshot_id = (
+            request.pricing_snapshot.snapshot_id
+            if request.pricing_snapshot
+            else (request.pricing_snapshot_id or "")
+        )
 
         if status_code == 200:
             try:
@@ -226,7 +256,9 @@ class OpenRouterAdapter:
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": total_tokens,
-                "actual_cost_usd": Decimal(str(reported_cost)) if reported_cost is not None else None,
+                "actual_cost_usd": Decimal(str(reported_cost))
+                if reported_cost is not None
+                else None,
             }
 
             return (
@@ -268,7 +300,11 @@ class OpenRouterAdapter:
                 retry_after=retry_after,
                 summary=summary,
             ),
-            {"pricing_snapshot_id": snapshot_id, "model": request.model, "status_code": status_code},
+            {
+                "pricing_snapshot_id": snapshot_id,
+                "model": request.model,
+                "status_code": status_code,
+            },
         )
 
     def _denied(self, summary: str) -> tuple[NormalizedProviderResult, dict[str, Any]]:
@@ -311,7 +347,11 @@ class MockOpenRouterAdapter(OpenRouterAdapter):
 
         self.calls.append(request)
         meta = dict(self.canned_meta)
-        snapshot_id = request.pricing_snapshot.snapshot_id if request.pricing_snapshot else (request.pricing_snapshot_id or "")
+        snapshot_id = (
+            request.pricing_snapshot.snapshot_id
+            if request.pricing_snapshot
+            else (request.pricing_snapshot_id or "")
+        )
         meta.setdefault("pricing_snapshot_id", snapshot_id)
         meta.setdefault("model", request.model)
         return self.canned_result, meta

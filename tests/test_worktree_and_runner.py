@@ -51,7 +51,11 @@ async def test_worktree_manager_create_collision_and_cleanup(tmp_path):
 @pytest.mark.asyncio
 async def test_cli_implementer_runner_redacts_output_and_times_out(tmp_path):
     output_runner = CliImplementerRunner(
-        [sys.executable, "-c", "print('token=secret123'); import sys; print('api_key=hidden', file=sys.stderr)"]
+        [
+            sys.executable,
+            "-c",
+            "print('token=secret123'); import sys; print('api_key=hidden', file=sys.stderr)",
+        ]
     )
     result = await output_runner.run(tmp_path, "prompt", timeout_seconds=5)
 
@@ -59,9 +63,7 @@ async def test_cli_implementer_runner_redacts_output_and_times_out(tmp_path):
     assert any("[REDACTED]" in line for line in result.stdout)
     assert any("[REDACTED]" in line for line in result.stderr)
 
-    timeout_runner = CliImplementerRunner(
-        [sys.executable, "-c", "import time; time.sleep(10)"]
-    )
+    timeout_runner = CliImplementerRunner([sys.executable, "-c", "import time; time.sleep(10)"])
     timeout_result = await timeout_runner.run(tmp_path, "prompt", timeout_seconds=1)
 
     assert timeout_result.timed_out is True

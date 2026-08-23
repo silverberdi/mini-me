@@ -14,13 +14,18 @@ from minime.domain.enums import (
     AuditFindingSeverity,
     AuditRiskLevel,
     AuditStatus,
+    BlockerValidationVerdict,
     CapacitySignalSource,
     ChangeStatus,
+    ContinuationDecision,
     EventType,
+    EvidenceDiagnosticStatus,
+    ExecutionOutcome,
     FindingSeverity,
     GitOperationStatus,
     JobStatus,
     LockSafetyStatus,
+    ProgressClassification,
     ProjectStatus,
     ProviderHealthStatus,
     ProviderResultClass,
@@ -159,8 +164,144 @@ class Job(BaseModel):
     capacity_block_reason: str | None = None
     recovery_blocked_reason: str | None = None
     expected_reset_at: datetime | None = None
+    attempt_count: int = 1
+    reassignment_count: int = 0
+    current_executor: str | None = None
+    latest_outcome: ExecutionOutcome | None = None
+    latest_progress: ProgressClassification | None = None
+    continuation_decision: ContinuationDecision | None = None
+    is_mixed_authorship: bool = False
+    escalation_reason: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+
+
+class JobAttempt(BaseModel):
+    """Durable execution attempt record for an executor run."""
+
+    attempt_id: str = Field(default_factory=generate_uuid)
+    job_id: str
+    attempt_number: int
+    executor_role: str
+    model_identity: str
+    start_sha: str | None = None
+    end_sha: str | None = None
+    normalized_outcome: ExecutionOutcome
+    progress_classification: ProgressClassification | None = None
+    continuation_decision: ContinuationDecision | None = None
+    corrective_retries_count: int = 0
+    same_outcome_streak: int = 1
+    same_blocker_fingerprint_streak: int = 0
+    started_at: datetime = Field(default_factory=utc_now)
+    completed_at: datetime | None = None
+    duration_ms: int | None = None
+    corrective_prompt: str | None = None
+    error_details: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class BlockerClaim(BaseModel):
+    """Durable validated blocker claim record."""
+
+    claim_id: str = Field(default_factory=generate_uuid)
+    job_id: str
+    attempt_id: str
+    blocker_type: str
+    blocker_fingerprint: str
+    affected_requirement: str | None = None
+    failing_invariant: str | None = None
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    attempted_remediation: str | None = None
+    rationale: str | None = None
+    is_agent_solvable: bool = True
+    validation_verdict: BlockerValidationVerdict
+    validation_rationale: str | None = None
+    available_integration_points: list[dict[str, Any]] | list[str] | dict[str, Any] = Field(
+        default_factory=list
+    )
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class BlockerClaimPayload(BaseModel):
+    """Parsed structured blocker payload from executor output."""
+
+    blocker_type: str
+    affected_requirement: str | None = None
+    failing_invariant: str | None = None
+    evidence: dict[str, Any] | str | None = None
+    attempted_remediation: str | None = None
+    rationale: str | None = None
+    is_agent_solvable: bool = True
+    normalized_reason_code: str | None = None
+
+
+class JobHandoff(BaseModel):
+    """Durable structured handoff payload for executor takeover."""
+
+    handoff_id: str = Field(default_factory=generate_uuid)
+    job_id: str
+    from_attempt_id: str
+    to_attempt_id: str | None = None
+    from_executor: str
+    to_executor: str
+    worktree_path: str
+    base_sha: str
+    candidate_sha: str
+    completed_tasks: list[str] = Field(default_factory=list)
+    remaining_tasks: list[str] = Field(default_factory=list)
+    manifest_summary: dict[str, Any] = Field(default_factory=dict)
+    checks_summary: dict[str, Any] = Field(default_factory=dict)
+    blockers_summary: dict[str, Any] = Field(default_factory=dict)
+    architectural_notes: dict[str, Any] = Field(default_factory=dict)
+    do_not_redo_guidance: list[str] = Field(default_factory=list)
+    authorship_history: list[dict[str, Any]] = Field(default_factory=list)
+    is_consumed: bool = False
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class CandidateManifest(BaseModel):
+    """Cryptographic and structural worktree manifest for candidate review."""
+
+    manifest_id: str = Field(default_factory=generate_uuid)
+    job_id: str
+    attempt_id: str | None = None
+    candidate_sha: str
+    tracked_files: list[dict[str, Any]] = Field(default_factory=list)
+    staged_files: list[dict[str, Any]] = Field(default_factory=list)
+    untracked_files: list[dict[str, Any]] = Field(default_factory=list)
+    deleted_files: list[str] = Field(default_factory=list)
+    total_files_count: int = 0
+    manifest_hash: str
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class CandidateAuthorship(BaseModel):
+    """Author contribution record across execution attempts."""
+
+    authorship_id: str = Field(default_factory=generate_uuid)
+    job_id: str
+    agent_role: str
+    model_identity: str
+    attempt_number: int
+    files_touched: list[str] = Field(default_factory=list)
+    is_primary_author: bool = False
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class EvidenceDiagnostic(BaseModel):
+    """Machine-readable evidence and environment execution diagnostic."""
+
+    diagnostic_id: str = Field(default_factory=generate_uuid)
+    job_id: str
+    attempt_id: str | None = None
+    stage_type: str
+    check_name: str | None = None
+    diagnostic_status: EvidenceDiagnosticStatus
+    environment_identity: str
+    candidate_sha: str
+    reason: str | None = None
+    evidence_reference: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=utc_now)
 
 
 class OpenRouterBudgetPolicy(BaseModel):
@@ -174,11 +315,13 @@ class OpenRouterBudgetPolicy(BaseModel):
     updated_at: datetime = Field(default_factory=utc_now)
 
 
-AUTHORITATIVE_PRICING_SOURCES: frozenset[str] = frozenset({
-    "operator_verified",
-    "openrouter_catalog_verified",
-    "openrouter_catalog_api",
-})
+AUTHORITATIVE_PRICING_SOURCES: frozenset[str] = frozenset(
+    {
+        "operator_verified",
+        "openrouter_catalog_verified",
+        "openrouter_catalog_api",
+    }
+)
 
 
 class OpenRouterPricingSnapshot(BaseModel):
