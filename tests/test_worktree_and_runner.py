@@ -94,6 +94,41 @@ async def test_production_push_uses_repository_root_after_worktree_cleanup(tmp_p
     assert remote_sha == candidate_sha
 
 
+@pytest.mark.asyncio
+async def test_remote_branch_head_uses_registered_repo_not_process_cwd(tmp_path, monkeypatch):
+    """Remote reconciliation must resolve origin from the registered repo root."""
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    remote_a = tmp_path / "remote-a.git"
+    remote_b = tmp_path / "remote-b.git"
+
+    for repo, remote, marker in (
+        (repo_a, remote_a, "A"),
+        (repo_b, remote_b, "B"),
+    ):
+        repo.mkdir()
+        await run(["git", "init", "-b", "main"], repo)
+        await run(["git", "config", "user.email", "test@example.com"], repo)
+        await run(["git", "config", "user.name", "Test User"], repo)
+        (repo / "marker.txt").write_text(f"{marker}\n", encoding="utf-8")
+        await run(["git", "add", "marker.txt"], repo)
+        await run(["git", "commit", "-m", f"initial {marker}"], repo)
+        await run(["git", "init", "--bare", str(remote)], repo)
+        await run(["git", "remote", "add", "origin", str(remote)], repo)
+        await run(["git", "push", "origin", "main"], repo)
+
+    sha_a = (await _git_output(["git", "rev-parse", "HEAD"], repo_a)).strip()
+    sha_b = (await _git_output(["git", "rev-parse", "HEAD"], repo_b)).strip()
+    assert sha_a != sha_b
+
+    monkeypatch.chdir(repo_b)
+    observed = GitHubAdapter().get_remote_branch_head(
+        repository=str(repo_a), branch="main", remote="origin"
+    )
+    assert observed == sha_a
+    assert observed != sha_b
+
+
 async def _git_output(cmd: list[str], cwd: Path) -> str:
     proc = await asyncio.create_subprocess_exec(
         *cmd,

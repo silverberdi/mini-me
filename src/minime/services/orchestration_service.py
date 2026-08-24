@@ -724,7 +724,7 @@ class OrchestrationService:
                 # Reconcile remote branch head before any push attempt
                 try:
                     remote_sha = self.github_adapter.get_remote_branch_head(
-                        repository=project.repository,
+                        repository=str(root),
                         branch=branch_name,
                         remote="origin",
                     )

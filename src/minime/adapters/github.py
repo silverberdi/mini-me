@@ -236,12 +236,25 @@ class GitHubAdapter(GitHubAdapterInterface):
     def get_remote_branch_head(
         self, repository: str, branch: str, remote: str = "origin"
     ) -> str | None:
-        """Query the remote branch HEAD commit SHA using git ls-remote or gh."""
+        """Query a remote branch from the explicitly registered local repository root."""
         import subprocess
+        from pathlib import Path
 
         try:
+            repo = Path(repository).resolve()
+            if not repo.exists() or not repo.is_dir():
+                raise RuntimeError(f"Registered repository path does not exist: {repo}")
+            top = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if top.returncode != 0 or Path(top.stdout.strip()).resolve() != repo:
+                raise RuntimeError(f"Registered repository path is not a Git root: {repo}")
             cmd = ["git", "ls-remote", "--heads", remote, f"refs/heads/{branch}"]
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            res = subprocess.run(cmd, cwd=repo, capture_output=True, text=True, timeout=15)
             if res.returncode != 0:
                 raise RuntimeError(f"git ls-remote failed: {res.stderr or res.stdout}")
             output = res.stdout.strip()
