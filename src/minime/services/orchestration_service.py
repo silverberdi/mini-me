@@ -492,32 +492,43 @@ class OrchestrationService:
             elif stage == OrchestrationStage.RUNNING_CHECKS:
                 job = self.uow.jobs.get_by_id(run.active_job_id)
                 project = self.uow.projects.get_by_id(run.project_id)
-                worktree_path = root / ".minime" / "worktrees" / job.job_id
+                if not job or not job.candidate_sha:
+                    self._stop_run(
+                        run,
+                        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+                        human_gate=HumanGate.NEEDS_HUMAN,
+                        stop_reason="Execution pipeline did not persist a verified candidate SHA.",
+                        stop_details={"code": "MISSING_AUTHORITATIVE_CANDIDATE"},
+                    )
+                    break
 
-                # Run checks
+                # ExecutionPipelineService owns deterministic check execution.  It persists
+                # those results before cleaning up its worktree, so orchestration must consume
+                # that authority rather than rerun checks against a path that no longer exists.
                 checks_to_run = project.checks if project and project.checks else []
-                all_passed = True
-                if checks_to_run:
-                    import asyncio
+                persisted_checks = self.uow.check_results.list_by_job(job.job_id)
+                checks_by_name = {result.check_name: result for result in persisted_checks}
+                missing_checks = [
+                    check.get("name")
+                    for check in checks_to_run
+                    if check.get("name") not in checks_by_name
+                ]
+                if missing_checks:
+                    self._stop_run(
+                        run,
+                        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+                        human_gate=HumanGate.NEEDS_HUMAN,
+                        stop_reason="Execution pipeline did not persist results for every configured check.",
+                        stop_details={
+                            "code": "INCOMPLETE_AUTHORITATIVE_CHECKS",
+                            "missing_checks": missing_checks,
+                        },
+                    )
+                    break
 
-                    try:
-                        check_run = asyncio.run(
-                            self.pipeline.checks_runner.run(
-                                job_id=job.job_id,
-                                checks=checks_to_run,
-                                worktree_path=worktree_path,
-                                candidate_sha=job.candidate_sha or "",
-                            )
-                        )
-                        for r in check_run.results:
-                            self.uow.check_results.save(r)
-                        for d in check_run.diagnostics:
-                            self.uow.evidence_diagnostics.save(d)
-                        all_passed = check_run.passed
-                    except Exception as exc:
-                        logger.error(f"Error running checks for job '{job.job_id}': {exc}")
-                        all_passed = False
-
+                all_passed = all(
+                    checks_by_name[check.get("name")].exit_code == 0 for check in checks_to_run
+                )
                 if not all_passed:
                     if job.status not in {JobStatus.CHECKS_FAILED, JobStatus.FAILED}:
                         self.uow.jobs.transition(
@@ -533,20 +544,35 @@ class OrchestrationService:
 
             elif stage == OrchestrationStage.FREEZING_CANDIDATE:
                 job = self.uow.jobs.get_by_id(run.active_job_id)
-                worktree_path = root / ".minime" / "worktrees" / job.job_id
+                if not job or not job.candidate_sha or job.base_sha != run.base_sha:
+                    self._stop_run(
+                        run,
+                        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+                        human_gate=HumanGate.NEEDS_HUMAN,
+                        stop_reason="Candidate identity is incomplete or does not match the admitted base.",
+                        stop_details={"code": "CANDIDATE_IDENTITY_MISMATCH"},
+                    )
+                    break
 
-                # Resolve actual worktree HEAD
-                head_sha = (
-                    self._resolve_head_sha(worktree_path)
-                    or job.candidate_sha
-                    or "0000000000000000000000000000000000000000"
+                # The execution pipeline generated and persisted the manifest while the
+                # managed worktree existed.  Reuse that exact immutable evidence; never
+                # regenerate it from the finalized (and cleaned) worktree path.
+                manifest = self.uow.candidate_manifests.get_by_candidate_sha(
+                    job.job_id, job.candidate_sha
                 )
-                manifest = self.pipeline.manifest_service.generate_manifest(
-                    worktree_path=str(worktree_path),
-                    candidate_sha=head_sha,
-                    job_id=job.job_id,
-                )
-                self.uow.candidate_manifests.save(manifest)
+                if not manifest or not manifest.manifest_hash or manifest.total_files_count <= 0:
+                    self._stop_run(
+                        run,
+                        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+                        human_gate=HumanGate.NEEDS_HUMAN,
+                        stop_reason="Execution pipeline did not persist a non-empty candidate manifest.",
+                        stop_details={
+                            "code": "MISSING_AUTHORITATIVE_MANIFEST",
+                            "candidate_sha": job.candidate_sha,
+                        },
+                    )
+                    break
+                head_sha = job.candidate_sha
                 authorships = self.uow.candidate_authorships.list_by_job(job.job_id)
 
                 latest_candidate = self.uow.orchestration_candidates.get_latest_for_run(run.run_id)

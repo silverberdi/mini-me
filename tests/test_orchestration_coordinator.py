@@ -37,12 +37,13 @@ from minime.domain.models import (
     Review,
     utc_now,
 )
-from minime.services.checks_runner import ChecksRunResult
+from minime.services.checks_runner import ChecksRunner, ChecksRunResult
 from minime.services.deepseek_auditor_runner import MockAuditorRunner
 from minime.services.execution_pipeline import ExecutionPipelineService
 from minime.services.implementer_runner import ImplementerResult, MockImplementerRunner
 from minime.services.orchestration_service import OrchestrationService
 from minime.services.reviewer_runner import MockReviewerRunner
+from minime.services.worktree_manager import WorktreeManager
 
 
 class FakeGitHubAdapter(GitHubAdapterInterface):
@@ -352,6 +353,62 @@ def test_end_to_end_successful_orchestration(setup_orchestration_environment, in
     assert "github.com" in status_view.pr_url
     assert status_view.review_verdict == "READY_TO_MERGE"
     assert status_view.audit_status == "AUDIT_COMPLETED"
+
+
+def test_orchestration_reuses_pipeline_evidence_after_production_worktree_cleanup(
+    setup_orchestration_environment, in_memory_uow
+):
+    """The coordinator must use persisted pipeline evidence, never a removed worktree."""
+    env = setup_orchestration_environment
+    project = in_memory_uow.projects.get_by_id(env["project_id"])
+    project.checks = [{"name": "candidate-file", "command": "test -f candidate_impl.py"}]
+    in_memory_uow.projects.save(project)
+
+    pipeline = ExecutionPipelineService(
+        uow=in_memory_uow,
+        project_root=env["project_root"],
+        implementer_runner=MockImplementerRunner(),
+        worktree_manager=WorktreeManager(env["project_root"], uow=in_memory_uow),
+        checks_runner=ChecksRunner(),
+        reviewer_runner=MockReviewerRunner(
+            stdout=[
+                '```json\n{"verdict": "READY_TO_MERGE", "summary": "All good", "findings": []}\n```'
+            ]
+        ),
+        auditor_runner=MockAuditorRunner(
+            output=['{"risk": "low", "summary": "Passed", "findings": []}']
+        ),
+    )
+    service = OrchestrationService(
+        in_memory_uow,
+        project_root=env["project_root"],
+        pipeline=pipeline,
+        github_adapter=FakeGitHubAdapter(),
+    )
+
+    run = service.start(env["project_id"], env["change_name"])
+
+    assert run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
+    job = in_memory_uow.jobs.get_by_id(run.active_job_id)
+    assert job is not None and job.candidate_sha
+    assert not (env["project_root"] / ".minime" / "worktrees" / job.job_id).exists()
+
+    checks = in_memory_uow.check_results.list_by_job(job.job_id)
+    assert len(checks) == 1
+    assert checks[0].check_name == "candidate-file"
+    assert checks[0].exit_code == 0
+
+    manifest = in_memory_uow.candidate_manifests.get_by_candidate_sha(job.job_id, job.candidate_sha)
+    assert manifest is not None
+    assert manifest.total_files_count > 0
+    assert "candidate_impl.py" in {
+        item["path"]
+        for item in manifest.tracked_files + manifest.staged_files + manifest.untracked_files
+    }
+    candidate = in_memory_uow.orchestration_candidates.get_latest_for_run(run.run_id)
+    assert candidate is not None
+    assert candidate.candidate_sha == job.candidate_sha
+    assert candidate.manifest_hash == manifest.manifest_hash
 
 
 def test_capacity_exhaustion_stops_at_waiting_capacity(
