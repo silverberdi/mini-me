@@ -89,3 +89,120 @@ class GitHubAdapter(GitHubAdapterInterface):
             },
             timestamp=utc_now(),
         )
+
+    def get_pull_request(
+        self, repository: str, branch: str, base: str = "main"
+    ) -> dict[str, Any] | None:
+        """Lookup an existing PR for the branch against base in the given repository."""
+        import json
+        import subprocess
+
+        try:
+            cmd = [
+                "gh",
+                "pr",
+                "view",
+                branch,
+                "--repo",
+                repository,
+                "--json",
+                "number,url,headRefOid,baseRefName,headRefName,state,title,body",
+            ]
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if res.returncode == 0 and res.stdout.strip():
+                data = json.loads(res.stdout)
+                return {
+                    "repository": repository,
+                    "number": data.get("number"),
+                    "url": data.get("url"),
+                    "head_sha": data.get("headRefOid"),
+                    "head_branch": data.get("headRefName"),
+                    "base_branch": data.get("baseRefName"),
+                    "state": data.get("state"),
+                    "title": data.get("title"),
+                    "body": data.get("body"),
+                }
+            return None
+        except Exception as exc:
+            logger.warning(f"Error querying PR for branch '{branch}' in '{repository}': {exc}")
+            raise
+
+    def create_pull_request(
+        self,
+        repository: str,
+        branch: str,
+        base: str,
+        title: str,
+        body: str,
+        head_sha: str,
+    ) -> dict[str, Any]:
+        """Create a new PR for the branch against base in the given repository."""
+        import subprocess
+
+        try:
+            cmd = [
+                "gh",
+                "pr",
+                "create",
+                "--repo",
+                repository,
+                "--base",
+                base,
+                "--head",
+                branch,
+                "--title",
+                title,
+                "--body",
+                body,
+            ]
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            if res.returncode != 0:
+                raise RuntimeError(f"gh pr create failed: {res.stderr or res.stdout}")
+            pr_data = self.get_pull_request(repository, branch, base)
+            if pr_data:
+                return pr_data
+            raise RuntimeError("GitHub created the PR but returned no authoritative PR record.")
+        except Exception as exc:
+            logger.warning(f"Error creating PR for branch '{branch}' in '{repository}': {exc}")
+            raise
+
+    def push_branch(
+        self,
+        worktree_path: str,
+        remote: str,
+        branch: str,
+        candidate_sha: str,
+    ) -> bool:
+        """Push candidate branch to remote."""
+        import subprocess
+
+        try:
+            cmd = ["git", "push", remote, f"{candidate_sha}:refs/heads/{branch}"]
+            res = subprocess.run(cmd, cwd=worktree_path, capture_output=True, text=True, timeout=30)
+            if res.returncode != 0:
+                raise RuntimeError(f"git push failed: {res.stderr or res.stdout}")
+            return True
+        except Exception as exc:
+            logger.warning(f"Error pushing branch '{branch}' to '{remote}': {exc}")
+            raise
+
+    def get_remote_branch_head(
+        self, repository: str, branch: str, remote: str = "origin"
+    ) -> str | None:
+        """Query the remote branch HEAD commit SHA using git ls-remote or gh."""
+        import subprocess
+
+        try:
+            cmd = ["git", "ls-remote", "--heads", remote, f"refs/heads/{branch}"]
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            if res.returncode != 0:
+                raise RuntimeError(f"git ls-remote failed: {res.stderr or res.stdout}")
+            output = res.stdout.strip()
+            if output:
+                parts = output.split()
+                if parts:
+                    return parts[0]
+            return None
+        except Exception as exc:
+            logger.warning(f"Error querying remote branch head '{branch}' in '{remote}': {exc}")
+            raise

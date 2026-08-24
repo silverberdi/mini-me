@@ -5,10 +5,26 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
+from typing import Any
 
-from minime.domain.enums import EventType, GitOperationStatus, JobStatus, LockSafetyStatus
+from minime.domain.enums import (
+    EventType,
+    ExternalActionStatus,
+    GitOperationStatus,
+    HumanGate,
+    JobStatus,
+    LockSafetyStatus,
+    OrchestrationStopOutcome,
+)
 from minime.domain.interfaces import PersistenceUnitOfWork
-from minime.domain.models import Event, Job, LockInspectionResult, generate_uuid, utc_now
+from minime.domain.models import (
+    Event,
+    Job,
+    LockInspectionResult,
+    OrchestrationRun,
+    generate_uuid,
+    utc_now,
+)
 from minime.services.provider_health_service import ProviderHealthService
 
 logger = logging.getLogger(__name__)
@@ -39,10 +55,11 @@ class RestartRecoveryService:
         self.managed_worktrees_root = (self.project_root / ".minime" / "worktrees").resolve()
         self.health_service = health_service or ProviderHealthService(uow)
 
-    def reconcile_on_startup(self) -> list[Job]:
-        """Reconcile all in-flight / non-terminal jobs on daemon startup with full audit evidence."""
+    def reconcile_on_startup(self, orchestration_service: Any = None) -> list[Job]:
+        """Reconcile all in-flight / non-terminal jobs and active orchestration runs on daemon startup with full audit evidence."""
         recovery_cycle_id = generate_uuid()
         active_jobs = self.uow.jobs.list_active_jobs()
+        active_runs = self.uow.orchestration_runs.list_runs(is_active=True)
 
         interrupted_jobs = [
             j
@@ -70,6 +87,7 @@ class RestartRecoveryService:
                     "waiting_jobs_count": len(waiting_jobs),
                     "blocked_jobs_count": len(blocked_jobs),
                     "queued_jobs_count": len(queued_jobs),
+                    "active_orchestration_runs_count": len(active_runs),
                 },
                 timestamp=utc_now(),
             )
@@ -80,8 +98,105 @@ class RestartRecoveryService:
             rec_job = self._reconcile_job(job, recovery_cycle_id)
             reconciled.append(rec_job)
 
+        self.reconcile_orchestration_runs(
+            orchestration_service=orchestration_service,
+            recovery_cycle_id=recovery_cycle_id,
+        )
+
         self.uow.commit()
         return reconciled
+
+    def reconcile_orchestration_runs(
+        self,
+        orchestration_service: Any = None,
+        recovery_cycle_id: str | None = None,
+    ) -> list[OrchestrationRun]:
+        """Reconcile active orchestration runs on daemon startup."""
+        cycle_id = recovery_cycle_id or generate_uuid()
+        active_runs = self.uow.orchestration_runs.list_runs(is_active=True)
+        reconciled_runs = []
+
+        for run in active_runs:
+            rec_run = self._reconcile_orchestration_run(run, orchestration_service, cycle_id)
+            reconciled_runs.append(rec_run)
+
+        self.uow.commit()
+        return reconciled_runs
+
+    def _reconcile_orchestration_run(
+        self,
+        run: OrchestrationRun,
+        orchestration_service: Any = None,
+        recovery_cycle_id: str | None = None,
+    ) -> OrchestrationRun:
+        """Reconcile a single active orchestration run without duplicate actions."""
+        # 1. Check associated active job if any
+        if run.active_job_id:
+            job = self.uow.jobs.get_by_id(run.active_job_id)
+            if job and job.status in {JobStatus.RECOVERY_BLOCKED, JobStatus.NEEDS_HUMAN}:
+                run.is_active = False
+                run.stop_outcome = OrchestrationStopOutcome.NEEDS_HUMAN
+                run.human_gate = HumanGate.NEEDS_HUMAN
+                run.stop_reason = f"Active job '{job.job_id}' is in {job.status.value}."
+                self.uow.orchestration_runs.save(run)
+                return run
+
+        # 2. Inspect candidate and external actions
+        actions = self.uow.orchestration_external_actions.list_by_run(run.run_id)
+        current_cand = self.uow.orchestration_candidates.get_latest_for_run(run.run_id)
+
+        ambiguous_actions = [
+            action for action in actions if action.status == ExternalActionStatus.AMBIGUOUS
+        ]
+        if ambiguous_actions:
+            action_keys = [action.action_key for action in ambiguous_actions]
+            run.is_active = False
+            run.stop_outcome = OrchestrationStopOutcome.NEEDS_HUMAN
+            run.human_gate = HumanGate.NEEDS_HUMAN
+            run.stop_reason = "Restart found ambiguous external action state."
+            run.stop_details = {"action_keys": action_keys}
+            self.uow.orchestration_runs.save(run)
+            self.uow.events.save(
+                Event(
+                    event_type=EventType.RECOVERY_BLOCKED,
+                    project_id=run.project_id,
+                    change_id=run.change_name,
+                    operation_id=run.run_id,
+                    payload={"reason": run.stop_reason, "action_keys": action_keys},
+                    timestamp=utc_now(),
+                )
+            )
+            return run
+
+        # 3. Log recovery event
+        self.uow.events.save(
+            Event(
+                event_type="ORCHESTRATION_RECOVERED",
+                project_id=run.project_id,
+                change_id=run.change_name,
+                payload={
+                    "run_id": run.run_id,
+                    "stage": run.current_stage.value,
+                    "resumable_stage": run.resumable_stage.value,
+                    "candidate_generation": run.current_generation,
+                    "candidate_sha": current_cand.candidate_sha if current_cand else None,
+                    "actions_count": len(actions),
+                    "recovery_cycle_id": recovery_cycle_id,
+                },
+                timestamp=utc_now(),
+            )
+        )
+
+        # 4. If orchestration_service provided, resume the run safely
+        if orchestration_service is not None and run.is_active:
+            try:
+                orchestration_service.resume(run.run_id)
+            except Exception as exc:
+                logger.warning(
+                    f"Failed to auto-resume run '{run.run_id}' during restart recovery: {exc}"
+                )
+
+        return run
 
     def _reconcile_job(self, job: Job, recovery_cycle_id: str) -> Job:
         """Reconcile a single non-terminal job."""

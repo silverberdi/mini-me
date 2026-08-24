@@ -102,10 +102,26 @@ class WorktreeManager:
         if path.exists() and any(path.iterdir()):
             raise ValueError(f"Worktree path already exists and is not empty: {path}")
         path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            await self._git(["worktree", "prune"], cwd=self.project_root)
+        except Exception:
+            pass
         branch_name = f"minime/{change_name}-{job_id}"
         base_sha = await self._git(["rev-parse", base_branch])
+        branch_exists = False
+        try:
+            await self._git(["rev-parse", "--verify", f"refs/heads/{branch_name}"])
+            branch_exists = True
+        except Exception:
+            branch_exists = False
+
+        if branch_exists:
+            cmd = ["worktree", "add", str(path), branch_name]
+        else:
+            cmd = ["worktree", "add", "-b", branch_name, str(path), base_branch]
+
         await self._git(
-            ["worktree", "add", "-b", branch_name, str(path), base_branch],
+            cmd,
             cwd=self.project_root,
             job_id=job_id,
             project_id=project_id,

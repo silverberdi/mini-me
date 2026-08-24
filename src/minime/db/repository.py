@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
@@ -29,6 +30,10 @@ from minime.db.models import (
     MetricFactModel,
     OpenRouterBudgetPolicyModel,
     OpenRouterPricingSnapshotModel,
+    OrchestrationCandidateModel,
+    OrchestrationExternalActionModel,
+    OrchestrationRunModel,
+    OrchestrationStageEventModel,
     ProjectBindingModel,
     ProjectModel,
     ProviderHealthModel,
@@ -47,9 +52,14 @@ from minime.domain.enums import (
     EventType,
     EvidenceDiagnosticStatus,
     ExecutionOutcome,
+    ExternalActionStatus,
+    ExternalActionType,
     FindingSeverity,
     GitOperationStatus,
+    HumanGate,
     JobStatus,
+    OrchestrationStage,
+    OrchestrationStopOutcome,
     ProgressClassification,
     ProjectStatus,
     ProviderHealthStatus,
@@ -79,6 +89,10 @@ from minime.domain.interfaces import (
     MetricFactRepositoryInterface,
     OpenRouterBudgetPolicyRepositoryInterface,
     OpenRouterPricingSnapshotRepositoryInterface,
+    OrchestrationCandidateRepositoryInterface,
+    OrchestrationExternalActionRepositoryInterface,
+    OrchestrationRunRepositoryInterface,
+    OrchestrationStageEventRepositoryInterface,
     PersistenceUnitOfWork,
     ProjectBindingRepositoryInterface,
     ProjectRepositoryInterface,
@@ -108,6 +122,10 @@ from minime.domain.models import (
     MetricFact,
     OpenRouterBudgetPolicy,
     OpenRouterPricingSnapshot,
+    OrchestrationCandidate,
+    OrchestrationExternalAction,
+    OrchestrationRun,
+    OrchestrationStageEvent,
     Project,
     ProjectBinding,
     ProviderHealth,
@@ -175,6 +193,8 @@ def binding_model_to_domain(model: ProjectBindingModel) -> ProjectBinding:
         repository=model.repository,
         github_issue_number=model.github_issue_number,
         github_project_item_id=model.github_project_item_id,
+        github_pr_number=model.github_pr_number,
+        github_pr_url=model.github_pr_url,
         openspec_change_name=model.openspec_change_name,
         is_valid=model.is_valid,
         mismatch_reasons=model.mismatch_reasons or [],
@@ -445,8 +465,13 @@ def review_model_to_domain(model: ReviewModel) -> Review:
         project_id=model.project_id,
         change_name=model.change_name,
         reviewer_role=model.reviewer_role,
+        reviewer_model=model.reviewer_model,
+        orchestration_run_id=model.orchestration_run_id,
+        candidate_generation=model.candidate_generation,
         candidate_sha=model.candidate_sha,
         base_sha=model.base_sha,
+        manifest_id=model.manifest_id,
+        manifest_hash=model.manifest_hash,
         status=ReviewStatus(model.status),
         verdict=ReviewVerdict(model.verdict) if model.verdict else None,
         summary=model.summary,
@@ -478,8 +503,13 @@ def audit_model_to_domain(model: AuditModel) -> AuditRecord:
         change_name=model.change_name,
         provider=model.provider,
         model=model.model,
+        orchestration_run_id=model.orchestration_run_id,
+        candidate_generation=model.candidate_generation,
         candidate_sha=model.candidate_sha,
         base_sha=model.base_sha,
+        manifest_id=model.manifest_id,
+        manifest_hash=model.manifest_hash,
+        is_full_candidate=model.is_full_candidate,
         review_id=model.review_id,
         review_verdict=ReviewVerdict(model.review_verdict) if model.review_verdict else None,
         status=AuditStatus(model.status),
@@ -555,6 +585,84 @@ def budget_ledger_model_to_domain(model: BudgetLedgerModel) -> BudgetLedgerEntry
         amount_usd=_to_decimal(model.amount_usd),
         entry_type=model.entry_type,
         created_at=model.created_at,
+    )
+
+
+def orchestration_run_model_to_domain(model: OrchestrationRunModel) -> OrchestrationRun:
+    return OrchestrationRun(
+        run_id=model.id,
+        project_id=model.project_id,
+        change_name=model.change_name,
+        base_sha=model.base_sha,
+        current_stage=OrchestrationStage(model.current_stage),
+        resumable_stage=OrchestrationStage(model.resumable_stage),
+        stop_outcome=OrchestrationStopOutcome(model.stop_outcome) if model.stop_outcome else None,
+        human_gate=HumanGate(model.human_gate) if model.human_gate else None,
+        stop_reason=model.stop_reason,
+        stop_details=model.stop_details or {},
+        active_job_id=model.active_job_id,
+        current_generation=model.current_generation,
+        current_candidate_sha=model.current_candidate_sha,
+        is_active=model.is_active,
+        created_at=model.created_at,
+        updated_at=model.updated_at,
+    )
+
+
+def orchestration_stage_event_model_to_domain(
+    model: OrchestrationStageEventModel,
+) -> OrchestrationStageEvent:
+    return OrchestrationStageEvent(
+        event_id=model.id,
+        run_id=model.run_id,
+        from_stage=OrchestrationStage(model.from_stage) if model.from_stage else None,
+        to_stage=OrchestrationStage(model.to_stage),
+        event_type=model.event_type,
+        transition_key=model.transition_key,
+        evidence_references=model.evidence_references or {},
+        actor=model.actor,
+        created_at=model.created_at,
+    )
+
+
+def orchestration_candidate_model_to_domain(
+    model: OrchestrationCandidateModel,
+) -> OrchestrationCandidate:
+    return OrchestrationCandidate(
+        candidate_id=model.id,
+        run_id=model.run_id,
+        generation=model.generation,
+        base_sha=model.base_sha,
+        candidate_sha=model.candidate_sha,
+        manifest_id=model.manifest_id,
+        manifest_hash=model.manifest_hash,
+        authorship_summary=model.authorship_summary or {},
+        is_frozen=model.is_frozen,
+        superseded_by_id=model.superseded_by_id,
+        created_at=model.created_at,
+    )
+
+
+def orchestration_external_action_model_to_domain(
+    model: OrchestrationExternalActionModel,
+) -> OrchestrationExternalAction:
+    return OrchestrationExternalAction(
+        action_id=model.id,
+        run_id=model.run_id,
+        action_key=model.action_key,
+        action_type=ExternalActionType(model.action_type),
+        target_identity=model.target_identity,
+        request_fingerprint=model.request_fingerprint,
+        candidate_sha=model.candidate_sha,
+        generation=model.generation,
+        status=ExternalActionStatus(model.status),
+        remote_identifier=model.remote_identifier,
+        result_payload=model.result_payload or {},
+        error_message=model.error_message,
+        reserved_at=model.reserved_at,
+        reconciled_at=model.reconciled_at,
+        created_at=model.created_at,
+        updated_at=model.updated_at,
     )
 
 
@@ -676,6 +784,8 @@ class PostgresProjectBindingRepository(ProjectBindingRepositoryInterface):
             existing.repository = binding.repository
             existing.github_issue_number = binding.github_issue_number
             existing.github_project_item_id = binding.github_project_item_id
+            existing.github_pr_number = binding.github_pr_number
+            existing.github_pr_url = binding.github_pr_url
             existing.openspec_change_name = binding.openspec_change_name
             existing.is_valid = binding.is_valid
             existing.mismatch_reasons = binding.mismatch_reasons
@@ -687,6 +797,8 @@ class PostgresProjectBindingRepository(ProjectBindingRepositoryInterface):
                 repository=binding.repository,
                 github_issue_number=binding.github_issue_number,
                 github_project_item_id=binding.github_project_item_id,
+                github_pr_number=binding.github_pr_number,
+                github_pr_url=binding.github_pr_url,
                 openspec_change_name=binding.openspec_change_name,
                 is_valid=binding.is_valid,
                 mismatch_reasons=binding.mismatch_reasons,
@@ -866,7 +978,12 @@ class PostgresJobRepository(JobRepositoryInterface):
             JobStatus.CANCELLED,
         },
         JobStatus.READY_TO_MERGE: set(),
-        JobStatus.AUDIT_BLOCKED: set(),
+        JobStatus.AUDIT_BLOCKED: {
+            JobStatus.RUNNING,
+            JobStatus.NEEDS_HUMAN,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+        },
         JobStatus.CHANGES_REQUIRED: {
             JobStatus.RUNNING,
             JobStatus.NEEDS_HUMAN,
@@ -1099,6 +1216,13 @@ class PostgresReviewRepository(ReviewRepositoryInterface):
             existing.verdict = review.verdict.value if review.verdict else None
             existing.summary = review.summary
             existing.error_message = review.error_message
+            existing.reviewer_model = review.reviewer_model
+            existing.orchestration_run_id = review.orchestration_run_id
+            existing.candidate_generation = review.candidate_generation
+            existing.candidate_sha = review.candidate_sha
+            existing.base_sha = review.base_sha
+            existing.manifest_id = review.manifest_id
+            existing.manifest_hash = review.manifest_hash
             existing.updated_at = review.updated_at
         else:
             model = ReviewModel(
@@ -1107,8 +1231,13 @@ class PostgresReviewRepository(ReviewRepositoryInterface):
                 project_id=review.project_id,
                 change_name=review.change_name,
                 reviewer_role=review.reviewer_role,
+                reviewer_model=review.reviewer_model,
+                orchestration_run_id=review.orchestration_run_id,
+                candidate_generation=review.candidate_generation,
                 candidate_sha=review.candidate_sha,
                 base_sha=review.base_sha,
+                manifest_id=review.manifest_id,
+                manifest_hash=review.manifest_hash,
                 status=review.status.value,
                 verdict=review.verdict.value if review.verdict else None,
                 summary=review.summary,
@@ -1226,6 +1355,15 @@ class PostgresAuditRepository(AuditRepositoryInterface):
             existing.risk = audit.risk.value if audit.risk else None
             existing.summary = audit.summary
             existing.error_message = audit.error_message
+            existing.provider = audit.provider
+            existing.model = audit.model
+            existing.orchestration_run_id = audit.orchestration_run_id
+            existing.candidate_generation = audit.candidate_generation
+            existing.candidate_sha = audit.candidate_sha
+            existing.base_sha = audit.base_sha
+            existing.manifest_id = audit.manifest_id
+            existing.manifest_hash = audit.manifest_hash
+            existing.is_full_candidate = audit.is_full_candidate
             existing.updated_at = audit.updated_at
         else:
             self.session.add(
@@ -1236,8 +1374,13 @@ class PostgresAuditRepository(AuditRepositoryInterface):
                     change_name=audit.change_name,
                     provider=audit.provider,
                     model=audit.model,
+                    orchestration_run_id=audit.orchestration_run_id,
+                    candidate_generation=audit.candidate_generation,
                     candidate_sha=audit.candidate_sha,
                     base_sha=audit.base_sha,
+                    manifest_id=audit.manifest_id,
+                    manifest_hash=audit.manifest_hash,
+                    is_full_candidate=audit.is_full_candidate,
                     review_id=audit.review_id,
                     review_verdict=audit.review_verdict.value if audit.review_verdict else None,
                     status=audit.status.value,
@@ -2051,6 +2194,322 @@ class PostgresEvidenceDiagnosticRepository(EvidenceDiagnosticRepositoryInterface
         return [evidence_diagnostic_model_to_domain(m) for m in self.session.scalars(stmt).all()]
 
 
+class PostgresOrchestrationRunRepository(OrchestrationRunRepositoryInterface):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def save(self, run: OrchestrationRun) -> None:
+        existing = self.session.get(OrchestrationRunModel, run.run_id)
+        if existing:
+            existing.project_id = run.project_id
+            existing.change_name = run.change_name
+            existing.base_sha = run.base_sha
+            existing.current_stage = run.current_stage.value
+            existing.resumable_stage = run.resumable_stage.value
+            existing.human_gate = run.human_gate.value if run.human_gate else None
+            existing.stop_reason = run.stop_reason
+            existing.stop_details = run.stop_details
+            existing.stop_outcome = run.stop_outcome.value if run.stop_outcome else None
+            existing.human_gate = run.human_gate.value if run.human_gate else None
+            existing.stop_reason = run.stop_reason
+            existing.stop_details = run.stop_details
+            existing.active_job_id = run.active_job_id
+            existing.current_generation = run.current_generation
+            existing.current_candidate_sha = run.current_candidate_sha
+            existing.is_active = run.is_active
+            existing.updated_at = utc_now()
+        else:
+            self.session.add(
+                OrchestrationRunModel(
+                    id=run.run_id,
+                    project_id=run.project_id,
+                    change_name=run.change_name,
+                    base_sha=run.base_sha,
+                    current_stage=run.current_stage.value,
+                    resumable_stage=run.resumable_stage.value,
+                    stop_outcome=run.stop_outcome.value if run.stop_outcome else None,
+                    human_gate=run.human_gate.value if run.human_gate else None,
+                    stop_reason=run.stop_reason,
+                    stop_details=run.stop_details,
+                    active_job_id=run.active_job_id,
+                    current_generation=run.current_generation,
+                    current_candidate_sha=run.current_candidate_sha,
+                    is_active=run.is_active,
+                    created_at=run.created_at,
+                    updated_at=run.updated_at,
+                )
+            )
+
+    def get_by_id(self, run_id: str) -> OrchestrationRun | None:
+        model = self.session.get(OrchestrationRunModel, run_id)
+        return orchestration_run_model_to_domain(model) if model else None
+
+    def get_active_run(self, project_id: str, change_name: str) -> OrchestrationRun | None:
+        stmt = select(OrchestrationRunModel).where(
+            OrchestrationRunModel.project_id == project_id,
+            OrchestrationRunModel.change_name == change_name,
+            OrchestrationRunModel.is_active.is_(True),
+        )
+        model = self.session.scalars(stmt).first()
+        return orchestration_run_model_to_domain(model) if model else None
+
+    def list_runs(
+        self,
+        project_id: str | None = None,
+        change_name: str | None = None,
+        is_active: bool | None = None,
+    ) -> list[OrchestrationRun]:
+        stmt = select(OrchestrationRunModel)
+        if project_id:
+            stmt = stmt.where(OrchestrationRunModel.project_id == project_id)
+        if change_name:
+            stmt = stmt.where(OrchestrationRunModel.change_name == change_name)
+        if is_active is not None:
+            stmt = stmt.where(OrchestrationRunModel.is_active.is_(is_active))
+        stmt = stmt.order_by(desc(OrchestrationRunModel.created_at))
+        return [orchestration_run_model_to_domain(m) for m in self.session.scalars(stmt).all()]
+
+    def update_stage(
+        self,
+        run_id: str,
+        current_stage: OrchestrationStage,
+        resumable_stage: OrchestrationStage,
+    ) -> OrchestrationRun:
+        model = self.session.get(OrchestrationRunModel, run_id)
+        if not model:
+            raise ValueError(f"Orchestration run '{run_id}' not found")
+        model.current_stage = current_stage.value
+        model.resumable_stage = resumable_stage.value
+        model.updated_at = utc_now()
+        return orchestration_run_model_to_domain(model)
+
+    def update_stop_outcome(
+        self,
+        run_id: str,
+        stop_outcome: OrchestrationStopOutcome,
+        human_gate: HumanGate | None = None,
+        stop_reason: str | None = None,
+        stop_details: dict[str, Any] | None = None,
+        is_active: bool = False,
+    ) -> OrchestrationRun:
+        model = self.session.get(OrchestrationRunModel, run_id)
+        if not model:
+            raise ValueError(f"Orchestration run '{run_id}' not found")
+        model.stop_outcome = stop_outcome.value if stop_outcome else None
+        model.human_gate = human_gate.value if human_gate else None
+        model.stop_reason = stop_reason
+        model.stop_details = stop_details or {}
+        model.is_active = is_active
+        model.updated_at = utc_now()
+        return orchestration_run_model_to_domain(model)
+
+    def update_candidate_binding(
+        self,
+        run_id: str,
+        current_generation: int,
+        current_candidate_sha: str | None,
+    ) -> OrchestrationRun:
+        model = self.session.get(OrchestrationRunModel, run_id)
+        if not model:
+            raise ValueError(f"Orchestration run '{run_id}' not found")
+        model.current_generation = current_generation
+        model.current_candidate_sha = current_candidate_sha
+        model.updated_at = utc_now()
+        return orchestration_run_model_to_domain(model)
+
+    def update_active_job(
+        self,
+        run_id: str,
+        active_job_id: str | None,
+    ) -> OrchestrationRun:
+        model = self.session.get(OrchestrationRunModel, run_id)
+        if not model:
+            raise ValueError(f"Orchestration run '{run_id}' not found")
+        model.active_job_id = active_job_id
+        model.updated_at = utc_now()
+        return orchestration_run_model_to_domain(model)
+
+
+class PostgresOrchestrationStageEventRepository(OrchestrationStageEventRepositoryInterface):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def save(self, event: OrchestrationStageEvent) -> None:
+        self.session.add(
+            OrchestrationStageEventModel(
+                id=event.event_id,
+                run_id=event.run_id,
+                from_stage=event.from_stage.value if event.from_stage else None,
+                to_stage=event.to_stage.value,
+                event_type=event.event_type,
+                transition_key=event.transition_key,
+                evidence_references=event.evidence_references,
+                actor=event.actor,
+                created_at=event.created_at,
+            )
+        )
+
+    def list_by_run(self, run_id: str) -> list[OrchestrationStageEvent]:
+        stmt = (
+            select(OrchestrationStageEventModel)
+            .where(OrchestrationStageEventModel.run_id == run_id)
+            .order_by(OrchestrationStageEventModel.created_at.asc())
+        )
+        return [
+            orchestration_stage_event_model_to_domain(m) for m in self.session.scalars(stmt).all()
+        ]
+
+    def get_by_transition_key(self, transition_key: str) -> OrchestrationStageEvent | None:
+        stmt = select(OrchestrationStageEventModel).where(
+            OrchestrationStageEventModel.transition_key == transition_key
+        )
+        model = self.session.scalars(stmt).first()
+        return orchestration_stage_event_model_to_domain(model) if model else None
+
+
+class PostgresOrchestrationCandidateRepository(OrchestrationCandidateRepositoryInterface):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def save(self, candidate: OrchestrationCandidate) -> None:
+        existing = self.session.get(OrchestrationCandidateModel, candidate.candidate_id)
+        if existing:
+            existing.manifest_id = candidate.manifest_id
+            existing.manifest_hash = candidate.manifest_hash
+            existing.authorship_summary = candidate.authorship_summary
+            existing.is_frozen = candidate.is_frozen
+            existing.superseded_by_id = candidate.superseded_by_id
+        else:
+            self.session.add(
+                OrchestrationCandidateModel(
+                    id=candidate.candidate_id,
+                    run_id=candidate.run_id,
+                    generation=candidate.generation,
+                    base_sha=candidate.base_sha,
+                    candidate_sha=candidate.candidate_sha,
+                    manifest_id=candidate.manifest_id,
+                    manifest_hash=candidate.manifest_hash,
+                    authorship_summary=candidate.authorship_summary,
+                    is_frozen=candidate.is_frozen,
+                    superseded_by_id=candidate.superseded_by_id,
+                    created_at=candidate.created_at,
+                )
+            )
+
+    def get_by_id(self, candidate_id: str) -> OrchestrationCandidate | None:
+        model = self.session.get(OrchestrationCandidateModel, candidate_id)
+        return orchestration_candidate_model_to_domain(model) if model else None
+
+    def get_by_generation(self, run_id: str, generation: int) -> OrchestrationCandidate | None:
+        stmt = select(OrchestrationCandidateModel).where(
+            OrchestrationCandidateModel.run_id == run_id,
+            OrchestrationCandidateModel.generation == generation,
+        )
+        model = self.session.scalars(stmt).first()
+        return orchestration_candidate_model_to_domain(model) if model else None
+
+    def get_latest_for_run(self, run_id: str) -> OrchestrationCandidate | None:
+        stmt = (
+            select(OrchestrationCandidateModel)
+            .where(OrchestrationCandidateModel.run_id == run_id)
+            .order_by(desc(OrchestrationCandidateModel.generation))
+        )
+        model = self.session.scalars(stmt).first()
+        return orchestration_candidate_model_to_domain(model) if model else None
+
+    def list_by_run(self, run_id: str) -> list[OrchestrationCandidate]:
+        stmt = (
+            select(OrchestrationCandidateModel)
+            .where(OrchestrationCandidateModel.run_id == run_id)
+            .order_by(OrchestrationCandidateModel.generation.asc())
+        )
+        return [
+            orchestration_candidate_model_to_domain(m) for m in self.session.scalars(stmt).all()
+        ]
+
+    def supersede(self, candidate_id: str, superseded_by_id: str) -> None:
+        model = self.session.get(OrchestrationCandidateModel, candidate_id)
+        if model:
+            model.superseded_by_id = superseded_by_id
+
+
+class PostgresOrchestrationExternalActionRepository(OrchestrationExternalActionRepositoryInterface):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def reserve(self, action: OrchestrationExternalAction) -> None:
+        existing = self.session.get(OrchestrationExternalActionModel, action.action_id)
+        if not existing:
+            self.session.add(
+                OrchestrationExternalActionModel(
+                    id=action.action_id,
+                    run_id=action.run_id,
+                    action_key=action.action_key,
+                    action_type=action.action_type.value,
+                    target_identity=action.target_identity,
+                    request_fingerprint=action.request_fingerprint,
+                    candidate_sha=action.candidate_sha,
+                    generation=action.generation,
+                    status=action.status.value,
+                    remote_identifier=action.remote_identifier,
+                    result_payload=action.result_payload,
+                    error_message=action.error_message,
+                    reserved_at=action.reserved_at,
+                    reconciled_at=action.reconciled_at,
+                    created_at=action.created_at,
+                    updated_at=action.updated_at,
+                )
+            )
+
+    def get_by_action_key(self, action_key: str) -> OrchestrationExternalAction | None:
+        stmt = select(OrchestrationExternalActionModel).where(
+            OrchestrationExternalActionModel.action_key == action_key
+        )
+        model = self.session.scalars(stmt).first()
+        return orchestration_external_action_model_to_domain(model) if model else None
+
+    def list_by_run(self, run_id: str) -> list[OrchestrationExternalAction]:
+        stmt = (
+            select(OrchestrationExternalActionModel)
+            .where(OrchestrationExternalActionModel.run_id == run_id)
+            .order_by(OrchestrationExternalActionModel.created_at.asc())
+        )
+        return [
+            orchestration_external_action_model_to_domain(m)
+            for m in self.session.scalars(stmt).all()
+        ]
+
+    def update_status(
+        self,
+        action_key: str,
+        status: ExternalActionStatus,
+        remote_identifier: str | None = None,
+        result_payload: dict[str, Any] | None = None,
+        error_message: str | None = None,
+    ) -> OrchestrationExternalAction:
+        stmt = select(OrchestrationExternalActionModel).where(
+            OrchestrationExternalActionModel.action_key == action_key
+        )
+        model = self.session.scalars(stmt).first()
+        if not model:
+            raise ValueError(f"External action '{action_key}' not found")
+        model.status = status.value
+        if remote_identifier is not None:
+            model.remote_identifier = remote_identifier
+        if result_payload is not None:
+            model.result_payload = result_payload
+        if error_message is not None:
+            model.error_message = error_message
+        if status in {
+            ExternalActionStatus.COMPLETED,
+            ExternalActionStatus.FAILED,
+            ExternalActionStatus.AMBIGUOUS,
+        }:
+            model.reconciled_at = utc_now()
+        model.updated_at = utc_now()
+        return orchestration_external_action_model_to_domain(model)
+
+
 class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
     """Encapsulates a database session for atomic operations across repositories."""
 
@@ -2081,6 +2540,10 @@ class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.candidate_manifests = PostgresCandidateManifestRepository(session)
         self.candidate_authorships = PostgresCandidateAuthorshipRepository(session)
         self.evidence_diagnostics = PostgresEvidenceDiagnosticRepository(session)
+        self.orchestration_runs = PostgresOrchestrationRunRepository(session)
+        self.orchestration_stage_events = PostgresOrchestrationStageEventRepository(session)
+        self.orchestration_candidates = PostgresOrchestrationCandidateRepository(session)
+        self.orchestration_external_actions = PostgresOrchestrationExternalActionRepository(session)
 
     def commit(self) -> None:
         self.session.commit()

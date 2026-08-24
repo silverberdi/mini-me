@@ -18,6 +18,7 @@ from minime.logging import redact_secrets
 from minime.services.budget_service import BudgetService
 from minime.services.capacity_lifecycle_service import CapacityLifecycleService
 from minime.services.execution_pipeline import ExecutionPipelineService
+from minime.services.orchestration_service import OrchestrationService
 from minime.services.project_service import ProjectService
 from minime.services.provider_health_service import ProviderHealthService
 from minime.services.readiness_service import ReadinessService
@@ -34,7 +35,10 @@ async def lifespan(app: FastAPI):
     try:
         uow = PostgresPersistenceUnitOfWork(sess)
         recovery_service = RestartRecoveryService(uow, project_root=".")
-        reconciled = recovery_service.reconcile_on_startup()
+        orchestration_service = OrchestrationService(uow, project_root=".")
+        reconciled = recovery_service.reconcile_on_startup(
+            orchestration_service=orchestration_service
+        )
         if reconciled:
             logger.info(f"Reconciled {len(reconciled)} jobs on startup.")
     except Exception as exc:
@@ -536,3 +540,103 @@ def _job_summary(uow: PersistenceUnitOfWork, job: Job) -> dict[str, Any]:
         if audit
         else None,
     }
+
+
+class OrchestrationAdmitRequest(BaseModel):
+    project_id: str
+    change_name: str
+    project_root: str | None = None
+
+
+class OrchestrationStartRequest(BaseModel):
+    project_id: str
+    change_name: str
+    project_root: str | None = None
+
+
+class OrchestrationResumeRequest(BaseModel):
+    run_id: str
+    project_root: str | None = None
+
+
+@app.post("/api/v1/orchestration/admit", tags=["orchestration"])
+def admit_orchestration(
+    req: OrchestrationAdmitRequest,
+    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
+) -> dict[str, Any]:
+    """Admit a single change into autonomous orchestration after verifying DoR and bindings."""
+    service = OrchestrationService(uow, project_root=req.project_root or ".")
+    result = service.admit_change(req.project_id, req.change_name, project_root=req.project_root)
+    return result.model_dump()
+
+
+@app.post("/api/v1/orchestration/start", tags=["orchestration"])
+def start_orchestration(
+    req: OrchestrationStartRequest,
+    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
+) -> dict[str, Any]:
+    """Start autonomous orchestration for a single READY change."""
+    service = OrchestrationService(uow, project_root=req.project_root or ".")
+    try:
+        run = service.start(req.project_id, req.change_name, project_root=req.project_root)
+        status_view = service.get_status(run.run_id)
+        return status_view.model_dump()
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error during orchestration start: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Orchestration failed: {e}",
+        )
+
+
+@app.post("/api/v1/orchestration/resume", tags=["orchestration"])
+def resume_orchestration(
+    req: OrchestrationResumeRequest,
+    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
+) -> dict[str, Any]:
+    """Resume an existing orchestration run from its persisted checkpoint."""
+    service = OrchestrationService(uow, project_root=req.project_root or ".")
+    try:
+        run = service.resume(req.run_id, project_root=req.project_root)
+        status_view = service.get_status(run.run_id)
+        return status_view.model_dump()
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error during orchestration resume: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Orchestration resume failed: {e}",
+        )
+
+
+@app.get("/api/v1/orchestration/{run_id}/status", tags=["orchestration"])
+def get_orchestration_status(
+    run_id: str,
+    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
+) -> dict[str, Any]:
+    """Get secret-redacted operational status for an orchestration run."""
+    service = OrchestrationService(uow)
+    try:
+        status_view = service.get_status(run_id)
+        return status_view.model_dump()
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+
+
+@app.get("/api/v1/orchestration/runs", tags=["orchestration"])
+def list_orchestration_runs(
+    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
+    project_id: str | None = None,
+    change_name: str | None = None,
+    is_active: bool | None = None,
+) -> list[dict[str, Any]]:
+    """List historical and active orchestration runs."""
+    runs = uow.orchestration_runs.list_runs(
+        project_id=project_id,
+        change_name=change_name,
+        is_active=is_active,
+    )
+    return [r.model_dump() for r in runs]
