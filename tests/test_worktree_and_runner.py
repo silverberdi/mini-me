@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from minime.adapters.github import GitHubAdapter
 from minime.services.implementer_runner import CliImplementerRunner
 from minime.services.worktree_manager import WorktreeManager
 
@@ -46,6 +47,63 @@ async def test_worktree_manager_create_collision_and_cleanup(tmp_path):
 
     await manager.cleanup_worktree("job-1")
     assert not info.path.exists()
+
+
+@pytest.mark.asyncio
+async def test_production_push_uses_repository_root_after_worktree_cleanup(tmp_path):
+    """A finalized candidate remains pushable after its managed worktree is removed."""
+    repo = tmp_path / "repo"
+    remote = tmp_path / "remote.git"
+    repo.mkdir()
+    await run(["git", "init", "-b", "main"], repo)
+    await run(["git", "config", "user.email", "test@example.com"], repo)
+    await run(["git", "config", "user.name", "Test User"], repo)
+    (repo / "README.md").write_text("hello\n", encoding="utf-8")
+    await run(["git", "add", "README.md"], repo)
+    await run(["git", "commit", "-m", "initial"], repo)
+    await run(["git", "init", "--bare", str(remote)], repo)
+    await run(["git", "remote", "add", "origin", str(remote)], repo)
+
+    manager = WorktreeManager(repo)
+    info = await manager.create_worktree("job-push", "008-autonomous-change-orchestration", "main")
+    (info.path / "candidate.py").write_text("candidate = True\n", encoding="utf-8")
+    await run(["git", "add", "candidate.py"], info.path)
+    await run(["git", "commit", "-m", "candidate"], info.path)
+    candidate_sha = (await _git_output(["git", "rev-parse", "HEAD"], info.path)).strip()
+    await manager.cleanup_worktree("job-push")
+    assert not info.path.exists()
+
+    assert GitHubAdapter().push_branch(
+        worktree_path=str(repo),
+        remote="origin",
+        branch="minime/008-autonomous-change-orchestration",
+        candidate_sha=candidate_sha,
+    )
+    remote_sha = (
+        await _git_output(
+            [
+                "git",
+                "ls-remote",
+                "--heads",
+                str(remote),
+                "refs/heads/minime/008-autonomous-change-orchestration",
+            ],
+            repo,
+        )
+    ).split()[0]
+    assert remote_sha == candidate_sha
+
+
+async def _git_output(cmd: list[str], cwd: Path) -> str:
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        cwd=str(cwd),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    assert proc.returncode == 0, (stdout.decode(), stderr.decode())
+    return stdout.decode()
 
 
 @pytest.mark.asyncio

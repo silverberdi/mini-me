@@ -565,9 +565,7 @@ class GitHubAdapterInterface(ABC):
     ) -> Event: ...
 
     @abstractmethod
-    def get_pull_request(
-        self, repository: str, branch: str, base: str = "main"
-    ) -> dict[str, Any] | None: ...
+    def get_pull_request(self, repository: str, branch: str, base: str = "main") -> Any: ...
 
     @abstractmethod
     def create_pull_request(

@@ -21,6 +21,7 @@ from minime.domain.enums import (
     OrchestrationStage,
     OrchestrationStopOutcome,
     ProviderHealthStatus,
+    PullRequestLookupState,
     ReadinessState,
     ReviewStatus,
     ReviewVerdict,
@@ -770,10 +771,26 @@ class OrchestrationService:
                 else:
                     # Remote branch does not exist yet -> execute push once
                     if push_action.status != ExternalActionStatus.COMPLETED:
-                        worktree_path = str(root / ".minime" / "worktrees" / job.job_id)
+                        repository_context, context_error = self._validated_repository_context(
+                            root, project, binding, cand_sha
+                        )
+                        if context_error:
+                            self.uow.orchestration_external_actions.update_status(
+                                push_key,
+                                ExternalActionStatus.FAILED,
+                                error_message=context_error,
+                            )
+                            self._stop_run(
+                                run,
+                                stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+                                human_gate=HumanGate.NEEDS_HUMAN,
+                                stop_reason=context_error,
+                                stop_details={"code": "INVALID_PUSH_REPOSITORY_CONTEXT"},
+                            )
+                            break
                         try:
                             self.github_adapter.push_branch(
-                                worktree_path=worktree_path,
+                                worktree_path=str(repository_context),
                                 remote="origin",
                                 branch=branch_name,
                                 candidate_sha=cand_sha,
@@ -822,11 +839,36 @@ class OrchestrationService:
                 if pr_action.status != ExternalActionStatus.COMPLETED:
                     try:
                         # Check if PR already exists on GitHub
-                        existing_pr = self.github_adapter.get_pull_request(
+                        lookup = self.github_adapter.get_pull_request(
                             repository=project.repository,
                             branch=branch_name,
                             base=project.base_branch,
                         )
+                        lookup_state = getattr(lookup, "state", None)
+                        if lookup_state is not None:
+                            if lookup_state == PullRequestLookupState.UNOBSERVABLE:
+                                self._stop_run(
+                                    run,
+                                    stop_outcome=OrchestrationStopOutcome.WAITING_EXTERNAL,
+                                    human_gate=None,
+                                    stop_reason=lookup.detail or "Cannot observe remote PR state.",
+                                    stop_details={"action_key": pr_key, "code": lookup_state.value},
+                                )
+                                break
+                            if lookup_state == PullRequestLookupState.AMBIGUOUS:
+                                self._stop_run(
+                                    run,
+                                    stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+                                    human_gate=HumanGate.NEEDS_HUMAN,
+                                    stop_reason=lookup.detail or "Remote PR state is ambiguous.",
+                                    stop_details={"action_key": pr_key, "code": lookup_state.value},
+                                )
+                                break
+                            existing_pr = lookup.pull_request
+                        else:
+                            # Existing deterministic test doubles return the legacy shape.  A
+                            # real GitHubAdapter always returns PullRequestLookupResult.
+                            existing_pr = lookup
                         if existing_pr:
                             valid_adoption, reason, details = self._verify_pr_adoption_identity(
                                 existing_pr=existing_pr,
@@ -1499,6 +1541,44 @@ class OrchestrationService:
         except Exception:
             pass
         return None
+
+    def _validated_repository_context(
+        self,
+        root: Path,
+        project: Project,
+        binding: ProjectBinding | None,
+        candidate_sha: str,
+    ) -> tuple[Path, str | None]:
+        """Validate the registered repository root and exact audited candidate for push."""
+        import subprocess
+
+        if not binding or not binding.is_valid or binding.repository != project.repository:
+            return root, "Project repository binding is invalid for branch push."
+        try:
+            top = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if top.returncode != 0 or Path(top.stdout.strip()).resolve() != root.resolve():
+                return root, f"Registered repository root is not a valid Git repository: {root}"
+            candidate = subprocess.run(
+                ["git", "rev-parse", "--verify", f"{candidate_sha}^{{commit}}"],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if candidate.returncode != 0 or candidate.stdout.strip() != candidate_sha:
+                return (
+                    root,
+                    f"Audited candidate SHA '{candidate_sha}' is not resolvable from {root}.",
+                )
+        except OSError as exc:
+            return root, f"Cannot validate registered repository root '{root}': {exc}"
+        return root, None
 
     def _verify_pr_adoption_identity(
         self,

@@ -306,6 +306,15 @@ class HumanGate(str, Enum):
 class ExternalActionType(str, Enum):
     BRANCH_PUSH = "BRANCH_PUSH"
     PR_CREATE = "PR_CREATE"
+
+
+class PullRequestLookupState(str, Enum):
+    """Authoritative outcome of a remote pull-request lookup."""
+
+    NOT_FOUND = "NOT_FOUND"
+    FOUND_EXACT = "FOUND_EXACT"
+    UNOBSERVABLE = "UNOBSERVABLE"
+    AMBIGUOUS = "AMBIGUOUS"
     PR_UPDATE = "PR_UPDATE"
 
 

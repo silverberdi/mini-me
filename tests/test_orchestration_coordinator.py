@@ -18,6 +18,7 @@ from minime.domain.enums import (
     OrchestrationStopOutcome,
     ProjectStatus,
     ProviderHealthStatus,
+    PullRequestLookupState,
     ReadinessState,
     ReviewStatus,
     ReviewVerdict,
@@ -34,6 +35,7 @@ from minime.domain.models import (
     Project,
     ProjectBinding,
     ProviderHealth,
+    PullRequestLookupResult,
     Review,
     utc_now,
 )
@@ -54,6 +56,7 @@ class FakeGitHubAdapter(GitHubAdapterInterface):
         self.pushed_branches: list[dict[str, Any]] = []
         self.fail_push = False
         self.fail_pr = False
+        self.create_calls = 0
 
     def validate_issue_binding(
         self, expected_repository: str, issue_number: int, github_repository: str | None = None
@@ -93,6 +96,7 @@ class FakeGitHubAdapter(GitHubAdapterInterface):
         body: str,
         head_sha: str,
     ) -> dict[str, Any]:
+        self.create_calls += 1
         if self.fail_pr:
             raise RuntimeError("GitHub PR API unreachable")
         key = f"{repository}:{branch}"
@@ -153,6 +157,39 @@ class FakeChecksRunner:
             output_snippet="Passed" if self.should_pass else "Failed",
         )
         return ChecksRunResult(passed=self.should_pass, results=[res], diagnostics=[])
+
+
+class StructuredLookupGitHubAdapter(FakeGitHubAdapter):
+    """Fake transport with the production adapter's explicit PR lookup states."""
+
+    def __init__(self, state: PullRequestLookupState, mismatch: bool = False):
+        super().__init__()
+        self.lookup_state = state
+        self.lookup_mismatch = mismatch
+
+    def get_pull_request(self, repository: str, branch: str, base: str = "main"):
+        if self.lookup_state != PullRequestLookupState.FOUND_EXACT:
+            return PullRequestLookupResult(
+                state=self.lookup_state,
+                detail=f"simulated {self.lookup_state.value.lower()} lookup",
+            )
+        candidate_sha = self.pushed_branches[-1]["candidate_sha"]
+        if self.lookup_mismatch:
+            candidate_sha = "different-candidate-sha"
+        return PullRequestLookupResult(
+            state=PullRequestLookupState.FOUND_EXACT,
+            pull_request={
+                "repository": repository,
+                "number": 41,
+                "url": "https://github.com/silverberdi/mini-me/pull/41",
+                "head_sha": candidate_sha,
+                "head_branch": branch,
+                "base_branch": base,
+                "state": "OPEN",
+                "title": "008-autonomous-change-orchestration",
+                "body": "Closes #16",
+            },
+        )
 
 
 @pytest.fixture
@@ -238,6 +275,88 @@ def setup_orchestration_environment(tmp_path: Path, in_memory_uow):
         "project_root": tmp_path,
         "change_dir": change_dir,
     }
+
+
+def _service_for_pr_lookup(env, uow, github):
+    pipeline = ExecutionPipelineService(
+        uow=uow,
+        project_root=env["project_root"],
+        implementer_runner=MockImplementerRunner(),
+        checks_runner=FakeChecksRunner(should_pass=True),
+        reviewer_runner=MockReviewerRunner(
+            stdout=[
+                '```json\n{"verdict": "READY_TO_MERGE", "summary": "All good", "findings": []}\n```'
+            ]
+        ),
+        auditor_runner=MockAuditorRunner(
+            output=['{"risk": "low", "summary": "Passed", "findings": []}']
+        ),
+    )
+    return OrchestrationService(
+        uow,
+        project_root=env["project_root"],
+        pipeline=pipeline,
+        github_adapter=github,
+    )
+
+
+def test_pr_lookup_authoritative_not_found_allows_one_creation(
+    setup_orchestration_environment, in_memory_uow
+):
+    env = setup_orchestration_environment
+    github = StructuredLookupGitHubAdapter(PullRequestLookupState.NOT_FOUND)
+    run = _service_for_pr_lookup(env, in_memory_uow, github).start(
+        env["project_id"], env["change_name"]
+    )
+    assert run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
+    assert github.create_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("state", "expected_outcome"),
+    [
+        (PullRequestLookupState.UNOBSERVABLE, OrchestrationStopOutcome.WAITING_EXTERNAL),
+        (PullRequestLookupState.AMBIGUOUS, OrchestrationStopOutcome.NEEDS_HUMAN),
+    ],
+)
+def test_pr_lookup_non_authoritative_state_never_creates_pr(
+    setup_orchestration_environment, in_memory_uow, state, expected_outcome
+):
+    env = setup_orchestration_environment
+    github = StructuredLookupGitHubAdapter(state)
+    service = _service_for_pr_lookup(env, in_memory_uow, github)
+    run = service.start(env["project_id"], env["change_name"])
+    assert run.stop_outcome == expected_outcome
+    assert github.create_calls == 0
+
+    if state == PullRequestLookupState.UNOBSERVABLE:
+        resumed = service.resume(run.run_id)
+        assert resumed.stop_outcome == expected_outcome
+        assert github.create_calls == 0
+
+
+def test_pr_lookup_contradictory_identity_never_creates_pr(
+    setup_orchestration_environment, in_memory_uow
+):
+    env = setup_orchestration_environment
+    github = StructuredLookupGitHubAdapter(PullRequestLookupState.FOUND_EXACT, mismatch=True)
+    run = _service_for_pr_lookup(env, in_memory_uow, github).start(
+        env["project_id"], env["change_name"]
+    )
+    assert run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
+    assert github.create_calls == 0
+
+
+def test_pr_lookup_exact_identity_adopts_without_creation(
+    setup_orchestration_environment, in_memory_uow
+):
+    env = setup_orchestration_environment
+    github = StructuredLookupGitHubAdapter(PullRequestLookupState.FOUND_EXACT)
+    run = _service_for_pr_lookup(env, in_memory_uow, github).start(
+        env["project_id"], env["change_name"]
+    )
+    assert run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
+    assert github.create_calls == 0
 
 
 def test_admission_refusal_scenarios(setup_orchestration_environment, in_memory_uow):

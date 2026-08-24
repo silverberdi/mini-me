@@ -34,6 +34,7 @@ from minime.domain.enums import (
     ProjectStatus,
     ProviderHealthStatus,
     ProviderResultClass,
+    PullRequestLookupState,
     ReadinessState,
     ReviewStatus,
     ReviewVerdict,
@@ -88,6 +89,14 @@ class ProjectBinding(BaseModel):
     mismatch_reasons: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+
+
+class PullRequestLookupResult(BaseModel):
+    """Explicit remote PR lookup state; absence is never represented by None alone."""
+
+    state: PullRequestLookupState
+    pull_request: dict[str, Any] | None = None
+    detail: str | None = None
 
 
 class Change(BaseModel):
