@@ -14,35 +14,47 @@ The system SHALL persist execution jobs in PostgreSQL with unique immutable job 
 - **THEN** an execution job record is inserted with status `QUEUED`, capturing `project_id`, `change_id`, `implementer`, creation timestamp, and an initial `JOB_QUEUED` event.
 
 ### Requirement: Atomic state transitions
-The system SHALL transition execution jobs through explicit validated statuses: `QUEUED` → `RUNNING` → `CHECKS_RUNNING` → `CHECKS_PASSED` → `REVIEW_RUNNING` → `AUDIT_RUNNING` → `READY_TO_MERGE` / `AUDIT_BLOCKED` / `CHANGES_REQUIRED` / `CHECKS_FAILED` / `WAITING_CAPACITY` / `NEEDS_HUMAN` / `FAILED` / `CANCELLED`, supporting multi-attempt continuation loops before terminal disposition. Evidence diagnostics (such as `REVIEW_ENVIRONMENT_INVALID` or `ENVIRONMENT_UNAVAILABLE`) SHALL NOT be treated as job lifecycle statuses.
+The system SHALL transition execution jobs through explicit validated operational statuses, including `QUEUED`, `RUNNING`, `CHECKS_RUNNING`, `CHECKS_PASSED`, `REVIEW_RUNNING`, `AUDIT_RUNNING`, `READY_TO_MERGE`, `AUDIT_BLOCKED`, `CHANGES_REQUIRED`, `CHECKS_FAILED`, `WAITING_CAPACITY`, `NEEDS_HUMAN`, `FAILED`, and `CANCELLED`, while storing orchestration stages and human-gate outcomes in separate durable orchestration state. Evidence diagnostics SHALL NOT be treated as job lifecycle statuses, and an orchestration stage SHALL NOT be inferred from a job status alone.
+
+#### Scenario: Job and orchestration transition together without authority duplication
+- **WHEN** an orchestration checkpoint requires an operational job transition
+- **THEN** the relevant job status, orchestration stage event, and timing/evidence facts are committed atomically where they share a transition, while each remains queryable from its own authority.
+
+#### Scenario: Human gate does not overload JobStatus
+- **WHEN** the final audited candidate is ready for human merge
+- **THEN** the orchestration human gate records `READY_FOR_HUMAN_MERGE` and the operational job retains its applicable terminal operational status rather than receiving an invented orchestration phase.
+
+#### Scenario: Invalid orchestration advancement is rejected
+- **WHEN** a caller attempts to advance a run from a stage without its required committed evidence or from a terminal human gate
+- **THEN** the transition is rejected and neither the job status nor orchestration checkpoint is changed.
 
 #### Scenario: Valid status transition recorded atomically
-- **WHEN** an active job transitions to a subsequent phase (e.g. from `REVIEW_RUNNING` to `AUDIT_RUNNING`, or `AUDIT_RUNNING` to `READY_TO_MERGE` / `AUDIT_BLOCKED` / `NEEDS_HUMAN`)
-- **THEN** the job status is updated in PostgreSQL within the same database transaction that appends the corresponding state transition event and timing metric.
+- **WHEN** an active job transitions to a subsequent operational phase
+- **THEN** the job status is updated in PostgreSQL within the same transaction that appends the corresponding state transition event and timing metric.
 
 #### Scenario: Invalid state transition rejected
-- **WHEN** a transition is attempted from a terminal state (e.g. `FAILED`, `AUDIT_BLOCKED`, or `READY_TO_MERGE` to `RUNNING`)
-- **THEN** the system SHALL reject the transition with a validation error and keep the job in its terminal state.
+- **WHEN** a transition is attempted from a terminal job state to `RUNNING`
+- **THEN** the system rejects the transition and keeps the job in its terminal state.
 
 #### Scenario: Review only initiated after checks pass
 - **WHEN** a job completes deterministic checks
-- **THEN** review is launched ONLY if all checks passed with exit code 0; if any check failed, the job terminates at `CHECKS_FAILED` without launching review or audit.
+- **THEN** review is launched only if all checks passed with exit code 0; otherwise the job remains `CHECKS_FAILED` and review/audit are not launched.
 
 #### Scenario: Audit only initiated after complementary review produces READY_TO_MERGE
-- **WHEN** complementary review produces a `READY_TO_MERGE` verdict
-- **THEN** the system transitions the job to `AUDIT_RUNNING` and executes DeepSeek Direct audit; if the reviewer returned `CHANGES_REQUIRED`, `REVIEW_FAILED`, `REVIEW_TIMED_OUT`, or malformed output, the job terminates in the review failure/correction state without executing audit.
+- **WHEN** complementary review produces `READY_TO_MERGE`
+- **THEN** the job transitions to `AUDIT_RUNNING`; a changes-required, failed, timed-out, or malformed review does not launch audit.
 
 #### Scenario: Deterministic audit risk gating
-- **WHEN** DeepSeek Direct audit execution concludes
-- **THEN** if overall risk is `low` or `medium` (with no `critical` or `high` severity findings), the job transitions to `READY_TO_MERGE`; if overall risk is `high` or `critical`, or if any finding has severity `high` or `critical`, the job transitions to `AUDIT_BLOCKED`, preventing progression to human merge.
+- **WHEN** DeepSeek Direct audit concludes
+- **THEN** only an audit with `0 CRITICAL`, `0 HIGH`, and `0 MEDIUM` findings can provide the evidence needed for the orchestration human gate; LOW findings may remain only when explicitly reported and non-blocking.
 
 #### Scenario: Job transitions to WAITING_CAPACITY upon primary provider exhaustion
-- **WHEN** an in-flight job requires an implementer or reviewer whose primary provider is exhausted or unavailable
-- **THEN** the job transitions to `WAITING_CAPACITY` and records the exhaustion event and blocking provider without corrupting prior phase evidence.
+- **WHEN** an in-flight job requires an exhausted or unavailable primary provider
+- **THEN** the job transitions to `WAITING_CAPACITY` and records the provider and reason without corrupting prior evidence.
 
 #### Scenario: Job transitions to NEEDS_HUMAN upon unresolvable condition
-- **WHEN** an execution job encounters an unresolvable real blocker, reaches the maximum allowed reassignment ceiling, or detects irreconcilable policy/invariant conflict
-- **THEN** the system SHALL transition the job status to `NEEDS_HUMAN` and record the structured escalation rationale.
+- **WHEN** an execution job encounters an unresolvable blocker, exhausted reassignment ceiling, or irreconcilable policy/invariant conflict
+- **THEN** the job transitions to `NEEDS_HUMAN` with structured escalation rationale.
 
 ### Requirement: Primary quota exhaustion and safe waiting
 The system SHALL intercept primary provider quota limits, rate limits, and transient errors, transitioning affected jobs safely to `WAITING_CAPACITY` while preserving all committed artifacts and checkpoints.

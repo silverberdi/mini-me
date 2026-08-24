@@ -7,19 +7,35 @@ Provides daemon startup reconciliation, crash recovery, orphaned job state resol
 ## Requirements
 
 ### Requirement: Daemon restart in-flight job reconciliation
-The system SHALL scan PostgreSQL upon daemon startup to reconcile active non-terminal jobs (`RUNNING`, `CHECKS_RUNNING`, `REVIEW_RUNNING`, `AUDIT_RUNNING`) interrupted by a crash or restart.
+The system SHALL scan PostgreSQL, Git, and reconciliable GitHub evidence upon daemon startup to recover active orchestration runs and non-terminal jobs from the last committed checkpoint, preserving completed authoritative evidence and resuming only a uniquely safe next action.
+
+#### Scenario: Orchestration boundary survives restart
+- **WHEN** the daemon restarts after any committed admission, attempt, continuation, reassignment, capacity wait, check, candidate freeze, review, audit, or PR checkpoint
+- **THEN** recovery resumes the same orchestration run from that checkpoint without duplicating completed provider work or external side effects.
+
+#### Scenario: Ambiguous recovery fails closed
+- **WHEN** PostgreSQL, Git, or GitHub evidence cannot identify one safe next action or an external action has an ambiguous result
+- **THEN** recovery records the ambiguity and stops in `WAITING_EXTERNAL` when remote evidence is temporarily unavailable, or `NEEDS_HUMAN` when evidence is contradictory/irreconcilable, rather than retrying blindly.
+
+#### Scenario: PR accepted before local acknowledgement
+- **WHEN** GitHub evidence shows a matching PR created after the last local transaction
+- **THEN** recovery adopts the existing PR binding after verifying repository, base SHA, and audited head SHA, and does not create a duplicate.
 
 #### Scenario: Interrupted in-flight job detected on startup
-- **WHEN** the daemon starts and finds a job left in a non-terminal execution state from a previous runtime instance
-- **THEN** the system marks the interrupted execution attempt as `INTERRUPTED`, persists a `DAEMON_RESTARTED` event, and transitions the job to `WAITING_CAPACITY` or a resumable state without data loss.
+- **WHEN** startup finds a job left in a non-terminal execution state from a previous runtime instance
+- **THEN** the system records the interruption using existing recovery/outcome semantics, preserves durable state, and resumes or classifies the attempt from a uniquely safe checkpoint without implying `WAITING_CAPACITY`.
+
+#### Scenario: Interruption with independently proven capacity shortage
+- **WHEN** an interrupted job is recovered and canonical provider/capacity evidence independently proves the required provider unavailable
+- **THEN** the existing capacity lifecycle may place the job into `WAITING_CAPACITY`; the daemon interruption alone never does so.
 
 #### Scenario: Completed phases preserved without duplicate execution
-- **WHEN** an interrupted job had already passed deterministic checks, completed review, or finished audit before the restart
-- **THEN** on startup recovery, the existing verified check results, review verdicts, and audit records remain valid and the system SHALL NOT re-run completed expensive phases.
+- **WHEN** an interrupted run had already passed checks, completed review, or finished audit
+- **THEN** the committed evidence remains valid for its candidate and recovery does not rerun the completed expensive phase.
 
 #### Scenario: Mid-provider interruption requires verifiable evidence
-- **WHEN** a job was interrupted mid-agent execution (`RUNNING`, `REVIEW_RUNNING`, or `AUDIT_RUNNING`) without a recorded completion payload
-- **THEN** the system SHALL NOT infer successful agent completion, records the interruption, and marks the attempt failed/interrupted.
+- **WHEN** a provider process was interrupted without a recorded completion payload
+- **THEN** the system does not infer success, records the attempt as interrupted, and lets the coordinator apply its existing continuation policy.
 
 ### Requirement: Safe worktree Git lock recovery
 The system SHALL remove a `.git/index.lock` file upon recovery ONLY when ownership and safety can be conclusively verified within a mini me-managed worktree with no active owning process, and SHALL fail closed otherwise.
