@@ -11,8 +11,12 @@ from minime.domain.enums import (
     PRIMARY_PROVIDERS,
     AuditRiskLevel,
     AuditStatus,
+    ExternalActionStatus,
     GitOperationStatus,
+    HumanGate,
     JobStatus,
+    OrchestrationStage,
+    OrchestrationStopOutcome,
     ProviderHealthStatus,
     ProviderResultClass,
     ReviewStatus,
@@ -35,6 +39,10 @@ from minime.domain.interfaces import (
     JobLogRepositoryInterface,
     JobRepositoryInterface,
     MetricFactRepositoryInterface,
+    OrchestrationCandidateRepositoryInterface,
+    OrchestrationExternalActionRepositoryInterface,
+    OrchestrationRunRepositoryInterface,
+    OrchestrationStageEventRepositoryInterface,
     PersistenceUnitOfWork,
     ProjectBindingRepositoryInterface,
     ProjectRepositoryInterface,
@@ -64,6 +72,10 @@ from minime.domain.models import (
     MetricFact,
     OpenRouterBudgetPolicy,
     OpenRouterPricingSnapshot,
+    OrchestrationCandidate,
+    OrchestrationExternalAction,
+    OrchestrationRun,
+    OrchestrationStageEvent,
     Project,
     ProjectBinding,
     ProviderHealth,
@@ -265,10 +277,24 @@ class InMemoryJobRepository(JobRepositoryInterface):
             JobStatus.FAILED,
             JobStatus.CANCELLED,
         },
-        JobStatus.NEEDS_HUMAN: set(),
         JobStatus.READY_TO_MERGE: set(),
-        JobStatus.AUDIT_BLOCKED: set(),
-        JobStatus.CHANGES_REQUIRED: set(),
+        JobStatus.AUDIT_BLOCKED: {
+            JobStatus.RUNNING,
+            JobStatus.NEEDS_HUMAN,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+        },
+        JobStatus.CHANGES_REQUIRED: {
+            JobStatus.RUNNING,
+            JobStatus.NEEDS_HUMAN,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+        },
+        JobStatus.NEEDS_HUMAN: {
+            JobStatus.RUNNING,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+        },
         JobStatus.FAILED: set(),
         JobStatus.CANCELLED: set(),
     }
@@ -413,12 +439,12 @@ class InMemoryReviewRepository(ReviewRepositoryInterface):
 
     def get_by_job_id(self, job_id: str) -> Review | None:
         reviews = [r for r in self._store.values() if r.job_id == job_id]
-        reviews.sort(key=lambda r: r.created_at, reverse=True)
+        reviews.sort(key=lambda r: (r.updated_at, r.created_at), reverse=True)
         return reviews[0].model_copy(deep=True) if reviews else None
 
     def list_by_project(self, project_id: str, limit: int = 100) -> list[Review]:
         reviews = [r for r in self._store.values() if r.project_id == project_id]
-        reviews.sort(key=lambda r: r.created_at, reverse=True)
+        reviews.sort(key=lambda r: (r.updated_at, r.created_at), reverse=True)
         return [r.model_copy(deep=True) for r in reviews[:limit]]
 
     def transition(
@@ -437,7 +463,7 @@ class InMemoryReviewRepository(ReviewRepositoryInterface):
             raise ValueError(
                 f"Invalid review status transition: {rev.status.value} -> {target.value}."
             )
-        update_dict: dict[str, object] = {"status": target}
+        update_dict: dict[str, object] = {"status": target, "updated_at": utc_now()}
         if verdict:
             update_dict["verdict"] = ReviewVerdict(verdict)
         if summary is not None:
@@ -491,12 +517,12 @@ class InMemoryAuditRepository(AuditRepositoryInterface):
 
     def get_by_job_id(self, job_id: str) -> AuditRecord | None:
         audits = [a for a in self._store.values() if a.job_id == job_id]
-        audits.sort(key=lambda a: a.created_at, reverse=True)
+        audits.sort(key=lambda a: (a.updated_at, a.created_at), reverse=True)
         return audits[0].model_copy(deep=True) if audits else None
 
     def list_by_project(self, project_id: str, limit: int = 100) -> list[AuditRecord]:
         audits = [a for a in self._store.values() if a.project_id == project_id]
-        audits.sort(key=lambda a: a.created_at, reverse=True)
+        audits.sort(key=lambda a: (a.updated_at, a.created_at), reverse=True)
         return [a.model_copy(deep=True) for a in audits[:limit]]
 
     def transition(
@@ -509,13 +535,13 @@ class InMemoryAuditRepository(AuditRepositoryInterface):
     ) -> AuditRecord:
         audit = self._store.get(audit_id)
         if not audit:
-            raise ValueError(f"Audit '{audit_id}' not found.")
+            raise ValueError(f"Audit record '{audit_id}' not found.")
         target = AuditStatus(new_status)
         if target not in self._valid_transitions[audit.status]:
             raise ValueError(
                 f"Invalid audit status transition: {audit.status.value} -> {target.value}."
             )
-        update_dict: dict[str, object] = {"status": target}
+        update_dict: dict[str, object] = {"status": target, "updated_at": utc_now()}
         if risk:
             update_dict["risk"] = AuditRiskLevel(risk)
         if summary is not None:
@@ -894,6 +920,229 @@ class InMemoryEvidenceDiagnosticRepository(EvidenceDiagnosticRepositoryInterface
         return [d.model_copy(deep=True) for d in self._store.values() if d.attempt_id == attempt_id]
 
 
+class InMemoryOrchestrationRunRepository(OrchestrationRunRepositoryInterface):
+    def __init__(self):
+        self._store: dict[str, OrchestrationRun] = {}
+
+    def save(self, run: OrchestrationRun) -> None:
+        if run.is_active:
+            for existing in self._store.values():
+                if (
+                    existing.run_id != run.run_id
+                    and existing.project_id == run.project_id
+                    and existing.change_name == run.change_name
+                    and existing.is_active
+                ):
+                    raise ValueError(
+                        "Unique constraint violation: active orchestration run already exists for this project and change"
+                    )
+        self._store[run.run_id] = run.model_copy(deep=True)
+
+    def get_by_id(self, run_id: str) -> OrchestrationRun | None:
+        r = self._store.get(run_id)
+        return r.model_copy(deep=True) if r else None
+
+    def get_active_run(self, project_id: str, change_name: str) -> OrchestrationRun | None:
+        for r in self._store.values():
+            if r.project_id == project_id and r.change_name == change_name and r.is_active:
+                return r.model_copy(deep=True)
+        return None
+
+    def list_runs(
+        self,
+        project_id: str | None = None,
+        change_name: str | None = None,
+        is_active: bool | None = None,
+    ) -> list[OrchestrationRun]:
+        res = list(self._store.values())
+        if project_id:
+            res = [r for r in res if r.project_id == project_id]
+        if change_name:
+            res = [r for r in res if r.change_name == change_name]
+        if is_active is not None:
+            res = [r for r in res if r.is_active == is_active]
+        res.sort(key=lambda r: r.created_at, reverse=True)
+        return [r.model_copy(deep=True) for r in res]
+
+    def update_stage(
+        self,
+        run_id: str,
+        current_stage: OrchestrationStage,
+        resumable_stage: OrchestrationStage,
+    ) -> OrchestrationRun:
+        r = self._store.get(run_id)
+        if not r:
+            raise ValueError(f"Orchestration run '{run_id}' not found")
+        r.current_stage = current_stage
+        r.resumable_stage = resumable_stage
+        r.updated_at = utc_now()
+        return r.model_copy(deep=True)
+
+    def update_stop_outcome(
+        self,
+        run_id: str,
+        stop_outcome: OrchestrationStopOutcome,
+        human_gate: HumanGate | None = None,
+        stop_reason: str | None = None,
+        stop_details: dict | None = None,
+        is_active: bool = False,
+    ) -> OrchestrationRun:
+        r = self._store.get(run_id)
+        if not r:
+            raise ValueError(f"Orchestration run '{run_id}' not found")
+        r.stop_outcome = stop_outcome
+        r.human_gate = human_gate
+        r.stop_reason = stop_reason
+        r.stop_details = stop_details or {}
+        r.is_active = is_active
+        r.updated_at = utc_now()
+        return r.model_copy(deep=True)
+
+    def update_candidate_binding(
+        self,
+        run_id: str,
+        current_generation: int,
+        current_candidate_sha: str | None,
+    ) -> OrchestrationRun:
+        r = self._store.get(run_id)
+        if not r:
+            raise ValueError(f"Orchestration run '{run_id}' not found")
+        r.current_generation = current_generation
+        r.current_candidate_sha = current_candidate_sha
+        r.updated_at = utc_now()
+        return r.model_copy(deep=True)
+
+    def update_active_job(
+        self,
+        run_id: str,
+        active_job_id: str | None,
+    ) -> OrchestrationRun:
+        r = self._store.get(run_id)
+        if not r:
+            raise ValueError(f"Orchestration run '{run_id}' not found")
+        r.active_job_id = active_job_id
+        r.updated_at = utc_now()
+        return r.model_copy(deep=True)
+
+
+class InMemoryOrchestrationStageEventRepository(OrchestrationStageEventRepositoryInterface):
+    def __init__(self):
+        self._store: list[OrchestrationStageEvent] = []
+
+    def save(self, event: OrchestrationStageEvent) -> None:
+        if event.transition_key:
+            if any(e.transition_key == event.transition_key for e in self._store):
+                raise ValueError(f"Duplicate transition key '{event.transition_key}'")
+        self._store.append(event.model_copy(deep=True))
+
+    def list_by_run(self, run_id: str) -> list[OrchestrationStageEvent]:
+        events = [e.model_copy(deep=True) for e in self._store if e.run_id == run_id]
+        events.sort(key=lambda e: e.created_at)
+        return events
+
+    def get_by_transition_key(self, transition_key: str) -> OrchestrationStageEvent | None:
+        for e in self._store:
+            if e.transition_key == transition_key:
+                return e.model_copy(deep=True)
+        return None
+
+
+class InMemoryOrchestrationCandidateRepository(OrchestrationCandidateRepositoryInterface):
+    def __init__(self):
+        self._store: dict[str, OrchestrationCandidate] = {}
+
+    def save(self, candidate: OrchestrationCandidate) -> None:
+        for existing in self._store.values():
+            if (
+                existing.candidate_id != candidate.candidate_id
+                and existing.run_id == candidate.run_id
+                and existing.generation == candidate.generation
+            ):
+                raise ValueError(
+                    f"Unique constraint violation: generation {candidate.generation} already exists for run '{candidate.run_id}'"
+                )
+        self._store[candidate.candidate_id] = candidate.model_copy(deep=True)
+
+    def get_by_id(self, candidate_id: str) -> OrchestrationCandidate | None:
+        c = self._store.get(candidate_id)
+        return c.model_copy(deep=True) if c else None
+
+    def get_by_generation(self, run_id: str, generation: int) -> OrchestrationCandidate | None:
+        for c in self._store.values():
+            if c.run_id == run_id and c.generation == generation:
+                return c.model_copy(deep=True)
+        return None
+
+    def get_latest_for_run(self, run_id: str) -> OrchestrationCandidate | None:
+        matching = [c for c in self._store.values() if c.run_id == run_id]
+        if not matching:
+            return None
+        matching.sort(key=lambda c: c.generation, reverse=True)
+        return matching[0].model_copy(deep=True)
+
+    def list_by_run(self, run_id: str) -> list[OrchestrationCandidate]:
+        matching = [c.model_copy(deep=True) for c in self._store.values() if c.run_id == run_id]
+        matching.sort(key=lambda c: c.generation)
+        return matching
+
+    def supersede(self, candidate_id: str, superseded_by_id: str) -> None:
+        if candidate_id in self._store:
+            self._store[candidate_id].superseded_by_id = superseded_by_id
+
+
+class InMemoryOrchestrationExternalActionRepository(OrchestrationExternalActionRepositoryInterface):
+    def __init__(self):
+        self._store: dict[str, OrchestrationExternalAction] = {}
+
+    def reserve(self, action: OrchestrationExternalAction) -> None:
+        for existing in self._store.values():
+            if existing.action_key == action.action_key:
+                raise ValueError(f"Action key '{action.action_key}' already exists")
+        self._store[action.action_id] = action.model_copy(deep=True)
+
+    def get_by_action_key(self, action_key: str) -> OrchestrationExternalAction | None:
+        for a in self._store.values():
+            if a.action_key == action_key:
+                return a.model_copy(deep=True)
+        return None
+
+    def list_by_run(self, run_id: str) -> list[OrchestrationExternalAction]:
+        actions = [a.model_copy(deep=True) for a in self._store.values() if a.run_id == run_id]
+        actions.sort(key=lambda a: a.created_at)
+        return actions
+
+    def update_status(
+        self,
+        action_key: str,
+        status: ExternalActionStatus,
+        remote_identifier: str | None = None,
+        result_payload: dict | None = None,
+        error_message: str | None = None,
+    ) -> OrchestrationExternalAction:
+        target = None
+        for a in self._store.values():
+            if a.action_key == action_key:
+                target = a
+                break
+        if not target:
+            raise ValueError(f"External action '{action_key}' not found")
+        target.status = status
+        if remote_identifier is not None:
+            target.remote_identifier = remote_identifier
+        if result_payload is not None:
+            target.result_payload = result_payload
+        if error_message is not None:
+            target.error_message = error_message
+        if status in {
+            ExternalActionStatus.COMPLETED,
+            ExternalActionStatus.FAILED,
+            ExternalActionStatus.AMBIGUOUS,
+        }:
+            target.reconciled_at = utc_now()
+        target.updated_at = utc_now()
+        return target.model_copy(deep=True)
+
+
 class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
     def __init__(self):
         self.projects = InMemoryProjectRepository()
@@ -921,6 +1170,10 @@ class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.candidate_manifests = InMemoryCandidateManifestRepository()
         self.candidate_authorships = InMemoryCandidateAuthorshipRepository()
         self.evidence_diagnostics = InMemoryEvidenceDiagnosticRepository()
+        self.orchestration_runs = InMemoryOrchestrationRunRepository()
+        self.orchestration_stage_events = InMemoryOrchestrationStageEventRepository()
+        self.orchestration_candidates = InMemoryOrchestrationCandidateRepository()
+        self.orchestration_external_actions = InMemoryOrchestrationExternalActionRepository()
         self.committed = False
         self.rolled_back = False
 

@@ -766,3 +766,88 @@ def test_restart_resumes_pending_unconsumed_handoff(in_memory_uow, tmp_path):
     assert len(all_handoffs) == 1
     assert all_handoffs[0].handoff_id == "handoff-1"
     assert all_handoffs[0].is_consumed is False
+
+
+def test_daemon_startup_reconciles_active_orchestration_runs(in_memory_uow, tmp_path):
+    """
+    HIGH Finding 3 Regression Test:
+    Verify that startup recovery reconciles active orchestration runs, restores resumable stage,
+    emits ORCHESTRATION_RECOVERED event, and does not create spurious WAITING_CAPACITY.
+    """
+    from minime.domain.enums import ExternalActionStatus, ExternalActionType, OrchestrationStage
+    from minime.domain.models import (
+        OrchestrationCandidate,
+        OrchestrationExternalAction,
+        OrchestrationRun,
+    )
+
+    project = Project(
+        project_id="mini-me",
+        display_name="mini me",
+        repository="owner/mini-me",
+        implementer="codex",
+        reviewer="antigravity",
+    )
+    in_memory_uow.projects.save(project)
+
+    run = OrchestrationRun(
+        run_id="run-recover-1",
+        project_id="mini-me",
+        change_name="008-autonomous-change-orchestration",
+        base_sha="base-123",
+        current_stage=OrchestrationStage.PREPARING_PR,
+        resumable_stage=OrchestrationStage.PREPARING_PR,
+        current_generation=2,
+        current_candidate_sha="cand-gen2-sha",
+        is_active=True,
+    )
+    in_memory_uow.orchestration_runs.save(run)
+
+    cand = OrchestrationCandidate(
+        run_id=run.run_id,
+        generation=2,
+        base_sha="base-123",
+        candidate_sha="cand-gen2-sha",
+        manifest_hash="hash-gen2",
+        is_frozen=True,
+    )
+    in_memory_uow.orchestration_candidates.save(cand)
+
+    # In-flight push action was reserved before crash
+    push_action = OrchestrationExternalAction(
+        run_id=run.run_id,
+        action_key="push:run-recover-1:gen2:cand-gen2-sha",
+        action_type=ExternalActionType.BRANCH_PUSH,
+        target_identity="owner/mini-me:minime/008-autonomous-change-orchestration",
+        request_fingerprint="push:cand-gen2-sha",
+        candidate_sha="cand-gen2-sha",
+        generation=2,
+        status=ExternalActionStatus.RESERVED,
+    )
+    in_memory_uow.orchestration_external_actions.reserve(push_action)
+
+    class RecordingCoordinator:
+        def __init__(self):
+            self.resumed: list[str] = []
+
+        def resume(self, run_id: str):
+            self.resumed.append(run_id)
+
+    coordinator = RecordingCoordinator()
+    service = RestartRecoveryService(in_memory_uow, project_root=tmp_path)
+    reconciled_runs = service.reconcile_orchestration_runs(orchestration_service=coordinator)
+
+    assert len(reconciled_runs) == 1
+    rec = reconciled_runs[0]
+    assert rec.run_id == "run-recover-1"
+    assert rec.current_stage == OrchestrationStage.PREPARING_PR
+    assert rec.resumable_stage == OrchestrationStage.PREPARING_PR
+    assert rec.is_active is True
+    assert rec.stop_outcome is None  # Restart alone must NOT create WAITING_CAPACITY
+    assert coordinator.resumed == ["run-recover-1"]
+
+    events = in_memory_uow.events.list_events()
+    rec_events = [e for e in events if e.event_type == EventType.ORCHESTRATION_RECOVERED]
+    assert len(rec_events) == 1
+    assert rec_events[0].payload["run_id"] == "run-recover-1"
+    assert rec_events[0].payload["stage"] == OrchestrationStage.PREPARING_PR.value

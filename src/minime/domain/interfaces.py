@@ -6,7 +6,13 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Any
 
-from minime.domain.enums import GitOperationStatus
+from minime.domain.enums import (
+    ExternalActionStatus,
+    GitOperationStatus,
+    HumanGate,
+    OrchestrationStage,
+    OrchestrationStopOutcome,
+)
 from minime.domain.models import (
     AuditFinding,
     AuditRecord,
@@ -28,6 +34,10 @@ from minime.domain.models import (
     MetricFact,
     OpenRouterBudgetPolicy,
     OpenRouterPricingSnapshot,
+    OrchestrationCandidate,
+    OrchestrationExternalAction,
+    OrchestrationRun,
+    OrchestrationStageEvent,
     Project,
     ProjectBinding,
     ProviderHealth,
@@ -381,6 +391,111 @@ class EvidenceDiagnosticRepositoryInterface(ABC):
     def list_by_attempt(self, attempt_id: str) -> list[EvidenceDiagnostic]: ...
 
 
+class OrchestrationRunRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, run: OrchestrationRun) -> None: ...
+
+    @abstractmethod
+    def get_by_id(self, run_id: str) -> OrchestrationRun | None: ...
+
+    @abstractmethod
+    def get_active_run(self, project_id: str, change_name: str) -> OrchestrationRun | None: ...
+
+    @abstractmethod
+    def list_runs(
+        self,
+        project_id: str | None = None,
+        change_name: str | None = None,
+        is_active: bool | None = None,
+    ) -> list[OrchestrationRun]: ...
+
+    @abstractmethod
+    def update_stage(
+        self,
+        run_id: str,
+        current_stage: OrchestrationStage,
+        resumable_stage: OrchestrationStage,
+    ) -> OrchestrationRun: ...
+
+    @abstractmethod
+    def update_stop_outcome(
+        self,
+        run_id: str,
+        stop_outcome: OrchestrationStopOutcome,
+        human_gate: HumanGate | None = None,
+        stop_reason: str | None = None,
+        stop_details: dict[str, Any] | None = None,
+        is_active: bool = False,
+    ) -> OrchestrationRun: ...
+
+    @abstractmethod
+    def update_candidate_binding(
+        self,
+        run_id: str,
+        current_generation: int,
+        current_candidate_sha: str | None,
+    ) -> OrchestrationRun: ...
+
+    @abstractmethod
+    def update_active_job(
+        self,
+        run_id: str,
+        active_job_id: str | None,
+    ) -> OrchestrationRun: ...
+
+
+class OrchestrationStageEventRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, event: OrchestrationStageEvent) -> None: ...
+
+    @abstractmethod
+    def list_by_run(self, run_id: str) -> list[OrchestrationStageEvent]: ...
+
+    @abstractmethod
+    def get_by_transition_key(self, transition_key: str) -> OrchestrationStageEvent | None: ...
+
+
+class OrchestrationCandidateRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, candidate: OrchestrationCandidate) -> None: ...
+
+    @abstractmethod
+    def get_by_id(self, candidate_id: str) -> OrchestrationCandidate | None: ...
+
+    @abstractmethod
+    def get_by_generation(self, run_id: str, generation: int) -> OrchestrationCandidate | None: ...
+
+    @abstractmethod
+    def get_latest_for_run(self, run_id: str) -> OrchestrationCandidate | None: ...
+
+    @abstractmethod
+    def list_by_run(self, run_id: str) -> list[OrchestrationCandidate]: ...
+
+    @abstractmethod
+    def supersede(self, candidate_id: str, superseded_by_id: str) -> None: ...
+
+
+class OrchestrationExternalActionRepositoryInterface(ABC):
+    @abstractmethod
+    def reserve(self, action: OrchestrationExternalAction) -> None: ...
+
+    @abstractmethod
+    def get_by_action_key(self, action_key: str) -> OrchestrationExternalAction | None: ...
+
+    @abstractmethod
+    def list_by_run(self, run_id: str) -> list[OrchestrationExternalAction]: ...
+
+    @abstractmethod
+    def update_status(
+        self,
+        action_key: str,
+        status: ExternalActionStatus,
+        remote_identifier: str | None = None,
+        result_payload: dict[str, Any] | None = None,
+        error_message: str | None = None,
+    ) -> OrchestrationExternalAction: ...
+
+
 class PersistenceUnitOfWork(ABC):
     """Transactional persistence boundary: atomically persists state changes and emitted events."""
 
@@ -409,6 +524,10 @@ class PersistenceUnitOfWork(ABC):
     candidate_manifests: CandidateManifestRepositoryInterface
     candidate_authorships: CandidateAuthorshipRepositoryInterface
     evidence_diagnostics: EvidenceDiagnosticRepositoryInterface
+    orchestration_runs: OrchestrationRunRepositoryInterface
+    orchestration_stage_events: OrchestrationStageEventRepositoryInterface
+    orchestration_candidates: OrchestrationCandidateRepositoryInterface
+    orchestration_external_actions: OrchestrationExternalActionRepositoryInterface
 
     @abstractmethod
     def commit(self) -> None: ...
@@ -444,3 +563,31 @@ class GitHubAdapterInterface(ABC):
         operation: str,
         error_message: str,
     ) -> Event: ...
+
+    @abstractmethod
+    def get_pull_request(self, repository: str, branch: str, base: str = "main") -> Any: ...
+
+    @abstractmethod
+    def create_pull_request(
+        self,
+        repository: str,
+        branch: str,
+        base: str,
+        title: str,
+        body: str,
+        head_sha: str,
+    ) -> dict[str, Any]: ...
+
+    @abstractmethod
+    def push_branch(
+        self,
+        worktree_path: str,
+        remote: str,
+        branch: str,
+        candidate_sha: str,
+    ) -> bool: ...
+
+    @abstractmethod
+    def get_remote_branch_head(
+        self, repository: str, branch: str, remote: str = "origin"
+    ) -> str | None: ...

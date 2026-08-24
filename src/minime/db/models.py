@@ -12,11 +12,13 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -82,6 +84,8 @@ class ProjectBindingModel(Base):
     repository: Mapped[str] = mapped_column(String(255), nullable=False)
     github_issue_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     github_project_item_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    github_pr_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    github_pr_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     openspec_change_name: Mapped[str] = mapped_column(String(128), nullable=False)
     is_valid: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     mismatch_reasons: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
@@ -493,8 +497,13 @@ class ReviewModel(Base):
     )
     change_name: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     reviewer_role: Mapped[str] = mapped_column(String(64), nullable=False)
+    reviewer_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    orchestration_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    candidate_generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
     candidate_sha: Mapped[str] = mapped_column(String(64), nullable=False)
     base_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    manifest_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    manifest_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     verdict: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -543,8 +552,13 @@ class AuditModel(Base):
     change_name: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     provider: Mapped[str] = mapped_column(String(64), default="deepseek", nullable=False)
     model: Mapped[str] = mapped_column(String(128), default="deepseek-chat", nullable=False)
+    orchestration_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    candidate_generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
     candidate_sha: Mapped[str] = mapped_column(String(64), nullable=False)
     base_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    manifest_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    manifest_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    is_full_candidate: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     review_id: Mapped[str | None] = mapped_column(
         String(64), ForeignKey("reviews.id", ondelete="SET NULL"), nullable=True, index=True
     )
@@ -674,4 +688,155 @@ class BudgetLedgerModel(Base):
     entry_type: Mapped[str] = mapped_column(String(32), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+
+
+class OrchestrationRunModel(Base):
+    __tablename__ = "orchestration_runs"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    change_name: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    base_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    current_stage: Mapped[str] = mapped_column(
+        String(32), default="ADMITTED", nullable=False, index=True
+    )
+    resumable_stage: Mapped[str] = mapped_column(String(32), default="ADMITTED", nullable=False)
+    stop_outcome: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    human_gate: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    stop_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    stop_details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    active_job_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    current_generation: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    current_candidate_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+    project: Mapped[ProjectModel] = relationship("ProjectModel")
+    active_job: Mapped[JobModel | None] = relationship("JobModel")
+    stage_events: Mapped[list[OrchestrationStageEventModel]] = relationship(
+        "OrchestrationStageEventModel", back_populates="run", cascade="all, delete-orphan"
+    )
+    candidates: Mapped[list[OrchestrationCandidateModel]] = relationship(
+        "OrchestrationCandidateModel", back_populates="run", cascade="all, delete-orphan"
+    )
+    external_actions: Mapped[list[OrchestrationExternalActionModel]] = relationship(
+        "OrchestrationExternalActionModel", back_populates="run", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        Index(
+            "uq_active_orchestration_run",
+            "project_id",
+            "change_name",
+            unique=True,
+            postgresql_where=text("is_active = true"),
+            sqlite_where=text("is_active = 1"),
+        ),
+    )
+
+
+class OrchestrationStageEventModel(Base):
+    __tablename__ = "orchestration_stage_events"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("orchestration_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    from_stage: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    to_stage: Mapped[str] = mapped_column(String(32), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(64), default="STAGE_TRANSITION", nullable=False)
+    transition_key: Mapped[str | None] = mapped_column(
+        String(128), unique=True, nullable=True, index=True
+    )
+    evidence_references: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    actor: Mapped[str] = mapped_column(String(64), default="system", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+
+    run: Mapped[OrchestrationRunModel] = relationship(
+        "OrchestrationRunModel", back_populates="stage_events"
+    )
+
+
+class OrchestrationCandidateModel(Base):
+    __tablename__ = "orchestration_candidates"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("orchestration_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    base_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    candidate_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    manifest_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("candidate_manifests.id", ondelete="SET NULL"), nullable=True
+    )
+    manifest_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    authorship_summary: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    is_frozen: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    superseded_by_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+
+    run: Mapped[OrchestrationRunModel] = relationship(
+        "OrchestrationRunModel", back_populates="candidates"
+    )
+    manifest: Mapped[CandidateManifestModel | None] = relationship("CandidateManifestModel")
+
+    __table_args__ = (
+        UniqueConstraint("run_id", "generation", name="uq_orchestration_candidate_generation"),
+    )
+
+
+class OrchestrationExternalActionModel(Base):
+    __tablename__ = "orchestration_external_actions"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("orchestration_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    action_key: Mapped[str] = mapped_column(String(128), unique=True, nullable=False, index=True)
+    action_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    target_identity: Mapped[str] = mapped_column(String(255), nullable=False)
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    candidate_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="RESERVED", nullable=False, index=True)
+    remote_identifier: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    result_payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reserved_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    reconciled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+    run: Mapped[OrchestrationRunModel] = relationship(
+        "OrchestrationRunModel", back_populates="external_actions"
     )

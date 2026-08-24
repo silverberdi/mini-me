@@ -21,14 +21,20 @@ from minime.domain.enums import (
     EventType,
     EvidenceDiagnosticStatus,
     ExecutionOutcome,
+    ExternalActionStatus,
+    ExternalActionType,
     FindingSeverity,
     GitOperationStatus,
+    HumanGate,
     JobStatus,
     LockSafetyStatus,
+    OrchestrationStage,
+    OrchestrationStopOutcome,
     ProgressClassification,
     ProjectStatus,
     ProviderHealthStatus,
     ProviderResultClass,
+    PullRequestLookupState,
     ReadinessState,
     ReviewStatus,
     ReviewVerdict,
@@ -76,11 +82,21 @@ class ProjectBinding(BaseModel):
     repository: str
     github_issue_number: int | None = None
     github_project_item_id: str | None = None
+    github_pr_number: int | None = None
+    github_pr_url: str | None = None
     openspec_change_name: str
     is_valid: bool = True
     mismatch_reasons: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+
+
+class PullRequestLookupResult(BaseModel):
+    """Explicit remote PR lookup state; absence is never represented by None alone."""
+
+    state: PullRequestLookupState
+    pull_request: dict[str, Any] | None = None
+    detail: str | None = None
 
 
 class Change(BaseModel):
@@ -513,8 +529,13 @@ class Review(BaseModel):
     project_id: str
     change_name: str
     reviewer_role: str
+    reviewer_model: str | None = None
+    orchestration_run_id: str | None = None
+    candidate_generation: int | None = None
     candidate_sha: str
     base_sha: str
+    manifest_id: str | None = None
+    manifest_hash: str | None = None
     status: ReviewStatus = ReviewStatus.REVIEW_PENDING
     verdict: ReviewVerdict | None = None
     summary: str | None = None
@@ -561,10 +582,15 @@ class AuditRecord(BaseModel):
     job_id: str
     project_id: str
     change_name: str
-    provider: str = "deepseek"
+    provider: str = "deepseek_direct"
     model: str = "deepseek-chat"
+    orchestration_run_id: str | None = None
+    candidate_generation: int | None = None
     candidate_sha: str
     base_sha: str
+    manifest_id: str | None = None
+    manifest_hash: str | None = None
+    is_full_candidate: bool | None = None
     review_id: str | None = None
     review_verdict: ReviewVerdict | None = None
     status: AuditStatus = AuditStatus.AUDIT_PENDING
@@ -596,3 +622,122 @@ class AuditResult(BaseModel):
     summary: str
 
     model_config = {"extra": "forbid"}
+
+
+class OrchestrationRun(BaseModel):
+    """Durable orchestration run state for one-change autonomous coordination."""
+
+    run_id: str = Field(default_factory=generate_uuid)
+    project_id: str
+    change_name: str
+    base_sha: str
+    current_stage: OrchestrationStage = OrchestrationStage.ADMITTED
+    resumable_stage: OrchestrationStage = OrchestrationStage.ADMITTED
+    stop_outcome: OrchestrationStopOutcome | None = None
+    human_gate: HumanGate | None = None
+    stop_reason: str | None = None
+    stop_details: dict[str, Any] = Field(default_factory=dict)
+    active_job_id: str | None = None
+    current_generation: int = 1
+    current_candidate_sha: str | None = None
+    is_active: bool = True
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class OrchestrationStageEvent(BaseModel):
+    """Durable stage transition event for an orchestration run."""
+
+    event_id: str = Field(default_factory=generate_uuid)
+    run_id: str
+    from_stage: OrchestrationStage | None = None
+    to_stage: OrchestrationStage
+    event_type: str = "STAGE_TRANSITION"
+    transition_key: str | None = None
+    evidence_references: dict[str, Any] = Field(default_factory=dict)
+    actor: str = "system"
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class OrchestrationCandidate(BaseModel):
+    """Durable immutable candidate generation record."""
+
+    candidate_id: str = Field(default_factory=generate_uuid)
+    run_id: str
+    generation: int
+    base_sha: str
+    candidate_sha: str
+    manifest_id: str | None = None
+    manifest_hash: str
+    authorship_summary: dict[str, Any] = Field(default_factory=dict)
+    is_frozen: bool = True
+    superseded_by_id: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class OrchestrationExternalAction(BaseModel):
+    """Durable idempotency reservation record for mutating Git/GitHub actions."""
+
+    action_id: str = Field(default_factory=generate_uuid)
+    run_id: str
+    action_key: str
+    action_type: ExternalActionType
+    target_identity: str
+    request_fingerprint: str
+    candidate_sha: str
+    generation: int
+    status: ExternalActionStatus = ExternalActionStatus.RESERVED
+    remote_identifier: str | None = None
+    result_payload: dict[str, Any] = Field(default_factory=dict)
+    error_message: str | None = None
+    reserved_at: datetime = Field(default_factory=utc_now)
+    reconciled_at: datetime | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class AdmissionResult(BaseModel):
+    """Result of single-change orchestration admission evaluation."""
+
+    admitted: bool
+    run: OrchestrationRun | None = None
+    refusal_reason: str | None = None
+    refusal_details: dict[str, Any] = Field(default_factory=dict)
+    existing_run_id: str | None = None
+
+
+class OrchestrationStatusView(BaseModel):
+    """Comprehensive observability view for an orchestration run."""
+
+    run_id: str
+    project_id: str
+    change_name: str
+    current_stage: OrchestrationStage
+    resumable_stage: OrchestrationStage
+    is_active: bool
+    active_job_id: str | None = None
+    current_executor: str | None = None
+    current_generation: int = 1
+    base_sha: str
+    candidate_sha: str | None = None
+    manifest_hash: str | None = None
+    checks_status: str | None = None
+    review_verdict: str | None = None
+    review_candidate_binding: dict[str, Any] | None = None
+    audit_status: str | None = None
+    audit_risk: str | None = None
+    audit_candidate_binding: dict[str, Any] | None = None
+    provider_capacity_state: dict[str, Any] = Field(default_factory=dict)
+    retry_count: int = 0
+    reassignment_count: int = 0
+    pending_handoff: dict[str, Any] | None = None
+    pr_number: int | None = None
+    pr_url: str | None = None
+    pr_head_sha: str | None = None
+    stop_outcome: OrchestrationStopOutcome | None = None
+    human_gate: HumanGate | None = None
+    stop_reason: str | None = None
+    stop_details: dict[str, Any] = Field(default_factory=dict)
+    last_transition: dict[str, Any] | None = None
+    created_at: datetime
+    updated_at: datetime

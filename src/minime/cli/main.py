@@ -16,6 +16,7 @@ from minime.logging import configure_logging, get_logger
 from minime.services.budget_service import BudgetService
 from minime.services.capacity_lifecycle_service import CapacityLifecycleService
 from minime.services.execution_pipeline import ExecutionPipelineService
+from minime.services.orchestration_service import OrchestrationService
 from minime.services.project_service import ProjectService
 from minime.services.provider_health_service import ProviderHealthService
 from minime.services.readiness_service import ReadinessService
@@ -31,12 +32,14 @@ jobs_app = typer.Typer(help="Inspect execution jobs.")
 scheduler_app = typer.Typer(help="Inspect scheduler capacity mode and admission status.")
 providers_app = typer.Typer(help="Inspect primary provider health and capacity windows.")
 budget_app = typer.Typer(help="Inspect OpenRouter budget usage and policy state.")
+orchestrate_app = typer.Typer(help="Autonomous single-change orchestration commands.")
 
 app.add_typer(project_app, name="project")
 app.add_typer(jobs_app, name="jobs")
 app.add_typer(scheduler_app, name="scheduler")
 app.add_typer(providers_app, name="providers")
 app.add_typer(budget_app, name="budget")
+app.add_typer(orchestrate_app, name="orchestrate")
 
 logger = get_logger("cli")
 
@@ -795,6 +798,205 @@ def providers_openrouter_cmd(
                 )
     except Exception as e:
         typer.secho(f"Error fetching OpenRouter status: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
+@orchestrate_app.command("start")
+def orchestrate_start_cmd(
+    project_id: str = typer.Argument(..., help="Project identifier"),
+    change_name: str = typer.Argument(..., help="OpenSpec change name"),
+    project_root: str = typer.Option(".", "--path", "-p", help="Filesystem path to project root"),
+    json_output: bool = typer.Option(False, "--json", help="Output result as JSON"),
+) -> None:
+    """Admit and orchestrate a single READY change autonomously to a legitimate stop."""
+    try:
+        with db_manager.session() as session:
+            uow = PostgresPersistenceUnitOfWork(session)
+            service = OrchestrationService(uow, project_root=project_root)
+            run = service.start(project_id, change_name, project_root=project_root)
+            status_view = service.get_status(run.run_id)
+
+            if json_output:
+                typer.echo(json.dumps(status_view.model_dump(), indent=2, default=str))
+                return
+
+            typer.secho(
+                f"\n=== Orchestration Run {status_view.run_id} ===",
+                fg=typer.colors.CYAN,
+                bold=True,
+            )
+            typer.echo(f"Project: {status_view.project_id}")
+            typer.echo(f"Change: {status_view.change_name}")
+            typer.echo(f"Current Stage: {status_view.current_stage.value}")
+            typer.echo(f"Generation: {status_view.current_generation}")
+            if status_view.candidate_sha:
+                typer.echo(f"Candidate SHA: {status_view.candidate_sha}")
+            if status_view.pr_url:
+                typer.echo(f"PR URL: {status_view.pr_url}")
+
+            outcome_str = (
+                status_view.stop_outcome.value if status_view.stop_outcome else "IN_PROGRESS"
+            )
+            outcome_color = (
+                typer.colors.GREEN
+                if status_view.stop_outcome
+                and status_view.stop_outcome.value == "READY_FOR_HUMAN_MERGE"
+                else typer.colors.YELLOW
+                if status_view.stop_outcome and "WAITING" in status_view.stop_outcome.value
+                else typer.colors.RED
+            )
+            typer.secho(f"Stop Outcome: {outcome_str}", fg=outcome_color, bold=True)
+            if status_view.human_gate:
+                typer.secho(
+                    f"Human Gate: {status_view.human_gate.value}", fg=typer.colors.YELLOW, bold=True
+                )
+            if status_view.stop_reason:
+                typer.echo(f"Stop Reason: {status_view.stop_reason}")
+
+    except Exception as e:
+        typer.secho(f"Orchestration error: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
+@orchestrate_app.command("resume")
+def orchestrate_resume_cmd(
+    run_id: str = typer.Argument(..., help="Orchestration run identifier"),
+    project_root: str = typer.Option(".", "--path", "-p", help="Filesystem path to project root"),
+    json_output: bool = typer.Option(False, "--json", help="Output result as JSON"),
+) -> None:
+    """Resume an existing orchestration run from its persisted checkpoint."""
+    try:
+        with db_manager.session() as session:
+            uow = PostgresPersistenceUnitOfWork(session)
+            service = OrchestrationService(uow, project_root=project_root)
+            run = service.resume(run_id, project_root=project_root)
+            status_view = service.get_status(run.run_id)
+
+            if json_output:
+                typer.echo(json.dumps(status_view.model_dump(), indent=2, default=str))
+                return
+
+            typer.secho(
+                f"\n=== Resumed Orchestration Run {status_view.run_id} ===",
+                fg=typer.colors.CYAN,
+                bold=True,
+            )
+            typer.echo(f"Current Stage: {status_view.current_stage.value}")
+            typer.echo(f"Resumable Stage: {status_view.resumable_stage.value}")
+            outcome_str = (
+                status_view.stop_outcome.value if status_view.stop_outcome else "IN_PROGRESS"
+            )
+            typer.echo(f"Stop Outcome: {outcome_str}")
+            if status_view.human_gate:
+                typer.echo(f"Human Gate: {status_view.human_gate.value}")
+            if status_view.stop_reason:
+                typer.echo(f"Stop Reason: {status_view.stop_reason}")
+    except Exception as e:
+        typer.secho(f"Orchestration resume error: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
+@orchestrate_app.command("status")
+def orchestrate_status_cmd(
+    run_id: str = typer.Argument(..., help="Orchestration run identifier"),
+    json_output: bool = typer.Option(False, "--json", help="Output status as JSON"),
+) -> None:
+    """Show operational status for an orchestration run."""
+    try:
+        with db_manager.session() as session:
+            uow = PostgresPersistenceUnitOfWork(session)
+            service = OrchestrationService(uow)
+            status_view = service.get_status(run_id)
+
+            if json_output:
+                typer.echo(json.dumps(status_view.model_dump(), indent=2, default=str))
+                return
+
+            typer.secho(
+                f"=== Orchestration Run {status_view.run_id} ===",
+                fg=typer.colors.CYAN,
+                bold=True,
+            )
+            typer.echo(f"Project: {status_view.project_id}")
+            typer.echo(f"Change: {status_view.change_name}")
+            typer.echo(f"Stage: {status_view.current_stage.value}")
+            typer.echo(f"Resumable Stage: {status_view.resumable_stage.value}")
+            typer.echo(f"Active: {'YES' if status_view.is_active else 'NO'}")
+            typer.echo(f"Generation: {status_view.current_generation}")
+            typer.echo(f"Base SHA: {status_view.base_sha}")
+            typer.echo(f"Candidate SHA: {status_view.candidate_sha or '-'}")
+            if status_view.manifest_hash:
+                typer.echo(f"Manifest Hash: {status_view.manifest_hash}")
+            if status_view.checks_status:
+                typer.echo(f"Checks: {status_view.checks_status}")
+            if status_view.review_verdict:
+                typer.echo(f"Review Verdict: {status_view.review_verdict}")
+            if status_view.audit_status:
+                typer.echo(
+                    f"Audit: {status_view.audit_status} (Risk: {status_view.audit_risk or '-'})"
+                )
+            if status_view.pr_url:
+                typer.echo(f"PR: #{status_view.pr_number or '-'} -> {status_view.pr_url}")
+            if status_view.stop_outcome:
+                outcome_color = (
+                    typer.colors.GREEN
+                    if status_view.stop_outcome.value == "READY_FOR_HUMAN_MERGE"
+                    else typer.colors.YELLOW
+                    if "WAITING" in status_view.stop_outcome.value
+                    else typer.colors.RED
+                )
+                typer.secho(
+                    f"Stop Outcome: {status_view.stop_outcome.value}",
+                    fg=outcome_color,
+                    bold=True,
+                )
+            if status_view.human_gate:
+                typer.secho(
+                    f"Human Gate: {status_view.human_gate.value}",
+                    fg=typer.colors.YELLOW,
+                    bold=True,
+                )
+            if status_view.stop_reason:
+                typer.echo(f"Reason: {status_view.stop_reason}")
+
+    except Exception as e:
+        typer.secho(f"Error showing orchestration status: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
+@orchestrate_app.command("list")
+def orchestrate_list_cmd(
+    project_id: str = typer.Option(None, "--project-id", "-p", help="Filter by project"),
+    change_name: str = typer.Option(None, "--change-name", "-c", help="Filter by change"),
+    is_active: bool = typer.Option(None, "--active/--all", help="Filter active vs all"),
+    json_output: bool = typer.Option(False, "--json", help="Output runs as JSON"),
+) -> None:
+    """List orchestration runs."""
+    try:
+        with db_manager.session() as session:
+            uow = PostgresPersistenceUnitOfWork(session)
+            runs = uow.orchestration_runs.list_runs(
+                project_id=project_id,
+                change_name=change_name,
+                is_active=is_active,
+            )
+            if json_output:
+                typer.echo(json.dumps([r.model_dump() for r in runs], indent=2, default=str))
+                return
+
+            if not runs:
+                typer.echo("No orchestration runs found.")
+                return
+
+            typer.secho("=== Orchestration Runs ===", fg=typer.colors.CYAN, bold=True)
+            for r in runs:
+                outcome_str = r.stop_outcome.value if r.stop_outcome else "RUNNING"
+                gate_str = r.human_gate.value if r.human_gate else "-"
+                typer.echo(
+                    f"{r.run_id}  {r.project_id}  {r.change_name}  stage={r.current_stage.value}  outcome={outcome_str}  gate={gate_str}  gen={r.current_generation}  active={r.is_active}"
+                )
+    except Exception as e:
+        typer.secho(f"Error listing orchestration runs: {e}", fg=typer.colors.RED)
         raise typer.Exit(code=1)
 
 
