@@ -85,6 +85,13 @@ from minime.domain.models import (
 )
 
 
+class ReadinessGitHubStub:
+    """Explicit offline double for legacy readiness tests; live validation is tested separately."""
+
+    def validate_issue_binding(self, expected_repository, issue_number, github_repository=None):
+        return True, None
+
+
 class InMemoryProjectRepository(ProjectRepositoryInterface):
     def __init__(self):
         self._store: dict[str, Project] = {}

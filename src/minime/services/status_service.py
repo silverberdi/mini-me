@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from minime.adapters.github import GitHubAppAuth
 from minime.db.session import db_manager
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.logging import get_logger
@@ -46,6 +47,10 @@ class StatusService:
             )
 
         recent_events = self.uow.events.list_events(limit=10)
+        github_auth = GitHubAppAuth()
+        github_configured = bool(
+            github_auth.app_id and github_auth.installation_id and github_auth.private_key_path
+        )
 
         return {
             "status": "healthy" if db_healthy else "degraded",
@@ -56,6 +61,11 @@ class StatusService:
             },
             "projects_count": len(projects),
             "projects": project_summaries,
+            "github_runtime": {
+                "authentication_mode": github_auth.mode,
+                "configured": github_configured,
+                "health": "configured" if github_configured else "not_configured",
+            },
             "recent_events": [
                 {
                     "event_id": e.event_id,

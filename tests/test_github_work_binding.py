@@ -2,7 +2,7 @@
 
 import pytest
 
-from conftest import create_isolated_openspec_change
+from conftest import ReadinessGitHubStub, create_isolated_openspec_change
 from minime.adapters.github import GitHubAdapter
 from minime.domain.enums import EventType, ReadinessState
 from minime.domain.models import ProjectBinding
@@ -31,7 +31,7 @@ def test_github_work_binding_repository_mismatch(in_memory_uow, tmp_path):
     )
     in_memory_uow.bindings.save(binding)
 
-    readiness_service = ReadinessService(in_memory_uow)
+    readiness_service = ReadinessService(in_memory_uow, github_adapter=ReadinessGitHubStub())
 
     # When an external presentation/issue claims repository B, readiness fails
     eval_result = readiness_service.evaluate_change_readiness(
@@ -69,7 +69,7 @@ def test_github_issue_number_mandatory_for_ready(in_memory_uow, tmp_path):
     )
     in_memory_uow.bindings.save(binding)
 
-    readiness_service = ReadinessService(in_memory_uow)
+    readiness_service = ReadinessService(in_memory_uow, github_adapter=ReadinessGitHubStub())
     eval_result = readiness_service.evaluate_change_readiness(
         project_id="proj-a",
         change_name="synthetic-change",

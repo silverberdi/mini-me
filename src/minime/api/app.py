@@ -565,7 +565,9 @@ def admit_orchestration(
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> dict[str, Any]:
     """Admit a single change into autonomous orchestration after verifying DoR and bindings."""
-    service = OrchestrationService(uow, project_root=req.project_root or ".")
+    service = OrchestrationService(
+        uow, project_root=req.project_root or ".", github_adapter=getattr(app.state, "github_adapter", None)
+    )
     result = service.admit_change(req.project_id, req.change_name, project_root=req.project_root)
     return result.model_dump()
 
@@ -576,7 +578,9 @@ def start_orchestration(
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> dict[str, Any]:
     """Start autonomous orchestration for a single READY change."""
-    service = OrchestrationService(uow, project_root=req.project_root or ".")
+    service = OrchestrationService(
+        uow, project_root=req.project_root or ".", github_adapter=getattr(app.state, "github_adapter", None)
+    )
     try:
         run = service.start(req.project_id, req.change_name, project_root=req.project_root)
         status_view = service.get_status(run.run_id)

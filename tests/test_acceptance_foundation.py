@@ -2,7 +2,7 @@
 
 import pytest
 
-from conftest import create_isolated_openspec_change
+from conftest import ReadinessGitHubStub, create_isolated_openspec_change
 from minime.adapters.github import GitHubAdapter
 from minime.adapters.openspec import OpenSpecAdapter
 from minime.config import DatabaseConfig
@@ -158,7 +158,7 @@ def test_acceptance_presentation_metadata_never_authorizes_repo_change(in_memory
     in_memory_uow.bindings.save(binding)
 
     # Issue presentation metadata claims Repo B
-    readiness_service = ReadinessService(in_memory_uow)
+    readiness_service = ReadinessService(in_memory_uow, github_adapter=ReadinessGitHubStub())
     eval_result = readiness_service.evaluate_change_readiness(
         project_id="proj-a",
         change_name="synthetic-change",
@@ -269,7 +269,7 @@ def test_acceptance_runtime_state_outside_openspec(in_memory_uow, tmp_path):
     )
     in_memory_uow.bindings.save(binding)
 
-    readiness_service = ReadinessService(in_memory_uow)
+    readiness_service = ReadinessService(in_memory_uow, github_adapter=ReadinessGitHubStub())
     eval_result = readiness_service.evaluate_change_readiness(
         project_id="mini-me",
         change_name="synthetic-change",
