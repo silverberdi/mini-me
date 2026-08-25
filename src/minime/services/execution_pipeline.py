@@ -174,7 +174,7 @@ class ExecutionPipelineService:
             "mistralai/mistral-large",
         ]
 
-    def queue_job(self, project_id: str, change_name: str) -> Job:
+    def queue_job(self, project_id: str, change_name: str, *, commit: bool = True) -> Job:
         project = self._require_project(project_id)
         change = self.uow.changes.get_by_name(project_id, change_name)
         if not change or change.last_readiness_status != ReadinessState.READY:
@@ -195,7 +195,8 @@ class ExecutionPipelineService:
             job,
             {"status": JobStatus.QUEUED.value, "implementer": project.implementer},
         )
-        self.uow.commit()
+        if commit:
+            self.uow.commit()
         return job
 
     async def run_job(self, project_id: str, change_name: str) -> Job:
