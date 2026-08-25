@@ -474,6 +474,63 @@ def test_end_to_end_successful_orchestration(setup_orchestration_environment, in
     assert status_view.audit_status == "AUDIT_COMPLETED"
 
 
+def test_pipeline_exception_stops_before_evaluation_and_all_downstream_stages(
+    setup_orchestration_environment, in_memory_uow
+):
+    env = setup_orchestration_environment
+    pipeline = ExecutionPipelineService(
+        uow=in_memory_uow,
+        project_root=env["project_root"],
+        implementer_runner=MockImplementerRunner(),
+        checks_runner=FakeChecksRunner(),
+        reviewer_runner=MockReviewerRunner(),
+        auditor_runner=MockAuditorRunner(),
+    )
+
+    async def raise_pipeline_error(job_id: str):
+        raise RuntimeError("pipeline broke token=should-not-leak")
+
+    pipeline.execute_queued_job = raise_pipeline_error
+    service = OrchestrationService(
+        in_memory_uow,
+        project_root=env["project_root"],
+        pipeline=pipeline,
+        github_adapter=FakeGitHubAdapter(),
+    )
+
+    run = service.start(env["project_id"], env["change_name"])
+
+    assert run.current_stage == OrchestrationStage.IMPLEMENTING
+    assert run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
+    assert run.human_gate == HumanGate.NEEDS_HUMAN
+    assert run.is_active is False
+    assert run.stop_details == {
+        "code": "EXECUTION_PIPELINE_EXCEPTION",
+        "exception_type": "RuntimeError",
+        "error": "pipeline broke token=[REDACTED]",
+    }
+
+    job = in_memory_uow.jobs.get_by_id(run.active_job_id)
+    assert job is not None
+    assert job.status == JobStatus.QUEUED
+    assert job.candidate_sha is None
+    assert in_memory_uow.job_attempts.list_by_job(job.job_id) == []
+    assert in_memory_uow.check_results.list_by_job(job.job_id) == []
+    assert in_memory_uow.reviews.get_by_job_id(job.job_id) is None
+    assert in_memory_uow.audits.get_by_job_id(job.job_id) is None
+
+    events = in_memory_uow.orchestration_stage_events.list_by_run(run.run_id)
+    assert events[-1].event_type == "ORCHESTRATION_STOPPED"
+    assert not any(
+        event.to_stage
+        in {
+            OrchestrationStage.EVALUATING_ATTEMPT,
+            OrchestrationStage.RUNNING_CHECKS,
+        }
+        for event in events
+    )
+
+
 def test_orchestration_reuses_pipeline_evidence_after_production_worktree_cleanup(
     setup_orchestration_environment, in_memory_uow
 ):

@@ -1093,7 +1093,7 @@ class PostgresJobRepository(JobRepositoryInterface):
             raise ValueError(f"Job '{job_id}' not found.")
         current = JobStatus(model.status)
         target = JobStatus(new_status)
-        if target not in self._valid_transitions[current]:
+        if target not in self.VALID_TRANSITIONS[current]:
             raise ValueError(f"Invalid job status transition: {current.value} -> {target.value}.")
         model.status = target.value
         model.error_message = error_message
@@ -1112,7 +1112,7 @@ class PostgresJobRepository(JobRepositoryInterface):
             raise ValueError(f"Job '{job_id}' not found.")
         current = JobStatus(model.status)
         target = JobStatus.WAITING_CAPACITY
-        if target not in self._valid_transitions[current]:
+        if target not in self.VALID_TRANSITIONS[current]:
             raise ValueError(f"Invalid job status transition: {current.value} -> {target.value}.")
         model.status = target.value
         model.waiting_provider = waiting_provider
@@ -1127,7 +1127,7 @@ class PostgresJobRepository(JobRepositoryInterface):
             raise ValueError(f"Job '{job_id}' not found.")
         current = JobStatus(model.status)
         target = JobStatus.RECOVERY_BLOCKED
-        if target not in self._valid_transitions[current]:
+        if target not in self.VALID_TRANSITIONS[current]:
             raise ValueError(f"Invalid job status transition: {current.value} -> {target.value}.")
         model.status = target.value
         model.recovery_blocked_reason = reason
