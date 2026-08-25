@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from conftest import create_isolated_openspec_change
+from conftest import ReadinessGitHubStub, create_isolated_openspec_change
 from minime.domain.enums import (
     HumanGate,
     OrchestrationStage,
@@ -252,7 +252,7 @@ def test_acceptance_successful_end_to_end_orchestration(setup_acceptance_env, in
 def test_acceptance_duplicate_active_run_refused(setup_acceptance_env, in_memory_uow):
     """Scenario: Duplicate active run is refused."""
     env = setup_acceptance_env
-    service = OrchestrationService(in_memory_uow, project_root=env["project_root"])
+    service = OrchestrationService(in_memory_uow, project_root=env["project_root"], github_adapter=ReadinessGitHubStub())
 
     # Create an active run directly in store
     from minime.domain.models import OrchestrationRun
@@ -276,7 +276,7 @@ def test_acceptance_duplicate_active_run_refused(setup_acceptance_env, in_memory
 def test_acceptance_historical_run_permits_new_run(setup_acceptance_env, in_memory_uow):
     """Scenario: Historical terminal run does not block a later run."""
     env = setup_acceptance_env
-    service = OrchestrationService(in_memory_uow, project_root=env["project_root"])
+    service = OrchestrationService(in_memory_uow, project_root=env["project_root"], github_adapter=ReadinessGitHubStub())
 
     # Create a completed/terminal historical run
     from minime.domain.models import OrchestrationRun

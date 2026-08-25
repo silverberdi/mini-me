@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from conftest import create_isolated_openspec_change
+from conftest import ReadinessGitHubStub, create_isolated_openspec_change
 from minime.domain.enums import (
     AuditFindingSeverity,
     AuditStatus,
@@ -361,7 +361,7 @@ def test_pr_lookup_exact_identity_adopts_without_creation(
 
 def test_admission_refusal_scenarios(setup_orchestration_environment, in_memory_uow):
     env = setup_orchestration_environment
-    service = OrchestrationService(in_memory_uow, project_root=env["project_root"])
+    service = OrchestrationService(in_memory_uow, project_root=env["project_root"], github_adapter=ReadinessGitHubStub())
 
     # 1. Non-existent project
     res_bad_proj = service.admit_change("unknown-project", env["change_name"])
@@ -544,6 +544,7 @@ def test_capacity_exhaustion_stops_at_waiting_capacity(
         uow=in_memory_uow,
         project_root=env["project_root"],
         pipeline=pipeline,
+        github_adapter=ReadinessGitHubStub(),
     )
 
     admission = service.admit_change(env["project_id"], env["change_name"])

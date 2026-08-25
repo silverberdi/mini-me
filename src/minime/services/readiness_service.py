@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from minime.adapters.github import GitHubAdapter
+from minime.adapters.github import GitHubAdapter, GitHubAuthorizationError, GitHubRemoteError
 from minime.adapters.openspec import OpenSpecAdapter
 from minime.domain.enums import ChangeStatus, EventType, ReadinessState
 from minime.domain.interfaces import PersistenceUnitOfWork
@@ -198,17 +198,37 @@ class ReadinessService:
                 unmet_reasons.append(reason)
             else:
                 effective_issue = github_issue or binding.github_issue_number
-                checks.append(
-                    ReadinessCheck(
-                        name="durable_project_binding",
-                        passed=True,
-                        details={
-                            "binding_id": binding.binding_id,
-                            "repository": binding.repository,
-                            "issue_number": effective_issue,
-                        },
+                try:
+                    issue_valid, issue_reason = self.github_adapter.validate_issue_binding(
+                        project.repository, effective_issue, github_repository=github_repo
                     )
-                )
+                except GitHubRemoteError as exc:
+                    issue_valid = False
+                    issue_reason = f"Transient GitHub unobservability: {exc}"
+                except GitHubAuthorizationError as exc:
+                    issue_valid = False
+                    issue_reason = f"GitHub App authorization failure: {exc}"
+                if not issue_valid:
+                    reason = issue_reason or "Remote GitHub Issue validation failed."
+                    checks.append(
+                        ReadinessCheck(
+                            name="github_issue_verification", passed=False, reason=reason,
+                            details={"repository": project.repository, "issue_number": effective_issue},
+                        )
+                    )
+                    unmet_reasons.append(reason)
+                else:
+                    checks.append(
+                        ReadinessCheck(
+                            name="durable_project_binding", passed=True,
+                            details={
+                                "binding_id": binding.binding_id,
+                                "repository": binding.repository,
+                                "issue_number": effective_issue,
+                                "github_app_authentication": "github_app_installation",
+                            },
+                        )
+                    )
 
         # 5. OpenSpec artifacts evaluation
         artifacts_eval = self.openspec_adapter.evaluate_artifacts(

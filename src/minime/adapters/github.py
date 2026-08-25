@@ -1,268 +1,335 @@
-"""GitHub work-binding adapter and durable identifiers."""
+"""GitHub App-authorized work-binding and Git operations."""
 
 from __future__ import annotations
 
-from typing import Any
+import base64
+import os
+import re
+import subprocess
+import time
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Callable
+from urllib.parse import urlparse
+
+import httpx
+import jwt
 
 from minime.domain.enums import EventType, PullRequestLookupState
 from minime.domain.interfaces import GitHubAdapterInterface
 from minime.domain.models import Event, PullRequestLookupResult, utc_now
-from minime.logging import get_logger
+from minime.logging import get_logger, redact_secrets
 from minime.services.project_service import normalize_repository_identity
 
 logger = get_logger("adapters.github")
 
 
-class GitHubAdapter(GitHubAdapterInterface):
-    """Adapter for GitHub work tracking (Issues, Projects) and durable binding."""
+class GitHubAuthorizationError(RuntimeError):
+    """The configured GitHub App cannot authorize the requested operation."""
 
-    def __init__(self, token: str | None = None):
-        self.token = token
 
-    def validate_issue_binding(
+class GitHubRemoteError(RuntimeError):
+    """GitHub is temporarily unobservable for the requested operation."""
+
+
+@dataclass
+class _CachedInstallationToken:
+    value: str
+    expires_at: datetime
+
+
+class GitHubAppAuth:
+    """Create App JWTs and exchange them for volatile installation tokens."""
+
+    def __init__(
         self,
-        expected_repository: str,
-        issue_number: int,
-        github_repository: str | None = None,
-    ) -> tuple[bool, str | None]:
-        """Validate that a GitHub Issue actually belongs to the project's bound repository.
+        app_id: str | int | None = None,
+        installation_id: str | int | None = None,
+        private_key_path: str | Path | None = None,
+        *,
+        client: httpx.Client | None = None,
+        now: Callable[[], float] = time.time,
+        api_base_url: str = "https://api.github.com",
+    ) -> None:
+        self.app_id = str(app_id if app_id is not None else os.environ.get("MINIME_GITHUB_APP_ID", ""))
+        self.installation_id = str(installation_id if installation_id is not None else os.environ.get("MINIME_GITHUB_INSTALLATION_ID", ""))
+        self.private_key_path = str(private_key_path if private_key_path is not None else os.environ.get("MINIME_GITHUB_PRIVATE_KEY_PATH", ""))
+        self.client = client or httpx.Client(base_url=api_base_url, timeout=15.0)
+        self._now = now
+        self._cached: _CachedInstallationToken | None = None
 
-        Repository authority comes strictly from the durable project binding, never
-        from presentation metadata or external claims.
-        """
-        if github_repository is not None:
-            norm_expected = normalize_repository_identity(expected_repository)
-            norm_actual = normalize_repository_identity(github_repository)
-            if norm_expected != norm_actual:
-                return False, (
-                    f"Repository mismatch: GitHub Issue #{issue_number} is in repository "
-                    f"'{norm_actual}', but project is bound to '{norm_expected}'."
-                )
+    @property
+    def mode(self) -> str:
+        return "github_app_installation"
 
+    def _credentials(self) -> tuple[str, str, str]:
+        if not self.app_id or not self.installation_id or not self.private_key_path:
+            raise GitHubAuthorizationError("GitHub App credentials are not configured.")
+        try:
+            key = Path(self.private_key_path).read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            raise GitHubAuthorizationError("GitHub App private key is inaccessible.") from None
+        if not key.strip():
+            raise GitHubAuthorizationError("GitHub App private key is empty.")
+        return self.app_id, self.installation_id, key
+
+    def create_jwt(self) -> str:
+        app_id, _, private_key = self._credentials()
+        now = int(self._now())
+        try:
+            return jwt.encode({"iat": now - 60, "exp": now + 540, "iss": app_id}, private_key, algorithm="RS256")
+        except Exception:
+            raise GitHubAuthorizationError("GitHub App private key is invalid for RS256 signing.") from None
+
+    def get_installation_token(self) -> str:
+        now = datetime.fromtimestamp(self._now(), tz=UTC)
+        if self._cached and (self._cached.expires_at - now).total_seconds() >= 60:
+            return self._cached.value
+        _, installation_id, _ = self._credentials()
+        try:
+            response = self.client.post(
+                f"/app/installations/{installation_id}/access_tokens",
+                headers={"Authorization": f"Bearer {self.create_jwt()}", "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"},
+            )
+        except (httpx.HTTPError, OSError):
+            raise GitHubAuthorizationError("GitHub App installation token exchange was unobservable.") from None
+        if response.status_code not in (200, 201):
+            category = "unauthorized" if response.status_code in (401, 403) else "exchange_failed"
+            raise GitHubAuthorizationError(f"GitHub App installation authorization failed ({category}, HTTP {response.status_code}).")
+        try:
+            payload = response.json()
+            token = payload["token"]
+            expires_at = datetime.fromisoformat(payload["expires_at"].replace("Z", "+00:00"))
+            if not isinstance(token, str) or not token or expires_at.tzinfo is None:
+                raise ValueError
+        except (ValueError, KeyError, TypeError, AttributeError):
+            raise GitHubAuthorizationError("GitHub App token response was invalid.") from None
+        self._cached = _CachedInstallationToken(token, expires_at.astimezone(UTC))
+        return token
+
+
+def _safe_error(value: str, secrets: list[str] | None = None) -> str:
+    return redact_secrets(value, secrets)
+
+
+class GitHubAdapter(GitHubAdapterInterface):
+    """GitHub REST and Git adapter under the configured App installation."""
+
+    def __init__(self, token: str | None = None, *, auth: GitHubAppAuth | None = None):
+        # ``token`` is accepted for old test construction but is never runtime authority.
+        self.auth = auth or GitHubAppAuth()
+        self._last_git_token: str | None = None
+
+    def _token(self) -> str:
+        return self.auth.get_installation_token()
+
+    def _headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self._token()}", "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
+
+    @staticmethod
+    def _repo(repository: str) -> str:
+        normalized = normalize_repository_identity(repository)
+        if not re.fullmatch(r"[^/]+/[^/]+", normalized):
+            raise ValueError(f"Invalid GitHub repository identity: {normalized}")
+        return normalized
+
+    def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        try:
+            return self.auth.client.request(method, path, headers=self._headers(), **kwargs)
+        except (httpx.HTTPError, OSError):
+            raise GitHubRemoteError("GitHub API is unobservable.") from None
+
+    def verify_repository(self, repository: str) -> tuple[bool, str | None]:
+        repo = self._repo(repository)
+        response = self._request("GET", f"/repos/{repo}")
+        if response.status_code == 404:
+            return False, f"Repository '{repo}' does not exist or is not accessible."
+        if response.status_code in (401, 403):
+            raise GitHubAuthorizationError("GitHub App is unauthorized for the bound repository.")
+        if response.status_code >= 500 or response.status_code == 429:
+            raise GitHubRemoteError("GitHub repository verification is unobservable.")
+        if response.status_code >= 400:
+            return False, f"Repository verification failed (HTTP {response.status_code})."
+        try:
+            actual = normalize_repository_identity(response.json()["full_name"])
+        except (KeyError, TypeError, ValueError):
+            return False, "GitHub repository response was invalid."
+        return actual == repo, None if actual == repo else f"Repository mismatch: GitHub returned '{actual}', expected '{repo}'."
+
+    def validate_issue_binding(self, expected_repository: str, issue_number: int, github_repository: str | None = None) -> tuple[bool, str | None]:
+        repo = self._repo(expected_repository)
         if issue_number <= 0:
             return False, f"Invalid issue number: {issue_number} must be positive."
-
+        if github_repository is not None and normalize_repository_identity(github_repository) != repo:
+            actual = normalize_repository_identity(github_repository)
+            return False, f"Repository mismatch: GitHub Issue #{issue_number} belongs to '{actual}', not '{repo}'."
+        response = self._request("GET", f"/repos/{repo}/issues/{issue_number}")
+        if response.status_code == 404:
+            return False, f"GitHub Issue #{issue_number} does not exist in repository '{repo}'."
+        if response.status_code in (401, 403):
+            raise GitHubAuthorizationError("GitHub App is unauthorized to validate the bound Issue.")
+        if response.status_code >= 500 or response.status_code == 429:
+            raise GitHubRemoteError("GitHub Issue validation is unobservable.")
+        if response.status_code >= 400:
+            raise GitHubRemoteError(f"GitHub Issue validation is unobservable (HTTP {response.status_code}).")
+        try:
+            payload = response.json()
+            actual = self._issue_repository_identity(payload)
+        except (KeyError, TypeError, ValueError, AttributeError):
+            return False, f"GitHub Issue #{issue_number} response was invalid."
+        if actual != repo:
+            return False, f"Repository mismatch: GitHub Issue #{issue_number} belongs to '{actual}', not '{repo}'."
         return True, None
 
-    def record_sync_failure(
-        self,
-        project_id: str,
-        change_id: str | None,
-        operation: str,
-        error_message: str,
-    ) -> Event:
-        """Record an observable and reconcilable synchronization failure."""
-        logger.warning(
-            f"GitHub sync failure for project '{project_id}' during '{operation}': {error_message}"
-        )
-        return Event(
-            event_type=EventType.SYNC_FAILED,
-            project_id=project_id,
-            change_id=change_id,
-            operation_id=operation,
-            payload={
-                "operation": operation,
-                "error": error_message,
-                "reconcilable": True,
-            },
-            timestamp=utc_now(),
-        )
+    @staticmethod
+    def _issue_repository_identity(payload: dict[str, Any]) -> str:
+        """Extract a trustworthy repository identity from standard Issue JSON."""
+        repository_url = payload.get("repository_url")
+        if isinstance(repository_url, str):
+            parsed = urlparse(repository_url)
+            if parsed.scheme == "https" and parsed.netloc == "api.github.com":
+                match = re.fullmatch(r"/repos/([^/]+)/([^/]+)", parsed.path.rstrip("/"))
+                if match:
+                    return f"{match.group(1)}/{match.group(2)}"
 
-    def record_sync_reconciled(
-        self,
-        project_id: str,
-        change_id: str | None,
-        operation: str,
-        details: dict[str, Any] | None = None,
-    ) -> Event:
-        """Record a successful reconciliation after a prior synchronization failure."""
-        logger.info(f"GitHub sync reconciled for project '{project_id}' during '{operation}'")
-        return Event(
-            event_type=EventType.SYNC_RECONCILED,
-            project_id=project_id,
-            change_id=change_id,
-            operation_id=operation,
-            payload={
-                "operation": operation,
-                "details": details or {},
-                "reconciled": True,
-            },
-            timestamp=utc_now(),
-        )
+        nested = payload.get("repository")
+        if isinstance(nested, dict) and isinstance(nested.get("full_name"), str):
+            identity = normalize_repository_identity(nested["full_name"])
+            if re.fullmatch(r"[^/]+/[^/]+", identity):
+                return identity
+        raise ValueError("GitHub Issue response has no trustworthy repository identity.")
 
-    def get_pull_request(
-        self, repository: str, branch: str, base: str = "main"
-    ) -> PullRequestLookupResult:
-        """Lookup a PR with an explicit authoritative remote state."""
-        import json
-        import subprocess
+    def record_sync_failure(self, project_id: str, change_id: str | None, operation: str, error_message: str) -> Event:
+        safe = _safe_error(error_message)
+        logger.warning("GitHub sync failure for project '%s' during '%s': %s", project_id, operation, safe)
+        return Event(event_type=EventType.SYNC_FAILED, project_id=project_id, change_id=change_id, operation_id=operation, payload={"operation": operation, "error": safe, "reconcilable": True}, timestamp=utc_now())
 
+    def record_sync_reconciled(self, project_id: str, change_id: str | None, operation: str, details: dict[str, Any] | None = None) -> Event:
+        logger.info("GitHub sync reconciled for project '%s' during '%s'", project_id, operation)
+        return Event(event_type=EventType.SYNC_RECONCILED, project_id=project_id, change_id=change_id, operation_id=operation, payload={"operation": operation, "details": details or {}, "reconciled": True}, timestamp=utc_now())
+
+    def get_pull_request(self, repository: str, branch: str, base: str = "main") -> PullRequestLookupResult:
+        repo = self._repo(repository)
+        owner = repo.split("/", 1)[0]
         try:
-            cmd = [
-                "gh",
-                "pr",
-                "list",
-                "--repo",
-                repository,
-                "--head",
-                branch,
-                "--base",
-                base,
-                "--state",
-                "all",
-                "--limit",
-                "20",
-                "--json",
-                "number,url,headRefOid,baseRefName,headRefName,state,title,body",
-            ]
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-            if res.returncode != 0:
-                return PullRequestLookupResult(
-                    state=PullRequestLookupState.UNOBSERVABLE,
-                    detail=res.stderr or res.stdout or "gh pr list failed",
-                )
-            records = json.loads(res.stdout or "[]")
+            response = self._request("GET", f"/repos/{repo}/pulls", params={"head": f"{owner}:{branch}", "base": base, "state": "all", "per_page": 20})
+            if response.status_code in (401, 403):
+                raise GitHubAuthorizationError("GitHub App is unauthorized for pull-request lookup.")
+            if response.status_code == 404 or response.status_code >= 500 or response.status_code == 429:
+                return PullRequestLookupResult(state=PullRequestLookupState.UNOBSERVABLE, detail="GitHub PR lookup is unobservable.")
+            if response.status_code >= 400:
+                return PullRequestLookupResult(state=PullRequestLookupState.UNOBSERVABLE, detail=f"GitHub PR lookup failed (HTTP {response.status_code}).")
+            records = response.json()
             if not isinstance(records, list):
-                return PullRequestLookupResult(
-                    state=PullRequestLookupState.AMBIGUOUS,
-                    detail="gh returned a non-list PR result.",
-                )
+                return PullRequestLookupResult(state=PullRequestLookupState.AMBIGUOUS, detail="GitHub returned an invalid PR list.")
             if not records:
                 return PullRequestLookupResult(state=PullRequestLookupState.NOT_FOUND)
-            if len(records) > 1:
-                return PullRequestLookupResult(
-                    state=PullRequestLookupState.AMBIGUOUS,
-                    detail=f"Found {len(records)} plausible pull requests.",
-                )
+            if len(records) != 1 or not isinstance(records[0], dict):
+                return PullRequestLookupResult(state=PullRequestLookupState.AMBIGUOUS, detail=f"Found {len(records)} plausible pull requests.")
             data = records[0]
-            return PullRequestLookupResult(
-                state=PullRequestLookupState.FOUND_EXACT,
-                pull_request={
-                    "repository": repository,
-                    "number": data.get("number"),
-                    "url": data.get("url"),
-                    "head_sha": data.get("headRefOid"),
-                    "head_branch": data.get("headRefName"),
-                    "base_branch": data.get("baseRefName"),
-                    "state": data.get("state"),
-                    "title": data.get("title"),
-                    "body": data.get("body"),
-                },
-            )
-        except Exception as exc:
-            logger.warning(f"Error querying PR for branch '{branch}' in '{repository}': {exc}")
-            return PullRequestLookupResult(
-                state=PullRequestLookupState.UNOBSERVABLE,
-                detail=str(exc),
-            )
-
-    def create_pull_request(
-        self,
-        repository: str,
-        branch: str,
-        base: str,
-        title: str,
-        body: str,
-        head_sha: str,
-    ) -> dict[str, Any]:
-        """Create a new PR for the branch against base in the given repository."""
-        import subprocess
-
-        try:
-            cmd = [
-                "gh",
-                "pr",
-                "create",
-                "--repo",
-                repository,
-                "--base",
-                base,
-                "--head",
-                branch,
-                "--title",
-                title,
-                "--body",
-                body,
-            ]
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-            if res.returncode != 0:
-                raise RuntimeError(f"gh pr create failed: {res.stderr or res.stdout}")
-            lookup = self.get_pull_request(repository, branch, base)
-            if lookup.state == PullRequestLookupState.FOUND_EXACT and lookup.pull_request:
-                return lookup.pull_request
-            raise RuntimeError(
-                f"GitHub created the PR but lookup returned {lookup.state.value}: {lookup.detail or 'no authoritative PR record.'}"
-            )
-        except Exception as exc:
-            logger.warning(f"Error creating PR for branch '{branch}' in '{repository}': {exc}")
+            head = data.get("head") or {}
+            base_data = data.get("base") or {}
+            if not all((data.get("number"), data.get("html_url"), head.get("sha"), head.get("ref"), base_data.get("ref"))):
+                return PullRequestLookupResult(state=PullRequestLookupState.AMBIGUOUS, detail="GitHub PR record is incomplete.")
+            if head["ref"] != branch or base_data["ref"] != base:
+                return PullRequestLookupResult(state=PullRequestLookupState.AMBIGUOUS, detail="GitHub PR record does not match the requested branch and base.")
+            return PullRequestLookupResult(state=PullRequestLookupState.FOUND_EXACT, pull_request={"repository": repo, "number": data["number"], "url": data["html_url"], "head_sha": head["sha"], "head_branch": head["ref"], "base_branch": base_data["ref"], "state": data.get("state"), "title": data.get("title"), "body": data.get("body")})
+        except GitHubAuthorizationError:
             raise
+        except (GitHubRemoteError, ValueError, TypeError, KeyError, httpx.HTTPError) as exc:
+            return PullRequestLookupResult(state=PullRequestLookupState.UNOBSERVABLE, detail=_safe_error(str(exc)))
 
-    def push_branch(
-        self,
-        worktree_path: str,
-        remote: str,
-        branch: str,
-        candidate_sha: str,
-    ) -> bool:
-        """Push candidate branch to remote."""
-        import subprocess
-
+    def create_pull_request(self, repository: str, branch: str, base: str, title: str, body: str, head_sha: str) -> dict[str, Any]:
+        repo = self._repo(repository)
+        response = self._request("POST", f"/repos/{repo}/pulls", json={"title": title, "body": body, "head": branch, "base": base})
+        if response.status_code in (401, 403):
+            raise GitHubAuthorizationError("GitHub App is unauthorized for pull-request creation.")
+        if response.status_code >= 500 or response.status_code == 429:
+            raise GitHubRemoteError("GitHub PR creation is unobservable.")
+        if response.status_code >= 400:
+            raise RuntimeError(f"GitHub PR creation failed (HTTP {response.status_code}).")
         try:
-            from pathlib import Path
+            data = response.json()
+            returned_sha = data["head"]["sha"]
+            if returned_sha != head_sha:
+                raise RuntimeError("GitHub created a pull request with a different head SHA.")
+            return {"repository": repo, "number": data["number"], "url": data["html_url"], "head_sha": returned_sha, "head_branch": data["head"]["ref"], "base_branch": data["base"]["ref"], "state": data.get("state"), "title": data.get("title"), "body": data.get("body")}
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError("GitHub PR creation response was invalid.") from exc
 
-            repo = Path(worktree_path).resolve()
-            if not (repo / ".git").exists() and not (repo / "HEAD").exists():
-                raise RuntimeError(f"Push context is not a Git repository: {repo}")
-            verify = subprocess.run(
-                ["git", "rev-parse", "--verify", f"{candidate_sha}^{{commit}}"],
-                cwd=repo,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if verify.returncode != 0 or verify.stdout.strip() != candidate_sha:
-                raise RuntimeError(
-                    f"Candidate SHA '{candidate_sha}' is not resolvable from repository '{repo}'."
-                )
-            cmd = ["git", "push", remote, f"{candidate_sha}:refs/heads/{branch}"]
-            res = subprocess.run(cmd, cwd=repo, capture_output=True, text=True, timeout=30)
-            if res.returncode != 0:
-                raise RuntimeError(f"git push failed: {res.stderr or res.stdout}")
-            return True
-        except Exception as exc:
-            logger.warning(f"Error pushing branch '{branch}' to '{remote}': {exc}")
-            raise
+    @staticmethod
+    def _is_local_remote(remote_url: str) -> bool:
+        return not (remote_url.startswith(("http://", "https://", "ssh://", "git@")))
 
-    def get_remote_branch_head(
-        self, repository: str, branch: str, remote: str = "origin"
-    ) -> str | None:
-        """Query a remote branch from the explicitly registered local repository root."""
-        import subprocess
-        from pathlib import Path
+    def _git_auth_args(self, remote_url: str) -> list[str]:
+        if self._is_local_remote(remote_url):
+            return []
+        if not remote_url.startswith(("http://", "https://")):
+            raise GitHubAuthorizationError("GitHub App authorization requires an HTTPS Git remote.")
+        token = self._token()
+        self._last_git_token = token
+        encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+        return ["-c", "credential.helper=", "-c", f"http.extraHeader=Authorization: Basic {encoded}"]
 
-        try:
-            repo = Path(repository).resolve()
-            if not repo.exists() or not repo.is_dir():
-                raise RuntimeError(f"Registered repository path does not exist: {repo}")
-            top = subprocess.run(
-                ["git", "rev-parse", "--show-toplevel"],
-                cwd=repo,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            if top.returncode != 0 or Path(top.stdout.strip()).resolve() != repo:
-                raise RuntimeError(f"Registered repository path is not a Git root: {repo}")
-            cmd = ["git", "ls-remote", "--heads", remote, f"refs/heads/{branch}"]
-            res = subprocess.run(cmd, cwd=repo, capture_output=True, text=True, timeout=15)
-            if res.returncode != 0:
-                raise RuntimeError(f"git ls-remote failed: {res.stderr or res.stdout}")
-            output = res.stdout.strip()
-            if output:
-                parts = output.split()
-                if parts:
-                    return parts[0]
+    def _git_secrets(self) -> list[str] | None:
+        cached = getattr(self.auth, "_cached", None)
+        token = self._last_git_token or (cached.value if cached else None)
+        if not token:
             return None
-        except Exception as exc:
-            logger.warning(f"Error querying remote branch head '{branch}' in '{remote}': {exc}")
-            raise
+        encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+        basic = f"Basic {encoded}"
+        header = f"http.extraHeader=Authorization: {basic}"
+        return [token, encoded, basic, header]
+
+    @staticmethod
+    def _run_git(args: list[str], *, cwd: Path, timeout: int, secrets: list[str] | None = None) -> subprocess.CompletedProcess[str]:
+        failure: RuntimeError | None = None
+        try:
+            env = os.environ.copy()
+            env["GIT_TERMINAL_PROMPT"] = "0"
+            return subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=timeout, env=env)
+        except subprocess.TimeoutExpired:
+            failure = RuntimeError("Git command timed out.")
+        except subprocess.SubprocessError:
+            failure = RuntimeError("Git command failed before completion.")
+        except OSError:
+            failure = RuntimeError("Git command could not be started.")
+        except Exception:
+            failure = RuntimeError("Git command failed before completion.")
+        if failure is not None:
+            raise failure
+
+    def push_branch(self, worktree_path: str, remote: str, branch: str, candidate_sha: str) -> bool:
+        repo = Path(worktree_path).resolve()
+        if not (repo / ".git").exists() and not (repo / "HEAD").exists():
+            raise RuntimeError(f"Push context is not a Git repository: {repo}")
+        remote_proc = self._run_git(["git", "remote", "get-url", remote], cwd=repo, timeout=5)
+        if remote_proc.returncode != 0:
+            raise RuntimeError("Registered Git remote could not be resolved.")
+        remote_url = remote_proc.stdout.strip()
+        verify = self._run_git(["git", "rev-parse", "--verify", f"{candidate_sha}^{{commit}}"], cwd=repo, timeout=10)
+        if verify.returncode != 0 or verify.stdout.strip() != candidate_sha:
+            raise RuntimeError(f"Candidate SHA '{candidate_sha}' is not resolvable from repository '{repo}'.")
+        secret = self._git_secrets()
+        result = self._run_git(["git", *self._git_auth_args(remote_url), "push", remote, f"{candidate_sha}:refs/heads/{branch}"], cwd=repo, timeout=30, secrets=secret)
+        if result.returncode != 0:
+            raise RuntimeError(f"git push failed: {_safe_error(result.stderr or result.stdout, secret)}")
+        return True
+
+    def get_remote_branch_head(self, repository: str, branch: str, remote: str = "origin") -> str | None:
+        repo = Path(repository).resolve()
+        if not repo.exists() or not repo.is_dir():
+            raise RuntimeError(f"Registered repository path does not exist: {repo}")
+        top = self._run_git(["git", "rev-parse", "--show-toplevel"], cwd=repo, timeout=5)
+        if top.returncode != 0 or Path(top.stdout.strip()).resolve() != repo:
+            raise RuntimeError(f"Registered repository path is not a Git root: {repo}")
+        remote_proc = self._run_git(["git", "remote", "get-url", remote], cwd=repo, timeout=5)
+        if remote_proc.returncode != 0:
+            raise RuntimeError("Registered Git remote could not be resolved.")
+        remote_url = remote_proc.stdout.strip()
+        secret = self._git_secrets()
+        result = self._run_git(["git", *self._git_auth_args(remote_url), "ls-remote", "--heads", remote, f"refs/heads/{branch}"], cwd=repo, timeout=15, secrets=secret)
+        if result.returncode != 0:
+            raise RuntimeError(f"git ls-remote failed: {_safe_error(result.stderr or result.stdout, secret)}")
+        return result.stdout.strip().split()[0] if result.stdout.strip() else None

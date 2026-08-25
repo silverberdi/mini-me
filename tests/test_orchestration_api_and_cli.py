@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
-from conftest import create_isolated_openspec_change
+from conftest import ReadinessGitHubStub, create_isolated_openspec_change
 from minime.api.app import app, get_uow
 from minime.cli.main import app as cli_app
 from minime.domain.enums import (
@@ -95,6 +95,9 @@ def setup_api_env(tmp_path: Path, in_memory_uow):
         )
     )
 
+    from minime.api.app import app as application
+
+    application.state.github_adapter = ReadinessGitHubStub()
     return {"project_id": project_id, "change_name": change_name, "project_root": str(tmp_path)}
 
 

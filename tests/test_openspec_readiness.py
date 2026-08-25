@@ -1,6 +1,6 @@
 """Tests for OpenSpec discovery, artifact verification, and Definition of Ready (DoR)."""
 
-from conftest import create_isolated_openspec_change
+from conftest import ReadinessGitHubStub, create_isolated_openspec_change
 from minime.adapters.openspec import OpenSpecAdapter
 from minime.domain.enums import ReadinessState
 from minime.domain.models import Project, ProjectBinding
@@ -46,7 +46,7 @@ def test_dor_missing_project_binding_blocks_ready(in_memory_uow, tmp_path):
         reviewer="antigravity",
     )
 
-    readiness_service = ReadinessService(in_memory_uow)
+    readiness_service = ReadinessService(in_memory_uow, github_adapter=ReadinessGitHubStub())
     eval_result = readiness_service.evaluate_change_readiness(
         project_id="mini-me",
         change_name="synthetic-change",
@@ -116,7 +116,7 @@ def test_dor_evaluation_success(in_memory_uow, tmp_path):
     )
     in_memory_uow.bindings.save(binding)
 
-    readiness_service = ReadinessService(in_memory_uow)
+    readiness_service = ReadinessService(in_memory_uow, github_adapter=ReadinessGitHubStub())
     eval_result = readiness_service.evaluate_change_readiness(
         project_id="mini-me",
         change_name="synthetic-change",
@@ -294,7 +294,7 @@ def test_runtime_isolation_does_not_modify_openspec(in_memory_uow, tmp_path):
     )
     in_memory_uow.bindings.save(binding)
 
-    readiness_service = ReadinessService(in_memory_uow)
+    readiness_service = ReadinessService(in_memory_uow, github_adapter=ReadinessGitHubStub())
     eval_result = readiness_service.evaluate_change_readiness(
         project_id="mini-me",
         change_name="synthetic-change",

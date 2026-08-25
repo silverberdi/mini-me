@@ -98,7 +98,8 @@ class OrchestrationService:
         self.github_adapter = github_adapter or GitHubAdapter()
         self.openspec_adapter = openspec_adapter or OpenSpecAdapter()
         self.project_service = ProjectService(self.uow)
-        self.readiness_service = ReadinessService(self.uow)
+        # Admission and execution must share the same canonical GitHub authority.
+        self.readiness_service = ReadinessService(self.uow, github_adapter=self.github_adapter)
 
     def admit_change(
         self,
