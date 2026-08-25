@@ -11,6 +11,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
+from conftest import create_isolated_openspec_change
 from minime.adapters import github as github_module
 from minime.adapters.github import (
     GitHubAdapter,
@@ -20,6 +21,8 @@ from minime.adapters.github import (
     _CachedInstallationToken,
 )
 from minime.domain.enums import PullRequestLookupState
+from minime.domain.models import Project, ProjectBinding
+from minime.services.readiness_service import ReadinessService
 
 
 def _key_file(tmp_path: Path) -> tuple[Path, object]:
@@ -198,3 +201,124 @@ def test_git_nonzero_stderr_redacts_all_authorization_forms(tmp_path):
         adapter.push_branch(str(tmp_path), "origin", "feature", "abc")
     message = str(caught.value)
     assert all(value not in message for value in (token, encoded, basic, header))
+
+
+class _FreshGitAuth:
+    def __init__(self, token: str):
+        self.token = token
+        self.calls = 0
+        self._cached = None
+
+    def get_installation_token(self):
+        self.calls += 1
+        return self.token
+
+
+def _assert_secret_free(error, values):
+    surfaces = [str(error), repr(error), repr(error.args), repr(error.__cause__), repr(error.__context__)]
+    assert all(value not in "\n".join(surfaces) for value in values)
+    assert error.__cause__ is None and error.__context__ is None
+
+
+def test_push_first_use_builds_redaction_set_from_fresh_token(tmp_path):
+    token = "fresh-installation-token"
+    encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    basic = f"Basic {encoded}"
+    header = f"http.extraHeader=Authorization: {basic}"
+    auth = _FreshGitAuth(token)
+    adapter = GitHubAdapter(auth=auth)
+    (tmp_path / ".git").mkdir()
+    calls = [
+        subprocess.CompletedProcess([], 0, stdout="https://github.com/o/r.git\n", stderr=""),
+        subprocess.CompletedProcess([], 0, stdout="abc\n", stderr=""),
+        subprocess.CompletedProcess([], 1, stdout="", stderr=f"fatal: {header} {token} {encoded}"),
+    ]
+    adapter._run_git = lambda *args, **kwargs: calls.pop(0)
+
+    with pytest.raises(RuntimeError) as caught:
+        adapter.push_branch(str(tmp_path), "origin", "feature", "abc")
+    assert auth.calls == 1
+    _assert_secret_free(caught.value, (token, encoded, basic, header))
+
+
+def test_remote_head_first_use_builds_redaction_set_from_fresh_token(tmp_path):
+    token = "fresh-remote-token"
+    encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    basic = f"Basic {encoded}"
+    header = f"http.extraHeader=Authorization: {basic}"
+    auth = _FreshGitAuth(token)
+    adapter = GitHubAdapter(auth=auth)
+    (tmp_path / ".git").mkdir()
+    calls = [
+        subprocess.CompletedProcess([], 0, stdout=f"{tmp_path}\n", stderr=""),
+        subprocess.CompletedProcess([], 0, stdout="https://github.com/o/r.git\n", stderr=""),
+        subprocess.CompletedProcess([], 1, stdout="", stderr=f"fatal: {header} {token} {encoded}"),
+    ]
+    adapter._run_git = lambda *args, **kwargs: calls.pop(0)
+
+    with pytest.raises(RuntimeError) as caught:
+        adapter.get_remote_branch_head(str(tmp_path), "feature")
+    assert auth.calls == 1
+    _assert_secret_free(caught.value, (token, encoded, basic, header))
+
+
+class _ReadinessGitHubStub:
+    def __init__(self, result=None, error=None):
+        self.result = result
+        self.error = error
+
+    def validate_issue_binding(self, expected_repository, issue_number, github_repository=None):
+        if self.error:
+            raise self.error
+        return self.result
+
+
+def _readiness_case(in_memory_uow, tmp_path, github):
+    create_isolated_openspec_change(tmp_path, "audit-readiness")
+    in_memory_uow.projects.save(
+        Project(
+            project_id="mini-me",
+            display_name="mini me",
+            repository="o/r",
+            base_branch="main",
+            openspec_path="openspec",
+            implementer="codex",
+            reviewer="antigravity",
+        )
+    )
+    in_memory_uow.bindings.save(
+        ProjectBinding(
+            project_id="mini-me",
+            repository="o/r",
+            github_issue_number=12,
+            openspec_change_name="audit-readiness",
+        )
+    )
+    return ReadinessService(in_memory_uow, github_adapter=github).evaluate_change_readiness(
+        "mini-me", "audit-readiness", str(tmp_path)
+    )
+
+
+def test_readiness_fails_closed_when_issue_validation_returns_false(in_memory_uow, tmp_path):
+    result = _readiness_case(
+        in_memory_uow,
+        tmp_path,
+        _ReadinessGitHubStub(result=(False, "Issue repository mismatch")),
+    )
+    assert not result.is_ready
+    assert "Issue repository mismatch" in result.unmet_reasons
+
+
+@pytest.mark.parametrize(
+    "error, expected",
+    [
+        (GitHubRemoteError("GitHub Issue validation is unobservable."), "Transient GitHub unobservability"),
+        (GitHubAuthorizationError("GitHub App is unauthorized."), "GitHub App authorization failure"),
+    ],
+)
+def test_readiness_fails_closed_for_github_boundary_errors(
+    in_memory_uow, tmp_path, error, expected
+):
+    result = _readiness_case(in_memory_uow, tmp_path, _ReadinessGitHubStub(error=error))
+    assert not result.is_ready
+    assert any(expected in reason for reason in result.unmet_reasons)

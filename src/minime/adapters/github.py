@@ -39,6 +39,12 @@ class _CachedInstallationToken:
     expires_at: datetime
 
 
+@dataclass(frozen=True)
+class _GitAuthBundle:
+    args: tuple[str, ...]
+    secrets: tuple[str, ...]
+
+
 class GitHubAppAuth:
     """Create App JWTs and exchange them for volatile installation tokens."""
 
@@ -119,7 +125,6 @@ class GitHubAdapter(GitHubAdapterInterface):
     def __init__(self, token: str | None = None, *, auth: GitHubAppAuth | None = None):
         # ``token`` is accepted for old test construction but is never runtime authority.
         self.auth = auth or GitHubAppAuth()
-        self._last_git_token: str | None = None
 
     def _token(self) -> str:
         return self.auth.get_installation_token()
@@ -262,25 +267,19 @@ class GitHubAdapter(GitHubAdapterInterface):
     def _is_local_remote(remote_url: str) -> bool:
         return not (remote_url.startswith(("http://", "https://", "ssh://", "git@")))
 
-    def _git_auth_args(self, remote_url: str) -> list[str]:
+    def _git_auth_bundle(self, remote_url: str) -> _GitAuthBundle:
         if self._is_local_remote(remote_url):
-            return []
+            return _GitAuthBundle((), ())
         if not remote_url.startswith(("http://", "https://")):
             raise GitHubAuthorizationError("GitHub App authorization requires an HTTPS Git remote.")
         token = self._token()
-        self._last_git_token = token
-        encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode()
-        return ["-c", "credential.helper=", "-c", f"http.extraHeader=Authorization: Basic {encoded}"]
-
-    def _git_secrets(self) -> list[str] | None:
-        cached = getattr(self.auth, "_cached", None)
-        token = self._last_git_token or (cached.value if cached else None)
-        if not token:
-            return None
         encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode()
         basic = f"Basic {encoded}"
         header = f"http.extraHeader=Authorization: {basic}"
-        return [token, encoded, basic, header]
+        return _GitAuthBundle(
+            args=("-c", "credential.helper=", "-c", header),
+            secrets=(token, encoded, basic, header),
+        )
 
     @staticmethod
     def _run_git(args: list[str], *, cwd: Path, timeout: int, secrets: list[str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -311,10 +310,15 @@ class GitHubAdapter(GitHubAdapterInterface):
         verify = self._run_git(["git", "rev-parse", "--verify", f"{candidate_sha}^{{commit}}"], cwd=repo, timeout=10)
         if verify.returncode != 0 or verify.stdout.strip() != candidate_sha:
             raise RuntimeError(f"Candidate SHA '{candidate_sha}' is not resolvable from repository '{repo}'.")
-        secret = self._git_secrets()
-        result = self._run_git(["git", *self._git_auth_args(remote_url), "push", remote, f"{candidate_sha}:refs/heads/{branch}"], cwd=repo, timeout=30, secrets=secret)
+        auth = self._git_auth_bundle(remote_url)
+        result = self._run_git(
+            ["git", *auth.args, "push", remote, f"{candidate_sha}:refs/heads/{branch}"],
+            cwd=repo,
+            timeout=30,
+            secrets=list(auth.secrets),
+        )
         if result.returncode != 0:
-            raise RuntimeError(f"git push failed: {_safe_error(result.stderr or result.stdout, secret)}")
+            raise RuntimeError(f"git push failed: {_safe_error(result.stderr or result.stdout, list(auth.secrets))}")
         return True
 
     def get_remote_branch_head(self, repository: str, branch: str, remote: str = "origin") -> str | None:
@@ -328,8 +332,13 @@ class GitHubAdapter(GitHubAdapterInterface):
         if remote_proc.returncode != 0:
             raise RuntimeError("Registered Git remote could not be resolved.")
         remote_url = remote_proc.stdout.strip()
-        secret = self._git_secrets()
-        result = self._run_git(["git", *self._git_auth_args(remote_url), "ls-remote", "--heads", remote, f"refs/heads/{branch}"], cwd=repo, timeout=15, secrets=secret)
+        auth = self._git_auth_bundle(remote_url)
+        result = self._run_git(
+            ["git", *auth.args, "ls-remote", "--heads", remote, f"refs/heads/{branch}"],
+            cwd=repo,
+            timeout=15,
+            secrets=list(auth.secrets),
+        )
         if result.returncode != 0:
-            raise RuntimeError(f"git ls-remote failed: {_safe_error(result.stderr or result.stdout, secret)}")
+            raise RuntimeError(f"git ls-remote failed: {_safe_error(result.stderr or result.stdout, list(auth.secrets))}")
         return result.stdout.strip().split()[0] if result.stdout.strip() else None
