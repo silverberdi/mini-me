@@ -531,6 +531,115 @@ def test_pipeline_exception_stops_before_evaluation_and_all_downstream_stages(
     )
 
 
+def test_new_run_never_adopts_historical_job_for_same_change(
+    setup_orchestration_environment, in_memory_uow
+):
+    env = setup_orchestration_environment
+    old_job = Job(
+        project_id=env["project_id"],
+        change_name=env["change_name"],
+        implementer_role="codex",
+        current_executor="codex",
+        base_sha="old-base-sha",
+        attempt_count=3,
+        error_message="historical residual state",
+    )
+    in_memory_uow.jobs.save(old_job)
+    old_run = OrchestrationRun(
+        project_id=env["project_id"],
+        change_name=env["change_name"],
+        base_sha="old-base-sha",
+        current_stage=OrchestrationStage.IMPLEMENTING,
+        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+        human_gate=HumanGate.NEEDS_HUMAN,
+        is_active=False,
+        active_job_id=old_job.job_id,
+    )
+    in_memory_uow.orchestration_runs.save(old_run)
+
+    pipeline = ExecutionPipelineService(
+        uow=in_memory_uow,
+        project_root=env["project_root"],
+        implementer_runner=MockImplementerRunner(),
+        checks_runner=FakeChecksRunner(),
+        reviewer_runner=MockReviewerRunner(),
+        auditor_runner=MockAuditorRunner(),
+    )
+
+    async def stop_after_selection(job_id: str):
+        raise RuntimeError("stop selection test")
+
+    pipeline.execute_queued_job = stop_after_selection
+    service = OrchestrationService(
+        in_memory_uow,
+        project_root=env["project_root"],
+        pipeline=pipeline,
+        github_adapter=FakeGitHubAdapter(),
+    )
+
+    new_run = service.start(env["project_id"], env["change_name"])
+
+    assert new_run.active_job_id != old_job.job_id
+    assert new_run.base_sha != old_job.base_sha
+    jobs = in_memory_uow.jobs.list_by_project(env["project_id"])
+    assert {job.job_id for job in jobs} == {old_job.job_id, new_run.active_job_id}
+    unchanged_old_job = in_memory_uow.jobs.get_by_id(old_job.job_id)
+    assert unchanged_old_job is not None
+    assert unchanged_old_job.status == JobStatus.QUEUED
+    assert unchanged_old_job.attempt_count == 3
+    assert unchanged_old_job.base_sha == "old-base-sha"
+
+
+def test_same_run_resume_uses_attached_job_without_creating_duplicate(
+    setup_orchestration_environment, in_memory_uow
+):
+    env = setup_orchestration_environment
+    job = Job(
+        project_id=env["project_id"],
+        change_name=env["change_name"],
+        implementer_role="codex",
+        current_executor="codex",
+    )
+    in_memory_uow.jobs.save(job)
+    run = OrchestrationRun(
+        project_id=env["project_id"],
+        change_name=env["change_name"],
+        base_sha="attached-base-sha",
+        current_stage=OrchestrationStage.PREPARING_EXECUTION,
+        resumable_stage=OrchestrationStage.PREPARING_EXECUTION,
+        active_job_id=job.job_id,
+    )
+    in_memory_uow.orchestration_runs.save(run)
+
+    pipeline = ExecutionPipelineService(
+        uow=in_memory_uow,
+        project_root=env["project_root"],
+        implementer_runner=MockImplementerRunner(),
+        checks_runner=FakeChecksRunner(),
+        reviewer_runner=MockReviewerRunner(),
+        auditor_runner=MockAuditorRunner(),
+    )
+    calls: list[str] = []
+
+    async def stop_after_resume(job_id: str):
+        calls.append(job_id)
+        raise RuntimeError("stop resume test")
+
+    pipeline.execute_queued_job = stop_after_resume
+    service = OrchestrationService(
+        in_memory_uow,
+        project_root=env["project_root"],
+        pipeline=pipeline,
+        github_adapter=FakeGitHubAdapter(),
+    )
+
+    resumed = service.resume(run.run_id)
+
+    assert resumed.active_job_id == job.job_id
+    assert calls == [job.job_id]
+    assert len(in_memory_uow.jobs.list_by_project(env["project_id"])) == 1
+
+
 def test_orchestration_reuses_pipeline_evidence_after_production_worktree_cleanup(
     setup_orchestration_environment, in_memory_uow
 ):

@@ -356,26 +356,24 @@ class OrchestrationService:
 
                 # 2. Attach or queue Job
                 if not run.active_job_id:
-                    existing_jobs = self.uow.jobs.list_by_project(run.project_id)
-                    matching = [j for j in existing_jobs if j.change_name == run.change_name]
-                    job = matching[0] if matching else None
-                    if not job:
-                        try:
-                            job = self.pipeline.queue_job(run.project_id, run.change_name)
-                        except ValueError as exc:
-                            if (
-                                "waiting for capacity recovery" in str(exc).lower()
-                                or "scheduler is in wait mode" in str(exc).lower()
-                            ):
-                                self._stop_run(
-                                    run,
-                                    stop_outcome=OrchestrationStopOutcome.WAITING_CAPACITY,
-                                    human_gate=None,
-                                    stop_reason=str(exc),
-                                    stop_details={"provider": effective_executor},
-                                )
-                                break
-                            raise
+                    try:
+                        job = self.pipeline.queue_job(
+                            run.project_id, run.change_name, commit=False
+                        )
+                    except ValueError as exc:
+                        if (
+                            "waiting for capacity recovery" in str(exc).lower()
+                            or "scheduler is in wait mode" in str(exc).lower()
+                        ):
+                            self._stop_run(
+                                run,
+                                stop_outcome=OrchestrationStopOutcome.WAITING_CAPACITY,
+                                human_gate=None,
+                                stop_reason=str(exc),
+                                stop_details={"provider": effective_executor},
+                            )
+                            break
+                        raise
                     run.active_job_id = job.job_id
                     self.uow.orchestration_runs.update_active_job(run.run_id, job.job_id)
                     self.uow.commit()
