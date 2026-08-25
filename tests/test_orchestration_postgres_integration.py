@@ -122,6 +122,49 @@ def test_active_run_partial_unique_index_allows_history_and_independent_changes(
         )
 
 
+def test_postgres_job_transitions_use_the_canonical_transition_map(
+    session_factory: sessionmaker[Session], project_id: str
+):
+    """Exercise the real PostgreSQL job repository against the disposable database."""
+    queued_job = Job(
+        project_id=project_id,
+        change_name=f"job-{uuid4().hex}",
+        implementer_role="codex",
+    )
+    waiting_job = queued_job.model_copy(
+        deep=True, update={"job_id": f"{queued_job.job_id}-waiting"}
+    )
+    recovery_job = queued_job.model_copy(
+        deep=True, update={"job_id": f"{queued_job.job_id}-recovery"}
+    )
+
+    with session_factory() as session:
+        uow = PostgresPersistenceUnitOfWork(session)
+        for job in (queued_job, waiting_job, recovery_job):
+            uow.jobs.save(job)
+        uow.commit()
+
+        assert uow.jobs.transition(queued_job.job_id, "RUNNING").status.value == "RUNNING"
+        uow.jobs.transition(waiting_job.job_id, "RUNNING")
+        assert (
+            uow.jobs.set_waiting_capacity(
+                waiting_job.job_id, "codex", "subscription exhausted"
+            ).status.value
+            == "WAITING_CAPACITY"
+        )
+        uow.jobs.transition(recovery_job.job_id, "RUNNING")
+        assert (
+            uow.jobs.set_recovery_blocked(
+                recovery_job.job_id, "runtime identity unavailable"
+            ).status.value
+            == "RECOVERY_BLOCKED"
+        )
+        with pytest.raises(ValueError, match="Invalid job status transition"):
+            uow.jobs.transition(queued_job.job_id, "READY_TO_MERGE")
+
+        session.rollback()
+
+
 def test_transition_and_external_action_keys_survive_new_sessions(
     session_factory: sessionmaker[Session], project_id: str
 ):

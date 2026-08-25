@@ -400,8 +400,22 @@ class OrchestrationService:
                 try:
                     job = asyncio.run(self.pipeline.execute_queued_job(job.job_id))
                 except Exception as exc:
-                    logger.error(f"Error executing job attempt for run '{run.run_id}': {exc}")
-                    job = self.uow.jobs.get_by_id(run.active_job_id)
+                    redacted_error = redact_secrets(str(exc))
+                    logger.exception(
+                        "Error executing job attempt for run '%s': %s", run.run_id, redacted_error
+                    )
+                    self._stop_run(
+                        run,
+                        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+                        human_gate=HumanGate.NEEDS_HUMAN,
+                        stop_reason="Execution pipeline failed unexpectedly.",
+                        stop_details={
+                            "code": "EXECUTION_PIPELINE_EXCEPTION",
+                            "exception_type": type(exc).__name__,
+                            "error": redacted_error,
+                        },
+                    )
+                    break
 
                 if not job:
                     self._stop_run(
