@@ -8,12 +8,48 @@ from pathlib import Path
 import pytest
 
 from minime.domain.enums import ChangeStatus, EventType, JobStatus, ReadinessState
-from minime.domain.models import Change, Project
+from minime.domain.models import Change, JobHandoff, Project
 from minime.services.deepseek_auditor_runner import MockAuditorRunner
-from minime.services.execution_pipeline import ExecutionPipelineService
+from minime.services.execution_pipeline import (
+    ExecutionPipelineService,
+    format_candidate_workspace_context,
+)
+from minime.services.handoff_manager import HandoffManager
 from minime.services.implementer_runner import MockImplementerRunner
+from minime.services.openspec_tasks import OpenSpecTaskTracker
 from minime.services.reviewer_runner import MockReviewerRunner
 from minime.services.worktree_manager import WorktreeInfo
+
+
+def test_workspace_context_is_absolute_and_openspec_tracker_stays_task_focused(tmp_path):
+    relative_path = Path("relative-candidate-workspace")
+    context = format_candidate_workspace_context(relative_path)
+
+    assert f"Absolute path: {relative_path.resolve()}" in context
+    assert "all repository reads, writes, edits" in context
+    assert "provider scratch directories" in context
+
+    tracker = OpenSpecTaskTracker(tmp_path)
+    task_context = tracker.format_prompt_context("openspec", "missing-change")
+    assert "CANDIDATE WORKSPACE" not in task_context
+
+
+def test_handoff_prompt_normalizes_to_authoritative_workspace(tmp_path):
+    handoff = JobHandoff(
+        job_id="job-1",
+        from_attempt_id="attempt-1",
+        from_executor="one",
+        to_executor="two",
+        worktree_path="relative/stale-worktree",
+        base_sha="base",
+        candidate_sha="candidate",
+    )
+    prompt = HandoffManager().format_handoff_prompt(
+        handoff, authoritative_worktree_path=tmp_path / "candidate"
+    )
+
+    assert f"Worktree Path: {(tmp_path / 'candidate').resolve()}" in prompt
+    assert "relative/stale-worktree" not in prompt
 
 
 class FakeWorktreeManager:

@@ -344,6 +344,12 @@ async def test_continuation_pipeline_multi_attempt_success(tmp_path: Path):
     assert res_job.attempt_count == 2
     assert len(uow._attempts) == 2
     assert res_job.latest_outcome == ExecutionOutcome.COMPLETED
+    prompts = [call.args[1] for call in mock_imp_runner.run.call_args_list]
+    assert len(prompts) == 2
+    for prompt in prompts:
+        assert f"Absolute path: {mock_worktree.path.resolve()}" in prompt
+        assert "all repository reads, writes, edits" in prompt
+        assert "provider scratch directories" in prompt
 
 
 @pytest.mark.asyncio
