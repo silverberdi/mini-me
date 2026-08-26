@@ -92,6 +92,21 @@ from minime.services.worktree_manager import WorktreeManager
 
 logger = logging.getLogger(__name__)
 
+
+def format_candidate_workspace_context(worktree_path: str | Path) -> str:
+    """Build the provider-agnostic workspace boundary for an implementer attempt."""
+    resolved_path = Path(worktree_path).resolve()
+    return "\n".join(
+        [
+            "CANDIDATE WORKSPACE",
+            f"Absolute path: {resolved_path}",
+            "",
+            "Treat this path as the authoritative candidate workspace for this attempt.",
+            "Perform all repository reads, writes, edits, and generated implementation artifacts inside this workspace only.",
+            "Do not write candidate files to provider scratch directories, another checkout, or the parent repository root.",
+        ]
+    )
+
 EVENT_BY_STATUS = {
     JobStatus.QUEUED: EventType.JOB_QUEUED,
     JobStatus.RUNNING: EventType.JOB_RUNNING,
@@ -371,11 +386,16 @@ class ExecutionPipelineService:
                     self.handoff_manager.consume_handoff(
                         latest_handoff.handoff_id, attempt_id, self.uow
                     )
-                    handoff_prompt = self.handoff_manager.format_handoff_prompt(latest_handoff)
+                    handoff_prompt = self.handoff_manager.format_handoff_prompt(
+                        latest_handoff, authoritative_worktree_path=worktree.path.resolve()
+                    )
 
-                prompt_context = worktree_task_tracker.format_prompt_context(
+                workspace_path = worktree.path.resolve()
+                workspace_context = format_candidate_workspace_context(workspace_path)
+                task_context = worktree_task_tracker.format_prompt_context(
                     project.openspec_path, job.change_name
                 )
+                prompt_context = f"{workspace_context}\n\n{task_context}"
                 if handoff_prompt:
                     prompt_context = f"{prompt_context}\n\n{handoff_prompt}"
                 if corrective_prompt:
@@ -864,7 +884,7 @@ class ExecutionPipelineService:
                         from_attempt_id=attempt_id,
                         from_executor=current_executor,
                         to_executor=target_executor,
-                        worktree_path=str(worktree.path),
+                        worktree_path=str(worktree.path.resolve()),
                         base_sha=job.base_sha or "",
                         candidate_sha=current_sha,
                         completed_tasks=completed_tasks,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 from minime.domain.interfaces import PersistenceUnitOfWork
@@ -130,14 +131,21 @@ class HandoffManager:
         uow.job_handoffs.save(handoff)
         return handoff
 
-    def format_handoff_prompt(self, handoff: JobHandoff) -> str:
+    def format_handoff_prompt(
+        self, handoff: JobHandoff, authoritative_worktree_path: str | Path | None = None
+    ) -> str:
         """Generate formatted prompt context for the incoming executor."""
+        worktree_path = (
+            Path(authoritative_worktree_path).resolve()
+            if authoritative_worktree_path is not None
+            else handoff.worktree_path
+        )
         lines = [
             "==================================================",
             "HANDOFF CONTEXT FROM PREVIOUS EXECUTOR",
             "==================================================",
             f"Prior Executor: {handoff.from_executor}",
-            f"Worktree Path: {handoff.worktree_path}",
+            f"Worktree Path: {worktree_path}",
             f"Base SHA: {handoff.base_sha}",
             f"Candidate SHA: {handoff.candidate_sha}",
             "",
