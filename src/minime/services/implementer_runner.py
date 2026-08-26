@@ -10,6 +10,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from minime.config import AppConfig, CliInvocationProfile, resolve_cli_invocation
 from minime.logging import redact_secrets
 
 logger = logging.getLogger(__name__)
@@ -32,15 +33,33 @@ class ImplementerRunnerInterface:
 
 
 class CliImplementerRunner(ImplementerRunnerInterface):
-    def __init__(self, command: list[str]):
-        self.command = command
+    MAX_OUTPUT_LINES = 2000
+    MAX_LINE_CHARS = 4000
+
+    def __init__(self, invocation: CliInvocationProfile | list[str]):
+        if isinstance(invocation, CliInvocationProfile):
+            if invocation.prompt_transport not in {"stdin", "argument"}:
+                raise ValueError(f"Unsupported prompt transport '{invocation.prompt_transport}'.")
+            self.profile = invocation
+            self.command = [invocation.executable, *invocation.args]
+        else:
+            self.profile = None
+            self.command = invocation
+
+    def _command_for_prompt(self, prompt_context: str) -> list[str]:
+        if self.profile and self.profile.prompt_transport == "argument":
+            return [
+                self.profile.executable,
+                *(arg.replace("{prompt}", prompt_context) for arg in self.profile.args),
+            ]
+        return self.command
 
     async def run(
         self, worktree_path: Path, prompt_context: str, timeout_seconds: int
     ) -> ImplementerResult:
         start = asyncio.get_running_loop().time()
         proc = await asyncio.create_subprocess_exec(
-            *self.command,
+            *self._command_for_prompt(prompt_context),
             cwd=str(worktree_path),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
@@ -50,7 +69,11 @@ class CliImplementerRunner(ImplementerRunnerInterface):
         timed_out = False
         try:
             stdout, stderr = await asyncio.wait_for(
-                proc.communicate(prompt_context.encode()),
+                proc.communicate(
+                    prompt_context.encode()
+                    if not self.profile or self.profile.prompt_transport == "stdin"
+                    else None
+                ),
                 timeout=timeout_seconds,
             )
         except asyncio.TimeoutError:
@@ -65,10 +88,15 @@ class CliImplementerRunner(ImplementerRunnerInterface):
         return ImplementerResult(
             exit_code=proc.returncode if proc.returncode is not None else -1,
             timed_out=timed_out,
-            stdout=[redact_secrets(line) for line in stdout.decode(errors="replace").splitlines()],
-            stderr=[redact_secrets(line) for line in stderr.decode(errors="replace").splitlines()],
+            stdout=self._sanitize_output(stdout),
+            stderr=self._sanitize_output(stderr),
             duration_ms=duration_ms,
         )
+
+    @classmethod
+    def _sanitize_output(cls, output: bytes) -> list[str]:
+        lines = output.decode(errors="replace").splitlines()[: cls.MAX_OUTPUT_LINES]
+        return [redact_secrets(line[: cls.MAX_LINE_CHARS]) for line in lines]
 
 
 class MockImplementerRunner(ImplementerRunnerInterface):
@@ -128,6 +156,7 @@ class MockImplementerRunner(ImplementerRunnerInterface):
         )
 
 
-def runner_for_implementer(implementer: str) -> ImplementerRunnerInterface:
-    command = "codex" if implementer.lower() == "codex" else "agy"
-    return CliImplementerRunner([command])
+def runner_for_implementer(
+    implementer: str, config: AppConfig | None = None
+) -> ImplementerRunnerInterface:
+    return CliImplementerRunner(resolve_cli_invocation(implementer, "implementer", config))

@@ -5,7 +5,13 @@ import logging
 
 import pytest
 
-from minime.config import DatabaseConfig
+from minime.config import (
+    AppConfig,
+    CliInvocationConfig,
+    DatabaseConfig,
+    ProviderConfig,
+    resolve_cli_invocation,
+)
 from minime.db.session import validate_postgres_url
 from minime.logging import (
     StructuredJsonFormatter,
@@ -61,6 +67,74 @@ def test_secret_redaction(monkeypatch):
 
 def test_correlation_context_and_json_logging():
     clear_correlation_context()
+
+
+def test_cli_invocation_profiles_resolve_without_provider_specific_runner_logic():
+    config = AppConfig(
+        providers={
+            "test-cli": ProviderConfig(
+                command="future-runner",
+                roles=["implementer", "reviewer"],
+                invocation={
+                    "implementer": CliInvocationConfig(
+                        args=["--edit", "--input", "-"], prompt_transport="stdin"
+                    ),
+                    "reviewer": CliInvocationConfig(
+                        args=["--review", "--input", "-"], prompt_transport="stdin"
+                    ),
+                },
+            )
+        }
+    )
+
+    implementer = resolve_cli_invocation("test-cli", "implementer", config)
+    reviewer = resolve_cli_invocation("test-cli", "reviewer", config)
+
+    assert (implementer.executable, implementer.args) == (
+        "future-runner",
+        ("--edit", "--input", "-"),
+    )
+    assert reviewer.args == ("--review", "--input", "-")
+
+
+@pytest.mark.parametrize(
+    ("provider", "role", "message"),
+    [
+        ("missing", "implementer", "not configured"),
+        ("disabled", "implementer", "disabled"),
+        ("test-cli", "auditor", "does not allow role"),
+        ("test-cli", "reviewer", "no invocation profile"),
+    ],
+)
+def test_cli_invocation_resolution_fails_closed(provider, role, message):
+    config = AppConfig(
+        providers={
+            "disabled": ProviderConfig(enabled=False),
+            "test-cli": ProviderConfig(
+                command="runner",
+                roles=["implementer", "reviewer"],
+                invocation={"implementer": CliInvocationConfig()},
+            )
+        }
+    )
+    with pytest.raises(ValueError, match=message):
+        resolve_cli_invocation(provider, role, config)
+
+
+def test_cli_invocation_rejects_unsupported_prompt_transport():
+    config = AppConfig(
+        providers={
+            "test-cli": ProviderConfig(
+                command="runner",
+                roles=["implementer"],
+                invocation={
+                    "implementer": CliInvocationConfig(prompt_transport="file")
+                },
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="Unsupported prompt transport"):
+        resolve_cli_invocation("test-cli", "implementer", config)
     assert get_correlation_context() == {
         "project_id": None,
         "change_id": None,

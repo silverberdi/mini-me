@@ -22,11 +22,25 @@ providers:
     command: codex
     enabled: true
     roles: [implementer, reviewer]
+    invocation:
+      implementer:
+        args: [exec, "-", --approve-for-me, --ephemeral]
+        prompt_transport: stdin
+      reviewer:
+        args: [exec, "-", --sandbox, read-only, --ask-for-approval, never, --ephemeral]
+        prompt_transport: stdin
   antigravity:
     type: cli
     command: agy
     enabled: true
     roles: [implementer, reviewer]
+    invocation:
+      implementer:
+        args: [--mode, accept-edits, "--print={prompt}"]
+        prompt_transport: argument
+      reviewer:
+        args: [--mode, plan, "--print={prompt}"]
+        prompt_transport: argument
   deepseek:
     type: openai-compatible-direct
     base_url: https://api.deepseek.com

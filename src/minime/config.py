@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -54,11 +55,17 @@ class SchedulerConfig(BaseModel):
     max_review_rounds: int = 2
 
 
+class CliInvocationConfig(BaseModel):
+    args: list[str] = Field(default_factory=list)
+    prompt_transport: str = "stdin"
+
+
 class ProviderConfig(BaseModel):
     type: str = "cli"
     command: str | None = None
     enabled: bool = True
     roles: list[str] = Field(default_factory=list)
+    invocation: dict[str, CliInvocationConfig] = Field(default_factory=dict)
     base_url: str | None = None
     api_key_env: str | None = None
     paid: bool = False
@@ -144,6 +151,58 @@ class AppConfig(BaseModel):
     github: GitHubConfig = Field(default_factory=GitHubConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     projects: dict[str, ProjectConfig] = Field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class CliInvocationProfile:
+    provider: str
+    role: str
+    executable: str
+    args: tuple[str, ...]
+    prompt_transport: str
+
+
+def resolve_cli_invocation(
+    provider: str, role: str, config: AppConfig | None = None
+) -> CliInvocationProfile:
+    """Resolve and validate one provider/role CLI invocation from app configuration."""
+    app_config = config or load_config()
+    provider_config = app_config.providers.get(provider)
+    if provider_config is None:
+        raise ValueError(f"CLI provider '{provider}' is not configured.")
+    if not provider_config.enabled:
+        raise ValueError(f"CLI provider '{provider}' is disabled.")
+    if provider_config.type != "cli":
+        raise ValueError(f"Provider '{provider}' is not configured as a CLI provider.")
+    if role not in provider_config.roles:
+        raise ValueError(f"Provider '{provider}' does not allow role '{role}'.")
+    executable = (provider_config.command or "").strip()
+    if not executable:
+        raise ValueError(f"CLI provider '{provider}' has no executable command configured.")
+    invocation = provider_config.invocation.get(role)
+    if invocation is None:
+        raise ValueError(f"CLI provider '{provider}' has no invocation profile for role '{role}'.")
+    if invocation.prompt_transport not in {"stdin", "argument"}:
+        raise ValueError(
+            f"Unsupported prompt transport '{invocation.prompt_transport}' for provider "
+            f"'{provider}' role '{role}'."
+        )
+    if any(not isinstance(arg, str) for arg in invocation.args):
+        raise ValueError(f"CLI provider '{provider}' has non-string invocation arguments.")
+    if invocation.prompt_transport == "argument" and not any(
+        "{prompt}" in arg for arg in invocation.args
+    ):
+        raise ValueError(
+            f"CLI provider '{provider}' argument transport requires a '{{prompt}}' argument "
+            f"for role '{role}'."
+        )
+    return CliInvocationProfile(
+        provider=provider,
+        role=role,
+        executable=executable,
+        args=tuple(invocation.args),
+        prompt_transport=invocation.prompt_transport,
+    )
 
 
 def load_config(config_path: str | Path | None = None) -> AppConfig:
