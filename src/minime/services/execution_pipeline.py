@@ -588,6 +588,7 @@ class ExecutionPipelineService:
                         self._log(job.job_id, "stdout", line)
                     for line in result.stderr:
                         self._log(job.job_id, "stderr", line)
+                    self.uow.commit()
 
                     self.uow.metrics.save(
                         MetricFact(
@@ -1383,6 +1384,7 @@ class ExecutionPipelineService:
                     self._log(job.job_id, "stdout", line)
                 for line in review_result.stderr:
                     self._log(job.job_id, "stderr", line)
+                self.uow.commit()
 
                 self.uow.metrics.save(
                     MetricFact(

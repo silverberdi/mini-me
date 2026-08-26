@@ -9,7 +9,9 @@ from pathlib import Path
 import pytest
 
 from minime.adapters.github import GitHubAdapter
-from minime.services.implementer_runner import CliImplementerRunner
+from minime.config import AppConfig, CliInvocationConfig, ProviderConfig, load_config
+from minime.services.implementer_runner import CliImplementerRunner, runner_for_implementer
+from minime.services.reviewer_runner import CliReviewerRunner, runner_for_reviewer
 from minime.services.worktree_manager import WorktreeManager
 
 
@@ -161,3 +163,75 @@ async def test_cli_implementer_runner_redacts_output_and_times_out(tmp_path):
 
     assert timeout_result.timed_out is True
     assert timeout_result.exit_code != 0
+
+
+def test_configured_cli_profiles_build_generic_implementer_and_reviewer_vectors():
+    config = AppConfig(
+        providers={
+            "codex": ProviderConfig(
+                command="codex",
+                roles=["implementer", "reviewer"],
+                invocation={
+                    "implementer": CliInvocationConfig(
+                        args=["exec", "-", "--sandbox", "workspace-write"]
+                    ),
+                    "reviewer": CliInvocationConfig(
+                        args=["exec", "-", "--sandbox", "read-only"]
+                    ),
+                },
+            ),
+            "future-cli": ProviderConfig(
+                command="future",
+                roles=["implementer"],
+                invocation={
+                    "implementer": CliInvocationConfig(args=["run", "--headless"])
+                },
+            ),
+        }
+    )
+
+    implementer = runner_for_implementer("codex", config)
+    reviewer = runner_for_reviewer("codex", config)
+    future = runner_for_implementer("future-cli", config)
+
+    assert isinstance(implementer, CliImplementerRunner)
+    assert implementer.command == ["codex", "exec", "-", "--sandbox", "workspace-write"]
+    assert isinstance(reviewer, CliReviewerRunner)
+    assert reviewer.command == ["codex", "exec", "-", "--sandbox", "read-only"]
+    assert future.command == ["future", "run", "--headless"]
+
+
+def test_known_headless_cli_contracts_are_configured():
+    config = load_config("config/minime.yaml")
+
+    assert runner_for_implementer("codex", config).command == [
+        "codex",
+        "exec",
+        "-",
+        "--approve-for-me",
+        "--ephemeral",
+    ]
+    assert runner_for_implementer("antigravity", config).command == [
+        "agy",
+        "--mode",
+        "accept-edits",
+        "--print={prompt}",
+    ]
+    assert runner_for_reviewer("antigravity", config).command == [
+        "agy",
+        "--mode",
+        "plan",
+        "--print={prompt}",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cli_runner_bounds_sanitized_output(tmp_path):
+    output_runner = CliImplementerRunner(
+        [sys.executable, "-c", "print('token=secret123'); print('x' * 5000)"]
+    )
+    result = await output_runner.run(tmp_path, "prompt", timeout_seconds=5)
+
+    assert len(result.stdout) == 2
+    assert "secret123" not in result.stdout[0]
+    assert len(result.stdout[1]) == output_runner.MAX_LINE_CHARS
