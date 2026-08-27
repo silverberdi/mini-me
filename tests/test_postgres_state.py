@@ -1,6 +1,7 @@
 """Tests for PostgreSQL durable state, Alembic migrations, and persistence primitives."""
 
 import subprocess
+import sys
 
 from minime.db.models import (
     Base,
@@ -39,7 +40,7 @@ def test_models_metadata_tables():
 def test_alembic_offline_postgres_migration():
     """Verify that Alembic generates PostgreSQL-compatible DDL without error."""
     result = subprocess.run(
-        [".venv/bin/alembic", "upgrade", "head", "--sql"],
+        [sys.executable, "-m", "alembic", "upgrade", "head", "--sql"],
         env={"MINIME_DATABASE_URL": "postgresql://minime:pass@localhost:5432/minime"},
         capture_output=True,
         text=True,
