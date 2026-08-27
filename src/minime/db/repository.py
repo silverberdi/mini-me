@@ -1171,6 +1171,10 @@ class PostgresJobRepository(JobRepositoryInterface):
         return job_model_to_domain(model)
 
 
+    for _status in JobStatus:
+        VALID_TRANSITIONS[_status].add(JobStatus.RECOVERY_BLOCKED)
+
+
 class PostgresJobLogRepository(JobLogRepositoryInterface):
     def __init__(self, session: Session):
         self.session = session

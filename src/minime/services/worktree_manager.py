@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import shutil
 from dataclasses import dataclass
@@ -20,6 +21,13 @@ class WorktreeInfo:
     path: Path
     branch_name: str
     base_sha: str
+
+
+@dataclass(frozen=True)
+class WorktreeState:
+    dirty: bool
+    fingerprint: str
+    files: tuple[str, ...]
 
 
 class WorktreeManager:
@@ -133,19 +141,119 @@ class WorktreeManager:
     async def current_sha(self, worktree_path: str | Path) -> str:
         return await self._git(["rev-parse", "HEAD"], cwd=Path(worktree_path))
 
-    async def cleanup_worktree(self, job_id: str, project_id: str | None = None) -> None:
+    async def inspect_worktree_state(self, worktree_path: str | Path) -> WorktreeState:
+        path = Path(worktree_path).resolve()
+        status = await self._git(["status", "--porcelain=v1", "--untracked-files=all"], cwd=path)
+        files = tuple(
+            sorted(line[3:] for line in status.splitlines() if len(line) >= 4 and line[3:].strip())
+        )
+        cached = await self._git(["diff", "--cached", "--binary"], cwd=path)
+        unstaged = await self._git(["diff", "--binary"], cwd=path)
+        untracked = await self._git(
+            ["ls-files", "--others", "--exclude-standard", "-z"], cwd=path
+        )
+        digest = hashlib.sha256()
+        digest.update(cached.encode())
+        digest.update(unstaged.encode())
+        for relative in sorted(filter(None, untracked.split("\0"))):
+            candidate = path / relative
+            digest.update(relative.encode())
+            if candidate.is_file():
+                digest.update(candidate.read_bytes())
+        return WorktreeState(dirty=bool(status), fingerprint=digest.hexdigest(), files=files)
+
+    async def working_state_fingerprint(self, worktree_path: str | Path) -> str:
+        return (await self.inspect_worktree_state(worktree_path)).fingerprint
+
+    async def create_recovery_snapshot(
+        self, job_id: str, project_id: str | None = None
+    ) -> str | None:
+        path = self.worktree_path(job_id).resolve()
+        state = await self.inspect_worktree_state(path)
+        if not state.dirty:
+            return None
+        await self._git(
+            ["add", "-A"],
+            cwd=path,
+            job_id=job_id,
+            project_id=project_id,
+            operation_type="recovery_snapshot_stage",
+            managed_worktree_path=path,
+        )
+        await self._git(
+            [
+                "-c",
+                "user.name=mini me recovery",
+                "-c",
+                "user.email=mini-me-recovery@localhost",
+                "commit",
+                "-m",
+                f"mini me recovery snapshot for {job_id}",
+            ],
+            cwd=path,
+            job_id=job_id,
+            project_id=project_id,
+            operation_type="recovery_snapshot_commit",
+            managed_worktree_path=path,
+        )
+        return await self.current_sha(path)
+
+    async def finalize_candidate_commit(
+        self, worktree_path: str | Path, job_id: str, project_id: str | None = None
+    ) -> str:
+        path = Path(worktree_path).resolve()
+        state = await self.inspect_worktree_state(path)
+        if state.dirty:
+            await self._git(
+                ["add", "-A"],
+                cwd=path,
+                job_id=job_id,
+                project_id=project_id,
+                operation_type="candidate_stage",
+                managed_worktree_path=path,
+            )
+            await self._git(
+                [
+                    "-c",
+                    "user.name=mini me",
+                    "-c",
+                    "user.email=mini-me@localhost",
+                    "commit",
+                    "-m",
+                    f"mini me authoritative candidate for {job_id}",
+                ],
+                cwd=path,
+                job_id=job_id,
+                project_id=project_id,
+                operation_type="candidate_commit",
+                managed_worktree_path=path,
+            )
+        return await self.current_sha(path)
+
+    async def cleanup_worktree(self, job_id: str, project_id: str | None = None) -> str | None:
+        """Compatibility alias that refuses dirty-worktree cleanup."""
+        await self.remove_clean_worktree(job_id, project_id)
+        return None
+
+    async def remove_clean_worktree(
+        self, job_id: str, project_id: str | None = None
+    ) -> None:
+        """Remove a managed worktree only after independently proving it is clean."""
         path = self.worktree_path(job_id).resolve()
         if not path.exists():
             return
-        try:
-            await self._git(
-                ["worktree", "remove", "--force", str(path)],
-                cwd=self.project_root,
-                job_id=job_id,
-                project_id=project_id,
-                operation_type="worktree_remove",
-                managed_worktree_path=path,
+        state = await self.inspect_worktree_state(path)
+        if state.dirty:
+            raise RuntimeError(
+                f"Refusing to remove dirty managed worktree: {path}"
             )
-        finally:
-            if path.exists():
-                shutil.rmtree(path)
+        await self._git(
+            ["worktree", "remove", str(path)],
+            cwd=self.project_root,
+            job_id=job_id,
+            project_id=project_id,
+            operation_type="worktree_remove",
+            managed_worktree_path=path,
+        )
+        if path.exists():
+            shutil.rmtree(path)

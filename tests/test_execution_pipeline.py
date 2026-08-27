@@ -129,6 +129,21 @@ class FakeWorktreeManager:
             shutil.rmtree(path)
 
 
+class RecoveryOrderingWorktreeManager(FakeWorktreeManager):
+    def __init__(self, root: Path, ordering: list[str]):
+        super().__init__(root)
+        self.ordering = ordering
+
+    async def create_recovery_snapshot(self, job_id: str, project_id: str | None = None):
+        del project_id
+        self.ordering.append("snapshot")
+        return f"recovery-{job_id}"
+
+    async def remove_clean_worktree(self, job_id: str, project_id: str | None = None) -> None:
+        del project_id
+        self.ordering.append("remove")
+
+
 def seed_ready_change(
     in_memory_uow,
     tmp_path: Path,
@@ -208,6 +223,87 @@ async def test_execution_pipeline_success_records_evidence_and_cleans_worktree(
         "review_duration_ms",
         "total_duration_ms",
     }
+
+
+@pytest.mark.asyncio
+async def test_recovery_evidence_is_committed_before_worktree_removal(
+    in_memory_uow, tmp_path
+):
+    seed_ready_change(in_memory_uow, tmp_path, "# Tasks\n\n## 1. Things\n- [x] 1.1 Done\n")
+    ordering: list[str] = []
+    worktrees = RecoveryOrderingWorktreeManager(tmp_path, ordering)
+    original_commit = in_memory_uow.commit
+
+    def commit_with_ordering() -> None:
+        if any(
+            event.event_type == EventType.WORKTREE_RECOVERY_SNAPSHOT
+            for event in in_memory_uow.events.list_events()
+        ) and "evidence" not in ordering:
+            ordering.append("evidence")
+        original_commit()
+
+    in_memory_uow.commit = commit_with_ordering
+    service = ExecutionPipelineService(
+        in_memory_uow,
+        project_root=tmp_path,
+        implementer_runner=MockImplementerRunner(),
+        reviewer_runner=MockReviewerRunner(
+            stdout=['```json\n{"verdict": "READY_TO_MERGE", "summary": "ok", "findings": []}\n```']
+        ),
+        auditor_runner=MockAuditorRunner(
+            output=['{"risk": "low", "summary": "ok", "findings": []}']
+        ),
+        worktree_manager=worktrees,
+    )
+
+    job = await service.run_job("mini-me", "synthetic-pipeline-change")
+
+    assert job.status == JobStatus.READY_TO_MERGE
+    assert ordering == ["snapshot", "evidence", "remove"]
+    recovery_event = next(
+        event
+        for event in in_memory_uow.events.list_events()
+        if event.event_type == EventType.WORKTREE_RECOVERY_SNAPSHOT
+    )
+    assert recovery_event.payload["recovery_sha"] == f"recovery-{job.job_id}"
+    assert recovery_event.payload["authoritative_candidate"] is False
+
+
+@pytest.mark.asyncio
+async def test_recovery_evidence_failure_blocks_without_removal(
+    in_memory_uow, tmp_path
+):
+    seed_ready_change(in_memory_uow, tmp_path, "# Tasks\n\n## 1. Things\n- [x] 1.1 Done\n")
+    ordering: list[str] = []
+    worktrees = RecoveryOrderingWorktreeManager(tmp_path, ordering)
+    original_commit = in_memory_uow.commit
+    failed = False
+
+    def failing_recovery_commit() -> None:
+        nonlocal failed
+        has_recovery_event = any(
+            event.event_type == EventType.WORKTREE_RECOVERY_SNAPSHOT
+            for event in in_memory_uow.events.list_events()
+        )
+        if has_recovery_event and not failed:
+            failed = True
+            raise RuntimeError("token=secret-recovery-value")
+        original_commit()
+
+    in_memory_uow.commit = failing_recovery_commit
+    service = ExecutionPipelineService(
+        in_memory_uow,
+        project_root=tmp_path,
+        implementer_runner=MockImplementerRunner(),
+        worktree_manager=worktrees,
+    )
+
+    job = await service.run_job("mini-me", "synthetic-pipeline-change")
+
+    assert job.status == JobStatus.RECOVERY_BLOCKED
+    assert ordering == ["snapshot"]
+    assert "[REDACTED]" in (job.error_message or "")
+    assert "secret-recovery-value" not in (job.error_message or "")
 
 
 @pytest.mark.asyncio

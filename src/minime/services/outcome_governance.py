@@ -71,8 +71,9 @@ class OutcomeGovernanceService:
         """Perform fail-closed verification against OpenSpec tasks, git diff, and deterministic checks."""
         worktree = Path(worktree_path)
 
-        # 1. OpenSpec Task Check
-        tracker = self.task_tracker or OpenSpecTaskTracker(worktree)
+        # Candidate verification is authoritative to the managed worktree. A
+        # parent-repository tracker must never override its task state.
+        tracker = OpenSpecTaskTracker(worktree)
         try:
             incomplete_tasks = tracker.incomplete_tasks(openspec_path, change_name)
         except Exception as err:
@@ -82,14 +83,8 @@ class OutcomeGovernanceService:
                 reason=f"OpenSpec tasks could not be verified: {err}",
             )
 
-        if incomplete_tasks:
-            return CompletionVerificationResult(
-                is_complete=False,
-                reason=f"OpenSpec tasks incomplete ({len(incomplete_tasks)} remaining)",
-                incomplete_tasks=incomplete_tasks,
-            )
-
-        # 2. Git Working Tree / Diff Check
+        # Collect Git evidence before deciding whether incomplete tasks make the
+        # candidate premature. This preserves real partial implementation work.
         modified_files: list[str] = []
         try:
             diff_proc = subprocess.run(
@@ -121,6 +116,16 @@ class OutcomeGovernanceService:
                             modified_files.append(parts[1])
         except Exception as err:
             logger.warning("Failed to inspect worktree git status: %s", err)
+
+        if incomplete_tasks:
+            failing_checks = [check for check in (check_results or []) if check.exit_code != 0]
+            return CompletionVerificationResult(
+                is_complete=False,
+                reason=f"OpenSpec tasks incomplete ({len(incomplete_tasks)} remaining)",
+                incomplete_tasks=incomplete_tasks,
+                failing_checks=failing_checks,
+                modified_files=modified_files,
+            )
 
         if not modified_files:
             # Fallback for non-git fake worktree test directories

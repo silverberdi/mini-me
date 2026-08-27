@@ -26,11 +26,10 @@ from minime.services.outcome_governance import (
 
 
 def test_verify_completion_incomplete_tasks(tmp_path: Path):
-    tracker = MagicMock(spec=OpenSpecTaskTracker)
-    tracker.incomplete_tasks.return_value = [
-        OpenSpecTask(task_id="1.1", text="Task 1", section="Phase 1", complete=False)
-    ]
-    service = OutcomeGovernanceService(task_tracker=tracker)
+    tasks_path = tmp_path / "openspec/changes/007-continuation"
+    tasks_path.mkdir(parents=True)
+    (tasks_path / "tasks.md").write_text("## Phase 1\n- [ ] 1.1 Task 1\n", encoding="utf-8")
+    service = OutcomeGovernanceService()
 
     res = service.verify_completion(
         worktree_path=tmp_path,
@@ -405,3 +404,74 @@ def test_evaluate_progress_determinism():
 
     # No progress
     assert service.evaluate_progress(ProgressSignals()) == ProgressClassification.NO_PROGRESS
+
+
+def test_verify_completion_uses_managed_worktree_task_state_not_parent(tmp_path: Path):
+    parent = tmp_path / "parent"
+    worktree = tmp_path / "managed"
+    parent.mkdir()
+    worktree.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=worktree, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=worktree, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=worktree, check=True)
+    (worktree / "base.py").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "base.py"], cwd=worktree, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=worktree, check=True, capture_output=True)
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=worktree, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    for root, complete in ((parent, 0), (worktree, 25)):
+        tasks = root / "openspec/changes/010/tasks.md"
+        tasks.parent.mkdir(parents=True)
+        tasks.write_text(
+            "\n".join(f"- [{'x' if i < complete else ' '}] 1.{i} Task {i}" for i in range(26)),
+            encoding="utf-8",
+        )
+    service = OutcomeGovernanceService(OpenSpecTaskTracker(parent))
+    (worktree / "implementation.py").write_text("implemented = True\n", encoding="utf-8")
+
+    result = service.verify_completion(worktree, "openspec", "010", base_sha)
+
+    assert len(result.incomplete_tasks) == 1
+    assert "implementation.py" in result.modified_files
+
+
+def test_incomplete_tasks_preserve_git_evidence_and_classify_premature(tmp_path: Path):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+    (tmp_path / "tracked.py").write_text("before\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=tmp_path, check=True, capture_output=True)
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    tasks = tmp_path / "openspec/changes/010"
+    tasks.mkdir(parents=True)
+    (tasks / "tasks.md").write_text("- [ ] 1.1 Incomplete\n", encoding="utf-8")
+    (tmp_path / "tracked.py").write_text("after\n", encoding="utf-8")
+    (tmp_path / "new.py").write_text("new\n", encoding="utf-8")
+
+    service = OutcomeGovernanceService()
+    result = service.verify_completion(tmp_path, "openspec", "010", base_sha)
+
+    assert result.incomplete_tasks
+    assert "tracked.py" in result.modified_files
+    assert any(name.startswith("new.py") for name in result.modified_files)
+    assert service.classify_outcome(result) == ExecutionOutcome.PREMATURE_STOP
+
+
+def test_progress_signal_requires_current_attempt_delta():
+    service = OutcomeGovernanceService()
+    assert (
+        service.evaluate_progress(ProgressSignals(completed_task_delta=0))
+        == ProgressClassification.NO_PROGRESS
+    )
+    assert (
+        service.evaluate_progress(ProgressSignals(completed_task_delta=1))
+        == ProgressClassification.GOOD_PROGRESS
+    )
+    assert (
+        service.evaluate_progress(ProgressSignals(candidate_file_delta=1))
+        == ProgressClassification.PARTIAL_PROGRESS
+    )
