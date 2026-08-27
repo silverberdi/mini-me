@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 import subprocess
@@ -41,6 +42,7 @@ from minime.domain.models import (
     ReviewFinding,
     utc_now,
 )
+from minime.logging import redact_secrets
 from minime.services.audit_verdict_parser import parse_audit_result
 from minime.services.authorship_service import AuthorshipService
 from minime.services.blocker_validation import (
@@ -188,6 +190,66 @@ class ExecutionPipelineService:
             "meta-llama/llama-3.3-70b-instruct",
             "mistralai/mistral-large",
         ]
+
+    async def _working_state_fingerprint(self, worktree_path: Path) -> str:
+        method = getattr(self.worktree_manager, "working_state_fingerprint", None)
+        if method is None:
+            return ""
+        result = method(worktree_path)
+        return str(await result) if inspect.isawaitable(result) else str(result)
+
+    async def _finalize_candidate(self, worktree_path: Path, job_id: str, project_id: str, current_sha: str) -> str:
+        method = getattr(self.worktree_manager, "finalize_candidate_commit", None)
+        if method is None:
+            return current_sha
+        result = method(worktree_path, job_id, project_id)
+        return str(await result) if inspect.isawaitable(result) else current_sha
+
+    async def _preserve_and_cleanup_worktree(self, job: Job, worktree) -> None:
+        """Persist recovery authority before allowing managed cleanup."""
+        create_snapshot = getattr(
+            self.worktree_manager, "create_recovery_snapshot", None
+        )
+        remove_clean = getattr(self.worktree_manager, "remove_clean_worktree", None)
+        if (
+            inspect.iscoroutinefunction(create_snapshot)
+            and inspect.iscoroutinefunction(remove_clean)
+        ):
+            try:
+                recovery_sha = await create_snapshot(
+                    job.job_id, project_id=job.project_id
+                )
+            except TypeError:
+                recovery_sha = await create_snapshot(job.job_id)
+            if recovery_sha:
+                latest = self._require_job(job.job_id)
+                self._save_event(
+                    EventType.WORKTREE_RECOVERY_SNAPSHOT,
+                    latest,
+                    {
+                        "recovery_sha": recovery_sha,
+                        "branch": worktree.branch_name,
+                        "worktree_path": str(worktree.path),
+                        "authoritative_candidate": False,
+                    },
+                )
+                # This commit is the authority boundary: no removal is
+                # attempted until the recovery evidence is durable.
+                self.uow.commit()
+            try:
+                await remove_clean(job.job_id, project_id=job.project_id)
+            except TypeError:
+                await remove_clean(job.job_id)
+            return
+
+        # Compatibility for lightweight test doubles and older adapters; the
+        # production manager uses the two-phase API.
+        try:
+            await self.worktree_manager.cleanup_worktree(
+                job.job_id, project_id=job.project_id
+            )
+        except TypeError:
+            await self.worktree_manager.cleanup_worktree(job.job_id)
 
     def queue_job(self, project_id: str, change_name: str, *, commit: bool = True) -> Job:
         project = self._require_project(project_id)
@@ -402,6 +464,16 @@ class ExecutionPipelineService:
                     prompt_context = f"{prompt_context}\n\n{corrective_prompt}"
 
                 attempt_start_sha = await self.worktree_manager.current_sha(worktree.path)
+                attempt_start_tasks = {
+                    task.task_id
+                    for task in worktree_task_tracker.parse_tasks(
+                        project.openspec_path, job.change_name
+                    )
+                    if task.complete
+                }
+                attempt_start_fingerprint = await self._working_state_fingerprint(
+                    worktree.path
+                )
                 active_attempt = JobAttempt(
                     attempt_id=attempt_id,
                     job_id=job.job_id,
@@ -681,6 +753,14 @@ class ExecutionPipelineService:
 
                 # Capture touched files
                 current_sha = await self.worktree_manager.current_sha(worktree.path)
+                post_provider_fingerprint = await self._working_state_fingerprint(worktree.path)
+                post_tasks = worktree_task_tracker.parse_tasks(
+                    project.openspec_path, job.change_name
+                )
+                if not any(not task.complete for task in post_tasks):
+                    current_sha = await self._finalize_candidate(
+                        worktree.path, job.job_id, job.project_id, current_sha
+                    )
                 ver_res = self.outcome_governance.verify_completion(
                     worktree_path=worktree.path,
                     openspec_path=project.openspec_path,
@@ -722,13 +802,18 @@ class ExecutionPipelineService:
                 progress = self.outcome_governance.evaluate_progress(
                     ProgressSignals(
                         completed_task_delta=len(
-                            worktree_task_tracker.parse_tasks(
-                                project.openspec_path, job.change_name
-                            )
-                        )
-                        - len(ver_res.incomplete_tasks),
+                            {
+                                task.task_id
+                                for task in post_tasks
+                                if task.complete
+                            }
+                            - attempt_start_tasks
+                        ),
                         remaining_task_count=len(ver_res.incomplete_tasks),
-                        candidate_file_delta=len(touched_files),
+                        candidate_file_delta=int(
+                            post_provider_fingerprint != attempt_start_fingerprint
+                            or current_sha != attempt_start_sha
+                        ),
                     )
                 )
 
@@ -1574,11 +1659,25 @@ class ExecutionPipelineService:
                 self.reviewer_view_manager.cleanup_readonly_view(job.job_id)
             if worktree_created:
                 try:
-                    await self.worktree_manager.cleanup_worktree(
-                        job.job_id, project_id=job.project_id
+                    await self._preserve_and_cleanup_worktree(job, worktree)
+                except Exception as cleanup_error:
+                    redacted_error = redact_secrets(str(cleanup_error))
+                    logger.error("Managed candidate preservation/cleanup failed: %s", redacted_error)
+                    latest = self._require_job(job.job_id)
+                    if latest.status != JobStatus.RECOVERY_BLOCKED:
+                        latest = self._transition(
+                            latest, JobStatus.RECOVERY_BLOCKED, redacted_error
+                        )
+                    latest.recovery_blocked_reason = redacted_error
+                    latest.error_message = redacted_error
+                    latest.escalation_reason = redacted_error
+                    self.uow.jobs.save(latest)
+                    self._save_event(
+                        EventType.RECOVERY_BLOCKED,
+                        latest,
+                        {"error": redacted_error, "worktree_path": str(worktree.path)},
                     )
-                except TypeError:
-                    await self.worktree_manager.cleanup_worktree(job.job_id)
+                    self.uow.commit()
             latest = self._require_job(job.job_id)
             if latest.status in {
                 JobStatus.READY_TO_MERGE,

@@ -52,6 +52,60 @@ async def test_worktree_manager_create_collision_and_cleanup(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_cleanup_worktree_refuses_dirty_worktree_without_deleting_it(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    await run(["git", "init", "-b", "main"], repo)
+    await run(["git", "config", "user.email", "test@example.com"], repo)
+    await run(["git", "config", "user.name", "Test User"], repo)
+    (repo / "README.md").write_text("base\n", encoding="utf-8")
+    await run(["git", "add", "README.md"], repo)
+    await run(["git", "commit", "-m", "initial"], repo)
+    manager = WorktreeManager(repo)
+    info = await manager.create_worktree("job-recovery", "010-change", "main")
+    (info.path / "README.md").write_text("recovered\n", encoding="utf-8")
+    (info.path / "new.py").write_text("candidate = True\n", encoding="utf-8")
+    git_commands: list[list[str]] = []
+    original_git = manager._git
+
+    async def recording_git(args, **kwargs):
+        git_commands.append(args)
+        return await original_git(args, **kwargs)
+
+    manager._git = recording_git
+
+    with pytest.raises(RuntimeError, match="Refusing to remove dirty"):
+        await manager.cleanup_worktree("job-recovery")
+
+    assert info.path.exists()
+    assert (info.path / "README.md").read_text(encoding="utf-8") == "recovered\n"
+    assert (info.path / "new.py").read_text(encoding="utf-8") == "candidate = True\n"
+    assert (await _git_output(["git", "branch", "--show-current"], info.path)).strip().startswith(
+        "minime/010-change-job-recovery"
+    )
+    assert all("--force" not in args for args in git_commands)
+
+
+@pytest.mark.asyncio
+async def test_remove_clean_worktree_removes_clean_managed_worktree(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    await run(["git", "init", "-b", "main"], repo)
+    await run(["git", "config", "user.email", "test@example.com"], repo)
+    await run(["git", "config", "user.name", "Test User"], repo)
+    (repo / "README.md").write_text("base\n", encoding="utf-8")
+    await run(["git", "add", "README.md"], repo)
+    await run(["git", "commit", "-m", "initial"], repo)
+
+    manager = WorktreeManager(repo)
+    info = await manager.create_worktree("job-clean", "010-change", "main")
+
+    await manager.remove_clean_worktree("job-clean")
+
+    assert not info.path.exists()
+
+
+@pytest.mark.asyncio
 async def test_production_push_uses_repository_root_after_worktree_cleanup(tmp_path):
     """A finalized candidate remains pushable after its managed worktree is removed."""
     repo = tmp_path / "repo"

@@ -448,6 +448,22 @@ class OrchestrationService:
                     )
                     break
 
+                if job.status == JobStatus.RECOVERY_BLOCKED:
+                    reason = (
+                        job.recovery_blocked_reason
+                        or job.error_message
+                        or job.escalation_reason
+                        or "Candidate preservation is blocked."
+                    )
+                    self._stop_run(
+                        run,
+                        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+                        human_gate=HumanGate.NEEDS_HUMAN,
+                        stop_reason=reason,
+                        stop_details={"code": "RECOVERY_BLOCKED", "reason": reason},
+                    )
+                    break
+
                 attempts = self.uow.job_attempts.list_by_job(job.job_id)
                 attempts.sort(key=lambda a: a.attempt_number)
                 latest_att = attempts[-1] if attempts else None

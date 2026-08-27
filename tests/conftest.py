@@ -349,6 +349,9 @@ class InMemoryJobRepository(JobRepositoryInterface):
         JobStatus.CANCELLED: set(),
     }
 
+    for _status in JobStatus:
+        _valid_transitions[_status].add(JobStatus.RECOVERY_BLOCKED)
+
     def __init__(self):
         self._store: dict[str, Job] = {}
 
