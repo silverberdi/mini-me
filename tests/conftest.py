@@ -112,17 +112,60 @@ class InMemoryChangeRepository(ChangeRepositoryInterface):
         self._store: dict[str, Change] = {}
 
     def save(self, change: Change) -> None:
-        self._store[change.change_id] = change.model_copy(deep=True)
+        logical_matches = [
+            c
+            for c in self._store.values()
+            if c.project_id == change.project_id and c.name == change.name
+        ]
+        if len(logical_matches) > 1:
+            raise ValueError(
+                f"Ambiguous logical Change identity for project '{change.project_id}' and "
+                f"change '{change.name}': {len(logical_matches)} rows found."
+            )
+        physical = self._store.get(change.change_id)
+        if (
+            physical is not None
+            and logical_matches
+            and logical_matches[0].change_id != physical.change_id
+        ):
+            raise ValueError(
+                f"Conflicting Change identities for project '{change.project_id}' and "
+                f"change '{change.name}'."
+            )
+        if physical is not None:
+            updated = change.model_copy(deep=True)
+            updated.change_id = physical.change_id
+            updated.discovered_at = physical.discovered_at
+            self._store[physical.change_id] = updated
+            return
+        if logical_matches:
+            existing = logical_matches[0]
+            updated = existing.model_copy(deep=True)
+            updated.schema_name = change.schema_name
+            updated.proposal_path = change.proposal_path
+            updated.tasks_path = change.tasks_path
+            updated.design_path = change.design_path
+            updated.specs_paths = change.specs_paths
+            updated.updated_at = change.updated_at
+            self._store[existing.change_id] = updated
+            return
+        else:
+            self._store[change.change_id] = change.model_copy(deep=True)
 
     def get_by_id(self, change_id: str) -> Change | None:
         c = self._store.get(change_id)
         return c.model_copy(deep=True) if c else None
 
     def get_by_name(self, project_id: str, name: str) -> Change | None:
-        for c in self._store.values():
-            if c.project_id == project_id and c.name == name:
-                return c.model_copy(deep=True)
-        return None
+        matches = [
+            c for c in self._store.values() if c.project_id == project_id and c.name == name
+        ]
+        if len(matches) > 1:
+            raise ValueError(
+                f"Ambiguous logical Change identity for project '{project_id}' and change "
+                f"'{name}': {len(matches)} rows found."
+            )
+        return matches[0].model_copy(deep=True) if matches else None
 
     def list_by_project(self, project_id: str) -> list[Change]:
         return [c.model_copy(deep=True) for c in self._store.values() if c.project_id == project_id]

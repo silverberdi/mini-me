@@ -102,6 +102,8 @@ class ProjectBindingModel(Base):
 class ChangeModel(Base):
     __tablename__ = "changes"
 
+    __table_args__ = (UniqueConstraint("project_id", "name", name="uq_changes_project_name"),)
+
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     project_id: Mapped[str] = mapped_column(
         String(64), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
