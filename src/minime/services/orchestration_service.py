@@ -340,7 +340,12 @@ class OrchestrationService:
         if not run.active_job_id:
             raise ValueError("Human resolution requires an active job.")
         candidate = self.uow.orchestration_candidates.get_latest_for_run(run_id)
-        if not candidate or (not candidate.candidate_ref and not candidate_ref):
+        if candidate is None and not candidate_ref:
+            raise ValueError(
+                "No preserved candidate record exists; explicit --candidate-ref is required "
+                "for legacy record adoption."
+            )
+        if candidate is not None and not candidate.candidate_ref and not candidate_ref:
             raise ValueError(
                 "Preserved candidate lacks a durable candidate ref; explicit --candidate-ref is required."
             )
@@ -353,8 +358,127 @@ class OrchestrationService:
         root = Path(project_root).resolve() if project_root else self.project_root
         if job.project_id != run.project_id or job.change_name != run.change_name:
             raise ValueError("Active job does not belong to the current project/change run context.")
-        if job.candidate_sha and job.candidate_sha != candidate.candidate_sha:
+        if candidate is not None and job.candidate_sha and job.candidate_sha != candidate.candidate_sha:
             raise ValueError("Preserved candidate does not match the active job candidate authority.")
+        record_adoption_events = [
+            event
+            for event in self.uow.orchestration_stage_events.list_by_run(run_id)
+            if event.event_type == EventType.LEGACY_CANDIDATE_RECORD_ADOPTED.value
+        ]
+        if candidate is not None and record_adoption_events:
+            evidence = record_adoption_events[-1].evidence_references
+            if any(
+                evidence.get(field) != value
+                for field, value in {
+                    "candidate_id": candidate.candidate_id,
+                    "candidate_generation": candidate.generation,
+                    "candidate_sha": candidate.candidate_sha,
+                    "base_sha": candidate.base_sha,
+                    "manifest_id": candidate.manifest_id,
+                    "manifest_hash": candidate.manifest_hash,
+                }.items()
+            ):
+                raise ValueError("Legacy candidate record adoption evidence conflicts with the candidate record.")
+
+        if candidate is None:
+            if not job.candidate_sha:
+                raise ValueError("Legacy candidate record adoption requires an authoritative job candidate SHA.")
+            if not job.base_sha:
+                raise ValueError("Legacy candidate record adoption requires an authoritative job base SHA.")
+            if run.base_sha != job.base_sha:
+                raise ValueError("Legacy candidate record adoption requires run and job base SHA equality.")
+            if run.current_generation <= 0:
+                raise ValueError("Legacy candidate record adoption requires a positive run generation.")
+            if run.current_candidate_sha and run.current_candidate_sha != job.candidate_sha:
+                raise ValueError("Legacy candidate record adoption conflicts with the run candidate authority.")
+            manifest = self.uow.candidate_manifests.get_by_candidate_sha(
+                job.job_id, job.candidate_sha
+            )
+            if not manifest:
+                raise ValueError("Legacy candidate record adoption requires the canonical candidate manifest.")
+            if manifest.candidate_sha != job.candidate_sha:
+                raise ValueError("Legacy candidate manifest does not match the job candidate SHA.")
+            if not manifest.manifest_hash:
+                raise ValueError("Legacy candidate manifest hash must be non-empty.")
+            if manifest.total_files_count <= 0:
+                raise ValueError("Legacy candidate manifest must contain at least one file.")
+            self._validate_legacy_candidate_ref(
+                root, run, job, job.candidate_sha, candidate_ref
+            )
+            ancestry = subprocess.run(
+                ["git", "merge-base", "--is-ancestor", job.base_sha, job.candidate_sha],
+                cwd=str(root), capture_output=True, check=False,
+            )
+            if ancestry.returncode != 0:
+                raise ValueError("Historical candidate base is not an ancestor of the candidate SHA.")
+            commit = subprocess.run(
+                ["git", "cat-file", "-e", f"{job.candidate_sha}^{{commit}}"],
+                cwd=str(root), capture_output=True, check=False,
+            )
+            if commit.returncode != 0:
+                raise ValueError("Historical candidate commit does not exist in the registered repository.")
+            if any(
+                existing.generation == run.current_generation
+                for existing in self.uow.orchestration_candidates.list_by_run(run_id)
+            ):
+                raise ValueError("Legacy candidate record adoption found a generation collision.")
+            candidate = OrchestrationCandidate(
+                run_id=run.run_id,
+                generation=run.current_generation,
+                base_sha=job.base_sha,
+                candidate_sha=job.candidate_sha,
+                candidate_ref=None,
+                manifest_id=manifest.manifest_id,
+                manifest_hash=manifest.manifest_hash,
+                authorship_summary={"legacy_record_adoption": True},
+                is_frozen=True,
+            )
+            adoption_key = (
+                f"{run_id}:LEGACY_CANDIDATE_RECORD_ADOPTED:{candidate.generation}:"
+                f"{candidate.base_sha}:{candidate.candidate_sha}:{candidate.manifest_hash}"
+            )
+            existing_adoption = self.uow.orchestration_stage_events.get_by_transition_key(
+                adoption_key
+            )
+            if existing_adoption:
+                raise ValueError(
+                    "Legacy candidate record adoption evidence exists but its candidate record is missing."
+                )
+            evidence = {
+                "run_id": run_id,
+                "job_id": job.job_id,
+                "candidate_id": candidate.candidate_id,
+                "candidate_generation": candidate.generation,
+                "candidate_sha": candidate.candidate_sha,
+                "base_sha": candidate.base_sha,
+                "manifest_id": candidate.manifest_id,
+                "manifest_hash": candidate.manifest_hash,
+                "candidate_ref": candidate_ref,
+            }
+            self.uow.orchestration_candidates.save(candidate)
+            self.uow.orchestration_stage_events.save(
+                OrchestrationStageEvent(
+                    run_id=run_id,
+                    from_stage=run.current_stage,
+                    to_stage=run.current_stage,
+                    event_type=EventType.LEGACY_CANDIDATE_RECORD_ADOPTED.value,
+                    transition_key=adoption_key,
+                    evidence_references=evidence,
+                    actor="human",
+                    created_at=utc_now(),
+                )
+            )
+            self.uow.events.save(
+                Event(
+                    event_type=EventType.LEGACY_CANDIDATE_RECORD_ADOPTED,
+                    project_id=run.project_id,
+                    change_id=run.change_name,
+                    operation_id=run_id,
+                    payload={"transition_key": adoption_key, **evidence},
+                    timestamp=utc_now(),
+                )
+            )
+            self.uow.commit()
 
         if candidate.candidate_ref:
             if candidate_ref and candidate_ref != candidate.candidate_ref:
@@ -365,25 +489,7 @@ class OrchestrationService:
             )
         else:
             adopted_ref = candidate_ref
-            expected_ref = f"refs/heads/minime/{run.change_name}-{job.job_id}"
-            if adopted_ref != expected_ref:
-                raise ValueError(
-                    "Legacy candidate ref must be the current change/job mini me branch."
-                )
-            if not adopted_ref.startswith("refs/heads/minime/"):
-                raise ValueError("Legacy candidate ref must be a local mini me-owned branch.")
-            ref_exists = subprocess.run(
-                ["git", "show-ref", "--verify", "--quiet", adopted_ref],
-                cwd=str(root), capture_output=True, check=False,
-            )
-            if ref_exists.returncode != 0:
-                raise ValueError("Legacy candidate ref does not exist in the registered repository.")
-            adopted = subprocess.run(
-                ["git", "rev-parse", "--verify", f"{adopted_ref}^{{commit}}"],
-                cwd=str(root), capture_output=True, text=True, check=False,
-            )
-            if adopted.returncode != 0 or adopted.stdout.strip() != candidate.candidate_sha:
-                raise ValueError("Legacy candidate ref does not resolve to the authoritative candidate SHA.")
+            self._validate_legacy_candidate_ref(root, run, job, candidate.candidate_sha, adopted_ref)
             adoption_key = (
                 f"{run_id}:LEGACY_CANDIDATE_REF_ADOPTED:{candidate.generation}:"
                 f"{candidate.candidate_sha}:{adopted_ref}"
@@ -651,6 +757,34 @@ class OrchestrationService:
         )
         self.uow.commit()
         return self.drive_coordinator(run_id, project_root=project_root)
+
+    @staticmethod
+    def _validate_legacy_candidate_ref(
+        root: Path,
+        run: OrchestrationRun,
+        job: Job,
+        candidate_sha: str,
+        candidate_ref: str | None,
+    ) -> None:
+        if not candidate_ref:
+            raise ValueError("Explicit --candidate-ref is required for legacy candidate adoption.")
+        expected_ref = f"refs/heads/minime/{run.change_name}-{job.job_id}"
+        if candidate_ref != expected_ref:
+            raise ValueError("Legacy candidate ref must be the current change/job mini me branch.")
+        if not candidate_ref.startswith("refs/heads/minime/"):
+            raise ValueError("Legacy candidate ref must be a local mini me-owned branch.")
+        ref_exists = subprocess.run(
+            ["git", "show-ref", "--verify", "--quiet", candidate_ref],
+            cwd=str(root), capture_output=True, check=False,
+        )
+        if ref_exists.returncode != 0:
+            raise ValueError("Legacy candidate ref does not exist in the registered repository.")
+        adopted = subprocess.run(
+            ["git", "rev-parse", "--verify", f"{candidate_ref}^{{commit}}"],
+            cwd=str(root), capture_output=True, text=True, check=False,
+        )
+        if adopted.returncode != 0 or adopted.stdout.strip() != candidate_sha:
+            raise ValueError("Legacy candidate ref does not resolve to the authoritative candidate SHA.")
 
     def drive_coordinator(
         self,
