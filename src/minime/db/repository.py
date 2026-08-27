@@ -442,6 +442,8 @@ def check_result_model_to_domain(model: CheckResultModel) -> CheckResult:
         exit_code=model.exit_code,
         duration_ms=model.duration_ms,
         output_snippet=model.output_snippet,
+        candidate_sha=model.candidate_sha or "",
+        candidate_generation=model.candidate_generation,
         created_at=model.created_at,
     )
 
@@ -634,6 +636,7 @@ def orchestration_candidate_model_to_domain(
         generation=model.generation,
         base_sha=model.base_sha,
         candidate_sha=model.candidate_sha,
+        candidate_ref=model.candidate_ref,
         manifest_id=model.manifest_id,
         manifest_hash=model.manifest_hash,
         authorship_summary=model.authorship_summary or {},
@@ -1215,6 +1218,8 @@ class PostgresCheckResultRepository(CheckResultRepositoryInterface):
                 exit_code=result.exit_code,
                 duration_ms=result.duration_ms,
                 output_snippet=result.output_snippet,
+                candidate_sha=result.candidate_sha or None,
+                candidate_generation=result.candidate_generation,
                 created_at=result.created_at,
             )
         )
@@ -2415,6 +2420,7 @@ class PostgresOrchestrationCandidateRepository(OrchestrationCandidateRepositoryI
         existing = self.session.get(OrchestrationCandidateModel, candidate.candidate_id)
         if existing:
             existing.manifest_id = candidate.manifest_id
+            existing.candidate_ref = candidate.candidate_ref
             existing.manifest_hash = candidate.manifest_hash
             existing.authorship_summary = candidate.authorship_summary
             existing.is_frozen = candidate.is_frozen
@@ -2427,6 +2433,7 @@ class PostgresOrchestrationCandidateRepository(OrchestrationCandidateRepositoryI
                     generation=candidate.generation,
                     base_sha=candidate.base_sha,
                     candidate_sha=candidate.candidate_sha,
+                    candidate_ref=candidate.candidate_ref,
                     manifest_id=candidate.manifest_id,
                     manifest_hash=candidate.manifest_hash,
                     authorship_summary=candidate.authorship_summary,

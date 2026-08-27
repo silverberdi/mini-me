@@ -896,6 +896,35 @@ def orchestrate_resume_cmd(
         raise typer.Exit(code=1)
 
 
+@orchestrate_app.command("resolve")
+def orchestrate_resolve_cmd(
+    run_id: str = typer.Argument(..., help="Orchestration run identifier"),
+    continue_preserved_candidate: bool = typer.Option(
+        False, "--continue-preserved-candidate", help="Continue the validated preserved candidate"
+    ),
+    project_root: str = typer.Option(".", "--path", "-p", help="Filesystem path to project root"),
+    json_output: bool = typer.Option(False, "--json", help="Output result as JSON"),
+) -> None:
+    """Resolve a NEEDS_HUMAN preserved-candidate gate."""
+    try:
+        with db_manager.session() as session:
+            uow = PostgresPersistenceUnitOfWork(session)
+            service = OrchestrationService(uow, project_root=project_root)
+            run = service.resolve_preserved_candidate(
+                run_id,
+                continue_preserved_candidate=continue_preserved_candidate,
+                project_root=project_root,
+            )
+            status_view = service.get_status(run.run_id)
+            if json_output:
+                typer.echo(json.dumps(status_view.model_dump(), indent=2, default=str))
+            else:
+                typer.echo(f"Resolved orchestration run {run.run_id}; stage={run.current_stage.value}")
+    except Exception as e:
+        typer.secho(f"Orchestration resolution error: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
 @orchestrate_app.command("status")
 def orchestrate_status_cmd(
     run_id: str = typer.Argument(..., help="Orchestration run identifier"),

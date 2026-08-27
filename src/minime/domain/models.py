@@ -506,6 +506,8 @@ class CheckResult(BaseModel):
     exit_code: int
     duration_ms: int
     output_snippet: str
+    candidate_sha: str = ""
+    candidate_generation: int | None = None
     created_at: datetime = Field(default_factory=utc_now)
 
 
@@ -667,6 +669,7 @@ class OrchestrationCandidate(BaseModel):
     generation: int
     base_sha: str
     candidate_sha: str
+    candidate_ref: str | None = None
     manifest_id: str | None = None
     manifest_hash: str
     authorship_summary: dict[str, Any] = Field(default_factory=dict)

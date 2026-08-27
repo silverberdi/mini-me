@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import logging
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +45,7 @@ from minime.domain.models import (
     utc_now,
 )
 from minime.logging import redact_secrets
+from minime.services.candidate_integrity import resolve_base_branch_sha
 from minime.services.execution_pipeline import ExecutionPipelineService
 from minime.services.project_service import ProjectService
 from minime.services.readiness_service import ReadinessService
@@ -306,6 +310,269 @@ class OrchestrationService:
 
         return self.drive_coordinator(run.run_id, project_root=project_root)
 
+    def resolve_preserved_candidate(
+        self,
+        run_id: str,
+        *,
+        continue_preserved_candidate: bool = False,
+        project_root: str | Path | None = None,
+    ) -> OrchestrationRun:
+        """Resolve a human stop only after proving the immutable candidate ref."""
+        if not continue_preserved_candidate:
+            raise ValueError("Explicit --continue-preserved-candidate is required.")
+        run = self.uow.orchestration_runs.get_by_id(run_id)
+        if not run:
+            raise ValueError(f"Orchestration run '{run_id}' not found.")
+        prior_resolution = next(
+            (
+                event
+                for event in self.uow.orchestration_stage_events.list_by_run(run_id)
+                if event.event_type == EventType.HUMAN_RESOLUTION.value
+                and event.evidence_references.get("resulting_candidate_sha")
+            ),
+            None,
+        )
+        if prior_resolution and run.stop_outcome != OrchestrationStopOutcome.NEEDS_HUMAN:
+            return run
+        if run.stop_outcome != OrchestrationStopOutcome.NEEDS_HUMAN:
+            raise ValueError("Human resolution requires a run stopped with NEEDS_HUMAN.")
+        if not run.active_job_id:
+            raise ValueError("Human resolution requires an active job.")
+        candidate = self.uow.orchestration_candidates.get_latest_for_run(run_id)
+        if not candidate or not candidate.candidate_ref:
+            raise ValueError("Preserved candidate lacks a durable candidate ref.")
+        project = self.uow.projects.get_by_id(run.project_id)
+        if not project:
+            raise ValueError(f"Project '{run.project_id}' not found.")
+        job = self.uow.jobs.get_by_id(run.active_job_id)
+        if not job:
+            raise ValueError(f"Active job '{run.active_job_id}' not found.")
+        root = Path(project_root).resolve() if project_root else self.project_root
+        ref = candidate.candidate_ref
+        resolved = subprocess.run(
+            ["git", "rev-parse", "--verify", f"{ref}^{{commit}}"],
+            cwd=str(root), capture_output=True, text=True, check=False,
+        )
+        if resolved.returncode != 0 or resolved.stdout.strip() != candidate.candidate_sha:
+            raise ValueError("Preserved candidate ref does not resolve to its recorded SHA.")
+        current_base, base_error = resolve_base_branch_sha(root, project.base_branch)
+        if not current_base:
+            raise ValueError(base_error or "Current registered base could not be resolved.")
+        if current_base != candidate.base_sha:
+            next_generation = candidate.generation + 1
+            resolution_key = (
+                f"{run_id}:HUMAN_RESOLUTION:{candidate.generation}:"
+                f"{candidate.candidate_sha}:{current_base}:CONTINUE_PRESERVED_CANDIDATE"
+            )
+            existing = self.uow.orchestration_stage_events.get_by_transition_key(resolution_key)
+            if existing:
+                return self.uow.orchestration_runs.get_by_id(run_id) or run
+            branch_name = (
+                f"minime/{run.change_name}-{job.job_id}-integration-gen{next_generation}"
+            )
+            integration_path = (
+                root / ".minime" / "worktrees"
+                / f"{job.job_id}-integration-gen{next_generation}"
+            )
+            manager = self.pipeline.worktree_manager
+            try:
+                ancestry = subprocess.run(
+                    ["git", "merge-base", "--is-ancestor", candidate.base_sha, candidate.candidate_sha],
+                    cwd=str(root), capture_output=True, check=False,
+                )
+                if ancestry.returncode != 0:
+                    raise ValueError("Historical candidate is not based on its recorded historical base.")
+                commits_result = subprocess.run(
+                    ["git", "rev-list", "--reverse", f"{candidate.base_sha}..{candidate.candidate_sha}"],
+                    cwd=str(root), capture_output=True, text=True, check=False,
+                )
+                if commits_result.returncode != 0:
+                    raise ValueError("Unable to determine the preserved candidate commit sequence.")
+                commits = []
+                for commit_sha in filter(None, commits_result.stdout.splitlines()):
+                    already_on_base = subprocess.run(
+                        ["git", "merge-base", "--is-ancestor", commit_sha, current_base],
+                        cwd=str(root), capture_output=True, check=False,
+                    )
+                    if already_on_base.returncode != 0:
+                        commits.append(commit_sha)
+                worktree = asyncio.run(
+                    manager.create_integration_worktree(
+                        job.job_id, branch_name, current_base, next_generation, run.project_id
+                    )
+                )
+                integrated_sha = asyncio.run(
+                    manager.cherry_pick(worktree.path, commits, job.job_id, run.project_id)
+                )
+                verified = subprocess.run(
+                    ["git", "merge-base", "--is-ancestor", current_base, integrated_sha],
+                    cwd=str(root), capture_output=True, check=False,
+                )
+                if verified.returncode != 0:
+                    raise ValueError("Integrated candidate is not based on the current registered base.")
+                manifest = self.pipeline.manifest_service.generate_manifest(
+                    worktree.path, integrated_sha, job.job_id
+                )
+                self.uow.candidate_manifests.save(manifest)
+                new_candidate = OrchestrationCandidate(
+                    run_id=run_id,
+                    generation=next_generation,
+                    base_sha=current_base,
+                    candidate_sha=integrated_sha,
+                    candidate_ref=f"refs/heads/{branch_name}",
+                    manifest_id=manifest.manifest_id,
+                    manifest_hash=manifest.manifest_hash,
+                    authorship_summary={"resolution": "preserved_candidate_base_integration"},
+                    is_frozen=True,
+                )
+                self.uow.orchestration_candidates.save(new_candidate)
+                self.uow.orchestration_candidates.supersede(
+                    candidate.candidate_id, new_candidate.candidate_id
+                )
+                job.base_sha = current_base
+                job.candidate_sha = integrated_sha
+                self.uow.jobs.save(job)
+                self.uow.orchestration_runs.update_candidate_binding(
+                    run_id, next_generation, integrated_sha
+                )
+                run.current_generation = next_generation
+                run.current_candidate_sha = integrated_sha
+                check_run = asyncio.run(
+                    self.pipeline.checks_runner.run(
+                        job.job_id, project.checks, worktree.path,
+                        candidate_sha=integrated_sha,
+                        candidate_generation=next_generation,
+                    )
+                )
+                for result in check_run.results:
+                    self.uow.check_results.save(result)
+                for diagnostic in check_run.diagnostics:
+                    self.uow.evidence_diagnostics.save(diagnostic)
+                if not check_run.passed:
+                    raise ValueError("Integrated candidate deterministic checks failed.")
+                self.uow.commit()
+                asyncio.run(manager.remove_clean_worktree_path(
+                    worktree.path, job.job_id, run.project_id
+                ))
+            except Exception as exc:
+                details = {
+                    "code": "BASE_INTEGRATION_CONFLICT",
+                    "run_id": run_id,
+                    "job_id": job.job_id,
+                    "historical_candidate_sha": candidate.candidate_sha,
+                    "historical_candidate_ref": candidate.candidate_ref,
+                    "target_base_sha": current_base,
+                    "integration_branch": branch_name,
+                    "worktree_path": str(integration_path),
+                    "reason": str(exc),
+                }
+                self.uow.orchestration_stage_events.save(
+                    OrchestrationStageEvent(
+                        run_id=run_id,
+                        from_stage=run.current_stage,
+                        to_stage=run.current_stage,
+                        event_type=EventType.HUMAN_RESOLUTION.value,
+                        transition_key=resolution_key,
+                        evidence_references=details,
+                        actor="human",
+                        created_at=utc_now(),
+                    )
+                )
+                self._stop_run(
+                    run, OrchestrationStopOutcome.NEEDS_HUMAN, HumanGate.NEEDS_HUMAN,
+                    "Base integration requires human remediation.", details
+                )
+                return self.uow.orchestration_runs.get_by_id(run_id) or run
+            # Successful integration continues through the common authority reset below.
+            candidate = self.uow.orchestration_candidates.get_latest_for_run(run_id) or candidate
+            current_base = candidate.base_sha
+
+        resolution_key = (
+            f"{run_id}:HUMAN_RESOLUTION:{candidate.generation}:"
+            f"{candidate.candidate_sha}:{current_base}:CONTINUE_PRESERVED_CANDIDATE"
+        )
+        existing = self.uow.orchestration_stage_events.get_by_transition_key(resolution_key)
+        if existing:
+            return self.uow.orchestration_runs.get_by_id(run_id) or run
+
+        # Reopen the preserved branch in a managed worktree solely for a fresh
+        # authoritative check run.  No implementer stage is invoked.
+        manager = self.pipeline.worktree_manager
+        worktree = asyncio.run(
+            manager.create_worktree(
+                job.job_id,
+                run.change_name,
+                project.base_branch,
+                project_id=run.project_id,
+                branch_name=candidate.candidate_ref.removeprefix("refs/heads/"),
+            )
+        )
+        try:
+            check_run = asyncio.run(
+                self.pipeline.checks_runner.run(
+                    job.job_id,
+                    project.checks,
+                    worktree.path,
+                    candidate_sha=candidate.candidate_sha,
+                    candidate_generation=candidate.generation,
+                )
+            )
+            for result in check_run.results:
+                self.uow.check_results.save(result)
+            for diagnostic in check_run.diagnostics:
+                self.uow.evidence_diagnostics.save(diagnostic)
+            if not check_run.passed:
+                self.uow.commit()
+                raise ValueError("Preserved candidate deterministic checks failed.")
+            self.uow.commit()
+        finally:
+            asyncio.run(manager.remove_clean_worktree(job.job_id, project_id=run.project_id))
+
+        run.stop_outcome = None
+        run.human_gate = None
+        run.stop_reason = None
+        run.stop_details = {}
+        run.is_active = True
+        run.current_stage = OrchestrationStage.RUNNING_CHECKS
+        run.resumable_stage = OrchestrationStage.RUNNING_CHECKS
+        self.uow.orchestration_runs.save(run)
+        self.uow.orchestration_stage_events.save(
+            OrchestrationStageEvent(
+                run_id=run_id,
+                from_stage=OrchestrationStage.RUNNING_CHECKS,
+                to_stage=OrchestrationStage.RUNNING_CHECKS,
+                event_type=EventType.HUMAN_RESOLUTION.value,
+                transition_key=resolution_key,
+                evidence_references={
+                    "run_id": run_id,
+                    "job_id": job.job_id,
+                    "previous_candidate_sha": candidate.candidate_sha,
+                    "previous_candidate_generation": candidate.generation,
+                    "previous_candidate_ref": candidate.candidate_ref,
+                    "previous_base_sha": candidate.base_sha,
+                    "resolved_base_sha": current_base,
+                    "resulting_candidate_sha": candidate.candidate_sha,
+                    "resulting_candidate_generation": candidate.generation,
+                    "resulting_candidate_ref": candidate.candidate_ref,
+                    "resolution_action": "CONTINUE_PRESERVED_CANDIDATE",
+                },
+                actor="human",
+                created_at=utc_now(),
+            )
+        )
+        self.uow.events.save(
+            Event(
+                event_type=EventType.HUMAN_RESOLUTION,
+                project_id=run.project_id,
+                change_id=run.change_name,
+                operation_id=run_id,
+                payload={"transition_key": resolution_key, "candidate_sha": candidate.candidate_sha},
+                timestamp=utc_now(),
+            )
+        )
+        self.uow.commit()
+        return self.drive_coordinator(run_id, project_root=project_root)
+
     def drive_coordinator(
         self,
         run_id: str,
@@ -396,7 +663,13 @@ class OrchestrationService:
                 import asyncio
 
                 try:
-                    job = asyncio.run(self.pipeline.execute_queued_job(job.job_id))
+                    execute = self.pipeline.execute_queued_job
+                    if "candidate_generation" in inspect.signature(execute).parameters:
+                        job = asyncio.run(
+                            execute(job.job_id, candidate_generation=run.current_generation)
+                        )
+                    else:
+                        job = asyncio.run(execute(job.job_id))
                 except Exception as exc:
                     redacted_error = redact_secrets(str(exc))
                     logger.exception(
@@ -536,7 +809,12 @@ class OrchestrationService:
                 # those results before cleaning up its worktree, so orchestration must consume
                 # that authority rather than rerun checks against a path that no longer exists.
                 checks_to_run = project.checks if project and project.checks else []
-                persisted_checks = self.uow.check_results.list_by_job(job.job_id)
+                persisted_checks = [
+                    result
+                    for result in self.uow.check_results.list_by_job(job.job_id)
+                    if result.candidate_sha == job.candidate_sha
+                    and result.candidate_generation == run.current_generation
+                ]
                 checks_by_name = {result.check_name: result for result in persisted_checks}
                 missing_checks = [
                     check.get("name")
@@ -613,6 +891,7 @@ class OrchestrationService:
                         generation=1,
                         base_sha=run.base_sha,
                         candidate_sha=head_sha,
+                        candidate_ref=f"refs/heads/minime/{run.change_name}-{job.job_id}",
                         manifest_id=manifest.manifest_id,
                         manifest_hash=manifest.manifest_hash,
                         authorship_summary={"authorships_count": len(authorships)},
@@ -634,6 +913,7 @@ class OrchestrationService:
                             generation=next_gen,
                             base_sha=run.base_sha,
                             candidate_sha=head_sha,
+                            candidate_ref=f"refs/heads/minime/{run.change_name}-{job.job_id}",
                             manifest_id=manifest.manifest_id,
                             manifest_hash=manifest.manifest_hash,
                             authorship_summary={"authorships_count": len(authorships)},
@@ -1399,7 +1679,12 @@ class OrchestrationService:
         if to_stage == OrchestrationStage.FREEZING_CANDIDATE:
             if not job:
                 return "Cannot freeze candidate without an active job."
-            checks = self.uow.check_results.list_by_job(job.job_id)
+            checks = [
+                result
+                for result in self.uow.check_results.list_by_job(job.job_id)
+                if result.candidate_sha == job.candidate_sha
+                and result.candidate_generation == run.current_generation
+            ]
             project = self.uow.projects.get_by_id(run.project_id)
             if (
                 project

@@ -280,7 +280,7 @@ class ExecutionPipelineService:
         job = self.queue_job(project_id, change_name)
         return await self.execute_queued_job(job.job_id)
 
-    async def execute_queued_job(self, job_id: str) -> Job:
+    async def execute_queued_job(self, job_id: str, candidate_generation: int = 1) -> Job:
         job = self._require_job(job_id)
         project = self._require_project(job.project_id)
         worktree_created = False
@@ -1098,6 +1098,7 @@ class ExecutionPipelineService:
                     project.checks,
                     worktree.path,
                     candidate_sha=job.candidate_sha or "",
+                    candidate_generation=candidate_generation,
                     attempt_id=active_attempt.attempt_id if active_attempt else None,
                 )
             except TypeError:
@@ -1107,7 +1108,18 @@ class ExecutionPipelineService:
                     worktree.path,
                 )
             check_run_results = check_run.results
-            for check_result in check_run.results:
+            for index, check_result in enumerate(check_run.results):
+                if (
+                    check_result.candidate_sha != (job.candidate_sha or "")
+                    or check_result.candidate_generation != candidate_generation
+                ):
+                    check_result = check_result.model_copy(
+                        update={
+                            "candidate_sha": job.candidate_sha or "",
+                            "candidate_generation": candidate_generation,
+                        }
+                    )
+                check_run_results[index] = check_result
                 self.uow.check_results.save(check_result)
             for diag in check_run.diagnostics:
                 self.uow.evidence_diagnostics.save(diag)
