@@ -101,7 +101,8 @@ class WorktreeManager:
         return self.worktrees_root / job_id
 
     async def create_worktree(
-        self, job_id: str, change_name: str, base_branch: str, project_id: str | None = None
+        self, job_id: str, change_name: str, base_branch: str,
+        project_id: str | None = None, branch_name: str | None = None
     ) -> WorktreeInfo:
         path = self.worktree_path(job_id).resolve()
         root = self.worktrees_root.resolve()
@@ -114,7 +115,7 @@ class WorktreeManager:
             await self._git(["worktree", "prune"], cwd=self.project_root)
         except Exception:
             pass
-        branch_name = f"minime/{change_name}-{job_id}"
+        branch_name = branch_name or f"minime/{change_name}-{job_id}"
         base_sha = await self._git(["rev-parse", base_branch])
         branch_exists = False
         try:
@@ -140,6 +141,51 @@ class WorktreeManager:
 
     async def current_sha(self, worktree_path: str | Path) -> str:
         return await self._git(["rev-parse", "HEAD"], cwd=Path(worktree_path))
+
+    async def create_integration_worktree(
+        self,
+        job_id: str,
+        branch_name: str,
+        base_sha: str,
+        generation: int,
+        project_id: str | None = None,
+    ) -> WorktreeInfo:
+        path = (self.worktrees_root / f"{job_id}-integration-gen{generation}").resolve()
+        if self.worktrees_root.resolve() not in path.parents:
+            raise ValueError(f"Integration worktree path escapes managed root: {path}")
+        if path.exists():
+            state = await self.inspect_worktree_state(path)
+            if not state.dirty:
+                return WorktreeInfo(path, branch_name, base_sha)
+            raise RuntimeError(f"Existing integration worktree is dirty: {path}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        await self._git(
+            ["worktree", "add", "-b", branch_name, str(path), base_sha],
+            cwd=self.project_root,
+            job_id=job_id,
+            project_id=project_id,
+            operation_type="candidate_base_integration_worktree_add",
+            managed_worktree_path=path,
+        )
+        return WorktreeInfo(path, branch_name, base_sha)
+
+    async def cherry_pick(
+        self,
+        worktree_path: str | Path,
+        commits: list[str],
+        job_id: str,
+        project_id: str | None = None,
+    ) -> str:
+        if commits:
+            await self._git(
+                ["cherry-pick", *commits],
+                cwd=Path(worktree_path),
+                job_id=job_id,
+                project_id=project_id,
+                operation_type="candidate_base_integration_replay",
+                managed_worktree_path=Path(worktree_path),
+            )
+        return await self.current_sha(worktree_path)
 
     async def inspect_worktree_state(self, worktree_path: str | Path) -> WorktreeState:
         path = Path(worktree_path).resolve()
@@ -239,7 +285,17 @@ class WorktreeManager:
         self, job_id: str, project_id: str | None = None
     ) -> None:
         """Remove a managed worktree only after independently proving it is clean."""
-        path = self.worktree_path(job_id).resolve()
+        await self.remove_clean_worktree_path(
+            self.worktree_path(job_id), job_id, project_id
+        )
+
+    async def remove_clean_worktree_path(
+        self,
+        worktree_path: str | Path,
+        job_id: str,
+        project_id: str | None = None,
+    ) -> None:
+        path = Path(worktree_path).resolve()
         if not path.exists():
             return
         state = await self.inspect_worktree_state(path)

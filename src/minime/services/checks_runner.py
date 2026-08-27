@@ -28,6 +28,7 @@ class ChecksRunner:
         checks: list[dict],
         worktree_path: str | Path,
         candidate_sha: str = "",
+        candidate_generation: int | None = None,
         attempt_id: str | None = None,
     ) -> ChecksRunResult:
         results: list[CheckResult] = []
@@ -45,6 +46,8 @@ class ChecksRunner:
                     exit_code=2,
                     duration_ms=0,
                     output_snippet="Missing check command.",
+                    candidate_sha=candidate_sha,
+                    candidate_generation=candidate_generation,
                 )
                 results.append(result)
                 diag = EvidenceDiagnostic(
@@ -86,6 +89,8 @@ class ChecksRunner:
                 exit_code=exit_code,
                 duration_ms=duration_ms,
                 output_snippet=snippet,
+                candidate_sha=candidate_sha,
+                candidate_generation=candidate_generation,
             )
             results.append(result)
 

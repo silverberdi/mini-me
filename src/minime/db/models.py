@@ -480,6 +480,8 @@ class CheckResultModel(Base):
     exit_code: Mapped[int] = mapped_column(Integer, nullable=False)
     duration_ms: Mapped[int] = mapped_column(Integer, nullable=False)
     output_snippet: Mapped[str] = mapped_column(Text, nullable=False)
+    candidate_sha: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    candidate_generation: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False, index=True
     )
@@ -787,6 +789,7 @@ class OrchestrationCandidateModel(Base):
     generation: Mapped[int] = mapped_column(Integer, nullable=False)
     base_sha: Mapped[str] = mapped_column(String(64), nullable=False)
     candidate_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    candidate_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
     manifest_id: Mapped[str | None] = mapped_column(
         String(64), ForeignKey("candidate_manifests.id", ondelete="SET NULL"), nullable=True
     )
