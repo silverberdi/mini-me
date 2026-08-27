@@ -35,7 +35,7 @@ from minime.services.orchestration_service import OrchestrationService
 from minime.services.restart_recovery_service import RestartRecoveryService
 
 PG_URL = os.environ.get("MINIME_DATABASE_URL")
-EXPECTED_DATABASE = os.environ.get("MINIME_EXPECTED_DATABASE", "minime_008_verify")
+EXPECTED_DATABASE = os.environ.get("MINIME_EXPECTED_DATABASE", "minime_010_verify")
 pytestmark = pytest.mark.skipif(
     not PG_URL, reason="MINIME_DATABASE_URL must point to the migrated disposable PostgreSQL DB"
 )
@@ -48,7 +48,7 @@ def session_factory() -> sessionmaker[Session]:
     with engine.connect() as connection:
         assert connection.execute(text("select current_database()")).scalar() == EXPECTED_DATABASE
         assert connection.execute(text("select version_num from alembic_version")).scalar() == (
-            "008_autonomous_orchestration"
+            "011_governance_hardening"
         )
     factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     yield factory

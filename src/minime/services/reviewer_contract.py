@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from minime.domain.models import CheckResult, Project
 
@@ -16,6 +17,7 @@ def build_reviewer_prompt(
     base_sha: str,
     candidate_worktree_path: Path,
     checks_results: list[CheckResult],
+    authorship_evidence: dict[str, Any] | None = None,
 ) -> str:
     """Build a structured, provider-neutral review context prompt.
 
@@ -72,6 +74,7 @@ def build_reviewer_prompt(
             "design": design_text,
             "specs": specs_texts,
         },
+        "authorship": authorship_evidence or {"is_mixed_authorship": False, "surviving_contributions": []},
     }
 
     instructions = """
@@ -96,6 +99,7 @@ CRITICAL REVIEW RULES:
 }
 If all requirements and tests are satisfied, emit verdict "READY_TO_MERGE" with an empty findings list [].
 If issues exist, emit verdict "CHANGES_REQUIRED" with one or more structured findings.
+5. If authorship.is_mixed_authorship is true, disclose that this is complementary but not fully independent; DeepSeek Direct remains the independent audit boundary.
 """
 
     return f"### REVIEW CONTEXT PAYLOAD ###\n{json.dumps(payload, indent=2)}\n\n{instructions.strip()}\n"

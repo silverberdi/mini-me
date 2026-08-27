@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
+import sqlalchemy as sa
 from sqlalchemy import (
     JSON,
     Boolean,
@@ -512,6 +513,12 @@ class ReviewModel(Base):
     verdict: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_mixed_authorship: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sa.false()
+    )
+    authorship_evidence: Mapped[dict] = mapped_column(
+        JSON, nullable=False, server_default="{}"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False, index=True
     )

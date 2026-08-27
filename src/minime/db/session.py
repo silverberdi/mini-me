@@ -3,15 +3,55 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from typing import Generator
 
-from sqlalchemy import Engine, create_engine, text
+from sqlalchemy import Engine, create_engine, inspect, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from minime.config import load_config
 from minime.logging import get_logger
 
 logger = get_logger("db.session")
+
+
+@dataclass(frozen=True)
+class SchemaInvariantResult:
+    valid: bool
+    revision: str | None = None
+    missing_tables: tuple[str, ...] = field(default_factory=tuple)
+    missing_columns: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    reason: str | None = None
+
+
+def verify_physical_schema_invariants(engine: Engine) -> SchemaInvariantResult:
+    """Verify the physical PostgreSQL schema against SQLAlchemy metadata.
+
+    This is inspection only: it never runs DDL or repairs a database.
+    """
+    from minime.db.models import Base
+
+    expected_revision = "011_governance_hardening"
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    missing_tables = sorted(set(Base.metadata.tables) - tables)
+    missing_columns: dict[str, tuple[str, ...]] = {}
+    for table_name, table in Base.metadata.tables.items():
+        if table_name in tables:
+            actual = {column["name"] for column in inspector.get_columns(table_name)}
+            missing = tuple(sorted(set(table.columns.keys()) - actual))
+            if missing:
+                missing_columns[table_name] = missing
+    revision = None
+    if "alembic_version" in tables:
+        with engine.connect() as connection:
+            revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
+    reason = None
+    if revision != expected_revision:
+        reason = f"Expected Alembic head {expected_revision}, found {revision or 'none'}."
+    elif missing_tables or missing_columns:
+        reason = "Physical schema is missing required tables or columns."
+    return SchemaInvariantResult(not (reason or missing_tables or missing_columns), revision, tuple(missing_tables), missing_columns, reason)
 
 
 def validate_postgres_url(url: str) -> None:

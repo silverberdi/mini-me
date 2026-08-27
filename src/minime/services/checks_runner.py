@@ -66,26 +66,34 @@ class ChecksRunner:
                 diagnostics.append(diag)
                 continue
 
-            disposable = bool(check.get("disposable_postgres", False))
-            if disposable:
+            env = os.environ.copy()
+            inherited_database_url = env.pop("MINIME_DATABASE_URL", None)
+            env.pop("MINIME_EXPECTED_DATABASE", None)
+            if check.get("disposable_postgres") is True:
                 expected = str(
                     check.get("expected_database") or check.get("expected_db") or ""
                 ).strip()
-                actual_url = str(os.environ.get("MINIME_DATABASE_URL") or "").strip()
-                actual = urlparse(actual_url).path.lstrip("/") if actual_url else ""
+                database_url = str(
+                    check.get("database_url") or inherited_database_url or ""
+                ).strip()
+                actual = (
+                    (urlparse(database_url).path or "").lstrip("/").split("/", 1)[0]
+                    if database_url
+                    else ""
+                )
                 if (
                     not expected
-                    or not actual_url
-                    or not actual_url.startswith(("postgresql://", "postgresql+"))
+                    or not database_url
+                    or not database_url.startswith(("postgresql://", "postgresql+"))
+                    or actual.lower() == "minime"
                     or actual != expected
-                    or actual == "minime"
                 ):
-                    reason = "Disposable PostgreSQL safety validation failed; check not executed."
+                    reason = "Disposable PostgreSQL check rejected: expected_database must be non-empty and database URL must target a non-canonical database with the exact expected name."
                     result = CheckResult(
                         job_id=job_id,
                         check_name=name,
                         command=command,
-                        exit_code=2,
+                        exit_code=126,
                         duration_ms=0,
                         output_snippet=reason,
                         candidate_sha=candidate_sha,
@@ -102,21 +110,19 @@ class ChecksRunner:
                             environment_identity=env_identity,
                             candidate_sha=candidate_sha,
                             reason=reason,
-                            evidence_reference={"safety_rejected": True},
+                            evidence_reference={"exit_code": 126},
                         )
                     )
                     continue
+                env["MINIME_DATABASE_URL"] = database_url
+                env["MINIME_EXPECTED_DATABASE"] = expected
 
             start = asyncio.get_running_loop().time()
             try:
-                check_env = os.environ.copy()
-                if not disposable:
-                    check_env.pop("MINIME_DATABASE_URL", None)
-                    check_env.pop("MINIME_EXPECTED_DATABASE", None)
                 proc = await asyncio.create_subprocess_shell(
                     command,
                     cwd=str(worktree_path),
-                    env=check_env,
+                    env=env,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )

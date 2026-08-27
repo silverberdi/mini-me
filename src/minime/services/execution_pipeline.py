@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import logging
 import os
+import re
 import subprocess
 from decimal import Decimal
 from pathlib import Path
@@ -14,10 +15,12 @@ from minime.domain.enums import (
     AuditFindingSeverity,
     AuditRiskLevel,
     AuditStatus,
+    BlockerValidationVerdict,
     ContinuationDecision,
     EventType,
     EvidenceDiagnosticStatus,
     ExecutionOutcome,
+    FindingSeverity,
     JobStatus,
     ProviderHealthStatus,
     ProviderResultClass,
@@ -733,6 +736,19 @@ class ExecutionPipelineService:
                                 BlockerValidationContext(
                                     change_name=job.change_name,
                                     available_integration_points=[],
+                                    required_files=[
+                                        value for value in re.findall(
+                                            r"`([^`]+\.(?:py|md|yaml|yml|json|sql))`",
+                                            (worktree.path / project.openspec_path / "changes" / job.change_name / "tasks.md").read_text(encoding="utf-8")
+                                            if (worktree.path / project.openspec_path / "changes" / job.change_name / "tasks.md").exists()
+                                            else "",
+                                        )
+                                    ],
+                                    candidate_tree_files=[
+                                        str(path.relative_to(worktree.path))
+                                        for path in worktree.path.rglob("*")
+                                        if path.is_file() and ".git" not in path.parts
+                                    ],
                                 ),
                             )
                             blocker_claim = BlockerClaim(
@@ -1295,6 +1311,31 @@ class ExecutionPipelineService:
                 if reviewer_fallback_used
                 else project.reviewer
             )
+            diff = subprocess.run(
+                ["git", "diff", "--name-only", f"{job.base_sha}..{job.candidate_sha}"],
+                cwd=worktree.path, capture_output=True, text=True, check=False,
+            )
+            # A base..candidate diff is supporting evidence only. The frozen
+            # manifest is authoritative for all surviving files, including
+            # unchanged files that do not occur in the diff.
+            candidate_files = {
+                item["path"]
+                for entries in (
+                    manifest.tracked_files,
+                    manifest.staged_files,
+                    manifest.untracked_files,
+                )
+                for item in entries
+                if item.get("path")
+            }
+            authorship_evidence = self.authorship_service.evaluate_reviewer_authorship(
+                job_id=job.job_id,
+                reviewer_role=project.reviewer,
+                surviving_files=candidate_files,
+                candidate_sha=job.candidate_sha or "",
+                candidate_generation=active_attempt.attempt_number if active_attempt else None,
+                uow=self.uow,
+            )
             review = Review(
                 job_id=job.job_id,
                 project_id=job.project_id,
@@ -1303,6 +1344,8 @@ class ExecutionPipelineService:
                 candidate_sha=job.candidate_sha or "",
                 base_sha=job.base_sha or "",
                 status=ReviewStatus.REVIEW_RUNNING,
+                is_mixed_authorship=authorship_evidence["is_mixed_authorship"],
+                authorship_evidence=authorship_evidence,
             )
             self.uow.reviews.save(review)
             self.uow.commit()
@@ -1315,6 +1358,7 @@ class ExecutionPipelineService:
                 base_sha=job.base_sha or "",
                 candidate_worktree_path=readonly_view,
                 checks_results=check_run_results,
+                authorship_evidence=authorship_evidence,
             )
 
             verdict_payload = None
@@ -1617,6 +1661,43 @@ class ExecutionPipelineService:
                     raise RuntimeError(parse_err) from parse_exc
 
             # Apply review verdict transition
+            if verdict_payload.findings:
+                tree_files = {
+                    item["path"]
+                    for entries in (
+                        manifest.tracked_files,
+                        manifest.staged_files,
+                        manifest.untracked_files,
+                    )
+                    for item in entries
+                    if item.get("path")
+                }
+                tasks_path = worktree.path / project.openspec_path / "changes" / job.change_name / "tasks.md"
+                task_text = tasks_path.read_text(encoding="utf-8") if tasks_path.exists() else ""
+                required_files = re.findall(
+                    r"`([^`]+\.(?:py|md|yaml|yml|json|sql))`", task_text
+                )
+                blocker_context = BlockerValidationContext(
+                    change_name=job.change_name,
+                    required_files=required_files,
+                    candidate_tree_files=sorted(tree_files),
+                    manifest_files=sorted(tree_files),
+                    base_diff_files=[line.strip() for line in diff.stdout.splitlines() if line.strip()],
+                )
+                normalized_findings = []
+                for item in verdict_payload.findings:
+                    is_missing = "missing" in (
+                        f"{item.violated_requirement} {item.expected_correction}"
+                    ).lower()
+                    if item.severity.value == "BLOCKER" and is_missing:
+                        validation = self.blocker_validation.validate_missing_file(
+                            item.location, blocker_context
+                        )
+                        if validation.verdict == BlockerValidationVerdict.FALSE_BLOCKER:
+                            item = item.model_copy(update={"severity": FindingSeverity.MINOR})
+                    normalized_findings.append(item)
+                verdict_payload = verdict_payload.model_copy(update={"findings": normalized_findings})
+
             if verdict_payload.verdict == ReviewVerdict.READY_TO_MERGE:
                 self.uow.reviews.transition(
                     review.review_id,

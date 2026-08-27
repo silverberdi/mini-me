@@ -482,6 +482,8 @@ def review_model_to_domain(model: ReviewModel) -> Review:
         verdict=ReviewVerdict(model.verdict) if model.verdict else None,
         summary=model.summary,
         error_message=model.error_message,
+        is_mixed_authorship=model.is_mixed_authorship,
+        authorship_evidence=model.authorship_evidence or {},
         findings=[review_finding_model_to_domain(f) for f in (model.findings or [])],
         created_at=model.created_at,
         updated_at=model.updated_at,
@@ -1291,6 +1293,8 @@ class PostgresReviewRepository(ReviewRepositoryInterface):
             existing.verdict = review.verdict.value if review.verdict else None
             existing.summary = review.summary
             existing.error_message = review.error_message
+            existing.is_mixed_authorship = review.is_mixed_authorship
+            existing.authorship_evidence = review.authorship_evidence
             existing.reviewer_model = review.reviewer_model
             existing.orchestration_run_id = review.orchestration_run_id
             existing.candidate_generation = review.candidate_generation
@@ -1317,6 +1321,8 @@ class PostgresReviewRepository(ReviewRepositoryInterface):
                 verdict=review.verdict.value if review.verdict else None,
                 summary=review.summary,
                 error_message=review.error_message,
+                is_mixed_authorship=review.is_mixed_authorship,
+                authorship_evidence=review.authorship_evidence,
                 created_at=review.created_at,
                 updated_at=review.updated_at,
             )

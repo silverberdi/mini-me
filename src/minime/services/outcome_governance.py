@@ -248,9 +248,10 @@ class OutcomeGovernanceService:
                 ProviderResultClass.AUTH_ERROR,
                 ProviderResultClass.TIMEOUT,
                 ProviderResultClass.UNKNOWN_ERROR,
-                ProviderResultClass.TRANSIENT_ERROR,
             ):
                 return ExecutionOutcome.PROVIDER_FAILURE
+            if provider_result.result_class == ProviderResultClass.TRANSIENT_ERROR:
+                return ExecutionOutcome.ENVIRONMENT_UNAVAILABLE
             if provider_result.result_class == ProviderResultClass.POLICY_DENIED:
                 return ExecutionOutcome.POLICY_VIOLATION
             if provider_result.result_class == ProviderResultClass.MALFORMED_OUTPUT:

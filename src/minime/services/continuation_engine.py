@@ -122,6 +122,12 @@ class ContinuationEngine:
                 escalation_reason="Primary capacity exhausted; waiting for reset window.",
             )
 
+        if outcome == ExecutionOutcome.ENVIRONMENT_UNAVAILABLE:
+            return ContinuationDecisionResult(
+                decision=ContinuationDecision.WAIT_EXTERNAL,
+                escalation_reason="External execution environment is temporarily unavailable; waiting without consuming retry or reassignment budget.",
+            )
+
         # 5. Provider Failure (unrecoverable provider error / auth error)
         if outcome == ExecutionOutcome.PROVIDER_FAILURE:
             return self._reassign_or_escalate(
