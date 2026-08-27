@@ -315,6 +315,7 @@ class OrchestrationService:
         run_id: str,
         *,
         continue_preserved_candidate: bool = False,
+        candidate_ref: str | None = None,
         project_root: str | Path | None = None,
     ) -> OrchestrationRun:
         """Resolve a human stop only after proving the immutable candidate ref."""
@@ -339,8 +340,10 @@ class OrchestrationService:
         if not run.active_job_id:
             raise ValueError("Human resolution requires an active job.")
         candidate = self.uow.orchestration_candidates.get_latest_for_run(run_id)
-        if not candidate or not candidate.candidate_ref:
-            raise ValueError("Preserved candidate lacks a durable candidate ref.")
+        if not candidate or (not candidate.candidate_ref and not candidate_ref):
+            raise ValueError(
+                "Preserved candidate lacks a durable candidate ref; explicit --candidate-ref is required."
+            )
         project = self.uow.projects.get_by_id(run.project_id)
         if not project:
             raise ValueError(f"Project '{run.project_id}' not found.")
@@ -348,6 +351,82 @@ class OrchestrationService:
         if not job:
             raise ValueError(f"Active job '{run.active_job_id}' not found.")
         root = Path(project_root).resolve() if project_root else self.project_root
+        if job.project_id != run.project_id or job.change_name != run.change_name:
+            raise ValueError("Active job does not belong to the current project/change run context.")
+        if job.candidate_sha and job.candidate_sha != candidate.candidate_sha:
+            raise ValueError("Preserved candidate does not match the active job candidate authority.")
+
+        if candidate.candidate_ref:
+            if candidate_ref and candidate_ref != candidate.candidate_ref:
+                raise ValueError("Persisted candidate ref disagrees with the supplied candidate ref.")
+        elif not candidate_ref:
+            raise ValueError(
+                "Preserved candidate lacks a durable candidate ref; explicit --candidate-ref is required."
+            )
+        else:
+            adopted_ref = candidate_ref
+            expected_ref = f"refs/heads/minime/{run.change_name}-{job.job_id}"
+            if adopted_ref != expected_ref:
+                raise ValueError(
+                    "Legacy candidate ref must be the current change/job mini me branch."
+                )
+            if not adopted_ref.startswith("refs/heads/minime/"):
+                raise ValueError("Legacy candidate ref must be a local mini me-owned branch.")
+            ref_exists = subprocess.run(
+                ["git", "show-ref", "--verify", "--quiet", adopted_ref],
+                cwd=str(root), capture_output=True, check=False,
+            )
+            if ref_exists.returncode != 0:
+                raise ValueError("Legacy candidate ref does not exist in the registered repository.")
+            adopted = subprocess.run(
+                ["git", "rev-parse", "--verify", f"{adopted_ref}^{{commit}}"],
+                cwd=str(root), capture_output=True, text=True, check=False,
+            )
+            if adopted.returncode != 0 or adopted.stdout.strip() != candidate.candidate_sha:
+                raise ValueError("Legacy candidate ref does not resolve to the authoritative candidate SHA.")
+            adoption_key = (
+                f"{run_id}:LEGACY_CANDIDATE_REF_ADOPTED:{candidate.generation}:"
+                f"{candidate.candidate_sha}:{adopted_ref}"
+            )
+            existing_adoption = self.uow.orchestration_stage_events.get_by_transition_key(
+                adoption_key
+            )
+            if existing_adoption:
+                candidate.candidate_ref = adopted_ref
+            else:
+                candidate.candidate_ref = adopted_ref
+                self.uow.orchestration_candidates.save(candidate)
+                evidence = {
+                    "run_id": run_id,
+                    "job_id": job.job_id,
+                    "candidate_id": candidate.candidate_id,
+                    "candidate_generation": candidate.generation,
+                    "candidate_sha": candidate.candidate_sha,
+                    "adopted_candidate_ref": adopted_ref,
+                }
+                self.uow.orchestration_stage_events.save(
+                    OrchestrationStageEvent(
+                        run_id=run_id,
+                        from_stage=run.current_stage,
+                        to_stage=run.current_stage,
+                        event_type=EventType.LEGACY_CANDIDATE_REF_ADOPTED.value,
+                        transition_key=adoption_key,
+                        evidence_references=evidence,
+                        actor="human",
+                        created_at=utc_now(),
+                    )
+                )
+                self.uow.events.save(
+                    Event(
+                        event_type=EventType.LEGACY_CANDIDATE_REF_ADOPTED,
+                        project_id=run.project_id,
+                        change_id=run.change_name,
+                        operation_id=run_id,
+                        payload={"transition_key": adoption_key, **evidence},
+                        timestamp=utc_now(),
+                    )
+                )
+                self.uow.commit()
         ref = candidate.candidate_ref
         resolved = subprocess.run(
             ["git", "rev-parse", "--verify", f"{ref}^{{commit}}"],

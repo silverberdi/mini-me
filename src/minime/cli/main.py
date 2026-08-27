@@ -902,6 +902,11 @@ def orchestrate_resolve_cmd(
     continue_preserved_candidate: bool = typer.Option(
         False, "--continue-preserved-candidate", help="Continue the validated preserved candidate"
     ),
+    candidate_ref: str | None = typer.Option(
+        None,
+        "--candidate-ref",
+        help="Adopt a local legacy candidate branch when the candidate has no persisted ref",
+    ),
     project_root: str = typer.Option(".", "--path", "-p", help="Filesystem path to project root"),
     json_output: bool = typer.Option(False, "--json", help="Output result as JSON"),
 ) -> None:
@@ -913,6 +918,7 @@ def orchestrate_resolve_cmd(
             run = service.resolve_preserved_candidate(
                 run_id,
                 continue_preserved_candidate=continue_preserved_candidate,
+                candidate_ref=candidate_ref,
                 project_root=project_root,
             )
             status_view = service.get_status(run.run_id)
