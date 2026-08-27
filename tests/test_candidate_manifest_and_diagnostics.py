@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -282,3 +283,69 @@ async def test_checks_runner_diagnostics_classification(tmp_path: Path):
     assert (
         res_env.diagnostics[0].diagnostic_status == EvidenceDiagnosticStatus.ENVIRONMENT_UNAVAILABLE
     )
+
+
+@pytest.mark.asyncio
+async def test_checks_runner_continues_after_failed_check_in_configured_order(tmp_path: Path):
+    runner = ChecksRunner()
+    result = await runner.run(
+        job_id="job-order",
+        checks=[
+            {"name": "first", "command": f"{sys.executable} -c 'exit(3)'"},
+            {"name": "second", "command": f"{sys.executable} -c 'print(\"ran\")'"},
+        ],
+        worktree_path=tmp_path,
+    )
+
+    assert [item.check_name for item in result.results] == ["first", "second"]
+    assert [item.check_name for item in result.diagnostics] == ["first", "second"]
+    assert result.results[1].output_snippet == "ran\n"
+    assert result.passed is False
+
+
+@pytest.mark.asyncio
+async def test_checks_runner_missing_command_does_not_block_later_check(tmp_path: Path):
+    runner = ChecksRunner()
+    result = await runner.run(
+        job_id="job-missing",
+        checks=[
+            {"name": "missing"},
+            {"name": "valid", "command": f"{sys.executable} -c 'print(\"valid\")'"},
+        ],
+        worktree_path=tmp_path,
+    )
+
+    assert [item.check_name for item in result.results] == ["missing", "valid"]
+    assert [item.check_name for item in result.diagnostics] == ["missing", "valid"]
+    assert result.diagnostics[0].diagnostic_status == EvidenceDiagnosticStatus.FAIL
+    assert result.diagnostics[1].diagnostic_status == EvidenceDiagnosticStatus.PASS
+
+
+@pytest.mark.asyncio
+async def test_checks_runner_aggregate_passed_is_false_when_any_check_fails(tmp_path: Path):
+    result = await ChecksRunner().run(
+        job_id="job-aggregate-fail",
+        checks=[
+            {"name": "pass", "command": f"{sys.executable} -c 'exit(0)'"},
+            {"name": "fail", "command": f"{sys.executable} -c 'exit(1)'"},
+        ],
+        worktree_path=tmp_path,
+    )
+
+    assert result.passed is False
+    assert len(result.results) == len(result.diagnostics) == 2
+
+
+@pytest.mark.asyncio
+async def test_checks_runner_aggregate_passed_is_true_when_all_checks_pass(tmp_path: Path):
+    result = await ChecksRunner().run(
+        job_id="job-aggregate-pass",
+        checks=[
+            {"name": "first", "command": f"{sys.executable} -c 'exit(0)'"},
+            {"name": "second", "command": f"{sys.executable} -c 'exit(0)'"},
+        ],
+        worktree_path=tmp_path,
+    )
+
+    assert result.passed is True
+    assert len(result.results) == len(result.diagnostics) == 2

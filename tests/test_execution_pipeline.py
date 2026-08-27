@@ -331,7 +331,7 @@ async def test_execution_pipeline_check_failure_halts_and_records_result(in_memo
 
     assert job.status == JobStatus.CHECKS_FAILED
     checks = in_memory_uow.check_results.list_by_job(job.job_id)
-    assert [c.check_name for c in checks] == ["fail"]
+    assert [c.check_name for c in checks] == ["fail", "skip"]
     assert checks[0].exit_code == 4
 
 

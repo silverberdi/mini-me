@@ -59,7 +59,7 @@ class ChecksRunner:
                     evidence_reference={"exit_code": 2},
                 )
                 diagnostics.append(diag)
-                return ChecksRunResult(passed=False, results=results, diagnostics=diagnostics)
+                continue
 
             start = asyncio.get_running_loop().time()
             try:
@@ -117,7 +117,8 @@ class ChecksRunner:
             )
             diagnostics.append(diag)
 
-            if result.exit_code != 0:
-                return ChecksRunResult(passed=False, results=results, diagnostics=diagnostics)
-
-        return ChecksRunResult(passed=True, results=results, diagnostics=diagnostics)
+        return ChecksRunResult(
+            passed=all(result.exit_code == 0 for result in results),
+            results=results,
+            diagnostics=diagnostics,
+        )
