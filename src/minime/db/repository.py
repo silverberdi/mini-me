@@ -721,9 +721,30 @@ class PostgresChangeRepository(ChangeRepositoryInterface):
         self.session = session
 
     def save(self, change: Change) -> None:
-        existing = self.session.get(ChangeModel, change.change_id)
-        if existing:
+        physical = self.session.get(ChangeModel, change.change_id)
+        logical_matches = self.session.scalars(
+            select(ChangeModel).where(
+                ChangeModel.project_id == change.project_id, ChangeModel.name == change.name
+            )
+        ).all()
+        if len(logical_matches) > 1:
+            raise ValueError(
+                f"Ambiguous logical Change identity for project '{change.project_id}' and "
+                f"change '{change.name}': {len(logical_matches)} rows found."
+            )
+        if physical is not None and logical_matches and logical_matches[0].id != physical.id:
+            raise ValueError(
+                f"Conflicting Change identities: physical id '{change.change_id}' does not "
+                f"match the logical row for project '{change.project_id}' and change "
+                f"'{change.name}'."
+            )
+        if physical:
+            # A loaded domain entity carries an explicit lifecycle update.  Its
+            # physical identity and original discovery timestamp are immutable,
+            # but all caller-provided mutable state must be persisted.
+            existing = physical
             existing.name = change.name
+            existing.project_id = change.project_id
             existing.status = change.status.value
             existing.stage = change.stage
             existing.schema_name = change.schema_name
@@ -733,6 +754,16 @@ class PostgresChangeRepository(ChangeRepositoryInterface):
             existing.specs_paths = change.specs_paths
             existing.last_readiness_status = change.last_readiness_status.value
             existing.last_readiness_reasons = change.last_readiness_reasons
+            existing.updated_at = change.updated_at
+        elif logical_matches:
+            # An unattached discovery object refreshes filesystem metadata but
+            # must not regress the durable lifecycle/readiness state.
+            existing = logical_matches[0]
+            existing.schema_name = change.schema_name
+            existing.proposal_path = change.proposal_path
+            existing.tasks_path = change.tasks_path
+            existing.design_path = change.design_path
+            existing.specs_paths = change.specs_paths
             existing.updated_at = change.updated_at
         else:
             model = ChangeModel(
@@ -761,8 +792,13 @@ class PostgresChangeRepository(ChangeRepositoryInterface):
         stmt = select(ChangeModel).where(
             ChangeModel.project_id == project_id, ChangeModel.name == name
         )
-        model = self.session.scalars(stmt).first()
-        return change_model_to_domain(model) if model else None
+        models = self.session.scalars(stmt).all()
+        if len(models) > 1:
+            raise ValueError(
+                f"Ambiguous logical Change identity for project '{project_id}' and change "
+                f"'{name}': {len(models)} rows found."
+            )
+        return change_model_to_domain(models[0]) if models else None
 
     def list_by_project(self, project_id: str) -> list[Change]:
         stmt = (
