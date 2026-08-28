@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
+import json
 import logging
 import subprocess
 from pathlib import Path
@@ -51,6 +53,19 @@ from minime.services.project_service import ProjectService
 from minime.services.readiness_service import ReadinessService
 
 logger = logging.getLogger(__name__)
+ORCHESTRATION_TRANSITION_KEY_MAX_LENGTH = 128
+
+
+def bounded_orchestration_transition_key(prefix: str, identity: dict[str, Any]) -> str:
+    """Encode a complete deterministic transition identity within the DB key bound."""
+    canonical_identity = json.dumps(
+        identity, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    )
+    digest = hashlib.sha256(canonical_identity.encode("utf-8")).hexdigest()
+    key = f"{prefix}:{digest}"
+    if len(key) > ORCHESTRATION_TRANSITION_KEY_MAX_LENGTH:
+        raise ValueError("Orchestration transition key prefix exceeds the schema contract.")
+    return key
 
 ALLOWED_STAGE_TRANSITIONS: dict[OrchestrationStage, set[OrchestrationStage]] = {
     OrchestrationStage.ADMITTED: {OrchestrationStage.PREPARING_EXECUTION},
@@ -433,12 +448,23 @@ class OrchestrationService:
                 authorship_summary={"legacy_record_adoption": True},
                 is_frozen=True,
             )
-            adoption_key = (
-                f"{run_id}:LEGACY_CANDIDATE_RECORD_ADOPTED:{candidate.generation}:"
-                f"{candidate.base_sha}:{candidate.candidate_sha}:{candidate.manifest_hash}"
-            )
-            existing_adoption = self.uow.orchestration_stage_events.get_by_transition_key(
-                adoption_key
+            adoption_identity = {
+                "run_id": run_id,
+                "candidate_generation": candidate.generation,
+                "base_sha": candidate.base_sha,
+                "candidate_sha": candidate.candidate_sha,
+                "manifest_hash": candidate.manifest_hash,
+            }
+            adoption_key = bounded_orchestration_transition_key("LCRE", adoption_identity)
+            existing_adoption = self._find_transition_event(
+                run_id,
+                EventType.LEGACY_CANDIDATE_RECORD_ADOPTED.value,
+                adoption_key,
+                adoption_identity,
+                legacy_keys=[
+                    f"{run_id}:LEGACY_CANDIDATE_RECORD_ADOPTED:{candidate.generation}:"
+                    f"{candidate.base_sha}:{candidate.candidate_sha}:{candidate.manifest_hash}"
+                ],
             )
             if existing_adoption:
                 raise ValueError(
@@ -490,12 +516,22 @@ class OrchestrationService:
         else:
             adopted_ref = candidate_ref
             self._validate_legacy_candidate_ref(root, run, job, candidate.candidate_sha, adopted_ref)
-            adoption_key = (
-                f"{run_id}:LEGACY_CANDIDATE_REF_ADOPTED:{candidate.generation}:"
-                f"{candidate.candidate_sha}:{adopted_ref}"
-            )
-            existing_adoption = self.uow.orchestration_stage_events.get_by_transition_key(
-                adoption_key
+            adoption_identity = {
+                "run_id": run_id,
+                "candidate_generation": candidate.generation,
+                "candidate_sha": candidate.candidate_sha,
+                "adopted_candidate_ref": adopted_ref,
+            }
+            adoption_key = bounded_orchestration_transition_key("LCREF", adoption_identity)
+            existing_adoption = self._find_transition_event(
+                run_id,
+                EventType.LEGACY_CANDIDATE_REF_ADOPTED.value,
+                adoption_key,
+                adoption_identity,
+                legacy_keys=[
+                    f"{run_id}:LEGACY_CANDIDATE_REF_ADOPTED:{candidate.generation}:"
+                    f"{candidate.candidate_sha}:{adopted_ref}"
+                ],
             )
             if existing_adoption:
                 candidate.candidate_ref = adopted_ref
@@ -545,11 +581,24 @@ class OrchestrationService:
             raise ValueError(base_error or "Current registered base could not be resolved.")
         if current_base != candidate.base_sha:
             next_generation = candidate.generation + 1
-            resolution_key = (
-                f"{run_id}:HUMAN_RESOLUTION:{candidate.generation}:"
-                f"{candidate.candidate_sha}:{current_base}:CONTINUE_PRESERVED_CANDIDATE"
+            resolution_identity = {
+                "run_id": run_id,
+                "candidate_generation": candidate.generation,
+                "candidate_sha": candidate.candidate_sha,
+                "target_base_sha": current_base,
+                "resolution_action": "CONTINUE_PRESERVED_CANDIDATE",
+            }
+            resolution_key = bounded_orchestration_transition_key("HRES", resolution_identity)
+            existing = self._find_transition_event(
+                run_id,
+                EventType.HUMAN_RESOLUTION.value,
+                resolution_key,
+                resolution_identity,
+                legacy_keys=[
+                    f"{run_id}:HUMAN_RESOLUTION:{candidate.generation}:"
+                    f"{candidate.candidate_sha}:{current_base}:CONTINUE_PRESERVED_CANDIDATE"
+                ],
             )
-            existing = self.uow.orchestration_stage_events.get_by_transition_key(resolution_key)
             if existing:
                 return self.uow.orchestration_runs.get_by_id(run_id) or run
             branch_name = (
@@ -672,11 +721,24 @@ class OrchestrationService:
             candidate = self.uow.orchestration_candidates.get_latest_for_run(run_id) or candidate
             current_base = candidate.base_sha
 
-        resolution_key = (
-            f"{run_id}:HUMAN_RESOLUTION:{candidate.generation}:"
-            f"{candidate.candidate_sha}:{current_base}:CONTINUE_PRESERVED_CANDIDATE"
+        resolution_identity = {
+            "run_id": run_id,
+            "candidate_generation": candidate.generation,
+            "candidate_sha": candidate.candidate_sha,
+            "target_base_sha": current_base,
+            "resolution_action": "CONTINUE_PRESERVED_CANDIDATE",
+        }
+        resolution_key = bounded_orchestration_transition_key("HRES", resolution_identity)
+        existing = self._find_transition_event(
+            run_id,
+            EventType.HUMAN_RESOLUTION.value,
+            resolution_key,
+            resolution_identity,
+            legacy_keys=[
+                f"{run_id}:HUMAN_RESOLUTION:{candidate.generation}:"
+                f"{candidate.candidate_sha}:{current_base}:CONTINUE_PRESERVED_CANDIDATE"
+            ],
         )
-        existing = self.uow.orchestration_stage_events.get_by_transition_key(resolution_key)
         if existing:
             return self.uow.orchestration_runs.get_by_id(run_id) or run
 
@@ -757,6 +819,29 @@ class OrchestrationService:
         )
         self.uow.commit()
         return self.drive_coordinator(run_id, project_root=project_root)
+
+    def _find_transition_event(
+        self,
+        run_id: str,
+        event_type: str,
+        bounded_key: str,
+        identity: dict[str, Any],
+        legacy_keys: list[str] | None = None,
+    ) -> OrchestrationStageEvent | None:
+        event = self.uow.orchestration_stage_events.get_by_transition_key(bounded_key)
+        if event:
+            return event
+        for legacy_key in legacy_keys or []:
+            event = self.uow.orchestration_stage_events.get_by_transition_key(legacy_key)
+            if event:
+                return event
+        for event in self.uow.orchestration_stage_events.list_by_run(run_id):
+            if event.event_type == event_type and all(
+                event.evidence_references.get(field) == value
+                for field, value in identity.items()
+            ):
+                return event
+        return None
 
     @staticmethod
     def _validate_legacy_candidate_ref(
