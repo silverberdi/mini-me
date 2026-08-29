@@ -17,6 +17,7 @@ from minime.db.models import (
     BudgetReservationModel,
     CandidateAuthorshipModel,
     CandidateManifestModel,
+    CandidateRemediationModel,
     CapacityWindowModel,
     ChangeModel,
     CheckResultModel,
@@ -65,6 +66,8 @@ from minime.domain.enums import (
     ProviderHealthStatus,
     ProviderResultClass,
     ReadinessState,
+    RemediationFailureCode,
+    RemediationStatus,
     ReviewStatus,
     ReviewVerdict,
 )
@@ -109,6 +112,7 @@ from minime.domain.models import (
     BudgetReservation,
     CandidateAuthorship,
     CandidateManifest,
+    CandidateRemediation,
     CapacityWindow,
     Change,
     CheckResult,
@@ -646,6 +650,33 @@ def orchestration_candidate_model_to_domain(
     )
 
 
+def candidate_remediation_model_to_domain(model: CandidateRemediationModel) -> CandidateRemediation:
+    return CandidateRemediation(
+        remediation_id=model.id,
+        run_id=model.run_id,
+        job_id=model.job_id,
+        source_candidate_id=model.source_candidate_id,
+        source_generation=model.source_generation,
+        source_candidate_sha=model.source_candidate_sha,
+        source_base_sha=model.source_base_sha,
+        contract_version=model.contract_version,
+        contract_hash=model.contract_hash,
+        contract_payload=model.contract_payload or {},
+        status=RemediationStatus(model.status),
+        failure_code=RemediationFailureCode(model.failure_code) if model.failure_code else None,
+        failure_reason=model.failure_reason,
+        workspace_path=model.workspace_path,
+        branch_name=model.branch_name,
+        authorized_paths=model.authorized_paths or [],
+        tree_fingerprint=model.tree_fingerprint,
+        result_candidate_id=model.result_candidate_id,
+        result_generation=model.result_generation,
+        result_candidate_sha=model.result_candidate_sha,
+        created_at=model.created_at,
+        updated_at=model.updated_at,
+    )
+
+
 def orchestration_external_action_model_to_domain(
     model: OrchestrationExternalActionModel,
 ) -> OrchestrationExternalAction:
@@ -1172,7 +1203,6 @@ class PostgresJobRepository(JobRepositoryInterface):
         model.recovery_blocked_reason = reason
         model.updated_at = utc_now()
         return job_model_to_domain(model)
-
 
     for _status in JobStatus:
         VALID_TRANSITIONS[_status].add(JobStatus.RECOVERY_BLOCKED)
@@ -2480,6 +2510,76 @@ class PostgresOrchestrationCandidateRepository(OrchestrationCandidateRepositoryI
             model.superseded_by_id = superseded_by_id
 
 
+class PostgresCandidateRemediationRepository:
+    """Durable repository for immutable remediation authorizations."""
+
+    def __init__(self, session: Session):
+        self.session = session
+
+    def save(self, remediation: CandidateRemediation) -> None:
+        existing = self.session.get(CandidateRemediationModel, remediation.remediation_id)
+        values = dict(
+            run_id=remediation.run_id,
+            job_id=remediation.job_id,
+            source_candidate_id=remediation.source_candidate_id,
+            source_generation=remediation.source_generation,
+            source_candidate_sha=remediation.source_candidate_sha,
+            source_base_sha=remediation.source_base_sha,
+            contract_version=remediation.contract_version,
+            contract_hash=remediation.contract_hash,
+            contract_payload=remediation.contract_payload,
+            status=remediation.status.value,
+            failure_code=remediation.failure_code.value if remediation.failure_code else None,
+            failure_reason=remediation.failure_reason,
+            workspace_path=remediation.workspace_path,
+            branch_name=remediation.branch_name,
+            authorized_paths=remediation.authorized_paths,
+            tree_fingerprint=remediation.tree_fingerprint,
+            result_candidate_id=remediation.result_candidate_id,
+            result_generation=remediation.result_generation,
+            result_candidate_sha=remediation.result_candidate_sha,
+            updated_at=utc_now(),
+        )
+        if existing:
+            if (
+                existing.contract_hash != remediation.contract_hash
+                or existing.contract_payload != remediation.contract_payload
+            ):
+                raise ValueError("Admitted remediation contract cannot be replaced.")
+            for key, value in values.items():
+                setattr(existing, key, value)
+        else:
+            self.session.add(
+                CandidateRemediationModel(
+                    id=remediation.remediation_id, created_at=remediation.created_at, **values
+                )
+            )
+
+    def get_by_id(self, remediation_id: str) -> CandidateRemediation | None:
+        model = self.session.get(CandidateRemediationModel, remediation_id)
+        return candidate_remediation_model_to_domain(model) if model else None
+
+    def get_by_identity(
+        self, run_id: str, source_generation: int, source_candidate_sha: str, contract_hash: str
+    ) -> CandidateRemediation | None:
+        stmt = select(CandidateRemediationModel).where(
+            CandidateRemediationModel.run_id == run_id,
+            CandidateRemediationModel.source_generation == source_generation,
+            CandidateRemediationModel.source_candidate_sha == source_candidate_sha,
+            CandidateRemediationModel.contract_hash == contract_hash,
+        )
+        model = self.session.scalars(stmt).first()
+        return candidate_remediation_model_to_domain(model) if model else None
+
+    def list_by_run(self, run_id: str) -> list[CandidateRemediation]:
+        stmt = (
+            select(CandidateRemediationModel)
+            .where(CandidateRemediationModel.run_id == run_id)
+            .order_by(CandidateRemediationModel.created_at.asc())
+        )
+        return [candidate_remediation_model_to_domain(m) for m in self.session.scalars(stmt).all()]
+
+
 class PostgresOrchestrationExternalActionRepository(OrchestrationExternalActionRepositoryInterface):
     def __init__(self, session: Session):
         self.session = session
@@ -2590,6 +2690,7 @@ class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.orchestration_runs = PostgresOrchestrationRunRepository(session)
         self.orchestration_stage_events = PostgresOrchestrationStageEventRepository(session)
         self.orchestration_candidates = PostgresOrchestrationCandidateRepository(session)
+        self.candidate_remediations = PostgresCandidateRemediationRepository(session)
         self.orchestration_external_actions = PostgresOrchestrationExternalActionRepository(session)
 
     def commit(self) -> None:

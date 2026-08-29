@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -36,6 +38,8 @@ from minime.domain.enums import (
     ProviderResultClass,
     PullRequestLookupState,
     ReadinessState,
+    RemediationFailureCode,
+    RemediationStatus,
     ReviewStatus,
     ReviewVerdict,
     SchedulerMode,
@@ -188,6 +192,66 @@ class Job(BaseModel):
     continuation_decision: ContinuationDecision | None = None
     is_mixed_authorship: bool = False
     escalation_reason: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class RemediationContract(BaseModel):
+    """Immutable, canonical authorization payload for one remediation identity."""
+
+    contract_version: str = Field(min_length=1, max_length=32)
+    run_id: str = Field(min_length=1, max_length=64)
+    source_candidate_generation: int = Field(gt=0)
+    source_candidate_sha: str = Field(min_length=1, max_length=64)
+    source_candidate_base_sha: str = Field(min_length=1, max_length=64)
+    change_name: str = Field(min_length=1, max_length=128)
+    objective: str = Field(min_length=1, max_length=4000)
+    allowed_paths: list[str] = Field(min_length=1)
+    protected_paths: list[str] = Field(default_factory=list)
+    required_outcomes: list[str] = Field(default_factory=list)
+    verification_commands: list[str] = Field(default_factory=list)
+    stop_conditions: list[str] = Field(default_factory=list)
+    context: dict[str, Any] = Field(default_factory=dict)
+    known_failures: list[str] = Field(default_factory=list)
+    implementation_constraints: list[str] = Field(default_factory=list)
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    def canonical_payload(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
+
+    def canonical_json(self) -> str:
+        return json.dumps(
+            self.canonical_payload(), sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        )
+
+    def contract_hash(self) -> str:
+        return hashlib.sha256(self.canonical_json().encode("utf-8")).hexdigest()
+
+
+class CandidateRemediation(BaseModel):
+    """Durable remediation request and resulting candidate identity."""
+
+    remediation_id: str = Field(default_factory=generate_uuid)
+    run_id: str
+    job_id: str
+    source_candidate_id: str
+    source_generation: int
+    source_candidate_sha: str
+    source_base_sha: str
+    contract_version: str
+    contract_hash: str
+    contract_payload: dict[str, Any]
+    status: RemediationStatus = RemediationStatus.ADMITTED
+    failure_code: RemediationFailureCode | None = None
+    failure_reason: str | None = None
+    workspace_path: str | None = None
+    branch_name: str | None = None
+    authorized_paths: list[str] = Field(default_factory=list)
+    tree_fingerprint: str | None = None
+    result_candidate_id: str | None = None
+    result_generation: int | None = None
+    result_candidate_sha: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
@@ -741,6 +805,7 @@ class OrchestrationStatusView(BaseModel):
     human_gate: HumanGate | None = None
     stop_reason: str | None = None
     stop_details: dict[str, Any] = Field(default_factory=dict)
+    remediation: dict[str, Any] | None = None
     last_transition: dict[str, Any] | None = None
     created_at: datetime
     updated_at: datetime

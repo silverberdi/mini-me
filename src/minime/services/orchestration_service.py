@@ -48,6 +48,7 @@ from minime.domain.models import (
 )
 from minime.logging import redact_secrets
 from minime.services.candidate_integrity import resolve_base_branch_sha
+from minime.services.candidate_remediation import CandidateRemediationService
 from minime.services.execution_pipeline import ExecutionPipelineService
 from minime.services.project_service import ProjectService
 from minime.services.readiness_service import ReadinessService
@@ -66,6 +67,7 @@ def bounded_orchestration_transition_key(prefix: str, identity: dict[str, Any]) 
     if len(key) > ORCHESTRATION_TRANSITION_KEY_MAX_LENGTH:
         raise ValueError("Orchestration transition key prefix exceeds the schema contract.")
     return key
+
 
 ALLOWED_STAGE_TRANSITIONS: dict[OrchestrationStage, set[OrchestrationStage]] = {
     OrchestrationStage.ADMITTED: {OrchestrationStage.PREPARING_EXECUTION},
@@ -119,6 +121,11 @@ class OrchestrationService:
         self.project_service = ProjectService(self.uow)
         # Admission and execution must share the same canonical GitHub authority.
         self.readiness_service = ReadinessService(self.uow, github_adapter=self.github_adapter)
+        self.remediation_service = CandidateRemediationService(
+            self.uow,
+            self.project_root,
+            pipeline=self.pipeline,
+        )
 
     def admit_change(
         self,
@@ -372,9 +379,17 @@ class OrchestrationService:
             raise ValueError(f"Active job '{run.active_job_id}' not found.")
         root = Path(project_root).resolve() if project_root else self.project_root
         if job.project_id != run.project_id or job.change_name != run.change_name:
-            raise ValueError("Active job does not belong to the current project/change run context.")
-        if candidate is not None and job.candidate_sha and job.candidate_sha != candidate.candidate_sha:
-            raise ValueError("Preserved candidate does not match the active job candidate authority.")
+            raise ValueError(
+                "Active job does not belong to the current project/change run context."
+            )
+        if (
+            candidate is not None
+            and job.candidate_sha
+            and job.candidate_sha != candidate.candidate_sha
+        ):
+            raise ValueError(
+                "Preserved candidate does not match the active job candidate authority."
+            )
         record_adoption_events = [
             event
             for event in self.uow.orchestration_stage_events.list_by_run(run_id)
@@ -393,45 +408,65 @@ class OrchestrationService:
                     "manifest_hash": candidate.manifest_hash,
                 }.items()
             ):
-                raise ValueError("Legacy candidate record adoption evidence conflicts with the candidate record.")
+                raise ValueError(
+                    "Legacy candidate record adoption evidence conflicts with the candidate record."
+                )
 
         if candidate is None:
             if not job.candidate_sha:
-                raise ValueError("Legacy candidate record adoption requires an authoritative job candidate SHA.")
+                raise ValueError(
+                    "Legacy candidate record adoption requires an authoritative job candidate SHA."
+                )
             if not job.base_sha:
-                raise ValueError("Legacy candidate record adoption requires an authoritative job base SHA.")
+                raise ValueError(
+                    "Legacy candidate record adoption requires an authoritative job base SHA."
+                )
             if run.base_sha != job.base_sha:
-                raise ValueError("Legacy candidate record adoption requires run and job base SHA equality.")
+                raise ValueError(
+                    "Legacy candidate record adoption requires run and job base SHA equality."
+                )
             if run.current_generation <= 0:
-                raise ValueError("Legacy candidate record adoption requires a positive run generation.")
+                raise ValueError(
+                    "Legacy candidate record adoption requires a positive run generation."
+                )
             if run.current_candidate_sha and run.current_candidate_sha != job.candidate_sha:
-                raise ValueError("Legacy candidate record adoption conflicts with the run candidate authority.")
+                raise ValueError(
+                    "Legacy candidate record adoption conflicts with the run candidate authority."
+                )
             manifest = self.uow.candidate_manifests.get_by_candidate_sha(
                 job.job_id, job.candidate_sha
             )
             if not manifest:
-                raise ValueError("Legacy candidate record adoption requires the canonical candidate manifest.")
+                raise ValueError(
+                    "Legacy candidate record adoption requires the canonical candidate manifest."
+                )
             if manifest.candidate_sha != job.candidate_sha:
                 raise ValueError("Legacy candidate manifest does not match the job candidate SHA.")
             if not manifest.manifest_hash:
                 raise ValueError("Legacy candidate manifest hash must be non-empty.")
             if manifest.total_files_count <= 0:
                 raise ValueError("Legacy candidate manifest must contain at least one file.")
-            self._validate_legacy_candidate_ref(
-                root, run, job, job.candidate_sha, candidate_ref
-            )
+            self._validate_legacy_candidate_ref(root, run, job, job.candidate_sha, candidate_ref)
             ancestry = subprocess.run(
                 ["git", "merge-base", "--is-ancestor", job.base_sha, job.candidate_sha],
-                cwd=str(root), capture_output=True, check=False,
+                cwd=str(root),
+                capture_output=True,
+                check=False,
             )
             if ancestry.returncode != 0:
-                raise ValueError("Historical candidate base is not an ancestor of the candidate SHA.")
+                raise ValueError(
+                    "Historical candidate base is not an ancestor of the candidate SHA."
+                )
             commit = subprocess.run(
                 ["git", "cat-file", "-e", f"{job.candidate_sha}^{{commit}}"],
-                cwd=str(root), capture_output=True, check=False,
+                cwd=str(root),
+                capture_output=True,
+                check=False,
             )
             if commit.returncode != 0:
-                raise ValueError("Historical candidate commit does not exist in the registered repository.")
+                raise ValueError(
+                    "Historical candidate commit does not exist in the registered repository."
+                )
             if any(
                 existing.generation == run.current_generation
                 for existing in self.uow.orchestration_candidates.list_by_run(run_id)
@@ -508,14 +543,18 @@ class OrchestrationService:
 
         if candidate.candidate_ref:
             if candidate_ref and candidate_ref != candidate.candidate_ref:
-                raise ValueError("Persisted candidate ref disagrees with the supplied candidate ref.")
+                raise ValueError(
+                    "Persisted candidate ref disagrees with the supplied candidate ref."
+                )
         elif not candidate_ref:
             raise ValueError(
                 "Preserved candidate lacks a durable candidate ref; explicit --candidate-ref is required."
             )
         else:
             adopted_ref = candidate_ref
-            self._validate_legacy_candidate_ref(root, run, job, candidate.candidate_sha, adopted_ref)
+            self._validate_legacy_candidate_ref(
+                root, run, job, candidate.candidate_sha, adopted_ref
+            )
             adoption_identity = {
                 "run_id": run_id,
                 "candidate_generation": candidate.generation,
@@ -572,7 +611,10 @@ class OrchestrationService:
         ref = candidate.candidate_ref
         resolved = subprocess.run(
             ["git", "rev-parse", "--verify", f"{ref}^{{commit}}"],
-            cwd=str(root), capture_output=True, text=True, check=False,
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            check=False,
         )
         if resolved.returncode != 0 or resolved.stdout.strip() != candidate.candidate_sha:
             raise ValueError("Preserved candidate ref does not resolve to its recorded SHA.")
@@ -601,24 +643,39 @@ class OrchestrationService:
             )
             if existing:
                 return self.uow.orchestration_runs.get_by_id(run_id) or run
-            branch_name = (
-                f"minime/{run.change_name}-{job.job_id}-integration-gen{next_generation}"
-            )
+            branch_name = f"minime/{run.change_name}-{job.job_id}-integration-gen{next_generation}"
             integration_path = (
-                root / ".minime" / "worktrees"
-                / f"{job.job_id}-integration-gen{next_generation}"
+                root / ".minime" / "worktrees" / f"{job.job_id}-integration-gen{next_generation}"
             )
             manager = self.pipeline.worktree_manager
             try:
                 ancestry = subprocess.run(
-                    ["git", "merge-base", "--is-ancestor", candidate.base_sha, candidate.candidate_sha],
-                    cwd=str(root), capture_output=True, check=False,
+                    [
+                        "git",
+                        "merge-base",
+                        "--is-ancestor",
+                        candidate.base_sha,
+                        candidate.candidate_sha,
+                    ],
+                    cwd=str(root),
+                    capture_output=True,
+                    check=False,
                 )
                 if ancestry.returncode != 0:
-                    raise ValueError("Historical candidate is not based on its recorded historical base.")
+                    raise ValueError(
+                        "Historical candidate is not based on its recorded historical base."
+                    )
                 commits_result = subprocess.run(
-                    ["git", "rev-list", "--reverse", f"{candidate.base_sha}..{candidate.candidate_sha}"],
-                    cwd=str(root), capture_output=True, text=True, check=False,
+                    [
+                        "git",
+                        "rev-list",
+                        "--reverse",
+                        f"{candidate.base_sha}..{candidate.candidate_sha}",
+                    ],
+                    cwd=str(root),
+                    capture_output=True,
+                    text=True,
+                    check=False,
                 )
                 if commits_result.returncode != 0:
                     raise ValueError("Unable to determine the preserved candidate commit sequence.")
@@ -626,7 +683,9 @@ class OrchestrationService:
                 for commit_sha in filter(None, commits_result.stdout.splitlines()):
                     already_on_base = subprocess.run(
                         ["git", "merge-base", "--is-ancestor", commit_sha, current_base],
-                        cwd=str(root), capture_output=True, check=False,
+                        cwd=str(root),
+                        capture_output=True,
+                        check=False,
                     )
                     if already_on_base.returncode != 0:
                         commits.append(commit_sha)
@@ -640,10 +699,14 @@ class OrchestrationService:
                 )
                 verified = subprocess.run(
                     ["git", "merge-base", "--is-ancestor", current_base, integrated_sha],
-                    cwd=str(root), capture_output=True, check=False,
+                    cwd=str(root),
+                    capture_output=True,
+                    check=False,
                 )
                 if verified.returncode != 0:
-                    raise ValueError("Integrated candidate is not based on the current registered base.")
+                    raise ValueError(
+                        "Integrated candidate is not based on the current registered base."
+                    )
                 manifest = self.pipeline.manifest_service.generate_manifest(
                     worktree.path, integrated_sha, job.job_id
                 )
@@ -673,7 +736,9 @@ class OrchestrationService:
                 run.current_candidate_sha = integrated_sha
                 check_run = asyncio.run(
                     self.pipeline.checks_runner.run(
-                        job.job_id, project.checks, worktree.path,
+                        job.job_id,
+                        project.checks,
+                        worktree.path,
                         candidate_sha=integrated_sha,
                         candidate_generation=next_generation,
                     )
@@ -685,9 +750,9 @@ class OrchestrationService:
                 if not check_run.passed:
                     raise ValueError("Integrated candidate deterministic checks failed.")
                 self.uow.commit()
-                asyncio.run(manager.remove_clean_worktree_path(
-                    worktree.path, job.job_id, run.project_id
-                ))
+                asyncio.run(
+                    manager.remove_clean_worktree_path(worktree.path, job.job_id, run.project_id)
+                )
             except Exception as exc:
                 details = {
                     "code": "BASE_INTEGRATION_CONFLICT",
@@ -713,8 +778,11 @@ class OrchestrationService:
                     )
                 )
                 self._stop_run(
-                    run, OrchestrationStopOutcome.NEEDS_HUMAN, HumanGate.NEEDS_HUMAN,
-                    "Base integration requires human remediation.", details
+                    run,
+                    OrchestrationStopOutcome.NEEDS_HUMAN,
+                    HumanGate.NEEDS_HUMAN,
+                    "Base integration requires human remediation.",
+                    details,
                 )
                 return self.uow.orchestration_runs.get_by_id(run_id) or run
             # Successful integration continues through the common authority reset below.
@@ -813,7 +881,10 @@ class OrchestrationService:
                 project_id=run.project_id,
                 change_id=run.change_name,
                 operation_id=run_id,
-                payload={"transition_key": resolution_key, "candidate_sha": candidate.candidate_sha},
+                payload={
+                    "transition_key": resolution_key,
+                    "candidate_sha": candidate.candidate_sha,
+                },
                 timestamp=utc_now(),
             )
         )
@@ -837,8 +908,7 @@ class OrchestrationService:
                 return event
         for event in self.uow.orchestration_stage_events.list_by_run(run_id):
             if event.event_type == event_type and all(
-                event.evidence_references.get(field) == value
-                for field, value in identity.items()
+                event.evidence_references.get(field) == value for field, value in identity.items()
             ):
                 return event
         return None
@@ -860,16 +930,23 @@ class OrchestrationService:
             raise ValueError("Legacy candidate ref must be a local mini me-owned branch.")
         ref_exists = subprocess.run(
             ["git", "show-ref", "--verify", "--quiet", candidate_ref],
-            cwd=str(root), capture_output=True, check=False,
+            cwd=str(root),
+            capture_output=True,
+            check=False,
         )
         if ref_exists.returncode != 0:
             raise ValueError("Legacy candidate ref does not exist in the registered repository.")
         adopted = subprocess.run(
             ["git", "rev-parse", "--verify", f"{candidate_ref}^{{commit}}"],
-            cwd=str(root), capture_output=True, text=True, check=False,
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            check=False,
         )
         if adopted.returncode != 0 or adopted.stdout.strip() != candidate_sha:
-            raise ValueError("Legacy candidate ref does not resolve to the authoritative candidate SHA.")
+            raise ValueError(
+                "Legacy candidate ref does not resolve to the authoritative candidate SHA."
+            )
 
     def drive_coordinator(
         self,
@@ -922,9 +999,7 @@ class OrchestrationService:
                 # 2. Attach or queue Job
                 if not run.active_job_id:
                     try:
-                        job = self.pipeline.queue_job(
-                            run.project_id, run.change_name, commit=False
-                        )
+                        job = self.pipeline.queue_job(run.project_id, run.change_name, commit=False)
                     except ValueError as exc:
                         if (
                             "waiting for capacity recovery" in str(exc).lower()
@@ -1589,6 +1664,60 @@ class OrchestrationService:
 
         return self.uow.orchestration_runs.get_by_id(run_id) or run
 
+    def remediate_preserved_candidate(
+        self,
+        run_id: str,
+        contract: dict[str, Any] | str | Path,
+        project_root: str | Path | None = None,
+    ) -> OrchestrationRun:
+        """Perform the separate, explicitly authorized remediation operation."""
+        if project_root and Path(project_root).resolve() != self.project_root:
+            self.remediation_service = CandidateRemediationService(
+                self.uow,
+                Path(project_root).resolve(),
+                pipeline=self.pipeline,
+            )
+        remediation = self.remediation_service.remediate(run_id, contract)
+        run = self.uow.orchestration_runs.get_by_id(run_id)
+        if not run:
+            raise ValueError(f"Orchestration run '{run_id}' not found after remediation.")
+        if remediation.status.value == "COMPLETED":
+            job = self.uow.jobs.get_by_id(run.active_job_id) if run.active_job_id else None
+            if job:
+                job.status = JobStatus.CHECKS_PASSED
+                self.uow.jobs.save(job)
+            run.stop_outcome = None
+            run.human_gate = None
+            run.stop_reason = None
+            run.stop_details = {"remediation_id": remediation.remediation_id}
+            run.is_active = True
+            # Re-enter the existing coordinator at its legal post-check boundary;
+            # drive_coordinator performs RUNNING_CHECKS -> FREEZING_CANDIDATE -> review.
+            run.current_stage = OrchestrationStage.RUNNING_CHECKS
+            run.resumable_stage = OrchestrationStage.RUNNING_CHECKS
+            self.uow.orchestration_runs.save(run)
+            self.uow.orchestration_stage_events.save(
+                OrchestrationStageEvent(
+                    run_id=run_id,
+                    from_stage=OrchestrationStage.RUNNING_CHECKS,
+                    to_stage=OrchestrationStage.RUNNING_CHECKS,
+                    event_type=EventType.ORCHESTRATION_RESUMED.value,
+                    transition_key=bounded_orchestration_transition_key(
+                        "REMED", {"run_id": run_id, "remediation_id": remediation.remediation_id}
+                    ),
+                    evidence_references={
+                        "remediation_id": remediation.remediation_id,
+                        "generation": remediation.result_generation,
+                        "candidate_sha": remediation.result_candidate_sha,
+                    },
+                    actor="human",
+                    created_at=utc_now(),
+                )
+            )
+            self.uow.commit()
+            return self.drive_coordinator(run_id, project_root=project_root)
+        return self.uow.orchestration_runs.get_by_id(run_id) or run
+
     def get_status(self, run_id: str) -> OrchestrationStatusView:
         """Return truthful, secret-redacted operational status for an orchestration run."""
         run = self.uow.orchestration_runs.get_by_id(run_id)
@@ -1603,6 +1732,24 @@ class OrchestrationService:
         review = self.uow.reviews.get_by_job_id(job.job_id) if job else None
         audit = self.uow.audits.get_by_job_id(job.job_id) if job else None
         checks = self.uow.check_results.list_by_job(job.job_id) if job else []
+        remediation_view = None
+        remediation_repo = getattr(self.uow, "candidate_remediations", None)
+        if remediation_repo:
+            remediations = remediation_repo.list_by_run(run.run_id)
+            if remediations:
+                latest_remediation = remediations[-1]
+                remediation_view = {
+                    "remediation_id": latest_remediation.remediation_id,
+                    "source_generation": latest_remediation.source_generation,
+                    "source_candidate_sha": latest_remediation.source_candidate_sha,
+                    "contract_hash": latest_remediation.contract_hash,
+                    "status": latest_remediation.status.value,
+                    "result_generation": latest_remediation.result_generation,
+                    "result_candidate_sha": latest_remediation.result_candidate_sha,
+                    "failure_code": latest_remediation.failure_code.value
+                    if latest_remediation.failure_code
+                    else None,
+                }
         pending_handoff = None
         if job:
             handoffs = self.uow.job_handoffs.list_by_job(job.job_id)
@@ -1711,6 +1858,7 @@ class OrchestrationService:
             human_gate=run.human_gate,
             stop_reason=redact_secrets(run.stop_reason or "") if run.stop_reason else None,
             stop_details=run.stop_details or {},
+            remediation=remediation_view,
             last_transition={
                 "from_stage": last_event.from_stage.value
                 if last_event and last_event.from_stage

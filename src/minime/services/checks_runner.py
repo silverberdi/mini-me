@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlparse
 
 from minime.domain.enums import EvidenceDiagnosticStatus
 from minime.domain.models import CheckResult, EvidenceDiagnostic
@@ -64,11 +66,57 @@ class ChecksRunner:
                 diagnostics.append(diag)
                 continue
 
+            disposable = bool(check.get("disposable_postgres", False))
+            if disposable:
+                expected = str(
+                    check.get("expected_database") or check.get("expected_db") or ""
+                ).strip()
+                actual_url = str(os.environ.get("MINIME_DATABASE_URL") or "").strip()
+                actual = urlparse(actual_url).path.lstrip("/") if actual_url else ""
+                if (
+                    not expected
+                    or not actual_url
+                    or not actual_url.startswith(("postgresql://", "postgresql+"))
+                    or actual != expected
+                    or actual == "minime"
+                ):
+                    reason = "Disposable PostgreSQL safety validation failed; check not executed."
+                    result = CheckResult(
+                        job_id=job_id,
+                        check_name=name,
+                        command=command,
+                        exit_code=2,
+                        duration_ms=0,
+                        output_snippet=reason,
+                        candidate_sha=candidate_sha,
+                        candidate_generation=candidate_generation,
+                    )
+                    results.append(result)
+                    diagnostics.append(
+                        EvidenceDiagnostic(
+                            job_id=job_id,
+                            attempt_id=attempt_id,
+                            stage_type="CHECKS",
+                            check_name=name,
+                            diagnostic_status=EvidenceDiagnosticStatus.FAIL,
+                            environment_identity=env_identity,
+                            candidate_sha=candidate_sha,
+                            reason=reason,
+                            evidence_reference={"safety_rejected": True},
+                        )
+                    )
+                    continue
+
             start = asyncio.get_running_loop().time()
             try:
+                check_env = os.environ.copy()
+                if not disposable:
+                    check_env.pop("MINIME_DATABASE_URL", None)
+                    check_env.pop("MINIME_EXPECTED_DATABASE", None)
                 proc = await asyncio.create_subprocess_shell(
                     command,
                     cwd=str(worktree_path),
+                    env=check_env,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
