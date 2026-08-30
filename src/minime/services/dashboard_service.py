@@ -1092,6 +1092,8 @@ class OperationsDashboardService:
         if not target_run_id or project_id or change_name:
             general_events = self.uow.events.list_events(project_id=project_id, change_id=change_name, limit=limit)
             for ge in general_events:
+                if project_id and hasattr(ge, "project_id") and ge.project_id and ge.project_id != project_id:
+                    continue
                 summary = ge.event_type.value.replace("_", " ").title() if hasattr(ge.event_type, "value") else str(ge.event_type).replace("_", " ").title()
                 if ge.payload and "reason" in ge.payload:
                     summary += f": {ge.payload['reason']}"

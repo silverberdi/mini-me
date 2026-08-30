@@ -699,11 +699,11 @@
       <div class="overview-meta-grid">
         <div class="meta-box">
           <div class="meta-box-label">GitHub Issue</div>
-          <div class="meta-box-val">${github.issue_url ? `<a href="${escapeHtml(github.issue_url)}" target="_blank" class="text-primary">#${github.issue_number} ↗</a>` : (github.issue_number ? `#${github.issue_number}` : '---')}</div>
+          <div class="meta-box-val">${github.issue_url ? `<a href="${sanitizeUrl(github.issue_url)}" target="_blank" rel="noopener noreferrer" class="text-primary">#${github.issue_number} ↗</a>` : (github.issue_number ? `#${github.issue_number}` : '---')}</div>
         </div>
         <div class="meta-box">
           <div class="meta-box-label">Pull Request</div>
-          <div class="meta-box-val">${github.pr_url ? `<a href="${escapeHtml(github.pr_url)}" target="_blank" class="text-primary">PR #${github.pr_number} ↗</a>` : (github.pr_number ? `PR #${github.pr_number}` : 'None created yet')}</div>
+          <div class="meta-box-val">${github.pr_url ? `<a href="${sanitizeUrl(github.pr_url)}" target="_blank" rel="noopener noreferrer" class="text-primary">PR #${github.pr_number} ↗</a>` : (github.pr_number ? `PR #${github.pr_number}` : 'None created yet')}</div>
         </div>
         <div class="meta-box">
           <div class="meta-box-label">PR State</div>
@@ -757,6 +757,15 @@
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#039;');
+  }
+
+  function sanitizeUrl(url) {
+    if (!url) return '#';
+    const str = String(url).trim();
+    if (str.startsWith('https://') || str.startsWith('http://')) {
+      return escapeHtml(str);
+    }
+    return '#';
   }
 
   function formatRelativeTime(isoStr) {
