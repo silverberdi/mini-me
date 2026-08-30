@@ -819,7 +819,7 @@ class OperationsDashboardService:
         elif stage == OrchestrationStage.PREPARING_PR:
             pr_status = "running"
             pr_summary = "Preparing Pull Request"
-        elif "merge_commit_sha" in pr_details or (change and change.status == ChangeStatus.DONE):
+        elif "merge_commit_sha" in pr_details or (change and change.status == ChangeStatus.DONE and rev_status == "passed" and audit_status == "passed"):
             pr_status = "passed"
             pr_summary = f"Merged into target branch ({_short_sha(pr_details.get('merge_commit_sha')) or 'complete'})"
         elif stage == OrchestrationStage.PR_PREPARED or run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE:

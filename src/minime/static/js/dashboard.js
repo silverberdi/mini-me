@@ -82,7 +82,11 @@
 
   // Theme Handling
   function setupTheme() {
-    const savedTheme = safeGetStorage('minime_theme', 'theme-dark');
+    let savedTheme = safeGetStorage('minime_theme', null);
+    if (!savedTheme) {
+      const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+      savedTheme = prefersDark ? 'theme-dark' : 'theme-light';
+    }
     document.body.className = savedTheme;
     updateThemeIcon(savedTheme);
   }
