@@ -100,9 +100,71 @@ class WorktreeManager:
     def worktree_path(self, job_id: str) -> Path:
         return self.worktrees_root / job_id
 
+    def remediation_worktree_path(self, job_id: str, generation: int) -> Path:
+        return self.worktrees_root / f"{job_id}-remediation-gen{generation}"
+
+    async def create_remediation_worktree(
+        self,
+        job_id: str,
+        change_name: str,
+        source_sha: str,
+        generation: int,
+        project_id: str | None = None,
+    ) -> WorktreeInfo:
+        """Create or reconcile a remediation workspace rooted at an immutable source SHA."""
+        path = self.remediation_worktree_path(job_id, generation).resolve()
+        root = self.worktrees_root.resolve()
+        if root not in path.parents:
+            raise ValueError(f"Worktree path escapes managed root: {path}")
+        branch = f"minime/{change_name}-{job_id}-remediation-gen{generation}"
+        if path.exists():
+            actual_branch = (await self._git(["branch", "--show-current"], cwd=path)).strip()
+            actual_sha = await self.current_sha(path)
+            if actual_branch != branch or actual_sha != source_sha:
+                raise RuntimeError(
+                    "Existing remediation workspace identity does not match durable source."
+                )
+            return WorktreeInfo(path, branch, source_sha)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            await self._git(["rev-parse", "--verify", f"refs/heads/{branch}"])
+            raise RuntimeError(
+                f"Remediation branch already exists without its managed worktree: {branch}"
+            )
+        except RuntimeError as exc:
+            if "already exists without" in str(exc):
+                raise
+        await self._git(
+            ["worktree", "add", "-b", branch, str(path), source_sha],
+            cwd=self.project_root,
+            job_id=job_id,
+            project_id=project_id,
+            operation_type="remediation_worktree_add",
+            managed_worktree_path=path,
+        )
+        return WorktreeInfo(path, branch, source_sha)
+
+    async def changed_paths_since(
+        self, worktree_path: str | Path, source_sha: str
+    ) -> tuple[str, ...]:
+        """Return committed, staged, unstaged and untracked paths relative to source."""
+        path = Path(worktree_path).resolve()
+        diff = await self._git(["diff", "--name-only", source_sha], cwd=path)
+        committed = await self._git(["diff", "--name-only", f"{source_sha}..HEAD"], cwd=path)
+        status = await self._git(["status", "--porcelain=v1", "--untracked-files=all"], cwd=path)
+        found = {line.strip() for line in (diff + "\n" + committed).splitlines() if line.strip()}
+        found.update(
+            line[3:].strip() for line in status.splitlines() if len(line) >= 4 and line[3:].strip()
+        )
+        return tuple(sorted(found))
+
     async def create_worktree(
-        self, job_id: str, change_name: str, base_branch: str,
-        project_id: str | None = None, branch_name: str | None = None
+        self,
+        job_id: str,
+        change_name: str,
+        base_branch: str,
+        project_id: str | None = None,
+        branch_name: str | None = None,
     ) -> WorktreeInfo:
         path = self.worktree_path(job_id).resolve()
         root = self.worktrees_root.resolve()
@@ -195,9 +257,7 @@ class WorktreeManager:
         )
         cached = await self._git(["diff", "--cached", "--binary"], cwd=path)
         unstaged = await self._git(["diff", "--binary"], cwd=path)
-        untracked = await self._git(
-            ["ls-files", "--others", "--exclude-standard", "-z"], cwd=path
-        )
+        untracked = await self._git(["ls-files", "--others", "--exclude-standard", "-z"], cwd=path)
         digest = hashlib.sha256()
         digest.update(cached.encode())
         digest.update(unstaged.encode())
@@ -245,7 +305,12 @@ class WorktreeManager:
         return await self.current_sha(path)
 
     async def finalize_candidate_commit(
-        self, worktree_path: str | Path, job_id: str, project_id: str | None = None
+        self,
+        worktree_path: str | Path,
+        job_id: str,
+        project_id: str | None = None,
+        remediation_id: str | None = None,
+        contract_hash: str | None = None,
     ) -> str:
         path = Path(worktree_path).resolve()
         state = await self.inspect_worktree_state(path)
@@ -258,16 +323,24 @@ class WorktreeManager:
                 operation_type="candidate_stage",
                 managed_worktree_path=path,
             )
+            commit_args = [
+                "-c",
+                "user.name=mini me",
+                "-c",
+                "user.email=mini-me@localhost",
+                "commit",
+                "-m",
+                f"mini me authoritative candidate for {job_id}",
+            ]
+            if remediation_id and contract_hash:
+                commit_args.extend(
+                    [
+                        "-m",
+                        f"Mini-Me-Remediation: {remediation_id}\nMini-Me-Contract: {contract_hash}",
+                    ]
+                )
             await self._git(
-                [
-                    "-c",
-                    "user.name=mini me",
-                    "-c",
-                    "user.email=mini-me@localhost",
-                    "commit",
-                    "-m",
-                    f"mini me authoritative candidate for {job_id}",
-                ],
+                commit_args,
                 cwd=path,
                 job_id=job_id,
                 project_id=project_id,
@@ -276,18 +349,77 @@ class WorktreeManager:
             )
         return await self.current_sha(path)
 
+    async def verify_remediation_commit(
+        self,
+        worktree_path: str | Path,
+        source_sha: str,
+        branch_name: str,
+        remediation_id: str,
+        contract_hash: str,
+        authorized_paths: list[str],
+    ) -> tuple[bool, str | None]:
+        """Reconcile a post-commit crash only when Git proves exact remediation identity."""
+        path = Path(worktree_path).resolve()
+        actual_branch = (await self._git(["branch", "--show-current"], cwd=path)).strip()
+        head = await self.current_sha(path)
+        if actual_branch != branch_name or head == source_sha:
+            return False, "Remediation branch or advanced HEAD is not present."
+        parent = (await self._git(["rev-parse", "HEAD^"], cwd=path)).strip()
+        if parent != source_sha:
+            return False, "Remediation commit parent does not match source candidate."
+        message = await self._git(["show", "-s", "--format=%B", "HEAD"], cwd=path)
+        if (
+            f"Mini-Me-Remediation: {remediation_id}" not in message
+            or f"Mini-Me-Contract: {contract_hash}" not in message
+        ):
+            return False, "Remediation commit trailers do not match durable identity."
+        changed = set(await self.changed_paths_since(path, source_sha))
+        allowed = set(authorized_paths)
+        if not changed or not changed.issubset(allowed):
+            return (
+                False,
+                "Reconciled remediation commit changed paths outside its authorized scope.",
+            )
+        return True, head
+
+    async def reconcile_remediation_worktree(
+        self,
+        job_id: str,
+        change_name: str,
+        source_sha: str,
+        generation: int,
+        remediation_id: str,
+        contract_hash: str,
+        authorized_paths: list[str],
+    ) -> WorktreeInfo | None:
+        """Adopt only an exact post-commit remediation workspace after a crash."""
+        path = self.remediation_worktree_path(job_id, generation).resolve()
+        if not path.exists():
+            return None
+        branch = f"minime/{change_name}-{job_id}-remediation-gen{generation}"
+        head = await self.current_sha(path)
+        if head == source_sha:
+            return None
+        valid, error = await self.verify_remediation_commit(
+            path,
+            source_sha,
+            branch,
+            remediation_id,
+            contract_hash,
+            authorized_paths,
+        )
+        if not valid:
+            raise RuntimeError(error or "Remediation commit reconciliation failed.")
+        return WorktreeInfo(path, branch, source_sha)
+
     async def cleanup_worktree(self, job_id: str, project_id: str | None = None) -> str | None:
         """Compatibility alias that refuses dirty-worktree cleanup."""
         await self.remove_clean_worktree(job_id, project_id)
         return None
 
-    async def remove_clean_worktree(
-        self, job_id: str, project_id: str | None = None
-    ) -> None:
+    async def remove_clean_worktree(self, job_id: str, project_id: str | None = None) -> None:
         """Remove a managed worktree only after independently proving it is clean."""
-        await self.remove_clean_worktree_path(
-            self.worktree_path(job_id), job_id, project_id
-        )
+        await self.remove_clean_worktree_path(self.worktree_path(job_id), job_id, project_id)
 
     async def remove_clean_worktree_path(
         self,
@@ -300,9 +432,7 @@ class WorktreeManager:
             return
         state = await self.inspect_worktree_state(path)
         if state.dirty:
-            raise RuntimeError(
-                f"Refusing to remove dirty managed worktree: {path}"
-            )
+            raise RuntimeError(f"Refusing to remove dirty managed worktree: {path}")
         await self._git(
             ["worktree", "remove", str(path)],
             cwd=self.project_root,

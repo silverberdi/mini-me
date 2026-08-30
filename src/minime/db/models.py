@@ -811,6 +811,54 @@ class OrchestrationCandidateModel(Base):
     )
 
 
+class CandidateRemediationModel(Base):
+    __tablename__ = "candidate_remediations"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("orchestration_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    job_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source_candidate_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_candidate_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_base_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    contract_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    contract_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    contract_payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    failure_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    workspace_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    branch_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    authorized_paths: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    tree_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    result_candidate_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    result_generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    result_candidate_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "run_id",
+            "source_generation",
+            "source_candidate_sha",
+            "contract_hash",
+            name="uq_candidate_remediation_identity",
+        ),
+    )
+
+
 class OrchestrationExternalActionModel(Base):
     __tablename__ = "orchestration_external_actions"
 
