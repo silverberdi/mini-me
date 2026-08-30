@@ -310,6 +310,8 @@ class OperationsDashboardService:
                 (job_for_run and job_for_run.status == JobStatus.RECOVERY_BLOCKED)
                 or (r.stop_reason and "recovery" in r.stop_reason.lower())
             )
+            is_checks_failed = (job_for_run and job_for_run.status == JobStatus.CHECKS_FAILED)
+
             if not r.is_active and (
                 r.stop_outcome in {
                     OrchestrationStopOutcome.NEEDS_HUMAN,
@@ -317,9 +319,13 @@ class OperationsDashboardService:
                     OrchestrationStopOutcome.WAITING_EXTERNAL,
                 }
                 or is_recovery_blocked
+                or is_checks_failed
             ):
-                job_for_run = jobs_map.get(r.active_job_id) if r.active_job_id else None
-                reason = r.stop_reason or (job_for_run.recovery_blocked_reason if job_for_run else None) or f"Stopped at {r.current_stage.value if r.current_stage else 'unknown'}"
+                reason = r.stop_reason or (job_for_run.recovery_blocked_reason if (job_for_run and is_recovery_blocked) else None)
+                if not reason and is_checks_failed:
+                    reason = "Deterministic verification checks failed on candidate"
+                if not reason:
+                    reason = f"Stopped at {r.current_stage.value if r.current_stage else 'unknown'}"
                 reason = redact_secrets(reason)
 
                 guidance = "Review the stop reason and take necessary action."
@@ -329,6 +335,8 @@ class OperationsDashboardService:
                     guidance = "Wait for provider rate limits/capacity reset window."
                 elif is_recovery_blocked:
                     guidance = "Unblock recovery by resolving external dependency or workspace state."
+                elif is_checks_failed:
+                    guidance = "Fix code or tests to satisfy deterministic verification suite."
                 elif r.stop_outcome == OrchestrationStopOutcome.WAITING_EXTERNAL:
                     guidance = "Check external system status and resume run."
 
@@ -339,11 +347,11 @@ class OperationsDashboardService:
                         run_id=r.run_id,
                         job_id=r.active_job_id,
                         stage=r.current_stage.value if r.current_stage else "UNKNOWN",
-                        stop_outcome=r.stop_outcome.value if r.stop_outcome else None,
+                        stop_outcome=r.stop_outcome.value if r.stop_outcome else ("CHECKS_FAILED" if is_checks_failed else None),
                         human_gate=r.human_gate.value if r.human_gate else None,
                         reason=reason,
                         remediation_guidance=guidance,
-                        stop_code=r.stop_outcome.value if r.stop_outcome else None,
+                        stop_code=r.stop_outcome.value if r.stop_outcome else ("CHECKS_FAILED" if is_checks_failed else None),
                         can_retry=r.stop_outcome != OrchestrationStopOutcome.NEEDS_HUMAN,
                         can_reassign=True,
                         can_remediate=r.current_candidate_sha is not None,
@@ -448,13 +456,21 @@ class OperationsDashboardService:
                 github_health_status = h.status.value if hasattr(h.status, "value") else str(h.status)
                 break
 
+        is_overall_healthy = (
+            github_health_status not in {"FAILED", "DEGRADED"}
+            and all(
+                (h.status.value if hasattr(h.status, "value") else str(h.status)) not in {"FAILED", "DEGRADED"}
+                for h in prov_health
+            )
+        )
+
         system_status = SystemStatusDTO(
-            healthy=True,
+            healthy=is_overall_healthy,
             database_engine="PostgreSQL",
             database_healthy=True,
             database_message="PostgreSQL operational",
             scheduler_mode=sched_status.mode.value,
-            queue_depth=sched_status.queue_depth if hasattr(sched_status, "queue_depth") else 0,
+            queue_depth=sum(1 for c in all_changes if c.status == ChangeStatus.READY),
             github_app_health=github_health_status,
             active_runs_count=len(active_executions),
             total_changes_count=len(change_summaries),
@@ -781,12 +797,22 @@ class OperationsDashboardService:
         # 6. PR & Merge
         pr_status = "not_started"
         pr_summary = "Not prepared"
+        pr_details = {}
+        if run:
+            actions = self.uow.orchestration_external_actions.list_by_run(run.run_id)
+            for a in actions:
+                if a.result_payload and "merge_commit_sha" in a.result_payload:
+                    pr_details["merge_commit_sha"] = a.result_payload["merge_commit_sha"]
+
         if checks_status == "failed" or rev_status in {"failed", "blocked"} or audit_status in {"failed", "blocked"}:
             pr_status = "blocked"
             pr_summary = "Blocked by upstream pipeline failure"
         elif stage == OrchestrationStage.PREPARING_PR:
             pr_status = "running"
             pr_summary = "Preparing Pull Request"
+        elif "merge_commit_sha" in pr_details or (change and change.status == ChangeStatus.DONE):
+            pr_status = "passed"
+            pr_summary = f"Merged into target branch ({_short_sha(pr_details.get('merge_commit_sha')) or 'complete'})"
         elif stage == OrchestrationStage.PR_PREPARED or run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE:
             if rev_status == "passed" and audit_status == "passed":
                 pr_status = "passed"
@@ -794,12 +820,7 @@ class OperationsDashboardService:
             else:
                 pr_status = "not_started"
                 pr_summary = "Waiting for review and audit completion"
-        pr_details = {}
-        if run:
-            actions = self.uow.orchestration_external_actions.list_by_run(run.run_id)
-            for a in actions:
-                if a.result_payload and "merge_commit_sha" in a.result_payload:
-                    pr_details["merge_commit_sha"] = a.result_payload["merge_commit_sha"]
+
         phases.append(PipelinePhaseDTO(name="pr_merge", display_name="PR & Merge", status=pr_status, summary=pr_summary, details=pr_details))
 
         return phases
