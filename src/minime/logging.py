@@ -56,7 +56,7 @@ def redact_secrets(text: str, custom_secrets: list[str] | None = None) -> str:
 
     # Redact common key=value patterns for keys/tokens
     redacted = re.sub(
-        r"(api[_-]?key|token|password|secret|key)=([^\s&;]+)",
+        r"(api[_-]?key|access[_-]?key|secret[_-]?key|token|password|secret)=([^\s&;]+)",
         r"\1=[REDACTED]",
         redacted,
         flags=re.IGNORECASE,

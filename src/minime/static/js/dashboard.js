@@ -8,6 +8,7 @@
   // State
   let overviewData = null;
   let selectedChange = null;
+  let initialSelected = false;
   let activeFilter = 'ALL';
   let searchQuery = '';
   let refreshIntervalSeconds = parseInt(localStorage.getItem('minime_dashboard_interval') || '10', 10);
@@ -344,8 +345,9 @@
       `;
     }).join('');
 
-    // Auto-select first change if none selected
-    if (!selectedChange && list.length > 0) {
+    // Auto-select first change only on initial page load if none selected
+    if (!initialSelected && !selectedChange && list.length > 0) {
+      initialSelected = true;
       selectChange(list[0].project_id, list[0].change_name);
     }
   }

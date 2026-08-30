@@ -350,12 +350,13 @@ class OperationsDashboardService:
                         pr_num = a.result_payload["pr_number"]
                         pr_url = a.result_payload.get("pr_url")
 
-                # Review verdict & Audit risk
-                rev = None
-                aud = None
-                if r.active_job_id:
-                    rev = self.uow.reviews.get_by_job_id(r.active_job_id)
-                    aud = self.uow.audits.get_by_job_id(r.active_job_id)
+                # Review verdict & Audit risk strictly bound to current candidate SHA
+                rev = self.uow.reviews.get_by_job_id(r.active_job_id) if r.active_job_id else None
+                aud = self.uow.audits.get_by_job_id(r.active_job_id) if r.active_job_id else None
+
+                rev_verdict = rev.verdict.value if (rev and rev.verdict and rev.candidate_sha == r.current_candidate_sha) else None
+                reviewer = rev.reviewer_role if (rev and rev.candidate_sha == r.current_candidate_sha) else None
+                aud_risk = aud.risk.value if (aud and aud.risk and aud.candidate_sha == r.current_candidate_sha) else None
 
                 recent_completions.append(
                     RecentCompletionDTO(
@@ -367,9 +368,9 @@ class OperationsDashboardService:
                         candidate_sha=r.current_candidate_sha,
                         candidate_sha_short=_short_sha(r.current_candidate_sha),
                         completed_at=_format_dt(r.updated_at),
-                        reviewer_role=rev.reviewer_role if rev else None,
-                        review_verdict=rev.verdict.value if (rev and rev.verdict) else None,
-                        audit_risk=aud.risk.value if (aud and aud.risk) else None,
+                        reviewer_role=reviewer,
+                        review_verdict=rev_verdict,
+                        audit_risk=aud_risk,
                         github_pr_number=pr_num,
                         github_pr_url=pr_url,
                     )
@@ -646,13 +647,12 @@ class OperationsDashboardService:
         }:
             rev = self.uow.reviews.get_by_job_id(job.job_id) if job else None
             if rev:
-                if rev.verdict == ReviewVerdict.READY_TO_MERGE:
-                    if rev.candidate_sha == run.current_candidate_sha:
-                        rev_status = "passed"
-                        rev_summary = f"Approved by {rev.reviewer_role}"
-                    else:
-                        rev_status = "running"
-                        rev_summary = "Review pending for updated candidate"
+                if rev.candidate_sha != run.current_candidate_sha:
+                    rev_status = "running"
+                    rev_summary = "Review pending for updated candidate"
+                elif rev.verdict == ReviewVerdict.READY_TO_MERGE:
+                    rev_status = "passed"
+                    rev_summary = f"Approved by {rev.reviewer_role}"
                 elif rev.verdict == ReviewVerdict.CHANGES_REQUIRED:
                     rev_status = "failed"
                     rev_summary = "Changes required by reviewer"
@@ -683,17 +683,16 @@ class OperationsDashboardService:
         }:
             aud = self.uow.audits.get_by_job_id(job.job_id) if job else None
             if aud:
-                if aud.status == AuditStatus.AUDIT_COMPLETED:
-                    if aud.candidate_sha == run.current_candidate_sha:
-                        if aud.risk is None or aud.risk == AuditRiskLevel.LOW:
-                            audit_status = "passed"
-                            audit_summary = f"Audit passed (risk: {aud.risk.value if aud.risk else 'low'})"
-                        else:
-                            audit_status = "failed"
-                            audit_summary = f"Audit completed with {aud.risk.value} risk findings"
+                if aud.candidate_sha != run.current_candidate_sha:
+                    audit_status = "running"
+                    audit_summary = "Audit pending for updated candidate"
+                elif aud.status == AuditStatus.AUDIT_COMPLETED:
+                    if aud.risk is None or aud.risk == AuditRiskLevel.LOW:
+                        audit_status = "passed"
+                        audit_summary = f"Audit passed (risk: {aud.risk.value if aud.risk else 'low'})"
                     else:
-                        audit_status = "running"
-                        audit_summary = "Audit pending for updated candidate"
+                        audit_status = "failed"
+                        audit_summary = f"Audit completed with {aud.risk.value} risk findings"
                 elif aud.status == AuditStatus.AUDIT_BLOCKED:
                     audit_status = "failed"
                     audit_summary = "Audit blocked by security/integrity finding"
@@ -996,9 +995,17 @@ class OperationsDashboardService:
                     )
                 )
 
-        # Sort all events chronologically newest first (or oldest first for timeline)
-        events.sort(key=lambda e: e.timestamp, reverse=True)
-        return events[:limit]
+        # Deduplicate events by event_id
+        seen_ids: set[str] = set()
+        deduped_events: list[TimelineEventDTO] = []
+        for e in events:
+            if e.event_id not in seen_ids:
+                seen_ids.add(e.event_id)
+                deduped_events.append(e)
+
+        # Sort all events chronologically newest first
+        deduped_events.sort(key=lambda e: e.timestamp, reverse=True)
+        return deduped_events[:limit]
 
     def _project_blockers(self, run: OrchestrationRun | None) -> list[dict[str, Any]]:
         """Project blocker claims and recovery blockers."""

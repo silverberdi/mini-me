@@ -108,7 +108,7 @@ def test_dashboard_redacts_api_keys_and_tokens(
         provider="deepseek",
         candidate_sha="cand-sha-sec",
         base_sha="base-sha-sec",
-        summary=f"Audit caught key={secret_ds}",
+        summary=f"Audit caught api_key={secret_ds}",
         status=AuditStatus.AUDIT_COMPLETED,
         risk=AuditRiskLevel.HIGH,
     )
@@ -130,7 +130,7 @@ def test_dashboard_redacts_api_keys_and_tokens(
         environment_identity="local",
         candidate_sha="cand-sha-sec",
         diagnostic_status=EvidenceDiagnosticStatus.FAIL,
-        reason=f"pytest failed with key={secret_key}",
+        reason=f"pytest failed with api_key={secret_key}",
     )
     in_memory_uow.evidence_diagnostics.save(diag)
 
