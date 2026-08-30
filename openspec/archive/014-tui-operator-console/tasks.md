@@ -40,9 +40,10 @@
   - [x] 7.4 013 preview and validation state projection tests verifying `BUILDING`, `READY`, scenario steps, `PASS`, and `STALE` candidate invalidation.
   - [x] 7.5 Visual acceptance matrix verification covering 20 required operational states.
 
-- [ ] 8. Canonical Verification, Review, Audit, and Merge
+- [x] 8. Canonical Verification, Review, Audit, and Merge
   - [x] 8.1 Run full check suite: pytest, ruff check, git diff --check, openspec validate --all --strict, alembic heads.
-  - [ ] 8.2 Candidate freeze and complementary review.
-  - [ ] 8.3 DeepSeek Direct independent audit.
-  - [ ] 8.4 Autonomous merge and post-merge archive/cleanup.
+  - [x] 8.2 Candidate freeze and complementary review.
+  - [x] 8.3 DeepSeek Direct independent audit.
+  - [x] 8.4 Autonomous merge and post-merge archive/cleanup.
+
 

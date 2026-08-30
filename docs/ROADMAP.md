@@ -2,7 +2,7 @@
 
 Only the current stage should exist as an active OpenSpec change. Future stages are converted into OpenSpec changes only after prior-stage closure and a fresh readiness review.
 
-## Delivered Stages (001 – 013)
+## Delivered Stages (001 – 014)
 - **001 Foundation (`001-foundation`)**: PostgreSQL state/events/migrations, project registry, immutable repository binding, OpenSpec DoR, minimal status/health.
 - **002 Implementation Pipeline (`002-implementation-pipeline`)**: Worktree lifecycle, Codex/Antigravity implementers, deterministic checks runner.
 - **003 Complementary Review Pipeline (`003-complementary-review-pipeline`)**: Codex ↔ Antigravity complementary review, structured verdicts, bounded correction loop.
@@ -16,23 +16,15 @@ Only the current stage should exist as an active OpenSpec change. Future stages 
 - **011 Preserved Candidate Remediation Generations (`011-preserved-candidate-remediation-generations`)**: Candidate generation progression, base drift integration, manifest integrity.
 - **012 Execution Operations Dashboard (`012-execution-operations-dashboard`)**: Read-only real-time operations dashboard, pipeline phase stepper, secret-redacted diagnostics.
 - **013 Container Preview + Guided UI Validation (`013-container-preview-guided-validation`)**: Isolated candidate-bound container previews, image digest authority, guided validation scenarios, stale validation invalidation.
+- **014 TUI Operator Console (`014-tui-operator-console`)**: Interactive terminal operator console via Textual, multi-viewport layout, progressive disclosure, 013 preview/validation projection, and zero direct database queries.
 
 ---
 
-## Canonical Roadmap (014 – 018)
+## Canonical Roadmap (015 – 018)
 
-### 014 — TUI Operator Console (`014-tui-operator-console`) — ACTIVE
-**Outcome:** Provide the first interactive operator console for mini me from the terminal using Textual.
-**Expected Scope:**
-- Runs, jobs, candidates, checks, complementary review, DeepSeek audit, blockers, history;
-- Responsive terminal layout across narrow, normal, and wide/ultrawide viewports;
-- Full candidate lineage and 013 preview/validation state projection;
-- Safe operator inspection and navigation consuming canonical services rather than querying PostgreSQL directly.
-**Boundary:** 014 MUST NOT expand into the 015 control plane or 017 PWA. No arbitrary direct mutations.
-
-
-### 015 — Operator Actions / Control Plane (`015-operator-actions-control-plane`)
+### 015 — Operator Actions / Control Plane (`015-operator-actions-control-plane`) — NEXT
 **Outcome:** Create reusable canonical operational actions and services for both TUI and future PWA.
+
 **Expected Scope:**
 - Retry, continue, resume, reassign, resolve human gates, cancel, evidence drill-down, recovery actions;
 - Enforce authority, governance, auditability and idempotency across all mutations.
