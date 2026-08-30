@@ -1083,5 +1083,25 @@ def serve_cmd(
     uvicorn.run("minime.api.app:app", host=host, port=port, reload=reload)
 
 
+@app.command("console")
+def console_cmd(
+    refresh_interval: float = typer.Option(3.0, "--refresh", "-r", help="Refresh interval in seconds"),
+) -> None:
+    """Launch the interactive mini me TUI operator console."""
+    from minime.tui.app import run_tui
+
+    run_tui(refresh_interval=refresh_interval)
+
+
+@app.command("tui")
+def tui_cmd(
+    refresh_interval: float = typer.Option(3.0, "--refresh", "-r", help="Refresh interval in seconds"),
+) -> None:
+    """Launch the interactive mini me TUI operator console (alias for console)."""
+    from minime.tui.app import run_tui
+
+    run_tui(refresh_interval=refresh_interval)
+
+
 if __name__ == "__main__":
     app()
