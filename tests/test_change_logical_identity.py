@@ -125,9 +125,15 @@ def test_postgres_repository_logical_upsert_and_ambiguity():
         assert regressed.status == ChangeStatus.DISCOVERED
         assert regressed.last_readiness_status == ReadinessState.NOT_READY
         assert regressed.last_readiness_reasons == ["synthetic failure"]
-        assert session.scalar(
-            select(func.count()).select_from(ChangeModel).where(ChangeModel.project_id == "mini-me")
-        ) == 1
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(ChangeModel)
+                .where(ChangeModel.project_id == "mini-me")
+            )
+            == 1
+        )
+
 
 def test_change_model_declares_stable_unique_constraint():
     constraint = next(

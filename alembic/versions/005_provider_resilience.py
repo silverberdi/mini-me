@@ -22,9 +22,7 @@ def upgrade() -> None:
     op.add_column("jobs", sa.Column("waiting_provider", sa.String(length=64), nullable=True))
     op.add_column("jobs", sa.Column("capacity_block_reason", sa.Text(), nullable=True))
     op.add_column("jobs", sa.Column("recovery_blocked_reason", sa.Text(), nullable=True))
-    op.add_column(
-        "jobs", sa.Column("expected_reset_at", sa.DateTime(timezone=True), nullable=True)
-    )
+    op.add_column("jobs", sa.Column("expected_reset_at", sa.DateTime(timezone=True), nullable=True))
     op.create_index("ix_jobs_waiting_provider", "jobs", ["waiting_provider"])
     op.create_index("ix_jobs_expected_reset_at", "jobs", ["expected_reset_at"])
 
@@ -59,8 +57,12 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     )
     op.create_index("ix_capacity_windows_provider", "capacity_windows", ["provider"])
-    op.create_index("ix_capacity_windows_quota_exhausted_at", "capacity_windows", ["quota_exhausted_at"])
-    op.create_index("ix_capacity_windows_capacity_reset_at", "capacity_windows", ["capacity_reset_at"])
+    op.create_index(
+        "ix_capacity_windows_quota_exhausted_at", "capacity_windows", ["quota_exhausted_at"]
+    )
+    op.create_index(
+        "ix_capacity_windows_capacity_reset_at", "capacity_windows", ["capacity_reset_at"]
+    )
     op.create_index("ix_capacity_windows_created_at", "capacity_windows", ["created_at"])
 
     # 4. Create git_operations table for mini me Git operation ownership tracking

@@ -45,11 +45,26 @@ def test_app_jwt_claims_and_installation_token_cache(tmp_path):
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request)
-        token = jwt.decode(request.headers["Authorization"][7:], public_key, algorithms=["RS256"], options={"verify_exp": False})
+        token = jwt.decode(
+            request.headers["Authorization"][7:],
+            public_key,
+            algorithms=["RS256"],
+            options={"verify_exp": False},
+        )
         assert token == {"iat": 1_699_999_940, "exp": 1_700_000_540, "iss": "42"}
-        return httpx.Response(201, json={"token": "installation-secret", "expires_at": "2023-11-14T23:00:00Z"})
+        return httpx.Response(
+            201, json={"token": "installation-secret", "expires_at": "2023-11-14T23:00:00Z"}
+        )
 
-    auth = GitHubAppAuth("42", "99", path, client=httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.github.com"), now=lambda: now[0])
+    auth = GitHubAppAuth(
+        "42",
+        "99",
+        path,
+        client=httpx.Client(
+            transport=httpx.MockTransport(handler), base_url="https://api.github.com"
+        ),
+        now=lambda: now[0],
+    )
     assert auth.get_installation_token() == "installation-secret"
     assert auth.get_installation_token() == "installation-secret"
     assert len(calls) == 1
@@ -62,9 +77,19 @@ def test_app_token_refreshes_inside_sixty_seconds(tmp_path):
 
     def handler(_: httpx.Request) -> httpx.Response:
         counter["calls"] += 1
-        return httpx.Response(201, json={"token": f"token-{counter['calls']}", "expires_at": "2023-11-14T22:14:30Z"})
+        return httpx.Response(
+            201, json={"token": f"token-{counter['calls']}", "expires_at": "2023-11-14T22:14:30Z"}
+        )
 
-    auth = GitHubAppAuth("42", "99", path, client=httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.github.com"), now=lambda: now[0])
+    auth = GitHubAppAuth(
+        "42",
+        "99",
+        path,
+        client=httpx.Client(
+            transport=httpx.MockTransport(handler), base_url="https://api.github.com"
+        ),
+        now=lambda: now[0],
+    )
     auth._cached = _CachedInstallationToken("old", datetime.fromtimestamp(now[0] + 59, tz=UTC))
     assert auth.get_installation_token() == "token-1"
     assert counter["calls"] == 1
@@ -79,13 +104,31 @@ def test_missing_app_credentials_fail_closed_even_with_legacy_token(monkeypatch)
 
 
 def test_rest_pr_states_and_auth_header():
-    responses = [[ ], [{"number": 7, "html_url": "https://github.com/o/r/pull/7", "head": {"sha": "abc", "ref": "feature"}, "base": {"ref": "main"}}], [{"number": 1}, {"number": 2}]]
+    responses = [
+        [],
+        [
+            {
+                "number": 7,
+                "html_url": "https://github.com/o/r/pull/7",
+                "head": {"sha": "abc", "ref": "feature"},
+                "base": {"ref": "main"},
+            }
+        ],
+        [{"number": 1}, {"number": 2}],
+    ]
     index = {"value": 0}
 
     class Auth:
         mode = "github_app_installation"
-        _cached = _CachedInstallationToken("installation-secret", datetime.now(UTC) + timedelta(hours=1))
-        client = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=responses[min(index["value"], 2)])), base_url="https://api.github.com")
+        _cached = _CachedInstallationToken(
+            "installation-secret", datetime.now(UTC) + timedelta(hours=1)
+        )
+        client = httpx.Client(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, json=responses[min(index["value"], 2)])
+            ),
+            base_url="https://api.github.com",
+        )
 
         def get_installation_token(self):
             return "installation-secret"
@@ -103,7 +146,10 @@ def test_rest_pr_states_and_auth_header():
 def test_issue_validation_distinguishes_not_found_and_unobservable():
     class Auth:
         _cached = None
-        client = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(404)), base_url="https://api.github.com")
+        client = httpx.Client(
+            transport=httpx.MockTransport(lambda request: httpx.Response(404)),
+            base_url="https://api.github.com",
+        )
 
         def get_installation_token(self):
             return "token"
@@ -112,7 +158,12 @@ def test_issue_validation_distinguishes_not_found_and_unobservable():
     assert not ok and "does not exist" in reason
 
     class Outage(Auth):
-        client = httpx.Client(transport=httpx.MockTransport(lambda request: (_ for _ in ()).throw(httpx.ConnectError("down"))), base_url="https://api.github.com")
+        client = httpx.Client(
+            transport=httpx.MockTransport(
+                lambda request: (_ for _ in ()).throw(httpx.ConnectError("down"))
+            ),
+            base_url="https://api.github.com",
+        )
 
     with pytest.raises(GitHubRemoteError):
         GitHubAdapter(auth=Outage()).validate_issue_binding("o/r", 12)
@@ -139,7 +190,10 @@ def test_issue_validation_accepts_standard_repository_url_fixture():
         "repository_url": "https://api.github.com/repos/o/r",
         "url": "https://api.github.com/repos/o/r/issues/12",
     }
-    assert GitHubAdapter(auth=_issue_auth(payload)).validate_issue_binding("o/r", 12) == (True, None)
+    assert GitHubAdapter(auth=_issue_auth(payload)).validate_issue_binding("o/r", 12) == (
+        True,
+        None,
+    )
 
 
 def test_issue_validation_rejects_repository_mismatch_and_malformed_fixture():
@@ -147,7 +201,11 @@ def test_issue_validation_rejects_repository_mismatch_and_malformed_fixture():
     ok, reason = GitHubAdapter(auth=_issue_auth(mismatch)).validate_issue_binding("o/r", 12)
     assert not ok and "Repository mismatch" in reason
 
-    malformed = {"number": 12, "title": "Issue", "url": "https://api.github.com/repos/o/r/issues/12"}
+    malformed = {
+        "number": 12,
+        "title": "Issue",
+        "url": "https://api.github.com/repos/o/r/issues/12",
+    }
     ok, reason = GitHubAdapter(auth=_issue_auth(malformed)).validate_issue_binding("o/r", 12)
     assert not ok and "invalid" in reason.lower()
 
@@ -162,17 +220,23 @@ def test_git_timeout_and_generic_failures_do_not_expose_command_or_chain(monkeyp
 
     monkeypatch.setattr(github_module.subprocess, "run", timeout)
     with pytest.raises(RuntimeError) as caught:
-        github_module.GitHubAdapter._run_git(command, cwd=tmp_path, timeout=1, secrets=[token, encoded, f"Basic {encoded}"])
+        github_module.GitHubAdapter._run_git(
+            command, cwd=tmp_path, timeout=1, secrets=[token, encoded, f"Basic {encoded}"]
+        )
     assert str(caught.value) == "Git command timed out."
     assert caught.value.__cause__ is None and caught.value.__context__ is None
-    assert not any(value in repr(caught.value) for value in (token, encoded, f"Basic {encoded}", command[-2]))
+    assert not any(
+        value in repr(caught.value) for value in (token, encoded, f"Basic {encoded}", command[-2])
+    )
 
     def generic(*args, **kwargs):
         raise RuntimeError(f"failed command={command!r}")
 
     monkeypatch.setattr(github_module.subprocess, "run", generic)
     with pytest.raises(RuntimeError) as caught:
-        github_module.GitHubAdapter._run_git(command, cwd=tmp_path, timeout=1, secrets=[token, encoded, f"Basic {encoded}"])
+        github_module.GitHubAdapter._run_git(
+            command, cwd=tmp_path, timeout=1, secrets=[token, encoded, f"Basic {encoded}"]
+        )
     assert str(caught.value) == "Git command failed before completion."
     assert caught.value.__cause__ is None and caught.value.__context__ is None
 
@@ -215,7 +279,13 @@ class _FreshGitAuth:
 
 
 def _assert_secret_free(error, values):
-    surfaces = [str(error), repr(error), repr(error.args), repr(error.__cause__), repr(error.__context__)]
+    surfaces = [
+        str(error),
+        repr(error),
+        repr(error.args),
+        repr(error.__cause__),
+        repr(error.__context__),
+    ]
     assert all(value not in "\n".join(surfaces) for value in values)
     assert error.__cause__ is None and error.__context__ is None
 
@@ -312,8 +382,14 @@ def test_readiness_fails_closed_when_issue_validation_returns_false(in_memory_uo
 @pytest.mark.parametrize(
     "error, expected",
     [
-        (GitHubRemoteError("GitHub Issue validation is unobservable."), "Transient GitHub unobservability"),
-        (GitHubAuthorizationError("GitHub App is unauthorized."), "GitHub App authorization failure"),
+        (
+            GitHubRemoteError("GitHub Issue validation is unobservable."),
+            "Transient GitHub unobservability",
+        ),
+        (
+            GitHubAuthorizationError("GitHub App is unauthorized."),
+            "GitHub App authorization failure",
+        ),
     ],
 )
 def test_readiness_fails_closed_for_github_boundary_errors(

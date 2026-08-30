@@ -226,19 +226,20 @@ async def test_execution_pipeline_success_records_evidence_and_cleans_worktree(
 
 
 @pytest.mark.asyncio
-async def test_recovery_evidence_is_committed_before_worktree_removal(
-    in_memory_uow, tmp_path
-):
+async def test_recovery_evidence_is_committed_before_worktree_removal(in_memory_uow, tmp_path):
     seed_ready_change(in_memory_uow, tmp_path, "# Tasks\n\n## 1. Things\n- [x] 1.1 Done\n")
     ordering: list[str] = []
     worktrees = RecoveryOrderingWorktreeManager(tmp_path, ordering)
     original_commit = in_memory_uow.commit
 
     def commit_with_ordering() -> None:
-        if any(
-            event.event_type == EventType.WORKTREE_RECOVERY_SNAPSHOT
-            for event in in_memory_uow.events.list_events()
-        ) and "evidence" not in ordering:
+        if (
+            any(
+                event.event_type == EventType.WORKTREE_RECOVERY_SNAPSHOT
+                for event in in_memory_uow.events.list_events()
+            )
+            and "evidence" not in ordering
+        ):
             ordering.append("evidence")
         original_commit()
 
@@ -270,9 +271,7 @@ async def test_recovery_evidence_is_committed_before_worktree_removal(
 
 
 @pytest.mark.asyncio
-async def test_recovery_evidence_failure_blocks_without_removal(
-    in_memory_uow, tmp_path
-):
+async def test_recovery_evidence_failure_blocks_without_removal(in_memory_uow, tmp_path):
     seed_ready_change(in_memory_uow, tmp_path, "# Tasks\n\n## 1. Things\n- [x] 1.1 Done\n")
     ordering: list[str] = []
     worktrees = RecoveryOrderingWorktreeManager(tmp_path, ordering)

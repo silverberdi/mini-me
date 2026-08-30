@@ -31,7 +31,7 @@ from minime.domain.enums import (
     ReviewStatus,
     ReviewVerdict,
 )
-from minime.domain.interfaces import GitHubAdapterInterface, PersistenceUnitOfWork
+from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
     AdmissionResult,
     Event,
@@ -49,9 +49,11 @@ from minime.domain.models import (
 from minime.logging import redact_secrets
 from minime.services.candidate_integrity import resolve_base_branch_sha
 from minime.services.candidate_remediation import CandidateRemediationService
+from minime.services.container_preview_service import ContainerPreviewService
 from minime.services.execution_pipeline import ExecutionPipelineService
 from minime.services.project_service import ProjectService
 from minime.services.readiness_service import ReadinessService
+from minime.services.validation_authority_service import ValidationAuthorityService
 from minime.services.worktree_manager import WorktreeInfo
 
 logger = logging.getLogger(__name__)
@@ -108,8 +110,10 @@ class OrchestrationService:
         uow: PersistenceUnitOfWork,
         project_root: str | Path = ".",
         pipeline: ExecutionPipelineService | None = None,
-        github_adapter: GitHubAdapterInterface | None = None,
+        github_adapter: GitHubAdapter | None = None,
         openspec_adapter: OpenSpecAdapter | None = None,
+        validation_service: ValidationAuthorityService | None = None,
+        preview_service: ContainerPreviewService | None = None,
     ):
         self.uow = uow
         self.project_root = Path(project_root).resolve()
@@ -127,6 +131,8 @@ class OrchestrationService:
             self.project_root,
             pipeline=self.pipeline,
         )
+        self.validation_service = validation_service or ValidationAuthorityService(self.uow)
+        self.preview_service = preview_service or ContainerPreviewService(self.uow)
 
     def admit_change(
         self,
@@ -181,7 +187,10 @@ class OrchestrationService:
         if not eval_result.is_ready or eval_result.status != ReadinessState.READY:
             refusal_code = (
                 "SCHEMA_INVARIANT_VIOLATION"
-                if any(reason.startswith("SCHEMA_INVARIANT_VIOLATION") for reason in eval_result.unmet_reasons)
+                if any(
+                    reason.startswith("SCHEMA_INVARIANT_VIOLATION")
+                    for reason in eval_result.unmet_reasons
+                )
                 else "NOT_READY"
             )
             return AdmissionResult(
@@ -977,7 +986,9 @@ class OrchestrationService:
             if item.superseded_by_id is None
         ]
         if len(current_candidates) != 1:
-            raise ValueError("Completed human integration requires exactly one current source candidate.")
+            raise ValueError(
+                "Completed human integration requires exactly one current source candidate."
+            )
         source = current_candidates[0]
         if candidate is not None and source.candidate_id != candidate.candidate_id:
             raise ValueError("Current source candidate is ambiguous or not authoritative.")
@@ -1033,9 +1044,16 @@ class OrchestrationService:
         if recorded_path and Path(recorded_path).resolve() != integration_path:
             raise ValueError("Human integration worktree is not the deterministic expected path.")
         if self.uow.orchestration_candidates.get_by_generation(run.run_id, next_generation):
-            raise ValueError("Generation N+1 candidate already exists; refusing duplicate reconciliation.")
-        if any(item.generation > source.generation for item in self.uow.orchestration_candidates.list_by_run(run.run_id)):
-            raise ValueError("A later candidate generation already exists; refusing reconciliation.")
+            raise ValueError(
+                "Generation N+1 candidate already exists; refusing duplicate reconciliation."
+            )
+        if any(
+            item.generation > source.generation
+            for item in self.uow.orchestration_candidates.list_by_run(run.run_id)
+        ):
+            raise ValueError(
+                "A later candidate generation already exists; refusing reconciliation."
+            )
 
         show_ref = subprocess.run(
             ["git", "show-ref", "--verify", "--quiet", expected_ref],
@@ -1983,6 +2001,66 @@ class OrchestrationService:
                 self._advance_stage(run, OrchestrationStage.PR_PREPARED)
 
             elif stage == OrchestrationStage.PR_PREPARED:
+                project = self.uow.projects.get_by_id(run.project_id)
+                current_cand = self.uow.orchestration_candidates.get_latest_for_run(run.run_id)
+                cand_sha = current_cand.candidate_sha if current_cand else run.current_candidate_sha
+
+                is_ui_validation_required = False
+                if project and cand_sha:
+                    is_ui_validation_required = self.validation_service.is_preview_required(
+                        project, run.change_name, project_root=self.project_root
+                    )
+
+                if is_ui_validation_required and cand_sha:
+                    preview = self.uow.preview_sessions.get_latest_for_candidate(
+                        run.project_id, run.change_name, cand_sha
+                    )
+                    image_digest = preview.image_digest if preview else ""
+
+                    is_authorized, validation, is_stale = (
+                        self.validation_service.evaluate_candidate_validation_authority(
+                            project_id=run.project_id,
+                            change_name=run.change_name,
+                            head_sha=cand_sha,
+                            base_sha=run.base_sha,
+                            image_digest=image_digest,
+                        )
+                    )
+
+                    if not is_authorized:
+                        logger.info(
+                            f"Run '{run.run_id}' blocked at UI validation gate. Candidate '{cand_sha}', is_stale={is_stale}."
+                        )
+                        self.uow.events.save(
+                            Event(
+                                project_id=run.project_id,
+                                change_id=run.change_name,
+                                event_type=EventType.VALIDATION_REQUIRED_GATE_BLOCKED,
+                                payload={
+                                    "run_id": run.run_id,
+                                    "head_sha": cand_sha,
+                                    "base_sha": run.base_sha,
+                                    "image_digest": image_digest,
+                                    "is_stale": is_stale,
+                                },
+                            )
+                        )
+                        self.uow.commit()
+                        self._stop_run(
+                            run,
+                            stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+                            human_gate=HumanGate.NEEDS_HUMAN,
+                            stop_reason="UI visual validation required before final human merge.",
+                            stop_details={
+                                "code": "UI_VALIDATION_REQUIRED",
+                                "is_stale": is_stale,
+                                "head_sha": cand_sha,
+                                "base_sha": run.base_sha,
+                                "image_digest": image_digest,
+                            },
+                        )
+                        break
+
                 # Final terminal checkpoint: set human gate to READY_FOR_HUMAN_MERGE and STOP
                 self._stop_run(
                     run,

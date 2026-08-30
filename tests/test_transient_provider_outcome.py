@@ -15,15 +15,21 @@ from minime.services.outcome_governance import (
 def test_transient_provider_error_maps_to_environment_unavailable():
     outcome = OutcomeGovernanceService().classify_outcome(
         CompletionVerificationResult(is_complete=False),
-        NormalizedProviderResult(result_class=ProviderResultClass.TRANSIENT_ERROR, provider="codex", role="implementer"),
+        NormalizedProviderResult(
+            result_class=ProviderResultClass.TRANSIENT_ERROR, provider="codex", role="implementer"
+        ),
     )
     assert outcome == ExecutionOutcome.ENVIRONMENT_UNAVAILABLE
 
 
 def test_environment_unavailable_waits_without_consuming_budgets():
     context = ContinuationContext(
-        job_id="job", attempt_number=4, current_executor_role="codex", current_model_identity="codex-model",
-        outcome=ExecutionOutcome.ENVIRONMENT_UNAVAILABLE, corrective_retries_for_current_executor=2,
+        job_id="job",
+        attempt_number=4,
+        current_executor_role="codex",
+        current_model_identity="codex-model",
+        outcome=ExecutionOutcome.ENVIRONMENT_UNAVAILABLE,
+        corrective_retries_for_current_executor=2,
         reassignment_count=2,
     )
     decision = ContinuationEngine().decide(context)

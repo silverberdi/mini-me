@@ -15,11 +15,23 @@ from pydantic import BaseModel, Field
 from minime.adapters.openspec import OpenSpecAdapter
 from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.db.session import db_manager
+from minime.domain.enums import EventType, PreviewStatus, ValidationVerdict
 from minime.domain.interfaces import PersistenceUnitOfWork
-from minime.domain.models import Change, Job, JobLog, Project, ProviderHealth, SchedulerStatus
+from minime.domain.models import (
+    Change,
+    Event,
+    Job,
+    JobLog,
+    PreviewSession,
+    Project,
+    ProviderHealth,
+    SchedulerStatus,
+    utc_now,
+)
 from minime.logging import redact_secrets
 from minime.services.budget_service import BudgetService
 from minime.services.capacity_lifecycle_service import CapacityLifecycleService
+from minime.services.container_preview_service import ContainerPreviewService
 from minime.services.dashboard_service import (
     DashboardChangeDetailResponse,
     DashboardOverviewResponse,
@@ -33,6 +45,7 @@ from minime.services.provider_health_service import ProviderHealthService
 from minime.services.readiness_service import ReadinessService
 from minime.services.restart_recovery_service import RestartRecoveryService
 from minime.services.status_service import StatusService
+from minime.services.validation_authority_service import ValidationAuthorityService
 
 logger = logging.getLogger(__name__)
 
@@ -575,7 +588,9 @@ def admit_orchestration(
 ) -> dict[str, Any]:
     """Admit a single change into autonomous orchestration after verifying DoR and bindings."""
     service = OrchestrationService(
-        uow, project_root=req.project_root or ".", github_adapter=getattr(app.state, "github_adapter", None)
+        uow,
+        project_root=req.project_root or ".",
+        github_adapter=getattr(app.state, "github_adapter", None),
     )
     result = service.admit_change(req.project_id, req.change_name, project_root=req.project_root)
     return result.model_dump()
@@ -588,7 +603,9 @@ def start_orchestration(
 ) -> dict[str, Any]:
     """Start autonomous orchestration for a single READY change."""
     service = OrchestrationService(
-        uow, project_root=req.project_root or ".", github_adapter=getattr(app.state, "github_adapter", None)
+        uow,
+        project_root=req.project_root or ".",
+        github_adapter=getattr(app.state, "github_adapter", None),
     )
     try:
         run = service.start(req.project_id, req.change_name, project_root=req.project_root)
@@ -716,6 +733,387 @@ def get_dashboard_events(
 
 
 # -----------------------------------------------------------------------------
+# Preview & Validation Endpoints
+# -----------------------------------------------------------------------------
+
+
+class PreviewBuildRequest(BaseModel):
+    project_id: str
+    change_name: str
+    run_id: str | None = None
+    job_id: str | None = None
+    candidate_generation: int = 1
+    head_sha: str
+    base_sha: str
+    worktree_path: str = "."
+    dockerfile: str = "Dockerfile"
+    tag: str | None = None
+
+
+class PreviewStartRequest(BaseModel):
+    preview_id: str
+    internal_port: int = 8787
+    env_vars: dict[str, str] = Field(default_factory=dict)
+    probe_health: bool = True
+    health_path: str = "/api/v1/health"
+
+
+class ValidationSubmitRequest(BaseModel):
+    project_id: str
+    change_name: str
+    head_sha: str
+    base_sha: str
+    image_digest: str
+    verdict: str = "PASS"
+    scenario_results: list[dict[str, Any]] = Field(default_factory=list)
+    run_id: str | None = None
+    preview_id: str | None = None
+    candidate_generation: int = 1
+    notes: str | None = None
+    operator: str = "operator"
+
+
+@app.post("/api/v1/previews/build", tags=["previews"])
+async def build_preview_image(
+    req: PreviewBuildRequest,
+    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
+) -> dict[str, Any]:
+    project = uow.projects.get_by_id(req.project_id)
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project '{req.project_id}' not found.",
+        )
+
+    preview_svc = ContainerPreviewService(uow)
+    tag = (
+        req.tag
+        or f"minime-preview:{req.project_id}-{req.change_name}-gen{req.candidate_generation}"
+    )
+    try:
+        image_digest = await preview_svc.build_image(
+            worktree_path=req.worktree_path,
+            tag=tag,
+            dockerfile=req.dockerfile,
+        )
+    except Exception as e:
+        logger.error(f"Preview build failed: {e}")
+        session = PreviewSession(
+            project_id=req.project_id,
+            change_name=req.change_name,
+            run_id=req.run_id,
+            job_id=req.job_id,
+            candidate_generation=req.candidate_generation,
+            head_sha=req.head_sha,
+            base_sha=req.base_sha,
+            image_digest="",
+            status=PreviewStatus.FAILED,
+            failure_reason=str(e),
+            failure_code="BUILD_FAILED",
+        )
+        uow.preview_sessions.save(session)
+        uow.events.save(
+            Event(
+                project_id=req.project_id,
+                change_id=req.change_name,
+                event_type=EventType.PREVIEW_FAILED,
+                payload={"error": str(e), "head_sha": req.head_sha},
+            )
+        )
+        uow.commit()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Preview build failed: {e}",
+        )
+
+    session = PreviewSession(
+        project_id=req.project_id,
+        change_name=req.change_name,
+        run_id=req.run_id,
+        job_id=req.job_id,
+        candidate_generation=req.candidate_generation,
+        head_sha=req.head_sha,
+        base_sha=req.base_sha,
+        image_digest=image_digest,
+        status=PreviewStatus.BUILDING,
+    )
+    uow.preview_sessions.save(session)
+    uow.events.save(
+        Event(
+            project_id=req.project_id,
+            change_id=req.change_name,
+            event_type=EventType.PREVIEW_BUILDING,
+            payload={"preview_id": session.preview_id, "image_digest": image_digest, "tag": tag},
+        )
+    )
+    uow.commit()
+    return {
+        "preview_id": session.preview_id,
+        "image_digest": image_digest,
+        "tag": tag,
+        "status": session.status.value,
+    }
+
+
+@app.post("/api/v1/previews/start", tags=["previews"])
+async def start_preview_container(
+    req: PreviewStartRequest,
+    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
+) -> dict[str, Any]:
+    session = uow.preview_sessions.get_by_id(req.preview_id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Preview session '{req.preview_id}' not found.",
+        )
+
+    preview_svc = ContainerPreviewService(uow)
+    image_target = session.image_digest
+    try:
+        session.status = PreviewStatus.STARTING
+        uow.preview_sessions.save(session)
+        uow.commit()
+
+        container_id, preview_url, host_port = await preview_svc.start_preview_container(
+            preview_session=session,
+            image_tag_or_digest=image_target,
+            internal_port=req.internal_port,
+            env_vars=req.env_vars,
+        )
+        session.container_id = container_id
+        session.preview_url = preview_url
+        session.allocated_port = host_port
+        session.status = PreviewStatus.PROBING
+        uow.preview_sessions.save(session)
+        uow.commit()
+
+        if req.probe_health:
+            is_healthy = await preview_svc.probe_health(
+                preview_url=preview_url,
+                health_path=req.health_path,
+            )
+            if not is_healthy:
+                session.status = PreviewStatus.FAILED
+                session.failure_reason = "Health probe timed out."
+                session.failure_code = "HEALTH_PROBE_FAILED"
+                uow.preview_sessions.save(session)
+                uow.commit()
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="Preview container launched but health probe failed.",
+                )
+
+        session.status = PreviewStatus.READY
+        session.ready_at = utc_now()
+        uow.preview_sessions.save(session)
+        uow.events.save(
+            Event(
+                project_id=session.project_id,
+                change_id=session.change_name,
+                event_type=EventType.PREVIEW_READY,
+                payload={
+                    "preview_id": session.preview_id,
+                    "preview_url": preview_url,
+                    "port": host_port,
+                },
+            )
+        )
+        uow.commit()
+        return {
+            "preview_id": session.preview_id,
+            "status": session.status.value,
+            "preview_url": preview_url,
+            "allocated_port": host_port,
+            "container_id": container_id,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        session.status = PreviewStatus.FAILED
+        session.failure_reason = str(e)
+        session.failure_code = "START_FAILED"
+        uow.preview_sessions.save(session)
+        uow.commit()
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+@app.get("/api/v1/previews/{preview_id}", tags=["previews"])
+def get_preview_session(
+    preview_id: str,
+    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
+) -> dict[str, Any]:
+    session = uow.preview_sessions.get_by_id(preview_id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Preview session not found.",
+        )
+    return {
+        "preview_id": session.preview_id,
+        "project_id": session.project_id,
+        "change_name": session.change_name,
+        "run_id": session.run_id,
+        "candidate_generation": session.candidate_generation,
+        "head_sha": session.head_sha,
+        "base_sha": session.base_sha,
+        "image_digest": session.image_digest,
+        "status": session.status.value,
+        "preview_url": session.preview_url,
+        "allocated_port": session.allocated_port,
+        "container_id": session.container_id,
+        "container_name": session.container_name,
+        "failure_reason": session.failure_reason,
+        "failure_code": session.failure_code,
+        "created_at": session.created_at.isoformat() if session.created_at else None,
+        "ready_at": session.ready_at.isoformat() if session.ready_at else None,
+        "terminated_at": session.terminated_at.isoformat() if session.terminated_at else None,
+    }
+
+
+@app.get("/api/v1/previews/changes/{project_id}/{change_name}", tags=["previews"])
+def get_latest_preview_for_change(
+    project_id: str,
+    change_name: str,
+    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
+) -> dict[str, Any]:
+    previews = uow.preview_sessions.list_by_change(project_id, change_name)
+    if not previews:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No preview session found for change.",
+        )
+    latest = previews[0]
+    return {
+        "preview_id": latest.preview_id,
+        "status": latest.status.value,
+        "head_sha": latest.head_sha,
+        "base_sha": latest.base_sha,
+        "image_digest": latest.image_digest,
+        "preview_url": latest.preview_url,
+        "allocated_port": latest.allocated_port,
+        "created_at": latest.created_at.isoformat() if latest.created_at else None,
+        "ready_at": latest.ready_at.isoformat() if latest.ready_at else None,
+    }
+
+
+@app.post("/api/v1/previews/{preview_id}/teardown", tags=["previews"])
+async def teardown_preview_session(
+    preview_id: str,
+    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
+) -> dict[str, Any]:
+    session = uow.preview_sessions.get_by_id(preview_id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Preview session not found.",
+        )
+    preview_svc = ContainerPreviewService(uow)
+    await preview_svc.teardown_preview(session)
+    return {"preview_id": preview_id, "status": PreviewStatus.TERMINATED.value}
+
+
+@app.post("/api/v1/previews/reconcile", tags=["previews"])
+async def reconcile_orphan_previews(
+    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
+) -> dict[str, Any]:
+    preview_svc = ContainerPreviewService(uow)
+    cleaned = await preview_svc.reconcile_orphan_previews()
+    return {"cleaned_containers": cleaned, "count": len(cleaned)}
+
+
+@app.get("/api/v1/validations/scenarios/{project_id}/{change_name}", tags=["validations"])
+def get_validation_scenarios_endpoint(
+    project_id: str,
+    change_name: str,
+    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
+) -> list[dict[str, Any]]:
+    project = uow.projects.get_by_id(project_id)
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Project not found.",
+        )
+    val_svc = ValidationAuthorityService(uow)
+    scenarios = val_svc.get_validation_scenarios(project, change_name)
+    return [
+        {
+            "scenario_id": s.scenario_id,
+            "title": s.title,
+            "description": s.description,
+            "ordered_steps": s.ordered_steps,
+            "expected_result": s.expected_result,
+            "viewport": s.viewport,
+            "required": s.required,
+        }
+        for s in scenarios
+    ]
+
+
+@app.post("/api/v1/validations/submit", tags=["validations"])
+def submit_validation(
+    req: ValidationSubmitRequest,
+    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
+) -> dict[str, Any]:
+    verdict = ValidationVerdict.PASS if req.verdict.upper() == "PASS" else ValidationVerdict.FAIL
+    val_svc = ValidationAuthorityService(uow)
+    validation = val_svc.record_validation(
+        project_id=req.project_id,
+        change_name=req.change_name,
+        head_sha=req.head_sha,
+        base_sha=req.base_sha,
+        image_digest=req.image_digest,
+        verdict=verdict,
+        scenario_results=req.scenario_results,
+        run_id=req.run_id,
+        preview_id=req.preview_id,
+        generation=req.candidate_generation,
+        notes=req.notes,
+        operator=req.operator,
+    )
+    return {
+        "validation_id": validation.validation_id,
+        "verdict": validation.verdict.value,
+        "head_sha": validation.head_sha,
+        "base_sha": validation.base_sha,
+        "image_digest": validation.image_digest,
+        "created_at": validation.created_at.isoformat(),
+    }
+
+
+@app.get("/api/v1/validations/authority/{project_id}/{change_name}", tags=["validations"])
+def get_candidate_validation_authority_endpoint(
+    project_id: str,
+    change_name: str,
+    head_sha: str,
+    base_sha: str,
+    image_digest: str,
+    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
+) -> dict[str, Any]:
+    project = uow.projects.get_by_id(project_id)
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Project not found.",
+        )
+    val_svc = ValidationAuthorityService(uow)
+    is_required = val_svc.is_preview_required(project, change_name)
+    is_authorized, latest_val, is_stale = val_svc.evaluate_candidate_validation_authority(
+        project_id=project_id,
+        change_name=change_name,
+        head_sha=head_sha,
+        base_sha=base_sha,
+        image_digest=image_digest,
+    )
+    return {
+        "is_preview_required": is_required,
+        "is_authorized": is_authorized,
+        "is_stale": is_stale,
+        "latest_validation_id": latest_val.validation_id if latest_val else None,
+        "latest_verdict": latest_val.verdict.value if latest_val else None,
+    }
+
+
+# -----------------------------------------------------------------------------
 # Static UI Mounting & Index
 # -----------------------------------------------------------------------------
 
@@ -742,5 +1140,3 @@ def get_dashboard_page() -> Response:
         "</body></html>",
         status_code=404,
     )
-
-

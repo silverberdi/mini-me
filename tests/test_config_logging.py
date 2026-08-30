@@ -114,7 +114,7 @@ def test_cli_invocation_resolution_fails_closed(provider, role, message):
                 command="runner",
                 roles=["implementer", "reviewer"],
                 invocation={"implementer": CliInvocationConfig()},
-            )
+            ),
         }
     )
     with pytest.raises(ValueError, match=message):
@@ -127,9 +127,7 @@ def test_cli_invocation_rejects_unsupported_prompt_transport():
             "test-cli": ProviderConfig(
                 command="runner",
                 roles=["implementer"],
-                invocation={
-                    "implementer": CliInvocationConfig(prompt_transport="file")
-                },
+                invocation={"implementer": CliInvocationConfig(prompt_transport="file")},
             )
         }
     )

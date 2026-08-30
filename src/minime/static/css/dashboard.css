@@ -830,8 +830,30 @@ body {
   color: var(--text-muted);
 }
 
+.btn-sm {
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  border-radius: var(--radius-sm);
+}
+
+.font-bold {
+  font-weight: 600;
+}
+
+:root {
+  --bg-card-sub: rgba(255, 255, 255, 0.03);
+  --bg-input: rgba(0, 0, 0, 0.2);
+}
+
+body.theme-light {
+  --bg-card-sub: #f0f3f6;
+  --bg-input: #ffffff;
+}
+
 /* Responsive Breakpoints */
 @media (max-width: 1024px) {
+
   .content-split {
     grid-template-columns: 1fr;
   }

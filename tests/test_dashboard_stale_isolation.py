@@ -150,7 +150,10 @@ def test_stale_review_and_audit_isolation_on_new_generation(
     # 5. Pipeline review phase must NOT report passed
     phase_map = {p.name: p.status for p in detail.pipeline}
     assert phase_map["review"] == "running"
-    assert "progress" in detail.pipeline[3].summary.lower() or "pending" in detail.pipeline[3].summary.lower()
+    assert (
+        "progress" in detail.pipeline[3].summary.lower()
+        or "pending" in detail.pipeline[3].summary.lower()
+    )
 
 
 def test_stale_changes_required_review_not_presented_as_current_failure(
@@ -218,7 +221,10 @@ def test_stale_changes_required_review_not_presented_as_current_failure(
 
     # Review phase must report pending/running for updated candidate, NOT failed
     assert phase_map["review"] == "running"
-    assert "pending" in detail.pipeline[3].summary.lower() or "progress" in detail.pipeline[3].summary.lower()
+    assert (
+        "pending" in detail.pipeline[3].summary.lower()
+        or "progress" in detail.pipeline[3].summary.lower()
+    )
 
 
 def test_timeline_deduplicates_events_on_combined_filters(
@@ -249,7 +255,9 @@ def test_timeline_deduplicates_events_on_combined_filters(
     )
     in_memory_uow.events.save(ge)
 
-    events = service.get_events_timeline(project_id="mini-me", change_name="012-dedup", run_id="run-combo")
+    events = service.get_events_timeline(
+        project_id="mini-me", change_name="012-dedup", run_id="run-combo"
+    )
     # Must be deduplicated by event_id
     assert len(events) == 1
     assert events[0].event_id == "evt-shared-1"

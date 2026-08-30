@@ -516,9 +516,7 @@ class ReviewModel(Base):
     is_mixed_authorship: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=sa.false()
     )
-    authorship_evidence: Mapped[dict] = mapped_column(
-        JSON, nullable=False, server_default="{}"
-    )
+    authorship_evidence: Mapped[dict] = mapped_column(JSON, nullable=False, server_default="{}")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False, index=True
     )
@@ -900,3 +898,79 @@ class OrchestrationExternalActionModel(Base):
     run: Mapped[OrchestrationRunModel] = relationship(
         "OrchestrationRunModel", back_populates="external_actions"
     )
+
+
+class PreviewSessionModel(Base):
+    __tablename__ = "preview_sessions"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    change_name: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    run_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("orchestration_runs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    job_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    candidate_generation: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    head_sha: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    base_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    image_digest: Mapped[str] = mapped_column(String(128), default="", nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), default="REQUESTED", nullable=False, index=True)
+    container_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    container_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    allocated_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    preview_url: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    failure_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+    ready_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    terminated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    project: Mapped[ProjectModel] = relationship("ProjectModel")
+    run: Mapped[OrchestrationRunModel | None] = relationship("OrchestrationRunModel")
+
+
+class ValidationRunModel(Base):
+    __tablename__ = "validation_runs"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    preview_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("preview_sessions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    change_name: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    run_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("orchestration_runs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    candidate_generation: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    head_sha: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    base_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    image_digest: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    verdict: Mapped[str] = mapped_column(String(32), default="PASS", nullable=False, index=True)
+    scenario_results: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON, default=list, nullable=False
+    )
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    operator: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+
+    project: Mapped[ProjectModel] = relationship("ProjectModel")
+    preview: Mapped[PreviewSessionModel | None] = relationship("PreviewSessionModel")

@@ -30,6 +30,4 @@ def test_migration_allows_nullable_stage():
 
 def test_migration_rejects_contradictory_ready_state():
     with pytest.raises(RuntimeError, match="project_id=.*status='READY'.*readiness='NOT_READY'"):
-        migration._validate_consistency(
-            row(status="READY", last_readiness_status="NOT_READY")
-        )
+        migration._validate_consistency(row(status="READY", last_readiness_status="NOT_READY"))

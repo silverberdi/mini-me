@@ -29,9 +29,7 @@ from minime.services.worktree_manager import WorktreeManager
 
 
 def git(repo: Path, *args: str) -> str:
-    result = subprocess.run(
-        ["git", *args], cwd=repo, capture_output=True, text=True, check=False
-    )
+    result = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
     return result.stdout.strip()
 
@@ -55,9 +53,7 @@ def make_repo(tmp_path: Path, conflict: bool) -> tuple[Path, str, str, str]:
     candidate_sha = git(repo, "rev-parse", "HEAD")
     git(repo, "switch", "main")
 
-    (repo / "shared.txt").write_text(
-        "base B\n" if conflict else "base\n", encoding="utf-8"
-    )
+    (repo / "shared.txt").write_text("base B\n" if conflict else "base\n", encoding="utf-8")
     (repo / "base.txt").write_text("base advancement\n", encoding="utf-8")
     git(repo, "add", ".")
     git(repo, "commit", "-m", "base B")
@@ -149,7 +145,12 @@ def test_advanced_base_real_git_integration_and_idempotency(tmp_path, in_memory_
     assert git(repo, "rev-parse", new.candidate_ref) == new.candidate_sha
     assert git(repo, "merge-base", "--is-ancestor", base_b, new.candidate_sha) == ""
     assert old.superseded_by_id == new.candidate_id
-    assert (repo / ".minime" / "worktrees" / f"{in_memory_uow.jobs.get_by_id('job-human-resolution').job_id}-integration-gen2").exists() is False
+    assert (
+        repo
+        / ".minime"
+        / "worktrees"
+        / f"{in_memory_uow.jobs.get_by_id('job-human-resolution').job_id}-integration-gen2"
+    ).exists() is False
     assert in_memory_uow.jobs.get_by_id("job-human-resolution").base_sha == base_b
 
     again = service.resolve_preserved_candidate(
@@ -166,9 +167,7 @@ def test_advanced_base_real_git_integration_and_idempotency(tmp_path, in_memory_
     assert len(resolutions) == 1
 
 
-def test_advanced_base_real_git_conflict_preserves_integration_state(
-    tmp_path, in_memory_uow
-):
+def test_advanced_base_real_git_conflict_preserves_integration_state(tmp_path, in_memory_uow):
     repo, base_a, candidate_sha, base_b = make_repo(tmp_path, conflict=True)
     service, run_id = make_service(
         in_memory_uow, repo, base_a, candidate_sha, "refs/heads/historical-candidate"
@@ -181,8 +180,8 @@ def test_advanced_base_real_git_conflict_preserves_integration_state(
     assert len(in_memory_uow.orchestration_candidates.list_by_run(run_id)) == 1
     assert git(repo, "rev-parse", "refs/heads/historical-candidate") == candidate_sha
 
-    integration_path = repo / ".minime" / "worktrees" / (
-        f"job-human-resolution-integration-gen2-{base_b[:12]}"
+    integration_path = (
+        repo / ".minime" / "worktrees" / (f"job-human-resolution-integration-gen2-{base_b[:12]}")
     )
     integration_branch = (
         "refs/heads/minime/010-governance-and-recovery-hardening-"
@@ -206,13 +205,16 @@ def test_advanced_base_real_git_conflict_preserves_integration_state(
     assert again.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
     assert len(in_memory_uow.orchestration_candidates.list_by_run(run_id)) == 1
     assert integration_path.exists()
-    assert len(
-        [
-            event
-            for event in in_memory_uow.orchestration_stage_events.list_by_run(run_id)
-            if event.evidence_references.get("code") == "BASE_INTEGRATION_CONFLICT"
-        ]
-    ) == 1
+    assert (
+        len(
+            [
+                event
+                for event in in_memory_uow.orchestration_stage_events.list_by_run(run_id)
+                if event.evidence_references.get("code") == "BASE_INTEGRATION_CONFLICT"
+            ]
+        )
+        == 1
+    )
 
 
 def test_completed_human_integration_is_reconciled_idempotently(tmp_path, in_memory_uow):
@@ -227,8 +229,8 @@ def test_completed_human_integration_is_reconciled_idempotently(tmp_path, in_mem
     service.resolve_preserved_candidate(
         run_id, continue_preserved_candidate=True, project_root=repo
     )
-    integration_path = repo / ".minime" / "worktrees" / (
-        f"job-human-resolution-integration-gen2-{base_b[:12]}"
+    integration_path = (
+        repo / ".minime" / "worktrees" / (f"job-human-resolution-integration-gen2-{base_b[:12]}")
     )
     (integration_path / "shared.txt").write_text("candidate\n", encoding="utf-8")
     git(integration_path, "add", "shared.txt")
@@ -243,7 +245,10 @@ def test_completed_human_integration_is_reconciled_idempotently(tmp_path, in_mem
     assert resolved.current_generation == 2
     assert [candidate.generation for candidate in candidates] == [1, 2]
     assert candidates[0].superseded_by_id == candidates[1].candidate_id
-    assert in_memory_uow.jobs.get_by_id("job-human-resolution").candidate_sha == candidates[1].candidate_sha
+    assert (
+        in_memory_uow.jobs.get_by_id("job-human-resolution").candidate_sha
+        == candidates[1].candidate_sha
+    )
 
     again = service.resolve_preserved_candidate(
         run_id, continue_preserved_candidate=True, project_root=repo
@@ -259,9 +264,7 @@ def test_completed_human_integration_is_reconciled_idempotently(tmp_path, in_mem
     assert len(resolutions) == 1
 
 
-def test_stale_integration_target_retries_with_distinct_target_identity(
-    tmp_path, in_memory_uow
-):
+def test_stale_integration_target_retries_with_distinct_target_identity(tmp_path, in_memory_uow):
     repo, base_a, candidate_sha, base_b = make_repo(tmp_path, conflict=True)
     service, run_id = make_service(
         in_memory_uow, repo, base_a, candidate_sha, "refs/heads/historical-candidate"
@@ -296,18 +299,22 @@ def test_stale_integration_target_retries_with_distinct_target_identity(
     assert old_event.evidence_references["integration_branch"].endswith(base_b[:12])
     assert events[-1].evidence_references["target_base_sha"] == base_c
     assert events[-1].evidence_references["integration_branch"].endswith(base_c[:12])
-    assert events[-1].evidence_references["integration_branch"] != old_event.evidence_references[
-        "integration_branch"
-    ]
+    assert (
+        events[-1].evidence_references["integration_branch"]
+        != old_event.evidence_references["integration_branch"]
+    )
 
     with pytest.raises(ValueError, match="Human integration"):
         service.resolve_preserved_candidate(
             run_id, continue_preserved_candidate=True, project_root=repo
         )
-    assert len(
-        [
-            event
-            for event in in_memory_uow.orchestration_stage_events.list_by_run(run_id)
-            if event.evidence_references.get("code") == "BASE_INTEGRATION_CONFLICT"
-        ]
-    ) == 2
+    assert (
+        len(
+            [
+                event
+                for event in in_memory_uow.orchestration_stage_events.list_by_run(run_id)
+                if event.evidence_references.get("code") == "BASE_INTEGRATION_CONFLICT"
+            ]
+        )
+        == 2
+    )

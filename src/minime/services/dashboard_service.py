@@ -20,10 +20,11 @@ from minime.domain.enums import (
     SchedulerMode,
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
-from minime.domain.models import Change, Job, OrchestrationRun
+from minime.domain.models import Change, Job, OrchestrationRun, Project
 from minime.logging import redact_secrets
 from minime.services.capacity_lifecycle_service import CapacityLifecycleService
 from minime.services.provider_health_service import ProviderHealthService
+from minime.services.validation_authority_service import ValidationAuthorityService
 
 logger = logging.getLogger(__name__)
 
@@ -156,7 +157,9 @@ class CandidateAuthorityDTO(BaseModel):
     base_sha: str
     base_sha_short: str
     manifest_hash: str | None = None
+    image_digest: str | None = None
     is_frozen: bool = False
+
     is_superseded: bool = False
     changed_files: list[str] = Field(default_factory=list)
     created_at: str | None = None
@@ -210,6 +213,58 @@ class GitHubPRSummaryDTO(BaseModel):
     candidate_bound: bool = False
 
 
+class PreviewSessionDTO(BaseModel):
+    preview_id: str
+    status: str
+    head_sha: str
+    head_sha_short: str
+    base_sha: str
+    base_sha_short: str
+    image_digest: str
+    preview_url: str | None = None
+    allocated_port: int | None = None
+    container_name: str | None = None
+    failure_reason: str | None = None
+    failure_code: str | None = None
+    created_at: str | None = None
+    ready_at: str | None = None
+
+
+class ValidationScenarioDTO(BaseModel):
+    scenario_id: str
+    title: str
+    description: str = ""
+    ordered_steps: list[str] = Field(default_factory=list)
+    expected_result: str = ""
+    viewport: str | None = "desktop"
+    required: bool = True
+
+
+class ValidationRunDTO(BaseModel):
+    validation_id: str
+    verdict: str  # PASS, FAIL
+    head_sha: str
+    head_sha_short: str
+    base_sha: str
+    base_sha_short: str
+    image_digest: str
+    is_stale: bool = False
+    scenario_results: list[dict[str, Any]] = Field(default_factory=list)
+    notes: str | None = None
+    operator: str | None = None
+    created_at: str | None = None
+
+
+class PreviewValidationSummaryDTO(BaseModel):
+    is_preview_required: bool = False
+    is_authorized: bool = False
+    is_stale: bool = False
+    preview_session: PreviewSessionDTO | None = None
+    latest_validation: ValidationRunDTO | None = None
+    validation_history: list[ValidationRunDTO] = Field(default_factory=list)
+    scenarios: list[ValidationScenarioDTO] = Field(default_factory=list)
+
+
 class TimelineEventDTO(BaseModel):
     event_id: str
     timestamp: str
@@ -247,6 +302,9 @@ class DashboardChangeDetailResponse(BaseModel):
     review: ReviewSummaryDTO = Field(default_factory=ReviewSummaryDTO)
     audit: AuditSummaryDTO = Field(default_factory=AuditSummaryDTO)
     github: GitHubPRSummaryDTO = Field(default_factory=GitHubPRSummaryDTO)
+    preview_validation: PreviewValidationSummaryDTO = Field(
+        default_factory=PreviewValidationSummaryDTO
+    )
     timeline: list[TimelineEventDTO] = Field(default_factory=list)
     blocker_details: list[dict[str, Any]] = Field(default_factory=list)
 
@@ -270,7 +328,9 @@ class OperationsDashboardService:
             ProviderHealthDTO(
                 provider_id=h.provider,
                 status=h.status.value if hasattr(h.status, "value") else str(h.status),
-                message=redact_secrets(h.last_error_summary or "") if h.last_error_summary else None,
+                message=redact_secrets(h.last_error_summary or "")
+                if h.last_error_summary
+                else None,
                 last_probe_at=_format_dt(h.updated_at),
             )
             for h in prov_health
@@ -323,13 +383,13 @@ class OperationsDashboardService:
         for r in all_runs:
             job_for_run = jobs_map.get(r.active_job_id) if r.active_job_id else None
             is_recovery_blocked = (
-                (job_for_run and job_for_run.status == JobStatus.RECOVERY_BLOCKED)
-                or (r.stop_reason and "recovery" in r.stop_reason.lower())
-            )
-            is_checks_failed = (job_for_run and job_for_run.status == JobStatus.CHECKS_FAILED)
+                job_for_run and job_for_run.status == JobStatus.RECOVERY_BLOCKED
+            ) or (r.stop_reason and "recovery" in r.stop_reason.lower())
+            is_checks_failed = job_for_run and job_for_run.status == JobStatus.CHECKS_FAILED
 
             if not r.is_active and (
-                r.stop_outcome in {
+                r.stop_outcome
+                in {
                     OrchestrationStopOutcome.NEEDS_HUMAN,
                     OrchestrationStopOutcome.WAITING_CAPACITY,
                     OrchestrationStopOutcome.WAITING_EXTERNAL,
@@ -337,7 +397,11 @@ class OperationsDashboardService:
                 or is_recovery_blocked
                 or is_checks_failed
             ):
-                reason = r.stop_reason or (job_for_run.recovery_blocked_reason if (job_for_run and is_recovery_blocked) else None)
+                reason = r.stop_reason or (
+                    job_for_run.recovery_blocked_reason
+                    if (job_for_run and is_recovery_blocked)
+                    else None
+                )
                 if not reason and is_checks_failed:
                     reason = "Deterministic verification checks failed on candidate"
                 if not reason:
@@ -350,7 +414,9 @@ class OperationsDashboardService:
                 elif r.stop_outcome == OrchestrationStopOutcome.WAITING_CAPACITY:
                     guidance = "Wait for provider rate limits/capacity reset window."
                 elif is_recovery_blocked:
-                    guidance = "Unblock recovery by resolving external dependency or workspace state."
+                    guidance = (
+                        "Unblock recovery by resolving external dependency or workspace state."
+                    )
                 elif is_checks_failed:
                     guidance = "Fix code or tests to satisfy deterministic verification suite."
                 elif r.stop_outcome == OrchestrationStopOutcome.WAITING_EXTERNAL:
@@ -363,11 +429,15 @@ class OperationsDashboardService:
                         run_id=r.run_id,
                         job_id=r.active_job_id,
                         stage=r.current_stage.value if r.current_stage else "UNKNOWN",
-                        stop_outcome=r.stop_outcome.value if r.stop_outcome else ("CHECKS_FAILED" if is_checks_failed else None),
+                        stop_outcome=r.stop_outcome.value
+                        if r.stop_outcome
+                        else ("CHECKS_FAILED" if is_checks_failed else None),
                         human_gate=r.human_gate.value if r.human_gate else None,
                         reason=reason,
                         remediation_guidance=guidance,
-                        stop_code=r.stop_outcome.value if r.stop_outcome else ("CHECKS_FAILED" if is_checks_failed else None),
+                        stop_code=r.stop_outcome.value
+                        if r.stop_outcome
+                        else ("CHECKS_FAILED" if is_checks_failed else None),
                         can_retry=r.stop_outcome != OrchestrationStopOutcome.NEEDS_HUMAN,
                         can_reassign=True,
                         can_remediate=r.current_candidate_sha is not None,
@@ -375,8 +445,16 @@ class OperationsDashboardService:
                     )
                 )
             elif r.is_active:
-                job_for_run = jobs_map.get(r.active_job_id) if r.active_job_id else (self.uow.jobs.get_by_id(r.active_job_id) if r.active_job_id else None)
-                executor = (job_for_run.current_executor or job_for_run.implementer_role) if job_for_run else None
+                job_for_run = (
+                    jobs_map.get(r.active_job_id)
+                    if r.active_job_id
+                    else (self.uow.jobs.get_by_id(r.active_job_id) if r.active_job_id else None)
+                )
+                executor = (
+                    (job_for_run.current_executor or job_for_run.implementer_role)
+                    if job_for_run
+                    else None
+                )
                 active_executions.append(
                     ActiveExecutionDTO(
                         project_id=r.project_id,
@@ -396,7 +474,10 @@ class OperationsDashboardService:
             elif (
                 r.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
                 or r.current_stage == OrchestrationStage.PR_PREPARED
-                or (changes_map.get((r.project_id, r.change_name)) and changes_map[(r.project_id, r.change_name)].status == ChangeStatus.DONE)
+                or (
+                    changes_map.get((r.project_id, r.change_name))
+                    and changes_map[(r.project_id, r.change_name)].status == ChangeStatus.DONE
+                )
             ):
                 # Review verdict & Audit risk strictly bound to current candidate SHA
                 rev = reviews_map.get(r.active_job_id) if r.active_job_id else None
@@ -406,12 +487,28 @@ class OperationsDashboardService:
                 if not aud and r.active_job_id:
                     aud = self.uow.audits.get_by_job_id(r.active_job_id)
 
-                rev_verdict = rev.verdict.value if (rev and rev.verdict and rev.candidate_sha == r.current_candidate_sha) else None
-                reviewer = rev.reviewer_role if (rev and rev.candidate_sha == r.current_candidate_sha) else None
-                aud_risk = aud.risk.value if (aud and aud.risk and aud.candidate_sha == r.current_candidate_sha) else None
+                rev_verdict = (
+                    rev.verdict.value
+                    if (rev and rev.verdict and rev.candidate_sha == r.current_candidate_sha)
+                    else None
+                )
+                reviewer = (
+                    rev.reviewer_role
+                    if (rev and rev.candidate_sha == r.current_candidate_sha)
+                    else None
+                )
+                aud_risk = (
+                    aud.risk.value
+                    if (aud and aud.risk and aud.candidate_sha == r.current_candidate_sha)
+                    else None
+                )
 
                 # Only include when review and audit are both passed on current candidate
-                is_review_passed = rev is not None and rev.candidate_sha == r.current_candidate_sha and rev.verdict == ReviewVerdict.READY_TO_MERGE
+                is_review_passed = (
+                    rev is not None
+                    and rev.candidate_sha == r.current_candidate_sha
+                    and rev.verdict == ReviewVerdict.READY_TO_MERGE
+                )
                 is_audit_passed = (
                     aud is not None
                     and aud.candidate_sha == r.current_candidate_sha
@@ -458,8 +555,16 @@ class OperationsDashboardService:
             # Determine composite canonical status
             status_val = self._derive_canonical_change_status(change, latest_run)
 
-            job_for_latest = jobs_map.get(latest_run.active_job_id) if (latest_run and latest_run.active_job_id) else None
-            executor = (job_for_latest.current_executor or job_for_latest.implementer_role) if job_for_latest else None
+            job_for_latest = (
+                jobs_map.get(latest_run.active_job_id)
+                if (latest_run and latest_run.active_job_id)
+                else None
+            )
+            executor = (
+                (job_for_latest.current_executor or job_for_latest.implementer_role)
+                if job_for_latest
+                else None
+            )
 
             change_summaries.append(
                 ChangeSummaryDTO(
@@ -469,16 +574,26 @@ class OperationsDashboardService:
                     schema_name=change.schema_name,
                     current_run_id=latest_run.run_id if latest_run else None,
                     active_job_id=latest_run.active_job_id if latest_run else None,
-                    current_stage=latest_run.current_stage.value if (latest_run and latest_run.current_stage) else None,
-                    stop_outcome=latest_run.stop_outcome.value if (latest_run and latest_run.stop_outcome) else None,
-                    human_gate=latest_run.human_gate.value if (latest_run and latest_run.human_gate) else None,
+                    current_stage=latest_run.current_stage.value
+                    if (latest_run and latest_run.current_stage)
+                    else None,
+                    stop_outcome=latest_run.stop_outcome.value
+                    if (latest_run and latest_run.stop_outcome)
+                    else None,
+                    human_gate=latest_run.human_gate.value
+                    if (latest_run and latest_run.human_gate)
+                    else None,
                     current_executor=executor,
                     generation=latest_run.current_generation if latest_run else None,
                     candidate_sha=latest_run.current_candidate_sha if latest_run else None,
-                    candidate_sha_short=_short_sha(latest_run.current_candidate_sha) if latest_run else None,
+                    candidate_sha_short=_short_sha(latest_run.current_candidate_sha)
+                    if latest_run
+                    else None,
                     github_issue_number=binding.github_issue_number if binding else None,
                     github_pr_number=binding.github_pr_number if binding else None,
-                    updated_at=_format_dt(latest_run.updated_at if latest_run else change.updated_at),
+                    updated_at=_format_dt(
+                        latest_run.updated_at if latest_run else change.updated_at
+                    ),
                 )
             )
 
@@ -486,15 +601,15 @@ class OperationsDashboardService:
         github_health_status = "HEALTHY"
         for h in prov_health:
             if h.provider.lower() == "github":
-                github_health_status = h.status.value if hasattr(h.status, "value") else str(h.status)
+                github_health_status = (
+                    h.status.value if hasattr(h.status, "value") else str(h.status)
+                )
                 break
 
-        is_overall_healthy = (
-            github_health_status not in {"FAILED", "DEGRADED"}
-            and all(
-                (h.status.value if hasattr(h.status, "value") else str(h.status)) not in {"FAILED", "DEGRADED"}
-                for h in prov_health
-            )
+        is_overall_healthy = github_health_status not in {"FAILED", "DEGRADED"} and all(
+            (h.status.value if hasattr(h.status, "value") else str(h.status))
+            not in {"FAILED", "DEGRADED"}
+            for h in prov_health
         )
 
         system_status = SystemStatusDTO(
@@ -543,7 +658,11 @@ class OperationsDashboardService:
         status_val = self._derive_canonical_change_status(change, selected_run)
 
         project = self.uow.projects.get_by_id(project_id)
-        job = self.uow.jobs.get_by_id(selected_run.active_job_id) if (selected_run and selected_run.active_job_id) else None
+        job = (
+            self.uow.jobs.get_by_id(selected_run.active_job_id)
+            if (selected_run and selected_run.active_job_id)
+            else None
+        )
         target_branch = project.base_branch if project else None
         current_executor = (job.current_executor or job.implementer_role) if job else None
 
@@ -554,6 +673,9 @@ class OperationsDashboardService:
         review = self._project_review(selected_run, candidate_authority)
         audit = self._project_audit(selected_run, candidate_authority)
         github = self._project_github_binding(binding, selected_run)
+        preview_val = self._project_preview_validation(
+            project, change_name, selected_run, candidate_authority
+        )
         timeline = self._project_timeline(project_id, change_name, selected_run)
         blockers = self._project_blockers(selected_run)
 
@@ -563,11 +685,17 @@ class OperationsDashboardService:
             status=status_val,
             run_id=selected_run.run_id if selected_run else None,
             job_id=selected_run.active_job_id if selected_run else None,
-            current_stage=selected_run.current_stage.value if (selected_run and selected_run.current_stage) else None,
+            current_stage=selected_run.current_stage.value
+            if (selected_run and selected_run.current_stage)
+            else None,
             target_branch=target_branch,
             current_executor=current_executor,
-            stop_outcome=selected_run.stop_outcome.value if (selected_run and selected_run.stop_outcome) else None,
-            human_gate=selected_run.human_gate.value if (selected_run and selected_run.human_gate) else None,
+            stop_outcome=selected_run.stop_outcome.value
+            if (selected_run and selected_run.stop_outcome)
+            else None,
+            human_gate=selected_run.human_gate.value
+            if (selected_run and selected_run.human_gate)
+            else None,
             pipeline=pipeline_phases,
             candidate_authority=candidate_authority,
             candidate_history=candidate_history,
@@ -575,6 +703,7 @@ class OperationsDashboardService:
             review=review,
             audit=audit,
             github=github,
+            preview_validation=preview_val,
             timeline=timeline,
             blocker_details=blockers,
         )
@@ -628,7 +757,10 @@ class OperationsDashboardService:
             or run.current_stage == OrchestrationStage.PR_PREPARED
         ):
             return "COMPLETED"
-        if run.current_stage in {OrchestrationStage.ADMITTED, OrchestrationStage.PREPARING_EXECUTION}:
+        if run.current_stage in {
+            OrchestrationStage.ADMITTED,
+            OrchestrationStage.PREPARING_EXECUTION,
+        }:
             return "READY"
 
         return "FAILED"
@@ -650,11 +782,22 @@ class OperationsDashboardService:
             readiness_summary = "Definition of Ready satisfied"
         elif change and change.last_readiness_status == ReadinessState.NOT_READY:
             readiness_status = "failed"
-            readiness_summary = "; ".join(change.last_readiness_reasons) if change.last_readiness_reasons else "DoR criteria unmet"
+            readiness_summary = (
+                "; ".join(change.last_readiness_reasons)
+                if change.last_readiness_reasons
+                else "DoR criteria unmet"
+            )
         elif run:
             readiness_status = "passed"
             readiness_summary = "Admission verified"
-        phases.append(PipelinePhaseDTO(name="readiness", display_name="Readiness", status=readiness_status, summary=readiness_summary))
+        phases.append(
+            PipelinePhaseDTO(
+                name="readiness",
+                display_name="Readiness",
+                status=readiness_status,
+                summary=readiness_summary,
+            )
+        )
 
         if not run:
             for name, disp in [
@@ -664,7 +807,14 @@ class OperationsDashboardService:
                 ("audit", "DeepSeek Audit"),
                 ("pr_merge", "PR & Merge"),
             ]:
-                phases.append(PipelinePhaseDTO(name=name, display_name=disp, status="not_started", summary="Awaiting admission"))
+                phases.append(
+                    PipelinePhaseDTO(
+                        name=name,
+                        display_name=disp,
+                        status="not_started",
+                        summary="Awaiting admission",
+                    )
+                )
             return phases
 
         # Evaluate remaining phases based on stage and persistent state
@@ -709,7 +859,10 @@ class OperationsDashboardService:
             else:
                 impl_status = "running"
                 impl_summary = f"Candidate generation in progress under {executor or 'implementer'}"
-        elif run.stop_outcome in {OrchestrationStopOutcome.WAITING_CAPACITY, OrchestrationStopOutcome.WAITING_EXTERNAL}:
+        elif run.stop_outcome in {
+            OrchestrationStopOutcome.WAITING_CAPACITY,
+            OrchestrationStopOutcome.WAITING_EXTERNAL,
+        }:
             impl_status = "waiting"
             impl_summary = "Waiting for capacity or external event"
         impl_details = {
@@ -717,7 +870,15 @@ class OperationsDashboardService:
             "latest_progress": f"Generation {run.current_generation}",
             "is_mixed_authorship": False,
         }
-        phases.append(PipelinePhaseDTO(name="implementation", display_name="Implementation", status=impl_status, summary=impl_summary, details=impl_details))
+        phases.append(
+            PipelinePhaseDTO(
+                name="implementation",
+                display_name="Implementation",
+                status=impl_status,
+                summary=impl_summary,
+                details=impl_details,
+            )
+        )
 
         # 3. Deterministic Checks
         checks_status = "not_started"
@@ -741,7 +902,10 @@ class OperationsDashboardService:
             else:
                 checks_status = "passed"
                 checks_summary = "All deterministic checks passed"
-        elif run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN and stage == OrchestrationStage.RUNNING_CHECKS:
+        elif (
+            run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
+            and stage == OrchestrationStage.RUNNING_CHECKS
+        ):
             checks_status = "failed"
             checks_summary = "Checks failed"
         passed_count = 0
@@ -751,7 +915,15 @@ class OperationsDashboardService:
             passed_count = sum(1 for c in cr_list if c.exit_code == 0)
             failed_count = sum(1 for c in cr_list if c.exit_code != 0)
         checks_details = {"passed_count": passed_count, "failed_count": failed_count}
-        phases.append(PipelinePhaseDTO(name="checks", display_name="Deterministic Checks", status=checks_status, summary=checks_summary, details=checks_details))
+        phases.append(
+            PipelinePhaseDTO(
+                name="checks",
+                display_name="Deterministic Checks",
+                status=checks_status,
+                summary=checks_summary,
+                details=checks_details,
+            )
+        )
 
         # 4. Complementary Review
         rev_status = "not_started"
@@ -785,10 +957,20 @@ class OperationsDashboardService:
             else:
                 rev_status = "not_started"
                 rev_summary = "No review record found"
-        elif run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN and stage == OrchestrationStage.COMPLEMENTARY_REVIEW:
+        elif (
+            run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
+            and stage == OrchestrationStage.COMPLEMENTARY_REVIEW
+        ):
             rev_status = "blocked"
             rev_summary = "Review blocked"
-        phases.append(PipelinePhaseDTO(name="review", display_name="Complementary Review", status=rev_status, summary=rev_summary))
+        phases.append(
+            PipelinePhaseDTO(
+                name="review",
+                display_name="Complementary Review",
+                status=rev_status,
+                summary=rev_summary,
+            )
+        )
 
         # 5. DeepSeek Audit
         audit_status = "not_started"
@@ -815,19 +997,35 @@ class OperationsDashboardService:
                 else:
                     audit_status = "failed"
                     audit_summary = f"Audit completed with {audit_dto.risk} risk findings"
-            elif audit_dto.status in {AuditStatus.AUDIT_BLOCKED.value, AuditStatus.AUDIT_FAILED.value}:
+            elif audit_dto.status in {
+                AuditStatus.AUDIT_BLOCKED.value,
+                AuditStatus.AUDIT_FAILED.value,
+            }:
                 audit_status = "failed"
                 audit_summary = "Audit blocked by security/integrity finding"
-            elif audit_dto.status in {AuditStatus.AUDIT_RUNNING.value, AuditStatus.AUDIT_PENDING.value}:
+            elif audit_dto.status in {
+                AuditStatus.AUDIT_RUNNING.value,
+                AuditStatus.AUDIT_PENDING.value,
+            }:
                 audit_status = "running"
                 audit_summary = "Audit in progress"
             else:
                 audit_status = "not_started"
                 audit_summary = "No audit record found"
-        elif run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN and stage == OrchestrationStage.INDEPENDENT_AUDIT:
+        elif (
+            run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
+            and stage == OrchestrationStage.INDEPENDENT_AUDIT
+        ):
             audit_status = "blocked"
             audit_summary = "Audit blocked"
-        phases.append(PipelinePhaseDTO(name="audit", display_name="DeepSeek Audit", status=audit_status, summary=audit_summary))
+        phases.append(
+            PipelinePhaseDTO(
+                name="audit",
+                display_name="DeepSeek Audit",
+                status=audit_status,
+                summary=audit_summary,
+            )
+        )
 
         # 6. PR & Merge
         pr_status = "not_started"
@@ -839,16 +1037,28 @@ class OperationsDashboardService:
                 if a.result_payload and "merge_commit_sha" in a.result_payload:
                     pr_details["merge_commit_sha"] = a.result_payload["merge_commit_sha"]
 
-        if checks_status == "failed" or rev_status in {"failed", "blocked"} or audit_status in {"failed", "blocked"}:
+        if (
+            checks_status == "failed"
+            or rev_status in {"failed", "blocked"}
+            or audit_status in {"failed", "blocked"}
+        ):
             pr_status = "blocked"
             pr_summary = "Blocked by upstream pipeline failure"
         elif stage == OrchestrationStage.PREPARING_PR:
             pr_status = "running"
             pr_summary = "Preparing Pull Request"
-        elif "merge_commit_sha" in pr_details or (change and change.status == ChangeStatus.DONE and rev_status == "passed" and audit_status == "passed"):
+        elif "merge_commit_sha" in pr_details or (
+            change
+            and change.status == ChangeStatus.DONE
+            and rev_status == "passed"
+            and audit_status == "passed"
+        ):
             pr_status = "passed"
             pr_summary = f"Merged into target branch ({_short_sha(pr_details.get('merge_commit_sha')) or 'complete'})"
-        elif stage == OrchestrationStage.PR_PREPARED or run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE:
+        elif (
+            stage == OrchestrationStage.PR_PREPARED
+            or run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
+        ):
             if rev_status == "passed" and audit_status == "passed":
                 pr_status = "passed"
                 pr_summary = "Ready for human merge"
@@ -856,7 +1066,15 @@ class OperationsDashboardService:
                 pr_status = "not_started"
                 pr_summary = "Waiting for review and audit completion"
 
-        phases.append(PipelinePhaseDTO(name="pr_merge", display_name="PR & Merge", status=pr_status, summary=pr_summary, details=pr_details))
+        phases.append(
+            PipelinePhaseDTO(
+                name="pr_merge",
+                display_name="PR & Merge",
+                status=pr_status,
+                summary=pr_summary,
+                details=pr_details,
+            )
+        )
 
         return phases
 
@@ -874,11 +1092,20 @@ class OperationsDashboardService:
         for c in candidates:
             # Manifest info
             manifest = (
-                self.uow.candidate_manifests.get_by_candidate_sha(run.active_job_id, c.candidate_sha)
-                if (run.active_job_id and hasattr(self.uow.candidate_manifests, "get_by_candidate_sha"))
+                self.uow.candidate_manifests.get_by_candidate_sha(
+                    run.active_job_id, c.candidate_sha
+                )
+                if (
+                    run.active_job_id
+                    and hasattr(self.uow.candidate_manifests, "get_by_candidate_sha")
+                )
                 else None
             )
-            changed_files = list(manifest.file_manifest.keys()) if (manifest and hasattr(manifest, "file_manifest") and manifest.file_manifest) else []
+            changed_files = (
+                list(manifest.file_manifest.keys())
+                if (manifest and hasattr(manifest, "file_manifest") and manifest.file_manifest)
+                else []
+            )
             is_superseded = bool(c.superseded_by_id)
             dtos.append(
                 CandidateAuthorityDTO(
@@ -998,7 +1225,9 @@ class OperationsDashboardService:
             verdict=rev.verdict.value if rev.verdict else None,
             candidate_sha=rev.candidate_sha,
             is_stale_to_current_candidate=is_stale,
-            is_mixed_authorship=rev.is_mixed_authorship if hasattr(rev, "is_mixed_authorship") else False,
+            is_mixed_authorship=rev.is_mixed_authorship
+            if hasattr(rev, "is_mixed_authorship")
+            else False,
             material_findings_count=material_count,
             summary=clean_summary,
             findings=clean_findings,
@@ -1016,7 +1245,9 @@ class OperationsDashboardService:
             return AuditSummaryDTO()
 
         findings = self.uow.audit_findings.list_by_audit(aud.audit_id)
-        material_count = sum(1 for f in findings if f.severity.value in {"critical", "high", "medium"})
+        material_count = sum(
+            1 for f in findings if f.severity.value in {"critical", "high", "medium"}
+        )
 
         target_sha = candidate.candidate_sha if candidate else run.current_candidate_sha
         is_stale = False
@@ -1108,7 +1339,9 @@ class OperationsDashboardService:
         if target_run_id:
             target_runs = [target_run_id]
         elif project_id and change_name:
-            change_runs = self.uow.orchestration_runs.list_runs(project_id=project_id, change_name=change_name)
+            change_runs = self.uow.orchestration_runs.list_runs(
+                project_id=project_id, change_name=change_name
+            )
             target_runs = [r.run_id for r in change_runs]
 
         for rid in target_runs:
@@ -1134,12 +1367,25 @@ class OperationsDashboardService:
 
         # 2. General events from events repository (only if run_id not specified or if matching project/change provided)
         if not target_run_id or project_id or change_name:
-            general_events = self.uow.events.list_events(project_id=project_id, change_id=change_name, limit=limit)
+            general_events = self.uow.events.list_events(
+                project_id=project_id, change_id=change_name, limit=limit
+            )
             for ge in general_events:
-                if project_id and hasattr(ge, "project_id") and ge.project_id and ge.project_id != project_id:
+                if (
+                    project_id
+                    and hasattr(ge, "project_id")
+                    and ge.project_id
+                    and ge.project_id != project_id
+                ):
                     continue
-                sanitized_payload = {k: _sanitize_obj(v) for k, v in ge.payload.items()} if ge.payload else {}
-                summary = ge.event_type.value.replace("_", " ").title() if hasattr(ge.event_type, "value") else str(ge.event_type).replace("_", " ").title()
+                sanitized_payload = (
+                    {k: _sanitize_obj(v) for k, v in ge.payload.items()} if ge.payload else {}
+                )
+                summary = (
+                    ge.event_type.value.replace("_", " ").title()
+                    if hasattr(ge.event_type, "value")
+                    else str(ge.event_type).replace("_", " ").title()
+                )
                 if sanitized_payload and "reason" in sanitized_payload:
                     summary += f": {sanitized_payload['reason']}"
 
@@ -1147,7 +1393,9 @@ class OperationsDashboardService:
                     TimelineEventDTO(
                         event_id=ge.event_id,
                         timestamp=_format_dt(ge.timestamp) or "",
-                        event_type=ge.event_type.value if hasattr(ge.event_type, "value") else str(ge.event_type),
+                        event_type=ge.event_type.value
+                        if hasattr(ge.event_type, "value")
+                        else str(ge.event_type),
                         actor="system",
                         summary=redact_secrets(summary),
                         details=sanitized_payload,
@@ -1198,3 +1446,130 @@ class OperationsDashboardService:
             )
 
         return blockers
+
+    def _project_preview_validation(
+        self,
+        project: Project | None,
+        change_name: str,
+        run: OrchestrationRun | None,
+        candidate_authority: CandidateAuthorityDTO | None,
+    ) -> PreviewValidationSummaryDTO:
+        """Project container preview session and guided validation state for change."""
+        if not project:
+            return PreviewValidationSummaryDTO()
+
+        validation_svc = ValidationAuthorityService(self.uow)
+        is_required = validation_svc.is_preview_required(project, change_name)
+        scenarios_models = validation_svc.get_validation_scenarios(project, change_name)
+        scenarios = [
+            ValidationScenarioDTO(
+                scenario_id=s.scenario_id,
+                title=s.title,
+                description=s.description,
+                ordered_steps=s.ordered_steps,
+                expected_result=s.expected_result,
+                viewport=s.viewport,
+                required=s.required,
+            )
+            for s in scenarios_models
+        ]
+
+        cand_sha = (
+            candidate_authority.candidate_sha
+            if candidate_authority
+            else (run.current_candidate_sha if run else "")
+        )
+        base_sha = (
+            candidate_authority.base_sha if candidate_authority else (run.base_sha if run else "")
+        )
+
+        preview_dto: PreviewSessionDTO | None = None
+        if cand_sha:
+            preview_session = self.uow.preview_sessions.get_latest_for_candidate(
+                project.project_id, change_name, cand_sha
+            )
+            if not preview_session and run:
+                preview_session = self.uow.preview_sessions.get_latest_for_run(run.run_id)
+
+            if preview_session:
+                preview_dto = PreviewSessionDTO(
+                    preview_id=preview_session.preview_id,
+                    status=preview_session.status.value,
+                    head_sha=preview_session.head_sha,
+                    head_sha_short=_short_sha(preview_session.head_sha) or "",
+                    base_sha=preview_session.base_sha,
+                    base_sha_short=_short_sha(preview_session.base_sha) or "",
+                    image_digest=preview_session.image_digest,
+                    preview_url=preview_session.preview_url,
+                    allocated_port=preview_session.allocated_port,
+                    container_name=preview_session.container_name,
+                    failure_reason=preview_session.failure_reason,
+                    failure_code=preview_session.failure_code,
+                    created_at=_format_dt(preview_session.created_at),
+                    ready_at=_format_dt(preview_session.ready_at),
+                )
+
+        image_digest = preview_dto.image_digest if preview_dto else ""
+        is_authorized = False
+        is_stale = False
+        latest_val_dto: ValidationRunDTO | None = None
+
+        if cand_sha:
+            is_authorized, latest_val, is_stale = (
+                validation_svc.evaluate_candidate_validation_authority(
+                    project_id=project.project_id,
+                    change_name=change_name,
+                    head_sha=cand_sha,
+                    base_sha=base_sha,
+                    image_digest=image_digest,
+                )
+            )
+            if latest_val:
+                latest_val_dto = ValidationRunDTO(
+                    validation_id=latest_val.validation_id,
+                    verdict=latest_val.verdict.value,
+                    head_sha=latest_val.head_sha,
+                    head_sha_short=_short_sha(latest_val.head_sha) or "",
+                    base_sha=latest_val.base_sha,
+                    base_sha_short=_short_sha(latest_val.base_sha) or "",
+                    image_digest=latest_val.image_digest,
+                    is_stale=is_stale,
+                    scenario_results=latest_val.scenario_results,
+                    notes=latest_val.notes,
+                    operator=latest_val.operator,
+                    created_at=_format_dt(latest_val.created_at),
+                )
+
+        # Validation history
+        all_vals = self.uow.validation_runs.list_by_change(project.project_id, change_name)
+        val_history = [
+            ValidationRunDTO(
+                validation_id=v.validation_id,
+                verdict=v.verdict.value,
+                head_sha=v.head_sha,
+                head_sha_short=_short_sha(v.head_sha) or "",
+                base_sha=v.base_sha,
+                base_sha_short=_short_sha(v.base_sha) or "",
+                image_digest=v.image_digest,
+                is_stale=(
+                    v.head_sha != cand_sha
+                    or v.base_sha != base_sha
+                    or v.image_digest != image_digest
+                ),
+                scenario_results=v.scenario_results,
+                notes=v.notes,
+                operator=v.operator,
+                created_at=_format_dt(v.created_at),
+            )
+            for v in all_vals
+        ]
+
+        return PreviewValidationSummaryDTO(
+            is_preview_required=is_required,
+            is_authorized=is_authorized,
+            is_stale=is_stale,
+            preview_session=preview_dto,
+            latest_validation=latest_val_dto,
+            validation_history=val_history,
+            scenarios=scenarios,
+        )

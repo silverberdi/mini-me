@@ -1,32 +1,48 @@
 # Product Backlog
 
-| ID | Outcome | Verification idea |
-|---|---|---|
-| MM-001 | PostgreSQL config + versioned schema | migrate/restart tests |
-| MM-002 | Durable event/current-state core | transactional transition tests |
-| MM-003 | Register projects with immutable repo binding | mismatch denial tests |
-| MM-004 | Discover OpenSpec and enforce DoR | fixtures + invalid bindings |
-| MM-005 | GitHub Issue/Project durable mapping foundation | mocked API + reconciliation |
-| MM-006 | Status/health API/CLI | contract tests |
-| MM-010 | Isolated Git worktree lifecycle | integration tests |
-| MM-011 | Codex adapter | fake + opt-in CLI smoke |
-| MM-012 | Antigravity adapter | fake + opt-in CLI smoke |
-| MM-013 | deterministic checks/evidence | pass/fail/timeout |
-| MM-020 | complementary review | seeded defect |
-| MM-021 | bounded correction loop | max-round tests |
-| MM-022 | durable human inbox/decisions | API/TUI acceptance |
-| MM-030 | DeepSeek Direct audit | mock + opt-in live |
-| MM-040 | failure taxonomy/retry/circuit breaker | deterministic fault injection |
-| MM-041 | restart reconciliation | kill/restart E2E |
-| MM-042 | RUN/DRAIN/WAIT | scheduler simulations |
-| MM-043 | OpenRouter drain implementation/review | no-new-work + distinct-model tests |
-| MM-044 | hard budget/provider privacy | denied-call assertions |
-| MM-050 | containerized UI preview | build/up/health/down fixture |
-| MM-051 | guided UI human validation | scenario + stale-candidate tests |
-| MM-052 | candidate SHA/base/image identity | mutation/drift tests |
-| MM-060 | draft PR lifecycle + human merge | GitHub integration test |
-| MM-061 | production deployment/verification | container deployment fixture |
-| MM-062 | closure/archive/sync/cleanup | end-to-end DoD test |
-| MM-063 | metrics finalization | recomputation tests |
+## Delivered Items (Stages 001 – 012)
+
+| ID | Stage | Outcome | Verification idea |
+|---|---|---|---|
+| MM-001 | 001 | PostgreSQL config + versioned schema | migrate/restart tests |
+| MM-002 | 001 | Durable event/current-state core | transactional transition tests |
+| MM-003 | 001 | Register projects with immutable repo binding | mismatch denial tests |
+| MM-004 | 001 | Discover OpenSpec and enforce DoR | fixtures + invalid bindings |
+| MM-005 | 001 | GitHub Issue/Project durable mapping foundation | mocked API + reconciliation |
+| MM-006 | 001 | Status/health API/CLI | contract tests |
+| MM-010 | 002 | Isolated Git worktree lifecycle | integration tests |
+| MM-011 | 002 | Codex implementer adapter | fake + opt-in CLI smoke |
+| MM-012 | 002 | Antigravity implementer adapter | fake + opt-in CLI smoke |
+| MM-013 | 002 | Deterministic checks runner and diagnostics | pass/fail/timeout/redaction |
+| MM-020 | 003 | Complementary review pipeline | seeded defect test |
+| MM-021 | 003 | Bounded review correction loop | max-round tests |
+| MM-030 | 004 | DeepSeek Direct independent audit | mock + opt-in live audit |
+| MM-040 | 005 | Provider resilience, restart recovery & health | kill/restart E2E, fault injection |
+| MM-041 | 005 | RUN/DRAIN/WAIT scheduler modes | scheduler simulations |
+| MM-042 | 006 | OpenRouter drain fallback with model independence | distinct-model & budget tests |
+| MM-043 | 007 | Agent continuation and handoff governance | ping-pong denial & handoff tests |
+| MM-044 | 008 | Autonomous multi-stage orchestration coordinator | stage transition & gate tests |
+| MM-045 | 009 | GitHub App runtime integration & PR preparation | GitHub App authentication tests |
+| MM-046 | 010 | Governance and recovery hardening | transition key & identity tests |
+| MM-047 | 011 | Preserved candidate remediation generations | generation increment & drift tests |
+| MM-048 | 012 | Execution operations dashboard | API projections & UI visual tests |
+
+---
+
+## Canonical Active & Future Roadmap Items (Stages 013 – 018)
+
+| ID | Stage | Outcome | Verification idea |
+|---|---|---|---|
+| MM-050 | 013 (ACTIVE) | Container preview lifecycle (build/start/probe/teardown) | real Docker build & health probe test |
+| MM-051 | 013 (ACTIVE) | Candidate authority binding `(head_sha, base_sha, image_digest)` | image digest authority & mutation tests |
+| MM-052 | 013 (ACTIVE) | Guided UI validation workflow & scenarios | scenario runner & PASS/FAIL state tests |
+| MM-053 | 013 (ACTIVE) | Stale validation invalidation & historical evidence | candidate drift / stale PASS tests |
+| MM-054 | 013 (ACTIVE) | Preview restart/orphan reconciliation & isolation | restart recovery & foreign container guard |
+| MM-055 | 013 (ACTIVE) | Dashboard integration for guided scenario validation | UI component & browser acceptance tests |
+| MM-060 | 014 | TUI operator console (Textual) | interactive terminal navigation tests |
+| MM-070 | 015 | Operator actions / control plane (retry/resume/reassign/gates) | mutation authority & auditability tests |
+| MM-080 | 016 | Autonomous queue & work selection (readiness/budget/capacity) | multi-change autonomous scheduling tests |
+| MM-090 | 017 | PWA control center (rich web operator experience) | responsive web app & PWA acceptance |
+| MM-100 | 018 | End-to-end self-operating development loop & SDLC metrics | full-cycle autonomous delivery & metrics |
 
 Backlog items are planning units. OpenSpec `tasks.md` remains the implementation checklist for the active change; do not duplicate every task into GitHub Issues.

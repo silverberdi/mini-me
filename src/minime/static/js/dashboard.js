@@ -428,12 +428,16 @@
     // Tab 5: Audit
     renderAuditTab(detail.audit);
 
-    // Tab 6: GitHub & PR
+    // Tab 6: Container Preview & Guided Validation
+    renderPreviewTab(detail.preview_validation, detail);
+
+    // Tab 7: GitHub & PR
     renderGitHubTab(detail.github, detail.project_id);
 
-    // Tab 7: Timeline
+    // Tab 8: Timeline
     renderTimelineTab(detail.timeline);
   }
+
 
   function renderPipelineStepper(pipeline) {
     if (!pipelineStepper || !pipeline) return;
@@ -690,7 +694,283 @@
     `;
   }
 
+  function renderPreviewTab(previewVal, detail) {
+    const statusContainer = document.getElementById('previewContainerStatus');
+    const scenariosContainer = document.getElementById('guidedValidationContainer');
+    const historyContainer = document.getElementById('validationHistoryContainer');
+    const launchBtn = document.getElementById('launchPreviewBtn');
+    const teardownBtn = document.getElementById('teardownPreviewBtn');
+
+    if (!statusContainer || !scenariosContainer || !historyContainer) return;
+
+    const session = previewVal ? previewVal.preview_session : null;
+    const isRequired = previewVal ? previewVal.is_preview_required : false;
+    const isAuthorized = previewVal ? previewVal.is_authorized : false;
+    const isStale = previewVal ? previewVal.is_stale : false;
+    const candSha = detail.candidate_authority ? detail.candidate_authority.candidate_sha : '';
+    const baseSha = detail.candidate_authority ? detail.candidate_authority.base_sha : '';
+
+    // Action buttons visibility
+    if (session && (session.status === 'READY' || session.status === 'STARTING' || session.status === 'PROBING')) {
+      if (launchBtn) launchBtn.style.display = 'none';
+      if (teardownBtn) {
+        teardownBtn.style.display = 'inline-block';
+        teardownBtn.onclick = async () => {
+          teardownBtn.disabled = true;
+          teardownBtn.textContent = 'Tearing down...';
+          try {
+            await fetch(`/api/v1/previews/${session.preview_id}/teardown`, { method: 'POST' });
+            fetchOverview();
+          } catch (e) {
+            alert(`Teardown failed: ${e}`);
+          } finally {
+            teardownBtn.disabled = false;
+            teardownBtn.textContent = '⏹ Teardown';
+          }
+        };
+      }
+    } else {
+      if (teardownBtn) teardownBtn.style.display = 'none';
+      if (launchBtn) {
+        launchBtn.style.display = 'inline-block';
+        launchBtn.onclick = async () => {
+          launchBtn.disabled = true;
+          launchBtn.textContent = 'Building...';
+          try {
+            const buildRes = await fetch('/api/v1/previews/build', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                project_id: detail.project_id,
+                change_name: detail.change_name,
+                run_id: detail.run_id,
+                head_sha: candSha || 'HEAD',
+                base_sha: baseSha || 'main',
+                candidate_generation: detail.candidate_authority ? detail.candidate_authority.generation : 1,
+              })
+            });
+            if (!buildRes.ok) {
+              const err = await buildRes.json();
+              throw new Error(err.detail || 'Build failed');
+            }
+            const buildData = await buildRes.json();
+
+            launchBtn.textContent = 'Starting container...';
+            const startRes = await fetch('/api/v1/previews/start', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                preview_id: buildData.preview_id,
+                internal_port: 8787,
+                probe_health: true,
+              })
+            });
+            if (!startRes.ok) {
+              const err = await startRes.json();
+              throw new Error(err.detail || 'Start failed');
+            }
+            fetchOverview();
+          } catch (e) {
+            alert(`Preview launch failed: ${e.message}`);
+          } finally {
+            launchBtn.disabled = false;
+            launchBtn.textContent = '🚀 Launch Preview';
+          }
+        };
+      }
+    }
+
+    // Render Preview Container Status Card
+    if (!session) {
+      statusContainer.innerHTML = `
+        <div class="overview-meta-grid" style="margin-bottom: 8px;">
+          <div class="meta-box">
+            <div class="meta-box-label">Preview Requirement</div>
+            <div class="meta-box-val">${isRequired ? '<span class="badge badge-warning">REQUIRED FOR MERGE</span>' : '<span class="text-muted">Optional</span>'}</div>
+          </div>
+          <div class="meta-box">
+            <div class="meta-box-label">Status</div>
+            <div class="meta-box-val"><span class="badge badge-discovered">NOT LAUNCHED</span></div>
+          </div>
+          <div class="meta-box">
+            <div class="meta-box-label">Validation Verdict</div>
+            <div class="meta-box-val"><span class="badge badge-not-ready">PENDING</span></div>
+          </div>
+        </div>
+        <p class="text-muted" style="font-size: 12px; margin: 0;">Click "Launch Preview" to build and start an isolated container environment for this candidate.</p>
+      `;
+    } else {
+      const isReady = session.status === 'READY';
+      const statusBadgeClass = isReady ? 'badge-ready' : (session.status === 'FAILED' ? 'badge-failed' : 'badge-running');
+      statusContainer.innerHTML = `
+        <div class="overview-meta-grid" style="margin-bottom: 12px;">
+          <div class="meta-box">
+            <div class="meta-box-label">Preview Status</div>
+            <div class="meta-box-val"><span class="badge ${statusBadgeClass}">${escapeHtml(session.status)}</span></div>
+          </div>
+          <div class="meta-box">
+            <div class="meta-box-label">Live Preview URL</div>
+            <div class="meta-box-val">
+              ${session.preview_url ? `<a href="${sanitizeUrl(session.preview_url)}" target="_blank" rel="noopener noreferrer" class="text-primary font-mono font-bold">${escapeHtml(session.preview_url)} ↗</a>` : '<span class="text-muted">---</span>'}
+            </div>
+          </div>
+          <div class="meta-box">
+            <div class="meta-box-label">Allocated Port</div>
+            <div class="meta-box-val font-mono">${session.allocated_port || '---'}</div>
+          </div>
+          <div class="meta-box">
+            <div class="meta-box-label">Authority Verdict</div>
+            <div class="meta-box-val">
+              ${isAuthorized ? '<span class="badge badge-completed">VALIDATED PASS</span>' : (isStale ? '<span class="badge badge-warning">STALE (RE-VALIDATION REQUIRED)</span>' : '<span class="badge badge-not-ready">NEEDS VALIDATION</span>')}
+            </div>
+          </div>
+        </div>
+        <div class="meta-box" style="margin-bottom: 8px;">
+          <div class="meta-box-label">Immutable Image Digest</div>
+          <div class="meta-box-val font-mono" style="font-size: 11px; word-break: break-all;">${escapeHtml(session.image_digest || '---')}</div>
+        </div>
+        ${session.failure_reason ? `
+          <div class="meta-box" style="border-left: 3px solid var(--color-danger); margin-top: 8px;">
+            <div class="meta-box-label text-danger">Failure Diagnostics (${escapeHtml(session.failure_code || 'ERROR')})</div>
+            <p style="font-size: 11px; color: var(--color-danger); margin-top: 4px;">${escapeHtml(session.failure_reason)}</p>
+          </div>
+        ` : ''}
+      `;
+    }
+
+    // Render Guided Validation Scenarios
+    const scenarios = (previewVal && previewVal.scenarios) ? previewVal.scenarios : [];
+    if (scenarios.length === 0) {
+      scenariosContainer.innerHTML = `<p class="text-muted" style="font-size: 12px;">No specific validation scenarios defined for this change.</p>`;
+    } else {
+      scenariosContainer.innerHTML = `
+        <div class="checks-list" style="margin-bottom: 16px;">
+          ${scenarios.map((sc, scIdx) => `
+            <div class="check-item" style="flex-direction: column; align-items: flex-start; gap: 6px;">
+              <div style="display: flex; justify-content: space-between; width: 100%; align-items: center;">
+                <div class="check-item-title font-bold">${escapeHtml(sc.title)}</div>
+                <span class="badge badge-ready">Required</span>
+              </div>
+              <p style="font-size: 12px; margin: 0; color: var(--text-muted);">${escapeHtml(sc.description)}</p>
+              ${sc.ordered_steps && sc.ordered_steps.length > 0 ? `
+                <div style="margin-top: 4px; padding-left: 8px; font-size: 11px;">
+                  ${sc.ordered_steps.map((st, stIdx) => `
+                    <label style="display: flex; align-items: center; gap: 6px; margin: 3px 0; cursor: pointer;">
+                      <input type="checkbox" class="scenario-step-check" data-scenario-id="${escapeHtml(sc.scenario_id)}" data-step-idx="${stIdx}" checked>
+                      <span>${escapeHtml(st)}</span>
+                    </label>
+                  `).join('')}
+                </div>
+              ` : ''}
+            </div>
+          `).join('')}
+        </div>
+
+        <div class="validation-submission-form" style="background: var(--bg-card-sub); padding: 12px; border-radius: 6px; border: 1px solid var(--border-color);">
+          <h5 style="margin: 0 0 10px 0; font-size: 13px;">Record Candidate Validation Verdict</h5>
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px;">
+            <div>
+              <label style="font-size: 11px; color: var(--text-muted); display: block; margin-bottom: 4px;">Verdict</label>
+              <select id="validationVerdictSelect" style="width: 100%; padding: 6px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-input); color: var(--text-primary);">
+                <option value="PASS" selected>PASS — Candidate Visually Verified</option>
+                <option value="FAIL">FAIL — Visual Defects Observed</option>
+              </select>
+            </div>
+            <div>
+              <label style="font-size: 11px; color: var(--text-muted); display: block; margin-bottom: 4px;">Operator Identity</label>
+              <input type="text" id="validationOperatorInput" value="human_operator" style="width: 100%; padding: 6px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-input); color: var(--text-primary);">
+            </div>
+          </div>
+          <div style="margin-bottom: 10px;">
+            <label style="font-size: 11px; color: var(--text-muted); display: block; margin-bottom: 4px;">Validation Notes / Observations</label>
+            <textarea id="validationNotesInput" rows="2" placeholder="Document verified visual flows, layout checks, or defect notes..." style="width: 100%; padding: 6px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-input); color: var(--text-primary); font-size: 12px;"></textarea>
+          </div>
+          <button id="submitValidationBtn" class="btn btn-primary btn-sm">💾 Submit Validation Verdict</button>
+        </div>
+      `;
+
+      // Wire submit button
+      const submitBtn = document.getElementById('submitValidationBtn');
+      if (submitBtn) {
+        submitBtn.onclick = async () => {
+          submitBtn.disabled = true;
+          submitBtn.textContent = 'Submitting...';
+          const verdict = document.getElementById('validationVerdictSelect').value;
+          const operator = document.getElementById('validationOperatorInput').value || 'human_operator';
+          const notes = document.getElementById('validationNotesInput').value || '';
+          const imgDigest = session ? session.image_digest : '';
+
+          try {
+            const res = await fetch('/api/v1/validations/submit', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                project_id: detail.project_id,
+                change_name: detail.change_name,
+                run_id: detail.run_id,
+                preview_id: session ? session.preview_id : null,
+                candidate_generation: detail.candidate_authority ? detail.candidate_authority.generation : 1,
+                head_sha: candSha,
+                base_sha: baseSha,
+                image_digest: imgDigest,
+                verdict: verdict,
+                operator: operator,
+                notes: notes,
+                scenario_results: scenarios.map(sc => ({ scenario_id: sc.scenario_id, status: verdict })),
+              })
+            });
+            if (!res.ok) {
+              const err = await res.json();
+              throw new Error(err.detail || 'Validation submit failed');
+            }
+            alert(`Validation verdict '${verdict}' successfully recorded for candidate!`);
+            fetchOverview();
+          } catch (e) {
+            alert(`Error submitting validation: ${e.message}`);
+          } finally {
+            submitBtn.disabled = false;
+            submitBtn.textContent = '💾 Submit Validation Verdict';
+          }
+        };
+      }
+    }
+
+    // Render Validation History
+    const history = (previewVal && previewVal.validation_history) ? previewVal.validation_history : [];
+    if (history.length === 0) {
+      historyContainer.innerHTML = `<p class="text-muted" style="font-size: 12px;">No historical validation runs recorded.</p>`;
+    } else {
+      historyContainer.innerHTML = `
+        <table class="data-table small-table">
+          <thead>
+            <tr>
+              <th>Verdict</th>
+              <th>Candidate SHA</th>
+              <th>Image Digest</th>
+              <th>Operator</th>
+              <th>Recorded At</th>
+              <th>Authority Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${history.map(v => `
+              <tr>
+                <td><span class="badge ${v.verdict === 'PASS' ? 'badge-ready' : 'badge-failed'}">${escapeHtml(v.verdict)}</span></td>
+                <td><code class="code-sha">${escapeHtml(v.head_sha_short || v.head_sha.substring(0, 8))}</code></td>
+                <td><code class="code-sha">${escapeHtml(v.image_digest ? v.image_digest.substring(0, 15) + '...' : '---')}</code></td>
+                <td>${escapeHtml(v.operator || 'operator')}</td>
+                <td>${formatRelativeTime(v.created_at)}</td>
+                <td>${v.is_stale ? '<span class="badge badge-warning">STALE</span>' : '<span class="text-success">CURRENT</span>'}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      `;
+    }
+  }
+
   function renderGitHubTab(github, projectId) {
+
     const container = document.getElementById('githubContentContainer');
     if (!container) return;
 

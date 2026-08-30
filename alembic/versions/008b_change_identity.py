@@ -61,19 +61,21 @@ def _quality(row: sa.RowMapping) -> int:
 
 def upgrade() -> None:
     if context.is_offline_mode():
-        op.create_unique_constraint(
-            "uq_changes_project_name", "changes", ["project_id", "name"]
-        )
+        op.create_unique_constraint("uq_changes_project_name", "changes", ["project_id", "name"])
         return
     connection = op.get_bind()
-    rows = connection.execute(
-        sa.text(
-            "SELECT id, project_id, name, status, stage, schema_name, proposal_path, "
-            "tasks_path, design_path, specs_paths, last_readiness_status, "
-            "last_readiness_reasons, discovered_at, updated_at "
-            "FROM changes ORDER BY project_id, name, discovered_at, id"
+    rows = (
+        connection.execute(
+            sa.text(
+                "SELECT id, project_id, name, status, stage, schema_name, proposal_path, "
+                "tasks_path, design_path, specs_paths, last_readiness_status, "
+                "last_readiness_reasons, discovered_at, updated_at "
+                "FROM changes ORDER BY project_id, name, discovered_at, id"
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
 
     groups: dict[tuple[str, str], list[sa.RowMapping]] = {}
     for row in rows:

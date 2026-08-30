@@ -31,8 +31,9 @@ def verify_physical_schema_invariants(engine: Engine) -> SchemaInvariantResult:
     """
     from minime.db.models import Base
 
-    expected_revision = "011_governance_hardening"
+    expected_revision = "012_preview_and_validation"
     inspector = inspect(engine)
+
     tables = set(inspector.get_table_names())
     missing_tables = sorted(set(Base.metadata.tables) - tables)
     missing_columns: dict[str, tuple[str, ...]] = {}
@@ -51,7 +52,13 @@ def verify_physical_schema_invariants(engine: Engine) -> SchemaInvariantResult:
         reason = f"Expected Alembic head {expected_revision}, found {revision or 'none'}."
     elif missing_tables or missing_columns:
         reason = "Physical schema is missing required tables or columns."
-    return SchemaInvariantResult(not (reason or missing_tables or missing_columns), revision, tuple(missing_tables), missing_columns, reason)
+    return SchemaInvariantResult(
+        not (reason or missing_tables or missing_columns),
+        revision,
+        tuple(missing_tables),
+        missing_columns,
+        reason,
+    )
 
 
 def validate_postgres_url(url: str) -> None:
