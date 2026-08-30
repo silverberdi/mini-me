@@ -5,13 +5,28 @@
 (function () {
   'use strict';
 
+  // Safe Storage Helpers
+  function safeGetStorage(key, defaultVal) {
+    try {
+      return localStorage.getItem(key) || defaultVal;
+    } catch (_) {
+      return defaultVal;
+    }
+  }
+
+  function safeSetStorage(key, val) {
+    try {
+      localStorage.setItem(key, val);
+    } catch (_) {}
+  }
+
   // State
   let overviewData = null;
   let selectedChange = null;
   let initialSelected = false;
   let activeFilter = 'ALL';
   let searchQuery = '';
-  let refreshIntervalSeconds = parseInt(localStorage.getItem('minime_dashboard_interval') || '10', 10);
+  let refreshIntervalSeconds = parseInt(safeGetStorage('minime_dashboard_interval', '10'), 10);
   let countdownSeconds = refreshIntervalSeconds;
   let countdownInterval = null;
 
@@ -67,7 +82,7 @@
 
   // Theme Handling
   function setupTheme() {
-    const savedTheme = localStorage.getItem('minime_theme') || 'theme-dark';
+    const savedTheme = safeGetStorage('minime_theme', 'theme-dark');
     document.body.className = savedTheme;
     updateThemeIcon(savedTheme);
   }
@@ -76,7 +91,7 @@
     const isDark = document.body.classList.contains('theme-dark');
     const newTheme = isDark ? 'theme-light' : 'theme-dark';
     document.body.className = newTheme;
-    localStorage.setItem('minime_theme', newTheme);
+    safeSetStorage('minime_theme', newTheme);
     updateThemeIcon(newTheme);
   }
 
@@ -103,7 +118,7 @@
       refreshIntervalSelect.value = String(refreshIntervalSeconds);
       refreshIntervalSelect.addEventListener('change', (e) => {
         refreshIntervalSeconds = parseInt(e.target.value, 10);
-        localStorage.setItem('minime_dashboard_interval', String(refreshIntervalSeconds));
+        safeSetStorage('minime_dashboard_interval', String(refreshIntervalSeconds));
         countdownSeconds = refreshIntervalSeconds;
         setupAutoRefresh();
       });

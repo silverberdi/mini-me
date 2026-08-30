@@ -678,7 +678,10 @@ def get_dashboard_change_detail(
 ) -> DashboardChangeDetailResponse:
     """Get comprehensive execution detail for a specific change and its latest/selected run."""
     service = OperationsDashboardService(uow)
-    return service.get_change_detail(project_id, change_name, run_id=run_id)
+    try:
+        return service.get_change_detail(project_id, change_name, run_id=run_id)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
 
 
 @app.get("/api/v1/dashboard/runs/{run_id}", tags=["dashboard"])

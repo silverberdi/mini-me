@@ -62,6 +62,9 @@ def test_dashboard_redacts_api_keys_and_tokens(
     secret_key = "sk-ant-api03-abcdef1234567890abcdef1234567890"
     secret_ds = "sk-deepseek-998877665544332211"
     secret_gh = "ghp_1234567890abcdefghijklmnopqrstuvwxyz"
+    secret_aws = "AKIAIOSFODNN7EXAMPLE"
+    secret_slack = "xoxb-1234567890-abcdefghijkl"
+    secret_pat = "github_pat_11ABCD_efghijklmnopqrstuv"
 
     # Stopped run with secret in stop_reason
     run = OrchestrationRun(
@@ -73,7 +76,7 @@ def test_dashboard_redacts_api_keys_and_tokens(
         current_stage=OrchestrationStage.IMPLEMENTING,
         is_active=False,
         stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
-        stop_reason=f"Failed connecting to provider using token={secret_key}",
+        stop_reason=f"Failed connecting to provider using token={secret_key} and access_key={secret_aws}",
     )
     in_memory_uow.orchestration_runs.save(run)
 
@@ -87,7 +90,7 @@ def test_dashboard_redacts_api_keys_and_tokens(
         candidate_sha="cand-sha-sec",
         base_sha="base-sha-sec",
         verdict=ReviewVerdict.CHANGES_REQUIRED,
-        summary=f"Found leaked token={secret_gh} in configuration",
+        summary=f"Found leaked token={secret_gh} and slack={secret_slack} and pat={secret_pat} in configuration",
     )
     in_memory_uow.reviews.save(rev)
     rf = ReviewFinding(
@@ -108,7 +111,7 @@ def test_dashboard_redacts_api_keys_and_tokens(
         provider="deepseek",
         candidate_sha="cand-sha-sec",
         base_sha="base-sha-sec",
-        summary=f"Audit caught api_key={secret_ds}",
+        summary=f"Audit caught api_key={secret_ds} and secret_key={secret_aws}",
         status=AuditStatus.AUDIT_COMPLETED,
         risk=AuditRiskLevel.HIGH,
     )
@@ -149,6 +152,9 @@ def test_dashboard_redacts_api_keys_and_tokens(
     assert secret_key not in overview_json
     assert secret_ds not in overview_json
     assert secret_gh not in overview_json
+    assert secret_aws not in overview_json
+    assert secret_slack not in overview_json
+    assert secret_pat not in overview_json
 
     # 2. Detail Check
     detail = service.get_change_detail("secure-proj", "012-secret-test")
@@ -156,4 +162,7 @@ def test_dashboard_redacts_api_keys_and_tokens(
     assert secret_key not in detail_json
     assert secret_ds not in detail_json
     assert secret_gh not in detail_json
+    assert secret_aws not in detail_json
+    assert secret_slack not in detail_json
+    assert secret_pat not in detail_json
     assert "[REDACTED" in detail_json

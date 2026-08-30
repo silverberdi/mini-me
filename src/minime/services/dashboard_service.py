@@ -66,6 +66,8 @@ class SystemStatusDTO(BaseModel):
     database_healthy: bool = True
     database_message: str = "Connected"
     scheduler_mode: str = SchedulerMode.RUN.value
+    queue_depth: int = 0
+    github_app_health: str = "HEALTHY"
     active_runs_count: int = 0
     total_changes_count: int = 0
     attention_runs_count: int = 0
@@ -81,6 +83,7 @@ class AttentionItemDTO(BaseModel):
     stop_outcome: str | None = None
     human_gate: str | None = None
     reason: str
+    remediation_guidance: str | None = None
     stop_code: str | None = None
     provider: str | None = None
     can_retry: bool = False
@@ -172,6 +175,7 @@ class CheckResultItemDTO(BaseModel):
 class ReviewSummaryDTO(BaseModel):
     review_id: str | None = None
     reviewer_role: str | None = None
+    model: str | None = None
     status: str = "not_started"  # not_started, running, completed, failed
     verdict: str | None = None  # READY_TO_MERGE, CHANGES_REQUIRED
     candidate_sha: str | None = None
@@ -317,6 +321,17 @@ class OperationsDashboardService:
                 job_for_run = jobs_map.get(r.active_job_id) if r.active_job_id else None
                 reason = r.stop_reason or (job_for_run.recovery_blocked_reason if job_for_run else None) or f"Stopped at {r.current_stage.value if r.current_stage else 'unknown'}"
                 reason = redact_secrets(reason)
+
+                guidance = "Review the stop reason and take necessary action."
+                if r.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN:
+                    guidance = "Human intervention required to resolve gate or decision."
+                elif r.stop_outcome == OrchestrationStopOutcome.WAITING_CAPACITY:
+                    guidance = "Wait for provider rate limits/capacity reset window."
+                elif is_recovery_blocked:
+                    guidance = "Unblock recovery by resolving external dependency or workspace state."
+                elif r.stop_outcome == OrchestrationStopOutcome.WAITING_EXTERNAL:
+                    guidance = "Check external system status and resume run."
+
                 attention_items.append(
                     AttentionItemDTO(
                         project_id=r.project_id,
@@ -327,6 +342,7 @@ class OperationsDashboardService:
                         stop_outcome=r.stop_outcome.value if r.stop_outcome else None,
                         human_gate=r.human_gate.value if r.human_gate else None,
                         reason=reason,
+                        remediation_guidance=guidance,
                         stop_code=r.stop_outcome.value if r.stop_outcome else None,
                         can_retry=r.stop_outcome != OrchestrationStopOutcome.NEEDS_HUMAN,
                         can_reassign=True,
@@ -425,12 +441,21 @@ class OperationsDashboardService:
                 )
             )
 
+        # Check GitHub provider health
+        github_health_status = "HEALTHY"
+        for h in prov_health:
+            if h.provider.lower() == "github":
+                github_health_status = h.status.value if hasattr(h.status, "value") else str(h.status)
+                break
+
         system_status = SystemStatusDTO(
             healthy=True,
             database_engine="PostgreSQL",
             database_healthy=True,
             database_message="PostgreSQL operational",
             scheduler_mode=sched_status.mode.value,
+            queue_depth=sched_status.queue_depth if hasattr(sched_status, "queue_depth") else 0,
+            github_app_health=github_health_status,
             active_runs_count=len(active_executions),
             total_changes_count=len(change_summaries),
             attention_runs_count=len(attention_items),
@@ -451,6 +476,8 @@ class OperationsDashboardService:
         """Construct comprehensive detail for a specific change and its latest/selected run."""
         change = self.uow.changes.get_by_name(project_id, change_name)
         runs = self.uow.orchestration_runs.list_runs(project_id=project_id, change_name=change_name)
+        if not change and not runs:
+            raise ValueError(f"Change '{change_name}' not found in project '{project_id}'")
         runs.sort(key=lambda x: x.created_at, reverse=True)
 
         selected_run: OrchestrationRun | None = None
@@ -632,7 +659,12 @@ class OperationsDashboardService:
         elif run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN and stage == OrchestrationStage.IMPLEMENTING:
             impl_status = "blocked"
             impl_summary = "Implementation blocked"
-        phases.append(PipelinePhaseDTO(name="implementation", display_name="Implementation", status=impl_status, summary=impl_summary))
+        impl_details = {
+            "attempts_count": run.current_generation,
+            "latest_progress": f"Generation {run.current_generation}",
+            "is_mixed_authorship": False,
+        }
+        phases.append(PipelinePhaseDTO(name="implementation", display_name="Implementation", status=impl_status, summary=impl_summary, details=impl_details))
 
         # 3. Deterministic Checks
         checks_status = "not_started"
@@ -659,7 +691,14 @@ class OperationsDashboardService:
         elif run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN and stage == OrchestrationStage.RUNNING_CHECKS:
             checks_status = "failed"
             checks_summary = "Checks failed"
-        phases.append(PipelinePhaseDTO(name="checks", display_name="Deterministic Checks", status=checks_status, summary=checks_summary))
+        passed_count = 0
+        failed_count = 0
+        if job:
+            cr_list = self.uow.check_results.list_by_job(job.job_id)
+            passed_count = sum(1 for c in cr_list if c.exit_code == 0)
+            failed_count = sum(1 for c in cr_list if c.exit_code != 0)
+        checks_details = {"passed_count": passed_count, "failed_count": failed_count}
+        phases.append(PipelinePhaseDTO(name="checks", display_name="Deterministic Checks", status=checks_status, summary=checks_summary, details=checks_details))
 
         # 4. Complementary Review
         rev_status = "not_started"
@@ -755,7 +794,13 @@ class OperationsDashboardService:
             else:
                 pr_status = "not_started"
                 pr_summary = "Waiting for review and audit completion"
-        phases.append(PipelinePhaseDTO(name="pr_merge", display_name="PR & Merge", status=pr_status, summary=pr_summary))
+        pr_details = {}
+        if run:
+            actions = self.uow.orchestration_external_actions.list_by_run(run.run_id)
+            for a in actions:
+                if a.result_payload and "merge_commit_sha" in a.result_payload:
+                    pr_details["merge_commit_sha"] = a.result_payload["merge_commit_sha"]
+        phases.append(PipelinePhaseDTO(name="pr_merge", display_name="PR & Merge", status=pr_status, summary=pr_summary, details=pr_details))
 
         return phases
 
@@ -827,7 +872,10 @@ class OperationsDashboardService:
         diag_map = {d.check_name: d for d in diagnostics if d.check_name}
 
         dtos: list[CheckResultItemDTO] = []
+        current_sha = candidate.candidate_sha if candidate else run.current_candidate_sha
         for cr in check_results:
+            if cr.candidate_sha and current_sha and cr.candidate_sha != current_sha:
+                continue
             diag = diag_map.get(cr.check_name)
             diag_snippet = None
             if diag and hasattr(diag, "reproducible_command") and diag.reproducible_command:
@@ -844,7 +892,7 @@ class OperationsDashboardService:
                     status="PASS" if cr.exit_code == 0 else "FAIL",
                     exit_code=cr.exit_code,
                     duration_ms=cr.duration_ms,
-                    candidate_sha=candidate.candidate_sha if candidate else run.current_candidate_sha,
+                    candidate_sha=current_sha,
                     diagnostic_snippet=diag_snippet,
                 )
             )
@@ -882,9 +930,11 @@ class OperationsDashboardService:
             for f in findings
         ]
 
+        model_name = rev.model_name if hasattr(rev, "model_name") else None
         return ReviewSummaryDTO(
             review_id=rev.review_id,
             reviewer_role=rev.reviewer_role,
+            model=model_name,
             status=rev.status.value,
             verdict=rev.verdict.value if rev.verdict else None,
             candidate_sha=rev.candidate_sha,
