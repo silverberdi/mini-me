@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any, Generator
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -700,7 +700,7 @@ def get_dashboard_events(
     project_id: str | None = None,
     change_name: str | None = None,
     run_id: str | None = None,
-    limit: int = 100,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
 ) -> list[TimelineEventDTO]:
     """Get chronological event timeline for the operations dashboard."""
     service = OperationsDashboardService(uow)

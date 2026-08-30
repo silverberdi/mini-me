@@ -189,6 +189,7 @@
 
     countdownInterval = setInterval(() => {
       if (!autoRefreshToggle.checked) return;
+      if (document.hidden) return;
       countdownSeconds -= 1;
       if (countdownSeconds <= 0) {
         countdownSeconds = refreshIntervalSeconds;

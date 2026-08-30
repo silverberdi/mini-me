@@ -42,6 +42,17 @@ def _format_dt(dt: datetime | None) -> str | None:
     return dt.isoformat()
 
 
+def _sanitize_obj(val: Any) -> Any:
+    """Recursively sanitize nested strings, dicts, and lists against secrets."""
+    if isinstance(val, str):
+        return redact_secrets(val)
+    elif isinstance(val, dict):
+        return {k: _sanitize_obj(v) for k, v in val.items()}
+    elif isinstance(val, list):
+        return [_sanitize_obj(item) for item in val]
+    return val
+
+
 class ProviderHealthDTO(BaseModel):
     provider_id: str
     status: str
@@ -1000,7 +1011,7 @@ class OperationsDashboardService:
                         to_stage=se.to_stage.value,
                         actor=se.actor or "orchestrator",
                         summary=redact_secrets(summary),
-                        details={k: redact_secrets(str(v)) if isinstance(v, str) else v for k, v in details.items()},
+                        details={k: _sanitize_obj(v) for k, v in details.items()},
                     )
                 )
 
@@ -1019,7 +1030,7 @@ class OperationsDashboardService:
                         event_type=ge.event_type.value if hasattr(ge.event_type, "value") else str(ge.event_type),
                         actor="system",
                         summary=redact_secrets(summary),
-                        details={k: redact_secrets(str(v)) if isinstance(v, str) else v for k, v in ge.payload.items()} if ge.payload else {},
+                        details={k: _sanitize_obj(v) for k, v in ge.payload.items()} if ge.payload else {},
                     )
                 )
 
