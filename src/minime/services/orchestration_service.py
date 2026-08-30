@@ -179,11 +179,16 @@ class OrchestrationService:
             project_root=str(root),
         )
         if not eval_result.is_ready or eval_result.status != ReadinessState.READY:
+            refusal_code = (
+                "SCHEMA_INVARIANT_VIOLATION"
+                if any(reason.startswith("SCHEMA_INVARIANT_VIOLATION") for reason in eval_result.unmet_reasons)
+                else "NOT_READY"
+            )
             return AdmissionResult(
                 admitted=False,
                 refusal_reason=f"Change '{change_name}' is not READY: {'; '.join(eval_result.unmet_reasons)}",
                 refusal_details={
-                    "code": "NOT_READY",
+                    "code": refusal_code,
                     "status": eval_result.status.value,
                     "unmet_reasons": eval_result.unmet_reasons,
                 },
@@ -317,13 +322,17 @@ class OrchestrationService:
             # Escalated runs require explicit human resolution before resuming
             return run
 
+        transition_key = f"{run.run_id}:RESUME:{run.resumable_stage.value}:{run.current_generation}"
+        if self.uow.orchestration_stage_events.get_by_transition_key(transition_key):
+            return self.drive_coordinator(run.run_id, project_root=project_root)
+
         self.uow.orchestration_stage_events.save(
             OrchestrationStageEvent(
                 run_id=run.run_id,
                 from_stage=run.current_stage,
                 to_stage=run.resumable_stage,
                 event_type=EventType.ORCHESTRATION_RESUMED.value,
-                transition_key=f"{run.run_id}:RESUME:{utc_now().isoformat()}",
+                transition_key=transition_key,
                 evidence_references={"resumed_from": run.resumable_stage.value},
                 actor="system",
                 created_at=utc_now(),
@@ -2112,6 +2121,8 @@ class OrchestrationService:
                 "candidate_generation": review.candidate_generation,
                 "manifest_id": review.manifest_id,
                 "manifest_hash": review.manifest_hash,
+                "is_mixed_authorship": review.is_mixed_authorship,
+                "authorship_evidence": review.authorship_evidence,
                 "is_current": bool(
                     current_cand
                     and review.orchestration_run_id == run.run_id

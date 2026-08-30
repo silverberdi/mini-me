@@ -72,3 +72,20 @@ class AuthorshipService:
             "total_files_touched": len(all_files),
             "authorships": [a.model_dump(mode="json") for a in authorships],
         }
+
+    def evaluate_reviewer_authorship(
+        self, job_id: str, reviewer_role: str, surviving_files: list[str] | set[str],
+        candidate_sha: str, candidate_generation: int | None, uow: PersistenceUnitOfWork,
+    ) -> dict[str, Any]:
+        """Evaluate only contribution files proven to survive the frozen candidate."""
+        surviving = {str(path).strip().lstrip("./") for path in surviving_files}
+        contributions = []
+        for record in uow.candidate_authorships.list_by_job(job_id):
+            files = sorted(
+                surviving.intersection(
+                    {str(path).strip().lstrip("./") for path in record.files_touched}
+                )
+            )
+            if record.agent_role == reviewer_role and files:
+                contributions.append({"attempt_number": record.attempt_number, "agent_role": record.agent_role, "model_identity": record.model_identity, "files": files})
+        return {"candidate_sha": candidate_sha, "candidate_generation": candidate_generation, "reviewer_role": reviewer_role, "surviving_contributions": contributions, "is_mixed_authorship": bool(contributions)}

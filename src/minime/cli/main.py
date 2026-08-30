@@ -648,14 +648,14 @@ def providers_health_cmd(
         with db_manager.session() as session:
             uow = PostgresPersistenceUnitOfWork(session)
             service = ProviderHealthService(uow)
-            health_list = service.list_all_health()
+            health_list = service.list_all_health_with_capacity()
 
             if json_output:
-                typer.echo(json.dumps([h.model_dump() for h in health_list], indent=2, default=str))
+                typer.echo(json.dumps([{"health": h.model_dump(), "capacity_window": w.model_dump() if w else None} for h, w in health_list], indent=2, default=str))
                 return
 
             typer.secho("=== Primary Provider Health ===", fg=typer.colors.CYAN, bold=True)
-            for h in health_list:
+            for h, window in health_list:
                 h_color = {
                     ProviderHealthStatus.AVAILABLE: typer.colors.GREEN,
                     ProviderHealthStatus.EXHAUSTED: typer.colors.RED,
@@ -668,10 +668,10 @@ def providers_health_cmd(
                 typer.echo(f"  Consecutive Failures: {h.consecutive_failures}")
                 if h.last_error_summary:
                     typer.secho(f"  Last Error: {h.last_error_summary}", fg=typer.colors.YELLOW)
-                if h.capacity_reset_at:
-                    typer.echo(f"  Expected Reset: {h.capacity_reset_at.isoformat()}")
-                if h.retry_after_seconds:
-                    typer.echo(f"  Retry After: {h.retry_after_seconds}s")
+                if window and window.capacity_reset_at:
+                    typer.echo(f"  Expected Reset: {window.capacity_reset_at.isoformat()}")
+                if window and window.retry_after_seconds:
+                    typer.echo(f"  Retry After: {window.retry_after_seconds}s")
                 typer.echo(f"  Updated At: {h.updated_at.isoformat()}")
 
     except Exception as e:

@@ -306,6 +306,7 @@ class BlockerClaimPayload(BaseModel):
     """Parsed structured blocker payload from executor output."""
 
     blocker_type: str
+    location: str | None = None
     affected_requirement: str | None = None
     failing_invariant: str | None = None
     evidence: dict[str, Any] | str | None = None
@@ -606,6 +607,8 @@ class Review(BaseModel):
     verdict: ReviewVerdict | None = None
     summary: str | None = None
     error_message: str | None = None
+    is_mixed_authorship: bool = False
+    authorship_evidence: dict[str, Any] = Field(default_factory=dict)
     findings: list[ReviewFinding] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)

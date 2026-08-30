@@ -37,6 +37,10 @@ class BlockerValidationContext:
     openspec_requirements: list[str] = field(default_factory=list)
     available_integration_points: list[dict[str, Any]] = field(default_factory=list)
     existing_files: list[str] = field(default_factory=list)
+    required_files: list[str] = field(default_factory=list)
+    candidate_tree_files: list[str] = field(default_factory=list)
+    manifest_files: list[str] = field(default_factory=list)
+    base_diff_files: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -60,6 +64,19 @@ class BlockerValidationService:
             failing_invariant=payload.failing_invariant,
             normalized_reason_code=payload.normalized_reason_code,
         )
+
+    def validate_missing_file(
+        self, location: str | None, context: BlockerValidationContext
+    ) -> BlockerValidationResult:
+        """Validate a reviewer missing-file claim against frozen tree evidence."""
+        claimed = (location or "").strip().lstrip("./")
+        payload = BlockerClaimPayload(
+            blocker_type="MISSING_FILE",
+            location=claimed or None,
+            rationale="Reviewer claims a required file is missing.",
+            is_agent_solvable=True,
+        )
+        return self.validate(payload, context)
 
     def validate(
         self,
@@ -91,6 +108,33 @@ class BlockerValidationService:
                 "needs to be implemented",
             ]
         ):
+            claimed = (payload.location or "").strip().lstrip("./")
+            if claimed and (context.required_files or context.candidate_tree_files or context.manifest_files):
+                tree_files = {
+                    str(path).strip().lstrip("./")
+                    for path in (*context.candidate_tree_files, *context.manifest_files)
+                }
+                required_files = {
+                    str(path).strip().lstrip("./") for path in context.required_files
+                }
+                in_tree = claimed in tree_files
+                explicitly_required = claimed in required_files
+                if explicitly_required and not in_tree:
+                    return BlockerValidationResult(
+                        verdict=BlockerValidationVerdict.REAL_BLOCKER,
+                        rationale=f"Required file '{claimed}' is absent from the authoritative candidate tree at candidate SHA.",
+                        is_agent_solvable=True,
+                        fingerprint=fingerprint,
+                        available_integration_points=context.available_integration_points,
+                    )
+                if in_tree or not explicitly_required:
+                    return BlockerValidationResult(
+                        verdict=BlockerValidationVerdict.FALSE_BLOCKER,
+                        rationale=f"Missing-file claim for '{claimed}' is not a contractual absence in the frozen candidate tree.",
+                        is_agent_solvable=True,
+                        fingerprint=fingerprint,
+                        available_integration_points=context.available_integration_points,
+                    )
             # Check if this is an internal artifact to be created
             return BlockerValidationResult(
                 verdict=BlockerValidationVerdict.FALSE_BLOCKER,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from minime.adapters.github import GitHubAdapter, GitHubAuthorizationError, GitHubRemoteError
 from minime.adapters.openspec import OpenSpecAdapter
+from minime.db.session import SchemaInvariantResult, verify_physical_schema_invariants
 from minime.domain.enums import ChangeStatus, EventType, ReadinessState
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
@@ -49,6 +50,27 @@ class ReadinessService:
 
         checks: list[ReadinessCheck] = []
         unmet_reasons: list[str] = []
+
+        # Postgres UOWs expose their bound session; test doubles need no physical
+        # preflight. Inspection is read-only and never repairs the schema.
+        session = getattr(self.uow, "session", None)
+        engine = getattr(session, "bind", None) if session is not None else None
+        if engine is not None:
+            try:
+                schema = verify_physical_schema_invariants(engine)
+            except Exception as exc:
+                # Admission must fail closed even when catalog inspection itself
+                # is unavailable; runtime never repairs or bypasses this check.
+                schema = SchemaInvariantResult(
+                    valid=False,
+                    reason=f"Physical schema inspection failed: {exc}",
+                )
+            if not schema.valid:
+                reason = f"SCHEMA_INVARIANT_VIOLATION: {schema.reason}"
+                checks.append(ReadinessCheck(name="physical_schema", passed=False, reason=reason, details={"missing_tables": schema.missing_tables, "missing_columns": schema.missing_columns, "revision": schema.revision}))
+                unmet_reasons.append(reason)
+            else:
+                checks.append(ReadinessCheck(name="physical_schema", passed=True, details={"revision": schema.revision}))
 
         # 1. Registered project check
         project = self.uow.projects.get_by_id(project_id)

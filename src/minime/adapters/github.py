@@ -287,6 +287,12 @@ class GitHubAdapter(GitHubAdapterInterface):
         try:
             env = os.environ.copy()
             env["GIT_TERMINAL_PROMPT"] = "0"
+            if secrets:
+                for variable in (
+                    "GIT_TRACE", "GIT_TRACE_PACKET", "GIT_TRACE_CURL",
+                    "GIT_CURL_VERBOSE", "GIT_TRANSPORT_TRACE",
+                ):
+                    env.pop(variable, None)
             return subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=timeout, env=env)
         except subprocess.TimeoutExpired:
             failure = RuntimeError("Git command timed out.")

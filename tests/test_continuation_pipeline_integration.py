@@ -1159,6 +1159,7 @@ async def test_pipeline_reassignment_resumes_when_capacity_returns(tmp_path):
     uow.job_attempts.save(att2)
 
     mock_worktree_mgr = MagicMock()
+    (tmp_path / "wt-resume").mkdir()
     mock_worktree_mgr.create_worktree = AsyncMock(
         return_value=MagicMock(path=tmp_path / "wt-resume", base_sha="base-sha")
     )
