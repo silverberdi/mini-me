@@ -9,6 +9,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from minime.domain.enums import (
+    AuditRiskLevel,
     AuditStatus,
     ChangeStatus,
     JobStatus,
@@ -261,32 +262,47 @@ class OperationsDashboardService:
         # 3. Projects & Changes
         projects = self.uow.projects.list_all()
         all_changes: list[Change] = []
+        jobs_map: dict[str, Job] = {}
         for p in projects:
             all_changes.extend(self.uow.changes.list_by_project(p.project_id))
+            if hasattr(self.uow.jobs, "list_by_project"):
+                for j in self.uow.jobs.list_by_project(p.project_id):
+                    jobs_map[j.job_id] = j
 
         # 4. Orchestration Runs
         all_runs = self.uow.orchestration_runs.list_runs()
         runs_by_change: dict[tuple[str, str], list[OrchestrationRun]] = {}
         for r in all_runs:
             key = (r.project_id, r.change_name)
-            runs_by_change.setdefault(key, []).append(r)
+            if key not in runs_by_change:
+                runs_by_change[key] = []
+            runs_by_change[key].append(r)
 
         # Sort runs for each change newest first
         for key in runs_by_change:
             runs_by_change[key].sort(key=lambda x: x.created_at, reverse=True)
 
-        # 5. Build Attention Items
+        # 5. Attention Items, Active Executions & Recent Completions
         attention_items: list[AttentionItemDTO] = []
         active_executions: list[ActiveExecutionDTO] = []
         recent_completions: list[RecentCompletionDTO] = []
 
         for r in all_runs:
-            if not r.is_active and r.stop_outcome in {
-                OrchestrationStopOutcome.NEEDS_HUMAN,
-                OrchestrationStopOutcome.WAITING_CAPACITY,
-                OrchestrationStopOutcome.WAITING_EXTERNAL,
-            }:
-                reason = r.stop_reason or f"Stopped at {r.current_stage.value if r.current_stage else 'unknown'}"
+            job_for_run = jobs_map.get(r.active_job_id) if r.active_job_id else None
+            is_recovery_blocked = (
+                (job_for_run and job_for_run.status == JobStatus.RECOVERY_BLOCKED)
+                or (r.stop_reason and "recovery" in r.stop_reason.lower())
+            )
+            if not r.is_active and (
+                r.stop_outcome in {
+                    OrchestrationStopOutcome.NEEDS_HUMAN,
+                    OrchestrationStopOutcome.WAITING_CAPACITY,
+                    OrchestrationStopOutcome.WAITING_EXTERNAL,
+                }
+                or is_recovery_blocked
+            ):
+                job_for_run = jobs_map.get(r.active_job_id) if r.active_job_id else None
+                reason = r.stop_reason or (job_for_run.recovery_blocked_reason if job_for_run else None) or f"Stopped at {r.current_stage.value if r.current_stage else 'unknown'}"
                 reason = redact_secrets(reason)
                 attention_items.append(
                     AttentionItemDTO(
@@ -306,8 +322,8 @@ class OperationsDashboardService:
                     )
                 )
             elif r.is_active:
-                job_for_run = self.uow.jobs.get_by_id(r.active_job_id) if r.active_job_id else None
-                executor = job_for_run.current_executor or job_for_run.implementer_role if job_for_run else None
+                job_for_run = jobs_map.get(r.active_job_id) if r.active_job_id else (self.uow.jobs.get_by_id(r.active_job_id) if r.active_job_id else None)
+                executor = (job_for_run.current_executor or job_for_run.implementer_role) if job_for_run else None
                 active_executions.append(
                     ActiveExecutionDTO(
                         project_id=r.project_id,
@@ -346,14 +362,16 @@ class OperationsDashboardService:
                         project_id=r.project_id,
                         change_name=r.change_name,
                         run_id=r.run_id,
+                        job_id=r.active_job_id,
+                        generation=r.current_generation,
                         candidate_sha=r.current_candidate_sha,
                         candidate_sha_short=_short_sha(r.current_candidate_sha),
-                        generation=r.current_generation,
-                        pr_number=pr_num,
-                        pr_url=pr_url,
+                        completed_at=_format_dt(r.updated_at),
+                        reviewer_role=rev.reviewer_role if rev else None,
                         review_verdict=rev.verdict.value if (rev and rev.verdict) else None,
                         audit_risk=aud.risk.value if (aud and aud.risk) else None,
-                        completed_at=_format_dt(r.updated_at),
+                        github_pr_number=pr_num,
+                        github_pr_url=pr_url,
                     )
                 )
 
@@ -369,6 +387,9 @@ class OperationsDashboardService:
             # Determine composite canonical status
             status_val = self._derive_canonical_change_status(change, latest_run)
 
+            job_for_latest = jobs_map.get(latest_run.active_job_id) if (latest_run and latest_run.active_job_id) else None
+            executor = (job_for_latest.current_executor or job_for_latest.implementer_role) if job_for_latest else None
+
             change_summaries.append(
                 ChangeSummaryDTO(
                     project_id=change.project_id,
@@ -380,11 +401,7 @@ class OperationsDashboardService:
                     current_stage=latest_run.current_stage.value if (latest_run and latest_run.current_stage) else None,
                     stop_outcome=latest_run.stop_outcome.value if (latest_run and latest_run.stop_outcome) else None,
                     human_gate=latest_run.human_gate.value if (latest_run and latest_run.human_gate) else None,
-                    current_executor=(
-                        self.uow.jobs.get_by_id(latest_run.active_job_id).implementer_role
-                        if (latest_run and latest_run.active_job_id and self.uow.jobs.get_by_id(latest_run.active_job_id))
-                        else None
-                    ),
+                    current_executor=executor,
                     generation=latest_run.current_generation if latest_run else None,
                     candidate_sha=latest_run.current_candidate_sha if latest_run else None,
                     candidate_sha_short=_short_sha(latest_run.current_candidate_sha) if latest_run else None,
@@ -614,7 +631,10 @@ class OperationsDashboardService:
         # 4. Complementary Review
         rev_status = "not_started"
         rev_summary = "Not started"
-        if stage == OrchestrationStage.COMPLEMENTARY_REVIEW:
+        if checks_status == "failed":
+            rev_status = "blocked"
+            rev_summary = "Blocked by failing deterministic checks"
+        elif stage == OrchestrationStage.COMPLEMENTARY_REVIEW:
             rev_status = "running"
             rev_summary = "Complementary review in progress"
         elif stage in {
@@ -624,25 +644,24 @@ class OperationsDashboardService:
             OrchestrationStage.PREPARING_PR,
             OrchestrationStage.PR_PREPARED,
         }:
-            if job:
-                rev = self.uow.reviews.get_by_job_id(job.job_id)
-                if rev and rev.verdict == ReviewVerdict.READY_TO_MERGE:
-                    # Check stale isolation
+            rev = self.uow.reviews.get_by_job_id(job.job_id) if job else None
+            if rev:
+                if rev.verdict == ReviewVerdict.READY_TO_MERGE:
                     if rev.candidate_sha == run.current_candidate_sha:
                         rev_status = "passed"
                         rev_summary = f"Approved by {rev.reviewer_role}"
                     else:
                         rev_status = "running"
                         rev_summary = "Review pending for updated candidate"
-                elif rev and rev.verdict == ReviewVerdict.CHANGES_REQUIRED:
+                elif rev.verdict == ReviewVerdict.CHANGES_REQUIRED:
                     rev_status = "failed"
                     rev_summary = "Changes required by reviewer"
                 else:
-                    rev_status = "passed"
-                    rev_summary = "Review completed"
+                    rev_status = "running"
+                    rev_summary = f"Review verdict: {rev.verdict.value if rev.verdict else 'pending'}"
             else:
-                rev_status = "passed"
-                rev_summary = "Review completed"
+                rev_status = "not_started"
+                rev_summary = "No review record found"
         elif run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN and stage == OrchestrationStage.COMPLEMENTARY_REVIEW:
             rev_status = "blocked"
             rev_summary = "Review blocked"
@@ -651,7 +670,10 @@ class OperationsDashboardService:
         # 5. DeepSeek Audit
         audit_status = "not_started"
         audit_summary = "Not started"
-        if stage == OrchestrationStage.INDEPENDENT_AUDIT:
+        if checks_status == "failed" or rev_status in {"failed", "blocked"}:
+            audit_status = "blocked"
+            audit_summary = "Blocked by upstream check or review failure"
+        elif stage == OrchestrationStage.INDEPENDENT_AUDIT:
             audit_status = "running"
             audit_summary = "DeepSeek Direct audit in progress"
         elif stage in {
@@ -659,24 +681,28 @@ class OperationsDashboardService:
             OrchestrationStage.PREPARING_PR,
             OrchestrationStage.PR_PREPARED,
         }:
-            if job:
-                aud = self.uow.audits.get_by_job_id(job.job_id)
-                if aud and aud.status == AuditStatus.AUDIT_COMPLETED:
+            aud = self.uow.audits.get_by_job_id(job.job_id) if job else None
+            if aud:
+                if aud.status == AuditStatus.AUDIT_COMPLETED:
                     if aud.candidate_sha == run.current_candidate_sha:
-                        audit_status = "passed"
-                        audit_summary = f"Audit passed (risk: {aud.risk.value if aud.risk else 'low'})"
+                        if aud.risk is None or aud.risk == AuditRiskLevel.LOW:
+                            audit_status = "passed"
+                            audit_summary = f"Audit passed (risk: {aud.risk.value if aud.risk else 'low'})"
+                        else:
+                            audit_status = "failed"
+                            audit_summary = f"Audit completed with {aud.risk.value} risk findings"
                     else:
                         audit_status = "running"
                         audit_summary = "Audit pending for updated candidate"
-                elif aud and aud.status == AuditStatus.AUDIT_BLOCKED:
+                elif aud.status == AuditStatus.AUDIT_BLOCKED:
                     audit_status = "failed"
                     audit_summary = "Audit blocked by security/integrity finding"
                 else:
-                    audit_status = "passed"
-                    audit_summary = "Audit completed"
+                    audit_status = "running"
+                    audit_summary = "Audit in progress"
             else:
-                audit_status = "passed"
-                audit_summary = "Audit completed"
+                audit_status = "not_started"
+                audit_summary = "No audit record found"
         elif run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN and stage == OrchestrationStage.INDEPENDENT_AUDIT:
             audit_status = "blocked"
             audit_summary = "Audit blocked"
@@ -685,7 +711,10 @@ class OperationsDashboardService:
         # 6. PR & Merge
         pr_status = "not_started"
         pr_summary = "Not prepared"
-        if stage == OrchestrationStage.PREPARING_PR:
+        if checks_status == "failed" or rev_status in {"failed", "blocked"} or audit_status in {"failed", "blocked"}:
+            pr_status = "blocked"
+            pr_summary = "Blocked by upstream pipeline failure"
+        elif stage == OrchestrationStage.PREPARING_PR:
             pr_status = "running"
             pr_summary = "Preparing Pull Request"
         elif stage == OrchestrationStage.PR_PREPARED or run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE:

@@ -32,6 +32,12 @@
           <input type="checkbox" id="autoRefreshToggle" checked>
           <span>Auto-refresh (<span id="refreshTimer">10s</span>)</span>
         </label>
+        <select id="refreshIntervalSelect" class="interval-select" title="Auto-refresh interval">
+          <option value="5">5s</option>
+          <option value="10" selected>10s</option>
+          <option value="30">30s</option>
+          <option value="60">60s</option>
+        </select>
         <button id="refreshBtn" class="btn btn-secondary" title="Refresh dashboard data">
           <span class="btn-icon">🔄</span> Refresh
         </button>

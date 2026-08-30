@@ -250,3 +250,169 @@ def test_dashboard_change_detail_pipeline_phases(
     assert detail.github.issue_number == 15
     assert detail.github.pr_number == 42
     assert detail.github.pr_url == "https://github.com/owner/test-proj/pull/42"
+
+
+def test_dashboard_attention_includes_recovery_blocked(
+    in_memory_uow: PersistenceUnitOfWork,
+) -> None:
+    service = OperationsDashboardService(in_memory_uow)
+
+    project = Project(
+        project_id="test-proj",
+        display_name="Test Project",
+        repository="owner/test-proj",
+        base_branch="main",
+        openspec_path="openspec",
+    )
+    in_memory_uow.projects.save(project)
+
+    change = Change(
+        project_id="test-proj",
+        name="004-recovery-blocked-feature",
+        status=ChangeStatus.IN_PROGRESS,
+        last_readiness_status=ReadinessState.READY,
+    )
+    in_memory_uow.changes.save(change)
+
+    job = Job(
+        job_id="job-rec-1",
+        project_id="test-proj",
+        change_name="004-recovery-blocked-feature",
+        implementer_role="codex",
+        status=JobStatus.RECOVERY_BLOCKED,
+        recovery_blocked_reason="Worktree contains unresolved merge conflict on auth.py",
+    )
+    in_memory_uow.jobs.save(job)
+
+    run = OrchestrationRun(
+        run_id="run-rec-1",
+        project_id="test-proj",
+        change_name="004-recovery-blocked-feature",
+        active_job_id="job-rec-1",
+        current_stage=OrchestrationStage.PREPARING_EXECUTION,
+        is_active=False,
+        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+        stop_reason="Automatic recovery failed due to conflict",
+        current_generation=1,
+        current_candidate_sha="cand999",
+        base_sha="base999",
+    )
+    in_memory_uow.orchestration_runs.save(run)
+
+    overview = service.get_overview()
+    assert overview.system_status.attention_runs_count == 1
+    assert len(overview.attention_items) == 1
+    item = overview.attention_items[0]
+    assert item.run_id == "run-rec-1"
+    assert "Automatic recovery failed" in item.reason or "unresolved merge conflict" in item.reason
+
+
+def test_dashboard_failed_checks_blocks_downstream_phases(
+    in_memory_uow: PersistenceUnitOfWork,
+) -> None:
+    service = OperationsDashboardService(in_memory_uow)
+
+    project = Project(
+        project_id="test-proj",
+        display_name="Test Project",
+        repository="owner/test-proj",
+        base_branch="main",
+        openspec_path="openspec",
+    )
+    in_memory_uow.projects.save(project)
+
+    change = Change(
+        project_id="test-proj",
+        name="005-failed-checks-feature",
+        status=ChangeStatus.IN_PROGRESS,
+        last_readiness_status=ReadinessState.READY,
+    )
+    in_memory_uow.changes.save(change)
+
+    job = Job(
+        job_id="job-fc-1",
+        project_id="test-proj",
+        change_name="005-failed-checks-feature",
+        implementer_role="codex",
+        status=JobStatus.CHECKS_FAILED,
+        candidate_sha="cand-fail-1",
+        base_sha="base-fail-1",
+    )
+    in_memory_uow.jobs.save(job)
+
+    run = OrchestrationRun(
+        run_id="run-fc-1",
+        project_id="test-proj",
+        change_name="005-failed-checks-feature",
+        active_job_id="job-fc-1",
+        current_stage=OrchestrationStage.COMPLEMENTARY_REVIEW,
+        is_active=False,
+        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+        current_generation=1,
+        current_candidate_sha="cand-fail-1",
+        base_sha="base-fail-1",
+    )
+    in_memory_uow.orchestration_runs.save(run)
+
+    detail = service.get_change_detail("test-proj", "005-failed-checks-feature")
+    phase_map = {p.name: p.status for p in detail.pipeline}
+
+    assert phase_map["checks"] == "failed"
+    assert phase_map["review"] == "blocked"
+    assert phase_map["audit"] == "blocked"
+    assert phase_map["pr_merge"] == "blocked"
+
+
+def test_dashboard_pipeline_requires_persisted_evidence(
+    in_memory_uow: PersistenceUnitOfWork,
+) -> None:
+    service = OperationsDashboardService(in_memory_uow)
+
+    project = Project(
+        project_id="test-proj",
+        display_name="Test Project",
+        repository="owner/test-proj",
+        base_branch="main",
+        openspec_path="openspec",
+    )
+    in_memory_uow.projects.save(project)
+
+    change = Change(
+        project_id="test-proj",
+        name="006-no-evidence-feature",
+        status=ChangeStatus.IN_PROGRESS,
+        last_readiness_status=ReadinessState.READY,
+    )
+    in_memory_uow.changes.save(change)
+
+    job = Job(
+        job_id="job-ne-1",
+        project_id="test-proj",
+        change_name="006-no-evidence-feature",
+        implementer_role="codex",
+        status=JobStatus.RUNNING,
+        candidate_sha="cand-ne-1",
+        base_sha="base-ne-1",
+    )
+    in_memory_uow.jobs.save(job)
+
+    # Run advanced to PREPARING_PR but no review or audit record exists in DB
+    run = OrchestrationRun(
+        run_id="run-ne-1",
+        project_id="test-proj",
+        change_name="006-no-evidence-feature",
+        active_job_id="job-ne-1",
+        current_stage=OrchestrationStage.PREPARING_PR,
+        is_active=True,
+        current_generation=1,
+        current_candidate_sha="cand-ne-1",
+        base_sha="base-ne-1",
+    )
+    in_memory_uow.orchestration_runs.save(run)
+
+    detail = service.get_change_detail("test-proj", "006-no-evidence-feature")
+    phase_map = {p.name: p.status for p in detail.pipeline}
+
+    # Review and audit must NOT report passed without evidence records
+    assert phase_map["review"] == "not_started"
+    assert phase_map["audit"] == "not_started"

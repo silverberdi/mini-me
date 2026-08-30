@@ -10,8 +10,8 @@
   let selectedChange = null;
   let activeFilter = 'ALL';
   let searchQuery = '';
-  let autoRefreshTimer = null;
-  let countdownSeconds = 10;
+  let refreshIntervalSeconds = parseInt(localStorage.getItem('minime_dashboard_interval') || '10', 10);
+  let countdownSeconds = refreshIntervalSeconds;
   let countdownInterval = null;
 
   // DOM Elements
@@ -22,6 +22,7 @@
   const themeToggleBtn = document.getElementById('themeToggleBtn');
   const themeIcon = document.getElementById('themeIcon');
   const autoRefreshToggle = document.getElementById('autoRefreshToggle');
+  const refreshIntervalSelect = document.getElementById('refreshIntervalSelect');
   const refreshTimer = document.getElementById('refreshTimer');
 
   const kpiSystemStateVal = document.getElementById('kpiSystemStateVal');
@@ -97,6 +98,16 @@
       themeToggleBtn.addEventListener('click', toggleTheme);
     }
 
+    if (refreshIntervalSelect) {
+      refreshIntervalSelect.value = String(refreshIntervalSeconds);
+      refreshIntervalSelect.addEventListener('change', (e) => {
+        refreshIntervalSeconds = parseInt(e.target.value, 10);
+        localStorage.setItem('minime_dashboard_interval', String(refreshIntervalSeconds));
+        countdownSeconds = refreshIntervalSeconds;
+        setupAutoRefresh();
+      });
+    }
+
     if (autoRefreshToggle) {
       autoRefreshToggle.addEventListener('change', () => {
         if (autoRefreshToggle.checked) {
@@ -154,14 +165,14 @@
   // Auto-Refresh
   function setupAutoRefresh() {
     clearInterval(countdownInterval);
-    countdownSeconds = 10;
+    countdownSeconds = refreshIntervalSeconds;
     if (refreshTimer) refreshTimer.textContent = `${countdownSeconds}s`;
 
     countdownInterval = setInterval(() => {
       if (!autoRefreshToggle.checked) return;
       countdownSeconds -= 1;
       if (countdownSeconds <= 0) {
-        countdownSeconds = 10;
+        countdownSeconds = refreshIntervalSeconds;
         fetchOverview();
       }
       if (refreshTimer) refreshTimer.textContent = `${countdownSeconds}s`;
@@ -169,7 +180,7 @@
   }
 
   function resetCountdown() {
-    countdownSeconds = 10;
+    countdownSeconds = refreshIntervalSeconds;
     if (refreshTimer) refreshTimer.textContent = `${countdownSeconds}s`;
   }
 

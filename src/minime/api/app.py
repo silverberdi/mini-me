@@ -720,6 +720,8 @@ STATIC_DIR = Path(__file__).parent.parent / "static"
 
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+else:
+    logger.warning("Dashboard static directory '%s' does not exist.", STATIC_DIR)
 
 
 @app.get("/", tags=["dashboard-ui"], response_model=None)
@@ -729,6 +731,13 @@ def get_dashboard_page() -> Response:
     index_file = STATIC_DIR / "index.html"
     if index_file.exists():
         return FileResponse(index_file)
-    return HTMLResponse("<h1>mini me dashboard not found</h1>", status_code=404)
+    logger.error("Dashboard index.html not found at '%s'.", index_file)
+    return HTMLResponse(
+        "<!DOCTYPE html><html><head><title>mini me dashboard</title></head><body>"
+        "<h1>mini me operations dashboard</h1>"
+        "<p>Dashboard UI static assets not found. Verify package installation or static asset directory.</p>"
+        "</body></html>",
+        status_code=404,
+    )
 
 

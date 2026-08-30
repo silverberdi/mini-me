@@ -210,6 +210,21 @@ body {
   user-select: none;
 }
 
+.interval-select {
+  background-color: var(--bg-card);
+  color: var(--text-main);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  padding: 3px 6px;
+  font-size: 11px;
+  cursor: pointer;
+  outline: none;
+}
+
+.interval-select:hover {
+  border-color: var(--text-dim);
+}
+
 /* Buttons */
 .btn {
   background-color: var(--bg-card);
