@@ -1,0 +1,418 @@
+/* mini me TUI Operator Console TCSS Stylesheet */
+
+Screen {
+    background: #0f172a;
+    color: #f8fafc;
+    layout: vertical;
+}
+
+/* Header & Status Bar */
+#header-bar {
+    dock: top;
+    height: 3;
+    background: #1e293b;
+    color: #f8fafc;
+    border-bottom: solid #334155;
+    padding: 0 1;
+    layout: horizontal;
+    align-vertical: middle;
+}
+
+#header-title {
+    text-style: bold;
+    color: #38bdf8;
+    width: auto;
+    margin-right: 2;
+}
+
+#header-meta {
+    layout: horizontal;
+    width: 1fr;
+    align-vertical: middle;
+}
+
+#header-shortcuts {
+    width: auto;
+    color: #94a3b8;
+    text-align: right;
+}
+
+/* Tab Navigation */
+#main-tabs {
+    dock: top;
+    height: 3;
+    background: #1e293b;
+    border-bottom: solid #334155;
+}
+
+TabPane {
+    padding: 1;
+    height: 1fr;
+}
+
+/* Common Card & Panel Styling */
+.card-panel {
+    background: #1e293b;
+    border: round #334155;
+    padding: 1;
+    margin-bottom: 1;
+    height: auto;
+}
+
+.panel-title {
+    text-style: bold;
+    color: #38bdf8;
+    border-bottom: solid #334155;
+    padding-bottom: 0;
+    margin-bottom: 1;
+}
+
+.sub-title {
+    text-style: bold;
+    color: #94a3b8;
+    margin-top: 1;
+    margin-bottom: 0;
+}
+
+.empty-state {
+    color: #64748b;
+    text-style: italic;
+    padding: 1 0;
+}
+
+.badge-attention {
+    background: #eab308;
+    color: #000000;
+    text-style: bold;
+    padding: 0 1;
+}
+
+.badge-success {
+    background: #22c55e;
+    color: #000000;
+    text-style: bold;
+    padding: 0 1;
+}
+
+.badge-danger {
+    background: #ef4444;
+    color: #ffffff;
+    text-style: bold;
+    padding: 0 1;
+}
+
+.badge-info {
+    background: #0284c7;
+    color: #ffffff;
+    text-style: bold;
+    padding: 0 1;
+}
+
+/* ========================================================================= */
+/* Overview Screen Layout (Default Wide)                                     */
+/* ========================================================================= */
+#overview-container {
+    height: 1fr;
+    layout: horizontal;
+    width: 100%;
+}
+
+.overview-col-left {
+    width: 1fr;
+    height: 100%;
+    margin-right: 1;
+}
+
+.overview-col-center {
+    width: 1.4fr;
+    height: 100%;
+    margin-right: 1;
+}
+
+.overview-col-right {
+    width: 1.1fr;
+    height: 100%;
+}
+
+/* Scrollable sub-containers */
+.scroll-container {
+    height: 1fr;
+    overflow-y: auto;
+}
+
+/* Attention Items */
+.attention-card {
+    background: #291e24;
+    border: round #f59e0b;
+    padding: 1;
+    margin-bottom: 1;
+}
+
+.attention-reason {
+    color: #fde047;
+    text-style: bold;
+}
+
+.attention-guidance {
+    color: #cbd5e1;
+    margin-top: 1;
+}
+
+/* Executions & Completions */
+.exec-item {
+    border-bottom: dashed #334155;
+    padding: 1 0;
+}
+
+/* ========================================================================= */
+/* Changes Screen Layout                                                     */
+/* ========================================================================= */
+#changes-container {
+    height: 1fr;
+    layout: vertical;
+    width: 100%;
+}
+
+#changes-filter-bar {
+    height: 3;
+    layout: horizontal;
+    align-vertical: middle;
+    margin-bottom: 1;
+}
+
+#changes-table {
+    height: 1fr;
+    border: round #334155;
+    background: #1e293b;
+}
+
+/* ========================================================================= */
+/* Run Detail & Pipeline Layout                                              */
+/* ========================================================================= */
+#detail-container {
+    height: 1fr;
+    layout: horizontal;
+    width: 100%;
+}
+
+.detail-col-main {
+    width: 1.6fr;
+    height: 100%;
+    margin-right: 1;
+}
+
+.detail-col-evidence {
+    width: 1.4fr;
+    height: 100%;
+}
+
+/* Pipeline Stepper */
+#pipeline-stepper {
+    background: #1e293b;
+    border: round #334155;
+    padding: 1;
+    margin-bottom: 1;
+}
+
+.pipeline-phase-row {
+    layout: horizontal;
+    align-vertical: middle;
+    height: auto;
+    margin-bottom: 1;
+}
+
+.phase-name {
+    width: 22;
+    text-style: bold;
+}
+
+.phase-status {
+    width: 16;
+}
+
+.phase-summary {
+    width: 1fr;
+    color: #cbd5e1;
+}
+
+/* Candidate Lineage */
+.candidate-item {
+    border-bottom: solid #334155;
+    padding: 1 0;
+}
+
+.candidate-item-current {
+    background: #0f2b38;
+    border-left: thick #38bdf8;
+    padding-left: 1;
+}
+
+/* Evidence Cards (Checks, Review, Audit) */
+#checks-table {
+    height: auto;
+    max-height: 15;
+    background: #1e293b;
+    margin-bottom: 1;
+}
+
+.review-card {
+    background: #1e293b;
+    border: round #334155;
+    padding: 1;
+    margin-bottom: 1;
+}
+
+.audit-card {
+    background: #1e293b;
+    border: round #334155;
+    padding: 1;
+    margin-bottom: 1;
+}
+
+/* ========================================================================= */
+/* Preview & Guided Validation View (013 Integration)                        */
+/* ========================================================================= */
+#preview-container {
+    height: 1fr;
+    layout: horizontal;
+    width: 100%;
+}
+
+.preview-col-session {
+    width: 1fr;
+    height: 100%;
+    margin-right: 1;
+}
+
+.preview-col-scenarios {
+    width: 1.6fr;
+    height: 100%;
+}
+
+.preview-status-card {
+    background: #1e293b;
+    border: round #38bdf8;
+    padding: 1;
+    margin-bottom: 1;
+}
+
+.scenario-card {
+    background: #1e293b;
+    border: round #334155;
+    padding: 1;
+    margin-bottom: 1;
+}
+
+.scenario-step {
+    color: #cbd5e1;
+    margin-left: 2;
+    margin-bottom: 0;
+}
+
+.stale-warning-card {
+    background: #3b1d11;
+    border: round #f97316;
+    padding: 1;
+    margin-bottom: 1;
+    color: #fdba74;
+    text-style: bold;
+}
+
+/* ========================================================================= */
+/* Help Modal                                                                */
+/* ========================================================================= */
+HelpModal {
+    align: center middle;
+}
+
+#help-dialog {
+    background: #1e293b;
+    border: thick #38bdf8;
+    width: 70;
+    height: auto;
+    padding: 1 2;
+}
+
+#help-table {
+    height: auto;
+    margin: 1 0;
+}
+
+/* ========================================================================= */
+/* Responsive Layout Variations (.layout-normal, .layout-narrow)             */
+/* ========================================================================= */
+
+/* Normal Viewport: 110 to 170 columns */
+.layout-normal .overview-col-left {
+    width: 1fr;
+}
+.layout-normal .overview-col-center {
+    width: 1.2fr;
+}
+.layout-normal .overview-col-right {
+    width: 1fr;
+}
+.layout-normal .detail-col-main {
+    width: 1fr;
+}
+.layout-normal .detail-col-evidence {
+    width: 1fr;
+}
+.layout-normal .preview-col-session {
+    width: 1fr;
+}
+.layout-normal .preview-col-scenarios {
+    width: 1.2fr;
+}
+
+/* Narrow Viewport: < 110 columns (Vertical Stack) */
+.layout-narrow #overview-container {
+    layout: vertical;
+    overflow-y: auto;
+}
+.layout-narrow .overview-col-left {
+    width: 100%;
+    height: auto;
+    margin-right: 0;
+}
+.layout-narrow .overview-col-center {
+    width: 100%;
+    height: auto;
+    margin-right: 0;
+}
+.layout-narrow .overview-col-right {
+    width: 100%;
+    height: auto;
+}
+.layout-narrow #detail-container {
+    layout: vertical;
+    overflow-y: auto;
+}
+.layout-narrow .detail-col-main {
+    width: 100%;
+    height: auto;
+    margin-right: 0;
+}
+.layout-narrow .detail-col-evidence {
+    width: 100%;
+    height: auto;
+}
+.layout-narrow #preview-container {
+    layout: vertical;
+    overflow-y: auto;
+}
+.layout-narrow .preview-col-session {
+    width: 100%;
+    height: auto;
+    margin-right: 0;
+}
+.layout-narrow .preview-col-scenarios {
+    width: 100%;
+    height: auto;
+}
+.layout-narrow .phase-name {
+    width: 16;
+}
+.layout-narrow .phase-status {
+    width: 12;
+}

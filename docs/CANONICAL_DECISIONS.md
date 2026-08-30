@@ -52,6 +52,46 @@ These decisions supersede the previous AgentFlow context pack.
 - Production should promote the validated immutable container artifact when technically valid.
 - Production deployment occurs only after human merge and project policy authorization.
 
+## Canonical operating model
+The canonical future operator workflow is strictly:
+
+```text
+Product intent / roadmap
+        ↓
+GitHub Project + Issue
+        ↓
+OpenSpec contract
+        ↓
+mini me Run / Job
+        ↓
+Candidate
+        ↓
+Checks
+        ↓
+Complementary Review
+        ↓
+DeepSeek Audit
+        ↓
+Preview / Guided Validation (when required)
+        ↓
+Pull Request
+        ↓
+Merge gate
+        ↓
+Archive / cleanup
+```
+
+The operator SHOULD NOT manually create:
+- worktrees;
+- candidate branches;
+- OpenSpec changes;
+- orchestration DB records;
+- manifests;
+- review records;
+- audit records.
+
+These are internal mini me responsibilities. The TUI and operational interfaces serve to observe, navigate, and interact with canonical services and read models, not to bypass or replace autonomous lifecycle guarantees.
+
 ## Canonical roadmap sequencing (013 – 018)
 - The canonical delivery sequence is strictly:
   `013-container-preview-guided-validation` ->
