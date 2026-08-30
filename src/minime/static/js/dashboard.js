@@ -761,10 +761,12 @@
 
   function sanitizeUrl(url) {
     if (!url) return '#';
-    const str = String(url).trim();
-    if (str.startsWith('https://') || str.startsWith('http://')) {
-      return escapeHtml(str);
-    }
+    try {
+      const parsed = new URL(String(url).trim(), window.location.origin);
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        return escapeHtml(parsed.href);
+      }
+    } catch (_) {}
     return '#';
   }
 

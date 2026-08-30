@@ -378,7 +378,11 @@ class OperationsDashboardService:
                         latest_progress="IN_PROGRESS",
                     )
                 )
-            elif r.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE or r.current_stage == OrchestrationStage.PR_PREPARED:
+            elif (
+                r.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
+                or r.current_stage == OrchestrationStage.PR_PREPARED
+                or (changes_map.get((r.project_id, r.change_name)) and changes_map[(r.project_id, r.change_name)].status == ChangeStatus.DONE)
+            ):
                 # Review verdict & Audit risk strictly bound to current candidate SHA
                 rev = self.uow.reviews.get_by_job_id(r.active_job_id) if r.active_job_id else None
                 aud = self.uow.audits.get_by_job_id(r.active_job_id) if r.active_job_id else None
@@ -1094,9 +1098,10 @@ class OperationsDashboardService:
             for ge in general_events:
                 if project_id and hasattr(ge, "project_id") and ge.project_id and ge.project_id != project_id:
                     continue
+                sanitized_payload = {k: _sanitize_obj(v) for k, v in ge.payload.items()} if ge.payload else {}
                 summary = ge.event_type.value.replace("_", " ").title() if hasattr(ge.event_type, "value") else str(ge.event_type).replace("_", " ").title()
-                if ge.payload and "reason" in ge.payload:
-                    summary += f": {ge.payload['reason']}"
+                if sanitized_payload and "reason" in sanitized_payload:
+                    summary += f": {sanitized_payload['reason']}"
 
                 events.append(
                     TimelineEventDTO(
@@ -1105,7 +1110,7 @@ class OperationsDashboardService:
                         event_type=ge.event_type.value if hasattr(ge.event_type, "value") else str(ge.event_type),
                         actor="system",
                         summary=redact_secrets(summary),
-                        details={k: _sanitize_obj(v) for k, v in ge.payload.items()} if ge.payload else {},
+                        details=sanitized_payload,
                     )
                 )
 
