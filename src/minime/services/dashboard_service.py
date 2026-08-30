@@ -410,8 +410,15 @@ class OperationsDashboardService:
                 reviewer = rev.reviewer_role if (rev and rev.candidate_sha == r.current_candidate_sha) else None
                 aud_risk = aud.risk.value if (aud and aud.risk and aud.candidate_sha == r.current_candidate_sha) else None
 
-                # Only include when review and audit are both passed on candidate
-                is_fully_ready = rev_verdict == ReviewVerdict.READY_TO_MERGE.value and (aud_risk is None or aud_risk == AuditRiskLevel.LOW.value)
+                # Only include when review and audit are both passed on current candidate
+                is_review_passed = rev is not None and rev.candidate_sha == r.current_candidate_sha and rev.verdict == ReviewVerdict.READY_TO_MERGE
+                is_audit_passed = (
+                    aud is not None
+                    and aud.candidate_sha == r.current_candidate_sha
+                    and aud.status == AuditStatus.AUDIT_COMPLETED
+                    and (aud.risk is None or aud.risk == AuditRiskLevel.LOW)
+                )
+                is_fully_ready = is_review_passed and is_audit_passed
                 if is_fully_ready:
                     actions = self.uow.orchestration_external_actions.list_by_run(r.run_id)
                     pr_num = None
@@ -937,7 +944,7 @@ class OperationsDashboardService:
             dtos.append(
                 CheckResultItemDTO(
                     check_name=cr.check_name,
-                    command=cr.command,
+                    command=redact_secrets(cr.command) if cr.command else cr.command,
                     status="PASS" if cr.exit_code == 0 else "FAIL",
                     exit_code=cr.exit_code,
                     duration_ms=cr.duration_ms,
