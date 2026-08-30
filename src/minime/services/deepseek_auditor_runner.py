@@ -85,6 +85,7 @@ class DeepSeekAuditorRunner(AuditorRunnerInterface):
                 {"role": "user", "content": prompt_context},
             ],
             "temperature": 0,
+            "max_tokens": 8192,
         }
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -293,7 +294,7 @@ Look for missed contract violations, contradictions between evidence and impleme
 Return exactly one JSON object, optionally wrapped in a single markdown json code fence, matching:
 {
   "risk": "low" | "medium" | "high" | "critical",
-  "summary": "non-empty summary",
+  "summary": "concise 2-4 sentence summary of overall audit posture",
   "findings": [
     {
       "severity": "low" | "medium" | "high" | "critical",
@@ -304,7 +305,7 @@ Return exactly one JSON object, optionally wrapped in a single markdown json cod
     }
   ]
 }
-Do not include extra properties.
+Do not include extra properties or overly long string enumerations in summary. Record specific issues as separate items in findings.
 """
 
     return (
