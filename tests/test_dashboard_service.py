@@ -418,3 +418,124 @@ def test_dashboard_pipeline_requires_persisted_evidence(
     assert phase_map["review"] == "not_started"
     assert phase_map["audit"] == "not_started"
     assert phase_map["pr_merge"] == "not_started"
+
+
+def test_dashboard_pr_prepared_with_changes_required_blocks_pr_merge(
+    in_memory_uow: PersistenceUnitOfWork,
+) -> None:
+    from minime.domain.models import Review
+
+    service = OperationsDashboardService(in_memory_uow)
+
+    project = Project(
+        project_id="test-proj",
+        display_name="Test Project",
+        repository="silverberdi/mini-me",
+        base_branch="main",
+        openspec_path="openspec",
+    )
+    in_memory_uow.projects.save(project)
+
+    change = Change(
+        project_id="test-proj",
+        name="007-rejected-feature",
+        status=ChangeStatus.IN_PROGRESS,
+        last_readiness_status=ReadinessState.READY,
+    )
+    in_memory_uow.changes.save(change)
+
+    job = Job(
+        job_id="job-rej-1",
+        project_id="test-proj",
+        change_name="007-rejected-feature",
+        implementer_role="codex",
+        status=JobStatus.RUNNING,
+        candidate_sha="cand-rej-1",
+        base_sha="base-rej-1",
+    )
+    in_memory_uow.jobs.save(job)
+
+    # Review with CHANGES_REQUIRED
+    rev = Review(
+        review_id="rev-rej-1",
+        job_id="job-rej-1",
+        project_id="test-proj",
+        change_name="007-rejected-feature",
+        reviewer_role="antigravity",
+        candidate_sha="cand-rej-1",
+        base_sha="base-rej-1",
+        verdict=ReviewVerdict.CHANGES_REQUIRED,
+    )
+    in_memory_uow.reviews.save(rev)
+
+    run = OrchestrationRun(
+        run_id="run-rej-1",
+        project_id="test-proj",
+        change_name="007-rejected-feature",
+        active_job_id="job-rej-1",
+        current_stage=OrchestrationStage.PR_PREPARED,
+        is_active=False,
+        current_generation=1,
+        current_candidate_sha="cand-rej-1",
+        base_sha="base-rej-1",
+    )
+    in_memory_uow.orchestration_runs.save(run)
+
+    detail = service.get_change_detail("test-proj", "007-rejected-feature")
+    phase_map = {p.name: p.status for p in detail.pipeline}
+
+    assert phase_map["review"] == "failed"
+    assert phase_map["audit"] == "blocked"
+    assert phase_map["pr_merge"] == "blocked"
+
+
+def test_dashboard_implementation_phase_requires_candidate_sha(
+    in_memory_uow: PersistenceUnitOfWork,
+) -> None:
+    service = OperationsDashboardService(in_memory_uow)
+
+    project = Project(
+        project_id="test-proj",
+        display_name="Test Project",
+        repository="silverberdi/mini-me",
+        base_branch="main",
+        openspec_path="openspec",
+    )
+    in_memory_uow.projects.save(project)
+
+    change = Change(
+        project_id="test-proj",
+        name="008-no-sha-feature",
+        status=ChangeStatus.IN_PROGRESS,
+        last_readiness_status=ReadinessState.READY,
+    )
+    in_memory_uow.changes.save(change)
+
+    job = Job(
+        job_id="job-ns-1",
+        project_id="test-proj",
+        change_name="008-no-sha-feature",
+        implementer_role="codex",
+        status=JobStatus.RUNNING,
+    )
+    in_memory_uow.jobs.save(job)
+
+    # Run advanced to RUNNING_CHECKS but current_candidate_sha is None
+    run = OrchestrationRun(
+        run_id="run-ns-1",
+        project_id="test-proj",
+        change_name="008-no-sha-feature",
+        active_job_id="job-ns-1",
+        current_stage=OrchestrationStage.RUNNING_CHECKS,
+        is_active=True,
+        current_generation=1,
+        current_candidate_sha=None,
+        base_sha="base-ns-1",
+    )
+    in_memory_uow.orchestration_runs.save(run)
+
+    detail = service.get_change_detail("test-proj", "008-no-sha-feature")
+    phase_map = {p.name: p.status for p in detail.pipeline}
+
+    assert phase_map["implementation"] == "running"
+    assert "progress" in detail.pipeline[1].summary.lower()
