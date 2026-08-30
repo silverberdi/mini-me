@@ -397,15 +397,27 @@ class OrchestrationService:
         ]
         if candidate is not None and record_adoption_events:
             evidence = record_adoption_events[-1].evidence_references
+            historical_candidate = next(
+                (
+                    existing
+                    for existing in self.uow.orchestration_candidates.list_by_run(run_id)
+                    if existing.candidate_id == evidence.get("candidate_id")
+                ),
+                None,
+            )
+            if historical_candidate is None:
+                raise ValueError(
+                    "Legacy candidate record adoption references a missing candidate record."
+                )
             if any(
                 evidence.get(field) != value
                 for field, value in {
-                    "candidate_id": candidate.candidate_id,
-                    "candidate_generation": candidate.generation,
-                    "candidate_sha": candidate.candidate_sha,
-                    "base_sha": candidate.base_sha,
-                    "manifest_id": candidate.manifest_id,
-                    "manifest_hash": candidate.manifest_hash,
+                    "candidate_id": historical_candidate.candidate_id,
+                    "candidate_generation": historical_candidate.generation,
+                    "candidate_sha": historical_candidate.candidate_sha,
+                    "base_sha": historical_candidate.base_sha,
+                    "manifest_id": historical_candidate.manifest_id,
+                    "manifest_hash": historical_candidate.manifest_hash,
                 }.items()
             ):
                 raise ValueError(
