@@ -52,6 +52,7 @@ from minime.services.candidate_remediation import CandidateRemediationService
 from minime.services.execution_pipeline import ExecutionPipelineService
 from minime.services.project_service import ProjectService
 from minime.services.readiness_service import ReadinessService
+from minime.services.worktree_manager import WorktreeInfo
 
 logger = logging.getLogger(__name__)
 ORCHESTRATION_TRANSITION_KEY_MAX_LENGTH = 128
@@ -682,9 +683,16 @@ class OrchestrationService:
             )
             if existing:
                 return self.uow.orchestration_runs.get_by_id(run_id) or run
-            branch_name = f"minime/{run.change_name}-{job.job_id}-integration-gen{next_generation}"
+            target_short_sha = current_base[:12]
+            branch_name = (
+                f"minime/{run.change_name}-{job.job_id}-integration-gen{next_generation}-"
+                f"{target_short_sha}"
+            )
             integration_path = (
-                root / ".minime" / "worktrees" / f"{job.job_id}-integration-gen{next_generation}"
+                root
+                / ".minime"
+                / "worktrees"
+                / f"{job.job_id}-integration-gen{next_generation}-{target_short_sha}"
             )
             manager = self.pipeline.worktree_manager
             try:
@@ -729,8 +737,13 @@ class OrchestrationService:
                     if already_on_base.returncode != 0:
                         commits.append(commit_sha)
                 worktree = asyncio.run(
-                    manager.create_integration_worktree(
-                        job.job_id, branch_name, current_base, next_generation, run.project_id
+                    self._create_targeted_integration_worktree(
+                        manager,
+                        integration_path,
+                        branch_name,
+                        current_base,
+                        job,
+                        run,
                     )
                 )
                 integrated_sha = asyncio.run(
@@ -974,24 +987,38 @@ class OrchestrationService:
             and event.evidence_references.get("target_base_sha")
             and event.evidence_references.get("integration_branch")
         ]
-        if len(matching_conflicts) != 1:
-            raise ValueError("Stopped integration evidence does not identify exactly one source attempt.")
-        conflict = matching_conflicts[0]
-        details = conflict.evidence_references
-        target_base = str(details["target_base_sha"])
         current_base, base_error = resolve_base_branch_sha(root, project.base_branch)
         if not current_base:
             raise ValueError(base_error or "Current registered base could not be resolved.")
-        if current_base != target_base:
-            raise ValueError("Registered base no longer matches the original integration target.")
+        current_target_conflicts = [
+            event
+            for event in matching_conflicts
+            if event.evidence_references.get("target_base_sha") == current_base
+        ]
+        if not current_target_conflicts:
+            # Prior failures are historical for the newly registered base; the
+            # caller will start a distinct integration attempt below.
+            return None
+        if len(current_target_conflicts) != 1:
+            raise ValueError("Current integration evidence identifies multiple source attempts.")
+        conflict = current_target_conflicts[0]
+        details = conflict.evidence_references
+        target_base = str(details["target_base_sha"])
 
         next_generation = source.generation + 1
-        branch_name = f"minime/{run.change_name}-{job.job_id}-integration-gen{next_generation}"
+        target_short_sha = target_base[:12]
+        branch_name = (
+            f"minime/{run.change_name}-{job.job_id}-integration-gen{next_generation}-"
+            f"{target_short_sha}"
+        )
         expected_ref = f"refs/heads/{branch_name}"
         if details["integration_branch"] != branch_name:
             raise ValueError("Human integration branch is not the deterministic expected branch.")
         integration_path = (
-            root / ".minime" / "worktrees" / f"{job.job_id}-integration-gen{next_generation}"
+            root
+            / ".minime"
+            / "worktrees"
+            / f"{job.job_id}-integration-gen{next_generation}-{target_short_sha}"
         ).resolve()
         recorded_path = details.get("worktree_path")
         if recorded_path and Path(recorded_path).resolve() != integration_path:
@@ -1159,6 +1186,32 @@ class OrchestrationService:
         )
         self.uow.commit()
         return new_candidate
+
+    @staticmethod
+    async def _create_targeted_integration_worktree(
+        manager: Any,
+        path: Path,
+        branch_name: str,
+        base_sha: str,
+        job: Job,
+        run: OrchestrationRun,
+    ) -> WorktreeInfo:
+        """Create a managed integration worktree whose identity includes its target base."""
+        if path.exists():
+            state = await manager.inspect_worktree_state(path)
+            if state.dirty:
+                raise RuntimeError(f"Existing integration worktree is dirty: {path}")
+            return WorktreeInfo(path, branch_name, base_sha)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        await manager._git(
+            ["worktree", "add", "-b", branch_name, str(path), base_sha],
+            cwd=manager.project_root,
+            job_id=job.job_id,
+            project_id=run.project_id,
+            operation_type="candidate_base_integration_worktree_add",
+            managed_worktree_path=path,
+        )
+        return WorktreeInfo(path, branch_name, base_sha)
 
     def _find_transition_event(
         self,
