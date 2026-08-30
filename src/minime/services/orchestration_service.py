@@ -382,6 +382,33 @@ class OrchestrationService:
             raise ValueError(
                 "Active job does not belong to the current project/change run context."
             )
+        reconciled = self._reconcile_completed_human_integration(
+            run,
+            job,
+            candidate,
+            project,
+            root,
+        )
+        if reconciled is not None:
+            candidate = reconciled
+            current_base = candidate.base_sha
+            resolution_identity = {
+                "run_id": run_id,
+                "candidate_generation": candidate.generation,
+                "candidate_sha": candidate.candidate_sha,
+                "target_base_sha": current_base,
+                "resolution_action": "CONTINUE_PRESERVED_CANDIDATE",
+            }
+            resolution_key = bounded_orchestration_transition_key("HRES", resolution_identity)
+            existing = self._find_transition_event(
+                run_id,
+                EventType.HUMAN_RESOLUTION.value,
+                resolution_key,
+                resolution_identity,
+            )
+            if existing:
+                return self.uow.orchestration_runs.get_by_id(run_id) or run
+            return self.uow.orchestration_runs.get_by_id(run_id) or run
         if (
             candidate is not None
             and job.candidate_sha
@@ -902,6 +929,236 @@ class OrchestrationService:
         )
         self.uow.commit()
         return self.drive_coordinator(run_id, project_root=project_root)
+
+    def _reconcile_completed_human_integration(
+        self,
+        run: OrchestrationRun,
+        job: Job,
+        candidate: OrchestrationCandidate | None,
+        project: Project,
+        root: Path,
+    ) -> OrchestrationCandidate | None:
+        """Adopt only a completed, deterministic human-resolved integration branch."""
+        events = self.uow.orchestration_stage_events.list_by_run(run.run_id)
+        conflict_events = [
+            event
+            for event in events
+            if event.event_type == EventType.HUMAN_RESOLUTION.value
+            and event.evidence_references.get("code") == "BASE_INTEGRATION_CONFLICT"
+        ]
+        if not conflict_events:
+            return None
+
+        current_candidates = [
+            item
+            for item in self.uow.orchestration_candidates.list_by_run(run.run_id)
+            if item.superseded_by_id is None
+        ]
+        if len(current_candidates) != 1:
+            raise ValueError("Completed human integration requires exactly one current source candidate.")
+        source = current_candidates[0]
+        if candidate is not None and source.candidate_id != candidate.candidate_id:
+            raise ValueError("Current source candidate is ambiguous or not authoritative.")
+        if run.current_generation != source.generation:
+            raise ValueError("Run generation does not match the authoritative source candidate.")
+        if run.current_candidate_sha and run.current_candidate_sha != source.candidate_sha:
+            raise ValueError("Run candidate binding does not match the source candidate.")
+        if job.candidate_sha != source.candidate_sha:
+            raise ValueError("Job candidate binding does not match the source candidate.")
+
+        matching_conflicts = [
+            event
+            for event in conflict_events
+            if event.evidence_references.get("historical_candidate_sha") == source.candidate_sha
+            and event.evidence_references.get("historical_candidate_ref") == source.candidate_ref
+            and event.evidence_references.get("target_base_sha")
+            and event.evidence_references.get("integration_branch")
+        ]
+        if len(matching_conflicts) != 1:
+            raise ValueError("Stopped integration evidence does not identify exactly one source attempt.")
+        conflict = matching_conflicts[0]
+        details = conflict.evidence_references
+        target_base = str(details["target_base_sha"])
+        current_base, base_error = resolve_base_branch_sha(root, project.base_branch)
+        if not current_base:
+            raise ValueError(base_error or "Current registered base could not be resolved.")
+        if current_base != target_base:
+            raise ValueError("Registered base no longer matches the original integration target.")
+
+        next_generation = source.generation + 1
+        branch_name = f"minime/{run.change_name}-{job.job_id}-integration-gen{next_generation}"
+        expected_ref = f"refs/heads/{branch_name}"
+        if details["integration_branch"] != branch_name:
+            raise ValueError("Human integration branch is not the deterministic expected branch.")
+        integration_path = (
+            root / ".minime" / "worktrees" / f"{job.job_id}-integration-gen{next_generation}"
+        ).resolve()
+        recorded_path = details.get("worktree_path")
+        if recorded_path and Path(recorded_path).resolve() != integration_path:
+            raise ValueError("Human integration worktree is not the deterministic expected path.")
+        if self.uow.orchestration_candidates.get_by_generation(run.run_id, next_generation):
+            raise ValueError("Generation N+1 candidate already exists; refusing duplicate reconciliation.")
+        if any(item.generation > source.generation for item in self.uow.orchestration_candidates.list_by_run(run.run_id)):
+            raise ValueError("A later candidate generation already exists; refusing reconciliation.")
+
+        show_ref = subprocess.run(
+            ["git", "show-ref", "--verify", "--quiet", expected_ref],
+            cwd=str(root),
+            capture_output=True,
+            check=False,
+        )
+        if show_ref.returncode != 0:
+            raise ValueError("Expected human integration ref does not exist.")
+        head = subprocess.run(
+            ["git", "rev-parse", "--verify", f"{expected_ref}^{{commit}}"],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if head.returncode != 0:
+            raise ValueError("Human integration ref does not resolve to a commit.")
+        integrated_sha = head.stdout.strip()
+        if integrated_sha == source.candidate_sha:
+            raise ValueError("Human integration ref does not advance beyond the source candidate.")
+        parent = subprocess.run(
+            ["git", "rev-parse", "--verify", f"{integrated_sha}^"],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if parent.returncode != 0 or parent.stdout.strip() != target_base:
+            raise ValueError("Human integration HEAD parent does not match the target base.")
+        if not integration_path.is_dir():
+            raise ValueError("Expected human integration worktree does not exist.")
+        branch = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=str(integration_path),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if branch.returncode != 0 or branch.stdout.strip() != branch_name:
+            raise ValueError("Human integration worktree is not on the expected branch.")
+        worktree_head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(integration_path),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if worktree_head.returncode != 0 or worktree_head.stdout.strip() != integrated_sha:
+            raise ValueError("Human integration worktree HEAD disagrees with its branch ref.")
+        status = subprocess.run(
+            ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+            cwd=str(integration_path),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if status.returncode != 0 or status.stdout:
+            raise ValueError("Human integration worktree is not clean.")
+        unmerged = subprocess.run(
+            ["git", "ls-files", "-u"],
+            cwd=str(integration_path),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        cherry_pick_head = subprocess.run(
+            ["git", "rev-parse", "--verify", "CHERRY_PICK_HEAD"],
+            cwd=str(integration_path),
+            capture_output=True,
+            check=False,
+        )
+        if unmerged.returncode != 0 or unmerged.stdout or cherry_pick_head.returncode == 0:
+            raise ValueError("Human integration worktree remains in an active conflict state.")
+
+        manifest = self.pipeline.manifest_service.generate_manifest(
+            integration_path, integrated_sha, job.job_id
+        )
+        self.uow.candidate_manifests.save(manifest)
+        new_candidate = OrchestrationCandidate(
+            run_id=run.run_id,
+            generation=next_generation,
+            base_sha=target_base,
+            candidate_sha=integrated_sha,
+            candidate_ref=expected_ref,
+            manifest_id=manifest.manifest_id,
+            manifest_hash=manifest.manifest_hash,
+            authorship_summary={
+                "resolution": "human_resolved_preserved_candidate_base_integration",
+                "source_candidate_sha": source.candidate_sha,
+                "source_candidate_generation": source.generation,
+                "target_base_sha": target_base,
+            },
+            is_frozen=True,
+        )
+        self.uow.orchestration_candidates.save(new_candidate)
+        self.uow.orchestration_candidates.supersede(source.candidate_id, new_candidate.candidate_id)
+        job.base_sha = target_base
+        job.candidate_sha = integrated_sha
+        self.uow.jobs.save(job)
+        self.uow.orchestration_runs.update_candidate_binding(
+            run.run_id, next_generation, integrated_sha
+        )
+        run.current_generation = next_generation
+        run.current_candidate_sha = integrated_sha
+        run.stop_outcome = None
+        run.human_gate = None
+        run.stop_reason = None
+        run.stop_details = {}
+        run.is_active = True
+        run.current_stage = OrchestrationStage.RUNNING_CHECKS
+        run.resumable_stage = OrchestrationStage.RUNNING_CHECKS
+        self.uow.orchestration_runs.save(run)
+        resolution_identity = {
+            "run_id": run.run_id,
+            "candidate_generation": next_generation,
+            "candidate_sha": integrated_sha,
+            "target_base_sha": target_base,
+            "resolution_action": "CONTINUE_PRESERVED_CANDIDATE",
+        }
+        resolution_key = bounded_orchestration_transition_key("HRES", resolution_identity)
+        evidence = {
+            "run_id": run.run_id,
+            "job_id": job.job_id,
+            "previous_candidate_sha": source.candidate_sha,
+            "previous_candidate_generation": source.generation,
+            "previous_candidate_ref": source.candidate_ref,
+            "previous_base_sha": source.base_sha,
+            "resolved_base_sha": target_base,
+            "resulting_candidate_sha": integrated_sha,
+            "resulting_candidate_generation": next_generation,
+            "resulting_candidate_ref": expected_ref,
+            "resolution_action": "CONTINUE_PRESERVED_CANDIDATE",
+            "human_resolved_preserved_integration": True,
+        }
+        self.uow.orchestration_stage_events.save(
+            OrchestrationStageEvent(
+                run_id=run.run_id,
+                from_stage=run.current_stage,
+                to_stage=OrchestrationStage.RUNNING_CHECKS,
+                event_type=EventType.HUMAN_RESOLUTION.value,
+                transition_key=resolution_key,
+                evidence_references=evidence,
+                actor="human",
+                created_at=utc_now(),
+            )
+        )
+        self.uow.events.save(
+            Event(
+                event_type=EventType.HUMAN_RESOLUTION,
+                project_id=run.project_id,
+                change_id=run.change_name,
+                operation_id=run.run_id,
+                payload={"transition_key": resolution_key, **evidence},
+                timestamp=utc_now(),
+            )
+        )
+        self.uow.commit()
+        return new_candidate
 
     def _find_transition_event(
         self,

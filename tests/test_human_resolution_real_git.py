@@ -5,6 +5,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from minime.domain.enums import (
     ChangeStatus,
     EventType,
@@ -196,9 +198,11 @@ def test_advanced_base_real_git_conflict_preserves_integration_state(
     ]
     assert len(conflict_events) == 1
 
-    again = service.resolve_preserved_candidate(
-        run_id, continue_preserved_candidate=True, project_root=repo
-    )
+    with pytest.raises(ValueError, match="Human integration"):
+        service.resolve_preserved_candidate(
+            run_id, continue_preserved_candidate=True, project_root=repo
+        )
+    again = in_memory_uow.orchestration_runs.get_by_id(run_id)
     assert again.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
     assert len(in_memory_uow.orchestration_candidates.list_by_run(run_id)) == 1
     assert integration_path.exists()
@@ -209,3 +213,45 @@ def test_advanced_base_real_git_conflict_preserves_integration_state(
             if event.evidence_references.get("code") == "BASE_INTEGRATION_CONFLICT"
         ]
     ) == 1
+
+
+def test_completed_human_integration_is_reconciled_idempotently(tmp_path, in_memory_uow):
+    repo, base_a, candidate_sha, base_b = make_repo(tmp_path, conflict=True)
+    service, run_id = make_service(
+        in_memory_uow, repo, base_a, candidate_sha, "refs/heads/historical-candidate"
+    )
+    service.drive_coordinator = lambda run_id, project_root=None: (
+        in_memory_uow.orchestration_runs.get_by_id(run_id)
+    )
+
+    service.resolve_preserved_candidate(
+        run_id, continue_preserved_candidate=True, project_root=repo
+    )
+    integration_path = repo / ".minime" / "worktrees" / "job-human-resolution-integration-gen2"
+    (integration_path / "shared.txt").write_text("candidate\n", encoding="utf-8")
+    git(integration_path, "add", "shared.txt")
+    git(integration_path, "-c", "core.editor=true", "cherry-pick", "--continue")
+    assert git(integration_path, "rev-parse", "HEAD^") == base_b
+    assert git(integration_path, "status", "--porcelain") == ""
+
+    resolved = service.resolve_preserved_candidate(
+        run_id, continue_preserved_candidate=True, project_root=repo
+    )
+    candidates = in_memory_uow.orchestration_candidates.list_by_run(run_id)
+    assert resolved.current_generation == 2
+    assert [candidate.generation for candidate in candidates] == [1, 2]
+    assert candidates[0].superseded_by_id == candidates[1].candidate_id
+    assert in_memory_uow.jobs.get_by_id("job-human-resolution").candidate_sha == candidates[1].candidate_sha
+
+    again = service.resolve_preserved_candidate(
+        run_id, continue_preserved_candidate=True, project_root=repo
+    )
+    assert again.current_generation == 2
+    assert len(in_memory_uow.orchestration_candidates.list_by_run(run_id)) == 2
+    resolutions = [
+        event
+        for event in in_memory_uow.orchestration_stage_events.list_by_run(run_id)
+        if event.event_type == EventType.HUMAN_RESOLUTION.value
+        and event.evidence_references.get("resulting_candidate_sha")
+    ]
+    assert len(resolutions) == 1
