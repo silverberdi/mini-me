@@ -221,6 +221,8 @@ class DashboardChangeDetailResponse(BaseModel):
     run_id: str | None = None
     job_id: str | None = None
     current_stage: str | None = None
+    target_branch: str | None = None
+    current_executor: str | None = None
     stop_outcome: str | None = None
     human_gate: str | None = None
     pipeline: list[PipelinePhaseDTO] = Field(default_factory=list)
@@ -453,9 +455,14 @@ class OperationsDashboardService:
 
         status_val = self._derive_canonical_change_status(change, selected_run)
 
+        project = self.uow.projects.get_by_id(project_id)
+        job = self.uow.jobs.get_by_id(selected_run.active_job_id) if (selected_run and selected_run.active_job_id) else None
+        target_branch = project.base_branch if project else None
+        current_executor = (job.current_executor or job.implementer_role) if job else None
+
         # Pipeline phases & details
-        pipeline_phases = self._project_pipeline_phases(change, selected_run)
         candidate_authority, candidate_history = self._project_candidate_authority(selected_run)
+        pipeline_phases = self._project_pipeline_phases(change, selected_run, candidate_authority)
         checks = self._project_checks(selected_run, candidate_authority)
         review = self._project_review(selected_run, candidate_authority)
         audit = self._project_audit(selected_run, candidate_authority)
@@ -470,6 +477,8 @@ class OperationsDashboardService:
             run_id=selected_run.run_id if selected_run else None,
             job_id=selected_run.active_job_id if selected_run else None,
             current_stage=selected_run.current_stage.value if (selected_run and selected_run.current_stage) else None,
+            target_branch=target_branch,
+            current_executor=current_executor,
             stop_outcome=selected_run.stop_outcome.value if (selected_run and selected_run.stop_outcome) else None,
             human_gate=selected_run.human_gate.value if (selected_run and selected_run.human_gate) else None,
             pipeline=pipeline_phases,
@@ -538,7 +547,10 @@ class OperationsDashboardService:
         return "FAILED"
 
     def _project_pipeline_phases(
-        self, change: Change | None, run: OrchestrationRun | None
+        self,
+        change: Change | None,
+        run: OrchestrationRun | None,
+        candidate_authority: CandidateAuthorityDTO | None = None,
     ) -> list[PipelinePhaseDTO]:
         """Expose 6 major pipeline phases: readiness, implementation, checks, review, audit, pr_merge."""
         phases: list[PipelinePhaseDTO] = []
@@ -574,6 +586,11 @@ class OperationsDashboardService:
         if run.active_job_id:
             job = self.uow.jobs.get_by_id(run.active_job_id)
         executor = (job.current_executor or job.implementer_role) if job else None
+        authoritative_sha = (
+            candidate_authority.candidate_sha
+            if candidate_authority
+            else (run.current_candidate_sha if run else None)
+        )
 
         # 2. Implementation
         impl_status = "not_started"
@@ -647,7 +664,7 @@ class OperationsDashboardService:
         }:
             rev = self.uow.reviews.get_by_job_id(job.job_id) if job else None
             if rev:
-                if rev.candidate_sha != run.current_candidate_sha:
+                if rev.candidate_sha != authoritative_sha:
                     rev_status = "running"
                     rev_summary = "Review pending for updated candidate"
                 elif rev.verdict == ReviewVerdict.READY_TO_MERGE:
@@ -683,7 +700,7 @@ class OperationsDashboardService:
         }:
             aud = self.uow.audits.get_by_job_id(job.job_id) if job else None
             if aud:
-                if aud.candidate_sha != run.current_candidate_sha:
+                if aud.candidate_sha != authoritative_sha:
                     audit_status = "running"
                     audit_summary = "Audit pending for updated candidate"
                 elif aud.status == AuditStatus.AUDIT_COMPLETED:

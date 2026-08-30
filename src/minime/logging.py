@@ -62,9 +62,12 @@ def redact_secrets(text: str, custom_secrets: list[str] | None = None) -> str:
         flags=re.IGNORECASE,
     )
 
-    # Redact common standalone secret tokens (e.g. OpenAI/Anthropic/DeepSeek sk-..., GitHub ghp_...)
-    redacted = re.sub(r"\b(sk-[a-zA-Z0-9_-]{12,})\b", "[REDACTED_KEY]", redacted)
+    # Redact common standalone secret tokens (e.g. OpenAI/Anthropic/DeepSeek sk-..., GitHub ghp_.../github_pat_..., AWS AKIA..., Slack xoxb-...)
+    redacted = re.sub(r"\b(sk-[a-zA-Z0-9_\-]{12,})\b", "[REDACTED_KEY]", redacted)
     redacted = re.sub(r"\b(ghp_[a-zA-Z0-9]{20,})\b", "[REDACTED_TOKEN]", redacted)
+    redacted = re.sub(r"\b(github_pat_[a-zA-Z0-9_]{22,})\b", "[REDACTED_TOKEN]", redacted)
+    redacted = re.sub(r"\b(AKIA[0-9A-Z]{16})\b", "[REDACTED_KEY]", redacted)
+    redacted = re.sub(r"\b(xox[baprs]-[0-9a-zA-Z\-]{10,})\b", "[REDACTED_TOKEN]", redacted)
 
     # Redact explicit registered secrets
     secrets = get_secret_patterns()
