@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>mini me — Operations Dashboard</title>
+  <meta name="description" content="Operational control and observability surface for mini me autonomous software delivery pipeline.">
+  <link rel="stylesheet" href="/static/css/dashboard.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🤖</text></svg>">
+</head>
+<body class="theme-dark">
+  <!-- Top Navigation Header -->
+  <header class="top-nav" role="banner">
+    <div class="nav-brand">
+      <span class="brand-icon" aria-hidden="true">⚡</span>
+      <h1 class="brand-title">mini me <span class="brand-sub">ops</span></h1>
+      <span class="badge badge-version" id="appVersionBadge">v0.1.0</span>
+    </div>
+
+    <div class="nav-controls">
+      <div class="status-indicator-group">
+        <span class="indicator-item" id="schedulerModeBadge" title="Scheduler Mode">
+          <span class="dot dot-success"></span> MODE: RUN
+        </span>
+        <span class="indicator-item" id="dbHealthBadge" title="PostgreSQL State">
+          <span class="dot dot-success"></span> DB: HEALTHY
+        </span>
+      </div>
+
+      <div class="action-group">
+        <label class="auto-refresh-label" for="autoRefreshToggle">
+          <input type="checkbox" id="autoRefreshToggle" checked>
+          <span>Auto-refresh (<span id="refreshTimer">10s</span>)</span>
+        </label>
+        <button id="refreshBtn" class="btn btn-secondary" title="Refresh dashboard data">
+          <span class="btn-icon">🔄</span> Refresh
+        </button>
+        <button id="themeToggleBtn" class="btn btn-icon-only" title="Toggle dark/light theme" aria-label="Toggle theme">
+          <span id="themeIcon">☀️</span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Container -->
+  <main class="dashboard-main" role="main">
+
+    <!-- KPI Summary Grid (Above the Fold) -->
+    <section class="kpi-grid" aria-label="Operational Metrics">
+      <div class="kpi-card" id="kpiSystemStatus">
+        <div class="kpi-label">SYSTEM STATE</div>
+        <div class="kpi-value text-success" id="kpiSystemStateVal">HEALTHY</div>
+        <div class="kpi-sub" id="kpiSystemStateSub">Scheduler in active RUN mode</div>
+      </div>
+
+      <div class="kpi-card" id="kpiAttention">
+        <div class="kpi-label">ATTENTION REQUIRED</div>
+        <div class="kpi-value" id="kpiAttentionVal">0</div>
+        <div class="kpi-sub" id="kpiAttentionSub">0 human gates / blockers</div>
+      </div>
+
+      <div class="kpi-card" id="kpiActive">
+        <div class="kpi-label">ACTIVE EXECUTIONS</div>
+        <div class="kpi-value text-primary" id="kpiActiveVal">0</div>
+        <div class="kpi-sub" id="kpiActiveSub">0 changes currently in-flight</div>
+      </div>
+
+      <div class="kpi-card" id="kpiCompleted">
+        <div class="kpi-label">COMPLETED / MERGED</div>
+        <div class="kpi-value text-muted" id="kpiCompletedVal">0</div>
+        <div class="kpi-sub" id="kpiCompletedSub">Total discovered: 0</div>
+      </div>
+    </section>
+
+    <!-- Attention Banner (Prominent Callout for Blockers / Human Gates) -->
+    <section class="attention-banner" id="attentionBanner" style="display: none;" aria-label="Attention Required">
+      <div class="attention-header">
+        <span class="attention-icon">⚠️</span>
+        <h2 class="attention-title">Action Required: <span id="attentionCountText">1 run</span> paused at human gate</h2>
+      </div>
+      <div class="attention-items-list" id="attentionItemsContainer">
+        <!-- Injected dynamically -->
+      </div>
+    </section>
+
+    <!-- Master-Detail Content Layout -->
+    <div class="content-split">
+
+      <!-- Left Column: Changes Master Table -->
+      <section class="panel master-panel" aria-label="Changes Overview">
+        <div class="panel-header">
+          <h2 class="panel-title">Changes & Executions</h2>
+          <div class="filter-toolbar">
+            <input type="search" id="changeSearchInput" class="search-input" placeholder="Search changes..." aria-label="Search changes">
+            <div class="filter-pills" role="radiogroup" aria-label="Status Filters">
+              <button class="pill active" data-filter="ALL">All</button>
+              <button class="pill" data-filter="ATTENTION">Attention</button>
+              <button class="pill" data-filter="RUNNING">Running</button>
+              <button class="pill" data-filter="READY">Ready</button>
+              <button class="pill" data-filter="COMPLETED">Completed</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="table-container">
+          <table class="data-table" id="changesTable">
+            <thead>
+              <tr>
+                <th>Status</th>
+                <th>Change</th>
+                <th>Project</th>
+                <th>Stage / Stop</th>
+                <th>Candidate</th>
+                <th>Updated</th>
+              </tr>
+            </thead>
+            <tbody id="changesTableBody">
+              <tr>
+                <td colspan="6" class="table-empty">Loading operational state...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Right Column: Change / Run Detail Panel -->
+      <section class="panel detail-panel" id="detailPanel" aria-label="Execution Details">
+        <div class="detail-placeholder" id="detailPlaceholder">
+          <span class="placeholder-icon">📋</span>
+          <p>Select a change from the list to inspect execution pipeline, candidate authority, checks, reviews, and audit state.</p>
+        </div>
+
+        <div class="detail-content" id="detailContent" style="display: none;">
+          <!-- Detail Header -->
+          <div class="detail-header">
+            <div class="detail-title-group">
+              <div class="title-row">
+                <h3 class="detail-title" id="dtChangeName">012-execution-operations-dashboard</h3>
+                <span class="badge" id="dtStatusBadge">RUNNING</span>
+              </div>
+              <div class="detail-meta">
+                <span class="meta-item">Project: <strong id="dtProject">mini-me</strong></span>
+                <span class="meta-item">Stage: <strong id="dtStage">RUNNING_CHECKS</strong></span>
+                <span class="meta-item">Gen: <strong id="dtGeneration">gen-1</strong></span>
+                <span class="meta-item" id="dtCandidateMeta">SHA: <code id="dtCandidateSha" class="code-sha">---</code> <button id="copyShaBtn" class="btn-tiny" title="Copy SHA">📋</button></span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 6-Phase Pipeline Stepper -->
+          <div class="pipeline-stepper-container" aria-label="Pipeline Progress">
+            <div class="stepper" id="pipelineStepper">
+              <!-- Injected dynamically: 6 phases -->
+            </div>
+          </div>
+
+          <!-- Detail Navigation Tabs -->
+          <nav class="detail-tabs" role="tablist" aria-label="Detail Sections">
+            <button class="tab-btn active" role="tab" aria-selected="true" data-tab="overviewTab">Overview & Attention</button>
+            <button class="tab-btn" role="tab" aria-selected="false" data-tab="candidateTab">Candidate Authority</button>
+            <button class="tab-btn" role="tab" aria-selected="false" data-tab="checksTab">Checks (<span id="checksTabCount">0</span>)</button>
+            <button class="tab-btn" role="tab" aria-selected="false" data-tab="reviewTab">Review</button>
+            <button class="tab-btn" role="tab" aria-selected="false" data-tab="auditTab">DeepSeek Audit</button>
+            <button class="tab-btn" role="tab" aria-selected="false" data-tab="githubTab">GitHub & PR</button>
+            <button class="tab-btn" role="tab" aria-selected="false" data-tab="timelineTab">Timeline</button>
+          </nav>
+
+          <!-- Tab 1: Overview & Attention -->
+          <div class="tab-pane active" id="overviewTab" role="tabpanel">
+            <div class="section-card" id="overviewAttentionSection">
+              <h4 class="section-title">Current Execution State</h4>
+              <div class="overview-meta-grid" id="overviewMetaGrid">
+                <!-- Injected dynamically -->
+              </div>
+            </div>
+
+            <div class="section-card" id="overviewBlockerSection" style="display: none;">
+              <h4 class="section-title text-warning">Active Blockers & Claims</h4>
+              <div id="overviewBlockersList"></div>
+            </div>
+          </div>
+
+          <!-- Tab 2: Candidate Authority -->
+          <div class="tab-pane" id="candidateTab" role="tabpanel">
+            <div class="section-card">
+              <h4 class="section-title">Candidate Authority & Integrity</h4>
+              <div class="authority-summary" id="candidateAuthSummary">
+                <!-- Injected dynamically -->
+              </div>
+            </div>
+            <div class="section-card">
+              <h4 class="section-title">Candidate Generations History</h4>
+              <table class="data-table small-table" id="candidateHistoryTable">
+                <thead>
+                  <tr>
+                    <th>Gen</th>
+                    <th>Candidate SHA</th>
+                    <th>Base SHA</th>
+                    <th>Status</th>
+                    <th>Manifest Hash</th>
+                  </tr>
+                </thead>
+                <tbody id="candidateHistoryTbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Tab 3: Deterministic Checks -->
+          <div class="tab-pane" id="checksTab" role="tabpanel">
+            <div class="section-card">
+              <h4 class="section-title">Deterministic Candidate Checks</h4>
+              <div class="checks-list" id="checksListContainer">
+                <!-- Injected dynamically -->
+              </div>
+            </div>
+          </div>
+
+          <!-- Tab 4: Complementary Review -->
+          <div class="tab-pane" id="reviewTab" role="tabpanel">
+            <div class="section-card">
+              <h4 class="section-title">Complementary Review Verdict</h4>
+              <div id="reviewContentContainer">
+                <!-- Injected dynamically -->
+              </div>
+            </div>
+          </div>
+
+          <!-- Tab 5: DeepSeek Audit -->
+          <div class="tab-pane" id="auditTab" role="tabpanel">
+            <div class="section-card">
+              <h4 class="section-title">DeepSeek Direct Independent Audit</h4>
+              <div id="auditContentContainer">
+                <!-- Injected dynamically -->
+              </div>
+            </div>
+          </div>
+
+          <!-- Tab 6: GitHub & PR -->
+          <div class="tab-pane" id="githubTab" role="tabpanel">
+            <div class="section-card">
+              <h4 class="section-title">GitHub Work Binding & Pull Request</h4>
+              <div id="githubContentContainer">
+                <!-- Injected dynamically -->
+              </div>
+            </div>
+          </div>
+
+          <!-- Tab 7: Timeline -->
+          <div class="tab-pane" id="timelineTab" role="tabpanel">
+            <div class="section-card">
+              <h4 class="section-title">Chronological Lifecycle Events</h4>
+              <div class="timeline-container" id="timelineListContainer">
+                <!-- Injected dynamically -->
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+    </div>
+  </main>
+
+  <script src="/static/js/dashboard.js"></script>
+</body>
+</html>

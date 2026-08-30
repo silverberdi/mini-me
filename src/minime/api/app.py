@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated, Any, Generator
 
 from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from minime.adapters.openspec import OpenSpecAdapter
@@ -17,6 +20,12 @@ from minime.domain.models import Change, Job, JobLog, Project, ProviderHealth, S
 from minime.logging import redact_secrets
 from minime.services.budget_service import BudgetService
 from minime.services.capacity_lifecycle_service import CapacityLifecycleService
+from minime.services.dashboard_service import (
+    DashboardChangeDetailResponse,
+    DashboardOverviewResponse,
+    OperationsDashboardService,
+    TimelineEventDTO,
+)
 from minime.services.execution_pipeline import ExecutionPipelineService
 from minime.services.orchestration_service import OrchestrationService
 from minime.services.project_service import ProjectService
@@ -644,3 +653,82 @@ def list_orchestration_runs(
         is_active=is_active,
     )
     return [r.model_dump() for r in runs]
+
+
+# -----------------------------------------------------------------------------
+# Operations Dashboard Endpoints
+# -----------------------------------------------------------------------------
+
+
+@app.get("/api/v1/dashboard/overview", tags=["dashboard"])
+def get_dashboard_overview(
+    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
+) -> DashboardOverviewResponse:
+    """Get high-level operations dashboard overview."""
+    service = OperationsDashboardService(uow)
+    return service.get_overview()
+
+
+@app.get("/api/v1/dashboard/changes/{project_id}/{change_name}", tags=["dashboard"])
+def get_dashboard_change_detail(
+    project_id: str,
+    change_name: str,
+    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
+    run_id: str | None = None,
+) -> DashboardChangeDetailResponse:
+    """Get comprehensive execution detail for a specific change and its latest/selected run."""
+    service = OperationsDashboardService(uow)
+    return service.get_change_detail(project_id, change_name, run_id=run_id)
+
+
+@app.get("/api/v1/dashboard/runs/{run_id}", tags=["dashboard"])
+def get_dashboard_run_detail(
+    run_id: str,
+    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
+) -> DashboardChangeDetailResponse:
+    """Get comprehensive execution detail for an exact orchestration run."""
+    service = OperationsDashboardService(uow)
+    try:
+        return service.get_run_detail(run_id)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+
+
+@app.get("/api/v1/dashboard/events", tags=["dashboard"])
+def get_dashboard_events(
+    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
+    project_id: str | None = None,
+    change_name: str | None = None,
+    run_id: str | None = None,
+    limit: int = 100,
+) -> list[TimelineEventDTO]:
+    """Get chronological event timeline for the operations dashboard."""
+    service = OperationsDashboardService(uow)
+    return service.get_events_timeline(
+        project_id=project_id,
+        change_name=change_name,
+        run_id=run_id,
+        limit=limit,
+    )
+
+
+# -----------------------------------------------------------------------------
+# Static UI Mounting & Index
+# -----------------------------------------------------------------------------
+
+STATIC_DIR = Path(__file__).parent.parent / "static"
+
+if STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+@app.get("/", tags=["dashboard-ui"], response_model=None)
+@app.get("/dashboard", tags=["dashboard-ui"], response_model=None)
+def get_dashboard_page() -> Response:
+    """Serve the operations dashboard single-page web interface."""
+    index_file = STATIC_DIR / "index.html"
+    if index_file.exists():
+        return FileResponse(index_file)
+    return HTMLResponse("<h1>mini me dashboard not found</h1>", status_code=404)
+
+
