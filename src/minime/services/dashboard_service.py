@@ -300,6 +300,7 @@ class OperationsDashboardService:
             runs_by_change[key].sort(key=lambda x: x.created_at, reverse=True)
 
         # 5. Attention Items, Active Executions & Recent Completions
+        changes_map = {(c.project_id, c.name): c for c in all_changes}
         attention_items: list[AttentionItemDTO] = []
         active_executions: list[ActiveExecutionDTO] = []
         recent_completions: list[RecentCompletionDTO] = []
@@ -378,15 +379,6 @@ class OperationsDashboardService:
                     )
                 )
             elif r.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE or r.current_stage == OrchestrationStage.PR_PREPARED:
-                # Check PR info if exists
-                actions = self.uow.orchestration_external_actions.list_by_run(r.run_id)
-                pr_num = None
-                pr_url = None
-                for a in actions:
-                    if a.result_payload and "pr_number" in a.result_payload:
-                        pr_num = a.result_payload["pr_number"]
-                        pr_url = a.result_payload.get("pr_url")
-
                 # Review verdict & Audit risk strictly bound to current candidate SHA
                 rev = self.uow.reviews.get_by_job_id(r.active_job_id) if r.active_job_id else None
                 aud = self.uow.audits.get_by_job_id(r.active_job_id) if r.active_job_id else None
@@ -395,23 +387,35 @@ class OperationsDashboardService:
                 reviewer = rev.reviewer_role if (rev and rev.candidate_sha == r.current_candidate_sha) else None
                 aud_risk = aud.risk.value if (aud and aud.risk and aud.candidate_sha == r.current_candidate_sha) else None
 
-                recent_completions.append(
-                    RecentCompletionDTO(
-                        project_id=r.project_id,
-                        change_name=r.change_name,
-                        run_id=r.run_id,
-                        job_id=r.active_job_id,
-                        generation=r.current_generation,
-                        candidate_sha=r.current_candidate_sha,
-                        candidate_sha_short=_short_sha(r.current_candidate_sha),
-                        completed_at=_format_dt(r.updated_at),
-                        reviewer_role=reviewer,
-                        review_verdict=rev_verdict,
-                        audit_risk=aud_risk,
-                        github_pr_number=pr_num,
-                        github_pr_url=pr_url,
+                # Only include when review and audit are both passed, or change is marked DONE
+                change_for_r = changes_map.get((r.project_id, r.change_name))
+                is_fully_ready = rev_verdict == ReviewVerdict.READY_TO_MERGE.value and (aud_risk is None or aud_risk == AuditRiskLevel.LOW.value)
+                if is_fully_ready or (change_for_r and change_for_r.status == ChangeStatus.DONE):
+                    actions = self.uow.orchestration_external_actions.list_by_run(r.run_id)
+                    pr_num = None
+                    pr_url = None
+                    for a in actions:
+                        if a.result_payload and "pr_number" in a.result_payload:
+                            pr_num = a.result_payload["pr_number"]
+                            pr_url = a.result_payload.get("pr_url")
+
+                    recent_completions.append(
+                        RecentCompletionDTO(
+                            project_id=r.project_id,
+                            change_name=r.change_name,
+                            run_id=r.run_id,
+                            job_id=r.active_job_id,
+                            generation=r.current_generation,
+                            candidate_sha=r.current_candidate_sha,
+                            candidate_sha_short=_short_sha(r.current_candidate_sha),
+                            completed_at=_format_dt(r.updated_at),
+                            reviewer_role=reviewer,
+                            review_verdict=rev_verdict,
+                            audit_risk=aud_risk,
+                            github_pr_number=pr_num,
+                            github_pr_url=pr_url,
+                        )
                     )
-                )
 
         # 6. Change Summaries
         change_summaries: list[ChangeSummaryDTO] = []
@@ -732,20 +736,19 @@ class OperationsDashboardService:
             OrchestrationStage.PREPARING_PR,
             OrchestrationStage.PR_PREPARED,
         }:
-            rev = self.uow.reviews.get_by_job_id(job.job_id) if job else None
-            if rev:
-                if rev.candidate_sha != authoritative_sha:
-                    rev_status = "running"
-                    rev_summary = "Review pending for updated candidate"
-                elif rev.verdict == ReviewVerdict.READY_TO_MERGE:
-                    rev_status = "passed"
-                    rev_summary = f"Approved by {rev.reviewer_role}"
-                elif rev.verdict == ReviewVerdict.CHANGES_REQUIRED:
-                    rev_status = "failed"
-                    rev_summary = "Changes required by reviewer"
-                else:
-                    rev_status = "running"
-                    rev_summary = f"Review verdict: {rev.verdict.value if rev.verdict else 'pending'}"
+            review_dto = self._project_review(run, candidate_authority)
+            if review_dto.is_stale_to_current_candidate:
+                rev_status = "running"
+                rev_summary = "Review pending for updated candidate"
+            elif review_dto.verdict == ReviewVerdict.READY_TO_MERGE.value:
+                rev_status = "passed"
+                rev_summary = f"Approved by {review_dto.reviewer_role}"
+            elif review_dto.verdict == ReviewVerdict.CHANGES_REQUIRED.value:
+                rev_status = "failed"
+                rev_summary = "Changes required by reviewer"
+            elif review_dto.status == "running":
+                rev_status = "running"
+                rev_summary = f"Review verdict: {review_dto.verdict or 'pending'}"
             else:
                 rev_status = "not_started"
                 rev_summary = "No review record found"
@@ -768,24 +771,23 @@ class OperationsDashboardService:
             OrchestrationStage.PREPARING_PR,
             OrchestrationStage.PR_PREPARED,
         }:
-            aud = self.uow.audits.get_by_job_id(job.job_id) if job else None
-            if aud:
-                if aud.candidate_sha != authoritative_sha:
-                    audit_status = "running"
-                    audit_summary = "Audit pending for updated candidate"
-                elif aud.status == AuditStatus.AUDIT_COMPLETED:
-                    if aud.risk is None or aud.risk == AuditRiskLevel.LOW:
-                        audit_status = "passed"
-                        audit_summary = f"Audit passed (risk: {aud.risk.value if aud.risk else 'low'})"
-                    else:
-                        audit_status = "failed"
-                        audit_summary = f"Audit completed with {aud.risk.value} risk findings"
-                elif aud.status == AuditStatus.AUDIT_BLOCKED:
-                    audit_status = "failed"
-                    audit_summary = "Audit blocked by security/integrity finding"
+            audit_dto = self._project_audit(run, candidate_authority)
+            if audit_dto.is_stale_to_current_candidate:
+                audit_status = "running"
+                audit_summary = "Audit pending for updated candidate"
+            elif audit_dto.status == AuditStatus.AUDIT_COMPLETED.value:
+                if audit_dto.risk is None or audit_dto.risk == AuditRiskLevel.LOW.value:
+                    audit_status = "passed"
+                    audit_summary = f"Audit passed (risk: {audit_dto.risk or 'low'})"
                 else:
-                    audit_status = "running"
-                    audit_summary = "Audit in progress"
+                    audit_status = "failed"
+                    audit_summary = f"Audit completed with {audit_dto.risk} risk findings"
+            elif audit_dto.status in {AuditStatus.AUDIT_BLOCKED.value, AuditStatus.AUDIT_FAILED.value}:
+                audit_status = "failed"
+                audit_summary = "Audit blocked by security/integrity finding"
+            elif audit_dto.status in {AuditStatus.AUDIT_RUNNING.value, AuditStatus.AUDIT_PENDING.value}:
+                audit_status = "running"
+                audit_summary = "Audit in progress"
             else:
                 audit_status = "not_started"
                 audit_summary = "No audit record found"

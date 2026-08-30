@@ -135,6 +135,12 @@
       });
     }
 
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden && autoRefreshToggle && autoRefreshToggle.checked) {
+        resetCountdown();
+      }
+    });
+
     if (changeSearchInput) {
       changeSearchInput.addEventListener('input', (e) => {
         searchQuery = e.target.value.toLowerCase().trim();
