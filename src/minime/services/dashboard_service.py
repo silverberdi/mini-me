@@ -301,6 +301,21 @@ class OperationsDashboardService:
 
         # 5. Attention Items, Active Executions & Recent Completions
         changes_map = {(c.project_id, c.name): c for c in all_changes}
+        reviews_map: dict[str, Any] = {}
+        audits_map: dict[str, Any] = {}
+        for p in projects:
+            try:
+                for rev in self.uow.reviews.list_by_project(p.project_id, limit=200):
+                    reviews_map[rev.job_id] = rev
+            except Exception:
+                pass
+            if hasattr(self.uow.audits, "list_by_project"):
+                try:
+                    for aud in self.uow.audits.list_by_project(p.project_id, limit=200):
+                        audits_map[aud.job_id] = aud
+                except Exception:
+                    pass
+
         attention_items: list[AttentionItemDTO] = []
         active_executions: list[ActiveExecutionDTO] = []
         recent_completions: list[RecentCompletionDTO] = []
@@ -384,8 +399,12 @@ class OperationsDashboardService:
                 or (changes_map.get((r.project_id, r.change_name)) and changes_map[(r.project_id, r.change_name)].status == ChangeStatus.DONE)
             ):
                 # Review verdict & Audit risk strictly bound to current candidate SHA
-                rev = self.uow.reviews.get_by_job_id(r.active_job_id) if r.active_job_id else None
-                aud = self.uow.audits.get_by_job_id(r.active_job_id) if r.active_job_id else None
+                rev = reviews_map.get(r.active_job_id) if r.active_job_id else None
+                if not rev and r.active_job_id:
+                    rev = self.uow.reviews.get_by_job_id(r.active_job_id)
+                aud = audits_map.get(r.active_job_id) if r.active_job_id else None
+                if not aud and r.active_job_id:
+                    aud = self.uow.audits.get_by_job_id(r.active_job_id)
 
                 rev_verdict = rev.verdict.value if (rev and rev.verdict and rev.candidate_sha == r.current_candidate_sha) else None
                 reviewer = rev.reviewer_role if (rev and rev.candidate_sha == r.current_candidate_sha) else None
@@ -942,9 +961,12 @@ class OperationsDashboardService:
         findings = self.uow.review_findings.list_by_review(rev.review_id)
         material_count = sum(1 for f in findings if f.severity.value in {"BLOCKER", "MAJOR"})
 
-        # Stale isolation check
+        # Authoritative candidate SHA for isolation
+        target_sha = candidate.candidate_sha if candidate else run.current_candidate_sha
         is_stale = False
-        if candidate and rev.candidate_sha and rev.candidate_sha != candidate.candidate_sha:
+        if target_sha and rev.candidate_sha != target_sha:
+            is_stale = True
+        elif not rev.candidate_sha:
             is_stale = True
 
         clean_summary = redact_secrets(rev.summary or "") if rev.summary else None
@@ -989,8 +1011,11 @@ class OperationsDashboardService:
         findings = self.uow.audit_findings.list_by_audit(aud.audit_id)
         material_count = sum(1 for f in findings if f.severity.value in {"critical", "high", "medium"})
 
+        target_sha = candidate.candidate_sha if candidate else run.current_candidate_sha
         is_stale = False
-        if candidate and aud.candidate_sha and aud.candidate_sha != candidate.candidate_sha:
+        if target_sha and aud.candidate_sha != target_sha:
+            is_stale = True
+        elif not aud.candidate_sha:
             is_stale = True
 
         clean_summary = redact_secrets(aud.summary or "") if aud.summary else None
