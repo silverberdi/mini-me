@@ -391,10 +391,9 @@ class OperationsDashboardService:
                 reviewer = rev.reviewer_role if (rev and rev.candidate_sha == r.current_candidate_sha) else None
                 aud_risk = aud.risk.value if (aud and aud.risk and aud.candidate_sha == r.current_candidate_sha) else None
 
-                # Only include when review and audit are both passed, or change is marked DONE
-                change_for_r = changes_map.get((r.project_id, r.change_name))
+                # Only include when review and audit are both passed on candidate
                 is_fully_ready = rev_verdict == ReviewVerdict.READY_TO_MERGE.value and (aud_risk is None or aud_risk == AuditRiskLevel.LOW.value)
-                if is_fully_ready or (change_for_r and change_for_r.status == ChangeStatus.DONE):
+                if is_fully_ready:
                     actions = self.uow.orchestration_external_actions.list_by_run(r.run_id)
                     pr_num = None
                     pr_url = None
@@ -660,6 +659,13 @@ class OperationsDashboardService:
         if stage in {OrchestrationStage.PREPARING_EXECUTION, OrchestrationStage.IMPLEMENTING}:
             impl_status = "running"
             impl_summary = f"Executing under {executor or 'primary implementer'}"
+        elif run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN and stage in {
+            OrchestrationStage.IMPLEMENTING,
+            OrchestrationStage.REVIEW_REMEDIATION,
+            OrchestrationStage.AUDIT_REMEDIATION,
+        }:
+            impl_status = "blocked"
+            impl_summary = f"Implementation remediation blocked at {stage.value}"
         elif stage in {
             OrchestrationStage.EVALUATING_ATTEMPT,
             OrchestrationStage.RUNNING_CHECKS,
@@ -680,9 +686,6 @@ class OperationsDashboardService:
         elif run.stop_outcome in {OrchestrationStopOutcome.WAITING_CAPACITY, OrchestrationStopOutcome.WAITING_EXTERNAL}:
             impl_status = "waiting"
             impl_summary = "Waiting for capacity or external event"
-        elif run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN and stage == OrchestrationStage.IMPLEMENTING:
-            impl_status = "blocked"
-            impl_summary = "Implementation blocked"
         impl_details = {
             "attempts_count": run.current_generation,
             "latest_progress": f"Generation {run.current_generation}",
@@ -1062,6 +1065,11 @@ class OperationsDashboardService:
         events: list[TimelineEventDTO] = []
 
         target_run_id = run.run_id if run else run_id
+        if target_run_id and not (project_id and change_name):
+            target_run = run or self.uow.orchestration_runs.get_by_id(target_run_id)
+            if target_run:
+                project_id = target_run.project_id
+                change_name = target_run.change_name
 
         # 1. Stage events from orchestration_stage_events
         target_runs: list[str] = []
