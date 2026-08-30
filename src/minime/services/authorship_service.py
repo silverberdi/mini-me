@@ -74,8 +74,13 @@ class AuthorshipService:
         }
 
     def evaluate_reviewer_authorship(
-        self, job_id: str, reviewer_role: str, surviving_files: list[str] | set[str],
-        candidate_sha: str, candidate_generation: int | None, uow: PersistenceUnitOfWork,
+        self,
+        job_id: str,
+        reviewer_role: str,
+        surviving_files: list[str] | set[str],
+        candidate_sha: str,
+        candidate_generation: int | None,
+        uow: PersistenceUnitOfWork,
     ) -> dict[str, Any]:
         """Evaluate only contribution files proven to survive the frozen candidate."""
         surviving = {str(path).strip().lstrip("./") for path in surviving_files}
@@ -87,5 +92,18 @@ class AuthorshipService:
                 )
             )
             if record.agent_role == reviewer_role and files:
-                contributions.append({"attempt_number": record.attempt_number, "agent_role": record.agent_role, "model_identity": record.model_identity, "files": files})
-        return {"candidate_sha": candidate_sha, "candidate_generation": candidate_generation, "reviewer_role": reviewer_role, "surviving_contributions": contributions, "is_mixed_authorship": bool(contributions)}
+                contributions.append(
+                    {
+                        "attempt_number": record.attempt_number,
+                        "agent_role": record.agent_role,
+                        "model_identity": record.model_identity,
+                        "files": files,
+                    }
+                )
+        return {
+            "candidate_sha": candidate_sha,
+            "candidate_generation": candidate_generation,
+            "reviewer_role": reviewer_role,
+            "surviving_contributions": contributions,
+            "is_mixed_authorship": bool(contributions),
+        }

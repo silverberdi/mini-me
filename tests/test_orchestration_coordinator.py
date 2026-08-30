@@ -361,7 +361,9 @@ def test_pr_lookup_exact_identity_adopts_without_creation(
 
 def test_admission_refusal_scenarios(setup_orchestration_environment, in_memory_uow):
     env = setup_orchestration_environment
-    service = OrchestrationService(in_memory_uow, project_root=env["project_root"], github_adapter=ReadinessGitHubStub())
+    service = OrchestrationService(
+        in_memory_uow, project_root=env["project_root"], github_adapter=ReadinessGitHubStub()
+    )
 
     # 1. Non-existent project
     res_bad_proj = service.admit_change("unknown-project", env["change_name"])

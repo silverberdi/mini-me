@@ -27,7 +27,20 @@ class DurableMemory:
 
     def get_by_identity(self, run_id, source_generation, source_candidate_sha, contract_hash):
         self.calls += 1
-        return next((item for item in self.items.values() if (item.run_id, item.source_generation, item.source_candidate_sha, item.contract_hash) == (run_id, source_generation, source_candidate_sha, contract_hash)), None)
+        return next(
+            (
+                item
+                for item in self.items.values()
+                if (
+                    item.run_id,
+                    item.source_generation,
+                    item.source_candidate_sha,
+                    item.contract_hash,
+                )
+                == (run_id, source_generation, source_candidate_sha, contract_hash)
+            ),
+            None,
+        )
 
 
 class NoCallManager:
@@ -42,9 +55,26 @@ class NoCallManager:
 def stopped_run(uow, *, candidates=()):
     project = Project(project_id="p", display_name="p", repository="/tmp/repo")
     uow.projects.save(project)
-    job = Job(project_id="p", change_name="change", implementer_role="codex", status=JobStatus.NEEDS_HUMAN, candidate_sha="a" * 40, base_sha="b" * 40)
+    job = Job(
+        project_id="p",
+        change_name="change",
+        implementer_role="codex",
+        status=JobStatus.NEEDS_HUMAN,
+        candidate_sha="a" * 40,
+        base_sha="b" * 40,
+    )
     uow.jobs.save(job)
-    run = OrchestrationRun(project_id="p", change_name="change", base_sha="b" * 40, current_stage=OrchestrationStage.COMPLEMENTARY_REVIEW, stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN, human_gate=HumanGate.NEEDS_HUMAN, active_job_id=job.job_id, current_generation=1, current_candidate_sha="a" * 40)
+    run = OrchestrationRun(
+        project_id="p",
+        change_name="change",
+        base_sha="b" * 40,
+        current_stage=OrchestrationStage.COMPLEMENTARY_REVIEW,
+        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+        human_gate=HumanGate.NEEDS_HUMAN,
+        active_job_id=job.job_id,
+        current_generation=1,
+        current_candidate_sha="a" * 40,
+    )
     run.run_id = "run"
     uow.orchestration_runs.save(run)
     for candidate in candidates:
@@ -54,9 +84,14 @@ def stopped_run(uow, *, candidates=()):
 
 def valid_contract():
     return RemediationContract(
-        contract_version="1", run_id="run", source_candidate_generation=1,
-        source_candidate_sha="a" * 40, source_candidate_base_sha="b" * 40,
-        change_name="change", objective="test", allowed_paths=["src/fix.py"],
+        contract_version="1",
+        run_id="run",
+        source_candidate_generation=1,
+        source_candidate_sha="a" * 40,
+        source_candidate_base_sha="b" * 40,
+        change_name="change",
+        objective="test",
+        allowed_paths=["src/fix.py"],
     )
 
 
@@ -70,9 +105,18 @@ def test_missing_durable_repository_fails_closed_before_git(in_memory_uow, tmp_p
 
 
 @pytest.mark.parametrize("candidate_count", [0, 2])
-def test_current_candidate_requires_exactly_one_non_superseded(in_memory_uow, tmp_path, candidate_count):
+def test_current_candidate_requires_exactly_one_non_superseded(
+    in_memory_uow, tmp_path, candidate_count
+):
     candidates = [
-        OrchestrationCandidate(run_id="run", generation=i + 1, base_sha="b" * 40, candidate_sha="a" * 40, candidate_ref="refs/heads/missing", manifest_hash="m" * 64)
+        OrchestrationCandidate(
+            run_id="run",
+            generation=i + 1,
+            base_sha="b" * 40,
+            candidate_sha="a" * 40,
+            candidate_ref="refs/heads/missing",
+            manifest_hash="m" * 64,
+        )
         for i in range(candidate_count)
     ]
     run, _ = stopped_run(in_memory_uow, candidates=candidates)
@@ -96,20 +140,54 @@ def test_invalid_candidate_ref_never_invokes_implementer(tmp_path, in_memory_uow
     sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True).strip()
     project = Project(project_id="p", display_name="p", repository=str(tmp_path))
     in_memory_uow.projects.save(project)
-    job = Job(project_id="p", change_name="change", implementer_role="codex", status=JobStatus.NEEDS_HUMAN, candidate_sha=sha, base_sha=sha)
+    job = Job(
+        project_id="p",
+        change_name="change",
+        implementer_role="codex",
+        status=JobStatus.NEEDS_HUMAN,
+        candidate_sha=sha,
+        base_sha=sha,
+    )
     in_memory_uow.jobs.save(job)
     manifest = CandidateManifestService().generate_manifest(tmp_path, sha, job.job_id)
     in_memory_uow.candidate_manifests.save(manifest)
-    candidate = OrchestrationCandidate(run_id="run", generation=1, base_sha=sha, candidate_sha=sha, candidate_ref="refs/heads/does-not-exist", manifest_id=manifest.manifest_id, manifest_hash=manifest.manifest_hash)
+    candidate = OrchestrationCandidate(
+        run_id="run",
+        generation=1,
+        base_sha=sha,
+        candidate_sha=sha,
+        candidate_ref="refs/heads/does-not-exist",
+        manifest_id=manifest.manifest_id,
+        manifest_hash=manifest.manifest_hash,
+    )
     in_memory_uow.orchestration_candidates.save(candidate)
-    run = OrchestrationRun(project_id="p", change_name="change", base_sha=sha, current_stage=OrchestrationStage.COMPLEMENTARY_REVIEW, stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN, human_gate=HumanGate.NEEDS_HUMAN, active_job_id=job.job_id, current_candidate_sha=sha)
+    run = OrchestrationRun(
+        project_id="p",
+        change_name="change",
+        base_sha=sha,
+        current_stage=OrchestrationStage.COMPLEMENTARY_REVIEW,
+        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+        human_gate=HumanGate.NEEDS_HUMAN,
+        active_job_id=job.job_id,
+        current_candidate_sha=sha,
+    )
     run.run_id = "run"
     in_memory_uow.orchestration_runs.save(run)
     in_memory_uow.candidate_remediations = DurableMemory()
     manager = NoCallManager()
-    service = CandidateRemediationService(in_memory_uow, tmp_path, pipeline=SimpleNamespace(implementer_runner=SimpleNamespace()), worktree_manager=manager)
+    service = CandidateRemediationService(
+        in_memory_uow,
+        tmp_path,
+        pipeline=SimpleNamespace(implementer_runner=SimpleNamespace()),
+        worktree_manager=manager,
+    )
     with pytest.raises(RemediationError, match="[Cc]andidate ref"):
-        service.remediate("run", valid_contract().model_copy(update={"source_candidate_sha": sha, "source_candidate_base_sha": sha}))
+        service.remediate(
+            "run",
+            valid_contract().model_copy(
+                update={"source_candidate_sha": sha, "source_candidate_base_sha": sha}
+            ),
+        )
     assert manager.calls == 0
 
 
@@ -124,13 +202,9 @@ def test_invalid_candidate_ref_never_invokes_implementer(tmp_path, in_memory_uow
 def test_candidate_ref_must_authoritatively_resolve_to_candidate_sha(
     tmp_path, in_memory_uow, candidate_ref, expected_sha
 ):
-    subprocess.run(
-        ["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True
-    )
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(["git", "config", "user.name", "test"], cwd=tmp_path, check=True)
-    subprocess.run(
-        ["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True
-    )
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
     (tmp_path / "README.md").write_text("source\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-m", "source"], cwd=tmp_path, check=True, capture_output=True)
@@ -198,16 +272,14 @@ def test_candidate_ref_must_authoritatively_resolve_to_candidate_sha(
 
 
 def test_authoritative_base_advance_fails_closed_before_remediation(tmp_path, in_memory_uow):
-    subprocess.run(
-        ["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True
-    )
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(["git", "config", "user.name", "test"], cwd=tmp_path, check=True)
-    subprocess.run(
-        ["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True
-    )
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
     (tmp_path / "README.md").write_text("base one\n", encoding="utf-8")
     subprocess.run(["git", "add", "README.md"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-m", "base one"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "base one"], cwd=tmp_path, check=True, capture_output=True
+    )
     base_one = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True
     ).strip()
@@ -218,7 +290,9 @@ def test_authoritative_base_advance_fails_closed_before_remediation(tmp_path, in
     )
     (tmp_path / "README.md").write_text("base two\n", encoding="utf-8")
     subprocess.run(["git", "add", "README.md"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-m", "base two"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "base two"], cwd=tmp_path, check=True, capture_output=True
+    )
     base_two = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True
     ).strip()

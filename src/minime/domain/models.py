@@ -32,6 +32,7 @@ from minime.domain.enums import (
     LockSafetyStatus,
     OrchestrationStage,
     OrchestrationStopOutcome,
+    PreviewStatus,
     ProgressClassification,
     ProjectStatus,
     ProviderHealthStatus,
@@ -43,6 +44,7 @@ from minime.domain.enums import (
     ReviewStatus,
     ReviewVerdict,
     SchedulerMode,
+    ValidationVerdict,
 )
 
 
@@ -808,7 +810,63 @@ class OrchestrationStatusView(BaseModel):
     human_gate: HumanGate | None = None
     stop_reason: str | None = None
     stop_details: dict[str, Any] = Field(default_factory=dict)
+
     remediation: dict[str, Any] | None = None
     last_transition: dict[str, Any] | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class PreviewSession(BaseModel):
+    """Durable preview session for an isolated candidate container environment."""
+
+    preview_id: str = Field(default_factory=generate_uuid)
+    project_id: str
+    change_name: str
+    run_id: str | None = None
+    job_id: str | None = None
+    candidate_generation: int = 1
+    head_sha: str
+    base_sha: str
+    image_digest: str = ""
+    status: PreviewStatus = PreviewStatus.REQUESTED
+    container_id: str | None = None
+    container_name: str | None = None
+    allocated_port: int | None = None
+    preview_url: str | None = None
+    failure_reason: str | None = None
+    failure_code: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    ready_at: datetime | None = None
+    terminated_at: datetime | None = None
+
+
+class ValidationScenario(BaseModel):
+    """Structured visual / user-facing scenario for guided human validation."""
+
+    scenario_id: str
+    title: str
+    description: str = ""
+    ordered_steps: list[str] = Field(default_factory=list)
+    expected_result: str = ""
+    viewport: str | None = "desktop"
+    required: bool = True
+
+
+class ValidationRun(BaseModel):
+    """Authoritative recorded validation run tied strictly to candidate identity."""
+
+    validation_id: str = Field(default_factory=generate_uuid)
+    preview_id: str | None = None
+    project_id: str
+    change_name: str
+    run_id: str | None = None
+    candidate_generation: int = 1
+    head_sha: str
+    base_sha: str
+    image_digest: str
+    verdict: ValidationVerdict = ValidationVerdict.PASS
+    scenario_results: list[dict[str, Any]] = Field(default_factory=list)
+    notes: str | None = None
+    operator: str | None = "operator"
+    created_at: datetime = Field(default_factory=utc_now)

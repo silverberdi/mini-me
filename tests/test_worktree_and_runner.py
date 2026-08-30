@@ -80,8 +80,10 @@ async def test_cleanup_worktree_refuses_dirty_worktree_without_deleting_it(tmp_p
     assert info.path.exists()
     assert (info.path / "README.md").read_text(encoding="utf-8") == "recovered\n"
     assert (info.path / "new.py").read_text(encoding="utf-8") == "candidate = True\n"
-    assert (await _git_output(["git", "branch", "--show-current"], info.path)).strip().startswith(
-        "minime/010-change-job-recovery"
+    assert (
+        (await _git_output(["git", "branch", "--show-current"], info.path))
+        .strip()
+        .startswith("minime/010-change-job-recovery")
     )
     assert all("--force" not in args for args in git_commands)
 
@@ -229,17 +231,13 @@ def test_configured_cli_profiles_build_generic_implementer_and_reviewer_vectors(
                     "implementer": CliInvocationConfig(
                         args=["exec", "-", "--sandbox", "workspace-write"]
                     ),
-                    "reviewer": CliInvocationConfig(
-                        args=["exec", "-", "--sandbox", "read-only"]
-                    ),
+                    "reviewer": CliInvocationConfig(args=["exec", "-", "--sandbox", "read-only"]),
                 },
             ),
             "future-cli": ProviderConfig(
                 command="future",
                 roles=["implementer"],
-                invocation={
-                    "implementer": CliInvocationConfig(args=["run", "--headless"])
-                },
+                invocation={"implementer": CliInvocationConfig(args=["run", "--headless"])},
             ),
         }
     )

@@ -33,9 +33,21 @@ async def test_normal_checks_do_not_inherit_database_environment(monkeypatch, tm
 @pytest.mark.parametrize(
     "check",
     [
-        {"disposable_postgres": True, "expected_database": "minime", "database_url": "postgresql://x/minime"},
-        {"disposable_postgres": True, "expected_database": "other", "database_url": "mysql://x/other"},
-        {"disposable_postgres": True, "expected_database": "other", "database_url": "postgresql://x/actual"},
+        {
+            "disposable_postgres": True,
+            "expected_database": "minime",
+            "database_url": "postgresql://x/minime",
+        },
+        {
+            "disposable_postgres": True,
+            "expected_database": "other",
+            "database_url": "mysql://x/other",
+        },
+        {
+            "disposable_postgres": True,
+            "expected_database": "other",
+            "database_url": "postgresql://x/actual",
+        },
     ],
 )
 async def test_invalid_disposable_database_fails_before_spawn(monkeypatch, tmp_path, check):

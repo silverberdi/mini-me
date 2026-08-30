@@ -112,6 +112,7 @@ def format_candidate_workspace_context(worktree_path: str | Path) -> str:
         ]
     )
 
+
 EVENT_BY_STATUS = {
     JobStatus.QUEUED: EventType.JOB_QUEUED,
     JobStatus.RUNNING: EventType.JOB_RUNNING,
@@ -201,7 +202,9 @@ class ExecutionPipelineService:
         result = method(worktree_path)
         return str(await result) if inspect.isawaitable(result) else str(result)
 
-    async def _finalize_candidate(self, worktree_path: Path, job_id: str, project_id: str, current_sha: str) -> str:
+    async def _finalize_candidate(
+        self, worktree_path: Path, job_id: str, project_id: str, current_sha: str
+    ) -> str:
         method = getattr(self.worktree_manager, "finalize_candidate_commit", None)
         if method is None:
             return current_sha
@@ -210,18 +213,13 @@ class ExecutionPipelineService:
 
     async def _preserve_and_cleanup_worktree(self, job: Job, worktree) -> None:
         """Persist recovery authority before allowing managed cleanup."""
-        create_snapshot = getattr(
-            self.worktree_manager, "create_recovery_snapshot", None
-        )
+        create_snapshot = getattr(self.worktree_manager, "create_recovery_snapshot", None)
         remove_clean = getattr(self.worktree_manager, "remove_clean_worktree", None)
-        if (
-            inspect.iscoroutinefunction(create_snapshot)
-            and inspect.iscoroutinefunction(remove_clean)
+        if inspect.iscoroutinefunction(create_snapshot) and inspect.iscoroutinefunction(
+            remove_clean
         ):
             try:
-                recovery_sha = await create_snapshot(
-                    job.job_id, project_id=job.project_id
-                )
+                recovery_sha = await create_snapshot(job.job_id, project_id=job.project_id)
             except TypeError:
                 recovery_sha = await create_snapshot(job.job_id)
             if recovery_sha:
@@ -248,9 +246,7 @@ class ExecutionPipelineService:
         # Compatibility for lightweight test doubles and older adapters; the
         # production manager uses the two-phase API.
         try:
-            await self.worktree_manager.cleanup_worktree(
-                job.job_id, project_id=job.project_id
-            )
+            await self.worktree_manager.cleanup_worktree(job.job_id, project_id=job.project_id)
         except TypeError:
             await self.worktree_manager.cleanup_worktree(job.job_id)
 
@@ -474,9 +470,7 @@ class ExecutionPipelineService:
                     )
                     if task.complete
                 }
-                attempt_start_fingerprint = await self._working_state_fingerprint(
-                    worktree.path
-                )
+                attempt_start_fingerprint = await self._working_state_fingerprint(worktree.path)
                 active_attempt = JobAttempt(
                     attempt_id=attempt_id,
                     job_id=job.job_id,
@@ -737,10 +731,23 @@ class ExecutionPipelineService:
                                     change_name=job.change_name,
                                     available_integration_points=[],
                                     required_files=[
-                                        value for value in re.findall(
+                                        value
+                                        for value in re.findall(
                                             r"`([^`]+\.(?:py|md|yaml|yml|json|sql))`",
-                                            (worktree.path / project.openspec_path / "changes" / job.change_name / "tasks.md").read_text(encoding="utf-8")
-                                            if (worktree.path / project.openspec_path / "changes" / job.change_name / "tasks.md").exists()
+                                            (
+                                                worktree.path
+                                                / project.openspec_path
+                                                / "changes"
+                                                / job.change_name
+                                                / "tasks.md"
+                                            ).read_text(encoding="utf-8")
+                                            if (
+                                                worktree.path
+                                                / project.openspec_path
+                                                / "changes"
+                                                / job.change_name
+                                                / "tasks.md"
+                                            ).exists()
                                             else "",
                                         )
                                     ],
@@ -818,11 +825,7 @@ class ExecutionPipelineService:
                 progress = self.outcome_governance.evaluate_progress(
                     ProgressSignals(
                         completed_task_delta=len(
-                            {
-                                task.task_id
-                                for task in post_tasks
-                                if task.complete
-                            }
+                            {task.task_id for task in post_tasks if task.complete}
                             - attempt_start_tasks
                         ),
                         remaining_task_count=len(ver_res.incomplete_tasks),
@@ -1313,7 +1316,10 @@ class ExecutionPipelineService:
             )
             diff = subprocess.run(
                 ["git", "diff", "--name-only", f"{job.base_sha}..{job.candidate_sha}"],
-                cwd=worktree.path, capture_output=True, text=True, check=False,
+                cwd=worktree.path,
+                capture_output=True,
+                text=True,
+                check=False,
             )
             # A base..candidate diff is supporting evidence only. The frozen
             # manifest is authoritative for all surviving files, including
@@ -1672,23 +1678,26 @@ class ExecutionPipelineService:
                     for item in entries
                     if item.get("path")
                 }
-                tasks_path = worktree.path / project.openspec_path / "changes" / job.change_name / "tasks.md"
-                task_text = tasks_path.read_text(encoding="utf-8") if tasks_path.exists() else ""
-                required_files = re.findall(
-                    r"`([^`]+\.(?:py|md|yaml|yml|json|sql))`", task_text
+                tasks_path = (
+                    worktree.path / project.openspec_path / "changes" / job.change_name / "tasks.md"
                 )
+                task_text = tasks_path.read_text(encoding="utf-8") if tasks_path.exists() else ""
+                required_files = re.findall(r"`([^`]+\.(?:py|md|yaml|yml|json|sql))`", task_text)
                 blocker_context = BlockerValidationContext(
                     change_name=job.change_name,
                     required_files=required_files,
                     candidate_tree_files=sorted(tree_files),
                     manifest_files=sorted(tree_files),
-                    base_diff_files=[line.strip() for line in diff.stdout.splitlines() if line.strip()],
+                    base_diff_files=[
+                        line.strip() for line in diff.stdout.splitlines() if line.strip()
+                    ],
                 )
                 normalized_findings = []
                 for item in verdict_payload.findings:
-                    is_missing = "missing" in (
-                        f"{item.violated_requirement} {item.expected_correction}"
-                    ).lower()
+                    is_missing = (
+                        "missing"
+                        in (f"{item.violated_requirement} {item.expected_correction}").lower()
+                    )
                     if item.severity.value == "BLOCKER" and is_missing:
                         validation = self.blocker_validation.validate_missing_file(
                             item.location, blocker_context
@@ -1696,7 +1705,9 @@ class ExecutionPipelineService:
                         if validation.verdict == BlockerValidationVerdict.FALSE_BLOCKER:
                             item = item.model_copy(update={"severity": FindingSeverity.MINOR})
                     normalized_findings.append(item)
-                verdict_payload = verdict_payload.model_copy(update={"findings": normalized_findings})
+                verdict_payload = verdict_payload.model_copy(
+                    update={"findings": normalized_findings}
+                )
 
             if verdict_payload.verdict == ReviewVerdict.READY_TO_MERGE:
                 self.uow.reviews.transition(
@@ -1755,7 +1766,9 @@ class ExecutionPipelineService:
                     await self._preserve_and_cleanup_worktree(job, worktree)
                 except Exception as cleanup_error:
                     redacted_error = redact_secrets(str(cleanup_error))
-                    logger.error("Managed candidate preservation/cleanup failed: %s", redacted_error)
+                    logger.error(
+                        "Managed candidate preservation/cleanup failed: %s", redacted_error
+                    )
                     latest = self._require_job(job.job_id)
                     if latest.status != JobStatus.RECOVERY_BLOCKED:
                         latest = self._transition(

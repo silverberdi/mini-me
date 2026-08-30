@@ -44,11 +44,13 @@ from minime.domain.interfaces import (
     OrchestrationRunRepositoryInterface,
     OrchestrationStageEventRepositoryInterface,
     PersistenceUnitOfWork,
+    PreviewSessionRepositoryInterface,
     ProjectBindingRepositoryInterface,
     ProjectRepositoryInterface,
     ProviderHealthRepositoryInterface,
     ReviewFindingRepositoryInterface,
     ReviewRepositoryInterface,
+    ValidationRunRepositoryInterface,
 )
 from minime.domain.models import (
     AUTHORITATIVE_PRICING_SOURCES,
@@ -76,11 +78,13 @@ from minime.domain.models import (
     OrchestrationExternalAction,
     OrchestrationRun,
     OrchestrationStageEvent,
+    PreviewSession,
     Project,
     ProjectBinding,
     ProviderHealth,
     Review,
     ReviewFinding,
+    ValidationRun,
     utc_now,
 )
 
@@ -157,9 +161,7 @@ class InMemoryChangeRepository(ChangeRepositoryInterface):
         return c.model_copy(deep=True) if c else None
 
     def get_by_name(self, project_id: str, name: str) -> Change | None:
-        matches = [
-            c for c in self._store.values() if c.project_id == project_id and c.name == name
-        ]
+        matches = [c for c in self._store.values() if c.project_id == project_id and c.name == name]
         if len(matches) > 1:
             raise ValueError(
                 f"Ambiguous logical Change identity for project '{project_id}' and change "
@@ -1196,6 +1198,107 @@ class InMemoryOrchestrationExternalActionRepository(OrchestrationExternalActionR
         return target.model_copy(deep=True)
 
 
+class InMemoryPreviewSessionRepository(PreviewSessionRepositoryInterface):
+    def __init__(self):
+        self._store: dict[str, PreviewSession] = {}
+
+    def save(self, session: PreviewSession) -> None:
+        self._store[session.preview_id] = session.model_copy(deep=True)
+
+    def get_by_id(self, preview_id: str) -> PreviewSession | None:
+        s = self._store.get(preview_id)
+        return s.model_copy(deep=True) if s else None
+
+    def get_latest_for_run(self, run_id: str) -> PreviewSession | None:
+        matches = [s for s in self._store.values() if s.run_id == run_id]
+        if not matches:
+            return None
+        matches.sort(key=lambda s: s.created_at, reverse=True)
+        return matches[0].model_copy(deep=True)
+
+    def get_latest_for_candidate(
+        self, project_id: str, change_name: str, head_sha: str
+    ) -> PreviewSession | None:
+        matches = [
+            s
+            for s in self._store.values()
+            if s.project_id == project_id
+            and s.change_name == change_name
+            and s.head_sha == head_sha
+        ]
+        if not matches:
+            return None
+        matches.sort(key=lambda s: s.created_at, reverse=True)
+        return matches[0].model_copy(deep=True)
+
+    def list_by_change(self, project_id: str, change_name: str) -> list[PreviewSession]:
+        matches = [
+            s.model_copy(deep=True)
+            for s in self._store.values()
+            if s.project_id == project_id and s.change_name == change_name
+        ]
+        matches.sort(key=lambda s: s.created_at, reverse=True)
+        return matches
+
+    def list_active(self) -> list[PreviewSession]:
+        active_statuses = {"REQUESTED", "BUILDING", "STARTING", "PROBING", "READY"}
+        matches = [
+            s.model_copy(deep=True)
+            for s in self._store.values()
+            if s.status.value in active_statuses
+        ]
+        matches.sort(key=lambda s: s.created_at, reverse=True)
+        return matches
+
+
+class InMemoryValidationRunRepository(ValidationRunRepositoryInterface):
+    def __init__(self):
+        self._store: dict[str, ValidationRun] = {}
+
+    def save(self, validation: ValidationRun) -> None:
+        self._store[validation.validation_id] = validation.model_copy(deep=True)
+
+    def get_by_id(self, validation_id: str) -> ValidationRun | None:
+        v = self._store.get(validation_id)
+        return v.model_copy(deep=True) if v else None
+
+    def get_latest_for_candidate(
+        self,
+        project_id: str,
+        change_name: str,
+        head_sha: str,
+        base_sha: str,
+        image_digest: str,
+    ) -> ValidationRun | None:
+        matches = [
+            v
+            for v in self._store.values()
+            if v.project_id == project_id
+            and v.change_name == change_name
+            and v.head_sha == head_sha
+            and v.base_sha == base_sha
+            and v.image_digest == image_digest
+        ]
+        if not matches:
+            return None
+        matches.sort(key=lambda v: v.created_at, reverse=True)
+        return matches[0].model_copy(deep=True)
+
+    def list_by_change(self, project_id: str, change_name: str) -> list[ValidationRun]:
+        matches = [
+            v.model_copy(deep=True)
+            for v in self._store.values()
+            if v.project_id == project_id and v.change_name == change_name
+        ]
+        matches.sort(key=lambda v: v.created_at, reverse=True)
+        return matches
+
+    def list_by_run(self, run_id: str) -> list[ValidationRun]:
+        matches = [v.model_copy(deep=True) for v in self._store.values() if v.run_id == run_id]
+        matches.sort(key=lambda v: v.created_at, reverse=True)
+        return matches
+
+
 class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
     def __init__(self):
         self.projects = InMemoryProjectRepository()
@@ -1227,6 +1330,8 @@ class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.orchestration_stage_events = InMemoryOrchestrationStageEventRepository()
         self.orchestration_candidates = InMemoryOrchestrationCandidateRepository()
         self.orchestration_external_actions = InMemoryOrchestrationExternalActionRepository()
+        self.preview_sessions = InMemoryPreviewSessionRepository()
+        self.validation_runs = InMemoryValidationRunRepository()
         self.committed = False
         self.rolled_back = False
 

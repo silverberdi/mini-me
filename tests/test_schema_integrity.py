@@ -11,12 +11,14 @@ def _engine_with_schema(missing_table=None, missing_column=None):
     tables.discard(missing_table)
     inspector.get_table_names.return_value = list(tables)
     inspector.get_columns.side_effect = lambda table: [
-        {"name": c.name} for c in Base.metadata.tables[table].columns
+        {"name": c.name}
+        for c in Base.metadata.tables[table].columns
         if not (missing_column and table == missing_column[0] and c.name == missing_column[1])
     ]
     connection = MagicMock()
-    connection.execute.return_value.scalar.return_value = "011_governance_hardening"
+    connection.execute.return_value.scalar.return_value = "012_preview_and_validation"
     engine.connect.return_value.__enter__.return_value = connection
+
     return engine, inspector
 
 

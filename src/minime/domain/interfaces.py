@@ -38,11 +38,13 @@ from minime.domain.models import (
     OrchestrationExternalAction,
     OrchestrationRun,
     OrchestrationStageEvent,
+    PreviewSession,
     Project,
     ProjectBinding,
     ProviderHealth,
     Review,
     ReviewFinding,
+    ValidationRun,
 )
 
 
@@ -496,6 +498,52 @@ class OrchestrationExternalActionRepositoryInterface(ABC):
     ) -> OrchestrationExternalAction: ...
 
 
+class PreviewSessionRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, session: PreviewSession) -> None: ...
+
+    @abstractmethod
+    def get_by_id(self, preview_id: str) -> PreviewSession | None: ...
+
+    @abstractmethod
+    def get_latest_for_run(self, run_id: str) -> PreviewSession | None: ...
+
+    @abstractmethod
+    def get_latest_for_candidate(
+        self, project_id: str, change_name: str, head_sha: str
+    ) -> PreviewSession | None: ...
+
+    @abstractmethod
+    def list_by_change(self, project_id: str, change_name: str) -> list[PreviewSession]: ...
+
+    @abstractmethod
+    def list_active(self) -> list[PreviewSession]: ...
+
+
+class ValidationRunRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, validation: ValidationRun) -> None: ...
+
+    @abstractmethod
+    def get_by_id(self, validation_id: str) -> ValidationRun | None: ...
+
+    @abstractmethod
+    def get_latest_for_candidate(
+        self,
+        project_id: str,
+        change_name: str,
+        head_sha: str,
+        base_sha: str,
+        image_digest: str,
+    ) -> ValidationRun | None: ...
+
+    @abstractmethod
+    def list_by_change(self, project_id: str, change_name: str) -> list[ValidationRun]: ...
+
+    @abstractmethod
+    def list_by_run(self, run_id: str) -> list[ValidationRun]: ...
+
+
 class PersistenceUnitOfWork(ABC):
     """Transactional persistence boundary: atomically persists state changes and emitted events."""
 
@@ -528,6 +576,8 @@ class PersistenceUnitOfWork(ABC):
     orchestration_stage_events: OrchestrationStageEventRepositoryInterface
     orchestration_candidates: OrchestrationCandidateRepositoryInterface
     orchestration_external_actions: OrchestrationExternalActionRepositoryInterface
+    preview_sessions: PreviewSessionRepositoryInterface
+    validation_runs: ValidationRunRepositoryInterface
 
     @abstractmethod
     def commit(self) -> None: ...

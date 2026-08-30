@@ -109,14 +109,14 @@ class BlockerValidationService:
             ]
         ):
             claimed = (payload.location or "").strip().lstrip("./")
-            if claimed and (context.required_files or context.candidate_tree_files or context.manifest_files):
+            if claimed and (
+                context.required_files or context.candidate_tree_files or context.manifest_files
+            ):
                 tree_files = {
                     str(path).strip().lstrip("./")
                     for path in (*context.candidate_tree_files, *context.manifest_files)
                 }
-                required_files = {
-                    str(path).strip().lstrip("./") for path in context.required_files
-                }
+                required_files = {str(path).strip().lstrip("./") for path in context.required_files}
                 in_tree = claimed in tree_files
                 explicitly_required = claimed in required_files
                 if explicitly_required and not in_tree:

@@ -10,9 +10,7 @@ from minime.domain.models import CandidateManifest, OrchestrationCandidate, Orch
 
 
 def legacy_service(in_memory_uow, repo, base_a, candidate_sha):
-    service, run_id = make_service(
-        in_memory_uow, repo, base_a, candidate_sha, candidate_ref=None
-    )
+    service, run_id = make_service(in_memory_uow, repo, base_a, candidate_sha, candidate_ref=None)
     historical = in_memory_uow.orchestration_candidates.get_latest_for_run(run_id)
     in_memory_uow.orchestration_candidates._store.pop(historical.candidate_id)
     in_memory_uow.candidate_manifests.save(
@@ -41,7 +39,9 @@ def prepare_legacy_branch(repo, candidate_sha, job_id="job-human-resolution"):
     return ref
 
 
-def two_generation_legacy_service(in_memory_uow, repo, base_a, candidate_sha, base_b, *, bad_sha=None):
+def two_generation_legacy_service(
+    in_memory_uow, repo, base_a, candidate_sha, base_b, *, bad_sha=None
+):
     service, run_id = legacy_service(in_memory_uow, repo, base_a, candidate_sha)
     project = in_memory_uow.projects.get_by_id("mini-me")
     project.checks = []
@@ -73,9 +73,7 @@ def two_generation_legacy_service(in_memory_uow, repo, base_a, candidate_sha, ba
     )
     in_memory_uow.orchestration_candidates.save(historical)
     in_memory_uow.orchestration_candidates.save(current)
-    in_memory_uow.orchestration_candidates.supersede(
-        historical.candidate_id, current.candidate_id
-    )
+    in_memory_uow.orchestration_candidates.supersede(historical.candidate_id, current.candidate_id)
     run = in_memory_uow.orchestration_runs.get_by_id(run_id)
     run.base_sha = base_b
     run.current_generation = 2
@@ -125,14 +123,13 @@ def test_historical_record_adoption_remains_valid_after_current_generation_advan
 
     assert resolved.current_generation == 2
     assert historical.candidate_id != current.candidate_id
-    assert in_memory_uow.orchestration_candidates.get_by_id(
-        historical.candidate_id
-    ).superseded_by_id == current.candidate_id
+    assert (
+        in_memory_uow.orchestration_candidates.get_by_id(historical.candidate_id).superseded_by_id
+        == current.candidate_id
+    )
 
 
-def test_historical_record_adoption_rejects_contradictory_historical_sha(
-    tmp_path, in_memory_uow
-):
+def test_historical_record_adoption_rejects_contradictory_historical_sha(tmp_path, in_memory_uow):
     repo, base_a, candidate_sha, base_b = make_repo(tmp_path, conflict=False)
     service, run_id, _, _ = two_generation_legacy_service(
         in_memory_uow, repo, base_a, candidate_sha, base_b, bad_sha=git(repo, "rev-parse", "main")
@@ -144,9 +141,7 @@ def test_historical_record_adoption_rejects_contradictory_historical_sha(
         )
 
 
-def test_legacy_ref_adoption_validates_real_git_and_continues_resolution(
-    tmp_path, in_memory_uow
-):
+def test_legacy_ref_adoption_validates_real_git_and_continues_resolution(tmp_path, in_memory_uow):
     repo, base_a, candidate_sha, base_b = make_repo(tmp_path, conflict=False)
     ref = prepare_legacy_branch(repo, candidate_sha)
     service, run_id = legacy_service(in_memory_uow, repo, base_a, candidate_sha)
@@ -194,20 +189,25 @@ def test_legacy_ref_adoption_validates_real_git_and_continues_resolution(
     )
     assert again.current_generation == 2
     assert len(in_memory_uow.orchestration_candidates.list_by_run(run_id)) == 2
-    assert len(
-        [
-            event
-            for event in in_memory_uow.orchestration_stage_events.list_by_run(run_id)
-            if event.event_type == EventType.LEGACY_CANDIDATE_REF_ADOPTED.value
-        ]
-    ) == 1
+    assert (
+        len(
+            [
+                event
+                for event in in_memory_uow.orchestration_stage_events.list_by_run(run_id)
+                if event.event_type == EventType.LEGACY_CANDIDATE_REF_ADOPTED.value
+            ]
+        )
+        == 1
+    )
 
 
 @pytest.mark.parametrize(
     ("ref_factory", "message"),
     [
         (
-            lambda candidate_sha: "refs/heads/minime/010-governance-and-recovery-hardening-job-human-resolution-wrong",
+            lambda candidate_sha: (
+                "refs/heads/minime/010-governance-and-recovery-hardening-job-human-resolution-wrong"
+            ),
             "current change/job",
         ),
         (
@@ -272,9 +272,7 @@ def test_existing_candidate_ref_does_not_trigger_adoption(tmp_path, in_memory_uo
     ]
 
 
-def test_legacy_ref_adoption_rejects_contradictory_persisted_ref(
-    tmp_path, in_memory_uow
-):
+def test_legacy_ref_adoption_rejects_contradictory_persisted_ref(tmp_path, in_memory_uow):
     repo, base_a, candidate_sha, _ = make_repo(tmp_path, conflict=False)
     ref = prepare_legacy_branch(repo, candidate_sha)
     service, run_id = make_service(

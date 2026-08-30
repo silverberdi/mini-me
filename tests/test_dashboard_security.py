@@ -125,10 +125,13 @@ def test_dashboard_redacts_api_keys_and_tokens(
     )
     in_memory_uow.audit_findings.save(af)
 
-    secret_pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0Y...\n-----END RSA PRIVATE KEY-----"
+    secret_pem = (
+        "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0Y...\n-----END RSA PRIVATE KEY-----"
+    )
 
     # Check result with secret command
     from minime.domain.models import CheckResult
+
     cr = CheckResult(
         job_id="job-sec",
         check_name="pytest",

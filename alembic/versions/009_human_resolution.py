@@ -26,9 +26,7 @@ def upgrade() -> None:
         "check_results",
         sa.Column("candidate_generation", sa.Integer(), nullable=True),
     )
-    op.create_index(
-        "ix_check_results_candidate_sha", "check_results", ["candidate_sha"]
-    )
+    op.create_index("ix_check_results_candidate_sha", "check_results", ["candidate_sha"])
     op.create_index(
         "ix_check_results_candidate_generation",
         "check_results",

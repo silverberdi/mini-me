@@ -8,9 +8,7 @@ from minime.domain.models import Job
 
 
 @pytest.mark.parametrize("status", list(JobStatus))
-def test_in_memory_jobs_can_record_recovery_blocked_from_any_cleanup_state(
-    in_memory_uow, status
-):
+def test_in_memory_jobs_can_record_recovery_blocked_from_any_cleanup_state(in_memory_uow, status):
     job = Job(
         job_id=f"recovery-{status.value.lower()}",
         project_id="mini-me",

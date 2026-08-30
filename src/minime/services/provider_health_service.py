@@ -67,7 +67,10 @@ class ProviderHealthService:
 
     def list_all_health_with_capacity(self) -> list[tuple[ProviderHealth, CapacityWindow | None]]:
         """Return health with its authoritative latest capacity window."""
-        return [(health, self.uow.capacity_windows.get_latest_for_provider(health.provider)) for health in self.list_all_health()]
+        return [
+            (health, self.uow.capacity_windows.get_latest_for_provider(health.provider))
+            for health in self.list_all_health()
+        ]
 
     def record_outcome(
         self,

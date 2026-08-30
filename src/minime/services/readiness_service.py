@@ -67,10 +67,25 @@ class ReadinessService:
                 )
             if not schema.valid:
                 reason = f"SCHEMA_INVARIANT_VIOLATION: {schema.reason}"
-                checks.append(ReadinessCheck(name="physical_schema", passed=False, reason=reason, details={"missing_tables": schema.missing_tables, "missing_columns": schema.missing_columns, "revision": schema.revision}))
+                checks.append(
+                    ReadinessCheck(
+                        name="physical_schema",
+                        passed=False,
+                        reason=reason,
+                        details={
+                            "missing_tables": schema.missing_tables,
+                            "missing_columns": schema.missing_columns,
+                            "revision": schema.revision,
+                        },
+                    )
+                )
                 unmet_reasons.append(reason)
             else:
-                checks.append(ReadinessCheck(name="physical_schema", passed=True, details={"revision": schema.revision}))
+                checks.append(
+                    ReadinessCheck(
+                        name="physical_schema", passed=True, details={"revision": schema.revision}
+                    )
+                )
 
         # 1. Registered project check
         project = self.uow.projects.get_by_id(project_id)
@@ -234,15 +249,21 @@ class ReadinessService:
                     reason = issue_reason or "Remote GitHub Issue validation failed."
                     checks.append(
                         ReadinessCheck(
-                            name="github_issue_verification", passed=False, reason=reason,
-                            details={"repository": project.repository, "issue_number": effective_issue},
+                            name="github_issue_verification",
+                            passed=False,
+                            reason=reason,
+                            details={
+                                "repository": project.repository,
+                                "issue_number": effective_issue,
+                            },
                         )
                     )
                     unmet_reasons.append(reason)
                 else:
                     checks.append(
                         ReadinessCheck(
-                            name="durable_project_binding", passed=True,
+                            name="durable_project_binding",
+                            passed=True,
                             details={
                                 "binding_id": binding.binding_id,
                                 "repository": binding.repository,

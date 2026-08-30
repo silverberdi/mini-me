@@ -48,8 +48,22 @@ These decisions supersede the previous AgentFlow context pack.
 - Preview UI port/endpoint is configured per project.
 - Preview must never use production data stores unintentionally.
 - Human validation is bound to candidate head SHA + base SHA and deployed image digest when applicable.
+- Stale validation invalidation is mandatory: any change to head SHA, base SHA, or image digest invalidates prior validation authority for that candidate.
 - Production should promote the validated immutable container artifact when technically valid.
 - Production deployment occurs only after human merge and project policy authorization.
+
+## Canonical roadmap sequencing (013 – 018)
+- The canonical delivery sequence is strictly:
+  `013-container-preview-guided-validation` ->
+  `014-tui-operator-console` ->
+  `015-operator-actions-control-plane` ->
+  `016-autonomous-queue-work-selection` ->
+  `017-pwa-control-center` ->
+  `018-end-to-end-self-operating-loop`.
+- Scope boundaries must be strictly enforced:
+  - 013 MUST NOT expand into the full operator control plane, TUI, or PWA.
+  - 014 (TUI) precedes 015 (control plane) and 017 (PWA).
+  - 016 (autonomous queue/work selection) precedes full self-operating loop in 018.
 
 ## Safety and closure
 - Secrets live outside the repo under host-controlled configuration, e.g. `/etc/minime/`.
@@ -57,3 +71,4 @@ These decisions supersede the previous AgentFlow context pack.
 - No silent paid escalation.
 - No autonomous merge.
 - `DONE` means full operational closure, not merely merged code.
+

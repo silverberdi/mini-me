@@ -651,7 +651,19 @@ def providers_health_cmd(
             health_list = service.list_all_health_with_capacity()
 
             if json_output:
-                typer.echo(json.dumps([{"health": h.model_dump(), "capacity_window": w.model_dump() if w else None} for h, w in health_list], indent=2, default=str))
+                typer.echo(
+                    json.dumps(
+                        [
+                            {
+                                "health": h.model_dump(),
+                                "capacity_window": w.model_dump() if w else None,
+                            }
+                            for h, w in health_list
+                        ],
+                        indent=2,
+                        default=str,
+                    )
+                )
                 return
 
             typer.secho("=== Primary Provider Health ===", fg=typer.colors.CYAN, bold=True)

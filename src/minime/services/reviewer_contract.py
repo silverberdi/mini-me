@@ -74,7 +74,8 @@ def build_reviewer_prompt(
             "design": design_text,
             "specs": specs_texts,
         },
-        "authorship": authorship_evidence or {"is_mixed_authorship": False, "surviving_contributions": []},
+        "authorship": authorship_evidence
+        or {"is_mixed_authorship": False, "surviving_contributions": []},
     }
 
     instructions = """
