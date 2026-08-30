@@ -396,14 +396,15 @@ def test_dashboard_pipeline_requires_persisted_evidence(
     )
     in_memory_uow.jobs.save(job)
 
-    # Run advanced to PREPARING_PR but no review or audit record exists in DB
+    # Run advanced to PR_PREPARED but no review or audit record exists in DB
     run = OrchestrationRun(
         run_id="run-ne-1",
         project_id="test-proj",
         change_name="006-no-evidence-feature",
         active_job_id="job-ne-1",
-        current_stage=OrchestrationStage.PREPARING_PR,
-        is_active=True,
+        current_stage=OrchestrationStage.PR_PREPARED,
+        is_active=False,
+        stop_outcome=OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE,
         current_generation=1,
         current_candidate_sha="cand-ne-1",
         base_sha="base-ne-1",
@@ -413,6 +414,7 @@ def test_dashboard_pipeline_requires_persisted_evidence(
     detail = service.get_change_detail("test-proj", "006-no-evidence-feature")
     phase_map = {p.name: p.status for p in detail.pipeline}
 
-    # Review and audit must NOT report passed without evidence records
+    # Review, audit, and PR/Merge must NOT report passed without evidence records
     assert phase_map["review"] == "not_started"
     assert phase_map["audit"] == "not_started"
+    assert phase_map["pr_merge"] == "not_started"

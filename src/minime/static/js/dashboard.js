@@ -151,6 +151,24 @@
       });
     });
 
+    if (attentionItemsContainer) {
+      attentionItemsContainer.addEventListener('click', (e) => {
+        const card = e.target.closest('[data-project-id]');
+        if (card) {
+          selectChange(card.getAttribute('data-project-id'), card.getAttribute('data-change-name'));
+        }
+      });
+    }
+
+    if (changesTableBody) {
+      changesTableBody.addEventListener('click', (e) => {
+        const row = e.target.closest('[data-project-id]');
+        if (row) {
+          selectChange(row.getAttribute('data-project-id'), row.getAttribute('data-change-name'));
+        }
+      });
+    }
+
     if (copyShaBtn) {
       copyShaBtn.addEventListener('click', () => {
         if (dtCandidateSha && dtCandidateSha.textContent !== '---') {
@@ -262,7 +280,7 @@
       attentionBanner.style.display = 'block';
       attentionCountText.textContent = `${attention_items.length} run${attention_items.length > 1 ? 's' : ''}`;
       attentionItemsContainer.innerHTML = attention_items.map(item => `
-        <div class="attention-item-card" onclick="window.selectChange('${escapeHtml(item.project_id)}', '${escapeHtml(item.change_name)}')">
+        <div class="attention-item-card" data-project-id="${escapeHtml(item.project_id)}" data-change-name="${escapeHtml(item.change_name)}">
           <div class="attention-item-left">
             <span class="attention-item-name">${escapeHtml(item.project_id)} / ${escapeHtml(item.change_name)}</span>
             <span class="attention-item-reason">${escapeHtml(item.reason)}</span>
@@ -315,7 +333,7 @@
       const updated = formatRelativeTime(c.updated_at);
 
       return `
-        <tr class="${isSelected ? 'selected' : ''}" onclick="window.selectChange('${escapeHtml(c.project_id)}', '${escapeHtml(c.change_name)}')">
+        <tr class="${isSelected ? 'selected' : ''}" data-project-id="${escapeHtml(c.project_id)}" data-change-name="${escapeHtml(c.change_name)}">
           <td><span class="badge ${statusClass}">${escapeHtml(c.status)}</span></td>
           <td><strong>${escapeHtml(c.change_name)}</strong></td>
           <td>${escapeHtml(c.project_id)}</td>
@@ -328,7 +346,7 @@
 
     // Auto-select first change if none selected
     if (!selectedChange && list.length > 0) {
-      window.selectChange(list[0].project_id, list[0].change_name);
+      selectChange(list[0].project_id, list[0].change_name);
     }
   }
 

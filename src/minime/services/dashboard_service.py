@@ -718,8 +718,12 @@ class OperationsDashboardService:
             pr_status = "running"
             pr_summary = "Preparing Pull Request"
         elif stage == OrchestrationStage.PR_PREPARED or run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE:
-            pr_status = "passed"
-            pr_summary = "Ready for human merge"
+            if rev_status == "passed" and audit_status == "passed":
+                pr_status = "passed"
+                pr_summary = "Ready for human merge"
+            else:
+                pr_status = "not_started"
+                pr_summary = "Waiting for review and audit completion"
         phases.append(PipelinePhaseDTO(name="pr_merge", display_name="PR & Merge", status=pr_status, summary=pr_summary))
 
         return phases
@@ -973,23 +977,24 @@ class OperationsDashboardService:
                     )
                 )
 
-        # 2. General events from events repository
-        general_events = self.uow.events.list_events(project_id=project_id, change_id=change_name, limit=limit)
-        for ge in general_events:
-            summary = ge.event_type.value.replace("_", " ").title() if hasattr(ge.event_type, "value") else str(ge.event_type).replace("_", " ").title()
-            if ge.payload and "reason" in ge.payload:
-                summary += f": {ge.payload['reason']}"
+        # 2. General events from events repository (only if run_id not specified or if matching project/change provided)
+        if not target_run_id or project_id or change_name:
+            general_events = self.uow.events.list_events(project_id=project_id, change_id=change_name, limit=limit)
+            for ge in general_events:
+                summary = ge.event_type.value.replace("_", " ").title() if hasattr(ge.event_type, "value") else str(ge.event_type).replace("_", " ").title()
+                if ge.payload and "reason" in ge.payload:
+                    summary += f": {ge.payload['reason']}"
 
-            events.append(
-                TimelineEventDTO(
-                    event_id=ge.event_id,
-                    timestamp=_format_dt(ge.timestamp) or "",
-                    event_type=ge.event_type.value if hasattr(ge.event_type, "value") else str(ge.event_type),
-                    actor="system",
-                    summary=redact_secrets(summary),
-                    details={k: redact_secrets(str(v)) if isinstance(v, str) else v for k, v in ge.payload.items()} if ge.payload else {},
+                events.append(
+                    TimelineEventDTO(
+                        event_id=ge.event_id,
+                        timestamp=_format_dt(ge.timestamp) or "",
+                        event_type=ge.event_type.value if hasattr(ge.event_type, "value") else str(ge.event_type),
+                        actor="system",
+                        summary=redact_secrets(summary),
+                        details={k: redact_secrets(str(v)) if isinstance(v, str) else v for k, v in ge.payload.items()} if ge.payload else {},
+                    )
                 )
-            )
 
         # Sort all events chronologically newest first (or oldest first for timeline)
         events.sort(key=lambda e: e.timestamp, reverse=True)
