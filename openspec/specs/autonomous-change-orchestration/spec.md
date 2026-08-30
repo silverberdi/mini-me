@@ -6,14 +6,15 @@ Coordinates one already-READY OpenSpec change across existing implementation, ev
 ## Requirements
 
 ### Requirement: Single-change admission
-The system SHALL start an orchestration run only for one explicitly selected project/change pair whose durable repository binding and existing readiness authority both validate as READY.
+The system SHALL start an orchestration run only for one explicitly selected project/change pair whose durable repository binding and existing readiness authority both validate as READY, and SHALL verify all autonomous execution readiness prerequisites before admitting the run.
 
 #### Scenario: READY change is admitted
 - **WHEN** the operator starts orchestration for a durably bound READY project/change pair
+- **AND** project registration is active, durable binding exists, remote Issue verification passes, physical schema preflight passes, deterministic checks are non-empty, primary capacity is available, and GitHub App authority is healthy
 - **THEN** the system creates one immutable `orchestration_run_id`, records the bound project/change/base identity, and enters the first persisted orchestration stage.
 
 #### Scenario: Ineligible change is refused
-- **WHEN** the selected change is not READY, has ambiguous/missing binding, or fails repository/workspace preflight
+- **WHEN** the selected change is not READY, has ambiguous/missing binding, or fails repository/workspace/schema preflight
 - **THEN** no executable orchestration run is created and the refusal contains a structured reason.
 
 #### Scenario: Duplicate active run is refused
@@ -25,7 +26,7 @@ The system SHALL start an orchestration run only for one explicitly selected pro
 - **THEN** a new explicitly admitted run may be created while historical run records remain queryable.
 
 ### Requirement: Durable deterministic orchestration lifecycle
-The system SHALL persist a finite, ordered orchestration stage and checkpoint for every run, and SHALL advance it only after the required authoritative evidence for that stage is committed.
+The system SHALL persist a finite, ordered orchestration stage and checkpoint for every run, SHALL advance it only after the required authoritative evidence for that stage is committed, and SHALL use deterministic logical transition keys (`{run_id}:RESUME:{resumable_stage}:{current_generation}`) for resume operations and stage events to prevent duplicate event evidence upon repeated reconciliation or restart.
 
 #### Scenario: Successful path reaches the human gate
 - **WHEN** implementation/continuation completes, checks pass, the candidate is frozen, complementary review is authoritative, the final full DeepSeek Direct audit passes, and repository identity is valid
@@ -40,12 +41,16 @@ The system SHALL persist a finite, ordered orchestration stage and checkpoint fo
 - **THEN** the operational job remains or becomes `WAITING_CAPACITY`, the orchestration checkpoint records the resumable stage and handoff, and the run stops without becoming `NEEDS_HUMAN` solely for capacity.
 
 #### Scenario: Temporary external dependency blocks progress
-- **WHEN** a transient non-provider dependency such as GitHub is unavailable or an external action result cannot yet be observed
+- **WHEN** a transient non-provider dependency such as GitHub is unavailable, a transient provider error occurs, or an external action result cannot yet be observed
 - **THEN** the orchestration run stops with `WAITING_EXTERNAL`, preserves its resumable checkpoint, and does not change the job to `WAITING_CAPACITY` or `NEEDS_HUMAN` solely for the transient outage.
 
 #### Scenario: Unresolvable invariant blocks progress
 - **WHEN** binding, worktree identity, candidate identity, evidence authority, provider/model independence, or external-action outcome cannot be proven uniquely
 - **THEN** the run records a structured stop reason and enters `NEEDS_HUMAN` unless the existing capacity authority proves `WAITING_CAPACITY` or the external dependency is transiently unobservable and qualifies for `WAITING_EXTERNAL`, without speculative continuation.
+
+#### Scenario: Deterministic resume event idempotency
+- **WHEN** an orchestration run is resumed repeatedly across daemon restarts or recovery cycles without advancing stages
+- **THEN** the system SHALL record resume transitions using logical transition keys bound to the run ID, stage, and generation (`{run_id}:RESUME:{resumable_stage}:{current_generation}`), preventing duplicate logical stage events.
 
 ### Requirement: Existing pipeline coordination
 The system SHALL invoke existing implementation, 007 continuation, deterministic-check, complementary-review, and DeepSeek Direct audit authorities in their defined order and SHALL preserve their decisions and diagnostics.

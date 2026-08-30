@@ -6,7 +6,7 @@ Establishes the configured GitHub App as the canonical runtime identity for GitH
 ## Requirements
 
 ### Requirement: Canonical GitHub App authentication
-The system SHALL authenticate to GitHub using the configured GitHub App ID, installation ID, and private key, generating short-lived RS256 JSON Web Tokens (JWT) to obtain installation access tokens from the GitHub REST API.
+The system SHALL authenticate to GitHub using the configured GitHub App ID, installation ID, and private key, generating short-lived RS256 JSON Web Tokens (JWT) to obtain installation access tokens from the GitHub REST API, and SHALL rely on authoritative remote Issue verification for repository validation without redundant standalone repository queries.
 
 #### Scenario: Valid GitHub App credentials generate installation token
 - **GIVEN** valid GitHub App ID, installation ID, and private key path configured in the host environment
@@ -44,13 +44,19 @@ The system SHALL cache installation tokens strictly in volatile memory respectin
 - **THEN** installation access tokens and private key contents are completely redacted.
 
 ### Requirement: Secret-safe Git push authorization
-The system SHALL authenticate runtime Git push and remote inspection operations using ephemeral GitHub App installation authorization bound to the registered repository and exact candidate SHA without writing credentials to repository Git config or persistent remotes.
+The system SHALL authenticate runtime Git push and remote inspection operations using ephemeral GitHub App installation authorization bound to the registered repository and exact candidate SHA without writing credentials to repository Git config or persistent remotes, and SHALL strip inherited Git diagnostic and trace environment variables before launching authenticated Git subprocesses.
 
 #### Scenario: Git push authenticates via ephemeral App credentials
 - **GIVEN** a candidate is frozen, audited, and ready for branch push
 - **WHEN** the GitHub adapter executes a git push to the registered remote
 - **THEN** authentication is injected ephemerally for the subprocess invocation
 - **AND** only the exact candidate SHA is pushed to the bound branch.
+
+#### Scenario: Inherited Git trace variables stripped before authenticated Git execution
+- **GIVEN** ambient Git trace environment variables (`GIT_TRACE`, `GIT_TRACE_PACKET`, `GIT_TRACE_CURL`, `GIT_CURL_VERBOSE`, `GIT_TRANSPORT_TRACE`) are set in the runtime environment
+- **WHEN** authenticated Git subprocesses (e.g. `push`, `ls-remote`) are executed
+- **THEN** the adapter SHALL purge all trace variables from the subprocess environment before execution
+- **AND** HTTP Authorization headers containing token material cannot be dumped to trace streams.
 
 #### Scenario: Git push does not persist secrets to Git remotes or config
 - **GIVEN** a git push operation completes, fails, or is interrupted

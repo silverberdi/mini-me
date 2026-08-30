@@ -6,12 +6,17 @@ Expose safe Foundation health, readiness, correlation, and metric facts needed t
 ## Requirements
 
 ### Requirement: Health and status surface
-The system SHALL expose API and CLI status for an orchestration run and GitHub runtime identity, including project, change, run ID, current stage/checkpoint, operational job/current executor, candidate generation and SHA, base SHA, check/review/audit status and candidate bindings, provider/capacity state, retry/reassignment counters, pending handoff, GitHub App authentication mode and health, PR number/URL/head SHA when present, human gate, last deterministic transition, and structured stop detail, with secrets redacted.
+The system SHALL expose API and CLI status for an orchestration run, provider health, and GitHub runtime identity, including project, change, run ID, current stage/checkpoint, operational job/current executor, candidate generation and SHA, base SHA, check/review/audit status and candidate bindings, provider health with capacity reset windows resolved from durable capacity window records, retry/reassignment counters, pending handoff, GitHub App authentication mode and health, PR number/URL/head SHA when present, human gate, last deterministic transition, and structured stop detail, with secrets redacted.
 
 #### Scenario: Operator inspects orchestration status
 - **GIVEN** an orchestration run exists
 - **WHEN** the operator requests `orchestrate status` through the supported API or CLI
 - **THEN** the response reports the durable fields needed to identify what will happen next and why, without claiming progress from an uncommitted agent output.
+
+#### Scenario: Operator inspects provider health status via CLI
+- **GIVEN** one or more primary providers have health and capacity window records
+- **WHEN** the operator runs `minime providers health`
+- **THEN** provider status, consecutive failures, and reset timestamps resolved from associated capacity windows are formatted cleanly without attribute errors or process termination.
 
 #### Scenario: Status reports candidate-bound evidence
 - **WHEN** a review or audit exists for a run
