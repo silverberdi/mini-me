@@ -125,6 +125,21 @@ def test_dashboard_redacts_api_keys_and_tokens(
     )
     in_memory_uow.audit_findings.save(af)
 
+    secret_pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0Y...\n-----END RSA PRIVATE KEY-----"
+
+    # Check result with secret command
+    from minime.domain.models import CheckResult
+    cr = CheckResult(
+        job_id="job-sec",
+        check_name="pytest",
+        command=f"pytest --key={secret_key}",
+        exit_code=1,
+        duration_ms=100,
+        output_snippet=f"pytest error: {secret_key}",
+        candidate_sha="cand-sha-sec",
+    )
+    in_memory_uow.check_results.save(cr)
+
     # Diagnostic with secret command
     diag = EvidenceDiagnostic(
         job_id="job-sec",
@@ -133,7 +148,7 @@ def test_dashboard_redacts_api_keys_and_tokens(
         environment_identity="local",
         candidate_sha="cand-sha-sec",
         diagnostic_status=EvidenceDiagnosticStatus.FAIL,
-        reason=f"pytest failed with api_key={secret_key}",
+        reason=f"pytest failed with api_key={secret_key} and pem={secret_pem}",
     )
     in_memory_uow.evidence_diagnostics.save(diag)
 
@@ -155,6 +170,7 @@ def test_dashboard_redacts_api_keys_and_tokens(
     assert secret_aws not in overview_json
     assert secret_slack not in overview_json
     assert secret_pat not in overview_json
+    assert secret_pem not in overview_json
 
     # 2. Detail Check
     detail = service.get_change_detail("secure-proj", "012-secret-test")
@@ -165,4 +181,5 @@ def test_dashboard_redacts_api_keys_and_tokens(
     assert secret_aws not in detail_json
     assert secret_slack not in detail_json
     assert secret_pat not in detail_json
+    assert secret_pem not in detail_json
     assert "[REDACTED" in detail_json

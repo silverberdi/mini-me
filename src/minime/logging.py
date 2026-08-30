@@ -70,6 +70,11 @@ def redact_secrets(text: str, custom_secrets: list[str] | None = None) -> str:
     redacted = re.sub(r"\b((?:AKIA|ASIA|AROA|AIPA|ANPA|ANVA)[0-9A-Z]{16,32})\b", "[REDACTED_KEY]", redacted)
     redacted = re.sub(r"\b(xox[a-zA-Z0-9_\.\-]{10,})\b", "[REDACTED_TOKEN]", redacted)
     redacted = re.sub(r"(?i)\bBearer\s+([a-zA-Z0-9_\-\.]{16,})\b", "Bearer [REDACTED_TOKEN]", redacted)
+    redacted = re.sub(
+        r"-----BEGIN[ A-Z0-9_-]*PRIVATE KEY-----[\s\S]*?-----END[ A-Z0-9_-]*PRIVATE KEY-----",
+        "[REDACTED_PRIVATE_KEY]",
+        redacted,
+    )
 
     # Redact explicit registered secrets
     secrets = get_secret_patterns()

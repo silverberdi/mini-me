@@ -253,3 +253,90 @@ def test_timeline_deduplicates_events_on_combined_filters(
     # Must be deduplicated by event_id
     assert len(events) == 1
     assert events[0].event_id == "evt-shared-1"
+
+
+def test_pr_prepared_with_stale_review_blocks_pr_merge_phase(
+    in_memory_uow: PersistenceUnitOfWork,
+) -> None:
+    service = OperationsDashboardService(in_memory_uow)
+
+    project = Project(
+        project_id="mini-me",
+        display_name="mini me",
+        repository="silverberdi/mini-me",
+        base_branch="main",
+        openspec_path="openspec",
+    )
+    in_memory_uow.projects.save(project)
+
+    change = Change(
+        project_id="mini-me",
+        name="012-pr-stale",
+        status=ChangeStatus.IN_PROGRESS,
+        last_readiness_status=ReadinessState.READY,
+    )
+    in_memory_uow.changes.save(change)
+
+    job = Job(
+        job_id="job-pr-stale",
+        project_id="mini-me",
+        change_name="012-pr-stale",
+        implementer_role="codex",
+        status=JobStatus.RUNNING,
+        candidate_sha="sha-gen2",
+        base_sha="sha-base",
+    )
+    in_memory_uow.jobs.save(job)
+
+    # Stale Review bound to older sha-gen1
+    rev_gen1 = Review(
+        review_id="rev-old-merge",
+        job_id="job-pr-stale",
+        project_id="mini-me",
+        change_name="012-pr-stale",
+        reviewer_role="antigravity",
+        candidate_sha="sha-gen1",
+        base_sha="sha-base",
+        verdict=ReviewVerdict.READY_TO_MERGE,
+    )
+    in_memory_uow.reviews.save(rev_gen1)
+
+    # Current Audit bound to sha-gen2
+    aud_gen2 = AuditRecord(
+        audit_id="aud-curr-merge",
+        job_id="job-pr-stale",
+        project_id="mini-me",
+        change_name="012-pr-stale",
+        provider="deepseek",
+        model="deepseek-chat",
+        candidate_sha="sha-gen2",
+        base_sha="sha-base",
+        status=AuditStatus.AUDIT_COMPLETED,
+        risk=AuditRiskLevel.LOW,
+    )
+    in_memory_uow.audits.save(aud_gen2)
+
+    # Run in PR_PREPARED stage for generation 2
+    run = OrchestrationRun(
+        run_id="run-pr-stale",
+        project_id="mini-me",
+        change_name="012-pr-stale",
+        active_job_id="job-pr-stale",
+        current_stage=OrchestrationStage.PR_PREPARED,
+        is_active=False,
+        stop_outcome=None,
+        current_generation=2,
+        current_candidate_sha="sha-gen2",
+        base_sha="sha-base",
+    )
+    in_memory_uow.orchestration_runs.save(run)
+
+    detail = service.get_change_detail("mini-me", "012-pr-stale")
+    phase_map = {p.name: p.status for p in detail.pipeline}
+
+    # Review is stale => running
+    assert phase_map["review"] == "running"
+    # Audit is current => passed
+    assert phase_map["audit"] == "passed"
+    # PR/Merge must NOT be passed because review is not passed
+    assert phase_map["pr_merge"] != "passed"
