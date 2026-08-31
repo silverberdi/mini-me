@@ -439,3 +439,41 @@ class ActionRiskLevel(str, Enum):
     LOW = "LOW"
     MEDIUM = "MEDIUM"
     HIGH = "HIGH"
+
+
+class QueuePriority(str, Enum):
+    """Explicit priority levels for candidate work in the scheduler queue."""
+
+    CRITICAL = "CRITICAL"
+    HIGH = "HIGH"
+    NORMAL = "NORMAL"
+    LOW = "LOW"
+
+
+class AdmissionDecision(str, Enum):
+    """Outcome decision for a scheduler admission evaluation."""
+
+    ADMITTED = "ADMITTED"
+    REFUSED = "REFUSED"
+    SKIPPED = "SKIPPED"
+
+
+class AdmissionRefusalCode(str, Enum):
+    """Structured refusal reason codes for scheduler admission evaluation."""
+
+    NOT_READY = "NOT_READY"
+    ROADMAP_PREDECESSOR_INCOMPLETE = "ROADMAP_PREDECESSOR_INCOMPLETE"
+    DEPENDENCY_BLOCKED = "DEPENDENCY_BLOCKED"
+    PROVIDER_DRAIN = "PROVIDER_DRAIN"
+    PROVIDER_WAIT = "PROVIDER_WAIT"
+    PROVIDER_UNAVAILABLE = "PROVIDER_UNAVAILABLE"
+    BUDGET_BLOCKED = "BUDGET_BLOCKED"
+    GLOBAL_CONCURRENCY_LIMIT = "GLOBAL_CONCURRENCY_LIMIT"
+    PROJECT_CONCURRENCY_LIMIT = "PROJECT_CONCURRENCY_LIMIT"
+    CHANGE_ALREADY_ACTIVE = "CHANGE_ALREADY_ACTIVE"
+    ALREADY_ADMITTED = "ALREADY_ADMITTED"
+    INVALID_BINDING = "INVALID_BINDING"
+    SPEC_INVALID = "SPEC_INVALID"
+    WORKSPACE_PREFLIGHT_FAILED = "WORKSPACE_PREFLIGHT_FAILED"
+    WORKSPACE_ERROR = "WORKSPACE_ERROR"
+    EVALUATION_ERROR = "EVALUATION_ERROR"

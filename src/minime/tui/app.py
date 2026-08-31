@@ -22,6 +22,7 @@ from minime.tui.views.changes import ChangesView
 from minime.tui.views.detail import RunDetailView
 from minime.tui.views.overview import OverviewView
 from minime.tui.views.preview import PreviewView
+from minime.tui.views.queue import QueueView
 from minime.tui.widgets.action_bar import ActionsBarWidget
 from minime.tui.widgets.action_modal import ActionConfirmationModal, ActionSelectionModal
 from minime.tui.widgets.header import HeaderWidget
@@ -44,6 +45,7 @@ class MiniMeTuiApp(App[None]):
         Binding("2", "switch_tab('tab-changes')", "Changes", show=False),
         Binding("3", "switch_tab('tab-detail')", "Detail", show=False),
         Binding("4", "switch_tab('tab-preview')", "Preview", show=False),
+        Binding("5", "switch_tab('tab-queue')", "Queue", show=False),
         Binding("?", "show_help", "Help", show=True),
         Binding("f1", "show_help", "Help", show=False),
         Binding("escape", "handle_escape", "Back", show=False),
@@ -78,6 +80,8 @@ class MiniMeTuiApp(App[None]):
                     yield RunDetailView(id="view-detail")
                 with TabPane("Preview & Validation (013)", id="tab-preview"):
                     yield PreviewView(id="view-preview")
+                with TabPane("Queue & Scheduler (016)", id="tab-queue"):
+                    yield QueueView(id="view-queue")
 
     def on_resize(self, event) -> None:
         width = event.size.width
@@ -128,8 +132,45 @@ class MiniMeTuiApp(App[None]):
                     self.selected_project_id, self.selected_change_name
                 )
                 await self._apply_detail(detail)
+
+            # Queue & Scheduler data
+            queue_items = await self.client.get_queue_items()
+            scheduler_status = await self.client.get_scheduler_status()
+            self._apply_queue(queue_items, scheduler_status)
+
         except Exception as exc:
             self.notify(f"Data refresh warning: {exc}", severity="warning", timeout=3)
+
+    def _apply_queue(self, items: list[Any], status_view: Any) -> None:
+        try:
+            queue_view = self.query_one("#view-queue", QueueView)
+            queue_view.queue_items = items
+            queue_view.status_view = status_view
+        except Exception:
+            pass
+
+    async def on_queue_view_item_selected(self, message: QueueView.ItemSelected) -> None:
+        self.selected_project_id = message.project_id
+        self.selected_change_name = message.change_name
+        report = await self.client.get_queue_explain(message.project_id, message.change_name)
+        try:
+            queue_view = self.query_one("#view-queue", QueueView)
+            queue_view.explain_report = report
+        except Exception:
+            pass
+
+    async def on_queue_view_tick_requested(self, message: QueueView.TickRequested) -> None:
+        decisions = await self.client.trigger_scheduler_tick(self.selected_project_id)
+        admitted = [
+            d for d in decisions if getattr(d, "decision", None) and d.decision.value == "ADMITTED"
+        ]
+        if admitted:
+            self.notify(f"Scheduler tick: {len(admitted)} admitted!", severity="information")
+        else:
+            self.notify(
+                f"Scheduler tick completed ({len(decisions)} evaluated)", severity="information"
+            )
+        await self.action_refresh_data()
 
     def _apply_overview(self, overview: DashboardOverviewResponse) -> None:
         header = self.query_one("#app-header", HeaderWidget)

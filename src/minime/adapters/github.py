@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 import re
 import subprocess
@@ -232,6 +233,83 @@ class GitHubAdapter(GitHubAdapterInterface):
                 f"Repository mismatch: GitHub Issue #{issue_number} belongs to '{actual}', not '{repo}'.",
             )
         return True, None
+
+    def list_issues(
+        self, repository: str, state: str = "open", limit: int = 50
+    ) -> list[dict[str, Any]]:
+        """List issues for a repository."""
+        repo = self._repo(repository)
+        try:
+            response = self._request(
+                "GET",
+                f"/repos/{repo}/issues",
+                params={"state": state, "per_page": limit},
+            )
+            if response.status_code == 200:
+                payload = response.json()
+                if isinstance(payload, list):
+                    return [item for item in payload if not item.get("pull_request")]
+        except Exception as exc:
+            logger.debug(f"Failed to list issues via GitHub API: {exc}")
+
+        # Fallback to gh CLI if available
+        try:
+            result = subprocess.run(
+                [
+                    "gh",
+                    "issue",
+                    "list",
+                    "--repo",
+                    repo,
+                    "--state",
+                    state,
+                    "--limit",
+                    str(limit),
+                    "--json",
+                    "number,title,body,labels,state",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                items = json.loads(result.stdout)
+                if isinstance(items, list):
+                    return items
+        except Exception as exc:
+            logger.debug(f"Failed to list issues via gh CLI: {exc}")
+
+        return []
+
+    def list_project_items(
+        self, project_number: int = 2, owner: str = "silverberdi", limit: int = 50
+    ) -> list[dict[str, Any]]:
+        """List items in a GitHub Project V2."""
+        try:
+            result = subprocess.run(
+                [
+                    "gh",
+                    "project",
+                    "item-list",
+                    str(project_number),
+                    "--owner",
+                    owner,
+                    "--limit",
+                    str(limit),
+                    "--format",
+                    "json",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                data = json.loads(result.stdout)
+                items = data.get("items", [])
+                return items if isinstance(items, list) else []
+        except Exception as exc:
+            logger.debug(f"Failed to list project items via gh CLI: {exc}")
+        return []
 
     @staticmethod
     def _issue_repository_identity(payload: dict[str, Any]) -> str:

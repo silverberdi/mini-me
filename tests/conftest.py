@@ -51,7 +51,9 @@ from minime.domain.interfaces import (
     ProviderHealthRepositoryInterface,
     ReviewFindingRepositoryInterface,
     ReviewRepositoryInterface,
+    SchedulerDecisionRepositoryInterface,
     ValidationRunRepositoryInterface,
+    WorkQueueRepositoryInterface,
 )
 from minime.domain.models import (
     AUTHORITATIVE_PRICING_SOURCES,
@@ -86,7 +88,9 @@ from minime.domain.models import (
     ProviderHealth,
     Review,
     ReviewFinding,
+    SchedulerDecisionRecord,
     ValidationRun,
+    WorkQueueItem,
     utc_now,
 )
 
@@ -1345,6 +1349,82 @@ class InMemoryOperatorActionRepository(OperatorActionRepositoryInterface):
         return matches[:limit]
 
 
+class InMemoryWorkQueueRepository(WorkQueueRepositoryInterface):
+    def __init__(self):
+        self._store: dict[str, WorkQueueItem] = {}
+
+    def save(self, item: WorkQueueItem) -> None:
+        for existing in self._store.values():
+            if existing.project_id == item.project_id and existing.change_name == item.change_name:
+                updated = item.model_copy(deep=True)
+                updated.queue_item_id = existing.queue_item_id
+                updated.discovered_at = existing.discovered_at
+                self._store[existing.queue_item_id] = updated
+                return
+        self._store[item.queue_item_id] = item.model_copy(deep=True)
+
+    def get_by_id(self, queue_item_id: str) -> WorkQueueItem | None:
+        item = self._store.get(queue_item_id)
+        return item.model_copy(deep=True) if item else None
+
+    def get_by_project_and_change(self, project_id: str, change_name: str) -> WorkQueueItem | None:
+        matches = [
+            item
+            for item in self._store.values()
+            if item.project_id == project_id and item.change_name == change_name
+        ]
+        return matches[0].model_copy(deep=True) if matches else None
+
+    def list_all(self, project_id: str | None = None) -> list[WorkQueueItem]:
+        items = list(self._store.values())
+        if project_id:
+            items = [item for item in items if item.project_id == project_id]
+        items.sort(key=lambda i: (-i.priority_score, i.discovered_at))
+        return [i.model_copy(deep=True) for i in items]
+
+    def list_ready(self, project_id: str | None = None) -> list[WorkQueueItem]:
+        items = [item for item in self._store.values() if item.admission_eligible]
+        if project_id:
+            items = [item for item in items if item.project_id == project_id]
+        items.sort(key=lambda i: (-i.priority_score, i.discovered_at))
+        return [i.model_copy(deep=True) for i in items]
+
+    def delete(self, queue_item_id: str) -> None:
+        self._store.pop(queue_item_id, None)
+
+
+class InMemorySchedulerDecisionRepository(SchedulerDecisionRepositoryInterface):
+    def __init__(self):
+        self._store: list[SchedulerDecisionRecord] = []
+
+    def save(self, decision: SchedulerDecisionRecord) -> None:
+        self._store.append(decision.model_copy(deep=True))
+
+    def get_by_id(self, decision_id: str) -> SchedulerDecisionRecord | None:
+        for d in self._store:
+            if d.decision_id == decision_id:
+                return d.model_copy(deep=True)
+        return None
+
+    def list_by_change(
+        self, project_id: str, change_name: str, limit: int = 50
+    ) -> list[SchedulerDecisionRecord]:
+        matches = [
+            d for d in self._store if d.project_id == project_id and d.change_name == change_name
+        ]
+        matches.sort(key=lambda d: d.evaluated_at, reverse=True)
+        return [d.model_copy(deep=True) for d in matches[:limit]]
+
+    def list_recent(
+        self, project_id: str | None = None, limit: int = 100
+    ) -> list[SchedulerDecisionRecord]:
+        items = self._store
+        if project_id:
+            items = [d for d in items if d.project_id == project_id]
+        items.sort(key=lambda d: d.evaluated_at, reverse=True)
+        return [d.model_copy(deep=True) for d in items[:limit]]
+
+
 class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
     def __init__(self):
         self.projects = InMemoryProjectRepository()
@@ -1379,6 +1459,8 @@ class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.preview_sessions = InMemoryPreviewSessionRepository()
         self.validation_runs = InMemoryValidationRunRepository()
         self.operator_actions = InMemoryOperatorActionRepository()
+        self.work_queue = InMemoryWorkQueueRepository()
+        self.scheduler_decisions = InMemorySchedulerDecisionRepository()
         self.committed = False
         self.rolled_back = False
 

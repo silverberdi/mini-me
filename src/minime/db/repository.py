@@ -42,10 +42,14 @@ from minime.db.models import (
     ProviderHealthModel,
     ReviewFindingModel,
     ReviewModel,
+    SchedulerDecisionRecordModel,
     ValidationRunModel,
+    WorkQueueSnapshotModel,
 )
 from minime.domain.enums import (
     PRIMARY_PROVIDERS,
+    AdmissionDecision,
+    AdmissionRefusalCode,
     AuditFindingSeverity,
     AuditRiskLevel,
     AuditStatus,
@@ -72,6 +76,7 @@ from minime.domain.enums import (
     ProjectStatus,
     ProviderHealthStatus,
     ProviderResultClass,
+    QueuePriority,
     ReadinessState,
     RemediationFailureCode,
     RemediationStatus,
@@ -112,7 +117,9 @@ from minime.domain.interfaces import (
     ProviderHealthRepositoryInterface,
     ReviewFindingRepositoryInterface,
     ReviewRepositoryInterface,
+    SchedulerDecisionRepositoryInterface,
     ValidationRunRepositoryInterface,
+    WorkQueueRepositoryInterface,
 )
 from minime.domain.models import (
     AUTHORITATIVE_PRICING_SOURCES,
@@ -148,7 +155,9 @@ from minime.domain.models import (
     ProviderHealth,
     Review,
     ReviewFinding,
+    SchedulerDecisionRecord,
     ValidationRun,
+    WorkQueueItem,
     utc_now,
 )
 
@@ -3048,6 +3057,215 @@ class PostgresOperatorActionRepository(OperatorActionRepositoryInterface):
         return [operator_action_record_model_to_domain(m) for m in models]
 
 
+def work_queue_item_domain_to_model(item: WorkQueueItem) -> WorkQueueSnapshotModel:
+    return WorkQueueSnapshotModel(
+        id=item.queue_item_id,
+        project_id=item.project_id,
+        change_name=item.change_name,
+        github_issue_number=item.github_issue_number,
+        github_issue_title=item.github_issue_title,
+        github_project_item_id=item.github_project_item_id,
+        priority=item.priority.value if hasattr(item.priority, "value") else str(item.priority),
+        roadmap_stage=item.roadmap_stage,
+        dependencies=item.dependencies,
+        readiness_state=item.readiness_state.value
+        if hasattr(item.readiness_state, "value")
+        else str(item.readiness_state),
+        unmet_readiness_reasons=item.unmet_readiness_reasons,
+        blocked_reason=item.blocked_reason,
+        admission_eligible=item.admission_eligible,
+        priority_score=item.priority_score,
+        discovered_at=item.discovered_at,
+        last_evaluated_at=item.last_evaluated_at,
+    )
+
+
+def work_queue_item_model_to_domain(model: WorkQueueSnapshotModel) -> WorkQueueItem:
+    return WorkQueueItem(
+        queue_item_id=model.id,
+        project_id=model.project_id,
+        change_name=model.change_name,
+        github_issue_number=model.github_issue_number,
+        github_issue_title=model.github_issue_title,
+        github_project_item_id=model.github_project_item_id,
+        priority=QueuePriority(model.priority) if model.priority else QueuePriority.NORMAL,
+        roadmap_stage=model.roadmap_stage,
+        dependencies=model.dependencies or [],
+        readiness_state=ReadinessState(model.readiness_state)
+        if model.readiness_state
+        else ReadinessState.NOT_READY,
+        unmet_readiness_reasons=model.unmet_readiness_reasons or [],
+        blocked_reason=model.blocked_reason,
+        admission_eligible=model.admission_eligible,
+        priority_score=float(model.priority_score or 0.0),
+        discovered_at=model.discovered_at,
+        last_evaluated_at=model.last_evaluated_at,
+    )
+
+
+def scheduler_decision_domain_to_model(
+    decision: SchedulerDecisionRecord,
+) -> SchedulerDecisionRecordModel:
+    return SchedulerDecisionRecordModel(
+        id=decision.decision_id,
+        project_id=decision.project_id,
+        change_name=decision.change_name,
+        github_issue_number=decision.github_issue_number,
+        decision=decision.decision.value
+        if hasattr(decision.decision, "value")
+        else str(decision.decision),
+        reason_code=decision.reason_code.value
+        if decision.reason_code and hasattr(decision.reason_code, "value")
+        else (str(decision.reason_code) if decision.reason_code else None),
+        reason_summary=decision.reason_summary,
+        priority_score=decision.priority_score,
+        selected_implementer=decision.selected_implementer,
+        concurrency_snapshot=decision.concurrency_snapshot,
+        capacity_snapshot=decision.capacity_snapshot,
+        run_id=decision.run_id,
+        evaluated_at=decision.evaluated_at,
+    )
+
+
+def scheduler_decision_model_to_domain(
+    model: SchedulerDecisionRecordModel,
+) -> SchedulerDecisionRecord:
+    return SchedulerDecisionRecord(
+        decision_id=model.id,
+        project_id=model.project_id,
+        change_name=model.change_name,
+        github_issue_number=model.github_issue_number,
+        decision=AdmissionDecision(model.decision),
+        reason_code=AdmissionRefusalCode(model.reason_code) if model.reason_code else None,
+        reason_summary=model.reason_summary or "",
+        priority_score=float(model.priority_score or 0.0),
+        selected_implementer=model.selected_implementer,
+        concurrency_snapshot=model.concurrency_snapshot or {},
+        capacity_snapshot=model.capacity_snapshot or {},
+        run_id=model.run_id,
+        evaluated_at=model.evaluated_at,
+    )
+
+
+class PostgresWorkQueueRepository(WorkQueueRepositoryInterface):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def save(self, item: WorkQueueItem) -> None:
+        stmt = (
+            select(WorkQueueSnapshotModel)
+            .where(
+                WorkQueueSnapshotModel.project_id == item.project_id,
+                WorkQueueSnapshotModel.change_name == item.change_name,
+            )
+            .limit(1)
+        )
+        existing = self.session.scalars(stmt).first()
+        if existing:
+            existing.github_issue_number = item.github_issue_number
+            existing.github_issue_title = item.github_issue_title
+            existing.github_project_item_id = item.github_project_item_id
+            existing.priority = (
+                item.priority.value if hasattr(item.priority, "value") else str(item.priority)
+            )
+            existing.roadmap_stage = item.roadmap_stage
+            existing.dependencies = item.dependencies
+            existing.readiness_state = (
+                item.readiness_state.value
+                if hasattr(item.readiness_state, "value")
+                else str(item.readiness_state)
+            )
+            existing.unmet_readiness_reasons = item.unmet_readiness_reasons
+            existing.blocked_reason = item.blocked_reason
+            existing.admission_eligible = item.admission_eligible
+            existing.priority_score = item.priority_score
+            existing.last_evaluated_at = item.last_evaluated_at
+        else:
+            model = work_queue_item_domain_to_model(item)
+            self.session.add(model)
+
+    def get_by_id(self, queue_item_id: str) -> WorkQueueItem | None:
+        model = self.session.get(WorkQueueSnapshotModel, queue_item_id)
+        return work_queue_item_model_to_domain(model) if model else None
+
+    def get_by_project_and_change(self, project_id: str, change_name: str) -> WorkQueueItem | None:
+        stmt = (
+            select(WorkQueueSnapshotModel)
+            .where(
+                WorkQueueSnapshotModel.project_id == project_id,
+                WorkQueueSnapshotModel.change_name == change_name,
+            )
+            .limit(1)
+        )
+        model = self.session.scalars(stmt).first()
+        return work_queue_item_model_to_domain(model) if model else None
+
+    def list_all(self, project_id: str | None = None) -> list[WorkQueueItem]:
+        stmt = select(WorkQueueSnapshotModel)
+        if project_id:
+            stmt = stmt.where(WorkQueueSnapshotModel.project_id == project_id)
+        stmt = stmt.order_by(
+            desc(WorkQueueSnapshotModel.priority_score), WorkQueueSnapshotModel.discovered_at
+        )
+        models = self.session.scalars(stmt).all()
+        return [work_queue_item_model_to_domain(m) for m in models]
+
+    def list_ready(self, project_id: str | None = None) -> list[WorkQueueItem]:
+        stmt = select(WorkQueueSnapshotModel).where(
+            WorkQueueSnapshotModel.admission_eligible.is_(True)
+        )
+        if project_id:
+            stmt = stmt.where(WorkQueueSnapshotModel.project_id == project_id)
+        stmt = stmt.order_by(
+            desc(WorkQueueSnapshotModel.priority_score), WorkQueueSnapshotModel.discovered_at
+        )
+        models = self.session.scalars(stmt).all()
+        return [work_queue_item_model_to_domain(m) for m in models]
+
+    def delete(self, queue_item_id: str) -> None:
+        model = self.session.get(WorkQueueSnapshotModel, queue_item_id)
+        if model:
+            self.session.delete(model)
+
+
+class PostgresSchedulerDecisionRepository(SchedulerDecisionRepositoryInterface):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def save(self, decision: SchedulerDecisionRecord) -> None:
+        model = scheduler_decision_domain_to_model(decision)
+        self.session.add(model)
+
+    def get_by_id(self, decision_id: str) -> SchedulerDecisionRecord | None:
+        model = self.session.get(SchedulerDecisionRecordModel, decision_id)
+        return scheduler_decision_model_to_domain(model) if model else None
+
+    def list_by_change(
+        self, project_id: str, change_name: str, limit: int = 50
+    ) -> list[SchedulerDecisionRecord]:
+        stmt = (
+            select(SchedulerDecisionRecordModel)
+            .where(
+                SchedulerDecisionRecordModel.project_id == project_id,
+                SchedulerDecisionRecordModel.change_name == change_name,
+            )
+            .order_by(desc(SchedulerDecisionRecordModel.evaluated_at))
+            .limit(limit)
+        )
+        models = self.session.scalars(stmt).all()
+        return [scheduler_decision_model_to_domain(m) for m in models]
+
+    def list_recent(
+        self, project_id: str | None = None, limit: int = 100
+    ) -> list[SchedulerDecisionRecord]:
+        stmt = select(SchedulerDecisionRecordModel)
+        if project_id:
+            stmt = stmt.where(SchedulerDecisionRecordModel.project_id == project_id)
+        stmt = stmt.order_by(desc(SchedulerDecisionRecordModel.evaluated_at)).limit(limit)
+        models = self.session.scalars(stmt).all()
+        return [scheduler_decision_model_to_domain(m) for m in models]
+
+
 class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
     """Encapsulates a database session for atomic operations across repositories."""
 
@@ -3086,6 +3304,8 @@ class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.preview_sessions = PostgresPreviewSessionRepository(session)
         self.validation_runs = PostgresValidationRunRepository(session)
         self.operator_actions = PostgresOperatorActionRepository(session)
+        self.work_queue = PostgresWorkQueueRepository(session)
+        self.scheduler_decisions = PostgresSchedulerDecisionRepository(session)
 
     def commit(self) -> None:
         self.session.commit()
