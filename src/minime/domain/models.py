@@ -14,6 +14,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from minime.domain.enums import (
     PRIMARY_PROVIDERS,
     ActionRiskLevel,
+    AdmissionDecision,
+    AdmissionRefusalCode,
     AuditFindingSeverity,
     AuditRiskLevel,
     AuditStatus,
@@ -42,6 +44,7 @@ from minime.domain.enums import (
     ProviderHealthStatus,
     ProviderResultClass,
     PullRequestLookupState,
+    QueuePriority,
     ReadinessState,
     RemediationFailureCode,
     RemediationStatus,
@@ -967,3 +970,77 @@ class OperatorActionRecord(BaseModel):
     parameters_json: dict[str, Any] = Field(default_factory=dict)
     result_payload_json: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utc_now)
+
+
+class WorkQueueItem(BaseModel):
+    """Evaluated backlog work item in the scheduler queue."""
+
+    queue_item_id: str = Field(default_factory=generate_uuid)
+    project_id: str
+    change_name: str
+    github_issue_number: int | None = None
+    github_issue_title: str | None = None
+    github_project_item_id: str | None = None
+    priority: QueuePriority = QueuePriority.NORMAL
+    roadmap_stage: int | None = None
+    dependencies: list[str] = Field(default_factory=list)
+    readiness_state: ReadinessState = ReadinessState.NOT_READY
+    unmet_readiness_reasons: list[str] = Field(default_factory=list)
+    blocked_reason: str | None = None
+    admission_eligible: bool = False
+    priority_score: float = 0.0
+    discovered_at: datetime = Field(default_factory=utc_now)
+    last_evaluated_at: datetime = Field(default_factory=utc_now)
+
+
+class SchedulerDecisionRecord(BaseModel):
+    """Immutable audit record of a scheduler admission evaluation."""
+
+    decision_id: str = Field(default_factory=generate_uuid)
+    project_id: str
+    change_name: str
+    github_issue_number: int | None = None
+    decision: AdmissionDecision
+    reason_code: AdmissionRefusalCode | None = None
+    reason_summary: str
+    priority_score: float = 0.0
+    selected_implementer: str | None = None
+    concurrency_snapshot: dict[str, Any] = Field(default_factory=dict)
+    capacity_snapshot: dict[str, Any] = Field(default_factory=dict)
+    run_id: str | None = None
+    evaluated_at: datetime = Field(default_factory=utc_now)
+
+
+class QueueExplainReport(BaseModel):
+    """Explainability report for work item queue position, score, and blockers."""
+
+    project_id: str
+    change_name: str
+    github_issue_number: int | None = None
+    readiness_state: ReadinessState
+    admission_eligible: bool
+    priority: QueuePriority
+    base_score: float
+    aging_bonus: float
+    roadmap_precedence_penalty: float
+    total_score: float
+    queue_position: int | None = None
+    blockers: list[str] = Field(default_factory=list)
+    refusal_code: AdmissionRefusalCode | None = None
+    selection_rationale: str
+    evaluated_at: datetime = Field(default_factory=utc_now)
+
+
+class SchedulerStatusView(BaseModel):
+    """Operational status view of the autonomous scheduler and queue."""
+
+    mode: SchedulerMode = SchedulerMode.RUN
+    queue_depth: int = 0
+    ready_count: int = 0
+    blocked_count: int = 0
+    active_runs_count: int = 0
+    max_global_jobs: int = 1
+    next_candidate: WorkQueueItem | None = None
+    recent_decisions: list[SchedulerDecisionRecord] = Field(default_factory=list)
+    provider_health: dict[str, str] = Field(default_factory=dict)
+    evaluated_at: datetime = Field(default_factory=utc_now)

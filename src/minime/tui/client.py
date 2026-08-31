@@ -178,3 +178,87 @@ class TuiQueryClient:
         except Exception as exc:
             logger.warning(f"Error finding latest run for {project_id}/{change_name}: {exc}")
             return None
+
+    async def get_queue_items(
+        self, project_id: str | None = None, ready_only: bool = False
+    ) -> list[Any]:
+        """Fetch ranked queue items asynchronously."""
+        return await asyncio.to_thread(self._sync_get_queue_items, project_id, ready_only)
+
+    def _sync_get_queue_items(
+        self, project_id: str | None = None, ready_only: bool = False
+    ) -> list[Any]:
+        from minime.services.scheduler_service import SchedulerService
+
+        try:
+            uow = self._get_uow()
+            try:
+                scheduler = SchedulerService(uow)
+                if ready_only:
+                    items = uow.work_queue.list_ready(project_id)
+                else:
+                    items = uow.work_queue.list_all(project_id)
+                return scheduler.rank_candidates(items)
+            finally:
+                if hasattr(uow, "session") and hasattr(uow.session, "close"):
+                    uow.session.close()
+        except Exception as exc:
+            logger.warning(f"Error fetching queue items for TUI: {exc}")
+            return []
+
+    async def get_queue_explain(self, project_id: str, change_name: str) -> Any | None:
+        """Fetch explainability report for a queue item asynchronously."""
+        return await asyncio.to_thread(self._sync_get_queue_explain, project_id, change_name)
+
+    def _sync_get_queue_explain(self, project_id: str, change_name: str) -> Any | None:
+        from minime.services.scheduler_service import SchedulerService
+
+        try:
+            uow = self._get_uow()
+            try:
+                scheduler = SchedulerService(uow)
+                return scheduler.explain_item_priority(project_id, change_name)
+            finally:
+                if hasattr(uow, "session") and hasattr(uow.session, "close"):
+                    uow.session.close()
+        except Exception as exc:
+            logger.warning(f"Error fetching explain report for {change_name}: {exc}")
+            return None
+
+    async def get_scheduler_status(self, project_id: str | None = None) -> Any | None:
+        """Fetch scheduler operational status view asynchronously."""
+        return await asyncio.to_thread(self._sync_get_scheduler_status, project_id)
+
+    def _sync_get_scheduler_status(self, project_id: str | None = None) -> Any | None:
+        from minime.services.scheduler_service import SchedulerService
+
+        try:
+            uow = self._get_uow()
+            try:
+                scheduler = SchedulerService(uow)
+                return scheduler.get_status(project_id)
+            finally:
+                if hasattr(uow, "session") and hasattr(uow.session, "close"):
+                    uow.session.close()
+        except Exception as exc:
+            logger.warning(f"Error fetching scheduler status for TUI: {exc}")
+            return None
+
+    async def trigger_scheduler_tick(self, project_id: str | None = None) -> list[Any]:
+        """Trigger a scheduler tick asynchronously."""
+        return await asyncio.to_thread(self._sync_trigger_scheduler_tick, project_id)
+
+    def _sync_trigger_scheduler_tick(self, project_id: str | None = None) -> list[Any]:
+        from minime.services.scheduler_service import SchedulerService
+
+        try:
+            uow = self._get_uow()
+            try:
+                scheduler = SchedulerService(uow)
+                return scheduler.tick(project_id)
+            finally:
+                if hasattr(uow, "session") and hasattr(uow.session, "close"):
+                    uow.session.close()
+        except Exception as exc:
+            logger.error(f"Error triggering scheduler tick for TUI: {exc}")
+            return []

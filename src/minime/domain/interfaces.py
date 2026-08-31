@@ -45,7 +45,9 @@ from minime.domain.models import (
     ProviderHealth,
     Review,
     ReviewFinding,
+    SchedulerDecisionRecord,
     ValidationRun,
+    WorkQueueItem,
 )
 
 
@@ -600,12 +602,54 @@ class PersistenceUnitOfWork(ABC):
     preview_sessions: PreviewSessionRepositoryInterface
     validation_runs: ValidationRunRepositoryInterface
     operator_actions: OperatorActionRepositoryInterface
+    work_queue: WorkQueueRepositoryInterface
+    scheduler_decisions: SchedulerDecisionRepositoryInterface
 
     @abstractmethod
     def commit(self) -> None: ...
 
     @abstractmethod
     def rollback(self) -> None: ...
+
+
+class WorkQueueRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, item: WorkQueueItem) -> None: ...
+
+    @abstractmethod
+    def get_by_id(self, queue_item_id: str) -> WorkQueueItem | None: ...
+
+    @abstractmethod
+    def get_by_project_and_change(
+        self, project_id: str, change_name: str
+    ) -> WorkQueueItem | None: ...
+
+    @abstractmethod
+    def list_all(self, project_id: str | None = None) -> list[WorkQueueItem]: ...
+
+    @abstractmethod
+    def list_ready(self, project_id: str | None = None) -> list[WorkQueueItem]: ...
+
+    @abstractmethod
+    def delete(self, queue_item_id: str) -> None: ...
+
+
+class SchedulerDecisionRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, decision: SchedulerDecisionRecord) -> None: ...
+
+    @abstractmethod
+    def get_by_id(self, decision_id: str) -> SchedulerDecisionRecord | None: ...
+
+    @abstractmethod
+    def list_by_change(
+        self, project_id: str, change_name: str, limit: int = 50
+    ) -> list[SchedulerDecisionRecord]: ...
+
+    @abstractmethod
+    def list_recent(
+        self, project_id: str | None = None, limit: int = 100
+    ) -> list[SchedulerDecisionRecord]: ...
 
 
 class OpenSpecAdapterInterface(ABC):

@@ -34,7 +34,11 @@ from minime.domain.models import (
     PreviewSession,
     Project,
     ProviderHealth,
+    QueueExplainReport,
+    SchedulerDecisionRecord,
     SchedulerStatus,
+    SchedulerStatusView,
+    WorkQueueItem,
     utc_now,
 )
 from minime.logging import redact_secrets
@@ -54,6 +58,7 @@ from minime.services.project_service import ProjectService
 from minime.services.provider_health_service import ProviderHealthService
 from minime.services.readiness_service import ReadinessService
 from minime.services.restart_recovery_service import RestartRecoveryService
+from minime.services.scheduler_service import SchedulerService
 from minime.services.status_service import StatusService
 from minime.services.validation_authority_service import ValidationAuthorityService
 
@@ -1204,6 +1209,79 @@ def get_action_history_endpoint(
         )
     cp_service = ControlPlaneService(uow)
     return cp_service.list_action_history(run_id, limit=limit)
+
+
+# -----------------------------------------------------------------------------
+# Queue and Scheduler Endpoints
+# -----------------------------------------------------------------------------
+
+
+@app.get(
+    "/api/v1/queue",
+    tags=["queue"],
+    response_model=list[WorkQueueItem],
+)
+def list_queue_items_endpoint(
+    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
+    project_id: str | None = None,
+    ready_only: bool = False,
+) -> list[WorkQueueItem]:
+    """List candidate work items in the scheduler queue."""
+    scheduler = SchedulerService(uow)
+    if ready_only:
+        items = uow.work_queue.list_ready(project_id)
+    else:
+        items = uow.work_queue.list_all(project_id)
+    return scheduler.rank_candidates(items)
+
+
+@app.get(
+    "/api/v1/queue/{change_name}/explain",
+    tags=["queue"],
+    response_model=QueueExplainReport,
+)
+def explain_queue_item_endpoint(
+    change_name: str,
+    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
+    project_id: str = "mini-me",
+) -> QueueExplainReport:
+    """Get detailed explainability report for a work item's priority and blockers."""
+    scheduler = SchedulerService(uow)
+    try:
+        return scheduler.explain_item_priority(project_id, change_name)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+
+@app.get(
+    "/api/v1/scheduler/status",
+    tags=["scheduler"],
+    response_model=SchedulerStatusView,
+)
+def get_scheduler_status_endpoint(
+    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
+    project_id: str | None = None,
+) -> SchedulerStatusView:
+    """Get operational status view of the autonomous scheduler and queue."""
+    scheduler = SchedulerService(uow)
+    return scheduler.get_status(project_id)
+
+
+@app.post(
+    "/api/v1/scheduler/tick",
+    tags=["scheduler"],
+    response_model=list[SchedulerDecisionRecord],
+)
+def trigger_scheduler_tick_endpoint(
+    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
+    project_id: str | None = None,
+) -> list[SchedulerDecisionRecord]:
+    """Trigger a single scheduler evaluation and admission tick."""
+    scheduler = SchedulerService(uow)
+    return scheduler.tick(project_id)
 
 
 # -----------------------------------------------------------------------------

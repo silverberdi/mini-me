@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime
 
 import typer
 import uvicorn
@@ -21,13 +22,13 @@ from minime.domain.enums import (
 from minime.domain.models import OperatorActionRequest
 from minime.logging import configure_logging, get_logger
 from minime.services.budget_service import BudgetService
-from minime.services.capacity_lifecycle_service import CapacityLifecycleService
 from minime.services.control_plane_service import ControlPlaneService
 from minime.services.execution_pipeline import ExecutionPipelineService
 from minime.services.orchestration_service import OrchestrationService
 from minime.services.project_service import ProjectService
 from minime.services.provider_health_service import ProviderHealthService
 from minime.services.readiness_service import ReadinessService
+from minime.services.scheduler_service import SchedulerService
 from minime.services.status_service import StatusService
 
 app = typer.Typer(
@@ -38,6 +39,7 @@ app = typer.Typer(
 project_app = typer.Typer(help="Manage registered projects.")
 jobs_app = typer.Typer(help="Inspect execution jobs.")
 scheduler_app = typer.Typer(help="Inspect scheduler capacity mode and admission status.")
+queue_app = typer.Typer(help="Inspect and explain autonomous work queue.")
 providers_app = typer.Typer(help="Inspect primary provider health and capacity windows.")
 budget_app = typer.Typer(help="Inspect OpenRouter budget usage and policy state.")
 orchestrate_app = typer.Typer(help="Autonomous single-change orchestration commands.")
@@ -46,6 +48,7 @@ action_app = typer.Typer(help="Governed operator control plane actions.")
 app.add_typer(project_app, name="project")
 app.add_typer(jobs_app, name="jobs")
 app.add_typer(scheduler_app, name="scheduler")
+app.add_typer(queue_app, name="queue")
 app.add_typer(providers_app, name="providers")
 app.add_typer(budget_app, name="budget")
 app.add_typer(orchestrate_app, name="orchestrate")
@@ -616,12 +619,12 @@ def scheduler_status_cmd(
     project_id: str = typer.Option(None, "--project-id", "-p", help="Filter by registered project"),
     json_output: bool = typer.Option(False, "--json", help="Output scheduler status as JSON"),
 ) -> None:
-    """Show current scheduler mode (RUN, DRAIN, WAIT) and admission eligibility."""
+    """Show operational queue depth, active runs, next candidate, and scheduler status."""
     try:
         with db_manager.session() as session:
             uow = PostgresPersistenceUnitOfWork(session)
-            lifecycle = CapacityLifecycleService(uow)
-            sched_status = lifecycle.get_scheduler_status(project_id=project_id)
+            scheduler = SchedulerService(uow)
+            sched_status = scheduler.get_status(project_id=project_id)
 
             if json_output:
                 typer.echo(json.dumps(sched_status.model_dump(), indent=2, default=str))
@@ -633,19 +636,201 @@ def scheduler_status_cmd(
                 SchedulerMode.WAIT: typer.colors.RED,
             }.get(sched_status.mode, typer.colors.WHITE)
 
-            typer.secho("=== mini me Scheduler Status ===", fg=typer.colors.CYAN, bold=True)
+            typer.secho("=== mini me Scheduler & Queue Status ===", fg=typer.colors.CYAN, bold=True)
             typer.secho(f"Mode: {sched_status.mode.value}", fg=mode_color, bold=True)
-            typer.echo(f"Admission Allowed: {'YES' if sched_status.admission_allowed else 'NO'}")
             typer.echo(
-                f"Primary Capacity Available: {'YES' if sched_status.primary_capacity_available else 'NO'}"
+                f"Queue Depth: {sched_status.queue_depth} (Ready: {sched_status.ready_count}, Blocked: {sched_status.blocked_count})"
             )
-            typer.echo(f"Active Jobs: {sched_status.active_jobs_count}")
-            if sched_status.reason:
-                typer.echo(f"Reason: {sched_status.reason}")
-            typer.echo(f"Last Evaluated: {sched_status.updated_at.isoformat()}")
+            typer.echo(
+                f"Active Runs: {sched_status.active_runs_count}/{sched_status.max_global_jobs}"
+            )
+            if sched_status.next_candidate:
+                typer.secho(
+                    f"Next Candidate: {sched_status.next_candidate.change_name} (Score: {sched_status.next_candidate.priority_score:.1f})",
+                    fg=typer.colors.GREEN,
+                )
+            else:
+                typer.echo("Next Candidate: None eligible")
+
+            if sched_status.provider_health:
+                typer.echo("\nProvider Health:")
+                for p, h in sched_status.provider_health.items():
+                    h_color = typer.colors.GREEN if h == "AVAILABLE" else typer.colors.YELLOW
+                    typer.secho(f"  • {p}: {h}", fg=h_color)
+
+            if sched_status.recent_decisions:
+                typer.echo("\nRecent Decisions:")
+                for d in sched_status.recent_decisions[:5]:
+                    d_color = (
+                        typer.colors.GREEN
+                        if d.decision.value == "ADMITTED"
+                        else typer.colors.YELLOW
+                    )
+                    typer.secho(
+                        f"  • [{d.decision.value}] {d.change_name} — {d.reason_summary}", fg=d_color
+                    )
 
     except Exception as e:
         typer.secho(f"Error fetching scheduler status: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
+@scheduler_app.command("tick")
+def scheduler_tick_cmd(
+    project_id: str = typer.Option(None, "--project-id", "-p", help="Filter by registered project"),
+    json_output: bool = typer.Option(False, "--json", help="Output tick decisions as JSON"),
+) -> None:
+    """Execute a single scheduler evaluation and admission tick."""
+    try:
+        with db_manager.session() as session:
+            uow = PostgresPersistenceUnitOfWork(session)
+            scheduler = SchedulerService(uow)
+            decisions = scheduler.tick(project_id=project_id)
+
+            if json_output:
+                typer.echo(json.dumps([d.model_dump() for d in decisions], indent=2, default=str))
+                return
+
+            typer.secho(
+                f"Scheduler tick completed: {len(decisions)} items evaluated.",
+                fg=typer.colors.CYAN,
+                bold=True,
+            )
+            for d in decisions:
+                d_color = (
+                    typer.colors.GREEN if d.decision.value == "ADMITTED" else typer.colors.YELLOW
+                )
+                typer.secho(
+                    f"  • [{d.decision.value}] {d.change_name} (Score: {d.priority_score:.1f}) — {d.reason_summary}",
+                    fg=d_color,
+                )
+
+    except Exception as e:
+        typer.secho(f"Error during scheduler tick: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
+@scheduler_app.command("run")
+def scheduler_run_cmd(
+    project_id: str = typer.Option(None, "--project-id", "-p", help="Filter by registered project"),
+    interval: int = typer.Option(30, "--interval", "-i", help="Tick interval in seconds"),
+) -> None:
+    """Run scheduler loop in the foreground."""
+    typer.secho(
+        f"Starting mini me autonomous scheduler (interval: {interval}s)...",
+        fg=typer.colors.CYAN,
+        bold=True,
+    )
+    import time
+
+    try:
+        while True:
+            with db_manager.session() as session:
+                uow = PostgresPersistenceUnitOfWork(session)
+                scheduler = SchedulerService(uow)
+                decisions = scheduler.tick(project_id=project_id)
+                admitted = [d for d in decisions if d.decision.value == "ADMITTED"]
+                if admitted:
+                    for a in admitted:
+                        typer.secho(
+                            f"[{datetime.now().strftime('%H:%M:%S')}] ADMITTED: {a.change_name} (Run ID: {a.run_id})",
+                            fg=typer.colors.GREEN,
+                            bold=True,
+                        )
+                else:
+                    logger.debug(f"Scheduler tick: {len(decisions)} evaluated, 0 admitted.")
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        typer.secho("\nScheduler stopped by operator.", fg=typer.colors.YELLOW)
+
+
+# -----------------------------------------------------------------------------
+# Queue CLI Commands
+# -----------------------------------------------------------------------------
+
+
+@queue_app.command("list")
+def queue_list_cmd(
+    project_id: str = typer.Option(None, "--project-id", "-p", help="Filter by registered project"),
+    ready_only: bool = typer.Option(
+        False, "--ready-only", "-r", help="Only show READY/eligible items"
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Output queue as JSON"),
+) -> None:
+    """List ranked items in the autonomous work queue."""
+    try:
+        with db_manager.session() as session:
+            uow = PostgresPersistenceUnitOfWork(session)
+            scheduler = SchedulerService(uow)
+            if ready_only:
+                items = uow.work_queue.list_ready(project_id)
+            else:
+                items = uow.work_queue.list_all(project_id)
+            ranked = scheduler.rank_candidates(items)
+
+            if json_output:
+                typer.echo(json.dumps([i.model_dump() for i in ranked], indent=2, default=str))
+                return
+
+            typer.secho("=== mini me Work Queue ===", fg=typer.colors.CYAN, bold=True)
+            if not ranked:
+                typer.echo("Queue is empty.")
+                return
+
+            for idx, item in enumerate(ranked, start=1):
+                stat_color = typer.colors.GREEN if item.admission_eligible else typer.colors.YELLOW
+                issue_str = f"#{item.github_issue_number}" if item.github_issue_number else "-"
+                typer.secho(
+                    f"{idx:2d}. [{item.priority.value:8s}] {item.change_name} (Issue: {issue_str}) — Score: {item.priority_score:.1f}",
+                    fg=stat_color,
+                    bold=item.admission_eligible,
+                )
+                if item.blocked_reason:
+                    typer.echo(f"     Blocked: {item.blocked_reason}")
+
+    except Exception as e:
+        typer.secho(f"Error listing queue: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
+@queue_app.command("explain")
+def queue_explain_cmd(
+    change_name: str = typer.Argument(
+        ..., help="Change name to explain (e.g. 016-autonomous-queue-work-selection)"
+    ),
+    project_id: str = typer.Option("mini-me", "--project-id", "-p", help="Project ID"),
+    json_output: bool = typer.Option(False, "--json", help="Output explanation as JSON"),
+) -> None:
+    """Explain priority ranking, aging, score factors, and admission blockers for a queue item."""
+    try:
+        with db_manager.session() as session:
+            uow = PostgresPersistenceUnitOfWork(session)
+            scheduler = SchedulerService(uow)
+            report = scheduler.explain_item_priority(project_id, change_name)
+
+            if json_output:
+                typer.echo(json.dumps(report.model_dump(), indent=2, default=str))
+                return
+
+            typer.secho(
+                f"=== Queue Explanation: {change_name} ===", fg=typer.colors.CYAN, bold=True
+            )
+            typer.echo(f"Position: #{report.queue_position}")
+            typer.echo(f"Priority: {report.priority.value}")
+            typer.echo(f"Base Score: {report.base_score:.1f}")
+            typer.echo(f"Aging Bonus: {report.aging_bonus:.1f}")
+            typer.echo(f"Total Score: {report.total_score:.1f}")
+            typer.echo(f"Admission Eligible: {'YES' if report.admission_eligible else 'NO'}")
+            if report.refusal_code:
+                typer.secho(f"Refusal Reason: {report.refusal_code.value}", fg=typer.colors.RED)
+            if report.blockers:
+                typer.echo("\nBlockers:")
+                for b in report.blockers:
+                    typer.echo(f"  • {b}")
+            typer.secho(f"\nRationale: {report.selection_rationale}", fg=typer.colors.MAGENTA)
+
+    except Exception as e:
+        typer.secho(f"Error explaining queue item: {e}", fg=typer.colors.RED)
         raise typer.Exit(code=1)
 
 
