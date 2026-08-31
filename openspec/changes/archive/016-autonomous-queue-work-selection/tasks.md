@@ -57,8 +57,8 @@
 - [x] 9.3 Record verifiable pilot execution evidence and compute native self-hosting phase metrics.
 
 ## 10. Canonical Checks, Review, Audit, PR & Archive
-- [ ] 10.1 Run full check suite: pytest, Ruff lint & format, git diff check, OpenSpec strict validation, Alembic head check.
-- [ ] 10.2 Freeze candidate and perform complementary review.
-- [ ] 10.3 Perform DeepSeek independent audit.
-- [ ] 10.4 Prepare PR on GitHub and authorize merge upon passing all gates.
-- [ ] 10.5 Post-merge: sync OpenSpec, update roadmap docs, archive 016, and cleanup.
+- [x] 10.1 Run full check suite: pytest, Ruff lint & format, git diff check, OpenSpec strict validation, Alembic head check.
+- [x] 10.2 Freeze candidate and perform complementary review.
+- [x] 10.3 Perform DeepSeek independent audit.
+- [x] 10.4 Prepare PR on GitHub and authorize merge upon passing all gates.
+- [x] 10.5 Post-merge: sync OpenSpec, update roadmap docs, archive 016, and cleanup.

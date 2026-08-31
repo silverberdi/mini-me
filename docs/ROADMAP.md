@@ -2,7 +2,7 @@
 
 Only the current stage should exist as an active OpenSpec change. Future stages are converted into OpenSpec changes only after prior-stage closure and a fresh readiness review.
 
-## Delivered Stages (001 – 015)
+## Delivered Stages (001 – 016)
 - **001 Foundation (`001-foundation`)**: PostgreSQL state/events/migrations, project registry, immutable repository binding, OpenSpec DoR, minimal status/health.
 - **002 Implementation Pipeline (`002-implementation-pipeline`)**: Worktree lifecycle, Codex/Antigravity implementers, deterministic checks runner.
 - **003 Complementary Review Pipeline (`003-complementary-review-pipeline`)**: Codex ↔ Antigravity complementary review, structured verdicts, bounded correction loop.
@@ -18,23 +18,17 @@ Only the current stage should exist as an active OpenSpec change. Future stages 
 - **013 Container Preview + Guided UI Validation (`013-container-preview-guided-validation`)**: Isolated candidate-bound container previews, image digest authority, guided validation scenarios, stale validation invalidation.
 - **014 TUI Operator Console (`014-tui-operator-console`)**: Interactive terminal operator console via Textual, multi-viewport layout, progressive disclosure, 013 preview/validation projection, and zero direct database queries.
 - **015 Operator Actions / Control Plane (`015-operator-actions-control-plane`)**: Reusable canonical operational actions and mutation control plane (`ControlPlaneService`), optimistic concurrency protection, idempotency, safe cancellation, audit trail persistence, and TUI/CLI/API execution integration.
+- **016 Autonomous Queue + Work Selection (`016-autonomous-queue-work-selection`)**: Autonomous backlog item discovery, deterministic prioritization scoring, starvation aging, roadmap predecessor governance, admission control, native candidate startup, CLI/API management, and TUI queue observability.
 
 ---
 
-## Canonical Roadmap (016 – 018)
+## Canonical Roadmap (017 – 018)
 
-### 016 — Autonomous Queue + Work Selection (`016-autonomous-queue-work-selection`) — NEXT
-**Outcome:** Allow mini me to automatically discover, prioritize and admit READY work across registered repositories.
-**Expected Scope:**
-- Policy inputs: roadmap order, dependencies, provider availability, budget, concurrency, RUN/DRAIN/WAIT;
-- Creating a valid READY change allows mini me to autonomously schedule and execute it.
-**Boundary:** Do NOT implement 016 during 013.
-
-### 017 — PWA Control Center (`017-pwa-control-center`)
+### 017 — PWA Control Center (`017-pwa-control-center`) — NEXT
 **Outcome:** Deliver the rich web/PWA operator experience on top of the already-established control plane.
 **Expected Scope:**
 - Observability, mutations, previews, guided validation, history, provider/capacity state, responsive operational UX.
-**Boundary:** Do NOT implement the PWA early during 013.
+**Boundary:** Do NOT implement the PWA early before 017 is activated.
 
 ### 018 — End-to-End Self-Operating Development Loop (`018-end-to-end-self-operating-loop`)
 **Outcome:** Consolidate the complete autonomous SDLC from discovery to production closure and metrics:
