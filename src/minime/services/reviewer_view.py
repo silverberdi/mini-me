@@ -14,6 +14,19 @@ class SymlinkInCandidateError(RuntimeError):
     pass
 
 
+IGNORED_REVIEW_DIRS = {
+    ".venv",
+    "venv",
+    ".git",
+    "__pycache__",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".mypy_cache",
+    ".minime",
+    "node_modules",
+}
+
+
 def scan_candidate_for_symlinks(source_path: Path) -> list[str]:
     """Detect any symlinks in candidate files or directories without following links."""
     symlinks: list[str] = []
@@ -23,6 +36,7 @@ def scan_candidate_for_symlinks(source_path: Path) -> list[str]:
         return symlinks
 
     for root, dirs, files in os.walk(source_path, followlinks=False):
+        dirs[:] = [d for d in dirs if d not in IGNORED_REVIEW_DIRS]
         root_path = Path(root)
 
         # Check directories for symlinks
@@ -77,6 +91,7 @@ class ReviewerViewManager:
             target,
             symlinks=False,
             ignore_dangling_symlinks=False,
+            ignore=shutil.ignore_patterns(*IGNORED_REVIEW_DIRS),
         )
 
         # 3. Recursively remove write permissions from all files and directories
