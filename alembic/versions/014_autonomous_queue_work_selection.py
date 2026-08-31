@@ -19,6 +19,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    op.execute("ALTER TABLE alembic_version ALTER COLUMN version_num TYPE VARCHAR(64)")
     op.create_table(
         "work_queue_snapshots",
         sa.Column("id", sa.String(length=64), primary_key=True, nullable=False),

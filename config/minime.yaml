@@ -70,11 +70,11 @@ providers:
 
 github:
   account_scope: personal
-  owner: REPLACE_ME
+  owner: silverberdi
   app_id_env: MINIME_GITHUB_APP_ID
   installation_id_env: MINIME_GITHUB_INSTALLATION_ID
   private_key_path_env: MINIME_GITHUB_PRIVATE_KEY_PATH
-  global_project_number: null
+  global_project_number: 2
 
 security:
   redact_secrets: true
@@ -84,7 +84,7 @@ security:
 projects:
   mini-me:
     enabled: true
-    repository: REPLACE_ME/mini-me
+    repository: silverberdi/mini-me
     base_branch: main
     openspec_path: openspec
     implementer: codex

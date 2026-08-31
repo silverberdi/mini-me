@@ -33,10 +33,8 @@ DEFAULT_PG_URL = os.environ.get(
 def _ensure_pg_server() -> str | None:
     """Ensure a PostgreSQL database is available, starting local test instance if needed."""
     candidate_urls = [
-        os.environ.get("MINIME_DATABASE_URL"),
+        os.environ.get("MINIME_TEST_DATABASE_URL"),
         "postgresql+psycopg://testuser@localhost:54333/minime_test",
-        "postgresql+psycopg://minime:pass@localhost:5432/minime",
-        "postgresql+psycopg://localhost:5432/minime",
     ]
 
     for url in candidate_urls:

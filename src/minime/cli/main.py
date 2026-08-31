@@ -678,6 +678,7 @@ def scheduler_status_cmd(
 @scheduler_app.command("tick")
 def scheduler_tick_cmd(
     project_id: str = typer.Option(None, "--project-id", "-p", help="Filter by registered project"),
+    drive: bool = typer.Option(False, "--drive", "-d", help="Immediately drive admitted candidate execution"),
     json_output: bool = typer.Option(False, "--json", help="Output tick decisions as JSON"),
 ) -> None:
     """Execute a single scheduler evaluation and admission tick."""
@@ -685,7 +686,10 @@ def scheduler_tick_cmd(
         with db_manager.session() as session:
             uow = PostgresPersistenceUnitOfWork(session)
             scheduler = SchedulerService(uow)
-            decisions = scheduler.tick(project_id=project_id)
+            if drive is True:
+                decisions = scheduler.tick(project_id=project_id, drive_admitted=True)
+            else:
+                decisions = scheduler.tick(project_id=project_id)
 
             if json_output:
                 typer.echo(json.dumps([d.model_dump() for d in decisions], indent=2, default=str))
@@ -714,6 +718,7 @@ def scheduler_tick_cmd(
 def scheduler_run_cmd(
     project_id: str = typer.Option(None, "--project-id", "-p", help="Filter by registered project"),
     interval: int = typer.Option(30, "--interval", "-i", help="Tick interval in seconds"),
+    drive: bool = typer.Option(True, "--drive/--no-drive", help="Drive admitted candidate execution"),
 ) -> None:
     """Run scheduler loop in the foreground."""
     typer.secho(
@@ -728,7 +733,10 @@ def scheduler_run_cmd(
             with db_manager.session() as session:
                 uow = PostgresPersistenceUnitOfWork(session)
                 scheduler = SchedulerService(uow)
-                decisions = scheduler.tick(project_id=project_id)
+                if drive is not False:
+                    decisions = scheduler.tick(project_id=project_id, drive_admitted=True)
+                else:
+                    decisions = scheduler.tick(project_id=project_id)
                 admitted = [d for d in decisions if d.decision.value == "ADMITTED"]
                 if admitted:
                     for a in admitted:

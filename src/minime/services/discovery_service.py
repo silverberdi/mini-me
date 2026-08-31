@@ -10,6 +10,7 @@ from typing import Any
 from minime.adapters.github import GitHubAdapter
 from minime.adapters.openspec import OpenSpecAdapter
 from minime.domain.enums import (
+    ChangeStatus,
     QueuePriority,
     ReadinessState,
 )
@@ -99,6 +100,31 @@ class WorkDiscoveryService:
                 existing_change = self.uow.changes.get_by_name(project.project_id, change.name)
                 if not existing_change:
                     self.uow.changes.save(change)
+
+            # Reconcile archived changes in DB to ChangeStatus.DONE
+            archive_dir = Path(self.project_root) / project.openspec_path / "changes" / "archive"
+            archived_names: set[str] = set()
+            if archive_dir.exists() and archive_dir.is_dir():
+                archived_names = {d.name for d in archive_dir.iterdir() if d.is_dir()}
+
+            active_change_names = {c.name for c in changes}
+            all_db_changes = self.uow.changes.list_by_project(project.project_id)
+            for db_change in all_db_changes:
+                if db_change.name not in active_change_names and db_change.status != ChangeStatus.DONE:
+                    stage_num = extract_roadmap_stage(db_change.name)
+                    stage_prefix = f"{stage_num:03d}" if stage_num is not None else None
+                    is_archived = (
+                        db_change.name in archived_names
+                        or any(
+                            stage_prefix and (stage_prefix in a or f"-{stage_prefix}-" in a)
+                            for a in archived_names
+                        )
+                    )
+                    if is_archived:
+                        updated_change = db_change.model_copy(
+                            update={"status": ChangeStatus.DONE, "updated_at": now}
+                        )
+                        self.uow.changes.save(updated_change)
 
             # 2. Fetch remote issues from repository
             remote_issues: list[dict[str, Any]] = []

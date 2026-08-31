@@ -199,6 +199,14 @@ class WorktreeManager:
             operation_type="worktree_add",
             managed_worktree_path=path,
         )
+
+        # Copy active OpenSpec change directory into isolated worktree if present in project_root
+        source_change_dir = self.project_root / "openspec" / "changes" / change_name
+        dest_change_dir = path / "openspec" / "changes" / change_name
+        if source_change_dir.exists() and not dest_change_dir.exists():
+            dest_change_dir.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(source_change_dir, dest_change_dir)
+
         return WorktreeInfo(path=path, branch_name=branch_name, base_sha=base_sha)
 
     async def current_sha(self, worktree_path: str | Path) -> str:

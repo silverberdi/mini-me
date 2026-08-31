@@ -324,7 +324,7 @@ class SchedulerService:
         )
 
     def admit_work_item(
-        self, project_id: str, change_name: str
+        self, project_id: str, change_name: str, drive_admitted: bool = False
     ) -> tuple[AdmissionDecision, SchedulerDecisionRecord, OrchestrationRun | None]:
         """Atomically evaluate admission and start native candidate execution if eligible."""
         decision, refusal_code, reason_summary, selected_implementer = self.evaluate_admission(
@@ -415,6 +415,12 @@ class SchedulerService:
                 self.uow.work_queue.save(updated_item)
 
             self.uow.commit()
+
+            if drive_admitted:
+                run = self.orchestration_service.drive_coordinator(
+                    run.run_id, project_root=self.project_root
+                )
+
             return AdmissionDecision.ADMITTED, decision_record, run
 
         else:
@@ -445,7 +451,9 @@ class SchedulerService:
             self.uow.commit()
             return AdmissionDecision.REFUSED, decision_record, None
 
-    def tick(self, project_id: str | None = None) -> list[SchedulerDecisionRecord]:
+    def tick(
+        self, project_id: str | None = None, drive_admitted: bool = False
+    ) -> list[SchedulerDecisionRecord]:
         """Execute one complete scheduler evaluation and admission cycle."""
         # 1. Discover work items
         try:
@@ -471,7 +479,7 @@ class SchedulerService:
                 )
                 if decision == AdmissionDecision.ADMITTED and available_slots > 0:
                     dec, record, run = self.admit_work_item(
-                        candidate.project_id, candidate.change_name
+                        candidate.project_id, candidate.change_name, drive_admitted=drive_admitted
                     )
                     decision_records.append(record)
                     if dec == AdmissionDecision.ADMITTED:
