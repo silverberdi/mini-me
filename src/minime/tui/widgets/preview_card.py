@@ -66,7 +66,9 @@ class PreviewValidationWidget(Widget):
             body.append(f"Image Digest: {short_sha(sess.image_digest, 16)}\n", style="dim cyan")
 
             if sess.failure_reason:
-                body.append(f"Failure Reason: {sanitize_text(sess.failure_reason)}\n", style="bold red")
+                body.append(
+                    f"Failure Reason: {sanitize_text(sess.failure_reason)}\n", style="bold red"
+                )
         else:
             body.append("Preview Status: ")
             body.append_text(get_status_text("NOT_STARTED"))
@@ -82,7 +84,9 @@ class PreviewValidationWidget(Widget):
             )
             body.append("!" * 50 + "\n\n", style="bold yellow")
         elif val.is_authorized:
-            body.append("\n✓ Candidate validation AUTHORIZED for human merge.\n\n", style="bold green")
+            body.append(
+                "\n✓ Candidate validation AUTHORIZED for human merge.\n\n", style="bold green"
+            )
 
         # Latest Validation Run
         if val.latest_validation:
@@ -91,13 +95,17 @@ class PreviewValidationWidget(Widget):
             v_badge = get_status_text(v.verdict)
             body.append("  Verdict: ")
             body.append_text(v_badge)
-            body.append(f"  Operator: {v.operator or 'operator'}  Time: {format_timestamp(v.created_at)}\n")
+            body.append(
+                f"  Operator: {v.operator or 'operator'}  Time: {format_timestamp(v.created_at)}\n"
+            )
             if v.notes:
                 body.append(f"  Notes: {sanitize_text(v.notes)}\n", style="italic white")
 
         # Guided Validation Scenarios
         if val.scenarios:
-            body.append(f"\nGuided Validation Scenarios ({len(val.scenarios)}):\n", style="bold cyan")
+            body.append(
+                f"\nGuided Validation Scenarios ({len(val.scenarios)}):\n", style="bold cyan"
+            )
             for idx, sc in enumerate(val.scenarios, 1):
                 body.append(f"\n  Scenario {idx}: {sc.title}\n", style="bold white")
                 if sc.description:

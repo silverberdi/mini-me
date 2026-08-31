@@ -31,6 +31,7 @@ from minime.db.models import (
     MetricFactModel,
     OpenRouterBudgetPolicyModel,
     OpenRouterPricingSnapshotModel,
+    OperatorActionRecordModel,
     OrchestrationCandidateModel,
     OrchestrationExternalActionModel,
     OrchestrationRunModel,
@@ -61,6 +62,9 @@ from minime.domain.enums import (
     GitOperationStatus,
     HumanGate,
     JobStatus,
+    OperatorActionErrorCode,
+    OperatorActionStatus,
+    OperatorActionType,
     OrchestrationStage,
     OrchestrationStopOutcome,
     PreviewStatus,
@@ -96,6 +100,7 @@ from minime.domain.interfaces import (
     MetricFactRepositoryInterface,
     OpenRouterBudgetPolicyRepositoryInterface,
     OpenRouterPricingSnapshotRepositoryInterface,
+    OperatorActionRepositoryInterface,
     OrchestrationCandidateRepositoryInterface,
     OrchestrationExternalActionRepositoryInterface,
     OrchestrationRunRepositoryInterface,
@@ -132,6 +137,7 @@ from minime.domain.models import (
     MetricFact,
     OpenRouterBudgetPolicy,
     OpenRouterPricingSnapshot,
+    OperatorActionRecord,
     OrchestrationCandidate,
     OrchestrationExternalAction,
     OrchestrationRun,
@@ -2836,6 +2842,27 @@ class PostgresPreviewSessionRepository(PreviewSessionRepositoryInterface):
         models = self.session.scalars(stmt).all()
         return [preview_session_model_to_domain(m) for m in models]
 
+    def get_active_for_change(self, project_id: str, change_name: str) -> PreviewSession | None:
+        active_statuses = [
+            PreviewStatus.REQUESTED.value,
+            PreviewStatus.BUILDING.value,
+            PreviewStatus.STARTING.value,
+            PreviewStatus.PROBING.value,
+            PreviewStatus.READY.value,
+        ]
+        stmt = (
+            select(PreviewSessionModel)
+            .where(
+                PreviewSessionModel.project_id == project_id,
+                PreviewSessionModel.change_name == change_name,
+                PreviewSessionModel.status.in_(active_statuses),
+            )
+            .order_by(desc(PreviewSessionModel.created_at))
+            .limit(1)
+        )
+        model = self.session.scalars(stmt).first()
+        return preview_session_model_to_domain(model) if model else None
+
 
 class PostgresValidationRunRepository(ValidationRunRepositoryInterface):
     def __init__(self, session: Session):
@@ -2901,6 +2928,126 @@ class PostgresValidationRunRepository(ValidationRunRepositoryInterface):
         return [validation_run_model_to_domain(m) for m in models]
 
 
+def operator_action_record_model_to_domain(
+    model: OperatorActionRecordModel,
+) -> OperatorActionRecord:
+    return OperatorActionRecord(
+        id=model.id,
+        action_request_id=model.action_request_id,
+        project_id=model.project_id,
+        change_name=model.change_name,
+        run_id=model.run_id,
+        job_id=model.job_id,
+        action_type=OperatorActionType(model.action_type),
+        actor_identity=model.actor_identity,
+        source_interface=model.source_interface,
+        precondition_stage=model.precondition_stage,
+        precondition_gate=model.precondition_gate,
+        status=OperatorActionStatus(model.status),
+        error_code=OperatorActionErrorCode(model.error_code) if model.error_code else None,
+        summary=model.summary,
+        resulting_stage=model.resulting_stage,
+        resulting_outcome=model.resulting_outcome,
+        resulting_gate=model.resulting_gate,
+        evidence_reference=model.evidence_reference,
+        parameters_json=dict(model.parameters_json or {}),
+        result_payload_json=dict(model.result_payload_json or {}),
+        created_at=model.created_at,
+    )
+
+
+def operator_action_record_domain_to_model(
+    domain: OperatorActionRecord,
+) -> OperatorActionRecordModel:
+    return OperatorActionRecordModel(
+        id=domain.id,
+        action_request_id=domain.action_request_id,
+        project_id=domain.project_id,
+        change_name=domain.change_name,
+        run_id=domain.run_id,
+        job_id=domain.job_id,
+        action_type=domain.action_type.value
+        if hasattr(domain.action_type, "value")
+        else str(domain.action_type),
+        actor_identity=domain.actor_identity,
+        source_interface=domain.source_interface,
+        precondition_stage=domain.precondition_stage,
+        precondition_gate=domain.precondition_gate,
+        status=domain.status.value if hasattr(domain.status, "value") else str(domain.status),
+        error_code=domain.error_code.value
+        if domain.error_code and hasattr(domain.error_code, "value")
+        else (str(domain.error_code) if domain.error_code else None),
+        summary=domain.summary,
+        resulting_stage=domain.resulting_stage,
+        resulting_outcome=domain.resulting_outcome,
+        resulting_gate=domain.resulting_gate,
+        evidence_reference=domain.evidence_reference,
+        parameters_json=domain.parameters_json,
+        result_payload_json=domain.result_payload_json,
+        created_at=domain.created_at,
+    )
+
+
+class PostgresOperatorActionRepository(OperatorActionRepositoryInterface):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def save(self, record: OperatorActionRecord) -> None:
+        existing = self.session.get(OperatorActionRecordModel, record.id)
+        if existing:
+            existing.status = (
+                record.status.value if hasattr(record.status, "value") else str(record.status)
+            )
+            existing.error_code = (
+                record.error_code.value
+                if record.error_code and hasattr(record.error_code, "value")
+                else (str(record.error_code) if record.error_code else None)
+            )
+            existing.summary = record.summary
+            existing.resulting_stage = record.resulting_stage
+            existing.resulting_outcome = record.resulting_outcome
+            existing.resulting_gate = record.resulting_gate
+            existing.evidence_reference = record.evidence_reference
+            existing.parameters_json = record.parameters_json
+            existing.result_payload_json = record.result_payload_json
+        else:
+            model = operator_action_record_domain_to_model(record)
+            self.session.add(model)
+
+    def get_by_id(self, record_id: str) -> OperatorActionRecord | None:
+        model = self.session.get(OperatorActionRecordModel, record_id)
+        return operator_action_record_model_to_domain(model) if model else None
+
+    def get_by_request_id(self, action_request_id: str) -> OperatorActionRecord | None:
+        stmt = (
+            select(OperatorActionRecordModel)
+            .where(OperatorActionRecordModel.action_request_id == action_request_id)
+            .limit(1)
+        )
+        model = self.session.scalars(stmt).first()
+        return operator_action_record_model_to_domain(model) if model else None
+
+    def list_by_run(self, run_id: str, limit: int = 50) -> list[OperatorActionRecord]:
+        stmt = (
+            select(OperatorActionRecordModel)
+            .where(OperatorActionRecordModel.run_id == run_id)
+            .order_by(desc(OperatorActionRecordModel.created_at))
+            .limit(limit)
+        )
+        models = self.session.scalars(stmt).all()
+        return [operator_action_record_model_to_domain(m) for m in models]
+
+    def list_by_project(self, project_id: str, limit: int = 50) -> list[OperatorActionRecord]:
+        stmt = (
+            select(OperatorActionRecordModel)
+            .where(OperatorActionRecordModel.project_id == project_id)
+            .order_by(desc(OperatorActionRecordModel.created_at))
+            .limit(limit)
+        )
+        models = self.session.scalars(stmt).all()
+        return [operator_action_record_model_to_domain(m) for m in models]
+
+
 class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
     """Encapsulates a database session for atomic operations across repositories."""
 
@@ -2938,6 +3085,7 @@ class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.orchestration_external_actions = PostgresOrchestrationExternalActionRepository(session)
         self.preview_sessions = PostgresPreviewSessionRepository(session)
         self.validation_runs = PostgresValidationRunRepository(session)
+        self.operator_actions = PostgresOperatorActionRepository(session)
 
     def commit(self) -> None:
         self.session.commit()

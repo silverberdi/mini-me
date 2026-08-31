@@ -974,3 +974,45 @@ class ValidationRunModel(Base):
 
     project: Mapped[ProjectModel] = relationship("ProjectModel")
     preview: Mapped[PreviewSessionModel | None] = relationship("PreviewSessionModel")
+
+
+class OperatorActionRecordModel(Base):
+    __tablename__ = "operator_action_records"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    action_request_id: Mapped[str] = mapped_column(
+        String(64), unique=True, nullable=False, index=True
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    change_name: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    run_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("orchestration_runs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    job_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    action_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    actor_identity: Mapped[str] = mapped_column(String(128), default="operator", nullable=False)
+    source_interface: Mapped[str] = mapped_column(String(64), default="tui", nullable=False)
+    precondition_stage: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    precondition_gate: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="ACCEPTED", nullable=False, index=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    resulting_stage: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    resulting_outcome: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    resulting_gate: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    evidence_reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    parameters_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    result_payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+
+    project: Mapped[ProjectModel] = relationship("ProjectModel")
+    run: Mapped[OrchestrationRunModel | None] = relationship("OrchestrationRunModel")

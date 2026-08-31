@@ -36,7 +36,9 @@ class AuditSummaryWidget(Widget):
     def watch_audit(self, val: AuditSummaryDTO | None) -> None:
         content = self.query_one("#audit-content", Static)
         if val is None or val.status == "not_started":
-            content.update(Text("Audit not yet performed for current candidate.", style="dim italic"))
+            content.update(
+                Text("Audit not yet performed for current candidate.", style="dim italic")
+            )
             return
 
         body = Text()

@@ -46,11 +46,16 @@ class SystemHealthCard(Widget):
 
         # Database
         db_badge = get_status_text("HEALTHY" if val.database_healthy else "FAILED")
-        table.add_row("Database Engine", Text.assemble(db_badge, f"  {val.database_engine} ({val.database_message})"))
+        table.add_row(
+            "Database Engine",
+            Text.assemble(db_badge, f"  {val.database_engine} ({val.database_message})"),
+        )
 
         # Scheduler
         sched_badge = get_status_text("RUN" if val.scheduler_mode == "RUN" else "WAIT")
-        table.add_row("Scheduler Mode", Text.assemble(sched_badge, f"  Queue Depth: {val.queue_depth}"))
+        table.add_row(
+            "Scheduler Mode", Text.assemble(sched_badge, f"  Queue Depth: {val.queue_depth}")
+        )
 
         # GitHub App
         gh_badge = get_status_text(val.github_app_health)

@@ -18,7 +18,6 @@ from minime.tui.client import TuiQueryClient
 async def test_tui_query_client_overview():
     mock_uow = MagicMock()
     mock_overview = DashboardOverviewResponse(
-
         system_status=SystemStatusDTO(
             healthy=True,
             database_engine="PostgreSQL",

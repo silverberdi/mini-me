@@ -54,21 +54,31 @@ class CandidateLineageWidget(Widget):
         if self.current_candidate:
             c = self.current_candidate
             body.append(f"★ Generation {c.generation} [AUTHORITATIVE CURRENT]\n", style="bold cyan")
-            body.append(f"  Head SHA: {c.candidate_sha} ({short_sha(c.candidate_sha)})\n", style="bold green")
+            body.append(
+                f"  Head SHA: {c.candidate_sha} ({short_sha(c.candidate_sha)})\n",
+                style="bold green",
+            )
             body.append(f"  Base SHA: {c.base_sha} ({short_sha(c.base_sha)})\n", style="white")
             if c.manifest_hash:
                 body.append(f"  Manifest Hash: {short_sha(c.manifest_hash, 12)}\n", style="dim")
             if c.image_digest:
                 body.append(f"  Image Digest: {short_sha(c.image_digest, 16)}\n", style="cyan")
             if c.changed_files:
-                body.append(f"  Changed Files ({len(c.changed_files)}): {', '.join(c.changed_files[:3])}", style="dim")
+                body.append(
+                    f"  Changed Files ({len(c.changed_files)}): {', '.join(c.changed_files[:3])}",
+                    style="dim",
+                )
                 if len(c.changed_files) > 3:
-                    body.append(f" (+{len(c.changed_files)-3} more)", style="dim")
+                    body.append(f" (+{len(c.changed_files) - 3} more)", style="dim")
                 body.append("\n")
             body.append(f"  Created: {format_timestamp(c.created_at)}\n", style="dim")
 
         # Render historical / superseded candidates
-        superseded = [h for h in self.history if self.current_candidate is None or h.generation != self.current_candidate.generation]
+        superseded = [
+            h
+            for h in self.history
+            if self.current_candidate is None or h.generation != self.current_candidate.generation
+        ]
         if superseded:
             body.append("\n" + "─" * 40 + "\n", style="dim")
             body.append("Historical / Superseded Generations:\n", style="dim bold")

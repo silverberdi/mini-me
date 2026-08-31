@@ -9,8 +9,11 @@ from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Static
 
+from minime.domain.models import ActionDescriptor, OperatorActionRecord
 from minime.services.dashboard_service import DashboardChangeDetailResponse
 from minime.tui.models import get_status_text, short_sha
+from minime.tui.widgets.action_bar import ActionsBarWidget
+from minime.tui.widgets.action_history import ActionHistoryWidget
 from minime.tui.widgets.audit_card import AuditSummaryWidget
 from minime.tui.widgets.candidate_lineage import CandidateLineageWidget
 from minime.tui.widgets.checks_table import ChecksSummaryWidget
@@ -38,10 +41,16 @@ class RunDetailView(Widget):
     """
 
     detail_data: reactive[DashboardChangeDetailResponse | None] = reactive(None)
+    available_actions: reactive[list[ActionDescriptor]] = reactive(list, layout=True)
+    action_history: reactive[list[OperatorActionRecord]] = reactive(list, layout=True)
+    last_action_feedback: reactive[str | None] = reactive(None)
 
     def compose(self) -> ComposeResult:
         with Vertical(id="detail-container"):
-            yield Static("No change selected. Select a change from the Changes tab.", id="detail-header")
+            yield Static(
+                "No change selected. Select a change from the Changes tab.", id="detail-header"
+            )
+            yield ActionsBarWidget(id="detail-actions")
             with Horizontal(classes="scroll-container"):
                 with VerticalScroll(classes="detail-col-main"):
                     yield PipelineStepperWidget(id="detail-stepper")
@@ -52,11 +61,16 @@ class RunDetailView(Widget):
                     yield CandidateLineageWidget(id="detail-candidate")
                     yield ReviewSummaryWidget(id="detail-review")
                     yield AuditSummaryWidget(id="detail-audit")
+                    yield ActionHistoryWidget(id="detail-history")
 
     def watch_detail_data(self, val: DashboardChangeDetailResponse | None) -> None:
         header = self.query_one("#detail-header", Static)
         if val is None:
-            header.update(Text("No change selected. Select a change from the Changes tab.", style="dim italic"))
+            header.update(
+                Text(
+                    "No change selected. Select a change from the Changes tab.", style="dim italic"
+                )
+            )
             return
 
         # Update metadata header
@@ -64,7 +78,9 @@ class RunDetailView(Widget):
         body.append(f"RUN DETAIL: {val.project_id} / {val.change_name}\n", style="bold cyan")
 
         status_badge = get_status_text(val.status)
-        stage_badge = get_status_text(val.current_stage) if val.current_stage else Text("—", style="dim")
+        stage_badge = (
+            get_status_text(val.current_stage) if val.current_stage else Text("—", style="dim")
+        )
         body.append("Status: ")
         body.append_text(status_badge)
         body.append("  Stage: ")
@@ -84,7 +100,9 @@ class RunDetailView(Widget):
                 style="dim",
             )
             if val.github.pr_number:
-                body.append(f" | PR #{val.github.pr_number} ({val.github.pr_state or 'open'})", style="cyan")
+                body.append(
+                    f" | PR #{val.github.pr_number} ({val.github.pr_state or 'open'})", style="cyan"
+                )
             body.append("\n")
 
         header.update(body)
@@ -108,3 +126,15 @@ class RunDetailView(Widget):
 
         audit = self.query_one("#detail-audit", AuditSummaryWidget)
         audit.audit = val.audit
+
+    def watch_available_actions(self, val: list[ActionDescriptor]) -> None:
+        actions_bar = self.query_one("#detail-actions", ActionsBarWidget)
+        actions_bar.actions = val
+
+    def watch_action_history(self, val: list[OperatorActionRecord]) -> None:
+        history_widget = self.query_one("#detail-history", ActionHistoryWidget)
+        history_widget.history = val
+
+    def watch_last_action_feedback(self, val: str | None) -> None:
+        actions_bar = self.query_one("#detail-actions", ActionsBarWidget)
+        actions_bar.last_feedback = val

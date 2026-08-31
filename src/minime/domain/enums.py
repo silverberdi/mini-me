@@ -317,6 +317,10 @@ class EventType(str, Enum):
     VALIDATION_SUBMITTED = "VALIDATION_SUBMITTED"
     VALIDATION_INVALIDATED = "VALIDATION_INVALIDATED"
     VALIDATION_REQUIRED_GATE_BLOCKED = "VALIDATION_REQUIRED_GATE_BLOCKED"
+    OPERATOR_ACTION_REQUESTED = "OPERATOR_ACTION_REQUESTED"
+    OPERATOR_ACTION_EXECUTED = "OPERATOR_ACTION_EXECUTED"
+    OPERATOR_ACTION_REJECTED = "OPERATOR_ACTION_REJECTED"
+    OPERATOR_ACTION_FAILED = "OPERATOR_ACTION_FAILED"
 
 
 class PreviewStatus(str, Enum):
@@ -359,6 +363,8 @@ class OrchestrationStopOutcome(str, Enum):
     WAITING_CAPACITY = "WAITING_CAPACITY"
     WAITING_EXTERNAL = "WAITING_EXTERNAL"
     NEEDS_HUMAN = "NEEDS_HUMAN"
+    CANCELLED = "CANCELLED"
+    FAILED = "FAILED"
 
 
 class HumanGate(str, Enum):
@@ -387,3 +393,49 @@ class ExternalActionStatus(str, Enum):
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     AMBIGUOUS = "AMBIGUOUS"
+
+
+class OperatorActionType(str, Enum):
+    """Canonical action types supported by the Operator Control Plane."""
+
+    CONTINUE = "CONTINUE"
+    RESUME = "RESUME"
+    RETRY = "RETRY"
+    REASSIGN = "REASSIGN"
+    RESOLVE_GATE = "RESOLVE_GATE"
+    CANCEL = "CANCEL"
+    START_PREVIEW = "START_PREVIEW"
+    TEARDOWN_PREVIEW = "TEARDOWN_PREVIEW"
+    RECOVER_LOCKS = "RECOVER_LOCKS"
+
+
+class OperatorActionStatus(str, Enum):
+    """Durable execution outcome states for an operator action request."""
+
+    ACCEPTED = "ACCEPTED"
+    COMPLETED = "COMPLETED"
+    REJECTED = "REJECTED"
+    FAILED = "FAILED"
+    BLOCKED = "BLOCKED"
+
+
+class OperatorActionErrorCode(str, Enum):
+    """Structured machine-readable error codes for rejected or failed operator actions."""
+
+    ACTION_NOT_ALLOWED = "ACTION_NOT_ALLOWED"
+    STALE_OPERATOR_STATE = "STALE_OPERATOR_STATE"
+    AUTHORITY_MISMATCH = "AUTHORITY_MISMATCH"
+    PROVIDER_UNAVAILABLE = "PROVIDER_UNAVAILABLE"
+    BUDGET_BLOCKED = "BUDGET_BLOCKED"
+    RECOVERY_REQUIRED = "RECOVERY_REQUIRED"
+    ACTION_ALREADY_COMPLETED = "ACTION_ALREADY_COMPLETED"
+    INVALID_ACTION_PARAMETERS = "INVALID_ACTION_PARAMETERS"
+    ACTION_EXECUTION_FAILED = "ACTION_EXECUTION_FAILED"
+
+
+class ActionRiskLevel(str, Enum):
+    """Risk/impact classification for operator actions."""
+
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"

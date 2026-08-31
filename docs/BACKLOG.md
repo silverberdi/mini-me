@@ -1,6 +1,6 @@
 # Product Backlog
 
-## Delivered Items (Stages 001 – 012)
+## Delivered Items (Stages 001 – 015)
 
 | ID | Stage | Outcome | Verification idea |
 |---|---|---|---|
@@ -26,22 +26,22 @@
 | MM-046 | 010 | Governance and recovery hardening | transition key & identity tests |
 | MM-047 | 011 | Preserved candidate remediation generations | generation increment & drift tests |
 | MM-048 | 012 | Execution operations dashboard | API projections & UI visual tests |
+| MM-050 | 013 | Container preview lifecycle (build/start/probe/teardown) | real Docker build & health probe test |
+| MM-051 | 013 | Candidate authority binding `(head_sha, base_sha, image_digest)` | image digest authority & mutation tests |
+| MM-052 | 013 | Guided UI validation workflow & scenarios | scenario runner & PASS/FAIL state tests |
+| MM-053 | 013 | Stale validation invalidation & historical evidence | candidate drift / stale PASS tests |
+| MM-054 | 013 | Preview restart/orphan reconciliation & isolation | restart recovery & foreign container guard |
+| MM-055 | 013 | Dashboard integration for guided scenario validation | UI component & browser acceptance tests |
+| MM-060 | 014 | TUI operator console (Textual) | interactive terminal navigation tests |
+| MM-070 | 015 | Operator actions / control plane (retry/resume/reassign/gates) | mutation authority & auditability tests |
 
 ---
 
-## Canonical Active & Future Roadmap Items (Stages 013 – 018)
+## Canonical Active & Future Roadmap Items (Stages 016 – 018)
 
 | ID | Stage | Outcome | Verification idea |
 |---|---|---|---|
-| MM-050 | 013 (ACTIVE) | Container preview lifecycle (build/start/probe/teardown) | real Docker build & health probe test |
-| MM-051 | 013 (ACTIVE) | Candidate authority binding `(head_sha, base_sha, image_digest)` | image digest authority & mutation tests |
-| MM-052 | 013 (ACTIVE) | Guided UI validation workflow & scenarios | scenario runner & PASS/FAIL state tests |
-| MM-053 | 013 (ACTIVE) | Stale validation invalidation & historical evidence | candidate drift / stale PASS tests |
-| MM-054 | 013 (ACTIVE) | Preview restart/orphan reconciliation & isolation | restart recovery & foreign container guard |
-| MM-055 | 013 (ACTIVE) | Dashboard integration for guided scenario validation | UI component & browser acceptance tests |
-| MM-060 | 014 | TUI operator console (Textual) | interactive terminal navigation tests |
-| MM-070 | 015 | Operator actions / control plane (retry/resume/reassign/gates) | mutation authority & auditability tests |
-| MM-080 | 016 | Autonomous queue & work selection (readiness/budget/capacity) | multi-change autonomous scheduling tests |
+| MM-080 | 016 (NEXT) | Autonomous queue & work selection (readiness/budget/capacity) | multi-change autonomous scheduling tests |
 | MM-090 | 017 | PWA control center (rich web operator experience) | responsive web app & PWA acceptance |
 | MM-100 | 018 | End-to-end self-operating development loop & SDLC metrics | full-cycle autonomous delivery & metrics |
 

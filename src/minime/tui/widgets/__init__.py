@@ -1,5 +1,6 @@
-"""TUI widgets package for mini me."""
-
+from minime.tui.widgets.action_bar import ActionsBarWidget
+from minime.tui.widgets.action_history import ActionHistoryWidget
+from minime.tui.widgets.action_modal import ActionConfirmationModal, ActionSelectionModal
 from minime.tui.widgets.attention_list import AttentionListWidget
 from minime.tui.widgets.audit_card import AuditSummaryWidget
 from minime.tui.widgets.candidate_lineage import CandidateLineageWidget
@@ -28,4 +29,8 @@ __all__ = [
     "PreviewValidationWidget",
     "TimelineWidget",
     "HelpModal",
+    "ActionsBarWidget",
+    "ActionHistoryWidget",
+    "ActionSelectionModal",
+    "ActionConfirmationModal",
 ]

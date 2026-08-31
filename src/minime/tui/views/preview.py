@@ -35,7 +35,10 @@ class PreviewView(Widget):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="preview-view-container"):
-            yield Static("No change selected. Select a change from the Changes tab.", id="preview-view-header")
+            yield Static(
+                "No change selected. Select a change from the Changes tab.",
+                id="preview-view-header",
+            )
             yield PreviewValidationWidget(id="preview-view-card")
 
     def watch_detail_data(self, val: DashboardChangeDetailResponse | None) -> None:
@@ -43,15 +46,23 @@ class PreviewView(Widget):
         card = self.query_one("#preview-view-card", PreviewValidationWidget)
 
         if val is None:
-            header.update(Text("No change selected. Select a change from the Changes tab.", style="dim italic"))
+            header.update(
+                Text(
+                    "No change selected. Select a change from the Changes tab.", style="dim italic"
+                )
+            )
             card.summary = None
             return
 
         header_text = Text()
-        header_text.append(f"PREVIEW & VALIDATION: {val.project_id} / {val.change_name}\n", style="bold cyan")
+        header_text.append(
+            f"PREVIEW & VALIDATION: {val.project_id} / {val.change_name}\n", style="bold cyan"
+        )
         if val.candidate_authority:
             c = val.candidate_authority
-            header_text.append(f"Candidate Gen {c.generation} (SHA: {c.candidate_sha_short})", style="white")
+            header_text.append(
+                f"Candidate Gen {c.generation} (SHA: {c.candidate_sha_short})", style="white"
+            )
             if c.image_digest:
                 header_text.append(f" | Image: {c.image_digest[:16]}", style="dim cyan")
         header.update(header_text)

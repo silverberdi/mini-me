@@ -38,7 +38,9 @@ class ChecksSummaryWidget(Widget):
     def watch_checks(self, val: list[CheckResultItemDTO]) -> None:
         content = self.query_one("#checks-content", Static)
         if not val:
-            content.update(Text("No deterministic checks run yet for this candidate.", style="dim italic"))
+            content.update(
+                Text("No deterministic checks run yet for this candidate.", style="dim italic")
+            )
             return
 
         table = Table(box=None, show_header=True, expand=True, padding=(0, 1))

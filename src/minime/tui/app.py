@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.widgets import TabbedContent, TabPane
 
+from minime.domain.enums import OperatorActionStatus, OperatorActionType
 from minime.domain.interfaces import PersistenceUnitOfWork
+from minime.domain.models import ActionDescriptor, OperatorActionRecord, OperatorActionRequest
 from minime.services.dashboard_service import (
     DashboardChangeDetailResponse,
     DashboardOverviewResponse,
@@ -20,6 +22,8 @@ from minime.tui.views.changes import ChangesView
 from minime.tui.views.detail import RunDetailView
 from minime.tui.views.overview import OverviewView
 from minime.tui.views.preview import PreviewView
+from minime.tui.widgets.action_bar import ActionsBarWidget
+from minime.tui.widgets.action_modal import ActionConfirmationModal, ActionSelectionModal
 from minime.tui.widgets.header import HeaderWidget
 from minime.tui.widgets.help_modal import HelpModal
 
@@ -35,6 +39,7 @@ class MiniMeTuiApp(App[None]):
     BINDINGS = [
         Binding("q", "quit", "Quit", show=False),
         Binding("r", "refresh_data", "Refresh", show=True),
+        Binding("a", "open_actions", "Actions", show=True),
         Binding("1", "switch_tab('tab-overview')", "Overview", show=False),
         Binding("2", "switch_tab('tab-changes')", "Changes", show=False),
         Binding("3", "switch_tab('tab-detail')", "Detail", show=False),
@@ -99,7 +104,6 @@ class MiniMeTuiApp(App[None]):
         if self.refresh_interval > 0:
             self._refresh_timer = self.set_interval(self.refresh_interval, self._bg_refresh)
 
-
     async def _bg_refresh(self) -> None:
         await self.action_refresh_data()
 
@@ -123,7 +127,7 @@ class MiniMeTuiApp(App[None]):
                 detail: DashboardChangeDetailResponse | None = await self.client.get_change_detail(
                     self.selected_project_id, self.selected_change_name
                 )
-                self._apply_detail(detail)
+                await self._apply_detail(detail)
         except Exception as exc:
             self.notify(f"Data refresh warning: {exc}", severity="warning", timeout=3)
 
@@ -137,7 +141,7 @@ class MiniMeTuiApp(App[None]):
         changes_view = self.query_one("#view-changes", ChangesView)
         changes_view.changes = overview.changes
 
-    def _apply_detail(self, detail: DashboardChangeDetailResponse | None) -> None:
+    async def _apply_detail(self, detail: DashboardChangeDetailResponse | None) -> None:
         if detail is None:
             return
 
@@ -146,6 +150,16 @@ class MiniMeTuiApp(App[None]):
 
         preview_view = self.query_one("#view-preview", PreviewView)
         preview_view.detail_data = detail
+
+        # Fetch actions and history
+        run_id = await self.client.get_latest_run_id_for_change(
+            detail.project_id, detail.change_name
+        )
+        if run_id:
+            actions: list[ActionDescriptor] = await self.client.get_available_actions(run_id)
+            history: list[OperatorActionRecord] = await self.client.get_action_history(run_id)
+            detail_view.available_actions = actions
+            detail_view.action_history = history
 
     def action_switch_tab(self, tab_id: str) -> None:
         """Switch active tab in TabbedContent."""
@@ -165,7 +179,7 @@ class MiniMeTuiApp(App[None]):
         self.selected_project_id = message.project_id
         self.selected_change_name = message.change_name
         detail = await self.client.get_change_detail(message.project_id, message.change_name)
-        self._apply_detail(detail)
+        await self._apply_detail(detail)
         self.action_switch_tab("tab-detail")
 
     async def select_change(self, project_id: str, change_name: str) -> None:
@@ -173,7 +187,108 @@ class MiniMeTuiApp(App[None]):
         self.selected_project_id = project_id
         self.selected_change_name = change_name
         detail = await self.client.get_change_detail(project_id, change_name)
-        self._apply_detail(detail)
+        await self._apply_detail(detail)
+
+    async def action_open_actions(self) -> None:
+        """Open the governed actions menu for the currently selected run."""
+        if not self.selected_project_id or not self.selected_change_name:
+            self.notify("No change selected. Select a change to view actions.", severity="warning")
+            return
+
+        run_id = await self.client.get_latest_run_id_for_change(
+            self.selected_project_id, self.selected_change_name
+        )
+        if not run_id:
+            self.notify(
+                f"No execution run found for {self.selected_change_name}.", severity="warning"
+            )
+            return
+
+        actions = await self.client.get_available_actions(run_id)
+        if not actions:
+            self.notify("No operator actions available for this run.", severity="information")
+            return
+
+        def on_action_selected(chosen_action: OperatorActionType | None) -> None:
+            if chosen_action is not None:
+                matched = next((a for a in actions if a.action == chosen_action), None)
+                self.dispatch_action(run_id, chosen_action, matched)
+
+        self.push_screen(
+            ActionSelectionModal(actions=actions, run_id=run_id), callback=on_action_selected
+        )
+
+    def on_actions_bar_widget_open_action_menu(
+        self, message: ActionsBarWidget.OpenActionMenu
+    ) -> None:
+        self.run_worker(self.action_open_actions())
+
+    def on_actions_bar_widget_action_triggered(
+        self, message: ActionsBarWidget.ActionTriggered
+    ) -> None:
+        self.run_worker(self._handle_action_triggered(message))
+
+    async def _handle_action_triggered(self, message: ActionsBarWidget.ActionTriggered) -> None:
+        if not self.selected_project_id or not self.selected_change_name:
+            return
+        run_id = await self.client.get_latest_run_id_for_change(
+            self.selected_project_id, self.selected_change_name
+        )
+        if run_id:
+            self.dispatch_action(run_id, message.action, message.descriptor)
+
+    def dispatch_action(
+        self,
+        run_id: str,
+        action_type: OperatorActionType,
+        descriptor: ActionDescriptor | None,
+        params: dict[str, Any] | None = None,
+    ) -> None:
+        """Dispatches an action with confirmation dialogue if required."""
+        if descriptor and descriptor.requires_confirmation and params is None:
+
+            def on_confirmed(confirmed_params: dict[str, Any] | None) -> None:
+                if confirmed_params is not None:
+                    self.run_worker(
+                        self._execute_action_call(run_id, action_type, confirmed_params)
+                    )
+
+            self.push_screen(
+                ActionConfirmationModal(descriptor=descriptor, run_id=run_id),
+                callback=on_confirmed,
+            )
+        else:
+            self.run_worker(self._execute_action_call(run_id, action_type, params or {}))
+
+    async def _execute_action_call(
+        self,
+        run_id: str,
+        action_type: OperatorActionType,
+        params: dict[str, Any],
+    ) -> None:
+        """Execute action via TuiQueryClient and refresh views."""
+        req = OperatorActionRequest(
+            project_id=self.selected_project_id or "",
+            change_name=self.selected_change_name or "",
+            run_id=run_id,
+            action_type=action_type,
+            parameters=params,
+            actor_identity="tui_operator",
+            source_interface="tui",
+        )
+        result = await self.client.execute_action(req)
+
+        detail_view = self.query_one("#view-detail", RunDetailView)
+        detail_view.last_action_feedback = f"{result.status.value}: {result.summary}"
+
+        if result.status == OperatorActionStatus.COMPLETED:
+            self.notify(f"✔ Action completed: {result.summary}", severity="information", timeout=4)
+        else:
+            self.notify(
+                f"✖ Action {result.status.value}: {result.summary}", severity="error", timeout=5
+            )
+
+        await self.action_refresh_data()
 
 
 def run_tui(refresh_interval: float = 3.0) -> None:

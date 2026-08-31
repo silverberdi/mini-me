@@ -38,7 +38,9 @@ from minime.tui.widgets.review_card import ReviewSummaryWidget
 
 
 class MatrixMockQueryClient(TuiQueryClient):
-    def __init__(self, overview: DashboardOverviewResponse, detail: DashboardChangeDetailResponse | None) -> None:
+    def __init__(
+        self, overview: DashboardOverviewResponse, detail: DashboardChangeDetailResponse | None
+    ) -> None:
         super().__init__()
         self._overview = overview
         self._detail = detail
@@ -46,11 +48,15 @@ class MatrixMockQueryClient(TuiQueryClient):
     async def get_overview(self) -> DashboardOverviewResponse:
         return self._overview
 
-    async def get_change_detail(self, project_id: str, change_name: str) -> DashboardChangeDetailResponse | None:
+    async def get_change_detail(
+        self, project_id: str, change_name: str
+    ) -> DashboardChangeDetailResponse | None:
         return self._detail
 
 
-def default_overview_with_change(change_name: str = "014-tui", status: str = "RUNNING") -> DashboardOverviewResponse:
+def default_overview_with_change(
+    change_name: str = "014-tui", status: str = "RUNNING"
+) -> DashboardOverviewResponse:
     return DashboardOverviewResponse(
         system_status=SystemStatusDTO(healthy=True),
         changes=[ChangeSummaryDTO(project_id="mini-me", change_name=change_name, status=status)],
@@ -89,13 +95,14 @@ async def test_matrix_state_01_normal_system_overview():
         recent_completions=[],
         changes=[ChangeSummaryDTO(project_id="mini-me", change_name="014-tui", status="RUNNING")],
     )
-    detail = DashboardChangeDetailResponse(project_id="mini-me", change_name="014-tui", status="RUNNING")
+    detail = DashboardChangeDetailResponse(
+        project_id="mini-me", change_name="014-tui", status="RUNNING"
+    )
     app = MiniMeTuiApp(query_client=MatrixMockQueryClient(overview, detail), refresh_interval=0)
     async with app.run_test():
         card = app.query_one(SystemHealthCard)
         assert card.status is not None
         assert card.status.healthy is True
-
 
 
 @pytest.mark.asyncio
@@ -109,7 +116,9 @@ async def test_matrix_state_02_multiple_active_known_changes():
             ChangeSummaryDTO(project_id="mini-me", change_name="013-preview", status="COMPLETED"),
         ],
     )
-    detail = DashboardChangeDetailResponse(project_id="mini-me", change_name="014-tui", status="RUNNING")
+    detail = DashboardChangeDetailResponse(
+        project_id="mini-me", change_name="014-tui", status="RUNNING"
+    )
     app = MiniMeTuiApp(query_client=MatrixMockQueryClient(overview, detail), refresh_interval=0)
     async with app.run_test() as pilot:
         await pilot.press("2")
@@ -134,7 +143,9 @@ async def test_matrix_state_03_active_run():
         ],
         changes=[ChangeSummaryDTO(project_id="mini-me", change_name="014-tui", status="RUNNING")],
     )
-    detail = DashboardChangeDetailResponse(project_id="mini-me", change_name="014-tui", status="RUNNING")
+    detail = DashboardChangeDetailResponse(
+        project_id="mini-me", change_name="014-tui", status="RUNNING"
+    )
     app = MiniMeTuiApp(query_client=MatrixMockQueryClient(overview, detail), refresh_interval=0)
     async with app.run_test():
         exec_widget = app.query_one(ActiveExecutionsWidget)
@@ -149,11 +160,14 @@ async def test_matrix_state_04_ready_change():
         system_status=SystemStatusDTO(healthy=True),
         changes=[ChangeSummaryDTO(project_id="mini-me", change_name="015-actions", status="READY")],
     )
-    detail = DashboardChangeDetailResponse(project_id="mini-me", change_name="015-actions", status="READY")
+    detail = DashboardChangeDetailResponse(
+        project_id="mini-me", change_name="015-actions", status="READY"
+    )
     app = MiniMeTuiApp(query_client=MatrixMockQueryClient(overview, detail), refresh_interval=0)
     async with app.run_test(size=(140, 40)) as pilot:
         await pilot.press("2")
         from textual.widgets import Button
+
         btn = app.query_one("#filter-ready", Button)
         btn.press()
         await pilot.pause()
@@ -178,9 +192,13 @@ async def test_matrix_state_05_needs_human():
                 can_remediate=True,
             )
         ],
-        changes=[ChangeSummaryDTO(project_id="mini-me", change_name="014-tui", status="NEEDS_HUMAN")],
+        changes=[
+            ChangeSummaryDTO(project_id="mini-me", change_name="014-tui", status="NEEDS_HUMAN")
+        ],
     )
-    detail = DashboardChangeDetailResponse(project_id="mini-me", change_name="014-tui", status="NEEDS_HUMAN")
+    detail = DashboardChangeDetailResponse(
+        project_id="mini-me", change_name="014-tui", status="NEEDS_HUMAN"
+    )
     app = MiniMeTuiApp(query_client=MatrixMockQueryClient(overview, detail), refresh_interval=0)
     async with app.run_test():
         attn = app.query_one(AttentionListWidget)
@@ -205,12 +223,13 @@ async def test_matrix_state_06_waiting():
         ],
         changes=[ChangeSummaryDTO(project_id="mini-me", change_name="014-tui", status="WAITING")],
     )
-    detail = DashboardChangeDetailResponse(project_id="mini-me", change_name="014-tui", status="WAITING")
+    detail = DashboardChangeDetailResponse(
+        project_id="mini-me", change_name="014-tui", status="WAITING"
+    )
     app = MiniMeTuiApp(query_client=MatrixMockQueryClient(overview, detail), refresh_interval=0)
     async with app.run_test():
         attn = app.query_one(AttentionListWidget)
         assert attn.items[0].stage == "WAITING_CAPACITY"
-
 
 
 @pytest.mark.asyncio
@@ -222,7 +241,12 @@ async def test_matrix_state_07_failed_checks():
         change_name="014-tui",
         status="FAILED",
         pipeline=[
-            PipelinePhaseDTO(name="checks", display_name="3. Deterministic Checks", status="failed", summary="pytest failed (1 error)")
+            PipelinePhaseDTO(
+                name="checks",
+                display_name="3. Deterministic Checks",
+                status="failed",
+                summary="pytest failed (1 error)",
+            )
         ],
         checks=[
             CheckResultItemDTO(
@@ -279,7 +303,9 @@ async def test_matrix_state_09_review_rejected():
             status="completed",
             verdict="CHANGES_REQUIRED",
             material_findings_count=1,
-            findings=[{"description": "Missing secret redaction on token display", "severity": "material"}],
+            findings=[
+                {"description": "Missing secret redaction on token display", "severity": "material"}
+            ],
         ),
     )
     app = MiniMeTuiApp(query_client=MatrixMockQueryClient(overview, detail), refresh_interval=0)
@@ -594,4 +620,3 @@ async def test_matrix_state_20_no_active_work():
         overview_view = app.query_one(OverviewView)
         assert overview_view.overview_data.active_executions == []
         assert overview_view.overview_data.attention_items == []
-

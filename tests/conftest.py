@@ -39,6 +39,7 @@ from minime.domain.interfaces import (
     JobLogRepositoryInterface,
     JobRepositoryInterface,
     MetricFactRepositoryInterface,
+    OperatorActionRepositoryInterface,
     OrchestrationCandidateRepositoryInterface,
     OrchestrationExternalActionRepositoryInterface,
     OrchestrationRunRepositoryInterface,
@@ -74,6 +75,7 @@ from minime.domain.models import (
     MetricFact,
     OpenRouterBudgetPolicy,
     OpenRouterPricingSnapshot,
+    OperatorActionRecord,
     OrchestrationCandidate,
     OrchestrationExternalAction,
     OrchestrationRun,
@@ -1250,6 +1252,20 @@ class InMemoryPreviewSessionRepository(PreviewSessionRepositoryInterface):
         matches.sort(key=lambda s: s.created_at, reverse=True)
         return matches
 
+    def get_active_for_change(self, project_id: str, change_name: str) -> PreviewSession | None:
+        active_statuses = {"REQUESTED", "BUILDING", "STARTING", "PROBING", "READY"}
+        matches = [
+            s
+            for s in self._store.values()
+            if s.project_id == project_id
+            and s.change_name == change_name
+            and s.status.value in active_statuses
+        ]
+        if not matches:
+            return None
+        matches.sort(key=lambda s: s.created_at, reverse=True)
+        return matches[0].model_copy(deep=True)
+
 
 class InMemoryValidationRunRepository(ValidationRunRepositoryInterface):
     def __init__(self):
@@ -1299,6 +1315,36 @@ class InMemoryValidationRunRepository(ValidationRunRepositoryInterface):
         return matches
 
 
+class InMemoryOperatorActionRepository(OperatorActionRepositoryInterface):
+    def __init__(self):
+        self._store: dict[str, OperatorActionRecord] = {}
+
+    def save(self, record: OperatorActionRecord) -> None:
+        self._store[record.id] = record.model_copy(deep=True)
+
+    def get_by_id(self, action_id: str) -> OperatorActionRecord | None:
+        rec = self._store.get(action_id)
+        return rec.model_copy(deep=True) if rec else None
+
+    def get_by_request_id(self, action_request_id: str) -> OperatorActionRecord | None:
+        for rec in self._store.values():
+            if rec.action_request_id == action_request_id:
+                return rec.model_copy(deep=True)
+        return None
+
+    def list_by_run(self, run_id: str, limit: int = 50) -> list[OperatorActionRecord]:
+        matches = [r.model_copy(deep=True) for r in self._store.values() if r.run_id == run_id]
+        matches.sort(key=lambda r: r.created_at, reverse=True)
+        return matches[:limit]
+
+    def list_by_project(self, project_id: str, limit: int = 50) -> list[OperatorActionRecord]:
+        matches = [
+            r.model_copy(deep=True) for r in self._store.values() if r.project_id == project_id
+        ]
+        matches.sort(key=lambda r: r.created_at, reverse=True)
+        return matches[:limit]
+
+
 class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
     def __init__(self):
         self.projects = InMemoryProjectRepository()
@@ -1332,6 +1378,7 @@ class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.orchestration_external_actions = InMemoryOrchestrationExternalActionRepository()
         self.preview_sessions = InMemoryPreviewSessionRepository()
         self.validation_runs = InMemoryValidationRunRepository()
+        self.operator_actions = InMemoryOperatorActionRepository()
         self.committed = False
         self.rolled_back = False
 
