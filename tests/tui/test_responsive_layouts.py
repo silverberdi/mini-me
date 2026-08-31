@@ -63,4 +63,3 @@ async def test_wide_ultrawide_terminal_layout():
         assert left_col is not None
         assert center_col is not None
         assert right_col is not None
-

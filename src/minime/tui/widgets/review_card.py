@@ -36,7 +36,9 @@ class ReviewSummaryWidget(Widget):
     def watch_review(self, val: ReviewSummaryDTO | None) -> None:
         content = self.query_one("#review-content", Static)
         if val is None or val.status == "not_started":
-            content.update(Text("Review not yet started for current candidate.", style="dim italic"))
+            content.update(
+                Text("Review not yet started for current candidate.", style="dim italic")
+            )
             return
 
         body = Text()
@@ -53,7 +55,9 @@ class ReviewSummaryWidget(Widget):
 
         # Stale / Mixed authorship warnings
         if val.is_stale_to_current_candidate:
-            body.append("⚠ STALE REVIEW: Bound to older candidate generation (", style="bold yellow")
+            body.append(
+                "⚠ STALE REVIEW: Bound to older candidate generation (", style="bold yellow"
+            )
             body.append(f"{short_sha(val.candidate_sha)})\n", style="yellow")
         else:
             body.append(f"Bound to candidate SHA: {short_sha(val.candidate_sha)}\n", style="dim")

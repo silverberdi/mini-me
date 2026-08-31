@@ -29,6 +29,7 @@ class ChangeFilter(str, Enum):
 # Formatting Helpers
 # ---------------------------------------------------------------------------
 
+
 def short_sha(sha: str | None, length: int = 8) -> str:
     """Format full git SHA or hash to a short form."""
     if not sha:
@@ -87,9 +88,26 @@ def get_status_text(status_val: str | None) -> Text:
         return Text(f" {s} ", style="bold black on green")
     elif s in {"RUNNING", "ACTIVE", "IMPLEMENTING", "EXECUTING", "BUILDING", "PROBING", "STARTING"}:
         return Text(f" {s} ", style="bold black on cyan")
-    elif s in {"NEEDS_HUMAN", "WAITING", "WAITING_CAPACITY", "STALE", "CHANGES_REQUIRED", "WARNING", "DEGRADED"}:
+    elif s in {
+        "NEEDS_HUMAN",
+        "WAITING",
+        "WAITING_CAPACITY",
+        "STALE",
+        "CHANGES_REQUIRED",
+        "WARNING",
+        "DEGRADED",
+    }:
         return Text(f" {s} ", style="bold black on yellow")
-    elif s in {"FAILED", "BLOCKED", "RECOVERY_BLOCKED", "REJECTED", "CRITICAL", "HIGH", "STOPPED", "FALSE"}:
+    elif s in {
+        "FAILED",
+        "BLOCKED",
+        "RECOVERY_BLOCKED",
+        "REJECTED",
+        "CRITICAL",
+        "HIGH",
+        "STOPPED",
+        "FALSE",
+    }:
         return Text(f" {s} ", style="bold white on red")
     elif s in {"DISCOVERED", "NOT_READY", "NOT_STARTED", "SKIPPED", "HISTORICAL", "SUPERSEDED"}:
         return Text(f" {s} ", style="dim")
@@ -117,7 +135,9 @@ def get_phase_text(phase_name: str, phase_status: str | None) -> Text:
         icon = "⏳"
         style = "yellow"
 
-    return Text.assemble((f"{icon} ", style), (phase_name, "bold" if st in {"passed", "running"} else "dim"))
+    return Text.assemble(
+        (f"{icon} ", style), (phase_name, "bold" if st in {"passed", "running"} else "dim")
+    )
 
 
 def get_risk_text(risk: str | None) -> Text:

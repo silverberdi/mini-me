@@ -86,4 +86,3 @@ def test_sanitize_text_redacts_secrets(monkeypatch):
     sanitized = sanitize_text("Used key: sk-secret-deepseek-key-12345 in call")
     assert "sk-secret-deepseek-key-12345" not in sanitized
     assert "REDACTED" in sanitized
-

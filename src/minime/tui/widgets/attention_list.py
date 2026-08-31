@@ -41,7 +41,9 @@ class AttentionListWidget(Widget):
     def watch_items(self, val: list[AttentionItemDTO]) -> None:
         content = self.query_one("#attention-content", Static)
         if not val:
-            content.update(Text("✓ No runs require operator attention. System is clear.", style="green italic"))
+            content.update(
+                Text("✓ No runs require operator attention. System is clear.", style="green italic")
+            )
             return
 
         body = Text()

@@ -15,13 +15,22 @@ from pydantic import BaseModel, Field
 from minime.adapters.openspec import OpenSpecAdapter
 from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.db.session import db_manager
-from minime.domain.enums import EventType, PreviewStatus, ValidationVerdict
+from minime.domain.enums import (
+    EventType,
+    OperatorActionType,
+    PreviewStatus,
+    ValidationVerdict,
+)
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
+    ActionDescriptor,
     Change,
     Event,
     Job,
     JobLog,
+    OperatorActionRecord,
+    OperatorActionRequest,
+    OperatorActionResult,
     PreviewSession,
     Project,
     ProviderHealth,
@@ -32,6 +41,7 @@ from minime.logging import redact_secrets
 from minime.services.budget_service import BudgetService
 from minime.services.capacity_lifecycle_service import CapacityLifecycleService
 from minime.services.container_preview_service import ContainerPreviewService
+from minime.services.control_plane_service import ControlPlaneService
 from minime.services.dashboard_service import (
     DashboardChangeDetailResponse,
     DashboardOverviewResponse,
@@ -1111,6 +1121,89 @@ def get_candidate_validation_authority_endpoint(
         "latest_validation_id": latest_val.validation_id if latest_val else None,
         "latest_verdict": latest_val.verdict.value if latest_val else None,
     }
+
+
+# -----------------------------------------------------------------------------
+# Operator Control Plane Endpoints (015)
+# -----------------------------------------------------------------------------
+
+
+@app.get(
+    "/api/v1/runs/{run_id}/actions",
+    tags=["control-plane"],
+    response_model=list[ActionDescriptor],
+)
+def discover_actions_endpoint(
+    run_id: str,
+    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
+) -> list[ActionDescriptor]:
+    """Discover available operator actions for a run with enabled/disabled explanations."""
+    run = uow.orchestration_runs.get_by_id(run_id)
+    if not run:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Orchestration run '{run_id}' not found.",
+        )
+    cp_service = ControlPlaneService(uow)
+    return cp_service.get_available_actions(run_id)
+
+
+@app.post(
+    "/api/v1/runs/{run_id}/actions/{action_type}",
+    tags=["control-plane"],
+    response_model=OperatorActionResult,
+)
+def execute_action_endpoint(
+    run_id: str,
+    action_type: OperatorActionType,
+    request_body: OperatorActionRequest,
+    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
+) -> OperatorActionResult:
+    """Execute a governed operator action with optimistic concurrency and idempotency."""
+    if request_body.run_id != run_id or request_body.action_type != action_type:
+        request_body = request_body.model_copy(
+            update={"run_id": run_id, "action_type": action_type}
+        )
+    cp_service = ControlPlaneService(uow)
+    return cp_service.execute_action(request_body)
+
+
+@app.post(
+    "/api/v1/runs/{run_id}/actions",
+    tags=["control-plane"],
+    response_model=OperatorActionResult,
+)
+def execute_action_generic_endpoint(
+    run_id: str,
+    request_body: OperatorActionRequest,
+    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
+) -> OperatorActionResult:
+    """Execute a governed operator action."""
+    if request_body.run_id != run_id:
+        request_body = request_body.model_copy(update={"run_id": run_id})
+    cp_service = ControlPlaneService(uow)
+    return cp_service.execute_action(request_body)
+
+
+@app.get(
+    "/api/v1/runs/{run_id}/actions/history",
+    tags=["control-plane"],
+    response_model=list[OperatorActionRecord],
+)
+def get_action_history_endpoint(
+    run_id: str,
+    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
+    limit: int = 50,
+) -> list[OperatorActionRecord]:
+    """Fetch audit trail of operator actions executed for a run."""
+    run = uow.orchestration_runs.get_by_id(run_id)
+    if not run:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Orchestration run '{run_id}' not found.",
+        )
+    cp_service = ControlPlaneService(uow)
+    return cp_service.list_action_history(run_id, limit=limit)
 
 
 # -----------------------------------------------------------------------------

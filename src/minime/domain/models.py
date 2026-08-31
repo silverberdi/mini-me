@@ -9,10 +9,11 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from minime.domain.enums import (
     PRIMARY_PROVIDERS,
+    ActionRiskLevel,
     AuditFindingSeverity,
     AuditRiskLevel,
     AuditStatus,
@@ -30,6 +31,9 @@ from minime.domain.enums import (
     HumanGate,
     JobStatus,
     LockSafetyStatus,
+    OperatorActionErrorCode,
+    OperatorActionStatus,
+    OperatorActionType,
     OrchestrationStage,
     OrchestrationStopOutcome,
     PreviewStatus,
@@ -711,9 +715,28 @@ class OrchestrationRun(BaseModel):
     active_job_id: str | None = None
     current_generation: int = 1
     current_candidate_sha: str | None = None
+    retry_count: int = 0
+    reassignment_count: int = 0
+    pending_handoff: dict[str, Any] = Field(default_factory=dict)
     is_active: bool = True
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _map_candidate_sha(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "candidate_sha" in data and "current_candidate_sha" not in data:
+                data["current_candidate_sha"] = data.pop("candidate_sha")
+        return data
+
+    @property
+    def candidate_sha(self) -> str | None:
+        return self.current_candidate_sha
+
+    @candidate_sha.setter
+    def candidate_sha(self, val: str | None) -> None:
+        self.current_candidate_sha = val
 
 
 class OrchestrationStageEvent(BaseModel):
@@ -869,4 +892,78 @@ class ValidationRun(BaseModel):
     scenario_results: list[dict[str, Any]] = Field(default_factory=list)
     notes: str | None = None
     operator: str | None = "operator"
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class ActionDescriptor(BaseModel):
+    """Structured descriptor for action discovery presented to operators / clients."""
+
+    action: OperatorActionType
+    display_name: str
+    description: str = ""
+    enabled: bool = True
+    disabled_reason: str | None = None
+    requires_confirmation: bool = False
+    confirmation_prompt: str | None = None
+    risk_level: ActionRiskLevel = ActionRiskLevel.LOW
+    parameters_schema: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperatorActionRequest(BaseModel):
+    """Governed operator action request payload."""
+
+    action_request_id: str = Field(default_factory=generate_uuid)
+    project_id: str
+    change_name: str
+    run_id: str
+    action_type: OperatorActionType
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    actor_identity: str = "operator"
+    source_interface: str = "tui"
+    expected_stage: OrchestrationStage | None = None
+    expected_generation: int | None = None
+    expected_candidate_sha: str | None = None
+    expected_human_gate: HumanGate | None = None
+    requested_at: datetime = Field(default_factory=utc_now)
+
+
+class OperatorActionResult(BaseModel):
+    """Governed operator action execution result."""
+
+    action_request_id: str
+    action_type: OperatorActionType
+    status: OperatorActionStatus
+    error_code: OperatorActionErrorCode | None = None
+    summary: str
+    resulting_stage: OrchestrationStage | None = None
+    resulting_outcome: OrchestrationStopOutcome | None = None
+    resulting_gate: HumanGate | None = None
+    evidence_reference: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+    executed_at: datetime = Field(default_factory=utc_now)
+
+
+class OperatorActionRecord(BaseModel):
+    """Durable audit record of an operator action execution."""
+
+    id: str = Field(default_factory=generate_uuid)
+    action_request_id: str
+    project_id: str
+    change_name: str
+    run_id: str | None = None
+    job_id: str | None = None
+    action_type: OperatorActionType
+    actor_identity: str = "operator"
+    source_interface: str = "tui"
+    precondition_stage: str | None = None
+    precondition_gate: str | None = None
+    status: OperatorActionStatus = OperatorActionStatus.ACCEPTED
+    error_code: OperatorActionErrorCode | None = None
+    summary: str = ""
+    resulting_stage: str | None = None
+    resulting_outcome: str | None = None
+    resulting_gate: str | None = None
+    evidence_reference: str | None = None
+    parameters_json: dict[str, Any] = Field(default_factory=dict)
+    result_payload_json: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utc_now)

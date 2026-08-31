@@ -11,10 +11,18 @@ import uvicorn
 from minime.adapters.openspec import OpenSpecAdapter
 from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.db.session import db_manager
-from minime.domain.enums import ProviderHealthStatus, ReviewVerdict, SchedulerMode
+from minime.domain.enums import (
+    OperatorActionStatus,
+    OperatorActionType,
+    ProviderHealthStatus,
+    ReviewVerdict,
+    SchedulerMode,
+)
+from minime.domain.models import OperatorActionRequest
 from minime.logging import configure_logging, get_logger
 from minime.services.budget_service import BudgetService
 from minime.services.capacity_lifecycle_service import CapacityLifecycleService
+from minime.services.control_plane_service import ControlPlaneService
 from minime.services.execution_pipeline import ExecutionPipelineService
 from minime.services.orchestration_service import OrchestrationService
 from minime.services.project_service import ProjectService
@@ -33,6 +41,7 @@ scheduler_app = typer.Typer(help="Inspect scheduler capacity mode and admission 
 providers_app = typer.Typer(help="Inspect primary provider health and capacity windows.")
 budget_app = typer.Typer(help="Inspect OpenRouter budget usage and policy state.")
 orchestrate_app = typer.Typer(help="Autonomous single-change orchestration commands.")
+action_app = typer.Typer(help="Governed operator control plane actions.")
 
 app.add_typer(project_app, name="project")
 app.add_typer(jobs_app, name="jobs")
@@ -40,6 +49,7 @@ app.add_typer(scheduler_app, name="scheduler")
 app.add_typer(providers_app, name="providers")
 app.add_typer(budget_app, name="budget")
 app.add_typer(orchestrate_app, name="orchestrate")
+app.add_typer(action_app, name="action")
 
 logger = get_logger("cli")
 
@@ -1073,6 +1083,291 @@ def orchestrate_list_cmd(
         raise typer.Exit(code=1)
 
 
+@orchestrate_app.command("cancel")
+def orchestrate_cancel_cmd(
+    run_id: str = typer.Argument(..., help="Orchestration run identifier"),
+    actor: str = typer.Option("operator", "--actor", help="Actor identity"),
+    json_output: bool = typer.Option(False, "--json", help="Output result as JSON"),
+) -> None:
+    """Safely cancel an active orchestration run."""
+    try:
+        with db_manager.session() as session:
+            uow = PostgresPersistenceUnitOfWork(session)
+            run = uow.orchestration_runs.get_by_id(run_id)
+            if not run:
+                typer.secho(f"Run '{run_id}' not found.", fg=typer.colors.RED)
+                raise typer.Exit(code=1)
+
+            cp_service = ControlPlaneService(uow)
+            req = OperatorActionRequest(
+                project_id=run.project_id,
+                change_name=run.change_name,
+                run_id=run_id,
+                action_type=OperatorActionType.CANCEL,
+                actor_identity=actor,
+                source_interface="cli",
+            )
+            result = cp_service.execute_action(req)
+
+            if json_output:
+                typer.echo(json.dumps(result.model_dump(), indent=2, default=str))
+                return
+
+            res_color = (
+                typer.colors.GREEN
+                if result.status == OperatorActionStatus.COMPLETED
+                else typer.colors.RED
+            )
+            typer.secho(f"\n=== Cancel Result: {result.status.value} ===", fg=res_color, bold=True)
+            typer.echo(result.summary)
+    except Exception as e:
+        typer.secho(f"Cancel error: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
+@orchestrate_app.command("retry")
+def orchestrate_retry_cmd(
+    run_id: str = typer.Argument(..., help="Orchestration run identifier"),
+    actor: str = typer.Option("operator", "--actor", help="Actor identity"),
+    json_output: bool = typer.Option(False, "--json", help="Output result as JSON"),
+) -> None:
+    """Retry a failed stage for an orchestration run."""
+    try:
+        with db_manager.session() as session:
+            uow = PostgresPersistenceUnitOfWork(session)
+            run = uow.orchestration_runs.get_by_id(run_id)
+            if not run:
+                typer.secho(f"Run '{run_id}' not found.", fg=typer.colors.RED)
+                raise typer.Exit(code=1)
+
+            cp_service = ControlPlaneService(uow)
+            req = OperatorActionRequest(
+                project_id=run.project_id,
+                change_name=run.change_name,
+                run_id=run_id,
+                action_type=OperatorActionType.RETRY,
+                actor_identity=actor,
+                source_interface="cli",
+            )
+            result = cp_service.execute_action(req)
+
+            if json_output:
+                typer.echo(json.dumps(result.model_dump(), indent=2, default=str))
+                return
+
+            res_color = (
+                typer.colors.GREEN
+                if result.status == OperatorActionStatus.COMPLETED
+                else typer.colors.RED
+            )
+            typer.secho(f"\n=== Retry Result: {result.status.value} ===", fg=res_color, bold=True)
+            typer.echo(result.summary)
+    except Exception as e:
+        typer.secho(f"Retry error: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
+@orchestrate_app.command("reassign")
+def orchestrate_reassign_cmd(
+    run_id: str = typer.Argument(..., help="Orchestration run identifier"),
+    target_executor: str | None = typer.Option(
+        None, "--target-executor", "-t", help="Target agent/executor role"
+    ),
+    actor: str = typer.Option("operator", "--actor", help="Actor identity"),
+    json_output: bool = typer.Option(False, "--json", help="Output result as JSON"),
+) -> None:
+    """Reassign execution of an orchestration run to another configured provider."""
+    try:
+        with db_manager.session() as session:
+            uow = PostgresPersistenceUnitOfWork(session)
+            run = uow.orchestration_runs.get_by_id(run_id)
+            if not run:
+                typer.secho(f"Run '{run_id}' not found.", fg=typer.colors.RED)
+                raise typer.Exit(code=1)
+
+            cp_service = ControlPlaneService(uow)
+            params = {}
+            if target_executor:
+                params["target_executor"] = target_executor
+            req = OperatorActionRequest(
+                project_id=run.project_id,
+                change_name=run.change_name,
+                run_id=run_id,
+                action_type=OperatorActionType.REASSIGN,
+                parameters=params,
+                actor_identity=actor,
+                source_interface="cli",
+            )
+            result = cp_service.execute_action(req)
+
+            if json_output:
+                typer.echo(json.dumps(result.model_dump(), indent=2, default=str))
+                return
+
+            res_color = (
+                typer.colors.GREEN
+                if result.status == OperatorActionStatus.COMPLETED
+                else typer.colors.RED
+            )
+            typer.secho(
+                f"\n=== Reassign Result: {result.status.value} ===", fg=res_color, bold=True
+            )
+            typer.echo(result.summary)
+    except Exception as e:
+        typer.secho(f"Reassign error: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
+@action_app.command("list")
+def action_list_cmd(
+    run_id: str = typer.Argument(..., help="Orchestration run identifier"),
+    json_output: bool = typer.Option(False, "--json", help="Output actions as JSON"),
+) -> None:
+    """Discover available operator actions for a run."""
+    try:
+        with db_manager.session() as session:
+            uow = PostgresPersistenceUnitOfWork(session)
+            cp_service = ControlPlaneService(uow)
+            actions = cp_service.get_available_actions(run_id)
+
+            if json_output:
+                typer.echo(json.dumps([a.model_dump() for a in actions], indent=2, default=str))
+                return
+
+            typer.secho(
+                f"=== Available Actions for Run {run_id} ===", fg=typer.colors.CYAN, bold=True
+            )
+            for a in actions:
+                status_str = "ENABLED" if a.enabled else "DISABLED"
+                status_color = typer.colors.GREEN if a.enabled else typer.colors.YELLOW
+                typer.secho(
+                    f"  • {a.display_name} [{a.action.value}] -> {status_str}",
+                    fg=status_color,
+                    bold=True,
+                )
+                typer.echo(f"    Description: {a.description}")
+                if not a.enabled and a.disabled_reason:
+                    typer.secho(f"    Reason Disabled: {a.disabled_reason}", fg=typer.colors.RED)
+                if a.requires_confirmation:
+                    typer.echo(f"    Confirmation Required: YES ({a.confirmation_prompt})")
+                typer.echo(f"    Risk: {a.risk_level.value}")
+    except Exception as e:
+        typer.secho(f"Error discovering actions: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
+@action_app.command("execute")
+def action_execute_cmd(
+    run_id: str = typer.Argument(..., help="Orchestration run identifier"),
+    action: str = typer.Argument(
+        ..., help="Action type (CONTINUE, RETRY, REASSIGN, CANCEL, RESOLVE_GATE, etc.)"
+    ),
+    params: str = typer.Option("{}", "--params", "-p", help="JSON parameters for the action"),
+    actor: str = typer.Option("operator", "--actor", help="Actor identity"),
+    expected_stage: str | None = typer.Option(
+        None, "--expected-stage", help="Expected current stage for optimistic concurrency"
+    ),
+    expected_gen: int | None = typer.Option(
+        None, "--expected-gen", help="Expected candidate generation"
+    ),
+    expected_sha: str | None = typer.Option(None, "--expected-sha", help="Expected candidate SHA"),
+    json_output: bool = typer.Option(False, "--json", help="Output result as JSON"),
+) -> None:
+    """Execute a governed operator action."""
+    try:
+        parsed_params = json.loads(params)
+        action_type = OperatorActionType(action.upper())
+
+        with db_manager.session() as session:
+            uow = PostgresPersistenceUnitOfWork(session)
+            run = uow.orchestration_runs.get_by_id(run_id)
+            if not run:
+                typer.secho(f"Run '{run_id}' not found.", fg=typer.colors.RED)
+                raise typer.Exit(code=1)
+
+            cp_service = ControlPlaneService(uow)
+            req = OperatorActionRequest(
+                project_id=run.project_id,
+                change_name=run.change_name,
+                run_id=run_id,
+                action_type=action_type,
+                parameters=parsed_params,
+                actor_identity=actor,
+                source_interface="cli",
+                expected_stage=expected_stage,
+                expected_generation=expected_gen,
+                expected_candidate_sha=expected_sha,
+            )
+            result = cp_service.execute_action(req)
+
+            if json_output:
+                typer.echo(json.dumps(result.model_dump(), indent=2, default=str))
+                return
+
+            res_color = (
+                typer.colors.GREEN
+                if result.status == OperatorActionStatus.COMPLETED
+                else typer.colors.RED
+            )
+            typer.secho(
+                f"\n=== Action Execution Result: {result.status.value} ===",
+                fg=res_color,
+                bold=True,
+            )
+            typer.echo(f"Action: {result.action_type.value}")
+            typer.echo(f"Summary: {result.summary}")
+            if result.error_code:
+                typer.secho(f"Error Code: {result.error_code.value}", fg=typer.colors.RED)
+            if result.resulting_stage:
+                typer.echo(f"Resulting Stage: {result.resulting_stage.value}")
+            if result.resulting_outcome:
+                typer.echo(f"Resulting Outcome: {result.resulting_outcome.value}")
+    except Exception as e:
+        typer.secho(f"Error executing action: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
+@action_app.command("history")
+def action_history_cmd(
+    run_id: str = typer.Argument(..., help="Orchestration run identifier"),
+    limit: int = typer.Option(50, "--limit", "-n", help="Maximum records to show"),
+    json_output: bool = typer.Option(False, "--json", help="Output history as JSON"),
+) -> None:
+    """Show action audit trail for a run."""
+    try:
+        with db_manager.session() as session:
+            uow = PostgresPersistenceUnitOfWork(session)
+            cp_service = ControlPlaneService(uow)
+            records = cp_service.list_action_history(run_id, limit=limit)
+
+            if json_output:
+                typer.echo(json.dumps([r.model_dump() for r in records], indent=2, default=str))
+                return
+
+            typer.secho(f"=== Action History for Run {run_id} ===", fg=typer.colors.CYAN, bold=True)
+            if not records:
+                typer.echo("No operator actions recorded.")
+                return
+
+            for r in records:
+                status_color = (
+                    typer.colors.GREEN
+                    if r.status == OperatorActionStatus.COMPLETED
+                    else typer.colors.RED
+                )
+                typer.secho(
+                    f"  • [{r.created_at.isoformat()}] {r.action_type.value} by {r.actor_identity} ({r.source_interface}) -> {r.status.value}",
+                    fg=status_color,
+                    bold=True,
+                )
+                typer.echo(f"    Summary: {r.summary}")
+                if r.error_code:
+                    typer.echo(f"    Error: {r.error_code.value}")
+    except Exception as e:
+        typer.secho(f"Error fetching action history: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
 @app.command("serve")
 def serve_cmd(
     host: str = typer.Option("127.0.0.1", "--host", help="Bind host"),
@@ -1085,7 +1380,9 @@ def serve_cmd(
 
 @app.command("console")
 def console_cmd(
-    refresh_interval: float = typer.Option(3.0, "--refresh", "-r", help="Refresh interval in seconds"),
+    refresh_interval: float = typer.Option(
+        3.0, "--refresh", "-r", help="Refresh interval in seconds"
+    ),
 ) -> None:
     """Launch the interactive mini me TUI operator console."""
     from minime.tui.app import run_tui
@@ -1095,7 +1392,9 @@ def console_cmd(
 
 @app.command("tui")
 def tui_cmd(
-    refresh_interval: float = typer.Option(3.0, "--refresh", "-r", help="Refresh interval in seconds"),
+    refresh_interval: float = typer.Option(
+        3.0, "--refresh", "-r", help="Refresh interval in seconds"
+    ),
 ) -> None:
     """Launch the interactive mini me TUI operator console (alias for console)."""
     from minime.tui.app import run_tui

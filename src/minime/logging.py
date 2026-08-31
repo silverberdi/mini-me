@@ -46,8 +46,18 @@ def get_correlation_context() -> dict[str, str | None]:
     }
 
 
-def redact_secrets(text: str, custom_secrets: list[str] | None = None) -> str:
-    """Redact known secret patterns and standard credential formats from text."""
+def redact_secrets(data: Any, custom_secrets: list[str] | None = None) -> Any:
+    """Redact known secret patterns and standard credential formats from text or structured objects."""
+    if data is None:
+        return None
+    if isinstance(data, dict):
+        return {k: redact_secrets(v, custom_secrets=custom_secrets) for k, v in data.items()}
+    if isinstance(data, (list, tuple)):
+        return [redact_secrets(v, custom_secrets=custom_secrets) for v in data]
+    if not isinstance(data, str):
+        return data
+
+    text = data
     if not text:
         return text
 
@@ -72,7 +82,7 @@ def redact_secrets(text: str, custom_secrets: list[str] | None = None) -> str:
     )
     redacted = re.sub(r"\b(xox[a-zA-Z0-9_\.\-]{10,})\b", "[REDACTED_TOKEN]", redacted)
     redacted = re.sub(
-        r"(?i)\bBearer\s+([a-zA-Z0-9_\-\.]{16,})\b", "Bearer [REDACTED_TOKEN]", redacted
+        r"(?i)\bBearer\s+([a-zA-Z0-9_\-\.]{8,})\b", "Bearer [REDACTED_TOKEN]", redacted
     )
     redacted = re.sub(
         r"-----BEGIN[ A-Z0-9_-]*PRIVATE KEY-----[\s\S]*?-----END[ A-Z0-9_-]*PRIVATE KEY-----",
@@ -83,11 +93,10 @@ def redact_secrets(text: str, custom_secrets: list[str] | None = None) -> str:
     # Redact explicit registered secrets
     secrets = get_secret_patterns()
     if custom_secrets:
-        secrets.extend(custom_secrets)
-
-    for secret in secrets:
-        if secret and secret in redacted:
-            redacted = redacted.replace(secret, "[REDACTED]")
+        secrets = secrets + custom_secrets
+    for s in secrets:
+        if s and len(s) >= 4:
+            redacted = redacted.replace(s, "[REDACTED]")
 
     return redacted
 

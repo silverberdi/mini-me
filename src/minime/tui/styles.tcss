@@ -191,7 +191,7 @@ TabPane {
 /* ========================================================================= */
 #detail-container {
     height: 1fr;
-    layout: horizontal;
+    layout: vertical;
     width: 100%;
 }
 
@@ -385,6 +385,10 @@ HelpModal {
     height: auto;
 }
 .layout-narrow #detail-container {
+    layout: vertical;
+    overflow-y: auto;
+}
+.layout-narrow .scroll-container {
     layout: vertical;
     overflow-y: auto;
 }

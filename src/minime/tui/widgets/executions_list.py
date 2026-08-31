@@ -63,6 +63,9 @@ class ActiveExecutionsWidget(Widget):
             )
 
             if exec_item.latest_progress:
-                body.append(f"  Progress: {sanitize_text(exec_item.latest_progress)}\n", style="italic white")
+                body.append(
+                    f"  Progress: {sanitize_text(exec_item.latest_progress)}\n",
+                    style="italic white",
+                )
 
         content.update(body)

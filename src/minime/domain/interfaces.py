@@ -34,6 +34,7 @@ from minime.domain.models import (
     MetricFact,
     OpenRouterBudgetPolicy,
     OpenRouterPricingSnapshot,
+    OperatorActionRecord,
     OrchestrationCandidate,
     OrchestrationExternalAction,
     OrchestrationRun,
@@ -519,6 +520,9 @@ class PreviewSessionRepositoryInterface(ABC):
     @abstractmethod
     def list_active(self) -> list[PreviewSession]: ...
 
+    @abstractmethod
+    def get_active_for_change(self, project_id: str, change_name: str) -> PreviewSession | None: ...
+
 
 class ValidationRunRepositoryInterface(ABC):
     @abstractmethod
@@ -542,6 +546,23 @@ class ValidationRunRepositoryInterface(ABC):
 
     @abstractmethod
     def list_by_run(self, run_id: str) -> list[ValidationRun]: ...
+
+
+class OperatorActionRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, record: OperatorActionRecord) -> None: ...
+
+    @abstractmethod
+    def get_by_id(self, record_id: str) -> OperatorActionRecord | None: ...
+
+    @abstractmethod
+    def get_by_request_id(self, action_request_id: str) -> OperatorActionRecord | None: ...
+
+    @abstractmethod
+    def list_by_run(self, run_id: str, limit: int = 50) -> list[OperatorActionRecord]: ...
+
+    @abstractmethod
+    def list_by_project(self, project_id: str, limit: int = 50) -> list[OperatorActionRecord]: ...
 
 
 class PersistenceUnitOfWork(ABC):
@@ -578,6 +599,7 @@ class PersistenceUnitOfWork(ABC):
     orchestration_external_actions: OrchestrationExternalActionRepositoryInterface
     preview_sessions: PreviewSessionRepositoryInterface
     validation_runs: ValidationRunRepositoryInterface
+    operator_actions: OperatorActionRepositoryInterface
 
     @abstractmethod
     def commit(self) -> None: ...

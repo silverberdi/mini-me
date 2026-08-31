@@ -56,7 +56,6 @@ class ChangesView(Widget):
                 yield Button("Ready", id="filter-ready", classes="filter-btn")
                 yield Button("Completed", id="filter-completed", classes="filter-btn")
 
-
             yield DataTable(id="changes-table", cursor_type="row", zebra_stripes=True)
 
     def on_mount(self) -> None:
@@ -120,7 +119,9 @@ class ChangesView(Widget):
 
         for c in filtered:
             status_badge = get_status_text(c.status)
-            stage_badge = get_status_text(c.current_stage) if c.current_stage else Text("—", style="dim")
+            stage_badge = (
+                get_status_text(c.current_stage) if c.current_stage else Text("—", style="dim")
+            )
             executor_str = c.current_executor or "—"
             gen_str = str(c.generation) if c.generation is not None else "—"
             sha_str = short_sha(c.candidate_sha)

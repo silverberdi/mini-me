@@ -129,12 +129,42 @@ def create_sample_detail() -> DashboardChangeDetailResponse:
         current_stage="IMPLEMENTING",
         current_executor="codex",
         pipeline=[
-            PipelinePhaseDTO(name="readiness", display_name="1. Readiness", status="passed", summary="DoR verified"),
-            PipelinePhaseDTO(name="implementation", display_name="2. Implementation", status="running", summary="Executing Codex implementer"),
-            PipelinePhaseDTO(name="checks", display_name="3. Deterministic Checks", status="not_started", summary="Awaiting implementation"),
-            PipelinePhaseDTO(name="review", display_name="4. Complementary Review", status="not_started", summary="Awaiting checks"),
-            PipelinePhaseDTO(name="audit", display_name="5. DeepSeek Audit", status="not_started", summary="Awaiting review"),
-            PipelinePhaseDTO(name="pr_merge", display_name="6. PR & Merge Gate", status="not_started", summary="Awaiting audit"),
+            PipelinePhaseDTO(
+                name="readiness",
+                display_name="1. Readiness",
+                status="passed",
+                summary="DoR verified",
+            ),
+            PipelinePhaseDTO(
+                name="implementation",
+                display_name="2. Implementation",
+                status="running",
+                summary="Executing Codex implementer",
+            ),
+            PipelinePhaseDTO(
+                name="checks",
+                display_name="3. Deterministic Checks",
+                status="not_started",
+                summary="Awaiting implementation",
+            ),
+            PipelinePhaseDTO(
+                name="review",
+                display_name="4. Complementary Review",
+                status="not_started",
+                summary="Awaiting checks",
+            ),
+            PipelinePhaseDTO(
+                name="audit",
+                display_name="5. DeepSeek Audit",
+                status="not_started",
+                summary="Awaiting review",
+            ),
+            PipelinePhaseDTO(
+                name="pr_merge",
+                display_name="6. PR & Merge Gate",
+                status="not_started",
+                summary="Awaiting audit",
+            ),
         ],
         candidate_authority=CandidateAuthorityDTO(
             generation=1,
@@ -215,7 +245,12 @@ def create_sample_detail() -> DashboardChangeDetailResponse:
                     scenario_id="sc-1",
                     title="Validate TUI Overview & Keybindings",
                     description="Open console and switch tabs",
-                    ordered_steps=["Launch console", "Press 2 for changes", "Press 3 for detail", "Press ? for help"],
+                    ordered_steps=[
+                        "Launch console",
+                        "Press 2 for changes",
+                        "Press 3 for detail",
+                        "Press ? for help",
+                    ],
                     expected_result="All views render cleanly with zero broken borders",
                 )
             ],
@@ -235,7 +270,9 @@ def create_sample_detail() -> DashboardChangeDetailResponse:
 
 
 class MockQueryClient(TuiQueryClient):
-    def __init__(self, overview: DashboardOverviewResponse, detail: DashboardChangeDetailResponse) -> None:
+    def __init__(
+        self, overview: DashboardOverviewResponse, detail: DashboardChangeDetailResponse
+    ) -> None:
         super().__init__()
         self._overview = overview
         self._detail = detail
@@ -243,7 +280,9 @@ class MockQueryClient(TuiQueryClient):
     async def get_overview(self) -> DashboardOverviewResponse:
         return self._overview
 
-    async def get_change_detail(self, project_id: str, change_name: str) -> DashboardChangeDetailResponse | None:
+    async def get_change_detail(
+        self, project_id: str, change_name: str
+    ) -> DashboardChangeDetailResponse | None:
         return self._detail
 
 
@@ -264,7 +303,6 @@ async def test_tui_app_initial_mount_and_overview():
         # Check Active Tab is Overview
         tabs = app.query_one(TabbedContent)
         assert tabs.active == "tab-overview"
-
 
 
 @pytest.mark.asyncio
@@ -335,10 +373,10 @@ async def test_tui_app_preview_projection_and_stale_detection():
     async with app.run_test() as pilot:
         await pilot.press("4")  # Preview tab
         from minime.tui.widgets.preview_card import PreviewValidationWidget
+
         card = app.query_one("#preview-view-card", PreviewValidationWidget)
         assert card is not None
         assert card.summary is not None
         assert card.summary.is_stale is True
         assert card.summary.preview_session.status == "READY"
         assert card.summary.preview_session.allocated_port == 8088
-

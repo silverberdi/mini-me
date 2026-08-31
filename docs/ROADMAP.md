@@ -2,7 +2,7 @@
 
 Only the current stage should exist as an active OpenSpec change. Future stages are converted into OpenSpec changes only after prior-stage closure and a fresh readiness review.
 
-## Delivered Stages (001 – 014)
+## Delivered Stages (001 – 015)
 - **001 Foundation (`001-foundation`)**: PostgreSQL state/events/migrations, project registry, immutable repository binding, OpenSpec DoR, minimal status/health.
 - **002 Implementation Pipeline (`002-implementation-pipeline`)**: Worktree lifecycle, Codex/Antigravity implementers, deterministic checks runner.
 - **003 Complementary Review Pipeline (`003-complementary-review-pipeline`)**: Codex ↔ Antigravity complementary review, structured verdicts, bounded correction loop.
@@ -17,20 +17,13 @@ Only the current stage should exist as an active OpenSpec change. Future stages 
 - **012 Execution Operations Dashboard (`012-execution-operations-dashboard`)**: Read-only real-time operations dashboard, pipeline phase stepper, secret-redacted diagnostics.
 - **013 Container Preview + Guided UI Validation (`013-container-preview-guided-validation`)**: Isolated candidate-bound container previews, image digest authority, guided validation scenarios, stale validation invalidation.
 - **014 TUI Operator Console (`014-tui-operator-console`)**: Interactive terminal operator console via Textual, multi-viewport layout, progressive disclosure, 013 preview/validation projection, and zero direct database queries.
+- **015 Operator Actions / Control Plane (`015-operator-actions-control-plane`)**: Reusable canonical operational actions and mutation control plane (`ControlPlaneService`), optimistic concurrency protection, idempotency, safe cancellation, audit trail persistence, and TUI/CLI/API execution integration.
 
 ---
 
-## Canonical Roadmap (015 – 018)
+## Canonical Roadmap (016 – 018)
 
-### 015 — Operator Actions / Control Plane (`015-operator-actions-control-plane`) — NEXT
-**Outcome:** Create reusable canonical operational actions and services for both TUI and future PWA.
-
-**Expected Scope:**
-- Retry, continue, resume, reassign, resolve human gates, cancel, evidence drill-down, recovery actions;
-- Enforce authority, governance, auditability and idempotency across all mutations.
-**Boundary:** Do NOT implement 015 during 013.
-
-### 016 — Autonomous Queue + Work Selection (`016-autonomous-queue-work-selection`)
+### 016 — Autonomous Queue + Work Selection (`016-autonomous-queue-work-selection`) — NEXT
 **Outcome:** Allow mini me to automatically discover, prioritize and admit READY work across registered repositories.
 **Expected Scope:**
 - Policy inputs: roadmap order, dependencies, provider availability, budget, concurrency, RUN/DRAIN/WAIT;
