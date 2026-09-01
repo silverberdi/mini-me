@@ -1669,12 +1669,11 @@ class OrchestrationService:
                         self.uow.orchestration_candidates.supersede(
                             latest_candidate.candidate_id, new_cand.candidate_id
                         )
-                        run.current_generation = next_gen
-                        run.current_candidate_sha = head_sha
                         self.uow.orchestration_runs.update_candidate_binding(
                             run.run_id, next_gen, head_sha
                         )
 
+                self.uow.commit()
                 current_candidate = self.uow.orchestration_candidates.get_latest_for_run(run.run_id)
                 if current_candidate:
                     self._bind_current_authority_records(run, job, current_candidate)
@@ -2574,11 +2573,12 @@ class OrchestrationService:
             ):
                 return "Cannot freeze candidate without authoritative passing checks."
         elif to_stage == OrchestrationStage.COMPLEMENTARY_REVIEW:
+            cand = candidate or (self.uow.orchestration_candidates.get_latest_for_run(run.run_id) if run else None)
             if (
-                not candidate
-                or not candidate.is_frozen
-                or not candidate.manifest_id
-                or not candidate.manifest_hash
+                not cand
+                or not cand.is_frozen
+                or not cand.manifest_id
+                or not cand.manifest_hash
             ):
                 return "Cannot enter complementary review without a frozen candidate manifest."
         elif to_stage == OrchestrationStage.INDEPENDENT_AUDIT:
