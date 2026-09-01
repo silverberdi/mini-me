@@ -1669,6 +1669,8 @@ class OrchestrationService:
                         self.uow.orchestration_candidates.supersede(
                             latest_candidate.candidate_id, new_cand.candidate_id
                         )
+                        run.current_generation = next_gen
+                        run.current_candidate_sha = head_sha
                         self.uow.orchestration_runs.update_candidate_binding(
                             run.run_id, next_gen, head_sha
                         )
@@ -2504,7 +2506,21 @@ class OrchestrationService:
             raise ValueError(evidence_error)
 
         candidate_key = run.current_candidate_sha or "none"
-        transition_key = f"{run.run_id}:{from_stage.value}->{to_stage.value}:gen{run.current_generation}:cand{candidate_key}:{correlation_id or 'default'}"
+        raw_key = f"{run.run_id}:{from_stage.value}->{to_stage.value}:gen{run.current_generation}:cand{candidate_key}:{correlation_id or 'default'}"
+        if len(raw_key) <= 128:
+            transition_key = raw_key
+        else:
+            transition_key = bounded_orchestration_transition_key(
+                f"{run.run_id[:8]}:TRANS",
+                {
+                    "run_id": run.run_id,
+                    "from_stage": from_stage.value,
+                    "to_stage": to_stage.value,
+                    "generation": run.current_generation,
+                    "candidate_sha": candidate_key[:16],
+                    "correlation_id": correlation_id or "default",
+                },
+            )
         existing_event = self.uow.orchestration_stage_events.get_by_transition_key(transition_key)
 
         requested_evidence = {
@@ -2573,13 +2589,10 @@ class OrchestrationService:
             ):
                 return "Cannot freeze candidate without authoritative passing checks."
         elif to_stage == OrchestrationStage.COMPLEMENTARY_REVIEW:
-            cand = candidate or (self.uow.orchestration_candidates.get_latest_for_run(run.run_id) if run else None)
-            if (
-                not cand
-                or not cand.is_frozen
-                or not cand.manifest_id
-                or not cand.manifest_hash
-            ):
+            cand = candidate or (
+                self.uow.orchestration_candidates.get_latest_for_run(run.run_id) if run else None
+            )
+            if not cand or not cand.is_frozen or not cand.manifest_id or not cand.manifest_hash:
                 return "Cannot enter complementary review without a frozen candidate manifest."
         elif to_stage == OrchestrationStage.INDEPENDENT_AUDIT:
             if not job or not candidate:

@@ -18,6 +18,40 @@ class StatusService:
     def __init__(self, uow: PersistenceUnitOfWork):
         self.uow = uow
 
+    def get_system_status(self) -> dict[str, Any]:
+        """Aggregate operational system status."""
+        db_healthy, db_message = db_manager.check_health()
+        projects = self.uow.projects.list_all()
+
+        project_summaries: list[dict[str, Any]] = []
+        for proj in projects:
+            changes = self.uow.changes.list_by_project(proj.project_id)
+            project_summaries.append(
+                {
+                    "project_id": proj.project_id,
+                    "display_name": proj.display_name,
+                    "repository": proj.repository,
+                    "base_branch": proj.base_branch,
+                    "status": proj.status.value,
+                    "changes_count": len(changes),
+                    "changes": [
+                        {
+                            "name": c.name,
+                            "status": c.status.value,
+                            "readiness": c.last_readiness_status.value,
+                            "unmet_reasons": c.last_readiness_reasons,
+                        }
+                        for c in changes
+                    ],
+                }
+            )
+
+        recent_events = self.uow.events.list_events(limit=10)
+        github_auth = GitHubAppAuth()
+        github_configured = bool(
+            github_auth.app_id and github_auth.installation_id and github_auth.private_key_path
+        )
+
         return {
             "status": "healthy" if db_healthy else "degraded",
             "database": {
