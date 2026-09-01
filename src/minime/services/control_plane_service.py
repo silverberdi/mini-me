@@ -564,7 +564,7 @@ class ControlPlaneService:
         run: OrchestrationRun,
         sanitized_params: dict[str, Any],
     ) -> OperatorActionResult:
-        if run.is_active:
+        if run.is_active and not sanitized_params.get("force"):
             return self._record_and_return_rejection(
                 request=request,
                 run=run,
