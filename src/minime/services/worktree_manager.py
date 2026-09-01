@@ -179,6 +179,18 @@ class WorktreeManager:
             pass
         branch_name = branch_name or f"minime/{change_name}-{job_id}"
         base_sha = await self._git(["rev-parse", base_branch])
+
+        if path.exists():
+            try:
+                await self._git(["rev-parse", "HEAD"], cwd=path)
+                return WorktreeInfo(path=path, branch_name=branch_name, base_sha=base_sha)
+            except Exception:
+                shutil.rmtree(path, ignore_errors=True)
+                try:
+                    await self._git(["worktree", "prune"], cwd=self.project_root)
+                except Exception:
+                    pass
+
         branch_exists = False
         try:
             await self._git(["rev-parse", "--verify", f"refs/heads/{branch_name}"])
