@@ -1191,7 +1191,7 @@ class PostgresJobRepository(JobRepositoryInterface):
             raise ValueError(f"Job '{job_id}' not found.")
         current = JobStatus(model.status)
         target = JobStatus(new_status)
-        if target not in self.VALID_TRANSITIONS[current]:
+        if current != target and target not in self.VALID_TRANSITIONS[current]:
             raise ValueError(f"Invalid job status transition: {current.value} -> {target.value}.")
         model.status = target.value
         model.error_message = error_message
