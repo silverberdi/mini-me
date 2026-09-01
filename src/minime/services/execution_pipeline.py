@@ -1848,11 +1848,17 @@ class ExecutionPipelineService:
         """Execute DeepSeek Direct audit. OpenRouter is never used for audit."""
         review = self.uow.reviews.get_by_id(review_id)
         review_findings = self.uow.review_findings.list_by_review(review_id) if review else []
+        persisted_checks = [
+            r
+            for r in self.uow.check_results.list_by_job(job.job_id)
+            if r.candidate_sha == job.candidate_sha
+        ]
+        effective_checks_results = check_run_results if check_run_results else persisted_checks
         pre_ok, pre_err = verify_pre_audit(
             worktree_path=worktree_path,
             job=job,
             review=review,
-            checks_results=check_run_results,
+            checks_results=effective_checks_results,
             base_branch=project.base_branch,
             repo_root_path=self.project_root,
         )
