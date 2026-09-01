@@ -110,15 +110,15 @@ class WorkDiscoveryService:
             active_change_names = {c.name for c in changes}
             all_db_changes = self.uow.changes.list_by_project(project.project_id)
             for db_change in all_db_changes:
-                if db_change.name not in active_change_names and db_change.status != ChangeStatus.DONE:
+                if (
+                    db_change.name not in active_change_names
+                    and db_change.status != ChangeStatus.DONE
+                ):
                     stage_num = extract_roadmap_stage(db_change.name)
                     stage_prefix = f"{stage_num:03d}" if stage_num is not None else None
-                    is_archived = (
-                        db_change.name in archived_names
-                        or any(
-                            stage_prefix and (stage_prefix in a or f"-{stage_prefix}-" in a)
-                            for a in archived_names
-                        )
+                    is_archived = db_change.name in archived_names or any(
+                        stage_prefix and (stage_prefix in a or f"-{stage_prefix}-" in a)
+                        for a in archived_names
                     )
                     if is_archived:
                         updated_change = db_change.model_copy(

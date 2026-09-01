@@ -289,6 +289,7 @@ class OrchestrationService:
         self,
         run_id: str,
         project_root: str | Path | None = None,
+        force: bool = False,
     ) -> OrchestrationRun:
         """Resume an orchestration run from its persisted resumable checkpoint."""
         run = self.uow.orchestration_runs.get_by_id(run_id)
@@ -328,26 +329,40 @@ class OrchestrationService:
             self.uow.commit()
 
         elif run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN:
-            # Escalated runs require explicit human resolution before resuming
-            return run
+            if not force:
+                # Escalated runs require explicit human resolution before resuming
+                return run
+            run.stop_outcome = None
+            run.human_gate = None
+            run.is_active = True
+            run.stop_reason = None
+            run.stop_details = {}
+            if run.active_job_id:
+                job = self.uow.jobs.get_by_id(run.active_job_id)
+                if job and job.status == JobStatus.NEEDS_HUMAN:
+                    job.status = JobStatus.RUNNING
+                    job.continuation_decision = None
+                    job.escalation_reason = None
+                    job.reassignment_count = 0
+                    self.uow.jobs.save(job)
+            self.uow.orchestration_runs.save(run)
+            self.uow.commit()
 
         transition_key = f"{run.run_id}:RESUME:{run.resumable_stage.value}:{run.current_generation}"
-        if self.uow.orchestration_stage_events.get_by_transition_key(transition_key):
-            return self.drive_coordinator(run.run_id, project_root=project_root)
-
-        self.uow.orchestration_stage_events.save(
-            OrchestrationStageEvent(
-                run_id=run.run_id,
-                from_stage=run.current_stage,
-                to_stage=run.resumable_stage,
-                event_type=EventType.ORCHESTRATION_RESUMED.value,
-                transition_key=transition_key,
-                evidence_references={"resumed_from": run.resumable_stage.value},
-                actor="system",
-                created_at=utc_now(),
+        if not self.uow.orchestration_stage_events.get_by_transition_key(transition_key):
+            self.uow.orchestration_stage_events.save(
+                OrchestrationStageEvent(
+                    run_id=run.run_id,
+                    from_stage=run.current_stage,
+                    to_stage=run.resumable_stage,
+                    event_type=EventType.ORCHESTRATION_RESUMED.value,
+                    transition_key=transition_key,
+                    evidence_references={"resumed_from": run.resumable_stage.value},
+                    actor="operator" if force else "system",
+                    created_at=utc_now(),
+                )
             )
-        )
-        self.uow.commit()
+            self.uow.commit()
 
         return self.drive_coordinator(run.run_id, project_root=project_root)
 

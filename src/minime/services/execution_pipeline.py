@@ -79,7 +79,7 @@ from minime.services.implementer_runner import (
 )
 from minime.services.model_independence_policy import ModelIndependencePolicy
 from minime.services.openrouter_eligibility import OpenRouterEligibilityEvaluator
-from minime.services.openspec_tasks import OpenSpecTaskTracker
+from minime.services.openspec_tasks import OpenSpecTaskTracker, is_verification_task
 from minime.services.outcome_governance import (
     OutcomeGovernanceService,
     ProgressSignals,
@@ -780,6 +780,33 @@ class ExecutionPipelineService:
                 post_tasks = worktree_task_tracker.parse_tasks(
                     project.openspec_path, job.change_name
                 )
+                incomplete_tasks = [t for t in post_tasks if not t.complete]
+                if incomplete_tasks and all(is_verification_task(t) for t in incomplete_tasks):
+                    try:
+                        pre_check_run = await self.checks_runner.run(
+                            job.job_id,
+                            project.checks,
+                            worktree.path,
+                            candidate_sha=current_sha,
+                        )
+                        if pre_check_run.passed:
+                            reconciled, rec_ids = (
+                                worktree_task_tracker.reconcile_verification_tasks(
+                                    project.openspec_path,
+                                    job.change_name,
+                                    check_evidence_passed=True,
+                                )
+                            )
+                            if reconciled:
+                                logger.info(
+                                    f"Automatically reconciled verification tasks {rec_ids} for job '{job.job_id}' with passing check evidence."
+                                )
+                                post_tasks = worktree_task_tracker.parse_tasks(
+                                    project.openspec_path, job.change_name
+                                )
+                    except Exception as err:
+                        logger.warning(f"Failed pre-check task reconciliation: {err}")
+
                 if not any(not task.complete for task in post_tasks):
                     current_sha = await self._finalize_candidate(
                         worktree.path, job.job_id, job.project_id, current_sha

@@ -14,6 +14,7 @@ from minime.domain.enums import (
     ActionRiskLevel,
     EventType,
     HumanGate,
+    JobStatus,
     OperatorActionErrorCode,
     OperatorActionStatus,
     OperatorActionType,
@@ -584,8 +585,31 @@ class ControlPlaneService:
                 sanitized_params=sanitized_params,
             )
 
+        # Clear stop outcome and human gate upon explicit operator continuation
+        if (
+            run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
+            or run.human_gate == HumanGate.NEEDS_HUMAN
+        ):
+            run.stop_outcome = None
+            run.human_gate = None
+            run.is_active = True
+            run.stop_reason = None
+            run.stop_details = {}
+            if run.active_job_id:
+                job = self.uow.jobs.get_by_id(run.active_job_id)
+                if job and job.status == JobStatus.NEEDS_HUMAN:
+                    job.status = JobStatus.RUNNING
+                    job.continuation_decision = None
+                    job.escalation_reason = None
+                    job.reassignment_count = 0
+                    self.uow.jobs.save(job)
+            self.uow.orchestration_runs.save(run)
+            self.uow.commit()
+
         # Call orchestration service resume
-        resumed_run = self.orchestration_service.resume(run.run_id, project_root=self.project_root)
+        resumed_run = self.orchestration_service.resume(
+            run.run_id, project_root=self.project_root, force=True
+        )
 
         summary = f"Run resumed successfully at stage {resumed_run.current_stage.value}."
         record = OperatorActionRecord(

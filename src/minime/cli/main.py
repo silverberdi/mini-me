@@ -678,7 +678,9 @@ def scheduler_status_cmd(
 @scheduler_app.command("tick")
 def scheduler_tick_cmd(
     project_id: str = typer.Option(None, "--project-id", "-p", help="Filter by registered project"),
-    drive: bool = typer.Option(False, "--drive", "-d", help="Immediately drive admitted candidate execution"),
+    drive: bool = typer.Option(
+        False, "--drive", "-d", help="Immediately drive admitted candidate execution"
+    ),
     json_output: bool = typer.Option(False, "--json", help="Output tick decisions as JSON"),
 ) -> None:
     """Execute a single scheduler evaluation and admission tick."""
@@ -718,7 +720,9 @@ def scheduler_tick_cmd(
 def scheduler_run_cmd(
     project_id: str = typer.Option(None, "--project-id", "-p", help="Filter by registered project"),
     interval: int = typer.Option(30, "--interval", "-i", help="Tick interval in seconds"),
-    drive: bool = typer.Option(True, "--drive/--no-drive", help="Drive admitted candidate execution"),
+    drive: bool = typer.Option(
+        True, "--drive/--no-drive", help="Drive admitted candidate execution"
+    ),
 ) -> None:
     """Run scheduler loop in the foreground."""
     typer.secho(
