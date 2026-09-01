@@ -31,7 +31,7 @@ def verify_physical_schema_invariants(engine: Engine) -> SchemaInvariantResult:
     """
     from minime.db.models import Base
 
-    expected_revision = "014_autonomous_queue_work_selection"
+    expected_revision = "015_widen_transition_key"
     inspector = inspect(engine)
 
     tables = set(inspector.get_table_names())
