@@ -36,10 +36,10 @@ providers:
     roles: [implementer, reviewer]
     invocation:
       implementer:
-        args: [--mode, accept-edits, "--print={prompt}"]
+        args: [--mode, accept-edits, --dangerously-skip-permissions, "--print={prompt}"]
         prompt_transport: argument
       reviewer:
-        args: [--mode, plan, "--print={prompt}"]
+        args: [--mode, plan, --dangerously-skip-permissions, "--print={prompt}"]
         prompt_transport: argument
   deepseek:
     type: openai-compatible-direct
