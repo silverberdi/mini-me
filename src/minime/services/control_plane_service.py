@@ -597,12 +597,21 @@ class ControlPlaneService:
             run.stop_details = {}
             if run.active_job_id:
                 job = self.uow.jobs.get_by_id(run.active_job_id)
-                if job and job.status == JobStatus.NEEDS_HUMAN:
+                if job:
+                    if job.base_sha and job.base_sha != run.base_sha:
+                        run.base_sha = job.base_sha
                     job.status = JobStatus.RUNNING
                     job.continuation_decision = None
                     job.escalation_reason = None
                     job.reassignment_count = 0
                     self.uow.jobs.save(job)
+            if run.current_stage in {
+                OrchestrationStage.EVALUATING_ATTEMPT,
+                OrchestrationStage.FREEZING_CANDIDATE,
+                OrchestrationStage.RUNNING_CHECKS,
+            }:
+                run.resumable_stage = OrchestrationStage.IMPLEMENTING
+                run.current_stage = OrchestrationStage.IMPLEMENTING
             self.uow.orchestration_runs.save(run)
             self.uow.commit()
 
