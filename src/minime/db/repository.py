@@ -1002,7 +1002,6 @@ class PostgresJobRepository(JobRepositoryInterface):
             JobStatus.CHECKS_RUNNING,
             JobStatus.CHECKS_PASSED,
             JobStatus.CHECKS_FAILED,
-            JobStatus.READY_TO_MERGE,
             JobStatus.RUNNING,  # multi-attempt continuation loops
             JobStatus.QUEUED,
             JobStatus.WAITING_CAPACITY,
