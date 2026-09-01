@@ -365,6 +365,11 @@ class OrchestrationService:
             )
             self.uow.commit()
 
+        if force:
+            run.current_stage = run.resumable_stage
+            self.uow.orchestration_runs.save(run)
+            self.uow.commit()
+
         return self.drive_coordinator(run.run_id, project_root=project_root)
 
     def resolve_preserved_candidate(

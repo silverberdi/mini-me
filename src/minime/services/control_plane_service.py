@@ -589,6 +589,7 @@ class ControlPlaneService:
         if (
             run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
             or run.human_gate == HumanGate.NEEDS_HUMAN
+            or sanitized_params.get("force")
         ):
             run.stop_outcome = None
             run.human_gate = None
