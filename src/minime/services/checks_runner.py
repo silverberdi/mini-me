@@ -149,10 +149,14 @@ class ChecksRunner:
                 env["MINIME_DATABASE_URL"] = database_url
                 env["MINIME_EXPECTED_DATABASE"] = expected
 
+            cmd_to_run = command
+            if "pytest" in command and "-o pythonpath" not in command:
+                cmd_to_run = f'{command} -o pythonpath=". src"'
+
             start = asyncio.get_running_loop().time()
             try:
                 proc = await asyncio.create_subprocess_shell(
-                    command,
+                    cmd_to_run,
                     cwd=str(worktree_path),
                     env=env,
                     stdout=asyncio.subprocess.PIPE,
