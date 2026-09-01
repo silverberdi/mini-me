@@ -83,6 +83,7 @@ ALLOWED_STAGE_TRANSITIONS: dict[OrchestrationStage, set[OrchestrationStage]] = {
     OrchestrationStage.RUNNING_CHECKS: {
         OrchestrationStage.FREEZING_CANDIDATE,
         OrchestrationStage.IMPLEMENTING,
+        OrchestrationStage.EVALUATING_ATTEMPT,
     },
     OrchestrationStage.FREEZING_CANDIDATE: {OrchestrationStage.COMPLEMENTARY_REVIEW},
     OrchestrationStage.COMPLEMENTARY_REVIEW: {
@@ -1494,7 +1495,10 @@ class OrchestrationService:
                     )
                     outcome = latest_att.normalized_outcome if latest_att else job.latest_outcome
 
-                    if decision in {
+                    if job.status == JobStatus.RUNNING and job.continuation_decision is None:
+                        # Explicit operator continuation / fresh implementation attempt
+                        self._advance_stage(run, OrchestrationStage.IMPLEMENTING)
+                    elif decision in {
                         ContinuationDecision.CONTINUE_SAME_AGENT,
                         ContinuationDecision.CORRECT_AND_RETRY,
                         ContinuationDecision.REASSIGN_AGENT,

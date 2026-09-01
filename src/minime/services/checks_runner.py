@@ -69,6 +69,28 @@ class ChecksRunner:
             env = os.environ.copy()
             inherited_database_url = env.pop("MINIME_DATABASE_URL", None)
             env.pop("MINIME_EXPECTED_DATABASE", None)
+
+            wt_path = Path(worktree_path)
+            wt_venv_bin = wt_path / ".venv" / "bin"
+            repo_venv_bin = Path.cwd() / ".venv" / "bin"
+            standard_paths = [
+                str(wt_venv_bin),
+                str(repo_venv_bin),
+                "/Users/silveriobernal/.local/bin",
+                "/opt/homebrew/bin",
+                "/usr/local/bin",
+                "/usr/bin",
+                "/bin",
+            ]
+            current_path = env.get("PATH", "")
+            env["PATH"] = (
+                ":".join(p for p in standard_paths if p not in current_path) + ":" + current_path
+            )
+            if "VIRTUAL_ENV" not in env:
+                if wt_venv_bin.parent.exists():
+                    env["VIRTUAL_ENV"] = str(wt_venv_bin.parent)
+                elif repo_venv_bin.parent.exists():
+                    env["VIRTUAL_ENV"] = str(repo_venv_bin.parent)
             if check.get("disposable_postgres") is True:
                 expected = str(
                     check.get("expected_database") or check.get("expected_db") or ""
