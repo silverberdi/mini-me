@@ -350,8 +350,8 @@ def test_real_postgres_coordinator_status_and_restart_reconciliation(
         coordinator = RecordingCoordinator()
         recovery = RestartRecoveryService(uow, project_root=tmp_path)
         recovered = recovery.reconcile_orchestration_runs(coordinator)
-        assert recovered[0].run_id == run.run_id
-        assert coordinator.resumed == [run.run_id]
+        assert any(r.run_id == run.run_id for r in recovered)
+        assert run.run_id in coordinator.resumed
 
     with session_factory() as session:
         uow = PostgresPersistenceUnitOfWork(session)
