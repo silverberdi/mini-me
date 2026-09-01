@@ -768,7 +768,7 @@ class OrchestrationStageEventModel(Base):
     to_stage: Mapped[str] = mapped_column(String(32), nullable=False)
     event_type: Mapped[str] = mapped_column(String(64), default="STAGE_TRANSITION", nullable=False)
     transition_key: Mapped[str | None] = mapped_column(
-        String(128), unique=True, nullable=True, index=True
+        String(512), unique=True, nullable=True, index=True
     )
     evidence_references: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     actor: Mapped[str] = mapped_column(String(64), default="system", nullable=False)
