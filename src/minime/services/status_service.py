@@ -18,6 +18,14 @@ class StatusService:
     def __init__(self, uow: PersistenceUnitOfWork):
         self.uow = uow
 
+    def get_self_hosting_diagnostic(self) -> dict[str, Any]:
+        """Return static runtime capability facts for the self-hosting pilot."""
+        return {
+            "runtime_engine": "mini-me-runtime",
+            "status": "SELF_HOSTING_READY",
+            "autonomous_queue": True,
+        }
+
     def get_system_status(self) -> dict[str, Any]:
         """Aggregate operational system status."""
         db_healthy, db_message = db_manager.check_health()
@@ -66,6 +74,7 @@ class StatusService:
                 "configured": github_configured,
                 "health": "configured" if github_configured else "not_configured",
             },
+            "self_hosting": self.get_self_hosting_diagnostic(),
             "recent_events": [
                 {
                     "event_id": e.event_id,
