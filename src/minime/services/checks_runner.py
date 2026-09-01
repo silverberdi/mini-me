@@ -86,6 +86,16 @@ class ChecksRunner:
             env["PATH"] = (
                 ":".join(p for p in standard_paths if p not in current_path) + ":" + current_path
             )
+            current_pythonpath = env.get("PYTHONPATH", "")
+            pythonpath_dirs = [
+                str(wt_path),
+                str(wt_path / "src"),
+                str(Path.cwd()),
+                str(Path.cwd() / "src"),
+            ]
+            env["PYTHONPATH"] = ":".join(
+                p for p in pythonpath_dirs if p not in current_pythonpath
+            ) + (":" + current_pythonpath if current_pythonpath else "")
             if "VIRTUAL_ENV" not in env:
                 if wt_venv_bin.parent.exists():
                     env["VIRTUAL_ENV"] = str(wt_venv_bin.parent)
