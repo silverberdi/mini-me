@@ -1024,6 +1024,9 @@ class PostgresJobRepository(JobRepositoryInterface):
         },
         JobStatus.CHECKS_PASSED: {
             JobStatus.REVIEW_RUNNING,
+            JobStatus.CHECKS_RUNNING,
+            JobStatus.CHECKS_PASSED,
+            JobStatus.READY_TO_MERGE,
             JobStatus.WAITING_CAPACITY,
             JobStatus.NEEDS_HUMAN,
             JobStatus.FAILED,
@@ -1031,6 +1034,9 @@ class PostgresJobRepository(JobRepositoryInterface):
         },
         JobStatus.CHECKS_FAILED: {
             JobStatus.RUNNING,
+            JobStatus.CHECKS_RUNNING,
+            JobStatus.CHECKS_PASSED,
+            JobStatus.CHECKS_FAILED,
             JobStatus.NEEDS_HUMAN,
             JobStatus.FAILED,
             JobStatus.CANCELLED,
