@@ -165,11 +165,14 @@ class WorktreeManager:
         base_branch: str,
         project_id: str | None = None,
         branch_name: str | None = None,
+        reuse_existing: bool = False,
     ) -> WorktreeInfo:
         path = self.worktree_path(job_id).resolve()
         root = self.worktrees_root.resolve()
         if root not in path.parents:
             raise ValueError(f"Worktree path escapes managed root: {path}")
+        if path.exists() and any(path.iterdir()) and not reuse_existing:
+            raise ValueError(f"Worktree path already exists and is not empty: {path}")
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
             await self._git(["worktree", "prune"], cwd=self.project_root)

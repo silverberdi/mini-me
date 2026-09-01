@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -180,13 +179,6 @@ def resolve_cli_invocation(
     executable = (provider_config.command or "").strip()
     if not executable:
         raise ValueError(f"CLI provider '{provider}' has no executable command configured.")
-    search_path = (
-        os.environ.get("PATH", "")
-        + ":/Users/silveriobernal/.local/bin:/opt/homebrew/bin:/usr/local/bin"
-    )
-    resolved_path = shutil.which(executable) or shutil.which(executable, path=search_path)
-    if resolved_path:
-        executable = resolved_path
     invocation = provider_config.invocation.get(role)
     if invocation is None:
         raise ValueError(f"CLI provider '{provider}' has no invocation profile for role '{role}'.")

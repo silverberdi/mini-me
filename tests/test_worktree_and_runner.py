@@ -267,12 +267,14 @@ def test_known_headless_cli_contracts_are_configured():
         "agy",
         "--mode",
         "accept-edits",
+        "--dangerously-skip-permissions",
         "--print={prompt}",
     ]
     assert runner_for_reviewer("antigravity", config).command == [
         "agy",
         "--mode",
         "plan",
+        "--dangerously-skip-permissions",
         "--print={prompt}",
     ]
 

@@ -371,6 +371,7 @@ class ExecutionPipelineService:
                     job.change_name,
                     project.base_branch,
                     project_id=project.project_id,
+                    reuse_existing=True,
                 )
             except TypeError:
                 worktree = await self.worktree_manager.create_worktree(
