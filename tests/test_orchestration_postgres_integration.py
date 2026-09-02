@@ -48,7 +48,7 @@ def session_factory() -> sessionmaker[Session]:
     with engine.connect() as connection:
         assert connection.execute(text("select current_database()")).scalar() == EXPECTED_DATABASE
         assert connection.execute(text("select version_num from alembic_version")).scalar() == (
-            "014_autonomous_queue_work_selection"
+            "015_widen_transition_key"
         )
     factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     yield factory
