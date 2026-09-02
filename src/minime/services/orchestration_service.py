@@ -1489,7 +1489,11 @@ class OrchestrationService:
                     JobStatus.CHECKS_PASSED,
                     JobStatus.CHANGES_REQUIRED,
                     JobStatus.AUDIT_BLOCKED,
-                } or (latest_att and latest_att.normalized_outcome == ExecutionOutcome.COMPLETED):
+                } or (
+                    latest_att
+                    and latest_att.normalized_outcome == ExecutionOutcome.COMPLETED
+                    and job.status != JobStatus.CHECKS_FAILED
+                ):
                     # Ready for checks / freeze / review / audit stages
                     self._advance_stage(run, OrchestrationStage.RUNNING_CHECKS)
                 else:
@@ -1500,8 +1504,11 @@ class OrchestrationService:
                     )
                     outcome = latest_att.normalized_outcome if latest_att else job.latest_outcome
 
-                    if job.status == JobStatus.RUNNING and job.continuation_decision is None:
-                        # Explicit operator continuation / fresh implementation attempt
+                    if (
+                        job.status in {JobStatus.RUNNING, JobStatus.CHECKS_FAILED}
+                        and job.continuation_decision is None
+                    ):
+                        # Explicit operator continuation / fresh implementation attempt / checks remediation
                         self._advance_stage(run, OrchestrationStage.IMPLEMENTING)
                     elif decision in {
                         ContinuationDecision.CONTINUE_SAME_AGENT,

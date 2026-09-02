@@ -68,8 +68,9 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: reconcile active jobs and clean abandoned locks
-    sess = db_manager.sessionmaker()
+    sess = None
     try:
+        sess = db_manager.sessionmaker()
         uow = PostgresPersistenceUnitOfWork(sess)
         recovery_service = RestartRecoveryService(uow, project_root=".")
         orchestration_service = OrchestrationService(uow, project_root=".")
@@ -81,7 +82,8 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning(f"Error during startup reconciliation: {exc}")
     finally:
-        sess.close()
+        if sess:
+            sess.close()
     yield
 
 
