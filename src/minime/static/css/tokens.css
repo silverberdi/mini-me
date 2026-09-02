@@ -1,0 +1,17 @@
+:root {
+  --bg-app: #08111f; --bg-panel: #101c2d; --bg-card: #15243a; --bg-elevated: #1b2d46;
+  --bg-code: #07101c; --border-color: #29405c; --border-focus: #66b3ff;
+  --text-main: #f3f7fb; --text-muted: #a7b7c9; --text-dim: #71859d;
+  --color-primary: #66b3ff; --color-success: #45d483; --color-warning: #f4bd55;
+  --color-danger: #ff6b6b; --color-info: #8b9cff; --color-muted: #8192a8;
+  --color-success-bg: #123d31; --color-warning-bg: #493616; --color-danger-bg: #481d2a;
+  --color-info-bg: #202750; --color-muted-bg: #243247;
+  --radius-sm: 6px; --radius-md: 10px; --radius-lg: 14px; --radius-pill: 999px;
+  --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-5: 24px;
+  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, monospace;
+  --shadow-panel: 0 12px 30px rgb(0 0 0 / 22%);
+  --focus-ring: 0 0 0 3px rgb(102 179 255 / 45%);
+  --header-height: 68px;
+}
+body.theme-light { --bg-app: #f3f6fa; --bg-panel: #fff; --bg-card: #f7f9fc; --bg-elevated: #edf3fa; --bg-code: #e8eef5; --border-color: #c8d4e1; --text-main: #172334; --text-muted: #53657a; --text-dim: #71849b; --color-primary: #075fa8; --color-success: #087443; --color-warning: #8b5e00; --color-danger: #b72b3a; --color-info: #3948a5; --color-muted: #63748a; --color-success-bg: #dff5e9; --color-warning-bg: #fff0c9; --color-danger-bg: #ffe2e5; --color-info-bg: #e3e7ff; --color-muted-bg: #e7edf4; }

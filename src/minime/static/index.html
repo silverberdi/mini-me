@@ -5,10 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>mini me — Operations Dashboard</title>
   <meta name="description" content="Operational control and observability surface for mini me autonomous software delivery pipeline.">
+  <meta name="theme-color" content="#1e293b">
+  <link rel="manifest" href="/static/manifest.webmanifest">
+  <link rel="stylesheet" href="/static/css/pwa.css">
   <link rel="stylesheet" href="/static/css/dashboard.css">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🤖</text></svg>">
 </head>
 <body class="theme-dark">
+  <div id="offlineBanner" class="offline-banner" role="status" aria-live="polite"></div>
   <!-- Top Navigation Header -->
   <header class="top-nav" role="banner">
     <div class="nav-brand">
@@ -61,19 +65,19 @@
 
       <div class="kpi-card" id="kpiAttention">
         <div class="kpi-label">ATTENTION REQUIRED</div>
-        <div class="kpi-value" id="kpiAttentionVal">0</div>
+        <div class="kpi-value" id="kpiAttentionVal" data-kpi="blocked">0</div>
         <div class="kpi-sub" id="kpiAttentionSub">0 human gates / blockers</div>
       </div>
 
       <div class="kpi-card" id="kpiActive">
         <div class="kpi-label">ACTIVE EXECUTIONS</div>
-        <div class="kpi-value text-primary" id="kpiActiveVal">0</div>
+        <div class="kpi-value text-primary" id="kpiActiveVal" data-kpi="active">0</div>
         <div class="kpi-sub" id="kpiActiveSub">0 changes currently in-flight</div>
       </div>
 
       <div class="kpi-card" id="kpiCompleted">
         <div class="kpi-label">COMPLETED / MERGED</div>
-        <div class="kpi-value text-muted" id="kpiCompletedVal">0</div>
+        <div class="kpi-value text-muted" id="kpiCompletedVal" data-kpi="queue">0</div>
         <div class="kpi-sub" id="kpiCompletedSub">Total discovered: 0</div>
       </div>
     </section>
@@ -89,11 +93,21 @@
       </div>
     </section>
 
+    <section class="panel queue-panel" id="queue" aria-label="Autonomous queue prioritization">
+      <div class="panel-header"><h2 class="panel-title">Autonomous Queue Prioritization</h2><span class="text-muted">Server-ranked admission telemetry</span></div>
+      <div id="queueList" class="queue-list"><p class="table-empty">Loading ranked candidates...</p></div>
+    </section>
+
+    <section class="panel provider-panel" aria-label="Provider health and capacity">
+      <div class="panel-header"><h2 class="panel-title">Provider Health & Capacity</h2><span class="text-muted">Live availability</span></div>
+      <div id="providerGrid" class="provider-grid"><p class="table-empty">Loading provider health...</p></div>
+    </section>
+
     <!-- Master-Detail Content Layout -->
     <div class="content-split">
 
       <!-- Left Column: Changes Master Table -->
-      <section class="panel master-panel" aria-label="Changes Overview">
+      <section class="panel master-panel" id="runs" aria-label="Changes Overview">
         <div class="panel-header">
           <h2 class="panel-title">Changes & Executions</h2>
           <div class="filter-toolbar">
@@ -126,6 +140,7 @@
               </tr>
             </tbody>
           </table>
+          <div id="runsTableBody" class="runs-live-list" aria-label="Live orchestration runs"></div>
         </div>
       </section>
 
@@ -138,7 +153,7 @@
 
         <div class="detail-content" id="detailContent" style="display: none;">
           <!-- Detail Header -->
-          <div class="detail-header">
+            <div class="detail-header">
             <div class="detail-title-group">
               <div class="title-row">
                 <h3 class="detail-title" id="dtChangeName">012-execution-operations-dashboard</h3>
@@ -150,6 +165,7 @@
                 <span class="meta-item">Gen: <strong id="dtGeneration">gen-1</strong></span>
                 <span class="meta-item" id="dtCandidateMeta">SHA: <code id="dtCandidateSha" class="code-sha">---</code> <button id="copyShaBtn" class="btn-tiny" title="Copy SHA">📋</button></span>
               </div>
+              <div id="actionToolbar" class="action-toolbar" aria-label="Operator actions"></div>
             </div>
           </div>
 
@@ -299,6 +315,23 @@
     </div>
   </main>
 
+  <nav class="bottom-nav" aria-label="Mobile navigation">
+    <button type="button" data-scroll-to="overview">Overview</button>
+    <button type="button" data-scroll-to="runs">Runs</button>
+    <button type="button" data-scroll-to="queue">Queue</button>
+    <button type="button" data-scroll-to="preview">Preview</button>
+  </nav>
+
+  <dialog id="actionDialog" class="action-dialog" aria-labelledby="actionDialogTitle">
+    <h2 id="actionDialogTitle" data-dialog-title>Confirm action</h2>
+    <p data-dialog-description></p>
+    <form method="dialog" class="action-group">
+      <button type="submit" class="btn btn-secondary" data-cancel>Cancel</button>
+      <button type="button" class="btn btn-primary" data-confirm>Confirm</button>
+    </form>
+  </dialog>
+
   <script src="/static/js/dashboard.js"></script>
+  <script type="module" src="/static/js/app.js"></script>
 </body>
 </html>

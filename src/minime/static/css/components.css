@@ -1,0 +1,16 @@
+.status-badge, .badge { border-radius: var(--radius-pill); font-weight: 750; letter-spacing: .03em; }
+.status-badge { display: inline-flex; gap: 5px; align-items: center; padding: 4px 9px; font-size: 11px; background: var(--color-muted-bg); color: var(--text-main); }
+.status-badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.status-success { color: var(--color-success); background: var(--color-success-bg); } .status-warning { color: var(--color-warning); background: var(--color-warning-bg); } .status-danger { color: var(--color-danger); background: var(--color-danger-bg); } .status-info { color: var(--color-info); background: var(--color-info-bg); }
+.offline-banner { display: none; background: var(--color-danger-bg); color: var(--color-danger); border-bottom: 1px solid var(--color-danger); padding: 8px 16px; text-align: center; font-weight: 750; }
+.offline-banner.is-visible { display: block; } .attention-banner { border-left: 4px solid var(--color-warning); }
+.queue-explain { margin-top: 8px; padding: 10px; background: var(--bg-code); border-radius: var(--radius-sm); font-size: 12px; }
+.pipeline-nine-stage { display: grid; grid-template-columns: repeat(9, minmax(90px, 1fr)); gap: 4px; overflow-x: auto; }
+.pipeline-nine-stage .step { padding: 8px; border: 1px solid var(--border-color); border-radius: var(--radius-sm); text-align: center; font-size: 10px; }
+.pipeline-nine-stage .step.is-complete { border-color: var(--color-success); color: var(--color-success); } .pipeline-nine-stage .step.is-active { border-color: var(--color-info); color: var(--color-info); animation: pulse 1.6s infinite; } .pipeline-nine-stage .step.is-blocked { border-color: var(--color-warning); color: var(--color-warning); } .pipeline-nine-stage .step.is-failed { border-color: var(--color-danger); color: var(--color-danger); }
+@keyframes pulse { 50% { box-shadow: 0 0 0 3px rgb(139 156 255 / 15%); } }
+dialog.action-dialog { background: var(--bg-panel); color: var(--text-main); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 20px; max-width: min(460px, calc(100vw - 32px)); } dialog.action-dialog::backdrop { background: rgb(0 0 0 / 65%); }
+ .provider-card { display: grid; gap: 6px; padding: 12px; border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--bg-card); }
+.provider-card small { color: var(--text-muted); }
+.action-toolbar { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.action-toolbar button { min-height: 40px; }

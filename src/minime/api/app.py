@@ -1155,6 +1155,19 @@ def discover_actions_endpoint(
     return cp_service.get_available_actions(run_id)
 
 
+@app.get(
+    "/api/v1/control-plane/actions/available",
+    tags=["control-plane"],
+    response_model=list[ActionDescriptor],
+)
+def discover_control_plane_actions_endpoint(
+    run_id: str,
+    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
+) -> list[ActionDescriptor]:
+    """Stable control-plane discovery route for presentation clients."""
+    return discover_actions_endpoint(run_id, uow)
+
+
 @app.post(
     "/api/v1/runs/{run_id}/actions/{action_type}",
     tags=["control-plane"],
@@ -1190,6 +1203,19 @@ def execute_action_generic_endpoint(
         request_body = request_body.model_copy(update={"run_id": run_id})
     cp_service = ControlPlaneService(uow)
     return cp_service.execute_action(request_body)
+
+
+@app.post(
+    "/api/v1/control-plane/actions/execute",
+    tags=["control-plane"],
+    response_model=OperatorActionResult,
+)
+def execute_control_plane_action_endpoint(
+    request_body: OperatorActionRequest,
+    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
+) -> OperatorActionResult:
+    """Stable mutation route for presentation clients."""
+    return execute_action_generic_endpoint(request_body.run_id, request_body, uow)
 
 
 @app.get(

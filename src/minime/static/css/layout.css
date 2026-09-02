@@ -1,0 +1,14 @@
+* { box-sizing: border-box; }
+body { background: var(--bg-app); color: var(--text-main); font-family: var(--font-sans); }
+.dashboard-main { width: min(100% - 32px, 2240px); max-width: none; padding: 16px; }
+.content-split { display: grid; grid-template-columns: minmax(360px, .9fr) minmax(520px, 1.4fr) minmax(360px, .9fr); gap: 16px; align-items: start; }
+.master-panel { grid-column: 1 / 2; } .detail-panel { grid-column: 2 / 4; min-width: 0; }
+.kpi-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.bottom-nav { display: none; }
+.top-nav { position: sticky; top: 0; z-index: 100; min-height: var(--header-height); }
+.runs-live-list { display: none; }
+.provider-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+@media (max-width: 1199px) { .content-split { grid-template-columns: minmax(300px, .8fr) minmax(0, 1.2fr); } .detail-panel { grid-column: 2; } }
+@media (max-width: 767px) { body { padding-bottom: 64px; overflow-x: hidden; } .top-nav { padding: 10px 12px; } .nav-controls { gap: 6px; flex-wrap: wrap; max-width: 100%; } .status-indicator-group { display: none; } .auto-refresh-label { display: none; } .dashboard-main { width: 100%; padding: 10px; } .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; } .content-split { display: block; } .detail-panel { margin-top: 12px; } .table-container { overflow-x: hidden; } .data-table { width: 100%; min-width: 0; table-layout: fixed; } .data-table th, .data-table td { overflow-wrap: anywhere; } .stepper { width: 100%; overflow: hidden; } .step-item { min-width: 0; } .step-label { overflow-wrap: anywhere; } .bottom-nav { position: fixed; display: flex; inset: auto 0 0; z-index: 110; background: var(--bg-panel); border-top: 1px solid var(--border-color); justify-content: space-around; padding: 8px; } .bottom-nav button { min-height: 44px; background: none; border: 0; color: var(--text-muted); font-weight: 700; } }
+.provider-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.btn:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, dialog:focus-visible { outline: none; box-shadow: var(--focus-ring); }

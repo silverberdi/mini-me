@@ -44,6 +44,8 @@ body.theme-dark {
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.3);
 }
 
+/* 017 PWA tokens are loaded independently for modular consumers. */
+
 /* Light Theme Tokens */
 body.theme-light {
   --bg-app: #f6f8fa;
@@ -271,7 +273,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 16px;
-  max-width: 1600px;
+  max-width: 2240px;
   margin: 0 auto;
   width: 100%;
 }

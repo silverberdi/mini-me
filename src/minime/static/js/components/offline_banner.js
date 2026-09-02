@@ -1,0 +1,1 @@
+export function setOfflineBanner(offline, retrySeconds = 0) { const banner = document.querySelector("#offlineBanner"); if (!banner) return; banner.classList.toggle("is-visible", offline); banner.textContent = offline ? `Backend Disconnected — Retrying${retrySeconds ? ` in ${retrySeconds}s` : "..."}` : ""; }

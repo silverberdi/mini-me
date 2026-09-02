@@ -436,6 +436,36 @@
 
     // Tab 8: Timeline
     renderTimelineTab(detail.timeline);
+    renderActionToolbar(detail.run_id);
+  }
+
+  async function renderActionToolbar(runId) {
+    const toolbar = document.getElementById('actionToolbar');
+    if (!toolbar || !runId) return;
+    try {
+      const response = await fetch(`/api/v1/control-plane/actions/available?run_id=${encodeURIComponent(runId)}`);
+      const actions = await response.json();
+      toolbar.innerHTML = actions.map(action => `<button type="button" class="btn ${action.action_type === 'cancel' ? 'btn-danger' : 'btn-secondary'}" data-action="${escapeHtml(action.action_type)}" ${action.enabled === false ? 'disabled' : ''}>${escapeHtml(action.display_name || action.action_type)}</button>`).join('');
+      toolbar.querySelectorAll('[data-action]:not(:disabled)').forEach(button => button.addEventListener('click', () => {
+        const action = actions.find(item => item.action_type === button.dataset.action);
+        if (action) confirmAction(action, () => executeOperatorAction(runId, action.action_type));
+      }));
+    } catch (_) { toolbar.innerHTML = '<span class="text-muted">Operator actions unavailable</span>'; }
+  }
+
+  function confirmAction(action, onConfirm) {
+    const dialog = document.getElementById('actionDialog');
+    if (!dialog) return onConfirm();
+    dialog.querySelector('[data-dialog-title]').textContent = action.display_name || action.action_type;
+    dialog.querySelector('[data-dialog-description]').textContent = action.confirmation_prompt || action.description || 'Confirm this governed operator action.';
+    dialog.showModal();
+    dialog.querySelector('[data-confirm]').onclick = () => { dialog.close(); onConfirm(); };
+    dialog.querySelector('[data-cancel]').onclick = () => dialog.close();
+  }
+
+  async function executeOperatorAction(runId, actionType) {
+    await fetch('/api/v1/control-plane/actions/execute', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({run_id: runId, action_type: actionType, idempotency_key: crypto.randomUUID(), parameters: {}}) });
+    fetchOverview();
   }
 
 
