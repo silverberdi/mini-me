@@ -125,6 +125,11 @@ class WorkDiscoveryService:
                             update={"status": ChangeStatus.DONE, "updated_at": now}
                         )
                         self.uow.changes.save(updated_change)
+                        old_queue_item = self.uow.work_queue.get_by_project_and_change(
+                            project.project_id, db_change.name
+                        )
+                        if old_queue_item:
+                            self.uow.work_queue.delete(old_queue_item.queue_item_id)
 
             # 2. Fetch remote issues from repository
             remote_issues: list[dict[str, Any]] = []

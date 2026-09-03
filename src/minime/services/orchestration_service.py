@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import hashlib
 import inspect
 import json
@@ -63,6 +64,19 @@ from minime.services.worktree_manager import WorktreeInfo
 
 logger = logging.getLogger(__name__)
 ORCHESTRATION_TRANSITION_KEY_MAX_LENGTH = 128
+
+
+def run_coroutine_sync(coro):
+    """Run an async coroutine synchronously, safely handling existing running loops."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, coro).result()
+    return asyncio.run(coro)
 
 
 def bounded_orchestration_transition_key(prefix: str, identity: dict[str, Any]) -> str:
@@ -785,7 +799,7 @@ class OrchestrationService:
                     )
                     if already_on_base.returncode != 0:
                         commits.append(commit_sha)
-                worktree = asyncio.run(
+                worktree = run_coroutine_sync(
                     self._create_targeted_integration_worktree(
                         manager,
                         integration_path,
@@ -795,7 +809,7 @@ class OrchestrationService:
                         run,
                     )
                 )
-                integrated_sha = asyncio.run(
+                integrated_sha = run_coroutine_sync(
                     manager.cherry_pick(worktree.path, commits, job.job_id, run.project_id)
                 )
                 verified = subprocess.run(
@@ -835,7 +849,7 @@ class OrchestrationService:
                 )
                 run.current_generation = next_generation
                 run.current_candidate_sha = integrated_sha
-                check_run = asyncio.run(
+                check_run = run_coroutine_sync(
                     self.pipeline.checks_runner.run(
                         job.job_id,
                         project.checks,
@@ -851,7 +865,7 @@ class OrchestrationService:
                 if not check_run.passed:
                     raise ValueError("Integrated candidate deterministic checks failed.")
                 self.uow.commit()
-                asyncio.run(
+                run_coroutine_sync(
                     manager.remove_clean_worktree_path(worktree.path, job.job_id, run.project_id)
                 )
             except Exception as exc:
@@ -914,7 +928,7 @@ class OrchestrationService:
         # Reopen the preserved branch in a managed worktree solely for a fresh
         # authoritative check run.  No implementer stage is invoked.
         manager = self.pipeline.worktree_manager
-        worktree = asyncio.run(
+        worktree = run_coroutine_sync(
             manager.create_worktree(
                 job.job_id,
                 run.change_name,
@@ -924,7 +938,7 @@ class OrchestrationService:
             )
         )
         try:
-            check_run = asyncio.run(
+            check_run = run_coroutine_sync(
                 self.pipeline.checks_runner.run(
                     job.job_id,
                     project.checks,
@@ -942,7 +956,7 @@ class OrchestrationService:
                 raise ValueError("Preserved candidate deterministic checks failed.")
             self.uow.commit()
         finally:
-            asyncio.run(manager.remove_clean_worktree(job.job_id, project_id=run.project_id))
+            run_coroutine_sync(manager.remove_clean_worktree(job.job_id, project_id=run.project_id))
 
         run.stop_outcome = None
         run.human_gate = None
@@ -1413,16 +1427,15 @@ class OrchestrationService:
                     break
 
                 # Execute attempt via pipeline
-                import asyncio
 
                 try:
                     execute = self.pipeline.execute_queued_job
                     if "candidate_generation" in inspect.signature(execute).parameters:
-                        job = asyncio.run(
+                        job = run_coroutine_sync(
                             execute(job.job_id, candidate_generation=run.current_generation)
                         )
                     else:
-                        job = asyncio.run(execute(job.job_id))
+                        job = run_coroutine_sync(execute(job.job_id))
                 except Exception as exc:
                     redacted_error = redact_secrets(str(exc))
                     logger.exception(

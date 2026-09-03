@@ -948,6 +948,14 @@ class ExecutionPipelineService:
                         )
                         if not any(not t.complete for t in post_tasks):
                             outcome = ExecutionOutcome.COMPLETED
+                            current_sha = await self._finalize_candidate(
+                                worktree.path, job.job_id, job.project_id, current_sha
+                            )
+
+                if outcome == ExecutionOutcome.COMPLETED:
+                    current_sha = await self._finalize_candidate(
+                        worktree.path, job.job_id, job.project_id, current_sha
+                    )
 
                 # Mandatory Rule C: Same-SHA Duplicate Detection
                 is_same_sha = False

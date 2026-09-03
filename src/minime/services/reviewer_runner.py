@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import signal
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,11 +45,18 @@ class CliReviewerRunner(ReviewerRunnerInterface):
 
     def _command_for_prompt(self, prompt_context: str) -> list[str]:
         if self.profile and self.profile.prompt_transport == "argument":
-            return [
+            raw_cmd = [
                 self.profile.executable,
                 *(arg.replace("{prompt}", prompt_context) for arg in self.profile.args),
             ]
-        return self.command
+        else:
+            raw_cmd = list(self.command)
+        if raw_cmd:
+            search_path = f"{Path.home()}/.local/bin:/opt/homebrew/bin:/usr/local/bin:{os.environ.get('PATH', '')}"
+            resolved = shutil.which(raw_cmd[0], path=search_path)
+            if resolved:
+                raw_cmd[0] = resolved
+        return raw_cmd
 
     async def run(
         self, worktree_path: Path, prompt_context: str, timeout_seconds: int
