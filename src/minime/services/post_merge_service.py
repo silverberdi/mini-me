@@ -73,6 +73,16 @@ class PostMergeReconciliationService:
     def verify_candidate_ancestry(self, candidate_sha: str, base_ref: str = "HEAD") -> bool:
         """Verify that the candidate SHA is an ancestor of the base/main branch."""
         try:
+            # Fetch remote origin if base_ref references origin
+            if "origin" in base_ref or base_ref in {"HEAD", "main", "origin/main"}:
+                subprocess.run(
+                    ["git", "fetch", "origin"],
+                    cwd=self.project_root,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=30,
+                )
             res = subprocess.run(
                 ["git", "merge-base", "--is-ancestor", candidate_sha, base_ref],
                 cwd=self.project_root,

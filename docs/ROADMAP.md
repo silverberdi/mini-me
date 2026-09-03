@@ -37,10 +37,10 @@ Only the current stage should exist as an active OpenSpec change. Future stages 
 - **Boundary:** Autonomous queue-driven progression across all 9 canonical lifecycle stages without human intervention until the final human merge gate.
 - **Status:** DELIVERED / PROVEN (PR #54 Prepared, Ready for Human Merge)
 
-#### 018.3 — Autonomous Post-Merge Closure (`018.3-autonomous-post-merge-closure`) — CURRENT
+#### 018.3 — Autonomous Post-Merge Closure (`018.3-autonomous-post-merge-closure`) — DELIVERED
 - **Outcome:** Automated post-merge spec synchronization, change archiving, worktree cleanup, GitHub Issue/Project closure, and terminal state reconciliation.
-- **Status:** CURRENT / ACTIVE
+- **Status:** DELIVERED / PROVEN (12/12 native phases, 100% post-merge autonomy, verified ancestry, idempotent rerun)
 
-#### 018.4 — Metrics + Proving Run (`018.4-metrics-proving-run`) — BLOCKED
+#### 018.4 — Metrics + Proving Run (`018.4-metrics-proving-run`) — CURRENT
 - **Outcome:** Autonomy metrics aggregation, cross-stage self-hosting verification, and multi-change autonomous SDLC proving run.
-- **Status:** BLOCKED until 018.3 proving run PASS
+- **Status:** CURRENT / UNBLOCKED

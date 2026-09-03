@@ -14,6 +14,7 @@ from minime.domain.enums import (
     AdmissionDecision,
     AdmissionRefusalCode,
     ChangeStatus,
+    OrchestrationStage,
     OrchestrationStopOutcome,
     ProjectStatus,
     ProviderHealthStatus,
@@ -463,11 +464,16 @@ class SchedulerService:
         self, project_id: str | None = None, drive_admitted: bool = False
     ) -> list[SchedulerDecisionRecord]:
         """Execute one complete scheduler evaluation and admission cycle."""
-        # 0. Check and reconcile any merged runs waiting at READY_FOR_HUMAN_MERGE
-        active_runs_pre = self.uow.orchestration_runs.list_runs(is_active=True)
-        for r in active_runs_pre:
-            if r.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE and (
-                project_id is None or r.project_id == project_id
+        # 0. Check and reconcile any merged runs waiting at READY_FOR_HUMAN_MERGE or PR_PREPARED
+        all_runs_pre = self.uow.orchestration_runs.list_runs(project_id=project_id)
+        for r in all_runs_pre:
+            if (
+                (
+                    r.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
+                    or r.current_stage in {OrchestrationStage.PR_PREPARED, OrchestrationStage.POST_MERGE_RECONCILING}
+                )
+                and r.current_stage != OrchestrationStage.COMPLETED
+                and (project_id is None or r.project_id == project_id)
             ):
                 try:
                     res = self.post_merge_service.reconcile_post_merge(
