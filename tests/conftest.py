@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from pathlib import Path
 
 import pytest
+
+# By default in unit test runner, disable auth for older API tests that test pure serialization;
+# tests/test_google_auth.py explicitly enables it to test the full auth & authorization matrix.
+os.environ.setdefault("MINIME_AUTH_ENABLED", "false")
 
 from minime.domain.enums import (
     PRIMARY_PROVIDERS,
@@ -25,6 +30,9 @@ from minime.domain.enums import (
 from minime.domain.interfaces import (
     AuditFindingRepositoryInterface,
     AuditRepositoryInterface,
+    AuthAuditEventRepositoryInterface,
+    AuthorizedOperatorRepositoryInterface,
+    AuthSessionRepositoryInterface,
     BlockerClaimRepositoryInterface,
     CandidateAuthorshipRepositoryInterface,
     CandidateManifestRepositoryInterface,
@@ -60,6 +68,9 @@ from minime.domain.models import (
     AUTHORITATIVE_PRICING_SOURCES,
     AuditFinding,
     AuditRecord,
+    AuthAuditEvent,
+    AuthorizedOperator,
+    AuthSession,
     BlockerClaim,
     BudgetLedgerEntry,
     BudgetReservation,
@@ -1470,6 +1481,112 @@ class InMemorySchedulerDecisionRepository(SchedulerDecisionRepositoryInterface):
         return [d.model_copy(deep=True) for d in items[:limit]]
 
 
+class InMemoryAuthorizedOperatorRepository(AuthorizedOperatorRepositoryInterface):
+    def __init__(self):
+        self._store: list[AuthorizedOperator] = []
+
+    def save(self, operator: AuthorizedOperator) -> None:
+        self._store = [
+            o
+            for o in self._store
+            if o.operator_id != operator.operator_id
+            and o.email.lower().strip() != operator.email.lower().strip()
+        ]
+        self._store.append(operator.model_copy(deep=True))
+
+    def get_by_id(self, operator_id: str) -> AuthorizedOperator | None:
+        for o in self._store:
+            if o.operator_id == operator_id:
+                return o.model_copy(deep=True)
+        return None
+
+    def get_by_email(self, email: str) -> AuthorizedOperator | None:
+        target = email.lower().strip()
+        for o in self._store:
+            if o.email.lower().strip() == target:
+                return o.model_copy(deep=True)
+        return None
+
+    def get_by_google_sub(self, google_sub: str) -> AuthorizedOperator | None:
+        for o in self._store:
+            if o.google_sub == google_sub:
+                return o.model_copy(deep=True)
+        return None
+
+    def list_all(self) -> list[AuthorizedOperator]:
+        return [o.model_copy(deep=True) for o in self._store]
+
+    def delete(self, operator_id: str) -> None:
+        self._store = [o for o in self._store if o.operator_id != operator_id]
+
+
+class InMemoryAuthSessionRepository(AuthSessionRepositoryInterface):
+    def __init__(self):
+        self._store: list[AuthSession] = []
+
+    def save(self, session: AuthSession) -> None:
+        self._store = [s for s in self._store if s.session_id != session.session_id]
+        self._store.append(session.model_copy(deep=True))
+
+    def get_by_id(self, session_id: str) -> AuthSession | None:
+        for s in self._store:
+            if s.session_id == session_id:
+                return s.model_copy(deep=True)
+        return None
+
+    def get_by_token_hash(self, token_hash: str) -> AuthSession | None:
+        for s in self._store:
+            if s.session_token_hash == token_hash:
+                return s.model_copy(deep=True)
+        return None
+
+    def list_by_operator_email(self, email: str) -> list[AuthSession]:
+        target = email.lower().strip()
+        matches = [s for s in self._store if s.operator_email.lower().strip() == target]
+        matches.sort(key=lambda s: s.created_at, reverse=True)
+        return [s.model_copy(deep=True) for s in matches]
+
+    def revoke(self, session_id: str) -> None:
+        for s in self._store:
+            if s.session_id == session_id and s.revoked_at is None:
+                s.revoked_at = utc_now()
+
+    def revoke_all_for_operator(self, email: str) -> None:
+        target = email.lower().strip()
+        now = utc_now()
+        for s in self._store:
+            if s.operator_email.lower().strip() == target and s.revoked_at is None:
+                s.revoked_at = now
+
+    def cleanup_expired(self) -> int:
+        now = utc_now()
+        before = len(self._store)
+        self._store = [s for s in self._store if s.expires_at >= now]
+        return before - len(self._store)
+
+
+class InMemoryAuthAuditEventRepository(AuthAuditEventRepositoryInterface):
+    def __init__(self):
+        self._store: list[AuthAuditEvent] = []
+
+    def save(self, event: AuthAuditEvent) -> None:
+        self._store.append(event.model_copy(deep=True))
+
+    def list_events(
+        self, operator_email: str | None = None, limit: int = 100
+    ) -> list[AuthAuditEvent]:
+        items = self._store
+        if operator_email:
+            target = operator_email.lower().strip()
+            items = [
+                e
+                for e in items
+                if e.operator_email and e.operator_email.lower().strip() == target
+            ]
+        items.sort(key=lambda e: e.timestamp, reverse=True)
+        return [e.model_copy(deep=True) for e in items[:limit]]
+
+
 class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
     def __init__(self):
         self.projects = InMemoryProjectRepository()
@@ -1507,6 +1624,9 @@ class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.operator_actions = InMemoryOperatorActionRepository()
         self.work_queue = InMemoryWorkQueueRepository()
         self.scheduler_decisions = InMemorySchedulerDecisionRepository()
+        self.authorized_operators = InMemoryAuthorizedOperatorRepository()
+        self.auth_sessions = InMemoryAuthSessionRepository()
+        self.auth_audit_events = InMemoryAuthAuditEventRepository()
         self.committed = False
         self.rolled_back = False
 

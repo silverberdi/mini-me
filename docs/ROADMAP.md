@@ -30,5 +30,9 @@ Only the current stage should exist as an active OpenSpec change. Future stages 
 
 ## Canonical Roadmap (Next Stages)
 
-### 019 — Server Runtime & Production Deployment (`019-server-runtime-deployment`) — NEXT
-**Outcome:** Containerized server runtime daemon, deployment automation, production environment isolation, continuous self-operating daemon mode, and operational metrics export.
+### 019 — Server Runtime & Production Deployment (`019-server-runtime-deployment`)
+- **019.1 Server Bootstrap (`019.1-server-bootstrap`)**: DELIVERED. Machine bootstrap, user `minime`, Python 3.14 virtualenv, GitHub App token minting, headless Codex/Antigravity/DeepSeek/Chrome verified on `192.168.0.194`.
+- **019.2 Server Runtime (`019.2-server-runtime`)**: DELIVERED. Systemd services `minime-api.service` and `minime-scheduler.service`, LAN PWA acceptance, controlled reboot recovery, zero Mac dependency.
+- **019.3 Google Authentication & Operator Authorization (`019.3-google-authentication`)**: CURRENT. Google OIDC/OAuth 2.0 authentication, allowlist authorization, server-managed sessions, fail-closed API protection, PWA login shell, security audit trail.
+- **019.4 Cloudflare Tunnel & Secure Remote Access (`019.4-cloudflare-tunnel-remote-access`)**: BLOCKED until authentication enforcement is complete. Public HTTPS ingress, zero router port forwarding, DNS routing.
+- **019.5 Final Mac-Independent / Public Proving Run (`019.5-final-proving-run`)**: FUTURE. End-to-end proving run executed entirely on the server runtime with zero local machine involvement.

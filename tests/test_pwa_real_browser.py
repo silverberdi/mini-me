@@ -343,6 +343,13 @@ def browser_test_env():
     uow = create_seeded_uow()
     app.dependency_overrides[get_uow] = lambda: uow
 
+    from minime.services.auth_service import AuthorizedOperatorService, SessionManager
+
+    op_svc = AuthorizedOperatorService(uow)
+    op_svc.seed_operator("operator@example.com", display_name="Lead Operator")
+    session_mgr = SessionManager(uow)
+    raw_token, _ = session_mgr.create_session("operator@example.com")
+
     server_port = find_free_port()
     cdp_port = find_free_port()
 
@@ -407,6 +414,7 @@ def browser_test_env():
         "server_url": f"http://127.0.0.1:{server_port}",
         "ws_url": ws_url,
         "user_data_dir": user_data_dir,
+        "session_token": raw_token,
     }
 
     # Teardown
@@ -416,6 +424,48 @@ def browser_test_env():
     app.dependency_overrides.clear()
 
 
+async def authenticate_browser(client: ChromeCDPClient, server_url: str, session_token: str) -> None:
+    await client.navigate(f"{server_url}/")
+    await asyncio.sleep(0.3)
+    await client.eval_js(f'document.cookie = "minime_session={session_token}; path=/;";')
+    await client.navigate(f"{server_url}/")
+    await asyncio.sleep(0.8)
+
+
+@pytest.mark.asyncio
+async def test_real_browser_unauthenticated_login_screen(browser_test_env: dict[str, Any]) -> None:
+    """Verify that unauthenticated browser requests display the login screen with zero operational telemetry."""
+    client = ChromeCDPClient(browser_test_env["ws_url"])
+    await client.connect()
+    try:
+        # Clear cookies
+        await client.navigate(f"{browser_test_env['server_url']}/")
+        await client.eval_js('document.cookie = "minime_session=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";')
+        await client.navigate(f"{browser_test_env['server_url']}/")
+        await asyncio.sleep(0.8)
+
+        # Login section must be visible
+        login_display = await client.eval_js(
+            "window.getComputedStyle(document.getElementById('loginSection')).display"
+        )
+        assert login_display != "none", "Login screen should be visible when unauthenticated"
+
+        # Authenticated content must be hidden
+        auth_content_display = await client.eval_js(
+            "window.getComputedStyle(document.getElementById('authenticatedContent')).display"
+        )
+        assert auth_content_display == "none", "Authenticated content must be hidden prior to login"
+
+        # Google login link must point to Google login endpoint
+        login_href = await client.eval_js(
+            "document.getElementById('googleLoginLink').getAttribute('href')"
+        )
+        assert "/api/v1/auth/google/login" in login_href
+
+    finally:
+        await client.close()
+
+
 @pytest.mark.asyncio
 async def test_real_browser_desktop_standard_inspection(browser_test_env: dict[str, Any]) -> None:
     """Inspect Desktop Standard (~1366x768) viewport layout and responsiveness."""
@@ -423,8 +473,7 @@ async def test_real_browser_desktop_standard_inspection(browser_test_env: dict[s
     await client.connect()
     try:
         await client.set_viewport(1366, 768)
-        await client.navigate(f"{browser_test_env['server_url']}/")
-        await asyncio.sleep(1.2)
+        await authenticate_browser(client, browser_test_env["server_url"], browser_test_env["session_token"])
 
         # 1. Verify no horizontal overflow
         overflow = await client.eval_js(
@@ -468,8 +517,7 @@ async def test_real_browser_ultrawide_desktop_inspection(browser_test_env: dict[
     await client.connect()
     try:
         await client.set_viewport(2560, 1440)
-        await client.navigate(f"{browser_test_env['server_url']}/")
-        await asyncio.sleep(1.0)
+        await authenticate_browser(client, browser_test_env["server_url"], browser_test_env["session_token"])
 
         # 1. Verify no horizontal overflow
         overflow = await client.eval_js(
@@ -500,8 +548,7 @@ async def test_real_browser_tablet_inspection(browser_test_env: dict[str, Any]) 
     await client.connect()
     try:
         await client.set_viewport(1024, 768)
-        await client.navigate(f"{browser_test_env['server_url']}/")
-        await asyncio.sleep(1.0)
+        await authenticate_browser(client, browser_test_env["server_url"], browser_test_env["session_token"])
 
         # 1. Verify no horizontal overflow
         overflow = await client.eval_js(
@@ -530,8 +577,7 @@ async def test_real_browser_mobile_inspection(browser_test_env: dict[str, Any]) 
     await client.connect()
     try:
         await client.set_viewport(390, 844, mobile=True)
-        await client.navigate(f"{browser_test_env['server_url']}/")
-        await asyncio.sleep(1.0)
+        await authenticate_browser(client, browser_test_env["server_url"], browser_test_env["session_token"])
 
         # 1. Verify no horizontal overflow
         overflow = await client.eval_js(
@@ -578,7 +624,7 @@ async def test_real_browser_pwa_manifest_and_sw_inspection(
     await client.connect()
     try:
         await client.set_viewport(1366, 768)
-        await client.navigate(f"{browser_test_env['server_url']}/")
+        await authenticate_browser(client, browser_test_env["server_url"], browser_test_env["session_token"])
         await asyncio.sleep(1.5)
 
         # 1. Check <link rel="manifest">

@@ -540,3 +540,27 @@ class AttemptProductivityClass(str, Enum):
     ARCHITECTURE_WORK = "ARCHITECTURE_WORK"
     PROVIDER_FAILURE = "PROVIDER_FAILURE"
     OTHER = "OTHER"
+
+
+class AuthEventType(str, Enum):
+    """Security-relevant authentication event types for audit trail."""
+
+    LOGIN_SUCCEEDED = "LOGIN_SUCCEEDED"
+    LOGIN_REJECTED = "LOGIN_REJECTED"
+    AUTHORIZATION_DENIED = "AUTHORIZATION_DENIED"
+    LOGOUT = "LOGOUT"
+    SESSION_EXPIRED = "SESSION_EXPIRED"
+    SESSION_REVOKED = "SESSION_REVOKED"
+
+
+class OperatorAuthDecision(str, Enum):
+    """Deterministic authorization decision codes."""
+
+    AUTHORIZED = "AUTHORIZED"
+    IDENTITY_NOT_ALLOWLISTED = "IDENTITY_NOT_ALLOWLISTED"
+    IDENTITY_DISABLED = "IDENTITY_DISABLED"
+    INVALID_IDENTITY = "INVALID_IDENTITY"
+    SESSION_EXPIRED = "SESSION_EXPIRED"
+    SESSION_REVOKED = "SESSION_REVOKED"
+    NO_SESSION = "NO_SESSION"
+

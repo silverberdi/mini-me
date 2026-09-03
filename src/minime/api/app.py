@@ -3,27 +3,39 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any, Generator
 
-from fastapi import Depends, FastAPI, HTTPException, Query, status
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+)
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from minime.adapters.openspec import OpenSpecAdapter
+from minime.config import load_config
 from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.db.session import db_manager
 from minime.domain.enums import (
+    AuthEventType,
     EventType,
     OperatorActionType,
+    OperatorAuthDecision,
     PreviewStatus,
     ValidationVerdict,
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
     ActionDescriptor,
+    AuthorizedOperator,
+    AuthStatusDTO,
     Change,
     EfficiencyTelemetryView,
     Event,
@@ -32,6 +44,7 @@ from minime.domain.models import (
     OperatorActionRecord,
     OperatorActionRequest,
     OperatorActionResult,
+    OperatorIdentityDTO,
     PreviewSession,
     Project,
     ProviderEfficiencyMetrics,
@@ -44,6 +57,12 @@ from minime.domain.models import (
     utc_now,
 )
 from minime.logging import redact_secrets
+from minime.services.auth_service import (
+    AuthorizedOperatorService,
+    GoogleOidcService,
+    SessionManager,
+    generate_state_token,
+)
 from minime.services.budget_service import BudgetService
 from minime.services.capacity_lifecycle_service import CapacityLifecycleService
 from minime.services.container_preview_service import ContainerPreviewService
@@ -78,6 +97,29 @@ async def lifespan(app: FastAPI):
         reconciled = recovery_service.reconcile_on_startup()
         if reconciled:
             logger.info(f"Reconciled {len(reconciled)} jobs on startup.")
+
+        # Seed authorized operators from configuration or environment
+        try:
+            config = load_config()
+            op_svc = AuthorizedOperatorService(uow)
+            if config.auth.authorized_operators:
+                for op_data in config.auth.authorized_operators:
+                    if isinstance(op_data, dict) and "email" in op_data:
+                        op_svc.seed_operator(
+                            email=op_data["email"],
+                            display_name=op_data.get("display_name"),
+                            google_sub=op_data.get("google_sub"),
+                            is_active=op_data.get("is_active", True),
+                        )
+            env_operator = os.environ.get("MINIME_AUTHORIZED_OPERATOR_EMAIL")
+            if env_operator:
+                op_svc.seed_operator(
+                    email=env_operator,
+                    display_name="Primary Operator",
+                    is_active=True,
+                )
+        except Exception as exc:
+            logger.warning(f"Error initializing authorized operators: {exc}")
     except Exception as exc:
         logger.warning(f"Error during startup reconciliation: {exc}")
     finally:
@@ -105,6 +147,163 @@ def get_uow() -> Generator[PostgresPersistenceUnitOfWork, None, None]:
 
 
 UowDep = Annotated[PostgresPersistenceUnitOfWork, Depends(get_uow)]
+
+
+PUBLIC_EXEMPT_PATHS = {
+    "/health",
+    "/",
+    "/dashboard",
+    "/sw.js",
+    "/manifest.webmanifest",
+    "/favicon.ico",
+    "/api/v1/auth/google/login",
+    "/api/v1/auth/google/callback",
+    "/api/v1/auth/logout",
+    "/api/v1/auth/me",
+}
+PUBLIC_EXEMPT_PREFIXES = ("/static/",)
+
+
+def extract_token_from_request(request: Request) -> str | None:
+    cookie_token = request.cookies.get("minime_session")
+    if cookie_token and len(cookie_token.strip()) >= 16:
+        return cookie_token.strip()
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer ") and len(auth_header[7:].strip()) >= 16:
+        return auth_header[7:].strip()
+    return None
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    config = load_config()
+    auth_enabled_env = os.environ.get("MINIME_AUTH_ENABLED")
+    auth_enabled = (
+        auth_enabled_env.lower() in ("true", "1")
+        if auth_enabled_env is not None
+        else config.auth.enabled
+    )
+    if not auth_enabled:
+        return await call_next(request)
+
+    path = request.url.path
+    if (
+        path in PUBLIC_EXEMPT_PATHS
+        or any(path.startswith(prefix) for prefix in PUBLIC_EXEMPT_PREFIXES)
+        or request.method == "OPTIONS"
+    ):
+        return await call_next(request)
+
+    token = extract_token_from_request(request)
+    if not token:
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={"detail": "Authentication required", "code": "AUTH_REQUIRED"},
+        )
+
+    sess = None
+    try:
+        uow_override = app.dependency_overrides.get(get_uow)
+        if uow_override:
+            uow = uow_override()
+        else:
+            sess = db_manager.sessionmaker()
+            uow = PostgresPersistenceUnitOfWork(sess)
+
+        session_mgr = SessionManager(uow)
+        operator_svc = AuthorizedOperatorService(uow)
+
+        client_ip = request.client.host if request.client else None
+        user_agent = request.headers.get("user-agent")
+
+        auth_session = session_mgr.validate_session(
+            token, ip_address=client_ip, user_agent=user_agent
+        )
+        if not auth_session:
+            return JSONResponse(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                content={"detail": "Session expired or invalid", "code": "SESSION_EXPIRED"},
+            )
+
+        decision, operator = operator_svc.evaluate_operator(
+            auth_session.operator_email, auth_session.google_sub
+        )
+        if decision == OperatorAuthDecision.IDENTITY_NOT_ALLOWLISTED:
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={
+                    "detail": "Operator identity is not allowlisted",
+                    "code": "IDENTITY_NOT_ALLOWLISTED",
+                },
+            )
+        if decision == OperatorAuthDecision.IDENTITY_DISABLED:
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={
+                    "detail": "Operator identity is disabled",
+                    "code": "IDENTITY_DISABLED",
+                },
+            )
+
+        request.state.operator = operator
+        request.state.session = auth_session
+    except Exception as exc:
+        logger.error(f"Error evaluating request authentication: {exc}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"detail": "Authentication evaluation failed"},
+        )
+    finally:
+        if sess:
+            sess.close()
+
+    return await call_next(request)
+
+
+def get_current_operator(
+    request: Request,
+    uow: UowDep,
+) -> AuthorizedOperator:
+    if hasattr(request.state, "operator") and request.state.operator:
+        return request.state.operator
+
+    token = extract_token_from_request(request)
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required",
+        )
+
+    session_mgr = SessionManager(uow)
+    operator_svc = AuthorizedOperatorService(uow)
+    client_ip = request.client.host if request.client else None
+    user_agent = request.headers.get("user-agent")
+
+    auth_session = session_mgr.validate_session(token, ip_address=client_ip, user_agent=user_agent)
+    if not auth_session:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session expired or invalid",
+        )
+
+    decision, operator = operator_svc.evaluate_operator(
+        auth_session.operator_email, auth_session.google_sub
+    )
+    if decision == OperatorAuthDecision.IDENTITY_NOT_ALLOWLISTED:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Operator identity is not allowlisted",
+        )
+    if decision == OperatorAuthDecision.IDENTITY_DISABLED:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Operator identity is disabled",
+        )
+    return operator
+
+
+AuthenticatedOperatorDep = Annotated[AuthorizedOperator, Depends(get_current_operator)]
+
 
 
 class ProjectCreateRequest(BaseModel):
@@ -1356,6 +1555,285 @@ def trigger_scheduler_tick_endpoint(
     """Trigger a single scheduler evaluation and admission tick."""
     scheduler = SchedulerService(uow)
     return scheduler.tick(project_id)
+
+
+# -----------------------------------------------------------------------------
+# Authentication & Authorization Endpoints
+# -----------------------------------------------------------------------------
+
+
+def _resolve_google_credentials() -> tuple[str | None, str | None]:
+    config = load_config()
+    client_id = os.environ.get(config.auth.client_id_env) or os.environ.get("GOOGLE_CLIENT_ID")
+    client_secret = os.environ.get(config.auth.client_secret_env) or os.environ.get(
+        "GOOGLE_CLIENT_SECRET"
+    )
+    if not client_secret and config.auth.client_secret_path:
+        secret_file = Path(config.auth.client_secret_path)
+        if secret_file.exists():
+            try:
+                client_secret = secret_file.read_text(encoding="utf-8").strip()
+            except Exception as exc:
+                logger.warning(
+                    f"Failed reading Google client secret from '{secret_file}': {exc}"
+                )
+    return client_id, client_secret
+
+
+@app.get("/api/v1/auth/me", tags=["auth"], response_model=AuthStatusDTO)
+def get_auth_me_endpoint(request: Request, uow: UowDep) -> AuthStatusDTO:
+    """Retrieve current operator authentication and authorization status."""
+    token = extract_token_from_request(request)
+    if not token:
+        return AuthStatusDTO(authenticated=False)
+
+    session_mgr = SessionManager(uow)
+    operator_svc = AuthorizedOperatorService(uow)
+    client_ip = request.client.host if request.client else None
+    user_agent = request.headers.get("user-agent")
+
+    auth_session = session_mgr.validate_session(token, ip_address=client_ip, user_agent=user_agent)
+    if not auth_session:
+        return AuthStatusDTO(authenticated=False)
+
+    decision, operator = operator_svc.evaluate_operator(
+        auth_session.operator_email, auth_session.google_sub
+    )
+    if decision != OperatorAuthDecision.AUTHORIZED or not operator:
+        return AuthStatusDTO(authenticated=False)
+
+    return AuthStatusDTO(
+        authenticated=True,
+        operator=OperatorIdentityDTO(
+            email=operator.email,
+            display_name=operator.display_name,
+            provider="google",
+        ),
+        session_expires_at=auth_session.expires_at.isoformat(),
+    )
+
+
+@app.get("/api/v1/auth/google/login", tags=["auth"])
+def google_login_endpoint(request: Request, return_json: bool = False) -> Response:
+    """Initiate Google OAuth 2.0 / OIDC login flow."""
+    client_id, _ = _resolve_google_credentials()
+    config = load_config()
+    redirect_uri = (
+        config.auth.redirect_uri
+        or os.environ.get("GOOGLE_REDIRECT_URI")
+        or str(request.url_for("google_callback_endpoint"))
+    )
+    if request.headers.get("x-forwarded-proto") == "https" and redirect_uri.startswith("http://"):
+        redirect_uri = "https://" + redirect_uri[7:]
+
+    if not client_id:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Google OAuth client_id is not configured",
+        )
+
+    oidc_service = GoogleOidcService(client_id=client_id)
+    state = generate_state_token()
+    auth_url = oidc_service.get_authorization_url(redirect_uri=redirect_uri, state=state)
+
+    if return_json:
+        response = JSONResponse({"auth_url": auth_url, "state": state})
+    else:
+        response = RedirectResponse(url=auth_url, status_code=status.HTTP_302_FOUND)
+
+    is_secure = (
+        request.url.scheme == "https"
+        or request.headers.get("x-forwarded-proto") == "https"
+        or config.auth.cookie_secure.lower() == "true"
+    )
+    response.set_cookie(
+        key="minime_oauth_state",
+        value=state,
+        max_age=600,
+        httponly=True,
+        samesite="lax",
+        secure=is_secure,
+        path="/",
+    )
+    return response
+
+
+@app.get("/api/v1/auth/google/callback", tags=["auth"])
+def google_callback_endpoint(
+    request: Request,
+    uow: UowDep,
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+) -> Response:
+    """Handle Google OAuth 2.0 callback, verify ID token, validate operator allowlist, and issue session."""
+    client_ip = request.client.host if request.client else None
+    user_agent = request.headers.get("user-agent")
+    operator_svc = AuthorizedOperatorService(uow)
+    session_mgr = SessionManager(uow)
+    config = load_config()
+
+    if error:
+        operator_svc.record_audit(
+            event_type=AuthEventType.LOGIN_REJECTED,
+            ip_address=client_ip,
+            user_agent=user_agent,
+            reason=f"Google returned error: {error}",
+        )
+        return HTMLResponse(
+            f"<!DOCTYPE html><html><body><h1>Authentication Error</h1><p>{error}</p><p><a href='/'>Return to Login</a></p></body></html>",
+            status_code=400,
+        )
+
+    if not code or not state:
+        operator_svc.record_audit(
+            event_type=AuthEventType.LOGIN_REJECTED,
+            ip_address=client_ip,
+            user_agent=user_agent,
+            reason="Missing code or state parameter in OAuth callback",
+        )
+        return HTMLResponse(
+            "<!DOCTYPE html><html><body><h1>Authentication Error</h1><p>Missing code or state parameter.</p><p><a href='/'>Return to Login</a></p></body></html>",
+            status_code=400,
+        )
+
+    # Validate state cookie to prevent CSRF
+    expected_state = request.cookies.get("minime_oauth_state")
+    if not expected_state or expected_state != state:
+        operator_svc.record_audit(
+            event_type=AuthEventType.LOGIN_REJECTED,
+            ip_address=client_ip,
+            user_agent=user_agent,
+            reason="OAuth state mismatch or missing state cookie",
+        )
+        return HTMLResponse(
+            "<!DOCTYPE html><html><body><h1>Authentication Error</h1><p>Invalid or expired OAuth state token.</p><p><a href='/'>Return to Login</a></p></body></html>",
+            status_code=400,
+        )
+
+    client_id, client_secret = _resolve_google_credentials()
+    redirect_uri = (
+        config.auth.redirect_uri
+        or os.environ.get("GOOGLE_REDIRECT_URI")
+        or str(request.url_for("google_callback_endpoint"))
+    )
+    if request.headers.get("x-forwarded-proto") == "https" and redirect_uri.startswith("http://"):
+        redirect_uri = "https://" + redirect_uri[7:]
+
+    oidc_service = GoogleOidcService(client_id=client_id, client_secret=client_secret)
+    try:
+        tokens = oidc_service.exchange_code(code=code, redirect_uri=redirect_uri)
+        id_token_str = tokens.get("id_token")
+        if not id_token_str:
+            raise ValueError("Google token response missing id_token")
+        claims = oidc_service.verify_id_token(id_token_str)
+    except Exception as exc:
+        logger.warning(f"Google ID token verification failed: {exc}")
+        operator_svc.record_audit(
+            event_type=AuthEventType.LOGIN_REJECTED,
+            ip_address=client_ip,
+            user_agent=user_agent,
+            reason=f"Token verification failed: {exc}",
+        )
+        return HTMLResponse(
+            f"<!DOCTYPE html><html><body><h1>Authentication Error</h1><p>Token verification failed: {exc}</p><p><a href='/'>Return to Login</a></p></body></html>",
+            status_code=401,
+        )
+
+    google_sub = claims.get("sub")
+    email = claims.get("email", "").lower().strip()
+
+    # Evaluate operator authorization against local allowlist
+    decision, operator = operator_svc.evaluate_operator(email=email, google_sub=google_sub)
+    if decision == OperatorAuthDecision.IDENTITY_NOT_ALLOWLISTED:
+        operator_svc.record_audit(
+            event_type=AuthEventType.AUTHORIZATION_DENIED,
+            operator_email=email,
+            google_sub=google_sub,
+            ip_address=client_ip,
+            user_agent=user_agent,
+            reason="Google identity not in authorized operators allowlist",
+        )
+        return HTMLResponse(
+            f"<!DOCTYPE html><html><body><h1>Access Denied</h1><p>The Google account <b>{email}</b> is not authorized to access mini me.</p><p><a href='/'>Return to Login</a></p></body></html>",
+            status_code=403,
+        )
+    if decision == OperatorAuthDecision.IDENTITY_DISABLED:
+        operator_svc.record_audit(
+            event_type=AuthEventType.AUTHORIZATION_DENIED,
+            operator_email=email,
+            google_sub=google_sub,
+            ip_address=client_ip,
+            user_agent=user_agent,
+            reason="Authorized operator account is disabled",
+        )
+        return HTMLResponse(
+            f"<!DOCTYPE html><html><body><h1>Account Disabled</h1><p>The operator account <b>{email}</b> is disabled.</p><p><a href='/'>Return to Login</a></p></body></html>",
+            status_code=403,
+        )
+
+    # Issue server-side session
+    lifetime = config.auth.session_lifetime_seconds
+    raw_token, session = session_mgr.create_session(
+        operator_email=email,
+        google_sub=google_sub,
+        ip_address=client_ip,
+        user_agent=user_agent,
+        lifetime_seconds=lifetime,
+    )
+    operator_svc.record_audit(
+        event_type=AuthEventType.LOGIN_SUCCEEDED,
+        operator_email=email,
+        google_sub=google_sub,
+        ip_address=client_ip,
+        user_agent=user_agent,
+        reason="Successful Google OIDC login and authorization",
+    )
+
+    is_secure = (
+        request.url.scheme == "https"
+        or request.headers.get("x-forwarded-proto") == "https"
+        or config.auth.cookie_secure.lower() == "true"
+    )
+    response = RedirectResponse(url="/", status_code=status.HTTP_302_FOUND)
+    response.set_cookie(
+        key="minime_session",
+        value=raw_token,
+        max_age=lifetime,
+        httponly=True,
+        samesite="lax",
+        secure=is_secure,
+        path="/",
+    )
+    response.delete_cookie(key="minime_oauth_state", path="/")
+    return response
+
+
+@app.post("/api/v1/auth/logout", tags=["auth"])
+def logout_endpoint(request: Request, uow: UowDep) -> Response:
+    """Invalidate active session and clear session cookie."""
+    token = extract_token_from_request(request)
+    client_ip = request.client.host if request.client else None
+    user_agent = request.headers.get("user-agent")
+
+    if token:
+        session_mgr = SessionManager(uow)
+        operator_svc = AuthorizedOperatorService(uow)
+        session = session_mgr.validate_session(token)
+        if session:
+            operator_svc.record_audit(
+                event_type=AuthEventType.LOGOUT,
+                operator_email=session.operator_email,
+                google_sub=session.google_sub,
+                ip_address=client_ip,
+                user_agent=user_agent,
+                reason="Operator explicitly logged out",
+            )
+        session_mgr.revoke_session_by_token(token)
+
+    response = JSONResponse({"status": "logged_out", "message": "Session successfully invalidated"})
+    response.delete_cookie(key="minime_session", path="/")
+    return response
 
 
 # -----------------------------------------------------------------------------

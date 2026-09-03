@@ -106,6 +106,18 @@ class SecurityConfig(BaseModel):
     allow_paid_fallback_by_default: bool = False
 
 
+class AuthConfig(BaseModel):
+    enabled: bool = True
+    provider: str = "google"
+    client_id_env: str = "GOOGLE_CLIENT_ID"
+    client_secret_env: str = "GOOGLE_CLIENT_SECRET"
+    client_secret_path: str = "/etc/minime/secrets/google_oauth_client_secret"
+    redirect_uri: str | None = None
+    session_lifetime_seconds: int = 604800
+    cookie_secure: str = "auto"
+    authorized_operators: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class ProjectDeploymentPreviewConfig(BaseModel):
     required_for_ui_changes: bool = True
     strategy: str = "compose"
@@ -150,6 +162,7 @@ class AppConfig(BaseModel):
     openrouter: OpenRouterConfig = Field(default_factory=OpenRouterConfig)
     github: GitHubConfig = Field(default_factory=GitHubConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
+    auth: AuthConfig = Field(default_factory=AuthConfig)
     projects: dict[str, ProjectConfig] = Field(default_factory=dict)
 
 

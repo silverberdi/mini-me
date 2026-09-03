@@ -72,12 +72,70 @@
   const detailTabs = document.querySelectorAll('.detail-tabs .tab-btn');
   const tabPanes = document.querySelectorAll('.tab-pane');
 
+  // Auth DOM Elements
+  let currentUser = null;
+  const loginSection = document.getElementById('loginSection');
+  const authenticatedContent = document.getElementById('authenticatedContent');
+  const operatorProfileGroup = document.getElementById('operatorProfileGroup');
+  const operatorEmailText = document.getElementById('operatorEmailText');
+  const logoutBtn = document.getElementById('logoutBtn');
+
   // Initialization
-  function init() {
+  async function init() {
     setupTheme();
     setupEventListeners();
-    fetchOverview();
-    setupAutoRefresh();
+    const authenticated = await checkAuth();
+    if (authenticated) {
+      fetchOverview();
+      setupAutoRefresh();
+    }
+  }
+
+  // Authentication State Management
+  async function checkAuth() {
+    try {
+      const resp = await fetch('/api/v1/auth/me');
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data.authenticated && data.operator) {
+          currentUser = data.operator;
+          showAuthenticatedUI();
+          return true;
+        }
+      }
+    } catch (e) {
+      console.error('Failed checking authentication:', e);
+    }
+    showLoginUI();
+    return false;
+  }
+
+  function showAuthenticatedUI() {
+    if (loginSection) loginSection.style.display = 'none';
+    if (authenticatedContent) authenticatedContent.style.display = 'block';
+    if (operatorProfileGroup) {
+      operatorProfileGroup.style.display = 'flex';
+      if (operatorEmailText && currentUser) {
+        operatorEmailText.textContent = currentUser.email;
+      }
+    }
+  }
+
+  function showLoginUI() {
+    currentUser = null;
+    if (authenticatedContent) authenticatedContent.style.display = 'none';
+    if (operatorProfileGroup) operatorProfileGroup.style.display = 'none';
+    if (loginSection) loginSection.style.display = 'flex';
+    clearInterval(countdownInterval);
+  }
+
+  async function handleLogout() {
+    try {
+      await fetch('/api/v1/auth/logout', { method: 'POST' });
+    } catch (err) {
+      console.error('Logout error:', err);
+    }
+    showLoginUI();
   }
 
   // Theme Handling
@@ -204,6 +262,12 @@
         }
       });
     }
+
+    if (logoutBtn) {
+      logoutBtn.addEventListener('click', () => {
+        handleLogout();
+      });
+    }
   }
 
   // Auto-Refresh
@@ -233,6 +297,10 @@
   async function fetchOverview() {
     try {
       const resp = await fetch('/api/v1/dashboard/overview');
+      if (resp.status === 401) {
+        showLoginUI();
+        return;
+      }
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       overviewData = await resp.json();
       renderOverview();
@@ -247,6 +315,10 @@
   async function fetchChangeDetail(projectId, changeName) {
     try {
       const resp = await fetch(`/api/v1/dashboard/changes/${encodeURIComponent(projectId)}/${encodeURIComponent(changeName)}`);
+      if (resp.status === 401) {
+        showLoginUI();
+        return;
+      }
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const detailData = await resp.json();
       renderDetail(detailData);

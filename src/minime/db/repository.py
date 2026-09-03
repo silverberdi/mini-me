@@ -12,6 +12,9 @@ from sqlalchemy.orm import Session
 from minime.db.models import (
     AuditFindingModel,
     AuditModel,
+    AuthAuditEventModel,
+    AuthorizedOperatorModel,
+    AuthSessionModel,
     BlockerClaimModel,
     BudgetLedgerModel,
     BudgetReservationModel,
@@ -55,6 +58,7 @@ from minime.domain.enums import (
     AuditFindingSeverity,
     AuditRiskLevel,
     AuditStatus,
+    AuthEventType,
     BlockerValidationVerdict,
     CapacitySignalSource,
     ChangeStatus,
@@ -91,6 +95,9 @@ from minime.domain.enums import (
 from minime.domain.interfaces import (
     AuditFindingRepositoryInterface,
     AuditRepositoryInterface,
+    AuthAuditEventRepositoryInterface,
+    AuthorizedOperatorRepositoryInterface,
+    AuthSessionRepositoryInterface,
     BlockerClaimRepositoryInterface,
     BudgetLedgerRepositoryInterface,
     BudgetReservationRepositoryInterface,
@@ -130,6 +137,9 @@ from minime.domain.models import (
     AUTHORITATIVE_PRICING_SOURCES,
     AuditFinding,
     AuditRecord,
+    AuthAuditEvent,
+    AuthorizedOperator,
+    AuthSession,
     BlockerClaim,
     BudgetLedgerEntry,
     BudgetReservation,
@@ -3468,6 +3478,224 @@ class PostgresProviderEfficiencyMetricsRepository(ProviderEfficiencyMetricsRepos
         return [provider_efficiency_metrics_model_to_domain(m) for m in models]
 
 
+def authorized_operator_domain_to_model(op: AuthorizedOperator) -> AuthorizedOperatorModel:
+    return AuthorizedOperatorModel(
+        id=op.operator_id,
+        email=op.email.lower().strip(),
+        google_sub=op.google_sub,
+        display_name=op.display_name,
+        is_active=op.is_active,
+        created_at=op.created_at,
+        updated_at=op.updated_at,
+    )
+
+
+def authorized_operator_model_to_domain(model: AuthorizedOperatorModel) -> AuthorizedOperator:
+    return AuthorizedOperator(
+        operator_id=model.id,
+        email=model.email,
+        google_sub=model.google_sub,
+        display_name=model.display_name,
+        is_active=model.is_active,
+        created_at=model.created_at,
+        updated_at=model.updated_at,
+    )
+
+
+def auth_session_domain_to_model(session: AuthSession) -> AuthSessionModel:
+    return AuthSessionModel(
+        id=session.session_id,
+        session_token_hash=session.session_token_hash,
+        operator_email=session.operator_email.lower().strip(),
+        google_sub=session.google_sub,
+        created_at=session.created_at,
+        expires_at=session.expires_at,
+        last_seen_at=session.last_seen_at,
+        revoked_at=session.revoked_at,
+        ip_address=session.ip_address,
+        user_agent=session.user_agent,
+    )
+
+
+def auth_session_model_to_domain(model: AuthSessionModel) -> AuthSession:
+    return AuthSession(
+        session_id=model.id,
+        session_token_hash=model.session_token_hash,
+        operator_email=model.operator_email,
+        google_sub=model.google_sub,
+        created_at=model.created_at,
+        expires_at=model.expires_at,
+        last_seen_at=model.last_seen_at,
+        revoked_at=model.revoked_at,
+        ip_address=model.ip_address,
+        user_agent=model.user_agent,
+    )
+
+
+def auth_audit_event_domain_to_model(event: AuthAuditEvent) -> AuthAuditEventModel:
+    return AuthAuditEventModel(
+        id=event.event_id,
+        event_type=event.event_type.value if hasattr(event.event_type, "value") else str(event.event_type),
+        operator_email=event.operator_email.lower().strip() if event.operator_email else None,
+        google_sub=event.google_sub,
+        ip_address=event.ip_address,
+        user_agent=event.user_agent,
+        reason=event.reason,
+        timestamp=event.timestamp,
+    )
+
+
+def auth_audit_event_model_to_domain(model: AuthAuditEventModel) -> AuthAuditEvent:
+    return AuthAuditEvent(
+        event_id=model.id,
+        event_type=AuthEventType(model.event_type),
+        operator_email=model.operator_email,
+        google_sub=model.google_sub,
+        ip_address=model.ip_address,
+        user_agent=model.user_agent,
+        reason=model.reason,
+        timestamp=model.timestamp,
+    )
+
+
+class PostgresAuthorizedOperatorRepository(AuthorizedOperatorRepositoryInterface):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def save(self, operator: AuthorizedOperator) -> None:
+        existing = self.session.get(AuthorizedOperatorModel, operator.operator_id)
+        if existing:
+            existing.email = operator.email.lower().strip()
+            existing.google_sub = operator.google_sub
+            existing.display_name = operator.display_name
+            existing.is_active = operator.is_active
+            existing.updated_at = operator.updated_at
+        else:
+            # Check by email if existing under different ID to avoid unique constraint violations
+            stmt = select(AuthorizedOperatorModel).where(
+                AuthorizedOperatorModel.email == operator.email.lower().strip()
+            )
+            by_email = self.session.scalars(stmt).first()
+            if by_email:
+                by_email.google_sub = operator.google_sub
+                by_email.display_name = operator.display_name
+                by_email.is_active = operator.is_active
+                by_email.updated_at = operator.updated_at
+            else:
+                model = authorized_operator_domain_to_model(operator)
+                self.session.add(model)
+
+    def get_by_id(self, operator_id: str) -> AuthorizedOperator | None:
+        model = self.session.get(AuthorizedOperatorModel, operator_id)
+        return authorized_operator_model_to_domain(model) if model else None
+
+    def get_by_email(self, email: str) -> AuthorizedOperator | None:
+        stmt = select(AuthorizedOperatorModel).where(
+            AuthorizedOperatorModel.email == email.lower().strip()
+        )
+        model = self.session.scalars(stmt).first()
+        return authorized_operator_model_to_domain(model) if model else None
+
+    def get_by_google_sub(self, google_sub: str) -> AuthorizedOperator | None:
+        stmt = select(AuthorizedOperatorModel).where(
+            AuthorizedOperatorModel.google_sub == google_sub
+        )
+        model = self.session.scalars(stmt).first()
+        return authorized_operator_model_to_domain(model) if model else None
+
+    def list_all(self) -> list[AuthorizedOperator]:
+        stmt = select(AuthorizedOperatorModel).order_by(AuthorizedOperatorModel.email)
+        models = self.session.scalars(stmt).all()
+        return [authorized_operator_model_to_domain(m) for m in models]
+
+    def delete(self, operator_id: str) -> None:
+        model = self.session.get(AuthorizedOperatorModel, operator_id)
+        if model:
+            self.session.delete(model)
+
+
+class PostgresAuthSessionRepository(AuthSessionRepositoryInterface):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def save(self, session: AuthSession) -> None:
+        existing = self.session.get(AuthSessionModel, session.session_id)
+        if existing:
+            existing.last_seen_at = session.last_seen_at
+            existing.revoked_at = session.revoked_at
+            existing.expires_at = session.expires_at
+            existing.ip_address = session.ip_address
+            existing.user_agent = session.user_agent
+        else:
+            model = auth_session_domain_to_model(session)
+            self.session.add(model)
+
+    def get_by_id(self, session_id: str) -> AuthSession | None:
+        model = self.session.get(AuthSessionModel, session_id)
+        return auth_session_model_to_domain(model) if model else None
+
+    def get_by_token_hash(self, token_hash: str) -> AuthSession | None:
+        stmt = select(AuthSessionModel).where(AuthSessionModel.session_token_hash == token_hash)
+        model = self.session.scalars(stmt).first()
+        return auth_session_model_to_domain(model) if model else None
+
+    def list_by_operator_email(self, email: str) -> list[AuthSession]:
+        stmt = (
+            select(AuthSessionModel)
+            .where(AuthSessionModel.operator_email == email.lower().strip())
+            .order_by(desc(AuthSessionModel.created_at))
+        )
+        models = self.session.scalars(stmt).all()
+        return [auth_session_model_to_domain(m) for m in models]
+
+    def revoke(self, session_id: str) -> None:
+        existing = self.session.get(AuthSessionModel, session_id)
+        if existing and existing.revoked_at is None:
+            existing.revoked_at = utc_now()
+
+    def revoke_all_for_operator(self, email: str) -> None:
+        stmt = (
+            select(AuthSessionModel)
+            .where(
+                AuthSessionModel.operator_email == email.lower().strip(),
+                AuthSessionModel.revoked_at.is_(None),
+            )
+        )
+        models = self.session.scalars(stmt).all()
+        now = utc_now()
+        for m in models:
+            m.revoked_at = now
+
+    def cleanup_expired(self) -> int:
+        stmt = select(AuthSessionModel).where(AuthSessionModel.expires_at < utc_now())
+        models = self.session.scalars(stmt).all()
+        count = len(models)
+        for m in models:
+            self.session.delete(m)
+        return count
+
+
+class PostgresAuthAuditEventRepository(AuthAuditEventRepositoryInterface):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def save(self, event: AuthAuditEvent) -> None:
+        model = auth_audit_event_domain_to_model(event)
+        self.session.add(model)
+
+    def list_events(
+        self, operator_email: str | None = None, limit: int = 100
+    ) -> list[AuthAuditEvent]:
+        stmt = select(AuthAuditEventModel)
+        if operator_email:
+            stmt = stmt.where(
+                AuthAuditEventModel.operator_email == operator_email.lower().strip()
+            )
+        stmt = stmt.order_by(desc(AuthAuditEventModel.timestamp)).limit(limit)
+        models = self.session.scalars(stmt).all()
+        return [auth_audit_event_model_to_domain(m) for m in models]
+
+
 class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
     """Encapsulates a database session for atomic operations across repositories."""
 
@@ -3509,9 +3737,13 @@ class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.work_queue = PostgresWorkQueueRepository(session)
         self.scheduler_decisions = PostgresSchedulerDecisionRepository(session)
         self.provider_efficiency = PostgresProviderEfficiencyMetricsRepository(session)
+        self.authorized_operators = PostgresAuthorizedOperatorRepository(session)
+        self.auth_sessions = PostgresAuthSessionRepository(session)
+        self.auth_audit_events = PostgresAuthAuditEventRepository(session)
 
     def commit(self) -> None:
         self.session.commit()
 
     def rollback(self) -> None:
         self.session.rollback()
+

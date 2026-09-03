@@ -16,6 +16,9 @@ from minime.domain.enums import (
 from minime.domain.models import (
     AuditFinding,
     AuditRecord,
+    AuthAuditEvent,
+    AuthorizedOperator,
+    AuthSession,
     BlockerClaim,
     BudgetLedgerEntry,
     BudgetReservation,
@@ -606,6 +609,9 @@ class PersistenceUnitOfWork(ABC):
     work_queue: WorkQueueRepositoryInterface
     scheduler_decisions: SchedulerDecisionRepositoryInterface
     provider_efficiency: ProviderEfficiencyMetricsRepositoryInterface
+    authorized_operators: AuthorizedOperatorRepositoryInterface
+    auth_sessions: AuthSessionRepositoryInterface
+    auth_audit_events: AuthAuditEventRepositoryInterface
 
     @abstractmethod
     def commit(self) -> None: ...
@@ -744,3 +750,57 @@ class GitHubAdapterInterface(ABC):
 
     def delete_remote_branch(self, repository: str, branch: str, remote: str = "origin") -> bool:
         return True
+
+
+class AuthorizedOperatorRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, operator: AuthorizedOperator) -> None: ...
+
+    @abstractmethod
+    def get_by_id(self, operator_id: str) -> AuthorizedOperator | None: ...
+
+    @abstractmethod
+    def get_by_email(self, email: str) -> AuthorizedOperator | None: ...
+
+    @abstractmethod
+    def get_by_google_sub(self, google_sub: str) -> AuthorizedOperator | None: ...
+
+    @abstractmethod
+    def list_all(self) -> list[AuthorizedOperator]: ...
+
+    @abstractmethod
+    def delete(self, operator_id: str) -> None: ...
+
+
+class AuthSessionRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, session: AuthSession) -> None: ...
+
+    @abstractmethod
+    def get_by_id(self, session_id: str) -> AuthSession | None: ...
+
+    @abstractmethod
+    def get_by_token_hash(self, token_hash: str) -> AuthSession | None: ...
+
+    @abstractmethod
+    def list_by_operator_email(self, email: str) -> list[AuthSession]: ...
+
+    @abstractmethod
+    def revoke(self, session_id: str) -> None: ...
+
+    @abstractmethod
+    def revoke_all_for_operator(self, email: str) -> None: ...
+
+    @abstractmethod
+    def cleanup_expired(self) -> int: ...
+
+
+class AuthAuditEventRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, event: AuthAuditEvent) -> None: ...
+
+    @abstractmethod
+    def list_events(
+        self, operator_email: str | None = None, limit: int = 100
+    ) -> list[AuthAuditEvent]: ...
+

@@ -20,6 +20,7 @@ from minime.domain.enums import (
     AuditFindingSeverity,
     AuditRiskLevel,
     AuditStatus,
+    AuthEventType,
     BlockerValidationVerdict,
     CapacitySignalSource,
     ChangeStatus,
@@ -1133,3 +1134,67 @@ class EfficiencyTelemetryView(BaseModel):
     metrics: ProviderEfficiencyMetrics
     provider_summary: list[dict[str, Any]] = Field(default_factory=list)
     evaluated_at: datetime = Field(default_factory=utc_now)
+
+
+class AuthorizedOperator(BaseModel):
+    """Allowlisted operator identity authorized to operate mini me."""
+
+    operator_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    email: str
+    google_sub: str | None = None
+    display_name: str | None = None
+    is_active: bool = True
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class AuthSession(BaseModel):
+    """Server-side authenticated operator session record."""
+
+    session_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    session_token_hash: str
+    operator_email: str
+    google_sub: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    expires_at: datetime
+    last_seen_at: datetime | None = None
+    revoked_at: datetime | None = None
+    ip_address: str | None = None
+    user_agent: str | None = None
+
+    @property
+    def is_valid(self) -> bool:
+        """Check if session is active, unrevoked, and not expired."""
+        if self.revoked_at is not None:
+            return False
+        return utc_now() < self.expires_at
+
+
+class AuthAuditEvent(BaseModel):
+    """Audit log record for security-relevant authentication and authorization events."""
+
+    event_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    event_type: AuthEventType
+    operator_email: str | None = None
+    google_sub: str | None = None
+    ip_address: str | None = None
+    user_agent: str | None = None
+    reason: str | None = None
+    timestamp: datetime = Field(default_factory=utc_now)
+
+
+class OperatorIdentityDTO(BaseModel):
+    """Public operator identity representation for UI and API client."""
+
+    email: str
+    display_name: str | None = None
+    provider: str = "google"
+
+
+class AuthStatusDTO(BaseModel):
+    """Public authentication status returned by /api/v1/auth/me."""
+
+    authenticated: bool
+    operator: OperatorIdentityDTO | None = None
+    session_expires_at: str | None = None
+
