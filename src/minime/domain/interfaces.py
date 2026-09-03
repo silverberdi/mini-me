@@ -631,7 +631,7 @@ class ProviderEfficiencyMetricsRepositoryInterface(ABC):
 
     @abstractmethod
     def list_by_project(
-        self, project_id: str, limit: int = 50
+        self, project_id: str, limit: int | None = None
     ) -> list[ProviderEfficiencyMetrics]: ...
 
 
