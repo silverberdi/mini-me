@@ -129,7 +129,7 @@ class JobRunRequest(BaseModel):
     project_root: str = "."
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 def get_health() -> dict[str, Any]:
     healthy, message = db_manager.check_health()
     return {
@@ -1370,8 +1370,8 @@ else:
     logger.warning("Dashboard static directory '%s' does not exist.", STATIC_DIR)
 
 
-@app.get("/", tags=["dashboard-ui"], response_model=None)
-@app.get("/dashboard", tags=["dashboard-ui"], response_model=None)
+@app.api_route("/", methods=["GET", "HEAD"], tags=["dashboard-ui"], response_model=None)
+@app.api_route("/dashboard", methods=["GET", "HEAD"], tags=["dashboard-ui"], response_model=None)
 def get_dashboard_page() -> Response:
     """Serve the operations dashboard single-page web interface."""
     index_file = STATIC_DIR / "index.html"
@@ -1385,3 +1385,11 @@ def get_dashboard_page() -> Response:
         "</body></html>",
         status_code=404,
     )
+
+
+@app.api_route("/sw.js", methods=["GET", "HEAD"], include_in_schema=False)
+def get_service_worker() -> Response:
+    sw_file = STATIC_DIR / "sw.js"
+    if sw_file.exists():
+        return FileResponse(sw_file, media_type="application/javascript")
+    return Response(status_code=404)
