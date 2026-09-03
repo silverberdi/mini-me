@@ -29,8 +29,8 @@
 - [x] 5.4 Verify Alembic single head integrity
 
 ## 6. Deployment & LAN Acceptance
-- [ ] 6.1 Deploy candidate to server `192.168.0.194` (`/opt/minime/app`)
-- [ ] 6.2 Apply Alembic migration `017_auth_sessions_and_operators` on PostgreSQL database
-- [ ] 6.3 Restart `minime-api.service` and `minime-scheduler.service`
-- [ ] 6.4 Verify LAN unauthenticated access presents login shell and direct API calls return 401
-- [ ] 6.5 Confirm all 14 existing server containers remain healthy and unaffected
+- [x] 6.1 Deploy candidate to server `192.168.0.194` (`/opt/minime/app`)
+- [x] 6.2 Apply Alembic migration `017_auth_sessions_and_operators` on PostgreSQL database
+- [x] 6.3 Restart `minime-api.service` and `minime-scheduler.service`
+- [x] 6.4 Verify LAN unauthenticated access presents login shell and direct API calls return 401
+- [x] 6.5 Confirm all 14 existing server containers remain healthy and unaffected
