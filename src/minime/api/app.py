@@ -75,10 +75,7 @@ async def lifespan(app: FastAPI):
         sess = db_manager.sessionmaker()
         uow = PostgresPersistenceUnitOfWork(sess)
         recovery_service = RestartRecoveryService(uow, project_root=".")
-        orchestration_service = OrchestrationService(uow, project_root=".")
-        reconciled = recovery_service.reconcile_on_startup(
-            orchestration_service=orchestration_service
-        )
+        reconciled = recovery_service.reconcile_on_startup()
         if reconciled:
             logger.info(f"Reconciled {len(reconciled)} jobs on startup.")
     except Exception as exc:
