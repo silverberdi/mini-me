@@ -9,6 +9,7 @@ from minime.db.session import db_manager
 from minime.domain.enums import ExternalActionStatus, ExternalActionType
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.logging import get_logger
+from minime.services.efficiency_telemetry_service import EfficiencyTelemetryService
 
 logger = get_logger("services.status")
 
@@ -26,6 +27,16 @@ class StatusService:
             "status": "SELF_HOSTING_READY",
             "autonomous_queue": True,
         }
+
+    def get_efficiency_summary(self, project_id: str | None = None) -> dict[str, Any]:
+        """Return project efficiency telemetry, defaulting to the primary active project."""
+        if project_id is None:
+            projects = self.uow.projects.list_all()
+            project = next((p for p in projects if p.status.value == "ACTIVE"), None)
+            if project is None:
+                raise LookupError("No active registered project is available")
+            project_id = project.project_id
+        return EfficiencyTelemetryService(self.uow).get_project_efficiency_summary(project_id)
 
     def get_pipeline_diagnostic(self, run_id: str | None = None) -> dict[str, Any] | None:
         """Return a compact operational snapshot for an orchestration run."""

@@ -227,3 +227,46 @@ class EfficiencyTelemetryService:
             provider_summary=provider_summary,
             evaluated_at=utc_now(),
         )
+
+    def get_project_efficiency_summary(self, project_id: str) -> dict[str, Any]:
+        """Return aggregate provider-efficiency telemetry for every run in a project."""
+        metrics = self.uow.provider_efficiency.list_by_project(project_id, limit=None)
+
+        summary: dict[str, Any] = {
+            "total_runs": len(metrics),
+            "total_productive_attempts": sum(m.productive_attempt_count for m in metrics),
+            "total_no_progress_attempts": sum(m.no_progress_attempt_count for m in metrics),
+            "productive_attempt_ratio": 0.0,
+            "total_same_sha_suppressed": sum(
+                m.same_sha_retry_suppressed_count for m in metrics
+            ),
+            "total_corrective_retries": sum(m.corrective_retry_count for m in metrics),
+            "total_reassignments": sum(m.reassignments_count for m in metrics),
+            "average_self_hosting_percentage": 0.0,
+            "provider_breakdown": {},
+        }
+
+        total_attempts = (
+            summary["total_productive_attempts"] + summary["total_no_progress_attempts"]
+        )
+        if total_attempts:
+            summary["productive_attempt_ratio"] = round(
+                summary["total_productive_attempts"] / total_attempts * 100.0, 2
+            )
+        if metrics:
+            summary["average_self_hosting_percentage"] = round(
+                sum(m.self_hosting_percentage for m in metrics) / len(metrics), 2
+            )
+
+        provider_breakdown: dict[str, dict[str, int]] = {}
+        for metric in metrics:
+            for provider, attempts in metric.attempts_by_provider.items():
+                provider_summary = provider_breakdown.setdefault(
+                    provider, {"attempts": 0, "duration_ms": 0}
+                )
+                provider_summary["attempts"] += attempts
+                provider_summary["duration_ms"] += metric.duration_by_provider_ms.get(
+                    provider, 0
+                )
+        summary["provider_breakdown"] = provider_breakdown
+        return summary

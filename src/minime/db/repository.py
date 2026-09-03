@@ -3455,7 +3455,9 @@ class PostgresProviderEfficiencyMetricsRepository(ProviderEfficiencyMetricsRepos
         model = self.session.scalars(stmt).first()
         return provider_efficiency_metrics_model_to_domain(model) if model else None
 
-    def list_by_project(self, project_id: str, limit: int = 50) -> list[ProviderEfficiencyMetrics]:
+    def list_by_project(
+        self, project_id: str, limit: int | None = None
+    ) -> list[ProviderEfficiencyMetrics]:
         stmt = (
             select(ProviderEfficiencyMetricsModel)
             .where(ProviderEfficiencyMetricsModel.project_id == project_id)
