@@ -413,6 +413,7 @@ class PostMergeReconciliationService:
         run.current_stage = OrchestrationStage.COMPLETED
         run.resumable_stage = OrchestrationStage.COMPLETED
         run.stop_outcome = OrchestrationStopOutcome.COMPLETED
+        run.human_gate = None
         run.is_active = False
         run.stop_reason = "Autonomous post-merge closure completed successfully."
         run.stop_details = {

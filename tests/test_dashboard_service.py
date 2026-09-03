@@ -539,3 +539,137 @@ def test_dashboard_implementation_phase_requires_candidate_sha(
 
     assert phase_map["implementation"] == "running"
     assert "progress" in detail.pipeline[1].summary.lower()
+
+
+def test_dashboard_terminally_completed_change_has_no_attention_or_blockers(
+    in_memory_uow: PersistenceUnitOfWork,
+) -> None:
+    service = OperationsDashboardService(in_memory_uow)
+
+    project = Project(
+        project_id="test-proj",
+        display_name="Test Project",
+        repository="silverberdi/mini-me",
+        base_branch="main",
+        openspec_path="openspec",
+    )
+    in_memory_uow.projects.save(project)
+
+    # Change is terminally DONE (archived/completed)
+    change = Change(
+        project_id="test-proj",
+        name="016-completed-feature",
+        status=ChangeStatus.DONE,
+        last_readiness_status=ReadinessState.NOT_READY,
+    )
+    in_memory_uow.changes.save(change)
+
+    # Run was completed via post-merge, but had leftover human_gate value
+    run = OrchestrationRun(
+        run_id="run-c-1",
+        project_id="test-proj",
+        change_name="016-completed-feature",
+        current_stage=OrchestrationStage.COMPLETED,
+        stop_outcome=OrchestrationStopOutcome.COMPLETED,
+        human_gate=HumanGate.READY_FOR_HUMAN_MERGE,
+        stop_reason="Autonomous post-merge closure completed successfully.",
+        is_active=False,
+        current_generation=1,
+        current_candidate_sha="cand12345678",
+        base_sha="base12345678",
+    )
+    in_memory_uow.orchestration_runs.save(run)
+
+    overview = service.get_overview()
+
+    # Must produce 0 attention items
+    assert overview.attention_items == []
+    assert overview.system_status.attention_runs_count == 0
+
+    # Change summary must show COMPLETED with NO gate
+    summary = next(c for c in overview.changes if c.change_name == "016-completed-feature")
+    assert summary.status == "COMPLETED"
+    assert summary.current_stage == "COMPLETED"
+    assert summary.stop_outcome == "COMPLETED"
+    assert summary.human_gate is None
+
+    # Detail must show COMPLETED and 0 blockers
+    detail = service.get_change_detail("test-proj", "016-completed-feature")
+    assert detail.status == "COMPLETED"
+    assert detail.current_stage == "COMPLETED"
+    assert detail.stop_outcome == "COMPLETED"
+    assert detail.human_gate is None
+    assert detail.blocker_details == []
+
+    # All pipeline phases must show passed
+    phase_map = {p.name: p.status for p in detail.pipeline}
+    for phase_name in ["readiness", "implementation", "checks", "review", "audit", "pr_merge"]:
+        assert phase_map[phase_name] == "passed"
+
+
+def test_dashboard_multiple_runs_selects_completed_run_over_failed_intermediate_run(
+    in_memory_uow: PersistenceUnitOfWork,
+) -> None:
+    service = OperationsDashboardService(in_memory_uow)
+
+    project = Project(
+        project_id="test-proj",
+        display_name="Test Project",
+        repository="silverberdi/mini-me",
+        base_branch="main",
+        openspec_path="openspec",
+    )
+    in_memory_uow.projects.save(project)
+
+    change = Change(
+        project_id="test-proj",
+        name="018.2-proving-diagnostic-status",
+        status=ChangeStatus.DONE,
+        last_readiness_status=ReadinessState.NOT_READY,
+    )
+    in_memory_uow.changes.save(change)
+
+    # Older failed run that hit NEEDS_HUMAN
+    r_failed = OrchestrationRun(
+        run_id="run-failed-attempt",
+        project_id="test-proj",
+        change_name="018.2-proving-diagnostic-status",
+        current_stage=OrchestrationStage.EVALUATING_ATTEMPT,
+        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+        human_gate=HumanGate.NEEDS_HUMAN,
+        stop_reason="Provider failure occurred; reassigning to alternative executor.",
+        is_active=False,
+        current_generation=1,
+        current_candidate_sha="failed12345",
+        base_sha="base12345",
+    )
+    in_memory_uow.orchestration_runs.save(r_failed)
+
+    # Later successful run that completed post-merge
+    r_completed = OrchestrationRun(
+        run_id="run-completed-success",
+        project_id="test-proj",
+        change_name="018.2-proving-diagnostic-status",
+        current_stage=OrchestrationStage.COMPLETED,
+        stop_outcome=OrchestrationStopOutcome.COMPLETED,
+        human_gate=None,
+        stop_reason="Autonomous post-merge closure completed successfully.",
+        is_active=False,
+        current_generation=2,
+        current_candidate_sha="success12345",
+        base_sha="base12345",
+    )
+    in_memory_uow.orchestration_runs.save(r_completed)
+
+    overview = service.get_overview()
+
+    # Must produce NO attention items for the completed change
+    assert overview.attention_items == []
+
+    summary = next(c for c in overview.changes if c.change_name == "018.2-proving-diagnostic-status")
+    assert summary.status == "COMPLETED"
+    assert summary.current_run_id == "run-completed-success"
+    assert summary.current_stage == "COMPLETED"
+    assert summary.stop_outcome == "COMPLETED"
+    assert summary.human_gate is None
+
