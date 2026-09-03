@@ -23,14 +23,12 @@ from minime.domain.enums import (
     ExecutionOutcome,
     FindingSeverity,
     JobStatus,
-    PremiumProviderReasonCode,
     ProgressClassification,
     ProviderHealthStatus,
     ProviderResultClass,
     ReadinessState,
     ReviewStatus,
     ReviewVerdict,
-    TaskClass,
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
@@ -474,6 +472,32 @@ class ExecutionPipelineService:
                     prompt_context = f"{prompt_context}\n\n{handoff_prompt}"
                 if corrective_prompt:
                     prompt_context = f"{prompt_context}\n\n{corrective_prompt}"
+                else:
+                    remediation_sections: list[str] = []
+                    latest_rev = self.uow.reviews.get_by_job_id(job.job_id)
+                    if latest_rev:
+                        findings = self.uow.review_findings.list_by_review(latest_rev.review_id)
+                        if findings:
+                            lines = [
+                                f"- [{f.severity.value}] {f.location}: {f.violated_requirement} (Expected correction: {f.expected_correction})"
+                                for f in findings
+                            ]
+                            remediation_sections.append(
+                                "CORRECTIVE GUIDANCE (Review Findings to Address):\n" + "\n".join(lines)
+                            )
+                    latest_aud = self.uow.audits.get_by_job_id(job.job_id)
+                    if latest_aud and latest_aud.status == AuditStatus.AUDIT_BLOCKED:
+                        aud_findings = self.uow.audit_findings.list_by_audit(latest_aud.audit_id)
+                        if aud_findings:
+                            lines = [
+                                f"- [{f.severity.value}] {f.category} at {f.location or f.file or 'candidate'}: {f.message}"
+                                for f in aud_findings
+                            ]
+                            remediation_sections.append(
+                                "CORRECTIVE GUIDANCE (Audit Findings to Address):\n" + "\n".join(lines)
+                            )
+                    if remediation_sections:
+                        prompt_context = f"{prompt_context}\n\n" + "\n\n".join(remediation_sections)
 
                 attempt_start_sha = await self.worktree_manager.current_sha(worktree.path)
                 attempt_start_tasks = {

@@ -14,19 +14,14 @@ Validates all 018.1 Hard Efficiency Gates:
 import sys
 from pathlib import Path
 
-from minime.db.models import ProviderEfficiencyMetricsModel
 from minime.db.repository import PostgresPersistenceUnitOfWork
-from minime.db.session import db_manager
 from minime.domain.enums import (
     AttemptProductivityClass,
     ContinuationDecision,
-    EventType,
     ExecutionOutcome,
     JobStatus,
     OrchestrationStage,
     PremiumProviderReasonCode,
-    ProgressClassification,
-    ProviderHealthStatus,
     TaskClass,
 )
 from minime.domain.models import (
@@ -36,22 +31,22 @@ from minime.domain.models import (
     JobAttempt,
     OrchestrationRun,
     Project,
-    ProviderHealth,
     utc_now,
 )
 from minime.services.authorship_service import AuthorshipService
 from minime.services.continuation_engine import ContinuationContext, ContinuationEngine
 from minime.services.efficiency_telemetry_service import EfficiencyTelemetryService
 from minime.services.lightweight_reconciliation_service import LightweightReconciliationService
-from minime.services.openspec_tasks import OpenSpecTask
 from minime.services.provider_policy_service import ProviderPolicyService
 from minime.services.task_classifier import TaskClassifier
 
 
 def run_pilot():
     import os
+
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker as sa_sessionmaker
+
     from minime.db.models import Base
 
     print("============================================================")
@@ -267,7 +262,7 @@ def run_pilot():
         uow.commit()
 
         telemetry_service = EfficiencyTelemetryService(uow)
-        persisted_metrics = telemetry_service.record_run_telemetry(run)
+        _ = telemetry_service.record_run_telemetry(run)
         uow.commit()
 
         # Query from PostgreSQL

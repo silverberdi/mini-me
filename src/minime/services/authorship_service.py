@@ -112,7 +112,7 @@ class AuthorshipService:
     ) -> MaterialAuthorshipSummary:
         """Evaluate reviewer independence and determine eligible vs disqualified reviewers."""
         material_authors = self.get_material_candidate_authors(job_id, uow)
-        
+
         eligible: list[str] = []
         disqualified: list[str] = []
 

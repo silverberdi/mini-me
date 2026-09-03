@@ -11,40 +11,26 @@ Covers:
 - PostgreSQL Efficiency Telemetry & Self-Hosting Ratio Persistence
 """
 
-from datetime import datetime
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
+from unittest.mock import MagicMock
 
 from minime.domain.enums import (
-    AdmissionDecision,
-    AdmissionRefusalCode,
     AttemptProductivityClass,
-    AuditRiskLevel,
     ContinuationDecision,
     EventType,
-    EvidenceDiagnosticStatus,
     ExecutionOutcome,
-    JobStatus,
     OrchestrationStage,
     PremiumProviderReasonCode,
     ProgressClassification,
     ProviderHealthStatus,
-    ReadinessState,
-    ReviewVerdict,
-    SchedulerMode,
     TaskClass,
 )
 from minime.domain.models import (
     CandidateAuthorship,
-    Change,
-    Event,
     Job,
     JobAttempt,
     OrchestrationRun,
     Project,
-    ProviderEfficiencyMetrics,
     ProviderHealth,
     utc_now,
 )
@@ -56,7 +42,6 @@ from minime.services.continuation_engine import (
 from minime.services.efficiency_telemetry_service import EfficiencyTelemetryService
 from minime.services.lightweight_reconciliation_service import LightweightReconciliationService
 from minime.services.openspec_tasks import OpenSpecTask
-from minime.services.orchestration_service import OrchestrationService
 from minime.services.provider_policy_service import ProviderPolicyService
 from minime.services.task_classifier import TaskClassifier
 

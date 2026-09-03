@@ -13,7 +13,6 @@ import logging
 from typing import Any
 
 from minime.domain.enums import (
-    PRIMARY_PROVIDERS,
     EventType,
     ExecutionOutcome,
     PremiumProviderReasonCode,
