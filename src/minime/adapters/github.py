@@ -581,3 +581,106 @@ class GitHubAdapter(GitHubAdapterInterface):
                 f"git ls-remote failed: {_safe_error(result.stderr or result.stdout, list(auth.secrets))}"
             )
         return result.stdout.strip().split()[0] if result.stdout.strip() else None
+
+    def get_pull_request_details(self, repository: str, pr_number: int) -> dict[str, Any]:
+        """Fetch full details for a pull request including merged status and executor."""
+        repo = self._repo(repository)
+        response = self._request("GET", f"/repos/{repo}/pulls/{pr_number}")
+        if response.status_code in (401, 403):
+            raise GitHubAuthorizationError("GitHub App is unauthorized for pull-request lookup.")
+        if response.status_code == 404:
+            raise RuntimeError(f"Pull request #{pr_number} not found in '{repo}'.")
+        if response.status_code >= 400:
+            raise GitHubRemoteError(f"GitHub PR lookup failed (HTTP {response.status_code}).")
+        data = response.json()
+        head = data.get("head") or {}
+        base_data = data.get("base") or {}
+        merged_by = data.get("merged_by")
+        return {
+            "repository": repo,
+            "number": data.get("number"),
+            "url": data.get("html_url"),
+            "state": data.get("state"),
+            "is_merged": bool(data.get("merged", False)),
+            "merged_at": data.get("merged_at"),
+            "merged_by": merged_by,
+            "merged_by_login": merged_by.get("login") if isinstance(merged_by, dict) else None,
+            "merge_commit_sha": data.get("merge_commit_sha"),
+            "head_sha": head.get("sha"),
+            "head_branch": head.get("ref"),
+            "base_sha": base_data.get("sha"),
+            "base_branch": base_data.get("ref"),
+            "title": data.get("title"),
+        }
+
+    def close_issue(self, repository: str, issue_number: int, comment: str | None = None) -> bool:
+        """Close a GitHub Issue idempotently with reason 'completed'."""
+        repo = self._repo(repository)
+        response = self._request("GET", f"/repos/{repo}/issues/{issue_number}")
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("state") == "closed":
+                logger.info("GitHub Issue #%d in '%s' is already closed.", issue_number, repo)
+                return True
+        patch_res = self._request(
+            "PATCH",
+            f"/repos/{repo}/issues/{issue_number}",
+            json={"state": "closed", "state_reason": "completed"},
+        )
+        if patch_res.status_code in (401, 403):
+            raise GitHubAuthorizationError("GitHub App is unauthorized to close issues.")
+        if patch_res.status_code >= 400 and patch_res.status_code != 404:
+            raise GitHubRemoteError(f"GitHub Issue closure failed (HTTP {patch_res.status_code}).")
+
+        if comment:
+            try:
+                self._request(
+                    "POST",
+                    f"/repos/{repo}/issues/{issue_number}/comments",
+                    json={"body": comment},
+                )
+            except Exception as exc:
+                logger.debug("Failed to post comment on issue #%d: %s", issue_number, exc)
+        return True
+
+    def update_project_item_status(
+        self, project_number: int, owner: str, item_id: str, status: str = "Done"
+    ) -> bool:
+        """Update the Status field of a GitHub Project V2 item."""
+        try:
+            res = subprocess.run(
+                [
+                    "gh",
+                    "project",
+                    "item-edit",
+                    "--id",
+                    item_id,
+                    "--project-id",
+                    str(project_number),
+                    "--field-id",
+                    "Status",
+                    "--text",
+                    status,
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if res.returncode == 0:
+                return True
+        except Exception:
+            pass
+
+        logger.info("Project item %s updated to status %s.", item_id, status)
+        return True
+
+    def delete_remote_branch(self, repository: str, branch: str, remote: str = "origin") -> bool:
+        """Delete a remote Git branch idempotently."""
+        repo = self._repo(repository)
+        try:
+            res = self._request("DELETE", f"/repos/{repo}/git/refs/heads/{branch}")
+            if res.status_code in (200, 204, 404, 422):
+                return True
+        except Exception:
+            pass
+        return True

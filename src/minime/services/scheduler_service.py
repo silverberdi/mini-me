@@ -14,6 +14,7 @@ from minime.domain.enums import (
     AdmissionDecision,
     AdmissionRefusalCode,
     ChangeStatus,
+    OrchestrationStopOutcome,
     ProjectStatus,
     ProviderHealthStatus,
     QueuePriority,
@@ -31,6 +32,7 @@ from minime.domain.models import (
 )
 from minime.services.discovery_service import WorkDiscoveryService, extract_roadmap_stage
 from minime.services.orchestration_service import OrchestrationService
+from minime.services.post_merge_service import PostMergeReconciliationService
 from minime.services.provider_health_service import ProviderHealthService
 from minime.services.readiness_service import ReadinessService
 
@@ -58,6 +60,7 @@ class SchedulerService:
         orchestration_service: OrchestrationService | None = None,
         provider_health_service: ProviderHealthService | None = None,
         readiness_service: ReadinessService | None = None,
+        post_merge_service: PostMergeReconciliationService | None = None,
         max_global_jobs: int = 1,
         one_active_implementation_per_project: bool = True,
         mode: SchedulerMode = SchedulerMode.RUN,
@@ -79,6 +82,11 @@ class SchedulerService:
             project_root=self.project_root,
             github_adapter=gh_adapter,
             openspec_adapter=os_adapter,
+        )
+        self.post_merge_service = post_merge_service or PostMergeReconciliationService(
+            uow,
+            project_root=self.project_root,
+            github_adapter=gh_adapter,
         )
         self.provider_health_service = provider_health_service or ProviderHealthService(uow)
         self.max_global_jobs = max_global_jobs
@@ -455,6 +463,27 @@ class SchedulerService:
         self, project_id: str | None = None, drive_admitted: bool = False
     ) -> list[SchedulerDecisionRecord]:
         """Execute one complete scheduler evaluation and admission cycle."""
+        # 0. Check and reconcile any merged runs waiting at READY_FOR_HUMAN_MERGE
+        active_runs_pre = self.uow.orchestration_runs.list_runs(is_active=True)
+        for r in active_runs_pre:
+            if r.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE and (
+                project_id is None or r.project_id == project_id
+            ):
+                try:
+                    res = self.post_merge_service.reconcile_post_merge(
+                        project_id=r.project_id,
+                        change_name=r.change_name,
+                        run_id=r.run_id,
+                    )
+                    if res.success and not res.already_closed:
+                        logger.info(
+                            "Autonomously reconciled post-merge for run '%s' (%s).",
+                            r.run_id,
+                            r.change_name,
+                        )
+                except Exception as exc:
+                    logger.warning("Post-merge check failed for run '%s': %s", r.run_id, exc)
+
         # 1. Discover work items
         try:
             self.discovery_service.discover_work(project_id)

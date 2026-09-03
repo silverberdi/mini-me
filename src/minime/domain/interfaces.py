@@ -730,3 +730,17 @@ class GitHubAdapterInterface(ABC):
     def get_remote_branch_head(
         self, repository: str, branch: str, remote: str = "origin"
     ) -> str | None: ...
+
+    def get_pull_request_details(self, repository: str, pr_number: int) -> dict[str, Any]:
+        return {"number": pr_number, "is_merged": False}
+
+    def close_issue(self, repository: str, issue_number: int, comment: str | None = None) -> bool:
+        return True
+
+    def update_project_item_status(
+        self, project_number: int, owner: str, item_id: str, status: str = "Done"
+    ) -> bool:
+        return True
+
+    def delete_remote_branch(self, repository: str, branch: str, remote: str = "origin") -> bool:
+        return True

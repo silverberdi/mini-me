@@ -1111,9 +1111,7 @@ class ProviderEfficiencyMetricsModel(Base):
     same_sha_retry_suppressed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     corrective_retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     reassignments_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    reassignment_reason_codes: Mapped[list[str]] = mapped_column(
-        JSON, default=list, nullable=False
-    )
+    reassignment_reason_codes: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     provider_exhaustion_events: Mapped[list[dict[str, Any]]] = mapped_column(
         JSON, default=list, nullable=False
     )

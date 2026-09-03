@@ -1094,7 +1094,16 @@ class PostgresJobRepository(JobRepositoryInterface):
             JobStatus.FAILED,
             JobStatus.CANCELLED,
         },
-        JobStatus.READY_TO_MERGE: set(),
+        JobStatus.READY_TO_MERGE: {
+            JobStatus.POST_MERGE_RECONCILING,
+            JobStatus.COMPLETED,
+        },
+        JobStatus.POST_MERGE_RECONCILING: {
+            JobStatus.COMPLETED,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+        },
+        JobStatus.COMPLETED: set(),
         JobStatus.AUDIT_BLOCKED: {
             JobStatus.RUNNING,
             JobStatus.NEEDS_HUMAN,
@@ -3349,9 +3358,11 @@ class PostgresProviderEfficiencyMetricsRepository(ProviderEfficiencyMetricsRepos
     def save(self, metrics: ProviderEfficiencyMetrics) -> None:
         existing = self.session.get(ProviderEfficiencyMetricsModel, metrics.metrics_id)
         if not existing:
-            stmt = select(ProviderEfficiencyMetricsModel).where(
-                ProviderEfficiencyMetricsModel.run_id == metrics.run_id
-            ).limit(1)
+            stmt = (
+                select(ProviderEfficiencyMetricsModel)
+                .where(ProviderEfficiencyMetricsModel.run_id == metrics.run_id)
+                .limit(1)
+            )
             existing = self.session.scalars(stmt).first()
 
         if existing:
@@ -3421,9 +3432,11 @@ class PostgresProviderEfficiencyMetricsRepository(ProviderEfficiencyMetricsRepos
         return provider_efficiency_metrics_model_to_domain(model) if model else None
 
     def get_by_run_id(self, run_id: str) -> ProviderEfficiencyMetrics | None:
-        stmt = select(ProviderEfficiencyMetricsModel).where(
-            ProviderEfficiencyMetricsModel.run_id == run_id
-        ).limit(1)
+        stmt = (
+            select(ProviderEfficiencyMetricsModel)
+            .where(ProviderEfficiencyMetricsModel.run_id == run_id)
+            .limit(1)
+        )
         model = self.session.scalars(stmt).first()
         return provider_efficiency_metrics_model_to_domain(model) if model else None
 
@@ -3442,9 +3455,7 @@ class PostgresProviderEfficiencyMetricsRepository(ProviderEfficiencyMetricsRepos
         model = self.session.scalars(stmt).first()
         return provider_efficiency_metrics_model_to_domain(model) if model else None
 
-    def list_by_project(
-        self, project_id: str, limit: int = 50
-    ) -> list[ProviderEfficiencyMetrics]:
+    def list_by_project(self, project_id: str, limit: int = 50) -> list[ProviderEfficiencyMetrics]:
         stmt = (
             select(ProviderEfficiencyMetricsModel)
             .where(ProviderEfficiencyMetricsModel.project_id == project_id)
@@ -3502,4 +3513,3 @@ class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
 
     def rollback(self) -> None:
         self.session.rollback()
-

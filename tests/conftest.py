@@ -335,7 +335,16 @@ class InMemoryJobRepository(JobRepositoryInterface):
             JobStatus.FAILED,
             JobStatus.CANCELLED,
         },
-        JobStatus.READY_TO_MERGE: set(),
+        JobStatus.READY_TO_MERGE: {
+            JobStatus.POST_MERGE_RECONCILING,
+            JobStatus.COMPLETED,
+        },
+        JobStatus.POST_MERGE_RECONCILING: {
+            JobStatus.COMPLETED,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+        },
+        JobStatus.COMPLETED: set(),
         JobStatus.AUDIT_BLOCKED: {
             JobStatus.RUNNING,
             JobStatus.NEEDS_HUMAN,

@@ -89,13 +89,21 @@ class LightweightReconciliationService:
                     task_id = id_match.group("id") if id_match else body
                     body_lower = body.lower()
                     # Reconcile verification, test, check, sync, or documentation tasks when checks pass
-                    task_obj = OpenSpecTask(task_id=task_id, text=body, section=None, complete=False)
-                    should_mark = (
-                        is_verification_task(task_obj)
-                        or any(
-                            kw in body_lower
-                            for kw in ["test", "check", "verify", "sync", "spec", "document", "manifest", "evidence"]
-                        )
+                    task_obj = OpenSpecTask(
+                        task_id=task_id, text=body, section=None, complete=False
+                    )
+                    should_mark = is_verification_task(task_obj) or any(
+                        kw in body_lower
+                        for kw in [
+                            "test",
+                            "check",
+                            "verify",
+                            "sync",
+                            "spec",
+                            "document",
+                            "manifest",
+                            "evidence",
+                        ]
                     )
                     if should_mark:
                         indent = line[: len(line) - len(stripped)]

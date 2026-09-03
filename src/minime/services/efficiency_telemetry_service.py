@@ -151,7 +151,9 @@ class EfficiencyTelemetryService:
             else []
         )
         run_operator_actions = [
-            a for a in operator_actions if a.run_id == run.run_id and a.action_type not in {"CONTINUE", "RESUME"}
+            a
+            for a in operator_actions
+            if a.run_id == run.run_id and a.action_type not in {"CONTINUE", "RESUME"}
         ]
         total_phases = 9
         native_phases = max(0, total_phases - len(run_operator_actions))

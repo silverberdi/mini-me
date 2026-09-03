@@ -481,9 +481,9 @@ async def test_real_browser_ultrawide_desktop_inspection(browser_test_env: dict[
         main_width = await client.eval_js(
             "document.querySelector('.dashboard-main').getBoundingClientRect().width"
         )
-        assert (
-            main_width >= 2000
-        ), f"Dashboard main width ({main_width}px) does not properly utilize ultrawide viewport"
+        assert main_width >= 2000, (
+            f"Dashboard main width ({main_width}px) does not properly utilize ultrawide viewport"
+        )
 
         # 3. Verify Stepper and tabs
         stepper_steps = await client.eval_js("document.querySelectorAll('.step-item').length")
@@ -561,9 +561,9 @@ async def test_real_browser_mobile_inspection(browser_test_env: dict[str, Any]) 
         touch_heights = await client.eval_js("""
             Array.from(document.querySelectorAll('.bottom-nav button')).map(b => b.getBoundingClientRect().height)
         """)
-        assert all(
-            h >= 40.0 for h in touch_heights
-        ), f"Mobile touch targets too small: {touch_heights}"
+        assert all(h >= 40.0 for h in touch_heights), (
+            f"Mobile touch targets too small: {touch_heights}"
+        )
 
     finally:
         await client.close()
@@ -585,9 +585,9 @@ async def test_real_browser_pwa_manifest_and_sw_inspection(
         manifest_href = await client.eval_js(
             "document.querySelector('link[rel=\"manifest\"]')?.href"
         )
-        assert (
-            manifest_href and "manifest.webmanifest" in manifest_href
-        ), f"Manifest link missing: {manifest_href}"
+        assert manifest_href and "manifest.webmanifest" in manifest_href, (
+            f"Manifest link missing: {manifest_href}"
+        )
 
         # 2. Fetch manifest content in browser
         manifest_data = await client.eval_js("""

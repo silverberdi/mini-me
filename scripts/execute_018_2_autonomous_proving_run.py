@@ -147,28 +147,20 @@ def run_proving_pilot():
         print(f"Is Active: {run.is_active}")
 
         # 6. Verify Candidate, Review, Audit, PR, and Telemetry
-        active_cand = uow.orchestration_candidates.get_active_by_run(run.run_id)
+        active_cand = uow.orchestration_candidates.get_latest_for_run(run.run_id)
         if active_cand:
             print(f"Audited Candidate SHA: {active_cand.candidate_sha}")
             print(f"Candidate Generation: {active_cand.generation}")
             print(f"Manifest ID: {active_cand.manifest_id}")
 
-        review = (
-            uow.reviews.get_by_job_id(run.active_job_id)
-            if run.active_job_id
-            else None
-        )
+        review = uow.reviews.get_by_job_id(run.active_job_id) if run.active_job_id else None
         if review:
             print(
                 f"Review Verdict: {review.verdict.value if review.verdict else 'None'} ({review.reviewer_executor})"
             )
             print(f"Review Summary: {review.summary}")
 
-        audit = (
-            uow.audits.get_by_job_id(run.active_job_id)
-            if run.active_job_id
-            else None
-        )
+        audit = uow.audits.get_by_job_id(run.active_job_id) if run.active_job_id else None
         if audit:
             print(
                 f"DeepSeek Audit Status: {audit.status.value}, Risk: {audit.risk.value if audit.risk else 'None'}"
@@ -197,16 +189,14 @@ def run_proving_pilot():
         print(f"Same-SHA Retries Suppressed: {metrics.same_sha_retry_suppressed_count}")
         print(f"Bookkeeping Retries: {metrics.bookkeeping_llm_retry_count}")
         print(f"Antigravity Routine Implementations: {metrics.antigravity_routine_impl_count}")
-        print(
-            f"Reviewer Independence Violations: {metrics.reviewer_independence_violations_count}"
-        )
+        print(f"Reviewer Independence Violations: {metrics.reviewer_independence_violations_count}")
 
-        assert (
-            run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
-        ), f"Expected stop_outcome READY_FOR_HUMAN_MERGE, got {run.stop_outcome}"
-        assert (
-            run.human_gate == HumanGate.READY_FOR_HUMAN_MERGE
-        ), f"Expected human_gate READY_FOR_HUMAN_MERGE, got {run.human_gate}"
+        assert run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE, (
+            f"Expected stop_outcome READY_FOR_HUMAN_MERGE, got {run.stop_outcome}"
+        )
+        assert run.human_gate == HumanGate.READY_FOR_HUMAN_MERGE, (
+            f"Expected human_gate READY_FOR_HUMAN_MERGE, got {run.human_gate}"
+        )
         print("\n018_2_AUTONOMOUS_PREMERGE_COMPLETE: SUCCESS!")
 
 

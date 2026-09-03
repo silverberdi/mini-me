@@ -114,12 +114,16 @@ class ProviderPolicyService:
         # -------------------------------------------------------------------------
         # MANDATORY RULE A: Routine Implementation selects Codex, excludes AG
         # -------------------------------------------------------------------------
-        if task_class in {
-            TaskClass.ROUTINE_IMPLEMENTATION,
-            TaskClass.ORDINARY_REMEDIATION,
-            TaskClass.TEST_FIX,
-            TaskClass.SPECIALIZED,
-        } and not inferred_reason:
+        if (
+            task_class
+            in {
+                TaskClass.ROUTINE_IMPLEMENTATION,
+                TaskClass.ORDINARY_REMEDIATION,
+                TaskClass.TEST_FIX,
+                TaskClass.SPECIALIZED,
+            }
+            and not inferred_reason
+        ):
             if codex_available:
                 return ProviderSelectionExplanation(
                     selected_provider=PrimaryProvider.CODEX.value,
@@ -134,7 +138,11 @@ class ProviderPolicyService:
                     factors=factors,
                 )
 
-        if ag_available and inferred_reason and inferred_reason != PremiumProviderReasonCode.PREMIUM_PROVIDER_NOT_REQUIRED:
+        if (
+            ag_available
+            and inferred_reason
+            and inferred_reason != PremiumProviderReasonCode.PREMIUM_PROVIDER_NOT_REQUIRED
+        ):
             return ProviderSelectionExplanation(
                 selected_provider=PrimaryProvider.ANTIGRAVITY.value,
                 role=role,
@@ -194,9 +202,7 @@ class ProviderPolicyService:
         if not attempts:
             return False
 
-        codex_attempts = [
-            a for a in attempts if a.executor_role == PrimaryProvider.CODEX.value
-        ]
+        codex_attempts = [a for a in attempts if a.executor_role == PrimaryProvider.CODEX.value]
         if len(codex_attempts) < 2:
             return False
 

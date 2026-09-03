@@ -21,8 +21,12 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     # 1. Add efficiency columns to job_attempts
     op.add_column("job_attempts", sa.Column("task_class", sa.String(length=64), nullable=True))
-    op.add_column("job_attempts", sa.Column("productivity_class", sa.String(length=64), nullable=True))
-    op.add_column("job_attempts", sa.Column("premium_reason_code", sa.String(length=64), nullable=True))
+    op.add_column(
+        "job_attempts", sa.Column("productivity_class", sa.String(length=64), nullable=True)
+    )
+    op.add_column(
+        "job_attempts", sa.Column("premium_reason_code", sa.String(length=64), nullable=True)
+    )
     op.add_column(
         "job_attempts",
         sa.Column(
@@ -59,7 +63,9 @@ def upgrade() -> None:
         sa.Column("productive_attempt_count", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("no_progress_attempt_count", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("same_sha_retry_count", sa.Integer(), nullable=False, server_default="0"),
-        sa.Column("same_sha_retry_suppressed_count", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column(
+            "same_sha_retry_suppressed_count", sa.Integer(), nullable=False, server_default="0"
+        ),
         sa.Column("corrective_retry_count", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("reassignments_count", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("reassignment_reason_codes", sa.JSON(), nullable=False, server_default="[]"),
@@ -81,10 +87,18 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     )
-    op.create_index("ix_provider_efficiency_metrics_run_id", "provider_efficiency_metrics", ["run_id"])
-    op.create_index("ix_provider_efficiency_metrics_project_id", "provider_efficiency_metrics", ["project_id"])
-    op.create_index("ix_provider_efficiency_metrics_change_name", "provider_efficiency_metrics", ["change_name"])
-    op.create_index("ix_provider_efficiency_metrics_created_at", "provider_efficiency_metrics", ["created_at"])
+    op.create_index(
+        "ix_provider_efficiency_metrics_run_id", "provider_efficiency_metrics", ["run_id"]
+    )
+    op.create_index(
+        "ix_provider_efficiency_metrics_project_id", "provider_efficiency_metrics", ["project_id"]
+    )
+    op.create_index(
+        "ix_provider_efficiency_metrics_change_name", "provider_efficiency_metrics", ["change_name"]
+    )
+    op.create_index(
+        "ix_provider_efficiency_metrics_created_at", "provider_efficiency_metrics", ["created_at"]
+    )
 
 
 def downgrade() -> None:

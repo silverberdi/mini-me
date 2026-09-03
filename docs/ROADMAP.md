@@ -33,13 +33,14 @@ Only the current stage should exist as an active OpenSpec change. Future stages 
 - **Outcome:** Establish canonical provider roles (Codex workhorse, Antigravity premium), deterministic task classification, retry budgets, same-SHA anti-loop suppression, lightweight bookkeeping reconciliation, technical reviewer independence enforcement, CHECKS_FAILED remediation routing, anti-polling safeguards, PostgreSQL efficiency telemetry, and TUI/PWA telemetry views.
 - **Status:** DELIVERED / PILOT PROVEN (8/8 Gates Passed)
 
-#### 018.2 — Autonomous End-to-End Execution (`018.2-autonomous-end-to-end-execution`) — CURRENT
+#### 018.2 — Autonomous End-to-End Execution (`018.2-autonomous-end-to-end-execution`) — DELIVERED
 - **Boundary:** Autonomous queue-driven progression across all 9 canonical lifecycle stages without human intervention until the final human merge gate.
-- **Status:** CURRENT / READY TO COMMENCE
+- **Status:** DELIVERED / PROVEN (PR #54 Prepared, Ready for Human Merge)
 
-#### 018.3 — Autonomous Post-Merge Closure (`018.3-autonomous-post-merge-closure`) — BLOCKED
-- **Outcome:** Automated post-merge spec synchronization, change archiving, worktree cleanup, and portfolio state closure.
-- **Status:** BLOCKED on 018.2 proving run PASS
+#### 018.3 — Autonomous Post-Merge Closure (`018.3-autonomous-post-merge-closure`) — CURRENT
+- **Outcome:** Automated post-merge spec synchronization, change archiving, worktree cleanup, GitHub Issue/Project closure, and terminal state reconciliation.
+- **Status:** CURRENT / ACTIVE
 
-#### 018.4 — Metrics + Proving Run (`018.4-metrics-proving-run`) — UPCOMING
+#### 018.4 — Metrics + Proving Run (`018.4-metrics-proving-run`) — BLOCKED
 - **Outcome:** Autonomy metrics aggregation, cross-stage self-hosting verification, and multi-change autonomous SDLC proving run.
+- **Status:** BLOCKED until 018.3 proving run PASS

@@ -59,7 +59,9 @@ class TaskClassifier:
             )
 
         # 2. Explicit UX / Visual QA Task
-        if is_ux_validation or (stage and str(stage).upper() in {"PREVIEW_READY", "GUIDED_VALIDATION"}):
+        if is_ux_validation or (
+            stage and str(stage).upper() in {"PREVIEW_READY", "GUIDED_VALIDATION"}
+        ):
             return TaskClassificationResult(
                 task_class=TaskClass.UX_VISUAL_QA,
                 rationale="Visual preview inspection, containerized UI validation, or interactive scenario QA.",
@@ -80,12 +82,20 @@ class TaskClassifier:
             has_lint_only = True
             has_test_failures = False
             for c in failing_checks:
-                name = c.check_name if isinstance(c, CheckResult) else c.get("check_name", c.get("name", ""))
+                name = (
+                    c.check_name
+                    if isinstance(c, CheckResult)
+                    else c.get("check_name", c.get("name", ""))
+                )
                 check_names.append(name.lower())
                 if "test" in name.lower() or "pytest" in name.lower():
                     has_test_failures = True
                     has_lint_only = False
-                elif "ruff" not in name.lower() and "format" not in name.lower() and "lint" not in name.lower():
+                elif (
+                    "ruff" not in name.lower()
+                    and "format" not in name.lower()
+                    and "lint" not in name.lower()
+                ):
                     has_lint_only = False
 
             if has_test_failures:
@@ -111,7 +121,11 @@ class TaskClassifier:
         if incomplete_tasks is not None and len(incomplete_tasks) > 0:
             all_bookkeeping = True
             for t in incomplete_tasks:
-                desc = t.text if isinstance(t, OpenSpecTask) else t.get("text", t.get("description", ""))
+                desc = (
+                    t.text
+                    if isinstance(t, OpenSpecTask)
+                    else t.get("text", t.get("description", ""))
+                )
                 desc_lower = desc.lower()
                 is_sync_or_doc = any(
                     kw in desc_lower

@@ -124,10 +124,14 @@ def run_pilot():
             project=project,
             attempts=[],
         )
-        assert expl_routine.selected_provider == "codex", f"Expected Codex, got {expl_routine.selected_provider}"
+        assert expl_routine.selected_provider == "codex", (
+            f"Expected Codex, got {expl_routine.selected_provider}"
+        )
         assert expl_routine.is_premium is False
         assert "PREMIUM_PROVIDER_NOT_REQUIRED" in expl_routine.explanation
-        print("  ✓ PASS: Routine task deterministically assigns Codex; Antigravity eligibility is FALSE.")
+        print(
+            "  ✓ PASS: Routine task deterministically assigns Codex; Antigravity eligibility is FALSE."
+        )
 
         # -------------------------------------------------------------------------
         # Gate 2: 0 Unreasoned Antigravity Assignments (Rule E)
@@ -139,7 +143,9 @@ def run_pilot():
         )
         assert expl_arch.selected_provider == "antigravity"
         assert expl_arch.premium_reason_code == PremiumProviderReasonCode.ARCHITECTURE_REQUIRED
-        print(f"  ✓ PASS: Architecture task requires & records reason '{expl_arch.premium_reason_code.value}'.")
+        print(
+            f"  ✓ PASS: Architecture task requires & records reason '{expl_arch.premium_reason_code.value}'."
+        )
 
         # -------------------------------------------------------------------------
         # Gate 3: 0 Same-SHA Duplicate Retries (Rule C)
@@ -158,7 +164,9 @@ def run_pilot():
         assert dec_same_sha.decision == ContinuationDecision.NEEDS_HUMAN
         assert "SAME_SHA_RETRY_SUPPRESSED" in dec_same_sha.escalation_reason
         assert dec_same_sha.suppressed_same_sha is True
-        print("  ✓ PASS: Same-SHA retry with no new progress is strictly suppressed (SAME_SHA_RETRY_SUPPRESSED).")
+        print(
+            "  ✓ PASS: Same-SHA retry with no new progress is strictly suppressed (SAME_SHA_RETRY_SUPPRESSED)."
+        )
 
         # -------------------------------------------------------------------------
         # Gate 4: 0 Bookkeeping LLM Invocations (Rule D)
@@ -169,7 +177,9 @@ def run_pilot():
         tmp_pilot_dir.mkdir(parents=True, exist_ok=True)
         ch_dir = tmp_pilot_dir / "openspec" / "changes" / change_name
         ch_dir.mkdir(parents=True, exist_ok=True)
-        (ch_dir / "tasks.md").write_text("# Tasks\n- [x] 1.1 Core code\n- [ ] 1.2 Evidence sync and tasks.md update\n")
+        (ch_dir / "tasks.md").write_text(
+            "# Tasks\n- [x] 1.1 Core code\n- [ ] 1.2 Evidence sync and tasks.md update\n"
+        )
 
         rec_res = rec_service.reconcile_bookkeeping(
             worktree_path=tmp_pilot_dir,
@@ -182,7 +192,9 @@ def run_pilot():
         )
         assert rec_res["success"] is True
         assert "1.2" in rec_res["reconciled_tasks"]
-        print("  ✓ PASS: Bookkeeping & tasks.md reconciled in-process at 0 LLM cost (LIGHTWEIGHT_RECONCILIATION_PERFORMED).")
+        print(
+            "  ✓ PASS: Bookkeeping & tasks.md reconciled in-process at 0 LLM cost (LIGHTWEIGHT_RECONCILIATION_PERFORMED)."
+        )
 
         # -------------------------------------------------------------------------
         # Gate 5: 0 Reviewer-Independence Violations (Rule G)
@@ -228,7 +240,9 @@ def run_pilot():
         )
         assert ind_mixed.is_independent is False
         assert len(ind_mixed.eligible_reviewers) == 0
-        print("  ✓ PASS: Reviewer independence strictly fails closed on self-review (REVIEWER_INDEPENDENCE_BLOCKED).")
+        print(
+            "  ✓ PASS: Reviewer independence strictly fails closed on self-review (REVIEWER_INDEPENDENCE_BLOCKED)."
+        )
 
         # -------------------------------------------------------------------------
         # Gate 6, 7, 8: Efficiency Telemetry, Ratios & PostgreSQL Persistence
@@ -275,17 +289,25 @@ def run_pilot():
         assert retrieved.same_sha_retry_suppressed_count == 0
 
         # Gate 6: Productive Ratio >= 75%
-        productive_ratio = (retrieved.productive_attempt_count / (retrieved.attempts_by_provider["codex"])) * 100.0
+        productive_ratio = (
+            retrieved.productive_attempt_count / (retrieved.attempts_by_provider["codex"])
+        ) * 100.0
         assert productive_ratio >= 75.0, f"Productive ratio {productive_ratio}% is below 75%"
-        print(f"  ✓ PASS: Codex Productive Attempt Ratio = {productive_ratio:.1f}% (>= 75% target).")
+        print(
+            f"  ✓ PASS: Codex Productive Attempt Ratio = {productive_ratio:.1f}% (>= 75% target)."
+        )
 
         # Gate 7: Self-Hosting Native Ratio >= 60%
         assert retrieved.self_hosting_native_phases == 9
         assert retrieved.self_hosting_percentage == 100.0
-        print(f"  ✓ PASS: Self-Hosting Native Phases = {retrieved.self_hosting_native_phases}/{retrieved.self_hosting_total_phases} ({retrieved.self_hosting_percentage:.1f}% >= 60% target).")
+        print(
+            f"  ✓ PASS: Self-Hosting Native Phases = {retrieved.self_hosting_native_phases}/{retrieved.self_hosting_total_phases} ({retrieved.self_hosting_percentage:.1f}% >= 60% target)."
+        )
 
         # Gate 8: Database Fidelity
-        print(f"  ✓ PASS: PostgreSQL telemetry metrics '{retrieved.metrics_id}' verified with full schema fidelity.")
+        print(
+            f"  ✓ PASS: PostgreSQL telemetry metrics '{retrieved.metrics_id}' verified with full schema fidelity."
+        )
 
         print("\n============================================================")
         print("018.1 LIVE PROVING PILOT: ALL HARD EFFICIENCY GATES PASSED (8/8)")

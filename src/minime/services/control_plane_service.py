@@ -38,6 +38,7 @@ from minime.domain.models import (
 from minime.logging import redact_secrets
 from minime.services.container_preview_service import ContainerPreviewService
 from minime.services.orchestration_service import OrchestrationService
+from minime.services.post_merge_service import PostMergeReconciliationService
 from minime.services.provider_health_service import ProviderHealthService
 from minime.services.restart_recovery_service import RestartRecoveryService
 from minime.services.validation_authority_service import ValidationAuthorityService
@@ -57,6 +58,7 @@ class ControlPlaneService:
         validation_service: ValidationAuthorityService | None = None,
         recovery_service: RestartRecoveryService | None = None,
         provider_health_service: ProviderHealthService | None = None,
+        post_merge_service: PostMergeReconciliationService | None = None,
     ):
         self.uow = uow
         self.project_root = Path(project_root).resolve()
@@ -69,6 +71,10 @@ class ControlPlaneService:
             uow, project_root=self.project_root
         )
         self.provider_health_service = provider_health_service or ProviderHealthService(uow)
+        gh_adapter = getattr(self.orchestration_service, "github_adapter", None)
+        self.post_merge_service = post_merge_service or PostMergeReconciliationService(
+            uow, project_root=self.project_root, github_adapter=gh_adapter
+        )
 
     def get_available_actions(self, run_id: str) -> list[ActionDescriptor]:
         """Discover all supported operator actions for a run and their current eligibility."""
@@ -362,6 +368,27 @@ class ControlPlaneService:
             )
         )
 
+        # 9. RECONCILE_POST_MERGE
+        post_merge_enabled = (
+            run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
+            or run.current_stage
+            in {OrchestrationStage.PR_PREPARED, OrchestrationStage.POST_MERGE_RECONCILING}
+        )
+        post_merge_reason = (
+            None if post_merge_enabled else "Run is not awaiting post-merge reconciliation"
+        )
+        descriptors.append(
+            ActionDescriptor(
+                action=OperatorActionType.RECONCILE_POST_MERGE,
+                display_name="Reconcile Post-Merge",
+                description="Detect merge, verify candidate ancestry, reconcile terminal state, sync OpenSpec, and clean up resources.",
+                enabled=post_merge_enabled,
+                disabled_reason=post_merge_reason,
+                requires_confirmation=False,
+                risk_level=ActionRiskLevel.LOW,
+            )
+        )
+
         return descriptors
 
     def execute_action(self, request: OperatorActionRequest) -> OperatorActionResult:
@@ -443,6 +470,8 @@ class ControlPlaneService:
                 return self._execute_teardown_preview(request, run, sanitized_params)
             elif request.action_type == OperatorActionType.RECOVER_LOCKS:
                 return self._execute_recover_locks(request, run, sanitized_params)
+            elif request.action_type == OperatorActionType.RECONCILE_POST_MERGE:
+                return self._execute_reconcile_post_merge(request, run, sanitized_params)
             else:
                 return self._record_and_return_rejection(
                     request=request,
@@ -1349,6 +1378,67 @@ class ControlPlaneService:
             resulting_outcome=run.stop_outcome,
             resulting_gate=run.human_gate,
             payload={"recovered_locks_count": recovered_locks_count},
+        )
+
+    def _execute_reconcile_post_merge(
+        self,
+        request: OperatorActionRequest,
+        run: OrchestrationRun,
+        sanitized_params: dict[str, Any],
+    ) -> OperatorActionResult:
+        res = self.post_merge_service.reconcile_post_merge(
+            project_id=run.project_id,
+            change_name=run.change_name,
+            run_id=run.run_id,
+        )
+        if not res.success:
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.ACTION_EXECUTION_FAILED,
+                summary=res.error_message or "Post-merge reconciliation failed.",
+                sanitized_params=sanitized_params,
+            )
+
+        summary = (
+            "Post-merge reconciliation completed successfully."
+            if not res.already_closed
+            else "Post-merge reconciliation already completed."
+        )
+        record = OperatorActionRecord(
+            action_request_id=request.action_request_id,
+            project_id=request.project_id,
+            change_name=request.change_name,
+            run_id=request.run_id,
+            action_type=request.action_type,
+            actor_identity=request.actor_identity,
+            source_interface=request.source_interface,
+            precondition_stage=run.current_stage.value,
+            precondition_gate=run.human_gate.value if run.human_gate else None,
+            status=OperatorActionStatus.COMPLETED,
+            summary=summary,
+            resulting_stage=OrchestrationStage.COMPLETED.value,
+            resulting_outcome=OrchestrationStopOutcome.COMPLETED.value,
+            resulting_gate=None,
+            parameters_json=sanitized_params,
+            result_payload_json={
+                "is_merged": res.is_merged,
+                "merged_by": res.merged_by,
+                "ancestry_verified": res.ancestry_verified,
+                "native_phases_completed": res.native_phases_completed,
+            },
+        )
+        self.uow.operator_actions.save(record)
+        self.uow.commit()
+
+        return OperatorActionResult(
+            action_request_id=request.action_request_id,
+            action_type=request.action_type,
+            status=OperatorActionStatus.COMPLETED,
+            summary=summary,
+            resulting_stage=OrchestrationStage.COMPLETED,
+            resulting_outcome=OrchestrationStopOutcome.COMPLETED,
+            payload=record.result_payload_json,
         )
 
     def list_action_history(self, run_id: str, limit: int = 50) -> list[OperatorActionRecord]:

@@ -263,17 +263,11 @@ class TuiQueryClient:
             logger.error(f"Error triggering scheduler tick for TUI: {exc}")
             return []
 
-    async def get_efficiency_telemetry(
-        self, project_id: str, change_name: str
-    ) -> Any | None:
+    async def get_efficiency_telemetry(self, project_id: str, change_name: str) -> Any | None:
         """Fetch efficiency telemetry for a change asynchronously."""
-        return await asyncio.to_thread(
-            self._sync_get_efficiency_telemetry, project_id, change_name
-        )
+        return await asyncio.to_thread(self._sync_get_efficiency_telemetry, project_id, change_name)
 
-    def _sync_get_efficiency_telemetry(
-        self, project_id: str, change_name: str
-    ) -> Any | None:
+    def _sync_get_efficiency_telemetry(self, project_id: str, change_name: str) -> Any | None:
         try:
             uow = self._get_uow()
             try:

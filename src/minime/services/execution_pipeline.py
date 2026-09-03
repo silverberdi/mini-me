@@ -483,7 +483,8 @@ class ExecutionPipelineService:
                                 for f in findings
                             ]
                             remediation_sections.append(
-                                "CORRECTIVE GUIDANCE (Review Findings to Address):\n" + "\n".join(lines)
+                                "CORRECTIVE GUIDANCE (Review Findings to Address):\n"
+                                + "\n".join(lines)
                             )
                     latest_aud = self.uow.audits.get_by_job_id(job.job_id)
                     if latest_aud and latest_aud.status == AuditStatus.AUDIT_BLOCKED:
@@ -494,7 +495,8 @@ class ExecutionPipelineService:
                                 for f in aud_findings
                             ]
                             remediation_sections.append(
-                                "CORRECTIVE GUIDANCE (Audit Findings to Address):\n" + "\n".join(lines)
+                                "CORRECTIVE GUIDANCE (Audit Findings to Address):\n"
+                                + "\n".join(lines)
                             )
                     if remediation_sections:
                         prompt_context = f"{prompt_context}\n\n" + "\n\n".join(remediation_sections)
@@ -927,8 +929,12 @@ class ExecutionPipelineService:
 
                 # Mandatory Rule D: In-process Lightweight Bookkeeping Reconciliation
                 can_reconcile = self.reconciliation_service.can_reconcile(
-                    code_changed=bool(touched_files or (job.base_sha and current_sha != job.base_sha)),
-                    checks_passed=(outcome == ExecutionOutcome.COMPLETED or not ver_res.failing_checks),
+                    code_changed=bool(
+                        touched_files or (job.base_sha and current_sha != job.base_sha)
+                    ),
+                    checks_passed=(
+                        outcome == ExecutionOutcome.COMPLETED or not ver_res.failing_checks
+                    ),
                     incomplete_tasks_count=len(ver_res.incomplete_tasks),
                     only_bookkeeping_remaining=True,
                 )
@@ -961,32 +967,40 @@ class ExecutionPipelineService:
                 is_same_sha = False
                 if past_attempts:
                     prev = past_attempts[-1]
-                    if prev.end_sha and prev.end_sha == current_sha and prev.normalized_outcome == outcome:
+                    if (
+                        prev.end_sha
+                        and prev.end_sha == current_sha
+                        and prev.normalized_outcome == outcome
+                    ):
                         is_same_sha = True
                 active_attempt.is_same_sha_duplicate = is_same_sha
 
                 if is_same_sha:
-                    active_attempt.productivity_class = AttemptProductivityClass.SAME_SHA_NO_PROGRESS
-                elif (
-                    outcome == ExecutionOutcome.COMPLETED
-                    or progress
-                    in {
-                        ProgressClassification.GOOD_PROGRESS,
-                        ProgressClassification.PARTIAL_PROGRESS,
-                        "GOOD_PROGRESS",
-                        "PARTIAL_PROGRESS",
-                        "MADE_PROGRESS",
-                        "PARTIAL_COMPLETION",
-                        "FULL_COMPLETION",
-                    }
-                ):
-                    active_attempt.productivity_class = AttemptProductivityClass.SUBSTANTIVE_PROGRESS
+                    active_attempt.productivity_class = (
+                        AttemptProductivityClass.SAME_SHA_NO_PROGRESS
+                    )
+                elif outcome == ExecutionOutcome.COMPLETED or progress in {
+                    ProgressClassification.GOOD_PROGRESS,
+                    ProgressClassification.PARTIAL_PROGRESS,
+                    "GOOD_PROGRESS",
+                    "PARTIAL_PROGRESS",
+                    "MADE_PROGRESS",
+                    "PARTIAL_COMPLETION",
+                    "FULL_COMPLETION",
+                }:
+                    active_attempt.productivity_class = (
+                        AttemptProductivityClass.SUBSTANTIVE_PROGRESS
+                    )
                 elif outcome in {ExecutionOutcome.CHANGES_REQUIRED, ExecutionOutcome.FALSE_BLOCKER}:
-                    active_attempt.productivity_class = AttemptProductivityClass.VALID_CORRECTIVE_WORK
+                    active_attempt.productivity_class = (
+                        AttemptProductivityClass.VALID_CORRECTIVE_WORK
+                    )
                 elif outcome == ExecutionOutcome.PROVIDER_FAILURE:
                     active_attempt.productivity_class = AttemptProductivityClass.PROVIDER_FAILURE
                 else:
-                    active_attempt.productivity_class = AttemptProductivityClass.SAME_SHA_NO_PROGRESS
+                    active_attempt.productivity_class = (
+                        AttemptProductivityClass.SAME_SHA_NO_PROGRESS
+                    )
 
                 duration_ms = int((utc_now() - exec_start).total_seconds() * 1000)
                 active_attempt.end_sha = current_sha

@@ -79,7 +79,9 @@ class MockUOW:
 
         self.candidate_authorships = MagicMock()
         self._authorships = {}
-        self.candidate_authorships.save = lambda ca: self._authorships.update({ca.authorship_id: ca})
+        self.candidate_authorships.save = lambda ca: self._authorships.update(
+            {ca.authorship_id: ca}
+        )
         self.candidate_authorships.list_by_job = lambda jid: [
             ca for ca in self._authorships.values() if ca.job_id == jid
         ]
@@ -178,7 +180,9 @@ def test_task_classifier_determines_task_classes():
 
     # 5. Bookkeeping / Evidence reconciliation
     tasks = [
-        OpenSpecTask(task_id="1.1", text="Sync tasks.md and record evidence", section=None, complete=False)
+        OpenSpecTask(
+            task_id="1.1", text="Sync tasks.md and record evidence", section=None, complete=False
+        )
     ]
     res_bookkeeping = classifier.classify(
         stage="IMPLEMENTING",
