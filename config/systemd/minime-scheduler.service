@@ -1,0 +1,26 @@
+[Unit]
+Description=mini me Autonomous SDLC Scheduler & Runtime Driver
+After=network.target docker.service minime-api.service
+Wants=docker.service minime-api.service
+
+[Service]
+Type=simple
+User=minime
+Group=minime
+WorkingDirectory=/opt/minime/app
+EnvironmentFile=/etc/minime/minime.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/opt/minime/runtime/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/opt/minime/runtime/venv/bin/minime scheduler run
+Restart=always
+RestartSec=10
+LimitNOFILE=65536
+
+# Sandboxing & security hardening
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/var/lib/minime /var/log/minime /opt/minime /tmp
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

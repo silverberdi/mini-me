@@ -1,0 +1,26 @@
+[Unit]
+Description=mini me API and PWA Server
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+User=minime
+Group=minime
+WorkingDirectory=/opt/minime/app
+EnvironmentFile=/etc/minime/minime.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/opt/minime/runtime/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/opt/minime/runtime/venv/bin/uvicorn minime.api.main:app --host 0.0.0.0 --port 8787 --log-level info
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+# Sandboxing & security hardening
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/var/lib/minime /var/log/minime /opt/minime /tmp
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
