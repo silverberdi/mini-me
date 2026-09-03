@@ -3,19 +3,7 @@
 import os
 from pathlib import Path
 
-# Ensure paths
-os.environ["PATH"] = f"/Users/silveriobernal/.local/bin:/opt/homebrew/bin:{os.environ.get('PATH', '')}"
-
-# Load dev.env
-env_path = Path("/Users/silveriobernal/.config/minime/dev.env")
-if env_path.exists():
-    for line in env_path.read_text().splitlines():
-        if "=" in line and not line.startswith("#"):
-            k, v = line.split("=", 1)
-            os.environ[k.strip()] = v.strip()
-
 from minime.adapters.github import GitHubAdapter
-from minime.config import load_config
 from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.db.session import db_manager
 from minime.domain.enums import (
@@ -32,7 +20,20 @@ from minime.services.readiness_service import ReadinessService
 from minime.services.scheduler_service import SchedulerService
 
 
+def _bootstrap_env() -> None:
+    os.environ["PATH"] = (
+        f"/Users/silveriobernal/.local/bin:/opt/homebrew/bin:{os.environ.get('PATH', '')}"
+    )
+    env_path = Path("/Users/silveriobernal/.config/minime/dev.env")
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            if "=" in line and not line.startswith("#"):
+                k, v = line.split("=", 1)
+                os.environ[k.strip()] = v.strip()
+
+
 def run_proving_pilot():
+    _bootstrap_env()
     print("=" * 60)
     print("018.2 AUTONOMOUS END-TO-END PROVING PILOT")
     print("=" * 60)
