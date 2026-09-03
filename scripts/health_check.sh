@@ -31,9 +31,9 @@ check "minime-scheduler.service active" systemctl is-active --quiet minime-sched
 # 2. Local Endpoints
 echo ""
 echo "--- 2. Endpoints ---"
-check "API Health HTTP 200" curl -s -f -o /dev/null http://127.0.0.1:8787/api/health
-check "PWA Index HTTP 200" curl -s -f -o /dev/null http://127.0.0.1:8787/index.html
-check "PWA Manifest HTTP 200" curl -s -f -o /dev/null http://127.0.0.1:8787/manifest.webmanifest
+check "API Health HTTP 200" curl -s -f -o /dev/null http://127.0.0.1:8787/health
+check "PWA Index HTTP 200" curl -s -f -o /dev/null http://127.0.0.1:8787/
+check "PWA Manifest HTTP 200" curl -s -f -o /dev/null http://127.0.0.1:8787/static/manifest.webmanifest
 
 # 3. Database
 echo ""
