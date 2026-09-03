@@ -11,7 +11,7 @@ WorkingDirectory=/opt/minime/app
 EnvironmentFile=/etc/minime/minime.env
 Environment=PYTHONUNBUFFERED=1
 Environment=PATH=/opt/minime/runtime/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-ExecStart=/opt/minime/runtime/venv/bin/uvicorn minime.api.main:app --host 0.0.0.0 --port 8787 --log-level info
+ExecStart=/opt/minime/runtime/venv/bin/uvicorn minime.api.app:app --host 0.0.0.0 --port 8787 --log-level info
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
