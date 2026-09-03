@@ -9,7 +9,36 @@ import { renderProviders } from "./components/provider_grid.js";
 const intervals = [5, 10, 30];
 export const state = new AppState({ overview: null, queue: [], scheduler: null, runs: [], refreshSeconds: 10, autoRefresh: true });
 let timer;
-export async function refreshTelemetry() { try { const [overview, queue, scheduler, runs, providers] = await Promise.all([api.overview(), api.queue(), api.scheduler(), api.runs(), api.providers()]); state.update({ overview, queue, scheduler, runs, providers, connected: true }); setOfflineBanner(false); return overview; } catch (error) { state.update({ connected: false, error }); setOfflineBanner(true); return null; } }
+export async function refreshTelemetry() {
+  try {
+    const authResp = await fetch('/api/v1/auth/me');
+    if (authResp.ok) {
+      const authData = await authResp.json();
+      if (!authData.authenticated) {
+        setOfflineBanner(false);
+        return null;
+      }
+    }
+    const [overview, queue, scheduler, runs, providers] = await Promise.all([
+      api.overview(),
+      api.queue(),
+      api.scheduler(),
+      api.runs(),
+      api.providers(),
+    ]);
+    state.update({ overview, queue, scheduler, runs, providers, connected: true });
+    setOfflineBanner(false);
+    return overview;
+  } catch (error) {
+    if (error?.status === 401 || error?.message?.includes("401")) {
+      setOfflineBanner(false);
+      return null;
+    }
+    state.update({ connected: false, error });
+    setOfflineBanner(true);
+    return null;
+  }
+}
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>\"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
 export function renderQueue(items = []) { const target = document.querySelector("#queueList"); if (!target) return; if (!items.length) { target.innerHTML = '<p class="table-empty">No candidates currently in the autonomous queue.</p>'; return; } target.innerHTML = items.map((item, index) => { const blocked = item.admission_eligible === false || item.is_blocked || item.status === "BLOCKED"; const score = item.total_score ?? item.priority_score ?? item.score ?? "—"; const aging = item.starvation_aging_bonus ?? item.aging_bonus ?? 0; const refusal = item.refusal_code || item.block_reason || "Eligible"; return `<details class="queue-explain" ${index === 0 ? "open" : ""}><summary><strong>#${index + 1}</strong> ${escapeHtml(item.change_name || item.name)} <span class="status-badge ${blocked ? "status-warning" : "status-success"}">${blocked ? "BLOCKED" : "READY"}</span> <span class="text-muted">score ${escapeHtml(score)}</span></summary><div>Base score: <b>${escapeHtml(item.base_score ?? "—")}</b> · Starvation aging: <b>+${escapeHtml(aging)}</b> · Total: <b>${escapeHtml(score)}</b><br>Dependencies: ${escapeHtml(item.dependency_state || item.dependencies || "None reported")}<br>Admission: <b>${escapeHtml(refusal)}</b></div></details>`; }).join(""); }
 function renderTelemetry(value) {
