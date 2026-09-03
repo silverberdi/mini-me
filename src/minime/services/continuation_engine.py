@@ -1,4 +1,9 @@
-"""Continuation engine and deterministic decision-making rules for mini me."""
+"""Continuation engine and deterministic decision-making rules for mini me.
+
+Implements:
+- Mandatory Rule B: Retry budget (at most 1 normal attempt + 1 corrective retry before root cause classification).
+- Mandatory Rule C: Same-SHA anti-loop suppression (SAME_SHA_RETRY_SUPPRESSED).
+"""
 
 from __future__ import annotations
 
@@ -10,6 +15,7 @@ from minime.domain.enums import (
     ContinuationDecision,
     ExecutionOutcome,
     ProgressClassification,
+    TaskClass,
 )
 from minime.domain.models import BlockerClaim, CheckResult
 from minime.services.openspec_tasks import OpenSpecTask
@@ -38,6 +44,9 @@ class ContinuationContext:
     alternative_executor_eligible: bool = True
     target_executor_role: str | None = None
     target_model_identity: str | None = None
+    is_same_sha_duplicate: bool = False
+    can_lightweight_reconcile: bool = False
+    task_class: TaskClass | None = None
     details: dict[str, Any] = field(default_factory=dict)
 
 
@@ -51,6 +60,7 @@ class ContinuationDecisionResult:
     target_model_identity: str | None = None
     escalation_reason: str | None = None
     should_handoff: bool = False
+    suppressed_same_sha: bool = False
 
 
 class ContinuationEngine:
@@ -58,11 +68,12 @@ class ContinuationEngine:
 
     def __init__(
         self,
-        max_corrective_retries_per_executor: int = 2,
+        max_corrective_retries_per_executor: int = 1,
         max_reassignments_per_job: int = 2,
         max_same_outcome_streak: int = 2,
         max_same_false_blocker_streak: int = 2,
     ):
+        # Mandatory Rule B: Codex receives at most 1 normal attempt + 1 corrective retry
         self.max_corrective_retries = max_corrective_retries_per_executor
         self.max_reassignments = max_reassignments_per_job
         self.max_same_outcome_streak = max_same_outcome_streak
@@ -94,10 +105,29 @@ class ContinuationEngine:
         """Evaluate continuation state and deterministically choose the next action."""
         outcome = ctx.outcome
 
+        # -------------------------------------------------------------------------
+        # MANDATORY RULE C: Same-SHA Anti-Loop Suppression
+        # -------------------------------------------------------------------------
+        if ctx.is_same_sha_duplicate:
+            if ctx.can_lightweight_reconcile:
+                return ContinuationDecisionResult(
+                    decision=ContinuationDecision.CONTINUE_SAME_AGENT,
+                    escalation_reason="SAME_SHA_DIVERSIFIED_TO_LIGHTWEIGHT_RECONCILIATION",
+                    suppressed_same_sha=True,
+                )
+            return ContinuationDecisionResult(
+                decision=ContinuationDecision.NEEDS_HUMAN,
+                escalation_reason=(
+                    "SAME_SHA_RETRY_SUPPRESSED: Candidate SHA is unchanged from previous attempt with identical "
+                    "failure reason and no new material evidence. Duplicate full-provider retry suppressed."
+                ),
+                suppressed_same_sha=True,
+            )
+
         # 1. Terminal success / no continuation needed
         if outcome == ExecutionOutcome.COMPLETED:
             return ContinuationDecisionResult(
-                decision=ContinuationDecision.CONTINUE_SAME_AGENT,  # or complete
+                decision=ContinuationDecision.CONTINUE_SAME_AGENT,
                 corrective_prompt=None,
             )
 
@@ -136,14 +166,13 @@ class ContinuationEngine:
 
         # 6. False Blocker
         if outcome == ExecutionOutcome.FALSE_BLOCKER:
-            # Check false blocker streak
             if ctx.same_blocker_fingerprint_streak >= self.max_same_false_blocker_streak:
                 return self._reassign_or_escalate(
                     ctx,
                     f"Repeated false blocker streak ({ctx.same_blocker_fingerprint_streak}) reached threshold; reassigning executor.",
                 )
 
-            # Try corrective retry if within executor budget
+            # Try corrective retry if within executor budget (1 attempt max per Mandatory Rule B)
             if ctx.corrective_retries_for_current_executor < self.max_corrective_retries:
                 prompt = (
                     f"CORRECTIVE GUIDANCE: The reported blocker '{ctx.blocker_claim.blocker_type if ctx.blocker_claim else ''}' "

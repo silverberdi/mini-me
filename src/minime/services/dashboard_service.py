@@ -20,9 +20,17 @@ from minime.domain.enums import (
     SchedulerMode,
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
-from minime.domain.models import Change, Job, OrchestrationRun, Project
+from minime.domain.models import (
+    Change,
+    EfficiencyTelemetryView,
+    Job,
+    OrchestrationRun,
+    Project,
+    ProviderEfficiencyMetrics,
+)
 from minime.logging import redact_secrets
 from minime.services.capacity_lifecycle_service import CapacityLifecycleService
+from minime.services.efficiency_telemetry_service import EfficiencyTelemetryService
 from minime.services.provider_health_service import ProviderHealthService
 from minime.services.validation_authority_service import ValidationAuthorityService
 
@@ -1573,3 +1581,16 @@ class OperationsDashboardService:
             validation_history=val_history,
             scenarios=scenarios,
         )
+
+    def get_efficiency_telemetry(
+        self, project_id: str, change_name: str
+    ) -> EfficiencyTelemetryView | None:
+        """Retrieve operational efficiency telemetry facts."""
+        telemetry_service = EfficiencyTelemetryService(self.uow)
+        return telemetry_service.get_efficiency_view(project_id, change_name)
+
+    def list_project_efficiency(
+        self, project_id: str, limit: int = 50
+    ) -> list[ProviderEfficiencyMetrics]:
+        """List operational efficiency metric facts for a project."""
+        return self.uow.provider_efficiency.list_by_project(project_id, limit=limit)

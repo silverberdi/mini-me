@@ -39,6 +39,7 @@ from minime.db.models import (
     PreviewSessionModel,
     ProjectBindingModel,
     ProjectModel,
+    ProviderEfficiencyMetricsModel,
     ProviderHealthModel,
     ReviewFindingModel,
     ReviewModel,
@@ -50,6 +51,7 @@ from minime.domain.enums import (
     PRIMARY_PROVIDERS,
     AdmissionDecision,
     AdmissionRefusalCode,
+    AttemptProductivityClass,
     AuditFindingSeverity,
     AuditRiskLevel,
     AuditStatus,
@@ -71,6 +73,7 @@ from minime.domain.enums import (
     OperatorActionType,
     OrchestrationStage,
     OrchestrationStopOutcome,
+    PremiumProviderReasonCode,
     PreviewStatus,
     ProgressClassification,
     ProjectStatus,
@@ -82,6 +85,7 @@ from minime.domain.enums import (
     RemediationStatus,
     ReviewStatus,
     ReviewVerdict,
+    TaskClass,
     ValidationVerdict,
 )
 from minime.domain.interfaces import (
@@ -114,6 +118,7 @@ from minime.domain.interfaces import (
     PreviewSessionRepositoryInterface,
     ProjectBindingRepositoryInterface,
     ProjectRepositoryInterface,
+    ProviderEfficiencyMetricsRepositoryInterface,
     ProviderHealthRepositoryInterface,
     ReviewFindingRepositoryInterface,
     ReviewRepositoryInterface,
@@ -152,6 +157,7 @@ from minime.domain.models import (
     PreviewSession,
     Project,
     ProjectBinding,
+    ProviderEfficiencyMetrics,
     ProviderHealth,
     Review,
     ReviewFinding,
@@ -310,6 +316,14 @@ def job_attempt_model_to_domain(model: JobAttemptModel) -> JobAttempt:
         completed_at=model.completed_at,
         duration_ms=model.duration_ms,
         corrective_prompt=model.corrective_prompt,
+        task_class=TaskClass(model.task_class) if model.task_class else None,
+        productivity_class=AttemptProductivityClass(model.productivity_class)
+        if model.productivity_class
+        else None,
+        premium_reason_code=PremiumProviderReasonCode(model.premium_reason_code)
+        if model.premium_reason_code
+        else None,
+        is_same_sha_duplicate=bool(model.is_same_sha_duplicate),
         error_details=model.error_details or {},
         created_at=model.created_at,
     )
@@ -2005,6 +2019,14 @@ class PostgresJobAttemptRepository(JobAttemptRepositoryInterface):
             existing.completed_at = attempt.completed_at
             existing.duration_ms = attempt.duration_ms
             existing.corrective_prompt = attempt.corrective_prompt
+            existing.task_class = attempt.task_class.value if attempt.task_class else None
+            existing.productivity_class = (
+                attempt.productivity_class.value if attempt.productivity_class else None
+            )
+            existing.premium_reason_code = (
+                attempt.premium_reason_code.value if attempt.premium_reason_code else None
+            )
+            existing.is_same_sha_duplicate = attempt.is_same_sha_duplicate
             existing.error_details = attempt.error_details
         else:
             self.session.add(
@@ -2034,6 +2056,14 @@ class PostgresJobAttemptRepository(JobAttemptRepositoryInterface):
                     completed_at=attempt.completed_at,
                     duration_ms=attempt.duration_ms,
                     corrective_prompt=attempt.corrective_prompt,
+                    task_class=attempt.task_class.value if attempt.task_class else None,
+                    productivity_class=(
+                        attempt.productivity_class.value if attempt.productivity_class else None
+                    ),
+                    premium_reason_code=(
+                        attempt.premium_reason_code.value if attempt.premium_reason_code else None
+                    ),
+                    is_same_sha_duplicate=attempt.is_same_sha_duplicate,
                     error_details=attempt.error_details,
                     created_at=attempt.created_at,
                 )
@@ -2252,6 +2282,7 @@ class PostgresCandidateAuthorshipRepository(CandidateAuthorshipRepositoryInterfa
                     created_at=authorship.created_at,
                 )
             )
+        self.session.flush()
 
     def list_by_job(self, job_id: str) -> list[CandidateAuthorship]:
         stmt = (
@@ -3274,6 +3305,156 @@ class PostgresSchedulerDecisionRepository(SchedulerDecisionRepositoryInterface):
         return [scheduler_decision_model_to_domain(m) for m in models]
 
 
+def provider_efficiency_metrics_model_to_domain(
+    model: ProviderEfficiencyMetricsModel,
+) -> ProviderEfficiencyMetrics:
+    return ProviderEfficiencyMetrics(
+        metrics_id=model.id,
+        run_id=model.run_id,
+        project_id=model.project_id,
+        change_name=model.change_name,
+        attempts_by_provider=model.attempts_by_provider or {},
+        duration_by_provider_ms=model.duration_by_provider_ms or {},
+        productive_attempt_count=model.productive_attempt_count,
+        no_progress_attempt_count=model.no_progress_attempt_count,
+        same_sha_retry_count=model.same_sha_retry_count,
+        same_sha_retry_suppressed_count=model.same_sha_retry_suppressed_count,
+        corrective_retry_count=model.corrective_retry_count,
+        reassignments_count=model.reassignments_count,
+        reassignment_reason_codes=model.reassignment_reason_codes or [],
+        provider_exhaustion_events=model.provider_exhaustion_events or [],
+        drain_transitions=model.drain_transitions or [],
+        premium_provider_assignments=model.premium_provider_assignments,
+        premium_provider_reason_codes=model.premium_provider_reason_codes or [],
+        candidate_generations_count=model.candidate_generations_count,
+        time_to_candidate_ms=model.time_to_candidate_ms,
+        time_to_checks_ms=model.time_to_checks_ms,
+        time_to_review_ms=model.time_to_review_ms,
+        time_to_pr_ms=model.time_to_pr_ms,
+        total_cycle_time_ms=model.total_cycle_time_ms,
+        human_gates_count=model.human_gates_count,
+        operator_actions_count=model.operator_actions_count,
+        self_hosting_native_phases=model.self_hosting_native_phases,
+        self_hosting_total_phases=model.self_hosting_total_phases,
+        self_hosting_percentage=model.self_hosting_percentage,
+        created_at=model.created_at,
+        updated_at=model.updated_at,
+    )
+
+
+class PostgresProviderEfficiencyMetricsRepository(ProviderEfficiencyMetricsRepositoryInterface):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def save(self, metrics: ProviderEfficiencyMetrics) -> None:
+        existing = self.session.get(ProviderEfficiencyMetricsModel, metrics.metrics_id)
+        if not existing:
+            stmt = select(ProviderEfficiencyMetricsModel).where(
+                ProviderEfficiencyMetricsModel.run_id == metrics.run_id
+            ).limit(1)
+            existing = self.session.scalars(stmt).first()
+
+        if existing:
+            existing.attempts_by_provider = metrics.attempts_by_provider
+            existing.duration_by_provider_ms = metrics.duration_by_provider_ms
+            existing.productive_attempt_count = metrics.productive_attempt_count
+            existing.no_progress_attempt_count = metrics.no_progress_attempt_count
+            existing.same_sha_retry_count = metrics.same_sha_retry_count
+            existing.same_sha_retry_suppressed_count = metrics.same_sha_retry_suppressed_count
+            existing.corrective_retry_count = metrics.corrective_retry_count
+            existing.reassignments_count = metrics.reassignments_count
+            existing.reassignment_reason_codes = metrics.reassignment_reason_codes
+            existing.provider_exhaustion_events = metrics.provider_exhaustion_events
+            existing.drain_transitions = metrics.drain_transitions
+            existing.premium_provider_assignments = metrics.premium_provider_assignments
+            existing.premium_provider_reason_codes = metrics.premium_provider_reason_codes
+            existing.candidate_generations_count = metrics.candidate_generations_count
+            existing.time_to_candidate_ms = metrics.time_to_candidate_ms
+            existing.time_to_checks_ms = metrics.time_to_checks_ms
+            existing.time_to_review_ms = metrics.time_to_review_ms
+            existing.time_to_pr_ms = metrics.time_to_pr_ms
+            existing.total_cycle_time_ms = metrics.total_cycle_time_ms
+            existing.human_gates_count = metrics.human_gates_count
+            existing.operator_actions_count = metrics.operator_actions_count
+            existing.self_hosting_native_phases = metrics.self_hosting_native_phases
+            existing.self_hosting_total_phases = metrics.self_hosting_total_phases
+            existing.self_hosting_percentage = metrics.self_hosting_percentage
+            existing.updated_at = metrics.updated_at
+        else:
+            self.session.add(
+                ProviderEfficiencyMetricsModel(
+                    id=metrics.metrics_id,
+                    run_id=metrics.run_id,
+                    project_id=metrics.project_id,
+                    change_name=metrics.change_name,
+                    attempts_by_provider=metrics.attempts_by_provider,
+                    duration_by_provider_ms=metrics.duration_by_provider_ms,
+                    productive_attempt_count=metrics.productive_attempt_count,
+                    no_progress_attempt_count=metrics.no_progress_attempt_count,
+                    same_sha_retry_count=metrics.same_sha_retry_count,
+                    same_sha_retry_suppressed_count=metrics.same_sha_retry_suppressed_count,
+                    corrective_retry_count=metrics.corrective_retry_count,
+                    reassignments_count=metrics.reassignments_count,
+                    reassignment_reason_codes=metrics.reassignment_reason_codes,
+                    provider_exhaustion_events=metrics.provider_exhaustion_events,
+                    drain_transitions=metrics.drain_transitions,
+                    premium_provider_assignments=metrics.premium_provider_assignments,
+                    premium_provider_reason_codes=metrics.premium_provider_reason_codes,
+                    candidate_generations_count=metrics.candidate_generations_count,
+                    time_to_candidate_ms=metrics.time_to_candidate_ms,
+                    time_to_checks_ms=metrics.time_to_checks_ms,
+                    time_to_review_ms=metrics.time_to_review_ms,
+                    time_to_pr_ms=metrics.time_to_pr_ms,
+                    total_cycle_time_ms=metrics.total_cycle_time_ms,
+                    human_gates_count=metrics.human_gates_count,
+                    operator_actions_count=metrics.operator_actions_count,
+                    self_hosting_native_phases=metrics.self_hosting_native_phases,
+                    self_hosting_total_phases=metrics.self_hosting_total_phases,
+                    self_hosting_percentage=metrics.self_hosting_percentage,
+                    created_at=metrics.created_at,
+                    updated_at=metrics.updated_at,
+                )
+            )
+
+    def get_by_id(self, metrics_id: str) -> ProviderEfficiencyMetrics | None:
+        model = self.session.get(ProviderEfficiencyMetricsModel, metrics_id)
+        return provider_efficiency_metrics_model_to_domain(model) if model else None
+
+    def get_by_run_id(self, run_id: str) -> ProviderEfficiencyMetrics | None:
+        stmt = select(ProviderEfficiencyMetricsModel).where(
+            ProviderEfficiencyMetricsModel.run_id == run_id
+        ).limit(1)
+        model = self.session.scalars(stmt).first()
+        return provider_efficiency_metrics_model_to_domain(model) if model else None
+
+    def get_by_project_and_change(
+        self, project_id: str, change_name: str
+    ) -> ProviderEfficiencyMetrics | None:
+        stmt = (
+            select(ProviderEfficiencyMetricsModel)
+            .where(
+                ProviderEfficiencyMetricsModel.project_id == project_id,
+                ProviderEfficiencyMetricsModel.change_name == change_name,
+            )
+            .order_by(desc(ProviderEfficiencyMetricsModel.updated_at))
+            .limit(1)
+        )
+        model = self.session.scalars(stmt).first()
+        return provider_efficiency_metrics_model_to_domain(model) if model else None
+
+    def list_by_project(
+        self, project_id: str, limit: int = 50
+    ) -> list[ProviderEfficiencyMetrics]:
+        stmt = (
+            select(ProviderEfficiencyMetricsModel)
+            .where(ProviderEfficiencyMetricsModel.project_id == project_id)
+            .order_by(desc(ProviderEfficiencyMetricsModel.updated_at))
+            .limit(limit)
+        )
+        models = self.session.scalars(stmt).all()
+        return [provider_efficiency_metrics_model_to_domain(m) for m in models]
+
+
 class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
     """Encapsulates a database session for atomic operations across repositories."""
 
@@ -3314,9 +3495,11 @@ class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.operator_actions = PostgresOperatorActionRepository(session)
         self.work_queue = PostgresWorkQueueRepository(session)
         self.scheduler_decisions = PostgresSchedulerDecisionRepository(session)
+        self.provider_efficiency = PostgresProviderEfficiencyMetricsRepository(session)
 
     def commit(self) -> None:
         self.session.commit()
 
     def rollback(self) -> None:
         self.session.rollback()
+

@@ -47,12 +47,17 @@ from minime.domain.models import (
     utc_now,
 )
 from minime.logging import redact_secrets
+from minime.services.authorship_service import AuthorshipService
 from minime.services.candidate_integrity import resolve_base_branch_sha
 from minime.services.candidate_remediation import CandidateRemediationService
 from minime.services.container_preview_service import ContainerPreviewService
+from minime.services.efficiency_telemetry_service import EfficiencyTelemetryService
 from minime.services.execution_pipeline import ExecutionPipelineService
+from minime.services.lightweight_reconciliation_service import LightweightReconciliationService
 from minime.services.project_service import ProjectService
+from minime.services.provider_policy_service import ProviderPolicyService
 from minime.services.readiness_service import ReadinessService
+from minime.services.task_classifier import TaskClassifier
 from minime.services.validation_authority_service import ValidationAuthorityService
 from minime.services.worktree_manager import WorktreeInfo
 
@@ -134,6 +139,11 @@ class OrchestrationService:
         )
         self.validation_service = validation_service or ValidationAuthorityService(self.uow)
         self.preview_service = preview_service or ContainerPreviewService(self.uow)
+        self.telemetry_service = EfficiencyTelemetryService(self.uow)
+        self.authorship_service = AuthorshipService()
+        self.task_classifier = TaskClassifier()
+        self.provider_policy = ProviderPolicyService(self.uow)
+        self.reconciliation_service = LightweightReconciliationService(self.uow)
 
     def admit_change(
         self,
@@ -2385,6 +2395,13 @@ class OrchestrationService:
         if existing_review.verdict is None:
             return False, None, "Review has no structured verdict."
 
+        # Mandatory Rule G: Technical Reviewer Independence Enforcement
+        is_eligible, ineligibility_reason = self.authorship_service.is_reviewer_eligible(
+            job.job_id, existing_review.reviewer_role, self.uow
+        )
+        if not is_eligible:
+            return False, None, ineligibility_reason
+
         return True, existing_review.verdict, None
 
     def _validate_audit_authority(
@@ -2572,6 +2589,11 @@ class OrchestrationService:
             )
         self.uow.commit()
 
+        try:
+            self.telemetry_service.record_run_telemetry(run)
+        except Exception as e:
+            logger.warning(f"Failed recording run efficiency telemetry: {e}")
+
     def _stage_evidence_error(
         self, run: OrchestrationRun, to_stage: OrchestrationStage
     ) -> str | None:
@@ -2719,6 +2741,11 @@ class OrchestrationService:
             )
         )
         self.uow.commit()
+
+        try:
+            self.telemetry_service.record_run_telemetry(run)
+        except Exception as e:
+            logger.warning(f"Failed recording run efficiency telemetry on stop: {e}")
 
     def _resolve_base_sha(self, project: Project, root: Path) -> str:
         """Resolve base SHA from repository git HEAD or fallback."""

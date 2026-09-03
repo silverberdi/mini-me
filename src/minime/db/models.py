@@ -252,6 +252,10 @@ class JobAttemptModel(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     corrective_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    task_class: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    productivity_class: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    premium_reason_code: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    is_same_sha_duplicate: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     error_details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False, index=True
@@ -1080,3 +1084,63 @@ class SchedulerDecisionRecordModel(Base):
 
     project: Mapped[ProjectModel] = relationship("ProjectModel")
     run: Mapped[OrchestrationRunModel | None] = relationship("OrchestrationRunModel")
+
+
+class ProviderEfficiencyMetricsModel(Base):
+    __tablename__ = "provider_efficiency_metrics"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("orchestration_runs.id", ondelete="CASCADE"),
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    change_name: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    attempts_by_provider: Mapped[dict[str, int]] = mapped_column(JSON, default=dict, nullable=False)
+    duration_by_provider_ms: Mapped[dict[str, int]] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
+    productive_attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    no_progress_attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    same_sha_retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    same_sha_retry_suppressed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    corrective_retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    reassignments_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    reassignment_reason_codes: Mapped[list[str]] = mapped_column(
+        JSON, default=list, nullable=False
+    )
+    provider_exhaustion_events: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON, default=list, nullable=False
+    )
+    drain_transitions: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON, default=list, nullable=False
+    )
+    premium_provider_assignments: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    premium_provider_reason_codes: Mapped[list[str]] = mapped_column(
+        JSON, default=list, nullable=False
+    )
+    candidate_generations_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    time_to_candidate_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    time_to_checks_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    time_to_review_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    time_to_pr_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_cycle_time_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    human_gates_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    operator_actions_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    self_hosting_native_phases: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    self_hosting_total_phases: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    self_hosting_percentage: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+
+    project: Mapped[ProjectModel] = relationship("ProjectModel")
+    run: Mapped[OrchestrationRunModel] = relationship("OrchestrationRunModel")

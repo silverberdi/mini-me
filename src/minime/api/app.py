@@ -25,6 +25,7 @@ from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
     ActionDescriptor,
     Change,
+    EfficiencyTelemetryView,
     Event,
     Job,
     JobLog,
@@ -33,6 +34,7 @@ from minime.domain.models import (
     OperatorActionResult,
     PreviewSession,
     Project,
+    ProviderEfficiencyMetrics,
     ProviderHealth,
     QueueExplainReport,
     SchedulerDecisionRecord,
@@ -747,6 +749,53 @@ def get_dashboard_events(
         run_id=run_id,
         limit=limit,
     )
+
+
+# -----------------------------------------------------------------------------
+# Provider Efficiency & Telemetry Endpoints
+# -----------------------------------------------------------------------------
+
+
+@app.get(
+    "/api/v1/efficiency/{project_id}/{change_name}",
+    tags=["efficiency"],
+)
+@app.get(
+    "/projects/{project_id}/changes/{change_name}/efficiency",
+    tags=["efficiency"],
+)
+def get_change_efficiency_telemetry(
+    project_id: str,
+    change_name: str,
+    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
+) -> EfficiencyTelemetryView:
+    """Get aggregated provider efficiency and self-hosting metrics for a change."""
+    service = OperationsDashboardService(uow)
+    view = service.get_efficiency_telemetry(project_id, change_name)
+    if not view:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No provider efficiency metrics recorded for '{project_id}/{change_name}'.",
+        )
+    return view
+
+
+@app.get(
+    "/api/v1/efficiency/{project_id}",
+    tags=["efficiency"],
+)
+@app.get(
+    "/projects/{project_id}/efficiency",
+    tags=["efficiency"],
+)
+def list_project_efficiency_metrics(
+    project_id: str,
+    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+) -> list[ProviderEfficiencyMetrics]:
+    """List operational efficiency metric facts for a project."""
+    service = OperationsDashboardService(uow)
+    return service.list_project_efficiency(project_id, limit=limit)
 
 
 # -----------------------------------------------------------------------------

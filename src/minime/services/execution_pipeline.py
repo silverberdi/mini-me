@@ -12,6 +12,7 @@ from pathlib import Path
 
 from minime.adapters.openrouter_adapter import OpenRouterAdapter, OpenRouterRequest
 from minime.domain.enums import (
+    AttemptProductivityClass,
     AuditFindingSeverity,
     AuditRiskLevel,
     AuditStatus,
@@ -22,11 +23,14 @@ from minime.domain.enums import (
     ExecutionOutcome,
     FindingSeverity,
     JobStatus,
+    PremiumProviderReasonCode,
+    ProgressClassification,
     ProviderHealthStatus,
     ProviderResultClass,
     ReadinessState,
     ReviewStatus,
     ReviewVerdict,
+    TaskClass,
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
@@ -72,11 +76,13 @@ from minime.services.deepseek_auditor_runner import (
     DeepSeekAuditorRunner,
     build_audit_prompt,
 )
+from minime.services.efficiency_telemetry_service import EfficiencyTelemetryService
 from minime.services.handoff_manager import HandoffManager
 from minime.services.implementer_runner import (
     ImplementerRunnerInterface,
     runner_for_implementer,
 )
+from minime.services.lightweight_reconciliation_service import LightweightReconciliationService
 from minime.services.model_independence_policy import ModelIndependencePolicy
 from minime.services.openrouter_eligibility import OpenRouterEligibilityEvaluator
 from minime.services.openspec_tasks import OpenSpecTaskTracker, is_verification_task
@@ -86,6 +92,7 @@ from minime.services.outcome_governance import (
 )
 from minime.services.provider_health_service import ProviderHealthService
 from minime.services.provider_outcome_parser import ProviderOutcomeParser
+from minime.services.provider_policy_service import ProviderPolicyService
 from minime.services.review_verdict_parser import parse_review_verdict
 from minime.services.reviewer_contract import build_reviewer_prompt
 from minime.services.reviewer_runner import (
@@ -93,6 +100,7 @@ from minime.services.reviewer_runner import (
     runner_for_reviewer,
 )
 from minime.services.reviewer_view import ReviewerViewManager
+from minime.services.task_classifier import TaskClassifier
 from minime.services.worktree_manager import WorktreeManager
 
 logger = logging.getLogger(__name__)
@@ -185,6 +193,10 @@ class ExecutionPipelineService:
         self.handoff_manager = handoff_manager or HandoffManager()
         self.authorship_service = authorship_service or AuthorshipService()
         self.manifest_service = manifest_service or CandidateManifestService()
+        self.task_classifier = TaskClassifier()
+        self.provider_policy = ProviderPolicyService(self.uow)
+        self.reconciliation_service = LightweightReconciliationService(self.uow)
+        self.telemetry_service = EfficiencyTelemetryService(self.uow)
         self.openrouter_api_key = openrouter_api_key
         self.implementer_timeout_seconds = implementer_timeout_seconds
         self.reviewer_timeout_seconds = reviewer_timeout_seconds
@@ -472,6 +484,29 @@ class ExecutionPipelineService:
                     if task.complete
                 }
                 attempt_start_fingerprint = await self._working_state_fingerprint(worktree.path)
+
+                # Deterministic Task Classification & Multi-Factor Provider Policy Evaluation
+                incomplete_tasks_start = worktree_task_tracker.incomplete_tasks(
+                    project.openspec_path, job.change_name
+                )
+                task_class_result = self.task_classifier.classify(
+                    stage="IMPLEMENTING",
+                    attempt_number=attempt_number,
+                    code_changed=(attempt_start_sha != job.base_sha) if job.base_sha else False,
+                    incomplete_tasks=incomplete_tasks_start,
+                )
+                prov_policy_result = self.provider_policy.evaluate_selection(
+                    task_class=task_class_result.task_class,
+                    role="implementer",
+                    project=project,
+                    attempts=past_attempts,
+                )
+                premium_reason = (
+                    prov_policy_result.premium_reason_code
+                    if prov_policy_result.is_premium
+                    else None
+                )
+
                 active_attempt = JobAttempt(
                     attempt_id=attempt_id,
                     job_id=job.job_id,
@@ -484,6 +519,8 @@ class ExecutionPipelineService:
                     same_outcome_streak=same_outcome_streak,
                     same_blocker_fingerprint_streak=same_blocker_fingerprint_streak,
                     corrective_prompt=corrective_prompt,
+                    task_class=task_class_result.task_class,
+                    premium_reason_code=premium_reason,
                 )
                 self.uow.job_attempts.save(active_attempt)
                 self.uow.commit()
@@ -864,6 +901,61 @@ class ExecutionPipelineService:
                     )
                 )
 
+                # Mandatory Rule D: In-process Lightweight Bookkeeping Reconciliation
+                can_reconcile = self.reconciliation_service.can_reconcile(
+                    code_changed=bool(touched_files or (job.base_sha and current_sha != job.base_sha)),
+                    checks_passed=(outcome == ExecutionOutcome.COMPLETED or not ver_res.failing_checks),
+                    incomplete_tasks_count=len(ver_res.incomplete_tasks),
+                    only_bookkeeping_remaining=True,
+                )
+                if can_reconcile and ver_res.incomplete_tasks:
+                    rec_res = self.reconciliation_service.reconcile_bookkeeping(
+                        worktree_path=worktree.path,
+                        openspec_path=project.openspec_path,
+                        change_name=job.change_name,
+                        job=job,
+                        project=project,
+                        checks_passed=True,
+                        changed_files=touched_files,
+                    )
+                    if rec_res.get("tasks_reconciled_count", 0) > 0:
+                        post_tasks = worktree_task_tracker.parse_tasks(
+                            project.openspec_path, job.change_name
+                        )
+                        if not any(not t.complete for t in post_tasks):
+                            outcome = ExecutionOutcome.COMPLETED
+
+                # Mandatory Rule C: Same-SHA Duplicate Detection
+                is_same_sha = False
+                if past_attempts:
+                    prev = past_attempts[-1]
+                    if prev.end_sha and prev.end_sha == current_sha and prev.normalized_outcome == outcome:
+                        is_same_sha = True
+                active_attempt.is_same_sha_duplicate = is_same_sha
+
+                if is_same_sha:
+                    active_attempt.productivity_class = AttemptProductivityClass.SAME_SHA_NO_PROGRESS
+                elif (
+                    outcome == ExecutionOutcome.COMPLETED
+                    or progress
+                    in {
+                        ProgressClassification.GOOD_PROGRESS,
+                        ProgressClassification.PARTIAL_PROGRESS,
+                        "GOOD_PROGRESS",
+                        "PARTIAL_PROGRESS",
+                        "MADE_PROGRESS",
+                        "PARTIAL_COMPLETION",
+                        "FULL_COMPLETION",
+                    }
+                ):
+                    active_attempt.productivity_class = AttemptProductivityClass.SUBSTANTIVE_PROGRESS
+                elif outcome in {ExecutionOutcome.CHANGES_REQUIRED, ExecutionOutcome.FALSE_BLOCKER}:
+                    active_attempt.productivity_class = AttemptProductivityClass.VALID_CORRECTIVE_WORK
+                elif outcome == ExecutionOutcome.PROVIDER_FAILURE:
+                    active_attempt.productivity_class = AttemptProductivityClass.PROVIDER_FAILURE
+                else:
+                    active_attempt.productivity_class = AttemptProductivityClass.SAME_SHA_NO_PROGRESS
+
                 duration_ms = int((utc_now() - exec_start).total_seconds() * 1000)
                 active_attempt.end_sha = current_sha
                 active_attempt.normalized_outcome = outcome
@@ -926,6 +1018,8 @@ class ExecutionPipelineService:
                     alternative_executor_eligible=alt_eligible,
                     target_executor_role=target_executor if alt_eligible else None,
                     target_model_identity=target_model_id if alt_eligible else None,
+                    is_same_sha_duplicate=is_same_sha,
+                    can_lightweight_reconcile=can_reconcile,
                 )
                 decision_res = self.continuation_engine.decide(ctx)
                 job.continuation_decision = decision_res.decision
@@ -942,6 +1036,16 @@ class ExecutionPipelineService:
                         "reason": decision_res.escalation_reason,
                     },
                 )
+                if decision_res.suppressed_same_sha:
+                    self._save_event(
+                        EventType.SAME_SHA_RETRY_SUPPRESSED,
+                        job,
+                        {
+                            "attempt": attempt_number,
+                            "candidate_sha": current_sha,
+                            "reason": decision_res.escalation_reason,
+                        },
+                    )
                 self.uow.commit()
 
                 if decision_res.decision == ContinuationDecision.NEEDS_HUMAN:
@@ -1340,7 +1444,11 @@ class ExecutionPipelineService:
             effective_reviewer_role = (
                 f"openrouter:{selected_reviewer_model}"
                 if reviewer_fallback_used
-                else project.reviewer
+                else (
+                    project.implementer
+                    if current_executor == project.reviewer
+                    else project.reviewer
+                )
             )
             diff = subprocess.run(
                 ["git", "diff", "--name-only", f"{job.base_sha}..{job.candidate_sha}"],
@@ -1370,6 +1478,46 @@ class ExecutionPipelineService:
                 candidate_generation=active_attempt.attempt_number if active_attempt else None,
                 uow=self.uow,
             )
+
+            # Mandatory Rule G: Evaluate Reviewer Independence
+            is_independent, ineligibility_reason = self.authorship_service.is_reviewer_eligible(
+                job_id=job.job_id,
+                reviewer_role=effective_reviewer_role,
+                uow=self.uow,
+            )
+            if not is_independent:
+                err_msg = (
+                    f"REVIEWER_INDEPENDENCE_UNAVAILABLE: Reviewer '{effective_reviewer_role}' has material authorship "
+                    f"in candidate '{job.candidate_sha}' and is strictly disqualified under reviewer independence policy."
+                )
+                self._save_event(
+                    EventType.REVIEWER_INDEPENDENCE_BLOCKED,
+                    job,
+                    {
+                        "candidate_sha": job.candidate_sha,
+                        "disqualified_reviewer": effective_reviewer_role,
+                        "reason": err_msg,
+                    },
+                )
+                review = Review(
+                    job_id=job.job_id,
+                    project_id=job.project_id,
+                    change_name=job.change_name,
+                    reviewer_role=effective_reviewer_role,
+                    candidate_sha=job.candidate_sha or "",
+                    base_sha=job.base_sha or "",
+                    status=ReviewStatus.REVIEW_FAILED,
+                    is_mixed_authorship=True,
+                    authorship_evidence=authorship_evidence,
+                    error_message=err_msg,
+                )
+                self.uow.reviews.save(review)
+                job = self._transition(job, JobStatus.NEEDS_HUMAN)
+                job.escalation_reason = err_msg
+                self.uow.jobs.save(job)
+                self.uow.commit()
+                return job
+
             review = Review(
                 job_id=job.job_id,
                 project_id=job.project_id,

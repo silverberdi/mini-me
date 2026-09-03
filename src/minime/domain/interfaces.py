@@ -42,6 +42,7 @@ from minime.domain.models import (
     PreviewSession,
     Project,
     ProjectBinding,
+    ProviderEfficiencyMetrics,
     ProviderHealth,
     Review,
     ReviewFinding,
@@ -604,12 +605,34 @@ class PersistenceUnitOfWork(ABC):
     operator_actions: OperatorActionRepositoryInterface
     work_queue: WorkQueueRepositoryInterface
     scheduler_decisions: SchedulerDecisionRepositoryInterface
+    provider_efficiency: ProviderEfficiencyMetricsRepositoryInterface
 
     @abstractmethod
     def commit(self) -> None: ...
 
     @abstractmethod
     def rollback(self) -> None: ...
+
+
+class ProviderEfficiencyMetricsRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, metrics: ProviderEfficiencyMetrics) -> None: ...
+
+    @abstractmethod
+    def get_by_id(self, metrics_id: str) -> ProviderEfficiencyMetrics | None: ...
+
+    @abstractmethod
+    def get_by_run_id(self, run_id: str) -> ProviderEfficiencyMetrics | None: ...
+
+    @abstractmethod
+    def get_by_project_and_change(
+        self, project_id: str, change_name: str
+    ) -> ProviderEfficiencyMetrics | None: ...
+
+    @abstractmethod
+    def list_by_project(
+        self, project_id: str, limit: int = 50
+    ) -> list[ProviderEfficiencyMetrics]: ...
 
 
 class WorkQueueRepositoryInterface(ABC):

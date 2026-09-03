@@ -16,6 +16,7 @@ from minime.domain.enums import (
     ActionRiskLevel,
     AdmissionDecision,
     AdmissionRefusalCode,
+    AttemptProductivityClass,
     AuditFindingSeverity,
     AuditRiskLevel,
     AuditStatus,
@@ -38,6 +39,7 @@ from minime.domain.enums import (
     OperatorActionType,
     OrchestrationStage,
     OrchestrationStopOutcome,
+    PremiumProviderReasonCode,
     PreviewStatus,
     ProgressClassification,
     ProjectStatus,
@@ -51,6 +53,7 @@ from minime.domain.enums import (
     ReviewStatus,
     ReviewVerdict,
     SchedulerMode,
+    TaskClass,
     ValidationVerdict,
 )
 
@@ -285,6 +288,10 @@ class JobAttempt(BaseModel):
     completed_at: datetime | None = None
     duration_ms: int | None = None
     corrective_prompt: str | None = None
+    task_class: TaskClass | None = None
+    productivity_class: AttemptProductivityClass | None = None
+    premium_reason_code: PremiumProviderReasonCode | None = None
+    is_same_sha_duplicate: bool = False
     error_details: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utc_now)
 
@@ -1043,4 +1050,86 @@ class SchedulerStatusView(BaseModel):
     next_candidate: WorkQueueItem | None = None
     recent_decisions: list[SchedulerDecisionRecord] = Field(default_factory=list)
     provider_health: dict[str, str] = Field(default_factory=dict)
+    evaluated_at: datetime = Field(default_factory=utc_now)
+
+
+class TaskClassificationResult(BaseModel):
+    """Deterministic result of evaluating task and attempt classification."""
+
+    task_class: TaskClass
+    rationale: str
+    signals: dict[str, Any] = Field(default_factory=dict)
+    evaluated_at: datetime = Field(default_factory=utc_now)
+
+
+class ProviderSelectionExplanation(BaseModel):
+    """Deterministic multi-factor provider selection decision and explanation."""
+
+    selected_provider: str
+    role: str
+    task_class: TaskClass
+    is_premium: bool = False
+    premium_reason_code: PremiumProviderReasonCode | None = None
+    explanation: str
+    factors: dict[str, Any] = Field(default_factory=dict)
+    evaluated_at: datetime = Field(default_factory=utc_now)
+
+
+class MaterialAuthorshipSummary(BaseModel):
+    """Candidate-level material authorship provenance and reviewer independence eligibility."""
+
+    candidate_sha: str
+    generation: int = 1
+    material_authors: list[str] = Field(default_factory=list)
+    material_author_roles: list[str] = Field(default_factory=list)
+    configured_reviewers: list[str] = Field(default_factory=list)
+    eligible_reviewers: list[str] = Field(default_factory=list)
+    disqualified_reviewers: list[str] = Field(default_factory=list)
+    is_independent: bool = True
+    evaluated_at: datetime = Field(default_factory=utc_now)
+
+
+class ProviderEfficiencyMetrics(BaseModel):
+    """Durable per-change and per-run provider efficiency and telemetry facts."""
+
+    metrics_id: str = Field(default_factory=generate_uuid)
+    run_id: str
+    project_id: str
+    change_name: str
+    attempts_by_provider: dict[str, int] = Field(default_factory=dict)
+    duration_by_provider_ms: dict[str, int] = Field(default_factory=dict)
+    productive_attempt_count: int = 0
+    no_progress_attempt_count: int = 0
+    same_sha_retry_count: int = 0
+    same_sha_retry_suppressed_count: int = 0
+    corrective_retry_count: int = 0
+    reassignments_count: int = 0
+    reassignment_reason_codes: list[str] = Field(default_factory=list)
+    provider_exhaustion_events: list[dict[str, Any]] = Field(default_factory=list)
+    drain_transitions: list[dict[str, Any]] = Field(default_factory=list)
+    premium_provider_assignments: int = 0
+    premium_provider_reason_codes: list[str] = Field(default_factory=list)
+    candidate_generations_count: int = 1
+    time_to_candidate_ms: int | None = None
+    time_to_checks_ms: int | None = None
+    time_to_review_ms: int | None = None
+    time_to_pr_ms: int | None = None
+    total_cycle_time_ms: int | None = None
+    human_gates_count: int = 0
+    operator_actions_count: int = 0
+    self_hosting_native_phases: int = 0
+    self_hosting_total_phases: int = 0
+    self_hosting_percentage: float = 0.0
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class EfficiencyTelemetryView(BaseModel):
+    """Aggregated operational view of provider efficiency telemetry."""
+
+    project_id: str
+    change_name: str
+    run_id: str
+    metrics: ProviderEfficiencyMetrics
+    provider_summary: list[dict[str, Any]] = Field(default_factory=list)
     evaluated_at: datetime = Field(default_factory=utc_now)
