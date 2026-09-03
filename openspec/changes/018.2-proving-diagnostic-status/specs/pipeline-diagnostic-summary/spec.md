@@ -1,6 +1,8 @@
 # Spec: Pipeline Execution Diagnostic Summary
 
-## Requirement: Pipeline Diagnostic Snapshot
+## ADDED Requirements
+
+### Requirement: Pipeline Diagnostic Snapshot
 `StatusService` SHALL provide a method `get_pipeline_diagnostic(run_id: str | None = None)` that returns a dictionary snapshot of an orchestration run's execution status.
 
 ### Scenarios
