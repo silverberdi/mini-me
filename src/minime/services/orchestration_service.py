@@ -1531,6 +1531,16 @@ class OrchestrationService:
                         job.status in {JobStatus.RUNNING, JobStatus.CHECKS_FAILED}
                         and job.continuation_decision is None
                     ):
+                        # Bounded checks remediation: prevent runaway loop when checks fail repeatedly
+                        if job.status == JobStatus.CHECKS_FAILED and len(attempts) >= 2:
+                            self._stop_run(
+                                run,
+                                stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+                                human_gate=HumanGate.NEEDS_HUMAN,
+                                stop_reason="Deterministic checks failed after retry budget exhausted.",
+                                stop_details={"code": "CHECKS_FAILED_RETRY_EXHAUSTED"},
+                            )
+                            break
                         # Explicit operator continuation / fresh implementation attempt / checks remediation
                         self._advance_stage(run, OrchestrationStage.IMPLEMENTING)
                     elif decision in {

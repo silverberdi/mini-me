@@ -48,6 +48,7 @@ from minime.domain.interfaces import (
     PreviewSessionRepositoryInterface,
     ProjectBindingRepositoryInterface,
     ProjectRepositoryInterface,
+    ProviderEfficiencyMetricsRepositoryInterface,
     ProviderHealthRepositoryInterface,
     ReviewFindingRepositoryInterface,
     ReviewRepositoryInterface,
@@ -85,6 +86,7 @@ from minime.domain.models import (
     PreviewSession,
     Project,
     ProjectBinding,
+    ProviderEfficiencyMetrics,
     ProviderHealth,
     Review,
     ReviewFinding,
@@ -721,6 +723,40 @@ class InMemoryProviderHealthRepository(ProviderHealthRepositoryInterface):
             )
         self._store[provider] = h
         return h.model_copy(deep=True)
+
+
+class InMemoryProviderEfficiencyMetricsRepository(ProviderEfficiencyMetricsRepositoryInterface):
+    def __init__(self):
+        self._store: dict[str, ProviderEfficiencyMetrics] = {}
+
+    def save(self, metrics: ProviderEfficiencyMetrics) -> None:
+        self._store[metrics.metrics_id] = metrics.model_copy(deep=True)
+
+    def get_by_id(self, metrics_id: str) -> ProviderEfficiencyMetrics | None:
+        metrics = self._store.get(metrics_id)
+        return metrics.model_copy(deep=True) if metrics else None
+
+    def get_by_run_id(self, run_id: str) -> ProviderEfficiencyMetrics | None:
+        matches = [metrics for metrics in self._store.values() if metrics.run_id == run_id]
+        return matches[0].model_copy(deep=True) if matches else None
+
+    def get_by_project_and_change(
+        self, project_id: str, change_name: str
+    ) -> ProviderEfficiencyMetrics | None:
+        matches = [
+            metrics
+            for metrics in self._store.values()
+            if metrics.project_id == project_id and metrics.change_name == change_name
+        ]
+        return matches[0].model_copy(deep=True) if matches else None
+
+    def list_by_project(
+        self, project_id: str, limit: int | None = None
+    ) -> list[ProviderEfficiencyMetrics]:
+        matches = [metrics for metrics in self._store.values() if metrics.project_id == project_id]
+        if limit is not None:
+            matches = matches[:limit]
+        return [metrics.model_copy(deep=True) for metrics in matches]
 
 
 class InMemoryCapacityWindowRepository(CapacityWindowRepositoryInterface):
@@ -1449,6 +1485,7 @@ class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.audits = InMemoryAuditRepository()
         self.audit_findings = InMemoryAuditFindingRepository()
         self.provider_health = InMemoryProviderHealthRepository()
+        self.provider_efficiency = InMemoryProviderEfficiencyMetricsRepository()
         self.capacity_windows = InMemoryCapacityWindowRepository()
         self.git_operations = InMemoryGitOperationRepository()
         self.budget_policies = InMemoryOpenRouterBudgetPolicyRepository()
