@@ -20,7 +20,10 @@ fi
 
 # 2. Update Python dependencies
 echo "Updating Python package..."
-"${VENV_DIR}/bin/pip" install -e "${APP_DIR}"
+"${VENV_DIR}/bin/pip" install -e "${APP_DIR}[dev]"
+ln -sf "${VENV_DIR}/bin/ruff" /usr/local/bin/ruff
+ln -sf "${VENV_DIR}/bin/pytest" /usr/local/bin/pytest
+
 
 # 3. Apply database migrations if needed
 if [ -f /etc/minime/minime.env ]; then
