@@ -42,6 +42,10 @@ from minime.domain.models import (
     OrchestrationRun,
     PreviewSession,
     Project,
+    ProviderHealth,
+    Review,
+    WorkQueueItem,
+)
 import shutil
 
 def get_chrome_bin() -> str | None:
