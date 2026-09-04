@@ -18,6 +18,9 @@ def test_shell_exposes_observability_and_responsive_surfaces() -> None:
         "queueList",
         "attentionBanner",
         "actionDialog",
+        "actionParamDialog",
+        "efficiencyTab",
+        "actionHistoryTab",
         "bottom-nav",
     ):
         assert marker in index

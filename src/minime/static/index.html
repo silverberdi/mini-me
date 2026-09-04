@@ -219,6 +219,8 @@
             <button class="tab-btn" role="tab" aria-selected="false" data-tab="auditTab">DeepSeek Audit</button>
             <button class="tab-btn" role="tab" aria-selected="false" data-tab="previewTab">Preview & Validation</button>
             <button class="tab-btn" role="tab" aria-selected="false" data-tab="githubTab">GitHub & PR</button>
+            <button class="tab-btn" role="tab" aria-selected="false" data-tab="efficiencyTab">Efficiency & Telemetry</button>
+            <button class="tab-btn" role="tab" aria-selected="false" data-tab="actionHistoryTab">Action History</button>
             <button class="tab-btn" role="tab" aria-selected="false" data-tab="timelineTab">Timeline</button>
           </nav>
 
@@ -332,7 +334,27 @@
             </div>
           </div>
 
-          <!-- Tab 8: Timeline -->
+          <!-- Tab 8: Provider Efficiency & Telemetry -->
+          <div class="tab-pane" id="efficiencyTab" role="tabpanel">
+            <div class="section-card">
+              <h4 class="section-title">Provider Efficiency & Telemetry Facts</h4>
+              <div id="efficiencyContentContainer">
+                <!-- Injected dynamically -->
+              </div>
+            </div>
+          </div>
+
+          <!-- Tab 9: Action History -->
+          <div class="tab-pane" id="actionHistoryTab" role="tabpanel">
+            <div class="section-card">
+              <h4 class="section-title">Governed Operator Action Audit Trail</h4>
+              <div id="actionHistoryContentContainer">
+                <!-- Injected dynamically -->
+              </div>
+            </div>
+          </div>
+
+          <!-- Tab 10: Timeline -->
           <div class="tab-pane" id="timelineTab" role="tabpanel">
             <div class="section-card">
               <h4 class="section-title">Chronological Lifecycle Events</h4>
@@ -357,14 +379,37 @@
     <button type="button" data-scroll-to="preview">Preview</button>
   </nav>
 
+  <!-- Action Confirmation Modal -->
   <dialog id="actionDialog" class="action-dialog" aria-labelledby="actionDialogTitle">
-    <h2 id="actionDialogTitle" data-dialog-title>Confirm action</h2>
-    <p data-dialog-description></p>
-    <form method="dialog" class="action-group">
+    <div class="modal-header">
+      <h2 id="actionDialogTitle" data-dialog-title>Confirm Action</h2>
+    </div>
+    <div class="modal-body">
+      <div id="dialogWarningBanner" class="dialog-warning" style="display: none;"></div>
+      <p data-dialog-description class="dialog-desc"></p>
+      <div id="dialogMetaInfo" class="dialog-meta-box"></div>
+    </div>
+    <form method="dialog" class="modal-footer action-group">
       <button type="submit" class="btn btn-secondary" data-cancel>Cancel</button>
-      <button type="button" class="btn btn-primary" data-confirm>Confirm</button>
+      <button type="button" class="btn btn-primary" id="confirmActionBtn" data-confirm>Confirm Action</button>
     </form>
   </dialog>
+
+  <!-- Action Parameter Input Modal -->
+  <dialog id="actionParamDialog" class="action-dialog param-dialog" aria-labelledby="paramDialogTitle">
+    <div class="modal-header">
+      <h2 id="paramDialogTitle">Configure Operator Action</h2>
+    </div>
+    <div class="modal-body" id="paramDialogBody">
+      <!-- Dynamic form fields injected based on action -->
+    </div>
+    <form method="dialog" class="modal-footer action-group">
+      <button type="submit" class="btn btn-secondary" data-param-cancel>Cancel</button>
+      <button type="button" class="btn btn-primary" id="submitParamActionBtn" data-param-submit>Execute Action</button>
+    </form>
+  </dialog>
+
+  <div id="toastNotification" class="toast-notification" role="status" aria-live="polite" style="display: none;"></div>
 
   <script src="/static/js/dashboard.js"></script>
   <script type="module" src="/static/js/app.js"></script>

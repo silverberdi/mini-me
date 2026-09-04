@@ -506,38 +506,417 @@
     // Tab 7: GitHub & PR
     renderGitHubTab(detail.github, detail.project_id);
 
-    // Tab 8: Timeline
+    // Tab 8: Provider Efficiency & Telemetry
+    renderEfficiencyTab(detail.project_id, detail.change_name);
+
+    // Tab 9: Action History Audit Trail
+    renderActionHistoryTab(detail.run_id);
+
+    // Tab 10: Timeline
     renderTimelineTab(detail.timeline);
-    renderActionToolbar(detail.run_id);
+
+    // Action Toolbar
+    renderActionToolbar(detail);
   }
 
-  async function renderActionToolbar(runId) {
+  function showToast(message, type = 'info') {
+    const toast = document.getElementById('toastNotification');
+    if (!toast) return;
+    toast.textContent = message;
+    toast.className = `toast-notification toast-${type}`;
+    toast.style.display = 'block';
+    setTimeout(() => {
+      toast.style.display = 'none';
+    }, 4000);
+  }
+
+  async function renderActionToolbar(detail) {
     const toolbar = document.getElementById('actionToolbar');
-    if (!toolbar || !runId) return;
+    if (!toolbar) return;
+    const runId = detail?.run_id;
+    if (!runId) {
+      toolbar.innerHTML = '';
+      return;
+    }
     try {
       const response = await fetch(`/api/v1/control-plane/actions/available?run_id=${encodeURIComponent(runId)}`);
+      if (!response.ok) {
+        toolbar.innerHTML = '<span class="text-muted">No actions available</span>';
+        return;
+      }
       const actions = await response.json();
-      toolbar.innerHTML = actions.map(action => `<button type="button" class="btn ${action.action_type === 'cancel' ? 'btn-danger' : 'btn-secondary'}" data-action="${escapeHtml(action.action_type)}" ${action.enabled === false ? 'disabled' : ''}>${escapeHtml(action.display_name || action.action_type)}</button>`).join('');
-      toolbar.querySelectorAll('[data-action]:not(:disabled)').forEach(button => button.addEventListener('click', () => {
-        const action = actions.find(item => item.action_type === button.dataset.action);
-        if (action) confirmAction(action, () => executeOperatorAction(runId, action.action_type));
-      }));
-    } catch (_) { toolbar.innerHTML = '<span class="text-muted">Operator actions unavailable</span>'; }
+      if (!actions || !actions.length) {
+        toolbar.innerHTML = '<span class="text-muted">No actions available</span>';
+        return;
+      }
+      toolbar.innerHTML = actions.map(action => {
+        const actionType = action.action || action.action_type;
+        const isDanger = ['cancel', 'recover_locks'].includes(actionType.toLowerCase());
+        const isPrimary = ['continue', 'resolve_gate'].includes(actionType.toLowerCase());
+        const btnClass = isDanger ? 'btn-danger' : (isPrimary ? 'btn-primary' : 'btn-secondary');
+        const disabledAttr = action.enabled === false ? 'disabled' : '';
+        const tooltip = action.disabled_reason ? `title="${escapeHtml(action.disabled_reason)}"` : `title="${escapeHtml(action.description || '')}"`;
+        return `<button type="button" class="btn btn-sm ${btnClass}" data-action="${escapeHtml(actionType)}" ${disabledAttr} ${tooltip}>${escapeHtml(action.display_name || actionType)}</button>`;
+      }).join(' ');
+
+      toolbar.querySelectorAll('[data-action]:not(:disabled)').forEach(button => {
+        button.addEventListener('click', () => {
+          const actionType = button.dataset.action;
+          const action = actions.find(item => (item.action || item.action_type) === actionType);
+          if (action) handleActionClick(action, detail);
+        });
+      });
+    } catch (err) {
+      toolbar.innerHTML = '<span class="text-muted">Operator actions unavailable</span>';
+    }
   }
 
-  function confirmAction(action, onConfirm) {
+  function handleActionClick(action, detail) {
+    const actionType = (action.action || action.action_type || '').toLowerCase();
+
+    if (actionType === 'reassign') {
+      openParamModal({
+        title: 'Reassign Executor',
+        description: `Select target execution provider for '${detail.change_name}'.`,
+        fields: [
+          {
+            name: 'executor',
+            label: 'Target Executor',
+            type: 'select',
+            options: [
+              { value: 'codex', label: 'Codex (Routine Implementation Workhorse)' },
+              { value: 'antigravity', label: 'Antigravity (Supervisor & Governor)' }
+            ],
+            default: 'codex'
+          },
+          {
+            name: 'rationale',
+            label: 'Reassignment Rationale (Optional)',
+            type: 'text',
+            placeholder: 'Reason for handoff...'
+          }
+        ],
+        onSubmit: (params) => {
+          executeOperatorAction(detail, 'REASSIGN', {
+            target_executor: params.executor,
+            rationale: params.rationale || ''
+          });
+        }
+      });
+    } else if (actionType === 'resolve_gate') {
+      openParamModal({
+        title: 'Resolve Human Gate',
+        description: `Resolve gate for '${detail.change_name}' (Current Gate: ${detail.human_gate || 'Attention'}).`,
+        fields: [
+          {
+            name: 'resolution',
+            label: 'Decision',
+            type: 'select',
+            options: [
+              { value: 'APPROVED', label: 'Approve (Proceed to next stage)' },
+              { value: 'REJECTED', label: 'Reject (Require changes)' },
+              { value: 'OVERRIDDEN', label: 'Override Gate' }
+            ],
+            default: 'APPROVED'
+          },
+          {
+            name: 'notes',
+            label: 'Resolution Notes',
+            type: 'textarea',
+            placeholder: 'Enter notes or reason for resolution...'
+          }
+        ],
+        onSubmit: (params) => {
+          executeOperatorAction(detail, 'RESOLVE_GATE', {
+            gate_action: params.resolution,
+            operator_notes: params.notes || ''
+          });
+        }
+      });
+    } else if (actionType === 'retry') {
+      openParamModal({
+        title: 'Retry Stage',
+        description: `Retry execution stage for '${detail.change_name}'.`,
+        fields: [
+          {
+            name: 'reason',
+            label: 'Retry Reason (Optional)',
+            type: 'text',
+            placeholder: 'Reason for stage retry...'
+          }
+        ],
+        onSubmit: (params) => {
+          executeOperatorAction(detail, 'RETRY', {
+            reason: params.reason || 'Operator manual retry'
+          });
+        }
+      });
+    } else if (action.requires_confirmation || ['cancel', 'recover_locks', 'reconcile_post_merge'].includes(actionType)) {
+      openConfirmModal({
+        title: action.display_name || `Confirm ${actionType.toUpperCase()}`,
+        description: action.confirmation_prompt || action.description || `Confirm execution of ${action.display_name || actionType}.`,
+        warning: actionType === 'cancel' ? 'This will immediately abort the active run and clean active resources.' : (actionType === 'recover_locks' ? 'This will recover any stale locks held for this run.' : ''),
+        meta: {
+          'Change': detail.change_name,
+          'Run ID': detail.run_id ? detail.run_id.slice(0, 8) + '...' : '---',
+          'Current Stage': detail.current_stage || '---',
+          'Risk Level': action.risk_level || 'STANDARD'
+        },
+        onConfirm: () => {
+          executeOperatorAction(detail, action.action || action.action_type);
+        }
+      });
+    } else {
+      executeOperatorAction(detail, action.action || action.action_type);
+    }
+  }
+
+  function openConfirmModal({ title, description, warning, meta, onConfirm }) {
     const dialog = document.getElementById('actionDialog');
     if (!dialog) return onConfirm();
-    dialog.querySelector('[data-dialog-title]').textContent = action.display_name || action.action_type;
-    dialog.querySelector('[data-dialog-description]').textContent = action.confirmation_prompt || action.description || 'Confirm this governed operator action.';
+    dialog.querySelector('[data-dialog-title]').textContent = title;
+    dialog.querySelector('[data-dialog-description]').textContent = description;
+
+    const warnBanner = document.getElementById('dialogWarningBanner');
+    if (warnBanner) {
+      if (warning) {
+        warnBanner.textContent = '⚠️ ' + warning;
+        warnBanner.style.display = 'block';
+      } else {
+        warnBanner.style.display = 'none';
+      }
+    }
+
+    const metaBox = document.getElementById('dialogMetaInfo');
+    if (metaBox) {
+      if (meta && Object.keys(meta).length > 0) {
+        metaBox.innerHTML = Object.entries(meta).map(([k, v]) => `<div><strong>${escapeHtml(k)}:</strong> ${escapeHtml(v)}</div>`).join('');
+        metaBox.style.display = 'grid';
+      } else {
+        metaBox.style.display = 'none';
+      }
+    }
+
     dialog.showModal();
-    dialog.querySelector('[data-confirm]').onclick = () => { dialog.close(); onConfirm(); };
+    const confirmBtn = document.getElementById('confirmActionBtn');
+    confirmBtn.onclick = () => {
+      dialog.close();
+      onConfirm();
+    };
     dialog.querySelector('[data-cancel]').onclick = () => dialog.close();
   }
 
-  async function executeOperatorAction(runId, actionType) {
-    await fetch('/api/v1/control-plane/actions/execute', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({run_id: runId, action_type: actionType, idempotency_key: crypto.randomUUID(), parameters: {}}) });
-    fetchOverview();
+  function openParamModal({ title, description, fields, onSubmit }) {
+    const dialog = document.getElementById('actionParamDialog');
+    if (!dialog) return;
+    document.getElementById('paramDialogTitle').textContent = title;
+    const body = document.getElementById('paramDialogBody');
+    body.innerHTML = `
+      <p class="dialog-desc">${escapeHtml(description)}</p>
+      <form id="paramModalForm" class="param-form">
+        ${fields.map(f => {
+          if (f.type === 'select') {
+            return `
+              <div class="form-group">
+                <label for="field_${f.name}">${escapeHtml(f.label)}</label>
+                <select id="field_${f.name}" name="${f.name}" class="form-control">
+                  ${f.options.map(opt => `<option value="${opt.value}" ${opt.value === f.default ? 'selected' : ''}>${escapeHtml(opt.label)}</option>`).join('')}
+                </select>
+              </div>
+            `;
+          } else if (f.type === 'textarea') {
+            return `
+              <div class="form-group">
+                <label for="field_${f.name}">${escapeHtml(f.label)}</label>
+                <textarea id="field_${f.name}" name="${f.name}" class="form-control" rows="3" placeholder="${escapeHtml(f.placeholder || '')}"></textarea>
+              </div>
+            `;
+          } else {
+            return `
+              <div class="form-group">
+                <label for="field_${f.name}">${escapeHtml(f.label)}</label>
+                <input type="text" id="field_${f.name}" name="${f.name}" class="form-control" placeholder="${escapeHtml(f.placeholder || '')}" value="${escapeHtml(f.default || '')}">
+              </div>
+            `;
+          }
+        }).join('')}
+      </form>
+    `;
+
+    dialog.showModal();
+    const submitBtn = document.getElementById('submitParamActionBtn');
+    submitBtn.onclick = (e) => {
+      e.preventDefault();
+      const form = document.getElementById('paramModalForm');
+      const formData = new FormData(form);
+      const params = {};
+      for (const [k, v] of formData.entries()) {
+        params[k] = v;
+      }
+      dialog.close();
+      onSubmit(params);
+    };
+    dialog.querySelector('[data-param-cancel]').onclick = () => dialog.close();
+  }
+
+  async function executeOperatorAction(detail, actionType, parameters = {}) {
+    const runId = detail?.run_id;
+    if (!runId) {
+      showToast('Cannot execute action: No active run for this change.', 'error');
+      return;
+    }
+    const payload = {
+      action_request_id: crypto.randomUUID(),
+      project_id: detail.project_id,
+      change_name: detail.change_name,
+      run_id: runId,
+      action_type: actionType.toUpperCase(),
+      parameters: parameters,
+      actor_identity: currentUser?.email || 'operator',
+      source_interface: 'pwa',
+      expected_stage: detail.current_stage || null,
+      expected_generation: detail.candidate_authority?.generation || (detail.generation || null),
+      expected_candidate_sha: detail.candidate_authority?.candidate_sha || (detail.candidate_sha || null),
+      expected_human_gate: detail.human_gate || null,
+      requested_at: new Date().toISOString()
+    };
+
+    try {
+      showToast(`Executing ${actionType}...`, 'info');
+      const response = await fetch('/api/v1/control-plane/actions/execute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const result = await response.json();
+      if (response.ok && (result.status === 'SUCCESS' || result.success)) {
+        showToast(`Action ${actionType} succeeded: ${result.message || 'Execution completed'}`, 'success');
+        await fetchOverview();
+        if (selectedChange && selectedChange.projectId && selectedChange.changeName) {
+          await fetchChangeDetail(selectedChange.projectId, selectedChange.changeName);
+        }
+      } else {
+        const errMsg = result.error_message || result.detail || result.message || 'Action rejected or failed.';
+        showToast(`Action failed: ${errMsg}`, 'error');
+        await fetchOverview();
+        if (selectedChange && selectedChange.projectId && selectedChange.changeName) {
+          await fetchChangeDetail(selectedChange.projectId, selectedChange.changeName);
+        }
+      }
+    } catch (err) {
+      showToast(`Network error executing action: ${err.message}`, 'error');
+    }
+  }
+
+  async function renderEfficiencyTab(projectId, changeName) {
+    const container = document.getElementById('efficiencyContentContainer');
+    if (!container) return;
+    if (!projectId || !changeName) {
+      container.innerHTML = '<p class="table-empty">No telemetry recorded for this change.</p>';
+      return;
+    }
+    try {
+      const resp = await fetch(`/api/v1/efficiency/${encodeURIComponent(projectId)}/${encodeURIComponent(changeName)}`);
+      if (!resp.ok) {
+        container.innerHTML = '<p class="table-empty">No provider efficiency telemetry recorded for this change.</p>';
+        return;
+      }
+      const data = await resp.json();
+      const ratio = data.productive_attempt_ratio !== undefined ? (Number(data.productive_attempt_ratio) * 100).toFixed(0) + '%' : '100%';
+      const attempts = data.total_attempts ?? 1;
+      const reworks = data.rework_attempts ?? 0;
+      const model = data.primary_model || 'codex';
+      const reviewerModel = data.reviewer_model || 'antigravity';
+      const indStatus = data.reviewer_independence ? 'PASS' : 'INDEPENDENT';
+      const tokens = (data.total_tokens_consumed || 0).toLocaleString();
+
+      container.innerHTML = `
+        <div class="efficiency-kpi-grid">
+          <div class="stat-card">
+            <div class="stat-label">PRODUCTIVE ATTEMPTS</div>
+            <div class="stat-value text-success">${escapeHtml(ratio)}</div>
+            <div class="stat-sub">${attempts} total attempts (${reworks} rework)</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">PRIMARY IMPLEMENTER</div>
+            <div class="stat-value">${escapeHtml(model)}</div>
+            <div class="stat-sub">Routine workhorse</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">COMPLEMENTARY REVIEWER</div>
+            <div class="stat-value">${escapeHtml(reviewerModel)}</div>
+            <div class="stat-sub">Independence: <strong class="text-success">${escapeHtml(indStatus)}</strong></div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">TOKEN CONSUMPTION</div>
+            <div class="stat-value text-primary">${escapeHtml(tokens)}</div>
+            <div class="stat-sub">Telemetry tracked</div>
+          </div>
+        </div>
+        <div class="section-card" style="margin-top: 16px;">
+          <h5 class="section-subtitle">Anti-Loop & Retry Telemetry</h5>
+          <div class="overview-meta-grid" style="margin-top: 8px;">
+            <div class="meta-item"><span class="meta-label">Retry Budget Limit</span><span class="meta-val">${escapeHtml(data.retry_budget_limit || 3)}</span></div>
+            <div class="meta-item"><span class="meta-label">Same-SHA Retries</span><span class="meta-val">${escapeHtml(data.duplicate_sha_retries || 0)}</span></div>
+            <div class="meta-item"><span class="meta-label">Last Fact Update</span><span class="meta-val">${formatTimestamp(data.recorded_at || data.updated_at)}</span></div>
+          </div>
+        </div>
+      `;
+    } catch (err) {
+      container.innerHTML = '<p class="table-empty">Failed loading efficiency telemetry.</p>';
+    }
+  }
+
+  async function renderActionHistoryTab(runId) {
+    const container = document.getElementById('actionHistoryContentContainer');
+    if (!container) return;
+    if (!runId) {
+      container.innerHTML = '<p class="table-empty">No action history for this execution run.</p>';
+      return;
+    }
+    try {
+      const resp = await fetch(`/api/v1/runs/${encodeURIComponent(runId)}/actions/history`);
+      if (!resp.ok) {
+        container.innerHTML = '<p class="table-empty">No operator actions have been performed on this run.</p>';
+        return;
+      }
+      const history = await resp.json();
+      if (!history || !history.length) {
+        container.innerHTML = '<p class="table-empty">No operator actions recorded for this run yet.</p>';
+        return;
+      }
+      container.innerHTML = `
+        <table class="data-table small-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Action</th>
+              <th>Actor</th>
+              <th>Status</th>
+              <th>Source</th>
+              <th>Summary / Reason</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${history.map(item => {
+              const statusClass = item.status === 'SUCCESS' ? 'badge-success' : (item.status === 'REJECTED' ? 'badge-warning' : 'badge-danger');
+              return `
+                <tr>
+                  <td>${formatTimestamp(item.created_at || item.requested_at)}</td>
+                  <td><span class="badge">${escapeHtml(item.action_type)}</span></td>
+                  <td><strong>${escapeHtml(item.actor_identity || 'operator')}</strong></td>
+                  <td><span class="badge ${statusClass}">${escapeHtml(item.status)}</span></td>
+                  <td><code>${escapeHtml(item.source_interface || 'pwa')}</code></td>
+                  <td>${escapeHtml(item.message || item.rejection_reason || item.details?.reason || 'Executed')}</td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+      `;
+    } catch (err) {
+      container.innerHTML = '<p class="table-empty">Failed loading action audit trail.</p>';
+    }
   }
 
 

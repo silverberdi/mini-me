@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 
 import pytest
 
@@ -167,3 +168,41 @@ def test_cli_invocation_rejects_unsupported_prompt_transport():
     assert "[REDACTED]" in parsed["message"]
 
     clear_correlation_context()
+
+
+def test_discover_and_load_env_file(tmp_path, monkeypatch):
+    from minime.config import discover_and_load_env_file
+
+    env_file = tmp_path / "custom.env"
+    env_file.write_text(
+        "# Comment line\n"
+        "MINIME_DATABASE_URL=postgresql://minime:secret@localhost:5432/minime\n"
+        "CUSTOM_KEY='custom_val'\n"
+        'QUOTED_KEY="quoted_val"\n'
+        "EMPTY_VAL=\n"
+    )
+
+    monkeypatch.delenv("MINIME_DATABASE_URL", raising=False)
+    monkeypatch.delenv("CUSTOM_KEY", raising=False)
+    monkeypatch.delenv("QUOTED_KEY", raising=False)
+
+    loaded = discover_and_load_env_file(env_file)
+    assert "MINIME_DATABASE_URL" in loaded
+    assert "CUSTOM_KEY" in loaded
+    assert "QUOTED_KEY" in loaded
+
+    db_config = DatabaseConfig()
+    assert db_config.resolve_url() == "postgresql://minime:secret@localhost:5432/minime"
+
+
+def test_discover_and_load_env_file_preserves_existing(tmp_path, monkeypatch):
+    from minime.config import discover_and_load_env_file
+
+    env_file = tmp_path / "custom.env"
+    env_file.write_text("EXISTING_KEY=new_val\n")
+
+    monkeypatch.setenv("EXISTING_KEY", "original_val")
+    discover_and_load_env_file(env_file)
+
+    assert os.environ.get("EXISTING_KEY") == "original_val"
+

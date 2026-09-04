@@ -27,6 +27,9 @@ class DatabaseConfig(BaseModel):
             raw_url = self.url
         else:
             raw_url = os.environ.get(self.url_env, "")
+            if not raw_url:
+                discover_and_load_env_file()
+                raw_url = os.environ.get(self.url_env, "")
 
         if not raw_url:
             raise ValueError(
@@ -219,8 +222,63 @@ def resolve_cli_invocation(
     )
 
 
+def discover_and_load_env_file(env_path: str | Path | None = None) -> list[str]:
+    """Discover and safely load environment variables from canonical .env files.
+
+    Checks in order:
+    1. Explicit env_path argument
+    2. MINIME_CONFIG_PATH environment variable
+    3. MINIME_ENV_FILE environment variable
+    4. /etc/minime/minime.env
+    5. .env in current working directory
+
+    Populates os.environ using setdefault so existing process environment is preserved.
+    Returns list of loaded variable names.
+    """
+    candidates: list[Path] = []
+    if env_path:
+        candidates.append(Path(env_path))
+    if os.environ.get("MINIME_CONFIG_PATH"):
+        candidates.append(Path(os.environ["MINIME_CONFIG_PATH"]))
+    if os.environ.get("MINIME_ENV_FILE"):
+        candidates.append(Path(os.environ["MINIME_ENV_FILE"]))
+    candidates.extend(
+        [
+            Path("/etc/minime/minime.env"),
+            Path(".env"),
+        ]
+    )
+
+    loaded_vars: list[str] = []
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.R_OK):
+            try:
+                with open(candidate, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#"):
+                            continue
+                        if "=" in line:
+                            key, val = line.split("=", 1)
+                            key = key.strip()
+                            val = val.strip()
+                            if (val.startswith('"') and val.endswith('"')) or (
+                                val.startswith("'") and val.endswith("'")
+                            ):
+                                val = val[1:-1]
+                            if key and key not in os.environ:
+                                os.environ[key] = val
+                                loaded_vars.append(key)
+                if loaded_vars:
+                    break
+            except Exception:
+                continue
+    return loaded_vars
+
+
 def load_config(config_path: str | Path | None = None) -> AppConfig:
     """Load configuration from a YAML file or use default locations."""
+    discover_and_load_env_file()
     if config_path:
         path = Path(config_path)
     else:

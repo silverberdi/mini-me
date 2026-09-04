@@ -12,6 +12,7 @@ import uvicorn
 from minime.adapters.openspec import OpenSpecAdapter
 from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.db.session import db_manager
+from minime.config import discover_and_load_env_file
 from minime.domain.enums import (
     OperatorActionStatus,
     OperatorActionType,
@@ -30,6 +31,9 @@ from minime.services.provider_health_service import ProviderHealthService
 from minime.services.readiness_service import ReadinessService
 from minime.services.scheduler_service import SchedulerService
 from minime.services.status_service import StatusService
+
+# Auto-discover canonical environment files (.env, /etc/minime/minime.env)
+discover_and_load_env_file()
 
 app = typer.Typer(
     name="minime",
@@ -63,6 +67,7 @@ def main_callback(
     json_logs: bool = typer.Option(False, "--json-logs", help="Output logs in JSON format"),
 ) -> None:
     """Global configuration callback."""
+    discover_and_load_env_file()
     log_level = 10 if verbose else 20  # DEBUG vs INFO
     configure_logging(level=log_level, json_output=json_logs)
 
