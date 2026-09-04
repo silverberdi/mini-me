@@ -803,4 +803,3 @@ class AuthAuditEventRepositoryInterface(ABC):
     def list_events(
         self, operator_email: str | None = None, limit: int = 100
     ) -> list[AuthAuditEvent]: ...
-

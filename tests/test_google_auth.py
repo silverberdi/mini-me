@@ -48,7 +48,6 @@ def client(auth_uow: InMemoryPersistenceUnitOfWork):
     app.dependency_overrides.clear()
 
 
-
 # =============================================================================
 # 1. Unauthenticated / Public Route Tests
 # =============================================================================
@@ -300,32 +299,42 @@ def test_oidc_service_token_verification_lifecycle(rsa_key_pair):
         "iat": now,
         "exp": now + 3600,
     }
-    valid_jwt = jwt.encode(payload, private_key, algorithm="RS256", headers={"kid": "test-key-id-001"})
+    valid_jwt = jwt.encode(
+        payload, private_key, algorithm="RS256", headers={"kid": "test-key-id-001"}
+    )
     claims = service.verify_id_token(valid_jwt)
     assert claims["sub"] == "google-sub-12345"
     assert claims["email"] == "operator@company.com"
 
     # 2. Expired Token
     expired_payload = dict(payload, exp=now - 60)
-    expired_jwt = jwt.encode(expired_payload, private_key, algorithm="RS256", headers={"kid": "test-key-id-001"})
+    expired_jwt = jwt.encode(
+        expired_payload, private_key, algorithm="RS256", headers={"kid": "test-key-id-001"}
+    )
     with pytest.raises(ValueError, match="expired"):
         service.verify_id_token(expired_jwt)
 
     # 3. Audience Mismatch
     wrong_aud_payload = dict(payload, aud="unrelated-app.apps.googleusercontent.com")
-    wrong_aud_jwt = jwt.encode(wrong_aud_payload, private_key, algorithm="RS256", headers={"kid": "test-key-id-001"})
+    wrong_aud_jwt = jwt.encode(
+        wrong_aud_payload, private_key, algorithm="RS256", headers={"kid": "test-key-id-001"}
+    )
     with pytest.raises(ValueError, match="audience mismatch"):
         service.verify_id_token(wrong_aud_jwt)
 
     # 4. Unverified Email
     unverified_payload = dict(payload, email_verified=False)
-    unverified_jwt = jwt.encode(unverified_payload, private_key, algorithm="RS256", headers={"kid": "test-key-id-001"})
+    unverified_jwt = jwt.encode(
+        unverified_payload, private_key, algorithm="RS256", headers={"kid": "test-key-id-001"}
+    )
     with pytest.raises(ValueError, match="email is not verified"):
         service.verify_id_token(unverified_jwt)
 
     # 5. Invalid Issuer
     bad_iss_payload = dict(payload, iss="https://evil-issuer.com")
-    bad_iss_jwt = jwt.encode(bad_iss_payload, private_key, algorithm="RS256", headers={"kid": "test-key-id-001"})
+    bad_iss_jwt = jwt.encode(
+        bad_iss_payload, private_key, algorithm="RS256", headers={"kid": "test-key-id-001"}
+    )
     with pytest.raises(ValueError, match="Invalid ID token issuer"):
         service.verify_id_token(bad_iss_jwt)
 
@@ -355,7 +364,9 @@ def test_full_oauth_callback_flow_success(
         "iat": now,
         "exp": now + 3600,
     }
-    test_id_token = jwt.encode(payload, private_key, algorithm="RS256", headers={"kid": "test-key-id-001"})
+    test_id_token = jwt.encode(
+        payload, private_key, algorithm="RS256", headers={"kid": "test-key-id-001"}
+    )
 
     state_token = generate_state_token()
     client.cookies.set("minime_oauth_state", state_token)
@@ -365,7 +376,9 @@ def test_full_oauth_callback_flow_success(
         "GOOGLE_CLIENT_SECRET": client_secret,
     }
     with patch.dict(os.environ, env_patch):
-        with patch.object(GoogleOidcService, "exchange_code", return_value={"id_token": test_id_token}):
+        with patch.object(
+            GoogleOidcService, "exchange_code", return_value={"id_token": test_id_token}
+        ):
             with patch.object(GoogleOidcService, "fetch_jwks", return_value={"keys": [jwk_dict]}):
                 resp = client.get(
                     f"/api/v1/auth/google/callback?code=mock_oauth_code_123&state={state_token}",
@@ -396,9 +409,12 @@ def test_authorized_operators_env_seeding(auth_uow: InMemoryPersistenceUnitOfWor
         os.environ,
         {"MINIME_AUTHORIZED_OPERATORS": "op1@example.com, op2@example.com"},
     ):
-        with patch("minime.api.app.db_manager.__class__.sessionmaker", new_callable=PropertyMock) as mock_sm:
+        with patch(
+            "minime.api.app.db_manager.__class__.sessionmaker", new_callable=PropertyMock
+        ) as mock_sm:
             mock_sm.return_value = lambda: None
             with patch("minime.api.app.PostgresPersistenceUnitOfWork", return_value=auth_uow):
+
                 async def run_lifespan():
                     async with lifespan(app):
                         pass
@@ -409,5 +425,3 @@ def test_authorized_operators_env_seeding(auth_uow: InMemoryPersistenceUnitOfWor
     op2 = auth_uow.authorized_operators.get_by_email("op2@example.com")
     assert op1 is not None and op1.is_active is True
     assert op2 is not None and op2.is_active is True
-
-

@@ -563,4 +563,3 @@ class OperatorAuthDecision(str, Enum):
     SESSION_EXPIRED = "SESSION_EXPIRED"
     SESSION_REVOKED = "SESSION_REVOKED"
     NO_SESSION = "NO_SESSION"
-

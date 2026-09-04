@@ -40,12 +40,8 @@ def upgrade() -> None:
             nullable=False,
         ),
     )
-    op.create_index(
-        "ix_authorized_operators_email", "authorized_operators", ["email"]
-    )
-    op.create_index(
-        "ix_authorized_operators_google_sub", "authorized_operators", ["google_sub"]
-    )
+    op.create_index("ix_authorized_operators_email", "authorized_operators", ["email"])
+    op.create_index("ix_authorized_operators_google_sub", "authorized_operators", ["google_sub"])
 
     # 2. Create auth_sessions table
     op.create_table(
@@ -66,15 +62,9 @@ def upgrade() -> None:
         sa.Column("ip_address", sa.String(length=64), nullable=True),
         sa.Column("user_agent", sa.Text(), nullable=True),
     )
-    op.create_index(
-        "ix_auth_sessions_token_hash", "auth_sessions", ["session_token_hash"]
-    )
-    op.create_index(
-        "ix_auth_sessions_operator_email", "auth_sessions", ["operator_email"]
-    )
-    op.create_index(
-        "ix_auth_sessions_expires_at", "auth_sessions", ["expires_at"]
-    )
+    op.create_index("ix_auth_sessions_token_hash", "auth_sessions", ["session_token_hash"])
+    op.create_index("ix_auth_sessions_operator_email", "auth_sessions", ["operator_email"])
+    op.create_index("ix_auth_sessions_expires_at", "auth_sessions", ["expires_at"])
 
     # 3. Create auth_audit_events table
     op.create_table(
@@ -93,15 +83,9 @@ def upgrade() -> None:
             nullable=False,
         ),
     )
-    op.create_index(
-        "ix_auth_audit_events_event_type", "auth_audit_events", ["event_type"]
-    )
-    op.create_index(
-        "ix_auth_audit_events_operator_email", "auth_audit_events", ["operator_email"]
-    )
-    op.create_index(
-        "ix_auth_audit_events_timestamp", "auth_audit_events", ["timestamp"]
-    )
+    op.create_index("ix_auth_audit_events_event_type", "auth_audit_events", ["event_type"])
+    op.create_index("ix_auth_audit_events_operator_email", "auth_audit_events", ["operator_email"])
+    op.create_index("ix_auth_audit_events_timestamp", "auth_audit_events", ["timestamp"])
 
 
 def downgrade() -> None:

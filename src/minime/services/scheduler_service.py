@@ -470,7 +470,8 @@ class SchedulerService:
             if (
                 (
                     r.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
-                    or r.current_stage in {OrchestrationStage.PR_PREPARED, OrchestrationStage.POST_MERGE_RECONCILING}
+                    or r.current_stage
+                    in {OrchestrationStage.PR_PREPARED, OrchestrationStage.POST_MERGE_RECONCILING}
                 )
                 and r.current_stage != OrchestrationStage.COMPLETED
                 and (project_id is None or r.project_id == project_id)

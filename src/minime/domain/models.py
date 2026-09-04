@@ -1197,4 +1197,3 @@ class AuthStatusDTO(BaseModel):
     authenticated: bool
     operator: OperatorIdentityDTO | None = None
     session_expires_at: str | None = None
-

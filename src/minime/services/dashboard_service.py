@@ -494,8 +494,17 @@ class OperationsDashboardService:
                     )
                 )
             elif (
-                r.stop_outcome in {OrchestrationStopOutcome.COMPLETED, OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE}
-                or r.current_stage in {OrchestrationStage.COMPLETED, OrchestrationStage.PR_PREPARED, OrchestrationStage.POST_MERGE_RECONCILING}
+                r.stop_outcome
+                in {
+                    OrchestrationStopOutcome.COMPLETED,
+                    OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE,
+                }
+                or r.current_stage
+                in {
+                    OrchestrationStage.COMPLETED,
+                    OrchestrationStage.PR_PREPARED,
+                    OrchestrationStage.POST_MERGE_RECONCILING,
+                }
                 or is_change_done
             ):
                 # Review verdict & Audit risk strictly bound to current candidate SHA
@@ -573,14 +582,11 @@ class OperationsDashboardService:
             # Determine composite canonical status
             status_val = self._derive_canonical_change_status(change, authoritative_run)
 
-            is_terminally_completed = (
-                change.status == ChangeStatus.DONE
-                or (
-                    authoritative_run is not None
-                    and (
-                        authoritative_run.current_stage == OrchestrationStage.COMPLETED
-                        or authoritative_run.stop_outcome == OrchestrationStopOutcome.COMPLETED
-                    )
+            is_terminally_completed = change.status == ChangeStatus.DONE or (
+                authoritative_run is not None
+                and (
+                    authoritative_run.current_stage == OrchestrationStage.COMPLETED
+                    or authoritative_run.stop_outcome == OrchestrationStopOutcome.COMPLETED
                 )
             )
 
@@ -636,7 +642,9 @@ class OperationsDashboardService:
                     human_gate=gate_val,
                     current_executor=executor,
                     generation=authoritative_run.current_generation if authoritative_run else None,
-                    candidate_sha=authoritative_run.current_candidate_sha if authoritative_run else None,
+                    candidate_sha=authoritative_run.current_candidate_sha
+                    if authoritative_run
+                    else None,
                     candidate_sha_short=_short_sha(authoritative_run.current_candidate_sha)
                     if authoritative_run
                     else None,
@@ -707,14 +715,11 @@ class OperationsDashboardService:
 
         status_val = self._derive_canonical_change_status(change, selected_run)
 
-        is_terminally_completed = (
-            (change and change.status == ChangeStatus.DONE)
-            or (
-                selected_run is not None
-                and (
-                    selected_run.current_stage == OrchestrationStage.COMPLETED
-                    or selected_run.stop_outcome == OrchestrationStopOutcome.COMPLETED
-                )
+        is_terminally_completed = (change and change.status == ChangeStatus.DONE) or (
+            selected_run is not None
+            and (
+                selected_run.current_stage == OrchestrationStage.COMPLETED
+                or selected_run.stop_outcome == OrchestrationStopOutcome.COMPLETED
             )
         )
 
@@ -865,17 +870,14 @@ class OperationsDashboardService:
             return "RUNNING"
 
         # 2. Run terminal / merge states
-        if (
-            run.stop_outcome in {
-                OrchestrationStopOutcome.COMPLETED,
-                OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE,
-            }
-            or run.current_stage in {
-                OrchestrationStage.COMPLETED,
-                OrchestrationStage.PR_PREPARED,
-                OrchestrationStage.POST_MERGE_RECONCILING,
-            }
-        ):
+        if run.stop_outcome in {
+            OrchestrationStopOutcome.COMPLETED,
+            OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE,
+        } or run.current_stage in {
+            OrchestrationStage.COMPLETED,
+            OrchestrationStage.PR_PREPARED,
+            OrchestrationStage.POST_MERGE_RECONCILING,
+        }:
             return "COMPLETED"
 
         if run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN:
@@ -907,7 +909,8 @@ class OperationsDashboardService:
         is_done = (change and change.status == ChangeStatus.DONE) or (
             run is not None
             and (
-                run.current_stage in {OrchestrationStage.COMPLETED, OrchestrationStage.POST_MERGE_RECONCILING}
+                run.current_stage
+                in {OrchestrationStage.COMPLETED, OrchestrationStage.POST_MERGE_RECONCILING}
                 or run.stop_outcome == OrchestrationStopOutcome.COMPLETED
             )
         )
@@ -1579,7 +1582,8 @@ class OperationsDashboardService:
 
         # Terminal completed changes or completed runs have no active blockers
         is_done = (change and change.status == ChangeStatus.DONE) or (
-            run.current_stage in {OrchestrationStage.COMPLETED, OrchestrationStage.POST_MERGE_RECONCILING}
+            run.current_stage
+            in {OrchestrationStage.COMPLETED, OrchestrationStage.POST_MERGE_RECONCILING}
             or run.stop_outcome == OrchestrationStopOutcome.COMPLETED
         )
         if is_done:

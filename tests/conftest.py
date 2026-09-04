@@ -1579,9 +1579,7 @@ class InMemoryAuthAuditEventRepository(AuthAuditEventRepositoryInterface):
         if operator_email:
             target = operator_email.lower().strip()
             items = [
-                e
-                for e in items
-                if e.operator_email and e.operator_email.lower().strip() == target
+                e for e in items if e.operator_email and e.operator_email.lower().strip() == target
             ]
         items.sort(key=lambda e: e.timestamp, reverse=True)
         return [e.model_copy(deep=True) for e in items[:limit]]

@@ -9,8 +9,10 @@ import platform
 import sys
 import os
 
+
 class StatusService:
     ...
+
     def get_runtime_environment_diagnostic(self) -> dict[str, Any]:
         """Return server runtime environment facts without secret leakage."""
         return {

@@ -439,7 +439,8 @@ class ExecutionPipelineService:
 
                 if not corrective_prompt and job.status == JobStatus.CHECKS_FAILED:
                     failing_checks = [
-                        c for c in self.uow.check_results.list_by_job(job.job_id)
+                        c
+                        for c in self.uow.check_results.list_by_job(job.job_id)
                         if c.exit_code != 0
                     ]
                     if failing_checks:
@@ -447,7 +448,10 @@ class ExecutionPipelineService:
                             f"- [{c.check_name}] Command `{c.command}` failed with exit code {c.exit_code}:\n{c.output_snippet}"
                             for c in failing_checks
                         ]
-                        corrective_prompt = "CORRECTIVE GUIDANCE (Failing Deterministic Checks to Fix):\n" + "\n".join(lines)
+                        corrective_prompt = (
+                            "CORRECTIVE GUIDANCE (Failing Deterministic Checks to Fix):\n"
+                            + "\n".join(lines)
+                        )
 
                 latest_blockers = self.uow.blocker_claims.list_by_job(job.job_id)
                 if latest_blockers:

@@ -666,10 +666,11 @@ def test_dashboard_multiple_runs_selects_completed_run_over_failed_intermediate_
     # Must produce NO attention items for the completed change
     assert overview.attention_items == []
 
-    summary = next(c for c in overview.changes if c.change_name == "018.2-proving-diagnostic-status")
+    summary = next(
+        c for c in overview.changes if c.change_name == "018.2-proving-diagnostic-status"
+    )
     assert summary.status == "COMPLETED"
     assert summary.current_run_id == "run-completed-success"
     assert summary.current_stage == "COMPLETED"
     assert summary.stop_outcome == "COMPLETED"
     assert summary.human_gate is None
-

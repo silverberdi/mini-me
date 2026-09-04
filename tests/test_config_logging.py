@@ -205,4 +205,3 @@ def test_discover_and_load_env_file_preserves_existing(tmp_path, monkeypatch):
     discover_and_load_env_file(env_file)
 
     assert os.environ.get("EXISTING_KEY") == "original_val"
-

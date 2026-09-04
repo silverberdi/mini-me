@@ -1164,13 +1164,17 @@ class AuthSessionModel(Base):
     __tablename__ = "auth_sessions"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    session_token_hash: Mapped[str] = mapped_column(String(128), unique=True, nullable=False, index=True)
+    session_token_hash: Mapped[str] = mapped_column(
+        String(128), unique=True, nullable=False, index=True
+    )
     operator_email: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     google_sub: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ip_address: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -1190,4 +1194,3 @@ class AuthAuditEventModel(Base):
     timestamp: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False, index=True
     )
-

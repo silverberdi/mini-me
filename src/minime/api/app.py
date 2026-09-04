@@ -125,6 +125,7 @@ async def lifespan(app: FastAPI):
             )
             if env_operators:
                 import json
+
                 try:
                     parsed = json.loads(env_operators)
                     if isinstance(parsed, list):
@@ -343,7 +344,6 @@ def get_current_operator(
 
 
 AuthenticatedOperatorDep = Annotated[AuthorizedOperator, Depends(get_current_operator)]
-
 
 
 class ProjectCreateRequest(BaseModel):
@@ -1614,9 +1614,7 @@ def _resolve_google_credentials() -> tuple[str | None, str | None]:
             try:
                 client_secret = secret_file.read_text(encoding="utf-8").strip()
             except Exception as exc:
-                logger.warning(
-                    f"Failed reading Google client secret from '{secret_file}': {exc}"
-                )
+                logger.warning(f"Failed reading Google client secret from '{secret_file}': {exc}")
     return client_id, client_secret
 
 

@@ -3535,7 +3535,9 @@ def auth_session_model_to_domain(model: AuthSessionModel) -> AuthSession:
 def auth_audit_event_domain_to_model(event: AuthAuditEvent) -> AuthAuditEventModel:
     return AuthAuditEventModel(
         id=event.event_id,
-        event_type=event.event_type.value if hasattr(event.event_type, "value") else str(event.event_type),
+        event_type=event.event_type.value
+        if hasattr(event.event_type, "value")
+        else str(event.event_type),
         operator_email=event.operator_email.lower().strip() if event.operator_email else None,
         google_sub=event.google_sub,
         ip_address=event.ip_address,
@@ -3654,12 +3656,9 @@ class PostgresAuthSessionRepository(AuthSessionRepositoryInterface):
             existing.revoked_at = utc_now()
 
     def revoke_all_for_operator(self, email: str) -> None:
-        stmt = (
-            select(AuthSessionModel)
-            .where(
-                AuthSessionModel.operator_email == email.lower().strip(),
-                AuthSessionModel.revoked_at.is_(None),
-            )
+        stmt = select(AuthSessionModel).where(
+            AuthSessionModel.operator_email == email.lower().strip(),
+            AuthSessionModel.revoked_at.is_(None),
         )
         models = self.session.scalars(stmt).all()
         now = utc_now()
@@ -3688,9 +3687,7 @@ class PostgresAuthAuditEventRepository(AuthAuditEventRepositoryInterface):
     ) -> list[AuthAuditEvent]:
         stmt = select(AuthAuditEventModel)
         if operator_email:
-            stmt = stmt.where(
-                AuthAuditEventModel.operator_email == operator_email.lower().strip()
-            )
+            stmt = stmt.where(AuthAuditEventModel.operator_email == operator_email.lower().strip())
         stmt = stmt.order_by(desc(AuthAuditEventModel.timestamp)).limit(limit)
         models = self.session.scalars(stmt).all()
         return [auth_audit_event_model_to_domain(m) for m in models]
@@ -3746,4 +3743,3 @@ class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
 
     def rollback(self) -> None:
         self.session.rollback()
-

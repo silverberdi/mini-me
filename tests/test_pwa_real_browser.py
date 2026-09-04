@@ -424,7 +424,9 @@ def browser_test_env():
     app.dependency_overrides.clear()
 
 
-async def authenticate_browser(client: ChromeCDPClient, server_url: str, session_token: str) -> None:
+async def authenticate_browser(
+    client: ChromeCDPClient, server_url: str, session_token: str
+) -> None:
     await client.navigate(f"{server_url}/")
     await asyncio.sleep(0.3)
     await client.eval_js(f'document.cookie = "minime_session={session_token}; path=/;";')
@@ -440,7 +442,9 @@ async def test_real_browser_unauthenticated_login_screen(browser_test_env: dict[
     try:
         # Clear cookies
         await client.navigate(f"{browser_test_env['server_url']}/")
-        await client.eval_js('document.cookie = "minime_session=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";')
+        await client.eval_js(
+            'document.cookie = "minime_session=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";'
+        )
         await client.navigate(f"{browser_test_env['server_url']}/")
         await asyncio.sleep(0.8)
 
@@ -473,7 +477,9 @@ async def test_real_browser_desktop_standard_inspection(browser_test_env: dict[s
     await client.connect()
     try:
         await client.set_viewport(1366, 768)
-        await authenticate_browser(client, browser_test_env["server_url"], browser_test_env["session_token"])
+        await authenticate_browser(
+            client, browser_test_env["server_url"], browser_test_env["session_token"]
+        )
 
         # 1. Verify no horizontal overflow
         overflow = await client.eval_js(
@@ -517,7 +523,9 @@ async def test_real_browser_ultrawide_desktop_inspection(browser_test_env: dict[
     await client.connect()
     try:
         await client.set_viewport(2560, 1440)
-        await authenticate_browser(client, browser_test_env["server_url"], browser_test_env["session_token"])
+        await authenticate_browser(
+            client, browser_test_env["server_url"], browser_test_env["session_token"]
+        )
 
         # 1. Verify no horizontal overflow
         overflow = await client.eval_js(
@@ -548,7 +556,9 @@ async def test_real_browser_tablet_inspection(browser_test_env: dict[str, Any]) 
     await client.connect()
     try:
         await client.set_viewport(1024, 768)
-        await authenticate_browser(client, browser_test_env["server_url"], browser_test_env["session_token"])
+        await authenticate_browser(
+            client, browser_test_env["server_url"], browser_test_env["session_token"]
+        )
 
         # 1. Verify no horizontal overflow
         overflow = await client.eval_js(
@@ -577,7 +587,9 @@ async def test_real_browser_mobile_inspection(browser_test_env: dict[str, Any]) 
     await client.connect()
     try:
         await client.set_viewport(390, 844, mobile=True)
-        await authenticate_browser(client, browser_test_env["server_url"], browser_test_env["session_token"])
+        await authenticate_browser(
+            client, browser_test_env["server_url"], browser_test_env["session_token"]
+        )
 
         # 1. Verify no horizontal overflow
         overflow = await client.eval_js(
@@ -624,7 +636,9 @@ async def test_real_browser_pwa_manifest_and_sw_inspection(
     await client.connect()
     try:
         await client.set_viewport(1366, 768)
-        await authenticate_browser(client, browser_test_env["server_url"], browser_test_env["session_token"])
+        await authenticate_browser(
+            client, browser_test_env["server_url"], browser_test_env["session_token"]
+        )
         await asyncio.sleep(1.5)
 
         # 1. Check <link rel="manifest">
