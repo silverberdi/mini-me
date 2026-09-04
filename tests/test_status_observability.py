@@ -1,5 +1,8 @@
 """Tests for status observability, FastAPI endpoints, and CLI interface."""
 
+import platform
+import sys
+
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
@@ -30,6 +33,45 @@ from minime.domain.models import (
 from minime.services.status_service import StatusService
 
 runner = CliRunner()
+
+
+def test_runtime_environment_diagnostic_reports_standalone_runtime(in_memory_uow, monkeypatch):
+    monkeypatch.setattr("minime.services.status_service.os.path.exists", lambda path: False)
+
+    diagnostic = StatusService(in_memory_uow).get_runtime_environment_diagnostic()
+
+    assert diagnostic == {
+        "platform": sys.platform,
+        "python_version": platform.python_version(),
+        "runtime_mode": "standalone",
+        "database_engine": "PostgreSQL",
+    }
+
+
+def test_runtime_environment_diagnostic_reports_server_runtime(in_memory_uow, monkeypatch):
+    checked_paths = []
+    monkeypatch.setattr(
+        "minime.services.status_service.os.path.exists",
+        lambda path: checked_paths.append(path) or True,
+    )
+
+    diagnostic = StatusService(in_memory_uow).get_runtime_environment_diagnostic()
+
+    assert diagnostic["runtime_mode"] == "server"
+    assert checked_paths == ["/etc/minime"]
+
+
+def test_system_status_includes_runtime_environment(in_memory_uow, monkeypatch):
+    service = StatusService(in_memory_uow)
+    expected = {
+        "platform": "test-platform",
+        "python_version": "3.14.5",
+        "runtime_mode": "server",
+        "database_engine": "PostgreSQL",
+    }
+    monkeypatch.setattr(service, "get_runtime_environment_diagnostic", lambda: expected)
+
+    assert service.get_system_status()["runtime_environment"] == expected
 
 
 def test_status_service(in_memory_uow):
