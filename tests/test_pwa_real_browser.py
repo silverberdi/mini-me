@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -47,7 +48,7 @@ from minime.domain.models import (
     Review,
     WorkQueueItem,
 )
-import shutil
+
 
 def get_chrome_bin() -> str | None:
     candidates = [
@@ -63,6 +64,7 @@ def get_chrome_bin() -> str | None:
         if c and Path(c).exists():
             return str(c)
     return None
+
 
 CHROME_BIN = get_chrome_bin()
 
@@ -740,7 +742,9 @@ async def test_real_browser_interactive_features(browser_test_env: dict[str, Any
 
 
 @pytest.mark.asyncio
-async def test_real_browser_020_operator_tabs_and_param_modals(browser_test_env: dict[str, Any]) -> None:
+async def test_real_browser_020_operator_tabs_and_param_modals(
+    browser_test_env: dict[str, Any],
+) -> None:
     """Verify 020 Efficiency Tab, Action History Tab, and Action Param Dialog."""
     client = ChromeCDPClient(browser_test_env["ws_url"])
     await client.connect()
@@ -758,11 +762,15 @@ async def test_real_browser_020_operator_tabs_and_param_modals(browser_test_env:
         assert eff_active is True, "Clicking Efficiency tab failed to activate efficiencyTab pane"
 
         # 2. Action History Tab
-        await client.eval_js("document.querySelector('button[data-tab=\"actionHistoryTab\"]').click()")
+        await client.eval_js(
+            "document.querySelector('button[data-tab=\"actionHistoryTab\"]').click()"
+        )
         history_active = await client.eval_js(
             "document.getElementById('actionHistoryTab').classList.contains('active')"
         )
-        assert history_active is True, "Clicking Action History tab failed to activate actionHistoryTab pane"
+        assert history_active is True, (
+            "Clicking Action History tab failed to activate actionHistoryTab pane"
+        )
 
         # 3. Action Param Dialog
         param_dialog_open = await client.eval_js("""
@@ -785,4 +793,3 @@ async def test_real_browser_020_operator_tabs_and_param_modals(browser_test_env:
 
     finally:
         await client.close()
-

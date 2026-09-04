@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 from minime.domain.enums import (
     PRIMARY_PROVIDERS,
@@ -43,6 +43,7 @@ from minime.domain.enums import (
     PremiumProviderReasonCode,
     PreviewStatus,
     ProgressClassification,
+    ProjectOnboardingStatus,
     ProjectStatus,
     ProviderHealthStatus,
     ProviderResultClass,
@@ -56,6 +57,8 @@ from minime.domain.enums import (
     SchedulerMode,
     TaskClass,
     ValidationVerdict,
+    WorkItemSource,
+    WorkItemStatus,
 )
 
 
@@ -86,6 +89,13 @@ class Project(BaseModel):
     openrouter_drain_allowed: bool = False
     deployment_preview: dict[str, Any] = Field(default_factory=dict)
     deployment_production: dict[str, Any] = Field(default_factory=dict)
+    context_sources: list[str] = Field(default_factory=lambda: ["README.md", "docs/", "ROADMAP.md"])
+    roadmap_path: str = "docs/ROADMAP.md"
+    backlog_path: str = "docs/ROADMAP.md"
+    github_project_number: int | None = None
+    github_project_owner: str | None = None
+    onboarding_status: ProjectOnboardingStatus = ProjectOnboardingStatus.READY_FOR_WORK
+    onboarding_reasons: list[str] = Field(default_factory=list)
     status: ProjectStatus = ProjectStatus.ACTIVE
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
@@ -1197,3 +1207,147 @@ class AuthStatusDTO(BaseModel):
     authenticated: bool
     operator: OperatorIdentityDTO | None = None
     session_expires_at: str | None = None
+
+
+class HumanAnswerRecord(BaseModel):
+    """Immutable record of an operator answering a NEEDS_HUMAN question."""
+
+    question: str
+    answer: str
+    answered_by: str = "operator"
+    answered_at: datetime = Field(default_factory=utc_now)
+
+
+class BacklogItem(BaseModel):
+    """Normalized backlog work item in the product intake layer."""
+
+    item_id: str = Field(default_factory=generate_uuid)
+    project_id: str
+    item_key: str
+    title: str
+    description: str = ""
+    priority: QueuePriority = QueuePriority.NORMAL
+    status: WorkItemStatus = WorkItemStatus.BACKLOG
+    source: WorkItemSource = WorkItemSource.LOCAL_BACKLOG
+    source_location: str | None = None
+    dependencies: list[str] = Field(default_factory=list)
+    readiness_state: ReadinessState = ReadinessState.NOT_READY
+    unmet_readiness_reasons: list[str] = Field(default_factory=list)
+    human_questions: list[str] = Field(default_factory=list)
+    human_answers: list[HumanAnswerRecord] = Field(default_factory=list)
+    acceptance_criteria: list[str] = Field(default_factory=list)
+    github_issue_number: int | None = None
+    github_issue_url: str | None = None
+    github_project_item_id: str | None = None
+    openspec_change_name: str | None = None
+    run_id: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+    @computed_field
+    @property
+    def is_admitted(self) -> bool:
+        return (
+            self.status in (WorkItemStatus.RUNNING, WorkItemStatus.COMPLETED)
+            or self.run_id is not None
+        )
+
+    @computed_field
+    @property
+    def is_ready(self) -> bool:
+        return self.readiness_state == ReadinessState.READY
+
+
+class DiscoveredContextFact(BaseModel):
+    """Structured fact discovered from repository context."""
+
+    source_file: str
+    category: str
+    title: str
+    detail: str
+    is_fact: bool = True
+
+
+class ContextDiscoveryReport(BaseModel):
+    """Report categorizing discovered facts, inferred structure, and missing context."""
+
+    project_id: str
+    discovered_facts: list[DiscoveredContextFact] = Field(default_factory=list)
+    inferred_structure: list[str] = Field(default_factory=list)
+    missing_required_context: list[str] = Field(default_factory=list)
+    discovered_items_count: int = 0
+    discovered_at: datetime = Field(default_factory=utc_now)
+
+
+class ProjectOnboardingInput(BaseModel):
+    """Input payload for onboarding an external project."""
+
+    project_id: str
+    display_name: str
+    repository: str
+    base_branch: str = "main"
+    openspec_path: str = "openspec"
+    context_sources: list[str] = Field(default_factory=lambda: ["README.md", "docs/", "ROADMAP.md"])
+    roadmap_path: str = "docs/ROADMAP.md"
+    backlog_path: str = "docs/ROADMAP.md"
+    github_project_number: int | None = None
+    github_project_owner: str | None = None
+    implementer: str = "codex"
+    reviewer: str = "antigravity"
+    checks: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ProjectOnboardingResult(BaseModel):
+    """Result of project onboarding evaluation and registration."""
+
+    project: Project
+    status: ProjectOnboardingStatus
+    reasons: list[str] = Field(default_factory=list)
+    discovered_context: ContextDiscoveryReport | None = None
+
+    @computed_field
+    @property
+    def discovered_items_count(self) -> int:
+        return self.discovered_context.discovered_items_count if self.discovered_context else 0
+
+
+class WorkItemCreateInput(BaseModel):
+    """Input schema for creating a new backlog work item."""
+
+    title: str
+    item_key: str | None = None
+    description: str = ""
+    priority: QueuePriority = QueuePriority.NORMAL
+    acceptance_criteria: list[str] = Field(default_factory=list)
+    dependencies: list[str] = Field(default_factory=list)
+    source: WorkItemSource = WorkItemSource.MANUAL_INTAKE
+    source_location: str | None = None
+
+
+class WorkItemUpdateInput(BaseModel):
+    """Input schema for updating an existing backlog work item."""
+
+    title: str | None = None
+    description: str | None = None
+    priority: QueuePriority | None = None
+    acceptance_criteria: list[str] | None = None
+    dependencies: list[str] | None = None
+
+
+class WorkItemAnswerInput(BaseModel):
+    """Input schema for answering a NEEDS_HUMAN question."""
+
+    question: str
+    answer: str
+
+
+class WorkItemPrepareResult(BaseModel):
+    """Outcome of preparing canonical artifacts for a work item."""
+
+    item: BacklogItem
+    openspec_change_name: str | None = None
+    github_issue_number: int | None = None
+    github_project_item_id: str | None = None
+    readiness_state: ReadinessState
+    unmet_readiness_reasons: list[str] = Field(default_factory=list)
+    human_questions: list[str] = Field(default_factory=list)

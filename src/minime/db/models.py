@@ -51,6 +51,21 @@ class ProjectModel(Base):
     deployment_production: Mapped[dict[str, Any]] = mapped_column(
         JSON, default=dict, nullable=False
     )
+    context_sources: Mapped[list[str]] = mapped_column(
+        JSON, default=lambda: ["README.md", "docs/", "ROADMAP.md"], nullable=False
+    )
+    roadmap_path: Mapped[str] = mapped_column(
+        String(255), default="docs/ROADMAP.md", nullable=False
+    )
+    backlog_path: Mapped[str] = mapped_column(
+        String(255), default="docs/ROADMAP.md", nullable=False
+    )
+    github_project_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    github_project_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    onboarding_status: Mapped[str] = mapped_column(
+        String(32), default="READY_FOR_WORK", nullable=False
+    )
+    onboarding_reasons: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="ACTIVE", nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
@@ -68,6 +83,47 @@ class ProjectModel(Base):
     jobs: Mapped[list[JobModel]] = relationship(
         "JobModel", back_populates="project", cascade="all, delete-orphan"
     )
+    backlog_items: Mapped[list[BacklogItemModel]] = relationship(
+        "BacklogItemModel", back_populates="project", cascade="all, delete-orphan"
+    )
+
+
+class BacklogItemModel(Base):
+    __tablename__ = "backlog_items"
+    __table_args__ = (
+        UniqueConstraint("project_id", "item_key", name="uq_backlog_items_project_key"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    item_key: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    priority: Mapped[str] = mapped_column(String(32), default="NORMAL", nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="BACKLOG", nullable=False, index=True)
+    source: Mapped[str] = mapped_column(String(32), default="LOCAL_BACKLOG", nullable=False)
+    source_location: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    dependencies: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    readiness_state: Mapped[str] = mapped_column(String(32), default="NOT_READY", nullable=False)
+    unmet_readiness_reasons: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    human_questions: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    human_answers: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    acceptance_criteria: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    github_issue_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    github_issue_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    github_project_item_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    openspec_change_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+    project: Mapped[ProjectModel] = relationship("ProjectModel", back_populates="backlog_items")
 
 
 class ProjectBindingModel(Base):

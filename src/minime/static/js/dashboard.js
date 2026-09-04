@@ -30,6 +30,16 @@
   let countdownSeconds = refreshIntervalSeconds;
   let countdownInterval = null;
 
+  // 021 Intake & Projects State
+  let currentMainView = 'viewBacklog';
+  let currentProjectId = 'mini-me';
+  let projectsList = [];
+  let backlogItems = [];
+  let selectedBacklogItem = null;
+  let backlogFilter = 'ALL';
+  let backlogSearchQuery = '';
+  let editingItemKey = null;
+
   // DOM Elements
   const appVersionBadge = document.getElementById('appVersionBadge');
   const schedulerModeBadge = document.getElementById('schedulerModeBadge');
@@ -40,6 +50,67 @@
   const autoRefreshToggle = document.getElementById('autoRefreshToggle');
   const refreshIntervalSelect = document.getElementById('refreshIntervalSelect');
   const refreshTimer = document.getElementById('refreshTimer');
+
+  // Main Nav Tabs & Views
+  const mainNavTabs = document.querySelectorAll('.main-tab-btn');
+  const mainViewPanes = document.querySelectorAll('.main-view-pane');
+  const projectSelect = document.getElementById('projectSelect');
+
+  // Backlog DOM Elements
+  const backlogProjectDisplay = document.getElementById('backlogProjectDisplay');
+  const backlogSearchInput = document.getElementById('backlogSearchInput');
+  const backlogStatusPills = document.querySelectorAll('#backlogStatusPills .pill');
+  const newWorkItemBtn = document.getElementById('newWorkItemBtn');
+  const discoverBacklogBtn = document.getElementById('discoverBacklogBtn');
+  const backlogTableBody = document.getElementById('backlogTableBody');
+  const backlogPlaceholder = document.getElementById('backlogPlaceholder');
+  const backlogDetailContent = document.getElementById('backlogDetailContent');
+  const bkTitle = document.getElementById('bkTitle');
+  const bkStatusBadge = document.getElementById('bkStatusBadge');
+  const bkPriorityBadge = document.getElementById('bkPriorityBadge');
+  const bkKey = document.getElementById('bkKey');
+  const bkSource = document.getElementById('bkSource');
+  const bkReadiness = document.getElementById('bkReadiness');
+  const bkPrepareBtn = document.getElementById('bkPrepareBtn');
+  const bkStartBtn = document.getElementById('bkStartBtn');
+  const bkEditBtn = document.getElementById('bkEditBtn');
+  const bkDeleteBtn = document.getElementById('bkDeleteBtn');
+  const bkNeedsHumanCard = document.getElementById('bkNeedsHumanCard');
+  const bkHumanQuestionsList = document.getElementById('bkHumanQuestionsList');
+  const answerQuestionForm = document.getElementById('answerQuestionForm');
+  const answerQuestionTarget = document.getElementById('answerQuestionTarget');
+  const humanAnswerInput = document.getElementById('humanAnswerInput');
+  const bkDescriptionPreview = document.getElementById('bkDescriptionPreview');
+  const bkCriteriaList = document.getElementById('bkCriteriaList');
+  const bkDorOverallPill = document.getElementById('bkDorOverallPill');
+  const bkDorGrid = document.getElementById('bkDorGrid');
+  const bkArtOpenSpec = document.getElementById('bkArtOpenSpec');
+  const bkArtIssue = document.getElementById('bkArtIssue');
+  const bkArtProject = document.getElementById('bkArtProject');
+  const bkArtRun = document.getElementById('bkArtRun');
+
+  // Projects DOM Elements
+  const projectsGridContainer = document.getElementById('projectsGridContainer');
+  const onboardProjectBtn = document.getElementById('onboardProjectBtn');
+  const onboardProjectModal = document.getElementById('onboardProjectModal');
+  const onboardProjectForm = document.getElementById('onboardProjectForm');
+  const cancelOnboardBtn = document.getElementById('cancelOnboardBtn');
+  const projectContextModal = document.getElementById('projectContextModal');
+  const closeContextModalBtn = document.getElementById('closeContextModalBtn');
+  const ctxDiscoveredFacts = document.getElementById('ctxDiscoveredFacts');
+  const ctxInferredStructure = document.getElementById('ctxInferredStructure');
+  const ctxMissingContext = document.getElementById('ctxMissingContext');
+
+  // Work Item Modal Elements
+  const newWorkItemModal = document.getElementById('newWorkItemModal');
+  const newWorkItemForm = document.getElementById('newWorkItemForm');
+  const workItemModalTitle = document.getElementById('workItemModalTitle');
+  const newWorkItemTitle = document.getElementById('newWorkItemTitle');
+  const newWorkItemKey = document.getElementById('newWorkItemKey');
+  const newWorkItemPriority = document.getElementById('newWorkItemPriority');
+  const newWorkItemDescription = document.getElementById('newWorkItemDescription');
+  const newWorkItemCriteria = document.getElementById('newWorkItemCriteria');
+  const cancelWorkItemBtn = document.getElementById('cancelWorkItemBtn');
 
   const kpiSystemStateVal = document.getElementById('kpiSystemStateVal');
   const kpiSystemStateSub = document.getElementById('kpiSystemStateSub');
@@ -86,6 +157,8 @@
     setupEventListeners();
     const authenticated = await checkAuth();
     if (authenticated) {
+      await fetchProjects();
+      await fetchBacklog(currentProjectId);
       fetchOverview();
       setupAutoRefresh();
     }
@@ -165,9 +238,158 @@
 
   // Event Listeners
   function setupEventListeners() {
+    // 021 Main View Navigation
+    mainNavTabs.forEach((tab) => {
+      tab.addEventListener('click', () => {
+        const targetView = tab.getAttribute('data-main-view');
+        if (targetView) switchMainView(targetView);
+      });
+    });
+
+    if (projectSelect) {
+      projectSelect.addEventListener('change', (e) => {
+        currentProjectId = e.target.value;
+        if (backlogProjectDisplay) {
+          backlogProjectDisplay.textContent = `Project: ${currentProjectId}`;
+        }
+        if (currentMainView === 'viewBacklog') {
+          fetchBacklog(currentProjectId);
+        }
+      });
+    }
+
+    // Backlog Search & Filter
+    if (backlogSearchInput) {
+      backlogSearchInput.addEventListener('input', (e) => {
+        backlogSearchQuery = e.target.value.toLowerCase().trim();
+        renderBacklogTable();
+      });
+    }
+
+    backlogStatusPills.forEach((pill) => {
+      pill.addEventListener('click', () => {
+        backlogStatusPills.forEach((p) => p.classList.remove('active'));
+        pill.classList.add('active');
+        backlogFilter = pill.getAttribute('data-backlog-filter');
+        renderBacklogTable();
+      });
+    });
+
+    if (backlogTableBody) {
+      backlogTableBody.addEventListener('click', (e) => {
+        const row = e.target.closest('[data-item-key]');
+        if (row) {
+          const itemKey = row.getAttribute('data-item-key');
+          selectBacklogItem(itemKey);
+        }
+      });
+    }
+
+    // Backlog Action Buttons & Forms
+    if (newWorkItemBtn) {
+      newWorkItemBtn.addEventListener('click', () => {
+        openNewWorkItemModal();
+      });
+    }
+
+    if (cancelWorkItemBtn) {
+      cancelWorkItemBtn.addEventListener('click', () => {
+        if (newWorkItemModal) newWorkItemModal.close();
+      });
+    }
+
+    if (newWorkItemForm) {
+      newWorkItemForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        await saveWorkItem();
+      });
+    }
+
+    if (discoverBacklogBtn) {
+      discoverBacklogBtn.addEventListener('click', async () => {
+        await discoverBacklogContext(currentProjectId);
+      });
+    }
+
+    if (bkPrepareBtn) {
+      bkPrepareBtn.addEventListener('click', async () => {
+        if (selectedBacklogItem) {
+          await prepareBacklogItem(selectedBacklogItem.item_key);
+        }
+      });
+    }
+
+    if (bkStartBtn) {
+      bkStartBtn.addEventListener('click', async () => {
+        if (selectedBacklogItem) {
+          await startBacklogItem(selectedBacklogItem.item_key);
+        }
+      });
+    }
+
+    if (bkEditBtn) {
+      bkEditBtn.addEventListener('click', () => {
+        if (selectedBacklogItem) {
+          openNewWorkItemModal(selectedBacklogItem);
+        }
+      });
+    }
+
+    if (bkDeleteBtn) {
+      bkDeleteBtn.addEventListener('click', async () => {
+        if (selectedBacklogItem) {
+          await deleteWorkItem(selectedBacklogItem.item_key);
+        }
+      });
+    }
+
+    if (answerQuestionForm) {
+      answerQuestionForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        if (selectedBacklogItem) {
+          const answer = humanAnswerInput ? humanAnswerInput.value.trim() : '';
+          if (answer) {
+            await submitQuestionAnswer(selectedBacklogItem.item_key, answer);
+          }
+        }
+      });
+    }
+
+    // Project Onboarding & Context Modals
+    if (onboardProjectBtn) {
+      onboardProjectBtn.addEventListener('click', () => {
+        openOnboardModal();
+      });
+    }
+
+    if (cancelOnboardBtn) {
+      cancelOnboardBtn.addEventListener('click', () => {
+        if (onboardProjectModal) onboardProjectModal.close();
+      });
+    }
+
+    if (onboardProjectForm) {
+      onboardProjectForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        await submitOnboardProject();
+      });
+    }
+
+    if (closeContextModalBtn) {
+      closeContextModalBtn.addEventListener('click', () => {
+        if (projectContextModal) projectContextModal.close();
+      });
+    }
+
     if (refreshBtn) {
       refreshBtn.addEventListener('click', () => {
-        fetchOverview();
+        if (currentMainView === 'viewBacklog') {
+          fetchBacklog(currentProjectId);
+        } else if (currentMainView === 'viewProjects') {
+          fetchProjects();
+        } else {
+          fetchOverview();
+        }
         resetCountdown();
       });
     }
@@ -1505,6 +1727,689 @@
       </div>
     `).join('');
   }
+
+  // =========================================================================
+  // 021 WORK INTAKE & PROJECT ONBOARDING CONTROLLERS
+  // =========================================================================
+
+  function switchMainView(viewName) {
+    currentMainView = viewName;
+    mainNavTabs.forEach((tab) => {
+      const isTarget = tab.getAttribute('data-main-view') === viewName;
+      tab.classList.toggle('active', isTarget);
+      tab.setAttribute('aria-selected', isTarget ? 'true' : 'false');
+    });
+
+    mainViewPanes.forEach((pane) => {
+      if (pane.id === viewName) {
+        pane.style.display = 'block';
+        pane.classList.add('active');
+      } else {
+        pane.style.display = 'none';
+        pane.classList.remove('active');
+      }
+    });
+
+    if (viewName === 'viewBacklog') {
+      fetchBacklog(currentProjectId);
+    } else if (viewName === 'viewProjects') {
+      fetchProjects();
+    } else if (viewName === 'viewExecutions') {
+      fetchOverview();
+    }
+  }
+
+  // Projects Operations
+  async function fetchProjects() {
+    try {
+      const resp = await fetch('/api/v1/projects');
+      if (resp.status === 401) {
+        showLoginUI();
+        return;
+      }
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      projectsList = await resp.json();
+      renderProjectSelect();
+      if (currentMainView === 'viewProjects') {
+        renderProjectsGrid();
+      }
+    } catch (err) {
+      console.error('Failed to fetch projects:', err);
+    }
+  }
+
+  function renderProjectSelect() {
+    if (!projectSelect) return;
+    const currentVal = projectSelect.value || currentProjectId || 'mini-me';
+    projectSelect.innerHTML = projectsList.map((p) => `
+      <option value="${escapeHtml(p.id)}" ${p.id === currentVal ? 'selected' : ''}>${escapeHtml(p.name || p.id)}</option>
+    `).join('');
+    if (projectsList.length > 0 && !projectsList.some(p => p.id === currentVal)) {
+      currentProjectId = projectsList[0].id;
+      projectSelect.value = currentProjectId;
+    } else {
+      currentProjectId = currentVal;
+    }
+    if (backlogProjectDisplay) {
+      backlogProjectDisplay.textContent = `Project: ${currentProjectId}`;
+    }
+  }
+
+  function renderProjectsGrid() {
+    if (!projectsGridContainer) return;
+    if (!projectsList || projectsList.length === 0) {
+      projectsGridContainer.innerHTML = '<p class="text-muted">No projects registered yet. Click "Onboard Project" to bind your first repository.</p>';
+      return;
+    }
+
+    projectsGridContainer.innerHTML = projectsList.map((p) => {
+      const statusBadge = getProjectStatusBadge(p.onboarding_status);
+      const isCurrent = p.id === currentProjectId;
+      return `
+        <div class="project-card ${isCurrent ? 'active-project-card' : ''}">
+          <div class="project-card-header">
+            <div class="project-card-title-group">
+              <h3 class="project-name">${escapeHtml(p.name || p.id)}</h3>
+              <span class="project-id font-mono text-muted text-xs">ID: ${escapeHtml(p.id)}</span>
+            </div>
+            ${statusBadge}
+          </div>
+          <div class="project-card-meta">
+            <div class="meta-row"><strong>Repository:</strong> <span class="font-mono">${escapeHtml(p.repository)}</span></div>
+            <div class="meta-row"><strong>Base Branch:</strong> <span class="font-mono">${escapeHtml(p.base_branch || 'main')}</span></div>
+            <div class="meta-row"><strong>OpenSpec Path:</strong> <span class="font-mono">${escapeHtml(p.openspec_path || 'openspec')}</span></div>
+            <div class="meta-row"><strong>Roadmap:</strong> <span class="font-mono">${escapeHtml(p.roadmap_path || 'docs/ROADMAP.md')}</span></div>
+          </div>
+          <div class="project-card-actions">
+            <button class="btn btn-secondary btn-sm" onclick="window.minime.inspectContext('${escapeHtml(p.id)}')">
+              🔍 Inspect Context
+            </button>
+            <button class="btn btn-secondary btn-sm" onclick="window.minime.discoverContext('${escapeHtml(p.id)}')">
+              🔄 Discover
+            </button>
+            <button class="btn btn-primary btn-sm" onclick="window.minime.selectProjectAndGoBacklog('${escapeHtml(p.id)}')">
+              📥 Open Backlog
+            </button>
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  function getProjectStatusBadge(status) {
+    switch (status) {
+      case 'READY_FOR_WORK': return '<span class="badge badge-ready">READY FOR WORK</span>';
+      case 'CONTEXT_INCOMPLETE': return '<span class="badge badge-waiting">CONTEXT INCOMPLETE</span>';
+      case 'BINDING': return '<span class="badge badge-running">BINDING</span>';
+      case 'BLOCKED': return '<span class="badge badge-failed">BLOCKED</span>';
+      default: return '<span class="badge badge-not-ready">UNBOUND</span>';
+    }
+  }
+
+  function openOnboardModal() {
+    if (!onboardProjectModal) return;
+    if (onboardProjectForm) onboardProjectForm.reset();
+    onboardProjectModal.showModal();
+  }
+
+  async function submitOnboardProject() {
+    const projId = document.getElementById('onboardProjectId')?.value.trim();
+    const projName = document.getElementById('onboardProjectName')?.value.trim();
+    const repo = document.getElementById('onboardRepository')?.value.trim();
+    const branch = document.getElementById('onboardBaseBranch')?.value.trim() || 'main';
+    const openspecPath = document.getElementById('onboardOpenSpecPath')?.value.trim() || 'openspec';
+    const roadmapPath = document.getElementById('onboardRoadmapPath')?.value.trim() || 'docs/ROADMAP.md';
+    const backlogPath = document.getElementById('onboardBacklogPath')?.value.trim() || 'docs/ROADMAP.md';
+
+    if (!repo) {
+      showToast('Repository is required', 'warning');
+      return;
+    }
+
+    try {
+      const resp = await fetch('/api/v1/projects/onboard', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          project_id: projId || undefined,
+          name: projName || undefined,
+          repository: repo,
+          base_branch: branch,
+          openspec_path: openspecPath,
+          roadmap_path: roadmapPath,
+          backlog_path: backlogPath
+        })
+      });
+
+      if (!resp.ok) {
+        const errData = await resp.json().catch(() => ({}));
+        throw new Error(errData.detail || `HTTP ${resp.status}`);
+      }
+
+      const result = await resp.json();
+      showToast(`Project '${result.project.name}' onboarded successfully! Discovered ${result.discovered_items_count} backlog items.`, 'success');
+      if (onboardProjectModal) onboardProjectModal.close();
+      await fetchProjects();
+      currentProjectId = result.project.id;
+      if (projectSelect) projectSelect.value = currentProjectId;
+      switchMainView('viewBacklog');
+    } catch (err) {
+      console.error('Failed onboarding project:', err);
+      showToast(`Onboarding failed: ${err.message}`, 'error');
+    }
+  }
+
+  async function inspectContext(projectId) {
+    try {
+      const resp = await fetch(`/api/v1/projects/${encodeURIComponent(projectId)}/context`);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const report = await resp.json();
+      renderContextReport(report);
+      if (projectContextModal) projectContextModal.showModal();
+    } catch (err) {
+      console.error('Failed fetching context:', err);
+      showToast(`Failed inspecting context: ${err.message}`, 'error');
+    }
+  }
+
+  function renderContextReport(report) {
+    if (ctxDiscoveredFacts) {
+      if (!report.discovered_facts || report.discovered_facts.length === 0) {
+        ctxDiscoveredFacts.innerHTML = '<p class="text-muted">No facts discovered.</p>';
+      } else {
+        ctxDiscoveredFacts.innerHTML = report.discovered_facts.map(f => `
+          <div class="fact-card">
+            <div class="fact-header">
+              <span class="badge badge-discovered">${escapeHtml(f.fact_type)}</span>
+              <span class="fact-source font-mono text-xs">${escapeHtml(f.source_file)}</span>
+            </div>
+            <div class="fact-content">${escapeHtml(f.content)}</div>
+          </div>
+        `).join('');
+      }
+    }
+
+    if (ctxInferredStructure) {
+      if (!report.inferred_structure || report.inferred_structure.length === 0) {
+        ctxInferredStructure.innerHTML = '<li class="text-muted">No inferred milestones or waves.</li>';
+      } else {
+        ctxInferredStructure.innerHTML = report.inferred_structure.map(s => `
+          <li>${escapeHtml(s)}</li>
+        `).join('');
+      }
+    }
+
+    if (ctxMissingContext) {
+      if (!report.missing_context || report.missing_context.length === 0) {
+        ctxMissingContext.innerHTML = '<li class="text-success">✓ No critical context gaps identified.</li>';
+      } else {
+        ctxMissingContext.innerHTML = report.missing_context.map(g => `
+          <li class="text-warning">⚠️ ${escapeHtml(g)}</li>
+        `).join('');
+      }
+    }
+  }
+
+  // Backlog Operations
+  async function fetchBacklog(projectId) {
+    try {
+      const resp = await fetch(`/api/v1/projects/${encodeURIComponent(projectId)}/backlog`);
+      if (resp.status === 401) {
+        showLoginUI();
+        return;
+      }
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      backlogItems = await resp.json();
+      renderBacklogTable();
+      if (selectedBacklogItem) {
+        const updated = backlogItems.find(i => i.item_key === selectedBacklogItem.item_key);
+        if (updated) {
+          selectBacklogItem(updated.item_key);
+        } else if (backlogItems.length > 0) {
+          selectBacklogItem(backlogItems[0].item_key);
+        }
+      } else if (backlogItems.length > 0) {
+        selectBacklogItem(backlogItems[0].item_key);
+      } else {
+        if (backlogPlaceholder) backlogPlaceholder.style.display = 'flex';
+        if (backlogDetailContent) backlogDetailContent.style.display = 'none';
+      }
+    } catch (err) {
+      console.error('Failed fetching backlog:', err);
+    }
+  }
+
+  function renderBacklogTable() {
+    if (!backlogTableBody) return;
+
+    let filtered = backlogItems;
+    if (backlogFilter !== 'ALL') {
+      filtered = filtered.filter(i => {
+        if (backlogFilter === 'NEEDS_HUMAN') return i.status === 'NEEDS_HUMAN';
+        if (backlogFilter === 'READY') return i.status === 'READY';
+        if (backlogFilter === 'RUNNING') return i.status === 'RUNNING';
+        if (backlogFilter === 'COMPLETED') return i.status === 'COMPLETED';
+        if (backlogFilter === 'BACKLOG') return i.status === 'BACKLOG' || i.status === 'DRAFT' || i.status === 'PREPARING';
+        return true;
+      });
+    }
+
+    if (backlogSearchQuery) {
+      filtered = filtered.filter(i =>
+        i.title.toLowerCase().includes(backlogSearchQuery) ||
+        i.item_key.toLowerCase().includes(backlogSearchQuery) ||
+        (i.description && i.description.toLowerCase().includes(backlogSearchQuery))
+      );
+    }
+
+    if (!filtered || filtered.length === 0) {
+      backlogTableBody.innerHTML = `
+        <tr><td colspan="6" class="table-empty">No backlog items matching current filter.</td></tr>
+      `;
+      return;
+    }
+
+    backlogTableBody.innerHTML = filtered.map(item => {
+      const isSelected = selectedBacklogItem && selectedBacklogItem.item_key === item.item_key;
+      const statusClass = getStatusBadgeClass(item.status);
+      const priorityClass = getPriorityBadgeClass(item.priority);
+      const isReady = item.status === 'READY';
+
+      return `
+        <tr class="clickable-row ${isSelected ? 'selected-row' : ''}" data-item-key="${escapeHtml(item.item_key)}">
+          <td><span class="badge ${statusClass}">${escapeHtml(item.status)}</span></td>
+          <td>
+            <div class="bk-title font-semibold">${escapeHtml(item.title)}</div>
+            <div class="bk-key font-mono text-muted text-xs">${escapeHtml(item.item_key)}</div>
+          </td>
+          <td><span class="badge ${priorityClass}">${escapeHtml(item.priority || 'NORMAL')}</span></td>
+          <td><span class="badge badge-discovered">${escapeHtml(item.source || 'MANUAL')}</span></td>
+          <td>
+            <span class="dor-status-pill ${isReady ? 'pill-ready' : (item.status === 'NEEDS_HUMAN' ? 'pill-needs-human' : 'pill-not-ready')}">
+              ${isReady ? 'READY' : (item.status === 'NEEDS_HUMAN' ? 'NEEDS HUMAN' : 'NOT READY')}
+            </span>
+          </td>
+          <td>
+            <div class="action-btn-group">
+              ${!isReady && item.status !== 'RUNNING' && item.status !== 'COMPLETED' ? `
+                <button class="btn btn-secondary btn-xs" onclick="event.stopPropagation(); window.minime.prepareItem('${escapeHtml(item.item_key)}')">Prepare</button>
+              ` : ''}
+              ${isReady ? `
+                <button class="btn btn-primary btn-xs" onclick="event.stopPropagation(); window.minime.startItem('${escapeHtml(item.item_key)}')">🚀 Start</button>
+              ` : ''}
+            </div>
+          </td>
+        </tr>
+      `;
+    }).join('');
+  }
+
+  function getPriorityBadgeClass(priority) {
+    switch (priority) {
+      case 'CRITICAL': return 'badge-danger';
+      case 'HIGH': return 'badge-warning';
+      case 'LOW': return 'badge-muted';
+      default: return 'badge-info';
+    }
+  }
+
+  function selectBacklogItem(itemKey) {
+    const item = backlogItems.find(i => i.item_key === itemKey);
+    if (!item) return;
+    selectedBacklogItem = item;
+
+    // Update row selections in table
+    if (backlogTableBody) {
+      const rows = backlogTableBody.querySelectorAll('tr[data-item-key]');
+      rows.forEach(r => {
+        r.classList.toggle('selected-row', r.getAttribute('data-item-key') === itemKey);
+      });
+    }
+
+    renderBacklogDetail(item);
+  }
+
+  function renderBacklogDetail(item) {
+    if (!item) {
+      if (backlogPlaceholder) backlogPlaceholder.style.display = 'flex';
+      if (backlogDetailContent) backlogDetailContent.style.display = 'none';
+      return;
+    }
+
+    if (backlogPlaceholder) backlogPlaceholder.style.display = 'none';
+    if (backlogDetailContent) backlogDetailContent.style.display = 'block';
+
+    if (bkTitle) bkTitle.textContent = item.title;
+    if (bkStatusBadge) {
+      bkStatusBadge.textContent = item.status;
+      bkStatusBadge.className = `badge ${getStatusBadgeClass(item.status)}`;
+    }
+    if (bkPriorityBadge) {
+      bkPriorityBadge.textContent = item.priority || 'NORMAL';
+      bkPriorityBadge.className = `badge ${getPriorityBadgeClass(item.priority)}`;
+    }
+    if (bkKey) bkKey.textContent = item.item_key;
+    if (bkSource) bkSource.textContent = item.source || 'MANUAL';
+    if (bkReadiness) bkReadiness.textContent = item.status === 'READY' ? 'READY' : (item.status === 'NEEDS_HUMAN' ? 'NEEDS_HUMAN' : 'NOT_READY');
+
+    // Action button state
+    if (bkStartBtn) {
+      bkStartBtn.disabled = item.status !== 'READY';
+      if (item.status === 'RUNNING') {
+        bkStartBtn.textContent = '⚡ Running...';
+      } else {
+        bkStartBtn.innerHTML = '<span class="btn-icon">🚀</span> Start Work';
+      }
+    }
+
+    // NEEDS_HUMAN Card
+    if (bkNeedsHumanCard) {
+      const hasQuestions = (item.status === 'NEEDS_HUMAN') || (item.human_questions && item.human_questions.length > 0);
+      if (hasQuestions) {
+        bkNeedsHumanCard.style.display = 'block';
+        if (bkHumanQuestionsList) {
+          const questions = item.human_questions && item.human_questions.length > 0
+            ? item.human_questions
+            : ['Please provide more functional details and observable acceptance criteria.'];
+          bkHumanQuestionsList.innerHTML = questions.map(q => `
+            <div class="question-item">
+              <span class="question-icon">❓</span>
+              <span class="question-text">${escapeHtml(q)}</span>
+            </div>
+          `).join('');
+        }
+      } else {
+        bkNeedsHumanCard.style.display = 'none';
+      }
+    }
+
+    // Description & Criteria
+    if (bkDescriptionPreview) {
+      bkDescriptionPreview.innerHTML = renderMarkdownText(item.description || 'No description provided.');
+    }
+    if (bkCriteriaList) {
+      if (item.acceptance_criteria && item.acceptance_criteria.length > 0) {
+        bkCriteriaList.innerHTML = item.acceptance_criteria.map(c => `
+          <li class="criteria-item">✓ ${escapeHtml(c)}</li>
+        `).join('');
+      } else {
+        bkCriteriaList.innerHTML = '<li class="text-muted">No explicit acceptance criteria specified.</li>';
+      }
+    }
+
+    // DoR Checklist (11 criteria)
+    renderDoRChecklist(item);
+
+    // Canonical Artifacts
+    if (bkArtOpenSpec) {
+      bkArtOpenSpec.innerHTML = item.openspec_change_name
+        ? `<span class="text-success font-mono">openspec/changes/${escapeHtml(item.openspec_change_name)}</span>`
+        : '<span class="text-muted">Not generated yet</span>';
+    }
+    if (bkArtIssue) {
+      bkArtIssue.innerHTML = item.github_issue_url
+        ? `<a href="${sanitizeUrl(item.github_issue_url)}" target="_blank" rel="noopener noreferrer" class="text-primary font-mono">#${item.github_issue_number} ↗</a>`
+        : (item.github_issue_number ? `#${item.github_issue_number}` : '<span class="text-muted">Not linked yet</span>');
+    }
+    if (bkArtProject) {
+      bkArtProject.innerHTML = item.github_project_item_id
+        ? `<span class="text-success font-mono">${escapeHtml(item.github_project_item_id)}</span>`
+        : '<span class="text-muted">Not synced yet</span>';
+    }
+    if (bkArtRun) {
+      bkArtRun.innerHTML = item.active_orchestration_run_id
+        ? `<span class="text-primary font-mono" style="cursor:pointer;" onclick="window.minime.goToExecution('${escapeHtml(item.active_orchestration_run_id)}')">${escapeHtml(item.active_orchestration_run_id)} ↗</span>`
+        : '<span class="text-muted">No active run</span>';
+    }
+  }
+
+  function renderDoRChecklist(item) {
+    if (!bkDorGrid) return;
+    const checklist = item.readiness_checklist || {};
+    const isReady = item.status === 'READY' || checklist.is_ready;
+
+    if (bkDorOverallPill) {
+      bkDorOverallPill.textContent = isReady ? 'READY FOR ADMISSION' : (item.status === 'NEEDS_HUMAN' ? 'NEEDS HUMAN' : 'NOT READY');
+      bkDorOverallPill.className = `dor-status-pill ${isReady ? 'pill-ready' : (item.status === 'NEEDS_HUMAN' ? 'pill-needs-human' : 'pill-not-ready')}`;
+    }
+
+    const dorRules = [
+      { key: 'repo_binding_valid', label: 'Repository Binding Valid', val: checklist.repo_binding_valid ?? !!item.project_id },
+      { key: 'item_identity_valid', label: 'Work Item Identity Valid', val: checklist.item_identity_valid ?? !!(item.item_key && item.title) },
+      { key: 'github_issue_linked', label: 'GitHub Issue Linked', val: checklist.github_issue_linked ?? !!item.github_issue_number },
+      { key: 'github_project_linked', label: 'GitHub Project Item Linked', val: checklist.github_project_linked ?? !!item.github_project_item_id },
+      { key: 'openspec_valid', label: 'OpenSpec Artifacts Generated', val: checklist.openspec_valid ?? !!item.openspec_change_name },
+      { key: 'acceptance_criteria_present', label: 'Acceptance Criteria Defined', val: checklist.acceptance_criteria_present ?? (item.acceptance_criteria && item.acceptance_criteria.length > 0) },
+      { key: 'dependencies_resolved', label: 'Dependencies Resolved', val: checklist.dependencies_resolved ?? true },
+      { key: 'security_requirements_identified', label: 'Security Requirements Identified', val: checklist.security_requirements_identified ?? true },
+      { key: 'ux_requirements_identified', label: 'UX / Preview Identified', val: checklist.ux_requirements_identified ?? true },
+      { key: 'no_unresolved_ambiguity', label: 'No Unresolved Ambiguity', val: checklist.no_unresolved_ambiguity ?? (item.status !== 'NEEDS_HUMAN') },
+      { key: 'definition_of_ready_met', label: 'Definition of Ready Met', val: isReady }
+    ];
+
+    bkDorGrid.innerHTML = dorRules.map(r => `
+      <div class="dor-item ${r.val ? 'dor-pass' : 'dor-fail'}">
+        <span class="dor-icon">${r.val ? '✓' : '✗'}</span>
+        <span class="dor-label">${escapeHtml(r.label)}</span>
+      </div>
+    `).join('');
+  }
+
+  async function prepareBacklogItem(itemKey) {
+    try {
+      showToast(`Preparing artifacts for '${itemKey}'...`, 'info');
+      const resp = await fetch(`/api/v1/projects/${encodeURIComponent(currentProjectId)}/backlog/${encodeURIComponent(itemKey)}/prepare`, {
+        method: 'POST'
+      });
+      if (!resp.ok) {
+        const errData = await resp.json().catch(() => ({}));
+        throw new Error(errData.detail || `HTTP ${resp.status}`);
+      }
+      const result = await resp.json();
+      showToast(`Artifacts generated! Status: ${result.status}`, result.status === 'READY' ? 'success' : 'warning');
+      await fetchBacklog(currentProjectId);
+      selectBacklogItem(itemKey);
+    } catch (err) {
+      console.error('Failed preparing work item:', err);
+      showToast(`Preparation failed: ${err.message}`, 'error');
+    }
+  }
+
+  async function startBacklogItem(itemKey) {
+    try {
+      showToast(`Admitting '${itemKey}' into autonomous scheduler...`, 'info');
+      const resp = await fetch(`/api/v1/projects/${encodeURIComponent(currentProjectId)}/backlog/${encodeURIComponent(itemKey)}/start`, {
+        method: 'POST'
+      });
+      if (!resp.ok) {
+        const errData = await resp.json().catch(() => ({}));
+        throw new Error(errData.detail || `HTTP ${resp.status}`);
+      }
+      const result = await resp.json();
+      showToast(`Work started! Run ID: ${result.run_id}`, 'success');
+      await fetchBacklog(currentProjectId);
+      selectBacklogItem(itemKey);
+      setTimeout(() => {
+        switchMainView('viewExecutions');
+      }, 1000);
+    } catch (err) {
+      console.error('Failed starting work item:', err);
+      showToast(`Failed starting work item: ${err.message}`, 'error');
+    }
+  }
+
+  async function submitQuestionAnswer(itemKey, answerText) {
+    try {
+      showToast('Submitting clarification...', 'info');
+      const resp = await fetch(`/api/v1/projects/${encodeURIComponent(currentProjectId)}/backlog/${encodeURIComponent(itemKey)}/answer`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ answer: answerText })
+      });
+      if (!resp.ok) {
+        const errData = await resp.json().catch(() => ({}));
+        throw new Error(errData.detail || `HTTP ${resp.status}`);
+      }
+      showToast('Clarification recorded! Re-evaluating readiness...', 'success');
+      if (humanAnswerInput) humanAnswerInput.value = '';
+      await fetchBacklog(currentProjectId);
+      selectBacklogItem(itemKey);
+    } catch (err) {
+      console.error('Failed answering question:', err);
+      showToast(`Failed submitting answer: ${err.message}`, 'error');
+    }
+  }
+
+  function openNewWorkItemModal(itemToEdit = null) {
+    if (!newWorkItemModal) return;
+    if (itemToEdit) {
+      editingItemKey = itemToEdit.item_key;
+      if (workItemModalTitle) workItemModalTitle.textContent = 'Edit Backlog Work Item';
+      if (newWorkItemTitle) newWorkItemTitle.value = itemToEdit.title || '';
+      if (newWorkItemKey) {
+        newWorkItemKey.value = itemToEdit.item_key || '';
+        newWorkItemKey.disabled = true;
+      }
+      if (newWorkItemPriority) newWorkItemPriority.value = itemToEdit.priority || 'NORMAL';
+      if (newWorkItemDescription) newWorkItemDescription.value = itemToEdit.description || '';
+      if (newWorkItemCriteria) newWorkItemCriteria.value = (itemToEdit.acceptance_criteria || []).join('\n');
+    } else {
+      editingItemKey = null;
+      if (workItemModalTitle) workItemModalTitle.textContent = 'Create Backlog Work Item';
+      if (newWorkItemForm) newWorkItemForm.reset();
+      if (newWorkItemKey) newWorkItemKey.disabled = false;
+    }
+    newWorkItemModal.showModal();
+  }
+
+  async function saveWorkItem() {
+    const title = newWorkItemTitle?.value.trim();
+    const itemKey = newWorkItemKey?.value.trim();
+    const priority = newWorkItemPriority?.value || 'NORMAL';
+    const description = newWorkItemDescription?.value.trim() || '';
+    const criteriaRaw = newWorkItemCriteria?.value.trim() || '';
+    const criteria = criteriaRaw.split('\n').map(c => c.replace(/^[-*•]\s*/, '').trim()).filter(Boolean);
+
+    if (!title) {
+      showToast('Title is required', 'warning');
+      return;
+    }
+
+    try {
+      if (editingItemKey) {
+        const resp = await fetch(`/api/v1/projects/${encodeURIComponent(currentProjectId)}/backlog/${encodeURIComponent(editingItemKey)}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title,
+            priority,
+            description,
+            acceptance_criteria: criteria
+          })
+        });
+        if (!resp.ok) {
+          const errData = await resp.json().catch(() => ({}));
+          throw new Error(errData.detail || `HTTP ${resp.status}`);
+        }
+        showToast(`Work item '${editingItemKey}' updated!`, 'success');
+        if (newWorkItemModal) newWorkItemModal.close();
+        await fetchBacklog(currentProjectId);
+        selectBacklogItem(editingItemKey);
+      } else {
+        const resp = await fetch(`/api/v1/projects/${encodeURIComponent(currentProjectId)}/backlog`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            item_key: itemKey || undefined,
+            title,
+            priority,
+            description,
+            acceptance_criteria: criteria
+          })
+        });
+        if (!resp.ok) {
+          const errData = await resp.json().catch(() => ({}));
+          throw new Error(errData.detail || `HTTP ${resp.status}`);
+        }
+        const created = await resp.json();
+        showToast(`Work item '${created.item_key}' created!`, 'success');
+        if (newWorkItemModal) newWorkItemModal.close();
+        await fetchBacklog(currentProjectId);
+        selectBacklogItem(created.item_key);
+      }
+    } catch (err) {
+      console.error('Failed saving work item:', err);
+      showToast(`Failed saving work item: ${err.message}`, 'error');
+    }
+  }
+
+  async function deleteWorkItem(itemKey) {
+    if (!confirm(`Are you sure you want to delete work item '${itemKey}'?`)) return;
+    try {
+      const resp = await fetch(`/api/v1/projects/${encodeURIComponent(currentProjectId)}/backlog/${encodeURIComponent(itemKey)}`, {
+        method: 'DELETE'
+      });
+      if (!resp.ok) {
+        const errData = await resp.json().catch(() => ({}));
+        throw new Error(errData.detail || `HTTP ${resp.status}`);
+      }
+      showToast(`Work item '${itemKey}' deleted.`, 'info');
+      selectedBacklogItem = null;
+      await fetchBacklog(currentProjectId);
+    } catch (err) {
+      console.error('Failed deleting work item:', err);
+      showToast(`Delete failed: ${err.message}`, 'error');
+    }
+  }
+
+  async function discoverBacklogContext(projectId) {
+    try {
+      showToast('Scanning repository context & roadmap...', 'info');
+      const resp = await fetch(`/api/v1/projects/${encodeURIComponent(projectId)}/context/discover`, {
+        method: 'POST'
+      });
+      if (!resp.ok) {
+        const errData = await resp.json().catch(() => ({}));
+        throw new Error(errData.detail || `HTTP ${resp.status}`);
+      }
+      const result = await resp.json();
+      showToast(`Discovery complete! Discovered ${result.discovered_items_count} items.`, 'success');
+      await fetchProjects();
+      await fetchBacklog(projectId);
+    } catch (err) {
+      console.error('Failed discovering context:', err);
+      showToast(`Discovery failed: ${err.message}`, 'error');
+    }
+  }
+
+  function renderMarkdownText(text) {
+    if (!text) return '';
+    const escaped = escapeHtml(text);
+    return escaped
+      .replace(/^### (.*$)/gim, '<h5>$1</h5>')
+      .replace(/^## (.*$)/gim, '<h4>$1</h4>')
+      .replace(/^# (.*$)/gim, '<h3>$1</h3>')
+      .replace(/\*\*(.*?)\*\*/gim, '<strong>$1</strong>')
+      .replace(/\*(.*?)\*/gim, '<em>$1</em>')
+      .replace(/`([^`]+)`/gim, '<code>$1</code>')
+      .replace(/\n/gim, '<br>');
+  }
+
+  // Expose helper functions globally for inline handlers
+  window.minime = {
+    inspectContext,
+    discoverContext: (projId) => discoverBacklogContext(projId),
+    selectProjectAndGoBacklog: (projId) => {
+      currentProjectId = projId;
+      if (projectSelect) projectSelect.value = projId;
+      switchMainView('viewBacklog');
+    },
+    prepareItem: (itemKey) => prepareBacklogItem(itemKey),
+    startItem: (itemKey) => startBacklogItem(itemKey),
+    goToExecution: (runId) => {
+      switchMainView('viewExecutions');
+    }
+  };
 
   // Utilities
   function getStatusBadgeClass(status) {
