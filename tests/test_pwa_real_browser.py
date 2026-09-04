@@ -42,12 +42,24 @@ from minime.domain.models import (
     OrchestrationRun,
     PreviewSession,
     Project,
-    ProviderHealth,
-    Review,
-    WorkQueueItem,
-)
+import shutil
 
-CHROME_BIN = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+def get_chrome_bin() -> str | None:
+    candidates = [
+        os.environ.get("CHROME_BIN"),
+        "/usr/bin/google-chrome",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/chromium",
+        shutil.which("google-chrome"),
+        shutil.which("chromium"),
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    ]
+    for c in candidates:
+        if c and Path(c).exists():
+            return str(c)
+    return None
+
+CHROME_BIN = get_chrome_bin()
 
 
 def find_free_port() -> int:
@@ -337,8 +349,8 @@ class ChromeCDPClient:
 @pytest.fixture(scope="module")
 def browser_test_env():
     """Starts a local uvicorn server with seeded data and a headless Chrome instance."""
-    if not Path(CHROME_BIN).exists():
-        pytest.skip(f"Google Chrome not installed at {CHROME_BIN}")
+    if not CHROME_BIN or not Path(CHROME_BIN).exists():
+        pytest.skip("Google Chrome/Chromium not installed")
 
     uow = create_seeded_uow()
     app.dependency_overrides[get_uow] = lambda: uow
@@ -378,6 +390,8 @@ def browser_test_env():
         [
             CHROME_BIN,
             "--headless=new",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
             f"--remote-debugging-port={cdp_port}",
             f"--user-data-dir={user_data_dir}",
             "--disable-gpu",
@@ -718,3 +732,52 @@ async def test_real_browser_interactive_features(browser_test_env: dict[str, Any
 
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_real_browser_020_operator_tabs_and_param_modals(browser_test_env: dict[str, Any]) -> None:
+    """Verify 020 Efficiency Tab, Action History Tab, and Action Param Dialog."""
+    client = ChromeCDPClient(browser_test_env["ws_url"])
+    await client.connect()
+    try:
+        await client.set_viewport(1920, 1080)
+        await authenticate_browser(
+            client, browser_test_env["server_url"], browser_test_env["session_token"]
+        )
+
+        # 1. Efficiency Tab
+        await client.eval_js("document.querySelector('button[data-tab=\"efficiencyTab\"]').click()")
+        eff_active = await client.eval_js(
+            "document.getElementById('efficiencyTab').classList.contains('active')"
+        )
+        assert eff_active is True, "Clicking Efficiency tab failed to activate efficiencyTab pane"
+
+        # 2. Action History Tab
+        await client.eval_js("document.querySelector('button[data-tab=\"actionHistoryTab\"]').click()")
+        history_active = await client.eval_js(
+            "document.getElementById('actionHistoryTab').classList.contains('active')"
+        )
+        assert history_active is True, "Clicking Action History tab failed to activate actionHistoryTab pane"
+
+        # 3. Action Param Dialog
+        param_dialog_open = await client.eval_js("""
+            (() => {
+                const dialog = document.getElementById('actionParamDialog');
+                dialog.showModal();
+                return dialog.open;
+            })()
+        """)
+        assert param_dialog_open is True, "Action param dialog failed to open"
+
+        param_dialog_closed = await client.eval_js("""
+            (() => {
+                const dialog = document.getElementById('actionParamDialog');
+                dialog.querySelector('[data-param-cancel]').click();
+                return !dialog.open;
+            })()
+        """)
+        assert param_dialog_closed is True, "Action param dialog failed to close on cancel"
+
+    finally:
+        await client.close()
+
