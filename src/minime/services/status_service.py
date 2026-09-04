@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import platform
+import sys
 from typing import Any
 
 from minime.adapters.github import GitHubAppAuth
@@ -26,6 +29,15 @@ class StatusService:
             "runtime_engine": "mini-me-runtime",
             "status": "SELF_HOSTING_READY",
             "autonomous_queue": True,
+        }
+
+    def get_runtime_environment_diagnostic(self) -> dict[str, Any]:
+        """Return server runtime environment facts without secret leakage."""
+        return {
+            "platform": sys.platform,
+            "python_version": platform.python_version(),
+            "runtime_mode": "server" if os.path.exists("/etc/minime") else "standalone",
+            "database_engine": "PostgreSQL",
         }
 
     def get_efficiency_summary(self, project_id: str | None = None) -> dict[str, Any]:
@@ -128,6 +140,7 @@ class StatusService:
                 "health": "configured" if github_configured else "not_configured",
             },
             "self_hosting": self.get_self_hosting_diagnostic(),
+            "runtime_environment": self.get_runtime_environment_diagnostic(),
             "recent_events": [
                 {
                     "event_id": e.event_id,
