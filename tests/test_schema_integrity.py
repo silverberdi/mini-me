@@ -16,7 +16,7 @@ def _engine_with_schema(missing_table=None, missing_column=None):
         if not (missing_column and table == missing_column[0] and c.name == missing_column[1])
     ]
     connection = MagicMock()
-    connection.execute.return_value.scalar.return_value = "016_provider_efficiency_telemetry"
+    connection.execute.return_value.scalar.return_value = "017_auth_sessions_and_operators"
     engine.connect.return_value.__enter__.return_value = connection
 
     return engine, inspector
