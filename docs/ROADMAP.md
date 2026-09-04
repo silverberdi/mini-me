@@ -43,18 +43,19 @@ Only the current stage should exist as an active OpenSpec change. Future stages 
 
 ---
 
-## Canonical Roadmap (Next Stages)
-
 ### 020 — Operator Experience Parity & Production Console Reliability (`020-operator-experience-parity-and-production-console-reliability`)
-- **020.1 PWA Operator Parity (`020.1-pwa-operator-parity`)**: CURRENT. Full operational parity for PWA on desktop/tablet, dynamic parameter modals, action safety confirmations, action audit trail tab, provider efficiency tab, and responsive layout across desktop, tablet, and mobile.
-- **020.2 TUI Production Runtime Reliability (`020.2-tui-production-runtime-reliability`)**: CURRENT. Automatic canonical `.env` discovery in `config.py` and CLI launcher, enabling single-command `minime console` / `minime status` execution over SSH without manual environment exports or credential exposure.
+- **020.1 PWA Operator Parity (`020.1-pwa-operator-parity`)**: DELIVERED. Full operational parity for PWA on desktop/tablet, dynamic parameter modals, action safety confirmations, action audit trail tab, provider efficiency tab, and responsive layout across desktop, tablet, and mobile.
+- **020.2 TUI Production Runtime Reliability (`020.2-tui-production-runtime-reliability`)**: DELIVERED. Automatic canonical `.env` discovery in `config.py` and CLI launcher, enabling single-command `minime console` / `minime status` execution over SSH without manual environment exports or credential exposure.
 
 ---
 
+## Canonical Roadmap (Next Stages)
+
 ### 021 — Operational Greenfield Proving & Multi-Repo Orchestration (`021-operational-greenfield-proving`)
-- Operational greenfield proving project (BLOCKED until 020 complete)
+- Operational greenfield proving project (UNBLOCKED)
 - Remaining provider configuration (such as OpenRouter budgeted fallback in server environment)
 - Multi-repository project binding & validation
 - Operator PWA UX enhancements and telemetry views
+
 
 
