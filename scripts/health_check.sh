@@ -49,7 +49,7 @@ url = os.environ.get('MINIME_DATABASE_URL')
 engine = create_engine(url)
 with engine.connect() as conn:
     rev = conn.execute(text('SELECT version_num FROM alembic_version')).scalar()
-    assert rev == '016_provider_efficiency_telemetry', f'Unexpected rev: {rev}'
+    assert rev in ('016_provider_efficiency_telemetry', '017_auth_sessions_and_operators'), f'Unexpected rev: {rev}'
 "
 fi
 
