@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>mini me — Operations Dashboard</title>
-  <meta name="description" content="Operational control and observability surface for mini me autonomous software delivery pipeline.">
+  <title>mini me — Operations Dashboard & Work Intake</title>
+  <meta name="description" content="Operational control and work intake surface for mini me autonomous software delivery pipeline.">
   <meta name="theme-color" content="#1e293b">
   <link rel="manifest" href="/static/manifest.webmanifest">
   <link rel="stylesheet" href="/static/css/pwa.css">
@@ -17,11 +17,31 @@
   <header class="top-nav" role="banner">
     <div class="nav-brand">
       <span class="brand-icon" aria-hidden="true">⚡</span>
-      <h1 class="brand-title">mini me <span class="brand-sub">ops</span></h1>
-      <span class="badge badge-version" id="appVersionBadge">v0.1.0</span>
+      <h1 class="brand-title">mini me <span class="brand-sub">intake & ops</span></h1>
+      <span class="badge badge-version" id="appVersionBadge">v0.21.0</span>
     </div>
 
+    <!-- Main View Navigation Tabs -->
+    <nav class="main-nav-tabs" role="tablist" aria-label="Main View Navigation">
+      <button class="main-tab-btn active" id="navTabBacklog" role="tab" aria-selected="true" data-main-view="viewBacklog">
+        <span class="tab-icon">📥</span> Backlog & Intake
+      </button>
+      <button class="main-tab-btn" id="navTabProjects" role="tab" aria-selected="false" data-main-view="viewProjects">
+        <span class="tab-icon">📁</span> Projects
+      </button>
+      <button class="main-tab-btn" id="navTabExecutions" role="tab" aria-selected="false" data-main-view="viewExecutions">
+        <span class="tab-icon">⚡</span> Pipeline & Runs
+      </button>
+    </nav>
+
     <div class="nav-controls">
+      <div class="project-selector-group">
+        <label for="projectSelect" class="sr-only">Select Project</label>
+        <select id="projectSelect" class="project-select" title="Active Project">
+          <option value="mini-me" selected>mini-me</option>
+        </select>
+      </div>
+
       <div class="status-indicator-group">
         <span class="indicator-item" id="schedulerModeBadge" title="Scheduler Mode">
           <span class="dot dot-success"></span> MODE: RUN
@@ -64,12 +84,12 @@
   <main class="dashboard-main" role="main">
 
     <!-- Login View (Shown when unauthenticated) -->
-    <section class="login-container" id="loginSection" style="display: none;" aria-label="Operator Authentication">
+    <section class="login-container" id="loginSection" style="display: flex;" aria-label="Operator Authentication">
       <div class="login-card">
         <div class="login-header">
           <span class="login-icon">⚡</span>
-          <h2>mini me Operations Control</h2>
-          <p class="login-sub">Sign in with an authorized Google account to access the control plane and operational telemetry.</p>
+          <h2>mini me Operations & Intake</h2>
+          <p class="login-sub">Sign in with an authorized Google account to access project onboarding, backlog intake, and autonomous pipeline execution.</p>
         </div>
         <div class="login-actions">
           <a href="/api/v1/auth/google/login" class="btn btn-google" id="googleLoginLink">
@@ -86,298 +106,540 @@
       </div>
     </section>
 
-    <!-- Operational Dashboard Content (Shown when authenticated) -->
-    <div id="authenticatedContent">
+    <!-- Authenticated Content Container -->
+    <div id="authenticatedContent" style="display: none;">
 
-    <!-- KPI Summary Grid (Above the Fold) -->
-    <section class="kpi-grid" aria-label="Operational Metrics">
-      <div class="kpi-card" id="kpiSystemStatus">
-        <div class="kpi-label">SYSTEM STATE</div>
-        <div class="kpi-value text-success" id="kpiSystemStateVal">HEALTHY</div>
-        <div class="kpi-sub" id="kpiSystemStateSub">Scheduler in active RUN mode</div>
-      </div>
-
-      <div class="kpi-card" id="kpiAttention">
-        <div class="kpi-label">ATTENTION REQUIRED</div>
-        <div class="kpi-value" id="kpiAttentionVal" data-kpi="blocked">0</div>
-        <div class="kpi-sub" id="kpiAttentionSub">0 human gates / blockers</div>
-      </div>
-
-      <div class="kpi-card" id="kpiActive">
-        <div class="kpi-label">ACTIVE EXECUTIONS</div>
-        <div class="kpi-value text-primary" id="kpiActiveVal" data-kpi="active">0</div>
-        <div class="kpi-sub" id="kpiActiveSub">0 changes currently in-flight</div>
-      </div>
-
-      <div class="kpi-card" id="kpiCompleted">
-        <div class="kpi-label">COMPLETED / MERGED</div>
-        <div class="kpi-value text-muted" id="kpiCompletedVal" data-kpi="queue">0</div>
-        <div class="kpi-sub" id="kpiCompletedSub">Total discovered: 0</div>
-      </div>
-    </section>
-
-    <!-- Attention Banner (Prominent Callout for Blockers / Human Gates) -->
-    <section class="attention-banner" id="attentionBanner" style="display: none;" aria-label="Attention Required">
-      <div class="attention-header">
-        <span class="attention-icon">⚠️</span>
-        <h2 class="attention-title">Action Required: <span id="attentionCountText">1 run</span> paused at human gate</h2>
-      </div>
-      <div class="attention-items-list" id="attentionItemsContainer">
-        <!-- Injected dynamically -->
-      </div>
-    </section>
-
-    <section class="panel queue-panel" id="queue" aria-label="Autonomous queue prioritization">
-      <div class="panel-header"><h2 class="panel-title">Autonomous Queue Prioritization</h2><span class="text-muted">Server-ranked admission telemetry</span></div>
-      <div id="queueList" class="queue-list"><p class="table-empty">Loading ranked candidates...</p></div>
-    </section>
-
-    <section class="panel provider-panel" aria-label="Provider health and capacity">
-      <div class="panel-header"><h2 class="panel-title">Provider Health & Capacity</h2><span class="text-muted">Live availability</span></div>
-      <div id="providerGrid" class="provider-grid"><p class="table-empty">Loading provider health...</p></div>
-    </section>
-
-    <!-- Master-Detail Content Layout -->
-    <div class="content-split">
-
-      <!-- Left Column: Changes Master Table -->
-      <section class="panel master-panel" id="runs" aria-label="Changes Overview">
-        <div class="panel-header">
-          <h2 class="panel-title">Changes & Executions</h2>
-          <div class="filter-toolbar">
-            <input type="search" id="changeSearchInput" class="search-input" placeholder="Search changes..." aria-label="Search changes">
-            <div class="filter-pills" role="radiogroup" aria-label="Status Filters">
-              <button class="pill active" data-filter="ALL">All</button>
-              <button class="pill" data-filter="ATTENTION">Attention</button>
-              <button class="pill" data-filter="RUNNING">Running</button>
-              <button class="pill" data-filter="READY">Ready</button>
-              <button class="pill" data-filter="COMPLETED">Completed</button>
+      <!-- ================================================================= -->
+      <!-- VIEW 1: BACKLOG & WORK INTAKE (PRIMARY 021 PRODUCT SURFACE)       -->
+      <!-- ================================================================= -->
+      <div id="viewBacklog" class="main-view-pane active" aria-label="Product Backlog and Intake">
+        
+        <!-- Backlog Top Toolbar -->
+        <div class="backlog-toolbar-card">
+          <div class="backlog-toolbar-left">
+            <h2 class="view-title">Product Backlog</h2>
+            <span class="text-muted" id="backlogProjectDisplay">Project: mini-me</span>
+          </div>
+          <div class="backlog-toolbar-actions">
+            <input type="search" id="backlogSearchInput" class="search-input" placeholder="Search backlog items..." aria-label="Search backlog items">
+            <div class="filter-pills" id="backlogStatusPills" role="radiogroup" aria-label="Backlog Status Filters">
+              <button class="pill active" data-backlog-filter="ALL">All</button>
+              <button class="pill" data-backlog-filter="NEEDS_HUMAN">Needs Human</button>
+              <button class="pill" data-backlog-filter="READY">Ready</button>
+              <button class="pill" data-backlog-filter="BACKLOG">Backlog</button>
+              <button class="pill" data-backlog-filter="RUNNING">In Progress</button>
+              <button class="pill" data-backlog-filter="COMPLETED">Completed</button>
             </div>
+            <button id="newWorkItemBtn" class="btn btn-primary" title="Create a new backlog work item">
+              <span class="btn-icon">➕</span> New Work Item
+            </button>
+            <button id="discoverBacklogBtn" class="btn btn-secondary" title="Re-scan context & roadmap">
+              <span class="btn-icon">🔍</span> Discover
+            </button>
           </div>
         </div>
 
-        <div class="table-container">
-          <table class="data-table" id="changesTable">
-            <thead>
-              <tr>
-                <th>Status</th>
-                <th>Change</th>
-                <th>Project</th>
-                <th>Stage / Stop</th>
-                <th>Candidate</th>
-                <th>Updated</th>
-              </tr>
-            </thead>
-            <tbody id="changesTableBody">
-              <tr>
-                <td colspan="6" class="table-empty">Loading operational state...</td>
-              </tr>
-            </tbody>
-          </table>
-          <div id="runsTableBody" class="runs-live-list" aria-label="Live orchestration runs"></div>
-        </div>
-      </section>
-
-      <!-- Right Column: Change / Run Detail Panel -->
-      <section class="panel detail-panel" id="detailPanel" aria-label="Execution Details">
-        <div class="detail-placeholder" id="detailPlaceholder">
-          <span class="placeholder-icon">📋</span>
-          <p>Select a change from the list to inspect execution pipeline, candidate authority, checks, reviews, and audit state.</p>
-        </div>
-
-        <div class="detail-content" id="detailContent" style="display: none;">
-          <!-- Detail Header -->
-            <div class="detail-header">
-            <div class="detail-title-group">
-              <div class="title-row">
-                <h3 class="detail-title" id="dtChangeName">012-execution-operations-dashboard</h3>
-                <span class="badge" id="dtStatusBadge">RUNNING</span>
-              </div>
-              <div class="detail-meta">
-                <span class="meta-item">Project: <strong id="dtProject">mini-me</strong></span>
-                <span class="meta-item">Stage: <strong id="dtStage">RUNNING_CHECKS</strong></span>
-                <span class="meta-item">Gen: <strong id="dtGeneration">gen-1</strong></span>
-                <span class="meta-item" id="dtCandidateMeta">SHA: <code id="dtCandidateSha" class="code-sha">---</code> <button id="copyShaBtn" class="btn-tiny" title="Copy SHA">📋</button></span>
-              </div>
-              <div id="actionToolbar" class="action-toolbar" aria-label="Operator actions"></div>
-            </div>
-          </div>
-
-          <!-- 6-Phase Pipeline Stepper -->
-          <div class="pipeline-stepper-container" aria-label="Pipeline Progress">
-            <div class="stepper" id="pipelineStepper">
-              <!-- Injected dynamically: 6 phases -->
-            </div>
-          </div>
-
-          <!-- Detail Navigation Tabs -->
-          <nav class="detail-tabs" role="tablist" aria-label="Detail Sections">
-            <button class="tab-btn active" role="tab" aria-selected="true" data-tab="overviewTab">Overview & Attention</button>
-            <button class="tab-btn" role="tab" aria-selected="false" data-tab="candidateTab">Candidate Authority</button>
-            <button class="tab-btn" role="tab" aria-selected="false" data-tab="checksTab">Checks (<span id="checksTabCount">0</span>)</button>
-            <button class="tab-btn" role="tab" aria-selected="false" data-tab="reviewTab">Review</button>
-            <button class="tab-btn" role="tab" aria-selected="false" data-tab="auditTab">DeepSeek Audit</button>
-            <button class="tab-btn" role="tab" aria-selected="false" data-tab="previewTab">Preview & Validation</button>
-            <button class="tab-btn" role="tab" aria-selected="false" data-tab="githubTab">GitHub & PR</button>
-            <button class="tab-btn" role="tab" aria-selected="false" data-tab="efficiencyTab">Efficiency & Telemetry</button>
-            <button class="tab-btn" role="tab" aria-selected="false" data-tab="actionHistoryTab">Action History</button>
-            <button class="tab-btn" role="tab" aria-selected="false" data-tab="timelineTab">Timeline</button>
-          </nav>
-
-          <!-- Tab 1: Overview & Attention -->
-          <div class="tab-pane active" id="overviewTab" role="tabpanel">
-            <div class="section-card" id="overviewAttentionSection">
-              <h4 class="section-title">Current Execution State</h4>
-              <div class="overview-meta-grid" id="overviewMetaGrid">
-                <!-- Injected dynamically -->
-              </div>
-            </div>
-
-            <div class="section-card" id="overviewBlockerSection" style="display: none;">
-              <h4 class="section-title text-warning">Active Blockers & Claims</h4>
-              <div id="overviewBlockersList"></div>
-            </div>
-          </div>
-
-          <!-- Tab 2: Candidate Authority -->
-          <div class="tab-pane" id="candidateTab" role="tabpanel">
-            <div class="section-card">
-              <h4 class="section-title">Candidate Authority & Integrity</h4>
-              <div class="authority-summary" id="candidateAuthSummary">
-                <!-- Injected dynamically -->
-              </div>
-            </div>
-            <div class="section-card">
-              <h4 class="section-title">Candidate Generations History</h4>
-              <table class="data-table small-table" id="candidateHistoryTable">
+        <!-- Master-Detail Split for Backlog -->
+        <div class="content-split backlog-split">
+          
+          <!-- Left: Backlog Table / List -->
+          <section class="panel master-panel" aria-label="Backlog Item List">
+            <div class="table-container">
+              <table class="data-table" id="backlogTable">
                 <thead>
                   <tr>
-                    <th>Gen</th>
-                    <th>Candidate SHA</th>
-                    <th>Base SHA</th>
                     <th>Status</th>
-                    <th>Manifest Hash</th>
+                    <th>Item Key / Title</th>
+                    <th>Priority</th>
+                    <th>Source</th>
+                    <th>Readiness</th>
+                    <th>Actions</th>
                   </tr>
                 </thead>
-                <tbody id="candidateHistoryTbody"></tbody>
+                <tbody id="backlogTableBody">
+                  <tr>
+                    <td colspan="6" class="table-empty">Loading backlog items...</td>
+                  </tr>
+                </tbody>
               </table>
             </div>
-          </div>
+          </section>
 
-          <!-- Tab 3: Deterministic Checks -->
-          <div class="tab-pane" id="checksTab" role="tabpanel">
-            <div class="section-card">
-              <h4 class="section-title">Deterministic Candidate Checks</h4>
-              <div class="checks-list" id="checksListContainer">
-                <!-- Injected dynamically -->
-              </div>
+          <!-- Right: Selected Backlog Item Detail & DoR Inspector -->
+          <section class="panel detail-panel" id="backlogDetailPanel" aria-label="Work Item Details">
+            <div class="detail-placeholder" id="backlogPlaceholder">
+              <span class="placeholder-icon">📋</span>
+              <p>Select a backlog item from the table to inspect details, Definition of Ready checklist, canonical artifact linkage, or start execution.</p>
             </div>
-          </div>
 
-          <!-- Tab 4: Complementary Review -->
-          <div class="tab-pane" id="reviewTab" role="tabpanel">
-            <div class="section-card">
-              <h4 class="section-title">Complementary Review Verdict</h4>
-              <div id="reviewContentContainer">
-                <!-- Injected dynamically -->
-              </div>
-            </div>
-          </div>
-
-          <!-- Tab 5: DeepSeek Audit -->
-          <div class="tab-pane" id="auditTab" role="tabpanel">
-            <div class="section-card">
-              <h4 class="section-title">DeepSeek Direct Independent Audit</h4>
-              <div id="auditContentContainer">
-                <!-- Injected dynamically -->
-              </div>
-            </div>
-          </div>
-
-          <!-- Tab 6: Container Preview & Guided Validation -->
-          <div class="tab-pane" id="previewTab" role="tabpanel">
-            <div class="section-card">
-              <div class="section-header-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-                <h4 class="section-title" style="margin: 0;">Container Preview Environment</h4>
-                <div class="preview-actions-group" id="previewActionsGroup">
-                  <button id="launchPreviewBtn" class="btn btn-primary btn-sm">🚀 Launch Preview</button>
-                  <button id="teardownPreviewBtn" class="btn btn-secondary btn-sm" style="display: none;">⏹ Teardown</button>
+            <div class="detail-content" id="backlogDetailContent" style="display: none;">
+              <!-- Header -->
+              <div class="detail-header">
+                <div class="detail-title-group">
+                  <div class="title-row">
+                    <h3 class="detail-title" id="bkTitle">021 Work Intake</h3>
+                    <span class="badge" id="bkStatusBadge">BACKLOG</span>
+                    <span class="badge badge-priority" id="bkPriorityBadge">NORMAL</span>
+                  </div>
+                  <div class="detail-meta">
+                    <span class="meta-item">Key: <strong id="bkKey">021-work-intake</strong></span>
+                    <span class="meta-item">Source: <strong id="bkSource">ROADMAP</strong></span>
+                    <span class="meta-item">Readiness: <strong id="bkReadiness">NOT_READY</strong></span>
+                  </div>
+                </div>
+                <div class="action-toolbar" id="backlogActionToolbar">
+                  <button id="bkPrepareBtn" class="btn btn-secondary" title="Generate OpenSpec and sync GitHub Issue">
+                    <span class="btn-icon">⚙️</span> Prepare Artifacts
+                  </button>
+                  <button id="bkStartBtn" class="btn btn-primary" title="Start execution via autonomous scheduler">
+                    <span class="btn-icon">🚀</span> Start Work
+                  </button>
+                  <button id="bkEditBtn" class="btn btn-secondary" title="Edit work item details">
+                    <span class="btn-icon">✏️</span> Edit
+                  </button>
+                  <button id="bkDeleteBtn" class="btn btn-danger" title="Delete work item">
+                    <span class="btn-icon">🗑️</span>
+                  </button>
                 </div>
               </div>
-              <div id="previewContainerStatus">
-                <!-- Injected dynamically -->
-              </div>
-            </div>
 
-            <div class="section-card">
-              <h4 class="section-title">Guided Visual Validation Scenarios</h4>
-              <div id="guidedValidationContainer">
-                <!-- Injected dynamically -->
+              <!-- NEEDS_HUMAN Alert Box & Answer Form -->
+              <div class="needs-human-card" id="bkNeedsHumanCard" style="display: none;">
+                <div class="needs-human-header">
+                  <span class="alert-icon">⚠️</span>
+                  <h4>Ambiguity / Product Question (NEEDS_HUMAN)</h4>
+                </div>
+                <div id="bkHumanQuestionsList" class="questions-list"></div>
+                <form id="answerQuestionForm" class="answer-form">
+                  <input type="hidden" id="answerQuestionTarget" value="">
+                  <label for="humanAnswerInput" class="form-label" id="answerQuestionPromptLabel">Provide clarification:</label>
+                  <textarea id="humanAnswerInput" class="form-textarea" rows="3" placeholder="Type clarification / acceptance criteria to resolve ambiguity..." required></textarea>
+                  <div class="form-actions">
+                    <button type="submit" class="btn btn-primary" id="submitAnswerBtn">Submit Clarification</button>
+                  </div>
+                </form>
               </div>
-            </div>
 
-            <div class="section-card">
-              <h4 class="section-title">Validation History</h4>
-              <div id="validationHistoryContainer">
-                <!-- Injected dynamically -->
+              <!-- Description & Acceptance Criteria Card -->
+              <div class="section-card">
+                <h4 class="section-title">Description & Scope</h4>
+                <div class="markdown-preview" id="bkDescriptionPreview"></div>
+
+                <h4 class="section-title" style="margin-top: 16px;">Observable Acceptance Criteria</h4>
+                <ul class="criteria-list" id="bkCriteriaList"></ul>
               </div>
-            </div>
-          </div>
 
-          <!-- Tab 7: GitHub & PR -->
-          <div class="tab-pane" id="githubTab" role="tabpanel">
-            <div class="section-card">
-              <h4 class="section-title">GitHub Work Binding & Pull Request</h4>
-              <div id="githubContentContainer">
-                <!-- Injected dynamically -->
+              <!-- Definition of Ready (DoR) Checklist Card -->
+              <div class="section-card" id="bkDorCard">
+                <div class="card-header-flex">
+                  <h4 class="section-title">Definition of Ready (DoR) Checklist</h4>
+                  <span class="dor-status-pill" id="bkDorOverallPill">NOT READY</span>
+                </div>
+                <div class="dor-grid" id="bkDorGrid">
+                  <!-- 11 DoR checklist items injected dynamically -->
+                </div>
               </div>
-            </div>
-          </div>
 
-          <!-- Tab 8: Provider Efficiency & Telemetry -->
-          <div class="tab-pane" id="efficiencyTab" role="tabpanel">
-            <div class="section-card">
-              <h4 class="section-title">Provider Efficiency & Telemetry Facts</h4>
-              <div id="efficiencyContentContainer">
-                <!-- Injected dynamically -->
+              <!-- Canonical Artifacts Linkage Card -->
+              <div class="section-card">
+                <h4 class="section-title">Canonical Execution Artifacts</h4>
+                <div class="artifacts-grid" id="bkArtifactsGrid">
+                  <div class="artifact-item">
+                    <span class="art-label">OpenSpec Change:</span>
+                    <span class="art-val" id="bkArtOpenSpec">---</span>
+                  </div>
+                  <div class="artifact-item">
+                    <span class="art-label">GitHub Issue:</span>
+                    <span class="art-val" id="bkArtIssue">---</span>
+                  </div>
+                  <div class="artifact-item">
+                    <span class="art-label">GitHub Project Item:</span>
+                    <span class="art-val" id="bkArtProject">---</span>
+                  </div>
+                  <div class="artifact-item">
+                    <span class="art-label">Active Orchestration Run:</span>
+                    <span class="art-val" id="bkArtRun">---</span>
+                  </div>
+                </div>
               </div>
-            </div>
-          </div>
 
-          <!-- Tab 9: Action History -->
-          <div class="tab-pane" id="actionHistoryTab" role="tabpanel">
-            <div class="section-card">
-              <h4 class="section-title">Governed Operator Action Audit Trail</h4>
-              <div id="actionHistoryContentContainer">
-                <!-- Injected dynamically -->
-              </div>
             </div>
-          </div>
-
-          <!-- Tab 10: Timeline -->
-          <div class="tab-pane" id="timelineTab" role="tabpanel">
-            <div class="section-card">
-              <h4 class="section-title">Chronological Lifecycle Events</h4>
-              <div class="timeline-container" id="timelineListContainer">
-                <!-- Injected dynamically -->
-              </div>
-            </div>
-          </div>
-
+          </section>
 
         </div>
-      </section>
+      </div>
 
-    </div>
+      <!-- ================================================================= -->
+      <!-- VIEW 2: PROJECTS MANAGEMENT & ONBOARDING (021.1)                  -->
+      <!-- ================================================================= -->
+      <div id="viewProjects" class="main-view-pane" style="display: none;" aria-label="Projects Management">
+        <div class="projects-toolbar-card">
+          <div>
+            <h2 class="view-title">Registered Projects</h2>
+            <span class="text-muted">Multi-project registration, repository bindings, and context health</span>
+          </div>
+          <div>
+            <button id="onboardProjectBtn" class="btn btn-primary" title="Onboard a new project or repository">
+              <span class="btn-icon">➕</span> Onboard Project
+            </button>
+          </div>
+        </div>
+
+        <div class="projects-grid-container" id="projectsGridContainer">
+          <!-- Injected dynamically -->
+        </div>
+      </div>
+
+      <!-- ================================================================= -->
+      <!-- VIEW 3: PIPELINE & EXECUTIONS (EXISTING 012-020 OPERATIONAL VIEW) -->
+      <!-- ================================================================= -->
+      <div id="viewExecutions" class="main-view-pane" style="display: none;" aria-label="Pipeline and Executions">
+        <!-- KPI Summary Grid -->
+        <section class="kpi-grid" aria-label="Operational Metrics">
+          <div class="kpi-card" id="kpiSystemStatus">
+            <div class="kpi-label">SYSTEM STATE</div>
+            <div class="kpi-value text-success" id="kpiSystemStateVal">HEALTHY</div>
+            <div class="kpi-sub" id="kpiSystemStateSub">Scheduler in active RUN mode</div>
+          </div>
+
+          <div class="kpi-card" id="kpiAttention">
+            <div class="kpi-label">ATTENTION REQUIRED</div>
+            <div class="kpi-value" id="kpiAttentionVal" data-kpi="blocked">0</div>
+            <div class="kpi-sub" id="kpiAttentionSub">0 human gates / blockers</div>
+          </div>
+
+          <div class="kpi-card" id="kpiActive">
+            <div class="kpi-label">ACTIVE EXECUTIONS</div>
+            <div class="kpi-value text-primary" id="kpiActiveVal" data-kpi="active">0</div>
+            <div class="kpi-sub" id="kpiActiveSub">0 changes currently in-flight</div>
+          </div>
+
+          <div class="kpi-card" id="kpiCompleted">
+            <div class="kpi-label">COMPLETED / MERGED</div>
+            <div class="kpi-value text-muted" id="kpiCompletedVal" data-kpi="queue">0</div>
+            <div class="kpi-sub" id="kpiCompletedSub">Total discovered: 0</div>
+          </div>
+        </section>
+
+        <!-- Attention Banner -->
+        <section class="attention-banner" id="attentionBanner" style="display: none;" aria-label="Attention Required">
+          <div class="attention-header">
+            <span class="attention-icon">⚠️</span>
+            <h2 class="attention-title">Action Required: <span id="attentionCountText">1 run</span> paused at human gate</h2>
+          </div>
+          <div class="attention-items-list" id="attentionItemsContainer"></div>
+        </section>
+
+        <section class="panel queue-panel" id="queue" aria-label="Autonomous queue prioritization">
+          <div class="panel-header"><h2 class="panel-title">Autonomous Queue Prioritization</h2><span class="text-muted">Server-ranked admission telemetry</span></div>
+          <div id="queueList" class="queue-list"><p class="table-empty">Loading ranked candidates...</p></div>
+        </section>
+
+        <section class="panel provider-panel" aria-label="Provider health and capacity">
+          <div class="panel-header"><h2 class="panel-title">Provider Health & Capacity</h2><span class="text-muted">Live availability</span></div>
+          <div id="providerGrid" class="provider-grid"><p class="table-empty">Loading provider health...</p></div>
+        </section>
+
+        <!-- Master-Detail Content Layout -->
+        <div class="content-split">
+          <!-- Left Column: Changes Master Table -->
+          <section class="panel master-panel" id="runs" aria-label="Changes Overview">
+            <div class="panel-header">
+              <h2 class="panel-title">Changes & Executions</h2>
+              <div class="filter-toolbar">
+                <input type="search" id="changeSearchInput" class="search-input" placeholder="Search changes..." aria-label="Search changes">
+                <div class="filter-pills" role="radiogroup" aria-label="Status Filters">
+                  <button class="pill active" data-filter="ALL">All</button>
+                  <button class="pill" data-filter="ATTENTION">Attention</button>
+                  <button class="pill" data-filter="RUNNING">Running</button>
+                  <button class="pill" data-filter="READY">Ready</button>
+                  <button class="pill" data-filter="COMPLETED">Completed</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="table-container">
+              <table class="data-table" id="changesTable">
+                <thead>
+                  <tr>
+                    <th>Status</th>
+                    <th>Change</th>
+                    <th>Project</th>
+                    <th>Stage / Stop</th>
+                    <th>Candidate</th>
+                    <th>Updated</th>
+                  </tr>
+                </thead>
+                <tbody id="changesTableBody">
+                  <tr>
+                    <td colspan="6" class="table-empty">Loading operational state...</td>
+                  </tr>
+                </tbody>
+              </table>
+              <div id="runsTableBody" class="runs-live-list" aria-label="Live orchestration runs"></div>
+            </div>
+          </section>
+
+          <!-- Right Column: Change / Run Detail Panel -->
+          <section class="panel detail-panel" id="detailPanel" aria-label="Execution Details">
+            <div class="detail-placeholder" id="detailPlaceholder">
+              <span class="placeholder-icon">📋</span>
+              <p>Select a change from the list to inspect execution pipeline, candidate authority, checks, reviews, and audit state.</p>
+            </div>
+
+            <div class="detail-content" id="detailContent" style="display: none;">
+              <!-- Detail Header -->
+              <div class="detail-header">
+                <div class="detail-title-group">
+                  <div class="title-row">
+                    <h3 class="detail-title" id="dtChangeName">---</h3>
+                    <span class="badge" id="dtStatusBadge">RUNNING</span>
+                  </div>
+                  <div class="detail-meta">
+                    <span class="meta-item">Project: <strong id="dtProject">mini-me</strong></span>
+                    <span class="meta-item">Stage: <strong id="dtStage">---</strong></span>
+                    <span class="meta-item">Gen: <strong id="dtGeneration">---</strong></span>
+                    <span class="meta-item" id="dtCandidateMeta">SHA: <code id="dtCandidateSha" class="code-sha">---</code> <button id="copyShaBtn" class="btn-tiny" title="Copy SHA">📋</button></span>
+                  </div>
+                  <div id="actionToolbar" class="action-toolbar" aria-label="Operator actions"></div>
+                </div>
+              </div>
+
+              <!-- 6-Phase Pipeline Stepper -->
+              <div class="pipeline-stepper-container" aria-label="Pipeline Progress">
+                <div class="stepper" id="pipelineStepper"></div>
+              </div>
+
+              <!-- Detail Navigation Tabs -->
+              <nav class="detail-tabs" role="tablist" aria-label="Detail Sections">
+                <button class="tab-btn active" role="tab" aria-selected="true" data-tab="overviewTab">Overview & Attention</button>
+                <button class="tab-btn" role="tab" aria-selected="false" data-tab="candidateTab">Candidate Authority</button>
+                <button class="tab-btn" role="tab" aria-selected="false" data-tab="checksTab">Checks (<span id="checksTabCount">0</span>)</button>
+                <button class="tab-btn" role="tab" aria-selected="false" data-tab="reviewTab">Review</button>
+                <button class="tab-btn" role="tab" aria-selected="false" data-tab="auditTab">DeepSeek Audit</button>
+                <button class="tab-btn" role="tab" aria-selected="false" data-tab="previewTab">Preview & Validation</button>
+                <button class="tab-btn" role="tab" aria-selected="false" data-tab="githubTab">GitHub & PR</button>
+                <button class="tab-btn" role="tab" aria-selected="false" data-tab="efficiencyTab">Efficiency & Telemetry</button>
+                <button class="tab-btn" role="tab" aria-selected="false" data-tab="actionHistoryTab">Action History</button>
+                <button class="tab-btn" role="tab" aria-selected="false" data-tab="timelineTab">Timeline</button>
+              </nav>
+
+              <!-- Tab 1: Overview & Attention -->
+              <div class="tab-pane active" id="overviewTab" role="tabpanel">
+                <div class="section-card" id="overviewAttentionSection">
+                  <h4 class="section-title">Current Execution State</h4>
+                  <div class="overview-meta-grid" id="overviewMetaGrid"></div>
+                </div>
+                <div class="section-card" id="overviewBlockerSection" style="display: none;">
+                  <h4 class="section-title text-warning">Active Blockers & Claims</h4>
+                  <div id="overviewBlockersList"></div>
+                </div>
+              </div>
+
+              <!-- Tab 2: Candidate Authority -->
+              <div class="tab-pane" id="candidateTab" role="tabpanel">
+                <div class="section-card">
+                  <h4 class="section-title">Durable Candidate Identity & Generations</h4>
+                  <div id="candidateDetailsContainer"></div>
+                  <table class="data-table small-table" id="candidateHistoryTable">
+                    <thead>
+                      <tr><th>Gen</th><th>Head SHA</th><th>Base SHA</th><th>Outcome</th><th>Timestamp</th></tr>
+                    </thead>
+                    <tbody id="candidateHistoryBody"></tbody>
+                  </table>
+                </div>
+              </div>
+
+              <!-- Tab 3: Checks -->
+              <div class="tab-pane" id="checksTab" role="tabpanel">
+                <div class="section-card">
+                  <h4 class="section-title">Deterministic Test & Check Runs</h4>
+                  <div id="checksListContainer"></div>
+                </div>
+              </div>
+
+              <!-- Tab 4: Review -->
+              <div class="tab-pane" id="reviewTab" role="tabpanel">
+                <div class="section-card">
+                  <h4 class="section-title">Complementary Review Authority</h4>
+                  <div id="reviewDetailsContainer"></div>
+                </div>
+              </div>
+
+              <!-- Tab 5: DeepSeek Audit -->
+              <div class="tab-pane" id="auditTab" role="tabpanel">
+                <div class="section-card">
+                  <h4 class="section-title">Independent Security & Architecture Audit</h4>
+                  <div id="auditDetailsContainer"></div>
+                </div>
+              </div>
+
+              <!-- Tab 6: Preview & Validation -->
+              <div class="tab-pane" id="previewTab" role="tabpanel">
+                <div class="section-card" id="previewContainer"></div>
+                <div class="section-card" id="validationScenariosContainer"></div>
+              </div>
+
+              <!-- Tab 7: GitHub & PR -->
+              <div class="tab-pane" id="githubTab" role="tabpanel">
+                <div class="section-card">
+                  <h4 class="section-title">GitHub Integration & Pull Request Authority</h4>
+                  <div id="githubDetailsContainer"></div>
+                </div>
+              </div>
+
+              <!-- Tab 8: Efficiency & Telemetry -->
+              <div class="tab-pane" id="efficiencyTab" role="tabpanel">
+                <div class="section-card">
+                  <h4 class="section-title">Provider Resource Efficiency & Reviewer Independence</h4>
+                  <div id="efficiencyDetailsContainer"></div>
+                </div>
+              </div>
+
+              <!-- Tab 9: Action History -->
+              <div class="tab-pane" id="actionHistoryTab" role="tabpanel">
+                <div class="section-card">
+                  <h4 class="section-title">Governed Operator Action Audit Trail</h4>
+                  <div id="actionHistoryContentContainer"></div>
+                </div>
+              </div>
+
+              <!-- Tab 10: Timeline -->
+              <div class="tab-pane" id="timelineTab" role="tabpanel">
+                <div class="section-card">
+                  <h4 class="section-title">Chronological Lifecycle Events</h4>
+                  <div class="timeline-container" id="timelineListContainer"></div>
+                </div>
+              </div>
+
+            </div>
+          </section>
+        </div>
+      </div>
+
     </div>
   </main>
 
   <nav class="bottom-nav" aria-label="Mobile navigation">
-    <button type="button" data-scroll-to="overview">Overview</button>
-    <button type="button" data-scroll-to="runs">Runs</button>
-    <button type="button" data-scroll-to="queue">Queue</button>
-    <button type="button" data-scroll-to="preview">Preview</button>
+    <button type="button" id="mbNavBacklog" class="active" data-main-view="viewBacklog">Backlog</button>
+    <button type="button" id="mbNavProjects" data-main-view="viewProjects">Projects</button>
+    <button type="button" id="mbNavRuns" data-main-view="viewExecutions">Runs</button>
+    <button type="button" id="mbNavQueue" data-scroll-to="queue">Queue</button>
   </nav>
+
+  <!-- ================================================================= -->
+  <!-- MODALS                                                            -->
+  <!-- ================================================================= -->
+
+  <!-- Onboard Project Modal -->
+  <dialog id="onboardProjectModal" class="action-dialog form-dialog" aria-labelledby="onboardModalTitle">
+    <div class="modal-header">
+      <h2 id="onboardModalTitle">Onboard New Project</h2>
+    </div>
+    <form id="onboardProjectForm" class="modal-body form-body">
+      <div class="form-group">
+        <label for="onboardProjectId" class="form-label">Project ID <span class="text-danger">*</span></label>
+        <input type="text" id="onboardProjectId" class="form-input" placeholder="e.g. greenfield-pilot" required>
+        <span class="form-hint">Unique, immutable identifier for this project.</span>
+      </div>
+      <div class="form-group">
+        <label for="onboardDisplayName" class="form-label">Display Name <span class="text-danger">*</span></label>
+        <input type="text" id="onboardDisplayName" class="form-input" placeholder="e.g. Greenfield Pilot Project" required>
+      </div>
+      <div class="form-group">
+        <label for="onboardRepository" class="form-label">Repository (GitHub owner/repo or path) <span class="text-danger">*</span></label>
+        <input type="text" id="onboardRepository" class="form-input" placeholder="e.g. silverberdi/greenfield-pilot" required>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label for="onboardBaseBranch" class="form-label">Base Branch</label>
+          <input type="text" id="onboardBaseBranch" class="form-input" value="main">
+        </div>
+        <div class="form-group">
+          <label for="onboardOpenSpecPath" class="form-label">OpenSpec Path</label>
+          <input type="text" id="onboardOpenSpecPath" class="form-input" value="openspec">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label for="onboardRoadmapPath" class="form-label">Roadmap Path</label>
+          <input type="text" id="onboardRoadmapPath" class="form-input" value="docs/ROADMAP.md">
+        </div>
+        <div class="form-group">
+          <label for="onboardBacklogPath" class="form-label">Backlog Path</label>
+          <input type="text" id="onboardBacklogPath" class="form-input" value="docs/ROADMAP.md">
+        </div>
+      </div>
+      <div class="modal-footer action-group">
+        <button type="button" class="btn btn-secondary" id="cancelOnboardBtn">Cancel</button>
+        <button type="submit" class="btn btn-primary" id="submitOnboardBtn">Register & Discover</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- New Work Item Modal -->
+  <dialog id="newWorkItemModal" class="action-dialog form-dialog" aria-labelledby="workItemModalTitle">
+    <div class="modal-header">
+      <h2 id="workItemModalTitle">Create Backlog Work Item</h2>
+    </div>
+    <form id="newWorkItemForm" class="modal-body form-body">
+      <div class="form-group">
+        <label for="newWorkItemTitle" class="form-label">Title <span class="text-danger">*</span></label>
+        <input type="text" id="newWorkItemTitle" class="form-input" placeholder="e.g. Implement user authentication rate limiting" required>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label for="newWorkItemKey" class="form-label">Item Key (optional)</label>
+          <input type="text" id="newWorkItemKey" class="form-input" placeholder="e.g. 022-rate-limiting (auto-slugified if empty)">
+        </div>
+        <div class="form-group">
+          <label for="newWorkItemPriority" class="form-label">Priority</label>
+          <select id="newWorkItemPriority" class="form-select">
+            <option value="NORMAL" selected>Normal</option>
+            <option value="HIGH">High</option>
+            <option value="CRITICAL">Critical</option>
+            <option value="LOW">Low</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-group">
+        <label for="newWorkItemDescription" class="form-label">Description / Functional Requirements</label>
+        <textarea id="newWorkItemDescription" class="form-textarea" rows="3" placeholder="Describe the feature, bugfix, or functional scope..."></textarea>
+      </div>
+      <div class="form-group">
+        <label for="newWorkItemCriteria" class="form-label">Observable Acceptance Criteria (one per line)</label>
+        <textarea id="newWorkItemCriteria" class="form-textarea" rows="3" placeholder="- Returns HTTP 429 when rate limit is exceeded&#10;- Rate limit counter resets every 60 seconds&#10;- Unit tests verify concurrency protection"></textarea>
+      </div>
+      <div class="modal-footer action-group">
+        <button type="button" class="btn btn-secondary" id="cancelWorkItemBtn">Cancel</button>
+        <button type="submit" class="btn btn-primary" id="submitWorkItemBtn">Save Work Item</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Project Context Inspector Modal / Drawer -->
+  <dialog id="projectContextModal" class="action-dialog context-dialog" aria-labelledby="contextModalTitle">
+    <div class="modal-header">
+      <h2 id="contextModalTitle">Project Context Inspector</h2>
+    </div>
+    <div class="modal-body" id="projectContextModalBody">
+      <div class="context-section">
+        <h4 class="section-title text-success">Discovered Facts</h4>
+        <div id="ctxDiscoveredFacts" class="facts-list"></div>
+      </div>
+      <div class="context-section">
+        <h4 class="section-title text-primary">Inferred Structure & Milestones</h4>
+        <ul id="ctxInferredStructure" class="structure-list"></ul>
+      </div>
+      <div class="context-section">
+        <h4 class="section-title text-warning">Missing Context / Gaps</h4>
+        <ul id="ctxMissingContext" class="missing-list"></ul>
+      </div>
+    </div>
+    <div class="modal-footer action-group">
+      <button type="button" class="btn btn-primary" id="closeContextModalBtn">Close</button>
+    </div>
+  </dialog>
 
   <!-- Action Confirmation Modal -->
   <dialog id="actionDialog" class="action-dialog" aria-labelledby="actionDialogTitle">
@@ -400,9 +662,7 @@
     <div class="modal-header">
       <h2 id="paramDialogTitle">Configure Operator Action</h2>
     </div>
-    <div class="modal-body" id="paramDialogBody">
-      <!-- Dynamic form fields injected based on action -->
-    </div>
+    <div class="modal-body" id="paramDialogBody"></div>
     <form method="dialog" class="modal-footer action-group">
       <button type="submit" class="btn btn-secondary" data-param-cancel>Cancel</button>
       <button type="button" class="btn btn-primary" id="submitParamActionBtn" data-param-submit>Execute Action</button>

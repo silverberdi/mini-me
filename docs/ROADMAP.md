@@ -43,19 +43,29 @@ Only the current stage should exist as an active OpenSpec change. Future stages 
 
 ---
 
-### 020 — Operator Experience Parity & Production Console Reliability (`020-operator-experience-parity-and-production-console-reliability`)
+### 020 — Operator Experience Parity & Production Console Reliability (`020-operator-experience-parity-and-production-console-reliability`) — DELIVERED
 - **020.1 PWA Operator Parity (`020.1-pwa-operator-parity`)**: DELIVERED. Full operational parity for PWA on desktop/tablet, dynamic parameter modals, action safety confirmations, action audit trail tab, provider efficiency tab, and responsive layout across desktop, tablet, and mobile.
 - **020.2 TUI Production Runtime Reliability (`020.2-tui-production-runtime-reliability`)**: DELIVERED. Automatic canonical `.env` discovery in `config.py` and CLI launcher, enabling single-command `minime console` / `minime status` execution over SSH without manual environment exports or credential exposure.
 
 ---
 
-## Canonical Roadmap (Next Stages)
+## Canonical Roadmap (Current & Next Stages)
 
-### 021 — Operational Greenfield Proving & Multi-Repo Orchestration (`021-operational-greenfield-proving`)
-- Operational greenfield proving project (UNBLOCKED)
-- Remaining provider configuration (such as OpenRouter budgeted fallback in server environment)
-- Multi-repository project binding & validation
-- Operator PWA UX enhancements and telemetry views
+### 021 — Work Intake, Project Onboarding, and Backlog Execution (`021-work-intake-project-onboarding-and-backlog-execution`) — CURRENT
+- **021.1 Project Onboarding**: External project registration, auto-discovery of configuration/context, conflict detection, and fail-closed binding validation.
+- **021.2 Context & Backlog Discovery**: Structured discovery of README, docs, ROADMAP.md, BACKLOG.md, and specs into facts, inferred structure, and missing context.
+- **021.3 Work Item Intake**: Normalized backlog item model with lifecycle states, priority updates, question answering, and operator authorization.
+- **021.4 Canonical Artifact Generation**: Deterministic OpenSpec generation, GitHub Issue synchronization, and Project v2 item binding with `NEEDS_HUMAN` ambiguity governance.
+- **021.5 Readiness & Admission**: Automated Definition of Ready evaluation and scheduler admission with duplicate execution suppression.
+- **021.6 End-to-End Intake Proving**: PWA Projects and Backlog experience, proving end-to-end autonomous SDLC execution with 0 human prompts to Antigravity.
+
+---
+
+### 022 — Operational Greenfield Proving & Multi-Repo Orchestration (`022-operational-greenfield-proving`) — NEXT
+- Operational greenfield proving project from scratch.
+- Multi-repository project binding & fleet validation.
+- Remaining provider configuration in server environment.
+
 
 
 

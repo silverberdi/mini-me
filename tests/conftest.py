@@ -33,6 +33,7 @@ from minime.domain.interfaces import (
     AuthAuditEventRepositoryInterface,
     AuthorizedOperatorRepositoryInterface,
     AuthSessionRepositoryInterface,
+    BacklogItemRepositoryInterface,
     BlockerClaimRepositoryInterface,
     CandidateAuthorshipRepositoryInterface,
     CandidateManifestRepositoryInterface,
@@ -71,6 +72,7 @@ from minime.domain.models import (
     AuthAuditEvent,
     AuthorizedOperator,
     AuthSession,
+    BacklogItem,
     BlockerClaim,
     BudgetLedgerEntry,
     BudgetReservation,
@@ -113,6 +115,18 @@ class ReadinessGitHubStub:
 
     def validate_issue_binding(self, expected_repository, issue_number, github_repository=None):
         return True, None
+
+    def create_issue(self, repository: str, title: str, body: str, labels: list[str] | None = None):
+        return {
+            "number": 42,
+            "title": title,
+            "body": body,
+            "html_url": f"https://github.com/{repository}/issues/42",
+            "labels": labels or [],
+        }
+
+    def add_issue_to_project(self, project_number: int, owner: str, issue_url: str):
+        return "PVTI_mock_12345"
 
 
 class InMemoryProjectRepository(ProjectRepositoryInterface):
@@ -1585,6 +1599,42 @@ class InMemoryAuthAuditEventRepository(AuthAuditEventRepositoryInterface):
         return [e.model_copy(deep=True) for e in items[:limit]]
 
 
+class InMemoryBacklogItemRepository(BacklogItemRepositoryInterface):
+    def __init__(self):
+        self._store: dict[str, BacklogItem] = {}
+
+    def save(self, item: BacklogItem) -> None:
+        self._store[item.item_id] = item.model_copy(deep=True)
+
+    def get_by_id(self, item_id: str) -> BacklogItem | None:
+        item = self._store.get(item_id)
+        return item.model_copy(deep=True) if item else None
+
+    def get_by_project_and_key(self, project_id: str, item_key: str) -> BacklogItem | None:
+        for item in self._store.values():
+            if item.project_id == project_id and item.item_key == item_key:
+                return item.model_copy(deep=True)
+        return None
+
+    def list_by_project(
+        self,
+        project_id: str,
+        status: str | None = None,
+        priority: str | None = None,
+        limit: int = 100,
+    ) -> list[BacklogItem]:
+        items = [i for i in self._store.values() if i.project_id == project_id]
+        if status:
+            items = [i for i in items if i.status.value == status or i.status == status]
+        if priority:
+            items = [i for i in items if i.priority.value == priority or i.priority == priority]
+        items.sort(key=lambda i: i.created_at, reverse=True)
+        return [i.model_copy(deep=True) for i in items[:limit]]
+
+    def delete(self, item_id: str) -> None:
+        self._store.pop(item_id, None)
+
+
 class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
     def __init__(self):
         self.projects = InMemoryProjectRepository()
@@ -1625,6 +1675,7 @@ class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.authorized_operators = InMemoryAuthorizedOperatorRepository()
         self.auth_sessions = InMemoryAuthSessionRepository()
         self.auth_audit_events = InMemoryAuthAuditEventRepository()
+        self.backlog_items = InMemoryBacklogItemRepository()
         self.committed = False
         self.rolled_back = False
 

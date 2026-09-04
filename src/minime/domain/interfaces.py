@@ -19,6 +19,7 @@ from minime.domain.models import (
     AuthAuditEvent,
     AuthorizedOperator,
     AuthSession,
+    BacklogItem,
     BlockerClaim,
     BudgetLedgerEntry,
     BudgetReservation,
@@ -53,6 +54,29 @@ from minime.domain.models import (
     ValidationRun,
     WorkQueueItem,
 )
+
+
+class BacklogItemRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, item: BacklogItem) -> None: ...
+
+    @abstractmethod
+    def get_by_id(self, item_id: str) -> BacklogItem | None: ...
+
+    @abstractmethod
+    def get_by_project_and_key(self, project_id: str, item_key: str) -> BacklogItem | None: ...
+
+    @abstractmethod
+    def list_by_project(
+        self,
+        project_id: str,
+        status: str | None = None,
+        priority: str | None = None,
+        limit: int = 100,
+    ) -> list[BacklogItem]: ...
+
+    @abstractmethod
+    def delete(self, item_id: str) -> None: ...
 
 
 class ProjectRepositoryInterface(ABC):
@@ -612,6 +636,7 @@ class PersistenceUnitOfWork(ABC):
     authorized_operators: AuthorizedOperatorRepositoryInterface
     auth_sessions: AuthSessionRepositoryInterface
     auth_audit_events: AuthAuditEventRepositoryInterface
+    backlog_items: BacklogItemRepositoryInterface
 
     @abstractmethod
     def commit(self) -> None: ...
@@ -736,6 +761,31 @@ class GitHubAdapterInterface(ABC):
     def get_remote_branch_head(
         self, repository: str, branch: str, remote: str = "origin"
     ) -> str | None: ...
+
+    def verify_repository(self, repository: str) -> tuple[bool, str | None]:
+        return True, None
+
+    def list_issues(
+        self, repository: str, state: str = "open", limit: int = 50
+    ) -> list[dict[str, Any]]:
+        return []
+
+    def create_issue(
+        self,
+        repository: str,
+        title: str,
+        body: str,
+        labels: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "number": 1,
+            "title": title,
+            "body": body,
+            "html_url": f"https://github.com/{repository}/issues/1",
+        }
+
+    def add_issue_to_project(self, project_number: int, owner: str, issue_url: str) -> str | None:
+        return "PVTI_mock123"
 
     def get_pull_request_details(self, repository: str, pr_number: int) -> dict[str, Any]:
         return {"number": pr_number, "is_merged": False}

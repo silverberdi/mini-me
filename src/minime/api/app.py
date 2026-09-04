@@ -19,6 +19,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from minime.adapters.github import GitHubAdapter
 from minime.adapters.openspec import OpenSpecAdapter
 from minime.config import load_config
 from minime.db.repository import PostgresPersistenceUnitOfWork
@@ -36,7 +37,9 @@ from minime.domain.models import (
     ActionDescriptor,
     AuthorizedOperator,
     AuthStatusDTO,
+    BacklogItem,
     Change,
+    ContextDiscoveryReport,
     EfficiencyTelemetryView,
     Event,
     Job,
@@ -47,12 +50,18 @@ from minime.domain.models import (
     OperatorIdentityDTO,
     PreviewSession,
     Project,
+    ProjectOnboardingInput,
+    ProjectOnboardingResult,
     ProviderEfficiencyMetrics,
     ProviderHealth,
     QueueExplainReport,
     SchedulerDecisionRecord,
     SchedulerStatus,
     SchedulerStatusView,
+    WorkItemAnswerInput,
+    WorkItemCreateInput,
+    WorkItemPrepareResult,
+    WorkItemUpdateInput,
     WorkQueueItem,
     utc_now,
 )
@@ -66,6 +75,7 @@ from minime.services.auth_service import (
 from minime.services.budget_service import BudgetService
 from minime.services.capacity_lifecycle_service import CapacityLifecycleService
 from minime.services.container_preview_service import ContainerPreviewService
+from minime.services.context_discovery_service import ContextDiscoveryService
 from minime.services.control_plane_service import ControlPlaneService
 from minime.services.dashboard_service import (
     DashboardChangeDetailResponse,
@@ -74,7 +84,9 @@ from minime.services.dashboard_service import (
     TimelineEventDTO,
 )
 from minime.services.execution_pipeline import ExecutionPipelineService
+from minime.services.intake_service import IntakeService
 from minime.services.orchestration_service import OrchestrationService
+from minime.services.project_onboarding_service import ProjectOnboardingService
 from minime.services.project_service import ProjectService
 from minime.services.provider_health_service import ProviderHealthService
 from minime.services.readiness_service import ReadinessService
@@ -188,6 +200,13 @@ def get_uow() -> Generator[PostgresPersistenceUnitOfWork, None, None]:
 
 
 UowDep = Annotated[PostgresPersistenceUnitOfWork, Depends(get_uow)]
+
+
+def get_github_adapter() -> GitHubAdapter:
+    return GitHubAdapter()
+
+
+GitHubAdapterDep = Annotated[GitHubAdapter, Depends(get_github_adapter)]
 
 
 PUBLIC_EXEMPT_PATHS = {
@@ -523,6 +542,201 @@ def get_project(
             detail=f"Project '{project_id}' not found",
         )
     return project
+
+
+# -----------------------------------------------------------------------------
+# 021 Project Onboarding and Backlog Intake Endpoints
+# -----------------------------------------------------------------------------
+
+
+@app.post("/api/v1/projects/onboard", status_code=status.HTTP_201_CREATED, tags=["projects"])
+def onboard_project_endpoint(
+    req: ProjectOnboardingInput,
+    uow: UowDep,
+    request: Request,
+    github_adapter: GitHubAdapterDep,
+) -> ProjectOnboardingResult:
+    """Onboard an external project with repository validation and context discovery."""
+    operator_email = getattr(request.state, "operator_email", "operator")
+    onboarding_service = ProjectOnboardingService(uow, github_adapter=github_adapter)
+    try:
+        return onboarding_service.onboard_project(req, operator_email=operator_email)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@app.get("/api/v1/projects/{project_id}/context", tags=["projects"])
+def get_project_context_endpoint(
+    project_id: str,
+    uow: UowDep,
+) -> ContextDiscoveryReport:
+    """Get categorized context report (discovered facts, inferred structure, missing context)."""
+    context_service = ContextDiscoveryService(uow)
+    try:
+        return context_service.discover_context(project_id)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+
+
+@app.post("/api/v1/projects/{project_id}/context/discover", tags=["projects"])
+def discover_project_context_endpoint(
+    project_id: str,
+    uow: UowDep,
+) -> ContextDiscoveryReport:
+    """Trigger fresh context and backlog discovery."""
+    context_service = ContextDiscoveryService(uow)
+    try:
+        return context_service.discover_context(project_id)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+
+
+@app.get("/api/v1/projects/{project_id}/backlog", tags=["backlog"])
+def list_backlog_items_endpoint(
+    project_id: str,
+    uow: UowDep,
+    status_filter: str | None = Query(default=None, alias="status"),
+    priority: str | None = None,
+    limit: int = 100,
+) -> list[BacklogItem]:
+    """List normalized backlog items for a project."""
+    project = uow.projects.get_by_id(project_id)
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project '{project_id}' not found",
+        )
+    return uow.backlog_items.list_by_project(
+        project_id, status=status_filter, priority=priority, limit=limit
+    )
+
+
+@app.post(
+    "/api/v1/projects/{project_id}/backlog", status_code=status.HTTP_201_CREATED, tags=["backlog"]
+)
+def create_backlog_item_endpoint(
+    project_id: str,
+    req: WorkItemCreateInput,
+    uow: UowDep,
+    request: Request,
+    github_adapter: GitHubAdapterDep,
+) -> BacklogItem:
+    """Create a new work item in the backlog."""
+    operator_email = getattr(request.state, "operator_email", "operator")
+    intake_service = IntakeService(uow, github_adapter=github_adapter)
+    try:
+        return intake_service.create_work_item(project_id, req, operator_email=operator_email)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@app.get("/api/v1/projects/{project_id}/backlog/{item_key}", tags=["backlog"])
+def get_backlog_item_endpoint(
+    project_id: str,
+    item_key: str,
+    uow: UowDep,
+) -> BacklogItem:
+    """Get full details of a backlog work item."""
+    item = uow.backlog_items.get_by_project_and_key(project_id, item_key)
+    if not item:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Work item '{item_key}' not found in project '{project_id}'",
+        )
+    return item
+
+
+@app.patch("/api/v1/projects/{project_id}/backlog/{item_key}", tags=["backlog"])
+def update_backlog_item_endpoint(
+    project_id: str,
+    item_key: str,
+    req: WorkItemUpdateInput,
+    uow: UowDep,
+    request: Request,
+    github_adapter: GitHubAdapterDep,
+) -> BacklogItem:
+    """Update title, description, priority, or criteria of a backlog item."""
+    operator_email = getattr(request.state, "operator_email", "operator")
+    intake_service = IntakeService(uow, github_adapter=github_adapter)
+    try:
+        return intake_service.update_work_item(
+            project_id, item_key, req, operator_email=operator_email
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@app.post("/api/v1/projects/{project_id}/backlog/{item_key}/prepare", tags=["backlog"])
+def prepare_backlog_item_endpoint(
+    project_id: str,
+    item_key: str,
+    uow: UowDep,
+    request: Request,
+    github_adapter: GitHubAdapterDep,
+) -> WorkItemPrepareResult:
+    """Prepare canonical execution artifacts (GitHub Issue, Project Item, OpenSpec change)."""
+    operator_email = getattr(request.state, "operator_email", "operator")
+    intake_service = IntakeService(uow, github_adapter=github_adapter)
+    try:
+        return intake_service.prepare_work_item(project_id, item_key, operator_email=operator_email)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@app.post("/api/v1/projects/{project_id}/backlog/{item_key}/answer", tags=["backlog"])
+def answer_backlog_item_question_endpoint(
+    project_id: str,
+    item_key: str,
+    req: WorkItemAnswerInput,
+    uow: UowDep,
+    request: Request,
+    github_adapter: GitHubAdapterDep,
+) -> BacklogItem:
+    """Answer a NEEDS_HUMAN question to unblock preparation and reach READY."""
+    operator_email = getattr(request.state, "operator_email", "operator")
+    intake_service = IntakeService(uow, github_adapter=github_adapter)
+    try:
+        return intake_service.answer_human_question(
+            project_id, item_key, req, operator_email=operator_email
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@app.post("/api/v1/projects/{project_id}/backlog/{item_key}/start", tags=["backlog"])
+def start_backlog_item_endpoint(
+    project_id: str,
+    item_key: str,
+    uow: UowDep,
+    request: Request,
+    github_adapter: GitHubAdapterDep,
+) -> BacklogItem:
+    """Start execution of a READY work item through the autonomous scheduler."""
+    operator_email = getattr(request.state, "operator_email", "operator")
+    intake_service = IntakeService(uow, github_adapter=github_adapter)
+    try:
+        return intake_service.start_work_item(project_id, item_key, operator_email=operator_email)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@app.delete(
+    "/api/v1/projects/{project_id}/backlog/{item_key}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    tags=["backlog"],
+)
+def delete_backlog_item_endpoint(
+    project_id: str,
+    item_key: str,
+    uow: UowDep,
+    request: Request,
+    github_adapter: GitHubAdapterDep,
+) -> Response:
+    """Cancel / remove a backlog item."""
+    operator_email = getattr(request.state, "operator_email", "operator")
+    intake_service = IntakeService(uow, github_adapter=github_adapter)
+    intake_service.delete_work_item(project_id, item_key, operator_email=operator_email)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.get("/projects/{project_id}/changes")

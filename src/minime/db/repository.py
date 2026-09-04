@@ -15,6 +15,7 @@ from minime.db.models import (
     AuthAuditEventModel,
     AuthorizedOperatorModel,
     AuthSessionModel,
+    BacklogItemModel,
     BlockerClaimModel,
     BudgetLedgerModel,
     BudgetReservationModel,
@@ -80,6 +81,7 @@ from minime.domain.enums import (
     PremiumProviderReasonCode,
     PreviewStatus,
     ProgressClassification,
+    ProjectOnboardingStatus,
     ProjectStatus,
     ProviderHealthStatus,
     ProviderResultClass,
@@ -91,6 +93,8 @@ from minime.domain.enums import (
     ReviewVerdict,
     TaskClass,
     ValidationVerdict,
+    WorkItemSource,
+    WorkItemStatus,
 )
 from minime.domain.interfaces import (
     AuditFindingRepositoryInterface,
@@ -98,6 +102,7 @@ from minime.domain.interfaces import (
     AuthAuditEventRepositoryInterface,
     AuthorizedOperatorRepositoryInterface,
     AuthSessionRepositoryInterface,
+    BacklogItemRepositoryInterface,
     BlockerClaimRepositoryInterface,
     BudgetLedgerRepositoryInterface,
     BudgetReservationRepositoryInterface,
@@ -140,6 +145,7 @@ from minime.domain.models import (
     AuthAuditEvent,
     AuthorizedOperator,
     AuthSession,
+    BacklogItem,
     BlockerClaim,
     BudgetLedgerEntry,
     BudgetReservation,
@@ -152,6 +158,7 @@ from minime.domain.models import (
     Event,
     EvidenceDiagnostic,
     GitOperation,
+    HumanAnswerRecord,
     Job,
     JobAttempt,
     JobHandoff,
@@ -204,7 +211,60 @@ def project_model_to_domain(model: ProjectModel) -> Project:
         openrouter_drain_allowed=model.openrouter_drain_allowed,
         deployment_preview=model.deployment_preview or {},
         deployment_production=model.deployment_production or {},
+        context_sources=model.context_sources or ["README.md", "docs/", "ROADMAP.md"],
+        roadmap_path=model.roadmap_path or "docs/ROADMAP.md",
+        backlog_path=model.backlog_path or "docs/ROADMAP.md",
+        github_project_number=model.github_project_number,
+        github_project_owner=model.github_project_owner,
+        onboarding_status=ProjectOnboardingStatus(model.onboarding_status)
+        if model.onboarding_status
+        else ProjectOnboardingStatus.READY_FOR_WORK,
+        onboarding_reasons=model.onboarding_reasons or [],
         status=ProjectStatus(model.status),
+        created_at=model.created_at,
+        updated_at=model.updated_at,
+    )
+
+
+def backlog_item_model_to_domain(model: BacklogItemModel) -> BacklogItem:
+    answers: list[HumanAnswerRecord] = []
+    if model.human_answers:
+        for a in model.human_answers:
+            if isinstance(a, dict):
+                answers.append(
+                    HumanAnswerRecord(
+                        question=a.get("question", ""),
+                        answer=a.get("answer", ""),
+                        answered_by=a.get("answered_by", "operator"),
+                        answered_at=datetime.fromisoformat(a["answered_at"])
+                        if "answered_at" in a and isinstance(a["answered_at"], str)
+                        else utc_now(),
+                    )
+                )
+
+    return BacklogItem(
+        item_id=model.id,
+        project_id=model.project_id,
+        item_key=model.item_key,
+        title=model.title,
+        description=model.description or "",
+        priority=QueuePriority(model.priority) if model.priority else QueuePriority.NORMAL,
+        status=WorkItemStatus(model.status) if model.status else WorkItemStatus.BACKLOG,
+        source=WorkItemSource(model.source) if model.source else WorkItemSource.LOCAL_BACKLOG,
+        source_location=model.source_location,
+        dependencies=model.dependencies or [],
+        readiness_state=ReadinessState(model.readiness_state)
+        if model.readiness_state
+        else ReadinessState.NOT_READY,
+        unmet_readiness_reasons=model.unmet_readiness_reasons or [],
+        human_questions=model.human_questions or [],
+        human_answers=answers,
+        acceptance_criteria=model.acceptance_criteria or [],
+        github_issue_number=model.github_issue_number,
+        github_issue_url=model.github_issue_url,
+        github_project_item_id=model.github_project_item_id,
+        openspec_change_name=model.openspec_change_name,
+        run_id=model.run_id,
         created_at=model.created_at,
         updated_at=model.updated_at,
     )
@@ -767,6 +827,13 @@ class PostgresProjectRepository(ProjectRepositoryInterface):
             existing.openrouter_drain_allowed = project.openrouter_drain_allowed
             existing.deployment_preview = project.deployment_preview
             existing.deployment_production = project.deployment_production
+            existing.context_sources = project.context_sources
+            existing.roadmap_path = project.roadmap_path
+            existing.backlog_path = project.backlog_path
+            existing.github_project_number = project.github_project_number
+            existing.github_project_owner = project.github_project_owner
+            existing.onboarding_status = project.onboarding_status.value
+            existing.onboarding_reasons = project.onboarding_reasons
             existing.status = project.status.value
             existing.updated_at = project.updated_at
         else:
@@ -783,6 +850,13 @@ class PostgresProjectRepository(ProjectRepositoryInterface):
                 openrouter_drain_allowed=project.openrouter_drain_allowed,
                 deployment_preview=project.deployment_preview,
                 deployment_production=project.deployment_production,
+                context_sources=project.context_sources,
+                roadmap_path=project.roadmap_path,
+                backlog_path=project.backlog_path,
+                github_project_number=project.github_project_number,
+                github_project_owner=project.github_project_owner,
+                onboarding_status=project.onboarding_status.value,
+                onboarding_reasons=project.onboarding_reasons,
                 status=project.status.value,
                 created_at=project.created_at,
                 updated_at=project.updated_at,
@@ -3693,6 +3767,102 @@ class PostgresAuthAuditEventRepository(AuthAuditEventRepositoryInterface):
         return [auth_audit_event_model_to_domain(m) for m in models]
 
 
+class PostgresBacklogItemRepository(BacklogItemRepositoryInterface):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def save(self, item: BacklogItem) -> None:
+        existing = self.session.get(BacklogItemModel, item.item_id)
+        answers_payload = [
+            {
+                "question": a.question,
+                "answer": a.answer,
+                "answered_by": a.answered_by,
+                "answered_at": a.answered_at.isoformat(),
+            }
+            for a in item.human_answers
+        ]
+        if existing:
+            existing.title = item.title
+            existing.description = item.description
+            existing.priority = item.priority.value
+            existing.status = item.status.value
+            existing.source = item.source.value
+            existing.source_location = item.source_location
+            existing.dependencies = item.dependencies
+            existing.readiness_state = item.readiness_state.value
+            existing.unmet_readiness_reasons = item.unmet_readiness_reasons
+            existing.human_questions = item.human_questions
+            existing.human_answers = answers_payload
+            existing.acceptance_criteria = item.acceptance_criteria
+            existing.github_issue_number = item.github_issue_number
+            existing.github_issue_url = item.github_issue_url
+            existing.github_project_item_id = item.github_project_item_id
+            existing.openspec_change_name = item.openspec_change_name
+            existing.run_id = item.run_id
+            existing.updated_at = item.updated_at
+        else:
+            model = BacklogItemModel(
+                id=item.item_id,
+                project_id=item.project_id,
+                item_key=item.item_key,
+                title=item.title,
+                description=item.description,
+                priority=item.priority.value,
+                status=item.status.value,
+                source=item.source.value,
+                source_location=item.source_location,
+                dependencies=item.dependencies,
+                readiness_state=item.readiness_state.value,
+                unmet_readiness_reasons=item.unmet_readiness_reasons,
+                human_questions=item.human_questions,
+                human_answers=answers_payload,
+                acceptance_criteria=item.acceptance_criteria,
+                github_issue_number=item.github_issue_number,
+                github_issue_url=item.github_issue_url,
+                github_project_item_id=item.github_project_item_id,
+                openspec_change_name=item.openspec_change_name,
+                run_id=item.run_id,
+                created_at=item.created_at,
+                updated_at=item.updated_at,
+            )
+            self.session.add(model)
+
+    def get_by_id(self, item_id: str) -> BacklogItem | None:
+        model = self.session.get(BacklogItemModel, item_id)
+        return backlog_item_model_to_domain(model) if model else None
+
+    def get_by_project_and_key(self, project_id: str, item_key: str) -> BacklogItem | None:
+        stmt = (
+            select(BacklogItemModel)
+            .where(BacklogItemModel.project_id == project_id)
+            .where(BacklogItemModel.item_key == item_key)
+        )
+        model = self.session.scalars(stmt).first()
+        return backlog_item_model_to_domain(model) if model else None
+
+    def list_by_project(
+        self,
+        project_id: str,
+        status: str | None = None,
+        priority: str | None = None,
+        limit: int = 100,
+    ) -> list[BacklogItem]:
+        stmt = select(BacklogItemModel).where(BacklogItemModel.project_id == project_id)
+        if status:
+            stmt = stmt.where(BacklogItemModel.status == status)
+        if priority:
+            stmt = stmt.where(BacklogItemModel.priority == priority)
+        stmt = stmt.order_by(desc(BacklogItemModel.created_at)).limit(limit)
+        models = self.session.scalars(stmt).all()
+        return [backlog_item_model_to_domain(m) for m in models]
+
+    def delete(self, item_id: str) -> None:
+        model = self.session.get(BacklogItemModel, item_id)
+        if model:
+            self.session.delete(model)
+
+
 class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
     """Encapsulates a database session for atomic operations across repositories."""
 
@@ -3737,6 +3907,7 @@ class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.authorized_operators = PostgresAuthorizedOperatorRepository(session)
         self.auth_sessions = PostgresAuthSessionRepository(session)
         self.auth_audit_events = PostgresAuthAuditEventRepository(session)
+        self.backlog_items = PostgresBacklogItemRepository(session)
 
     def commit(self) -> None:
         self.session.commit()
