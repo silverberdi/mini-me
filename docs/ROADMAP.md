@@ -35,4 +35,19 @@ Only the current stage should exist as an active OpenSpec change. Future stages 
 - **019.2 Server Runtime (`019.2-server-runtime`)**: DELIVERED. Systemd services `minime-api.service` and `minime-scheduler.service`, LAN PWA acceptance, controlled reboot recovery, zero Mac dependency.
 - **019.3 Google Authentication & Operator Authorization (`019.3-google-authentication`)**: DELIVERED. Google OIDC/OAuth 2.0 authentication, allowlist authorization, server-managed sessions, fail-closed API protection, PWA login shell, security audit trail.
 - **019.4 Cloudflare Tunnel & Secure Remote Access (`019.4-cloudflare-tunnel-remote-access`)**: DELIVERED. Discovered and adopted existing Cloudflare Tunnel, public HTTPS ingress `https://mini-me.silverman.pro`, origin bound to `127.0.0.1:8787`, zero router port forwarding, 14 server workloads preserved, full HTTPS authentication and authorization verified.
-- **019.5 Final Mac-Independent / Public Proving Run (`019.5-final-proving-run`)**: CURRENT. End-to-end proving run executed entirely on the server runtime with zero local machine involvement.
+- **019.5 Final Mac-Independent / Public Proving Run (`019.5-final-proving-run`)**: DELIVERED. End-to-end SDLC proving run executed autonomously entirely on the Linux server runtime (`192.168.0.194`) with 0 Mac dependencies, server reboot recovery verified, public HTTPS PWA/OAuth verified, and 100% native post-merge closure.
+
+---
+
+### 019 — Server Runtime & Production Deployment (`019-server-runtime-deployment`) — DELIVERED
+
+---
+
+## Canonical Roadmap (Next Stages)
+
+### 021 — Operational Greenfield Proving & Multi-Repo Orchestration (`021-operational-greenfield-proving`)
+- Operational greenfield proving project
+- Remaining provider configuration (such as OpenRouter budgeted fallback in server environment)
+- Multi-repository project binding & validation
+- Operator PWA UX enhancements and telemetry views
+
