@@ -48,7 +48,7 @@ chown -R minime:minime /opt/minime /var/lib/minime /var/log/minime
 # 6. Restart services
 echo "Restarting services..."
 systemctl restart minime-api minime-scheduler
-sleep 2
+sleep 3
 
 # 7. Run health check
 if [ -f "${APP_DIR}/scripts/health_check.sh" ]; then
