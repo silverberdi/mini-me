@@ -10,9 +10,9 @@ import typer
 import uvicorn
 
 from minime.adapters.openspec import OpenSpecAdapter
+from minime.config import discover_and_load_env_file
 from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.db.session import db_manager
-from minime.config import discover_and_load_env_file
 from minime.domain.enums import (
     OperatorActionStatus,
     OperatorActionType,
