@@ -211,6 +211,7 @@ GitHubAdapterDep = Annotated[GitHubAdapter, Depends(get_github_adapter)]
 
 PUBLIC_EXEMPT_PATHS = {
     "/health",
+    "/api/health",
     "/",
     "/dashboard",
     "/sw.js",
@@ -387,8 +388,10 @@ class JobRunRequest(BaseModel):
     project_root: str = "."
 
 
+@app.get("/api/health")
 @app.api_route("/health", methods=["GET", "HEAD"])
-def get_health() -> dict[str, Any]:
+def get_health(response: Response) -> dict[str, Any]:
+    response.headers["X-Runtime-Diagnostic"] = utc_now().isoformat()
     healthy, message = db_manager.check_health()
     return {
         "status": "healthy" if healthy else "unhealthy",
