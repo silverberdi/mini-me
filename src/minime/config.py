@@ -112,6 +112,7 @@ class AuthConfig(BaseModel):
     client_id_env: str = "GOOGLE_CLIENT_ID"
     client_secret_env: str = "GOOGLE_CLIENT_SECRET"
     client_secret_path: str = "/etc/minime/secrets/google_oauth_client_secret"
+    authorized_operators_env: str = "MINIME_AUTHORIZED_OPERATORS"
     redirect_uri: str | None = None
     session_lifetime_seconds: int = 604800
     cookie_secure: str = "auto"

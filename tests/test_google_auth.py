@@ -383,3 +383,31 @@ def test_full_oauth_callback_flow_success(
                 # Verify audit trail contains LOGIN_SUCCEEDED
                 events = auth_uow.auth_audit_events.list_events(operator_email=operator_email)
                 assert any(e.event_type == AuthEventType.LOGIN_SUCCEEDED for e in events)
+
+
+def test_authorized_operators_env_seeding(auth_uow: InMemoryPersistenceUnitOfWork):
+    """MINIME_AUTHORIZED_OPERATORS env var should be parsed and seeded into authorized_operators."""
+    import asyncio
+    from unittest.mock import PropertyMock
+
+    from minime.api.app import lifespan
+
+    with patch.dict(
+        os.environ,
+        {"MINIME_AUTHORIZED_OPERATORS": "op1@example.com, op2@example.com"},
+    ):
+        with patch("minime.api.app.db_manager.__class__.sessionmaker", new_callable=PropertyMock) as mock_sm:
+            mock_sm.return_value = lambda: None
+            with patch("minime.api.app.PostgresPersistenceUnitOfWork", return_value=auth_uow):
+                async def run_lifespan():
+                    async with lifespan(app):
+                        pass
+
+                asyncio.run(run_lifespan())
+
+    op1 = auth_uow.authorized_operators.get_by_email("op1@example.com")
+    op2 = auth_uow.authorized_operators.get_by_email("op2@example.com")
+    assert op1 is not None and op1.is_active is True
+    assert op2 is not None and op2.is_active is True
+
+

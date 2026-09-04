@@ -111,13 +111,53 @@ async def lifespan(app: FastAPI):
                             google_sub=op_data.get("google_sub"),
                             is_active=op_data.get("is_active", True),
                         )
-            env_operator = os.environ.get("MINIME_AUTHORIZED_OPERATOR_EMAIL")
-            if env_operator:
-                op_svc.seed_operator(
-                    email=env_operator,
-                    display_name="Primary Operator",
-                    is_active=True,
-                )
+                    elif isinstance(op_data, str) and op_data.strip():
+                        op_svc.seed_operator(
+                            email=op_data.strip(),
+                            display_name="Authorized Operator",
+                            is_active=True,
+                        )
+
+            env_operators = (
+                os.environ.get(config.auth.authorized_operators_env)
+                or os.environ.get("MINIME_AUTHORIZED_OPERATORS")
+                or os.environ.get("MINIME_AUTHORIZED_OPERATOR_EMAIL")
+            )
+            if env_operators:
+                import json
+                try:
+                    parsed = json.loads(env_operators)
+                    if isinstance(parsed, list):
+                        for item in parsed:
+                            if isinstance(item, str) and item.strip():
+                                op_svc.seed_operator(
+                                    email=item.strip(),
+                                    display_name="Authorized Operator",
+                                    is_active=True,
+                                )
+                            elif isinstance(item, dict) and "email" in item:
+                                op_svc.seed_operator(
+                                    email=item["email"],
+                                    display_name=item.get("display_name", "Authorized Operator"),
+                                    google_sub=item.get("google_sub"),
+                                    is_active=item.get("is_active", True),
+                                )
+                    elif isinstance(parsed, dict) and "email" in parsed:
+                        op_svc.seed_operator(
+                            email=parsed["email"],
+                            display_name=parsed.get("display_name", "Authorized Operator"),
+                            google_sub=parsed.get("google_sub"),
+                            is_active=parsed.get("is_active", True),
+                        )
+                except Exception:
+                    for email in env_operators.split(","):
+                        email = email.strip()
+                        if email:
+                            op_svc.seed_operator(
+                                email=email,
+                                display_name="Authorized Operator",
+                                is_active=True,
+                            )
         except Exception as exc:
             logger.warning(f"Error initializing authorized operators: {exc}")
     except Exception as exc:
