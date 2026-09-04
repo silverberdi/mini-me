@@ -50,6 +50,7 @@ def session_factory() -> sessionmaker[Session]:
         assert connection.execute(text("select version_num from alembic_version")).scalar() in (
             "015_widen_transition_key",
             "017_auth_sessions_and_operators",
+            "018_widen_change_id_on_events",
         )
     factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     yield factory

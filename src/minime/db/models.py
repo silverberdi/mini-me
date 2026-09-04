@@ -137,7 +137,7 @@ class EventModel(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     event_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     project_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
-    change_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    change_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     operation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     timestamp: Mapped[datetime] = mapped_column(
@@ -151,7 +151,7 @@ class MetricFactModel(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     metric_name: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     project_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
-    change_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    change_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     stage: Mapped[str | None] = mapped_column(String(64), nullable=True)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     fact_value: Mapped[float | None] = mapped_column(Float, nullable=True)

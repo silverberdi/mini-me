@@ -31,7 +31,7 @@ def verify_physical_schema_invariants(engine: Engine) -> SchemaInvariantResult:
     """
     from minime.db.models import Base
 
-    expected_revision = "017_auth_sessions_and_operators"
+    expected_revision = "018_widen_change_id_on_events"
     inspector = inspect(engine)
 
     tables = set(inspector.get_table_names())
