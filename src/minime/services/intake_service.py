@@ -337,6 +337,7 @@ class IntakeService:
             binding.is_valid = True
             binding.updated_at = now
             self.uow.bindings.save(binding)
+        self.uow.commit()
 
         # 6. Evaluate Definition of Ready (DoR)
         readiness_eval = self.readiness_service.evaluate_change_readiness(
