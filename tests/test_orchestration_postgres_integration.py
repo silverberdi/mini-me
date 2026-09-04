@@ -51,6 +51,7 @@ def session_factory() -> sessionmaker[Session]:
             "015_widen_transition_key",
             "017_auth_sessions_and_operators",
             "018_widen_change_id_on_events",
+            "019_work_intake_and_backlog_items",
         )
     factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     yield factory
