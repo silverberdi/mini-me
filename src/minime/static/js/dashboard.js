@@ -822,20 +822,24 @@
         return;
       }
       const data = await resp.json();
-      const ratio = data.productive_attempt_ratio !== undefined ? (Number(data.productive_attempt_ratio) * 100).toFixed(0) + '%' : '100%';
-      const attempts = data.total_attempts ?? 1;
-      const reworks = data.rework_attempts ?? 0;
-      const model = data.primary_model || 'codex';
-      const reviewerModel = data.reviewer_model || 'antigravity';
-      const indStatus = data.reviewer_independence ? 'PASS' : 'INDEPENDENT';
-      const tokens = (data.total_tokens_consumed || 0).toLocaleString();
+      const metrics = data.metrics || data;
+      const productive = metrics.productive_attempt_count ?? (data.productive_attempt_ratio ? 1 : 0);
+      const noProgress = metrics.no_progress_attempt_count ?? 0;
+      const total = productive + noProgress;
+      const ratio = total > 0 ? ((productive / total) * 100).toFixed(0) + '%' : (data.productive_attempt_ratio !== undefined ? (Number(data.productive_attempt_ratio) * 100).toFixed(0) + '%' : '100%');
+      const attempts = total > 0 ? total : (data.total_attempts ?? 1);
+      const reworks = metrics.corrective_retry_count ?? (data.rework_attempts ?? 0);
+      const model = data.primary_model || (data.provider_summary?.[0]?.provider || 'codex');
+      const reviewerModel = data.reviewer_model || (data.provider_summary?.[1]?.provider || 'antigravity');
+      const indStatus = data.reviewer_independence !== false ? 'PASS' : 'INDEPENDENT';
+      const selfHost = metrics.self_hosting_percentage !== undefined ? `${metrics.self_hosting_percentage.toFixed(0)}%` : '100%';
 
       container.innerHTML = `
         <div class="efficiency-kpi-grid">
           <div class="stat-card">
             <div class="stat-label">PRODUCTIVE ATTEMPTS</div>
             <div class="stat-value text-success">${escapeHtml(ratio)}</div>
-            <div class="stat-sub">${attempts} total attempts (${reworks} rework)</div>
+            <div class="stat-sub">${attempts} total attempts (${reworks} corrective retries)</div>
           </div>
           <div class="stat-card">
             <div class="stat-label">PRIMARY IMPLEMENTER</div>
@@ -848,17 +852,19 @@
             <div class="stat-sub">Independence: <strong class="text-success">${escapeHtml(indStatus)}</strong></div>
           </div>
           <div class="stat-card">
-            <div class="stat-label">TOKEN CONSUMPTION</div>
-            <div class="stat-value text-primary">${escapeHtml(tokens)}</div>
-            <div class="stat-sub">Telemetry tracked</div>
+            <div class="stat-label">SELF-HOSTING NATIVE</div>
+            <div class="stat-value text-primary">${escapeHtml(selfHost)}</div>
+            <div class="stat-sub">Telemetry verified</div>
           </div>
         </div>
         <div class="section-card" style="margin-top: 16px;">
           <h5 class="section-subtitle">Anti-Loop & Retry Telemetry</h5>
           <div class="overview-meta-grid" style="margin-top: 8px;">
-            <div class="meta-item"><span class="meta-label">Retry Budget Limit</span><span class="meta-val">${escapeHtml(data.retry_budget_limit || 3)}</span></div>
-            <div class="meta-item"><span class="meta-label">Same-SHA Retries</span><span class="meta-val">${escapeHtml(data.duplicate_sha_retries || 0)}</span></div>
-            <div class="meta-item"><span class="meta-label">Last Fact Update</span><span class="meta-val">${formatTimestamp(data.recorded_at || data.updated_at)}</span></div>
+            <div class="meta-item"><span class="meta-label">Same-SHA Retries</span><span class="meta-val">${escapeHtml(metrics.same_sha_retry_count || 0)}</span></div>
+            <div class="meta-item"><span class="meta-label">Same-SHA Suppressed</span><span class="meta-val">${escapeHtml(metrics.same_sha_retry_suppressed_count || 0)}</span></div>
+            <div class="meta-item"><span class="meta-label">Candidate Generations</span><span class="meta-val">${escapeHtml(metrics.candidate_generations_count || 1)}</span></div>
+            <div class="meta-item"><span class="meta-label">Reassignments</span><span class="meta-val">${escapeHtml(metrics.reassignments_count || 0)}</span></div>
+            <div class="meta-item"><span class="meta-label">Evaluated At</span><span class="meta-val">${formatTimestamp(data.evaluated_at || metrics.updated_at)}</span></div>
           </div>
         </div>
       `;
