@@ -66,6 +66,15 @@ class ProjectModel(Base):
         String(32), default="READY_FOR_WORK", nullable=False
     )
     onboarding_reasons: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    auto_prepare: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default="true", nullable=False
+    )
+    auto_admit: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default="true", nullable=False
+    )
+    max_concurrent_jobs: Mapped[int] = mapped_column(
+        Integer, default=1, server_default="1", nullable=False
+    )
     status: Mapped[str] = mapped_column(String(32), default="ACTIVE", nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False

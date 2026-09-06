@@ -120,9 +120,29 @@ class IntakeService:
             timestamp=now,
         )
         self.uow.events.save(event)
-        self.uow.commit()
-
         logger.info("Created backlog item '%s' for project '%s'", item_key, project_id)
+
+        # Auto-prepare if project policy enables auto_prepare
+        if getattr(project, "auto_prepare", True):
+            logger.info("Auto-preparing backlog item '%s' for project '%s'", item_key, project_id)
+            prep_result = self.prepare_work_item(project_id, item_key, operator_email=operator_email)
+            auto_prep_event = Event(
+                event_type=EventType.WORK_ITEM_AUTO_PREPARED,
+                project_id=project_id,
+                change_id=item.openspec_change_name,
+                payload={
+                    "project_id": project_id,
+                    "item_key": item_key,
+                    "readiness_state": prep_result.readiness_state.value,
+                    "status": prep_result.item.status.value,
+                    "operator_email": operator_email,
+                },
+                timestamp=utc_now(),
+            )
+            self.uow.events.save(auto_prep_event)
+            self.uow.commit()
+            return prep_result.item
+
         return item
 
     def update_work_item(
@@ -303,23 +323,39 @@ class IntakeService:
         issue_number = item.github_issue_number
         issue_url = item.github_issue_url
         if not issue_number:
-            issue_res = self.github_adapter.create_issue(
-                repository=project.repository,
-                title=f"[{change_name}] {item.title}",
-                body=f"## Work Item: {item.title}\n\n{item.description}\n\n**OpenSpec Change:** `{change_name}`",
-                labels=[f"priority:{item.priority.value.lower()}"],
-            )
-            issue_number = issue_res.get("number")
-            issue_url = issue_res.get("html_url")
+            try:
+                issue_res = self.github_adapter.create_issue(
+                    repository=project.repository,
+                    title=f"[{change_name}] {item.title}",
+                    body=f"## Work Item: {item.title}\n\n{item.description}\n\n**OpenSpec Change:** `{change_name}`",
+                    labels=[f"priority:{item.priority.value.lower()}"],
+                )
+                issue_number = issue_res.get("number")
+                issue_url = issue_res.get("html_url")
+            except Exception as exc:
+                logger.warning(
+                    "Could not create remote GitHub issue for '%s' in '%s': %s",
+                    change_name,
+                    project.repository,
+                    exc,
+                )
 
         # 4. Sync GitHub Project v2 item if configured
         project_item_id = item.github_project_item_id
         if not project_item_id and project.github_project_number and issue_url:
-            project_item_id = self.github_adapter.add_issue_to_project(
-                project_number=project.github_project_number,
-                owner=project.github_project_owner or "silverberdi",
-                issue_url=issue_url,
-            )
+            try:
+                project_item_id = self.github_adapter.add_issue_to_project(
+                    project_number=project.github_project_number,
+                    owner=project.github_project_owner or "silverberdi",
+                    issue_url=issue_url,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Could not sync issue '%s' to GitHub Project %s: %s",
+                    issue_url,
+                    project.github_project_number,
+                    exc,
+                )
 
         # 5. Create or sync durable ProjectBinding
         binding = self.uow.bindings.get_by_project_and_change(project_id, change_name)

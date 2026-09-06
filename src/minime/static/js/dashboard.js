@@ -1953,6 +1953,35 @@
   // Backlog Operations
   async function fetchBacklog(projectId) {
     try {
+      // Fetch project details for admission policy
+      try {
+        const projResp = await fetch(`/api/v1/projects/${encodeURIComponent(projectId)}`);
+        if (projResp.ok) {
+          const proj = await projResp.json();
+          const autoPrep = proj.auto_prepare ?? true;
+          const autoAdmit = proj.auto_admit ?? true;
+          const maxConc = proj.max_concurrent_jobs ?? 1;
+
+          const badgePrep = document.getElementById('badgeAutoPrepare');
+          const badgeAdmit = document.getElementById('badgeAutoAdmit');
+          const badgeConc = document.getElementById('badgeConcurrency');
+
+          if (badgePrep) {
+            badgePrep.textContent = `Auto-Prepare: ${autoPrep ? 'ON' : 'OFF'}`;
+            badgePrep.className = `badge ${autoPrep ? 'badge-info' : 'badge-muted'}`;
+          }
+          if (badgeAdmit) {
+            badgeAdmit.textContent = `Auto-Admit: ${autoAdmit ? 'ON' : 'OFF'}`;
+            badgeAdmit.className = `badge ${autoAdmit ? 'badge-info' : 'badge-muted'}`;
+          }
+          if (badgeConc) {
+            badgeConc.textContent = `Concurrency: ${maxConc}`;
+          }
+        }
+      } catch (e) {
+        // Non-blocking project info fetch
+      }
+
       const resp = await fetch(`/api/v1/projects/${encodeURIComponent(projectId)}/backlog`);
       if (resp.status === 401) {
         showLoginUI();

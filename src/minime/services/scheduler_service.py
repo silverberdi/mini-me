@@ -293,7 +293,16 @@ class SchedulerService:
                 None,
             )
 
-        # 8. Concurrency checks
+        # 8. Project policy checks
+        if not getattr(project, "auto_admit", True):
+            return (
+                AdmissionDecision.REFUSED,
+                AdmissionRefusalCode.MANUAL_ADMISSION_POLICY,
+                f"Project '{project_id}' policy requires manual admission ('auto_admit' is disabled).",
+                None,
+            )
+
+        # 9. Concurrency checks
         active_runs = self.uow.orchestration_runs.list_runs(is_active=True)
 
         # Same-change exclusivity check
@@ -307,15 +316,15 @@ class SchedulerService:
                 )
 
         # Per-project concurrency check
-        if self.one_active_implementation_per_project:
-            project_active = [r for r in active_runs if r.project_id == project_id]
-            if project_active:
-                return (
-                    AdmissionDecision.REFUSED,
-                    AdmissionRefusalCode.PROJECT_CONCURRENCY_LIMIT,
-                    f"Project '{project_id}' already has active run '{project_active[0].run_id}'.",
-                    None,
-                )
+        max_project_jobs = getattr(project, "max_concurrent_jobs", 1)
+        project_active = [r for r in active_runs if r.project_id == project_id]
+        if len(project_active) >= max_project_jobs:
+            return (
+                AdmissionDecision.REFUSED,
+                AdmissionRefusalCode.PROJECT_CONCURRENCY_LIMIT,
+                f"Project '{project_id}' concurrency limit reached ({len(project_active)}/{max_project_jobs} active runs).",
+                None,
+            )
 
         # Global concurrency check
         if len(active_runs) >= self.max_global_jobs:

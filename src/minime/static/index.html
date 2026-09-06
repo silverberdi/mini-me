@@ -119,6 +119,11 @@
           <div class="backlog-toolbar-left">
             <h2 class="view-title">Product Backlog</h2>
             <span class="text-muted" id="backlogProjectDisplay">Project: mini-me</span>
+            <div class="policy-indicator-group" id="backlogPolicyGroup" style="display: inline-flex; gap: 6px; margin-left: 12px; font-size: 0.75rem;">
+              <span class="badge badge-info" id="badgeAutoPrepare" title="Automatic intake artifact generation and DoR evaluation">Auto-Prepare: ON</span>
+              <span class="badge badge-info" id="badgeAutoAdmit" title="Automatic admission of READY work to scheduler">Auto-Admit: ON</span>
+              <span class="badge badge-muted" id="badgeConcurrency" title="Maximum concurrent autonomous jobs for project">Concurrency: 1</span>
+            </div>
           </div>
           <div class="backlog-toolbar-actions">
             <input type="search" id="backlogSearchInput" class="search-input" placeholder="Search backlog items..." aria-label="Search backlog items">

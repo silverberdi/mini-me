@@ -220,6 +220,9 @@ def project_model_to_domain(model: ProjectModel) -> Project:
         if model.onboarding_status
         else ProjectOnboardingStatus.READY_FOR_WORK,
         onboarding_reasons=model.onboarding_reasons or [],
+        auto_prepare=getattr(model, "auto_prepare", True),
+        auto_admit=getattr(model, "auto_admit", True),
+        max_concurrent_jobs=getattr(model, "max_concurrent_jobs", 1),
         status=ProjectStatus(model.status),
         created_at=model.created_at,
         updated_at=model.updated_at,
@@ -834,6 +837,9 @@ class PostgresProjectRepository(ProjectRepositoryInterface):
             existing.github_project_owner = project.github_project_owner
             existing.onboarding_status = project.onboarding_status.value
             existing.onboarding_reasons = project.onboarding_reasons
+            existing.auto_prepare = project.auto_prepare
+            existing.auto_admit = project.auto_admit
+            existing.max_concurrent_jobs = project.max_concurrent_jobs
             existing.status = project.status.value
             existing.updated_at = project.updated_at
         else:
@@ -857,6 +863,9 @@ class PostgresProjectRepository(ProjectRepositoryInterface):
                 github_project_owner=project.github_project_owner,
                 onboarding_status=project.onboarding_status.value,
                 onboarding_reasons=project.onboarding_reasons,
+                auto_prepare=project.auto_prepare,
+                auto_admit=project.auto_admit,
+                max_concurrent_jobs=project.max_concurrent_jobs,
                 status=project.status.value,
                 created_at=project.created_at,
                 updated_at=project.updated_at,

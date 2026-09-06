@@ -31,7 +31,7 @@ def verify_physical_schema_invariants(engine: Engine) -> SchemaInvariantResult:
     """
     from minime.db.models import Base
 
-    expected_revision = "019_work_intake_and_backlog_items"
+    expected_revision = "020_autonomous_intake_admission_policy"
     inspector = inspect(engine)
 
     tables = set(inspector.get_table_names())
