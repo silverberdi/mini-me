@@ -563,15 +563,8 @@ class SchedulerService:
                 or "codex"
             )
 
-            # Check capacity window
-            window = self.uow.capacity_windows.get_latest_for_provider(provider)
-            if window and window.capacity_reset_at and now >= window.capacity_reset_at:
-                health = self.provider_health_service.get_health(provider)
-                if health.status == ProviderHealthStatus.EXHAUSTED:
-                    health.status = ProviderHealthStatus.AVAILABLE
-                    self.uow.provider_health.save(health)
-                    self.uow.commit()
-
+            # Reset timestamps are estimates, not evidence of actual recovery.
+            # Only a successful provider operation/probe may restore availability.
             health = self.provider_health_service.get_health(provider)
             is_available = health.status in (
                 ProviderHealthStatus.AVAILABLE,
@@ -586,7 +579,7 @@ class SchedulerService:
                     run.change_name,
                 )
                 try:
-                    resumed_run = self.orchestration_service.resume(
+                    self.orchestration_service.resume(
                         run.run_id,
                         project_root=self.project_root,
                     )

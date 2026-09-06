@@ -1,0 +1,42 @@
+# Tasks: Generic Provider Capacity Recovery & Drain Policy
+
+## Phase 1: Core Implementation for Generic Provider Capacity Recovery & Drain Policy
+- [ ] Implement: ============================================================
+- [ ] Implement: ACCEPTANCE CRITERIA
+- [ ] Implement: ============================================================
+- [x] Implement: Scheduler contains no Codex-specific recovery branching
+- [x] Implement: Scheduler contains no Antigravity-specific recovery branching
+- [x] Implement: Provider-specific recovery behavior is isolated behind provider adapters
+- [ ] Implement: Codex temporarily_unavailable is periodically re-probed
+- [ ] Implement: Antigravity temporarily_unavailable is periodically re-probed
+- [x] Implement: Fake/test provider uses the same generic recovery path
+- [ ] Implement: Positive probe transitions provider to available automatically
+- [x] Implement: Negative probe preserves temporarily_unavailable with fresh evidence
+- [ ] Implement: Provider probes create 0 Runs
+- [ ] Implement: Provider probes create 0 Jobs
+- [ ] Implement: Provider probes consume 0 implementation retry budget
+- [ ] Implement: Known expected reset is persisted and visible
+- [ ] Implement: AUTO_DISCOVERED reset source is supported
+- [ ] Implement: OPERATOR_REPORTED reset source is supported
+- [ ] Implement: Operator can enter or update expected provider return time
+- [ ] Implement: Unknown reset can enter bounded WAITING_CAPACITY
+- [ ] Implement: Blind automatic wait is bounded to 2 hours
+- [ ] Implement: After blind-wait threshold explicit operator decisions are surfaced
+- [ ] Implement: Keep Waiting does not consume implementation retry budget
+- [ ] Implement: Drain provider never starts BACKLOG work
+- [ ] Implement: Drain provider never starts READY work
+- [ ] Implement: Drain provider never starts QUEUED not-yet-started work
+- [ ] Implement: Drain eligibility requires material execution already started
+- [x] Implement: Drain handoff preserves valid existing work and evidence
+- [ ] Implement: Drain handoff continues the same Run/Job lifecycle
+- [ ] Implement: Drain does not create duplicate Run/Job/backlog item
+- [ ] Implement: Original provider recovery can resume waiting work automatically when safe
+- [ ] Implement: PWA exposes provider status, reason, wait timing, probes, reset and drain eligibility
+- [ ] Implement: TUI exposes equivalent provider-capacity state
+- [ ] Implement: PWA, TUI and PostgreSQL agree
+- [ ] Implement: Provider recovery and operator decisions are auditable
+- [ ] Implement: Current Codex behavior works through generic provider contract
+- [ ] Implement: Current Antigravity behavior works through generic provider contract
+- [ ] Implement: Future provider replacement requires adapter implementation, not scheduler rewrite
+- [ ] Implement: Real production validation demonstrates recovery without human provider-state repair
+- [x] Verify automated checks and deterministic tests pass

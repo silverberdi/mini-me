@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable, Coroutine
 from datetime import UTC
@@ -244,8 +245,8 @@ class ProviderHealthService:
             if reset_at.tzinfo is None:
                 reset_at = reset_at.replace(tzinfo=UTC)
             is_reset_elapsed = reset_at <= now
-        elif not latest_window:
-            # No capacity window recorded, eligible to probe
+        else:
+            # Unknown reset timing must not permanently prevent recovery.
             is_reset_elapsed = True
 
         if is_reset_elapsed and probe_fn:
@@ -253,7 +254,7 @@ class ProviderHealthService:
                 f"Provider {provider} reset window elapsed or probe eligible. Executing availability probe."
             )
             try:
-                probe_success = await probe_fn()
+                probe_success = await asyncio.wait_for(probe_fn(), timeout=30)
             except Exception as e:
                 logger.warning(f"Availability probe for {provider} raised exception: {e}")
                 probe_success = False
@@ -267,6 +268,7 @@ class ProviderHealthService:
                     status=ProviderHealthStatus.AVAILABLE.value,
                     result_class=ProviderResultClass.SUCCESS.value,
                     error_summary="Recovered via successful capacity reset probe",
+                    consecutive_failures=0,
                 )
                 self.uow.events.save(
                     Event(
