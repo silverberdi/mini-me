@@ -590,21 +590,28 @@ class IntakeService:
             is_archived = (
                 change_name in archived_change_names
                 or item.item_key in archived_change_names
-                or any(change_name in a for a in archived_change_names)
+                or any(
+                    a == change_name
+                    or a.endswith(f"-{change_name}")
+                    or a == item.item_key
+                    or a.endswith(f"-{item.item_key}")
+                    for a in archived_change_names
+                )
             )
-            is_done = (change_rec and change_rec.status == ChangeStatus.DONE) or is_archived
-
-            new_status = item.status
-            new_readiness = item.readiness_state
-            new_run_id = item.run_id
-
-            if is_done or (
+            is_run_completed = bool(
                 latest_run
                 and (
                     latest_run.current_stage == OrchestrationStage.COMPLETED
                     or latest_run.stop_outcome == OrchestrationStopOutcome.COMPLETED
                 )
-            ):
+            )
+            is_done = is_archived or is_run_completed or (change_rec and change_rec.status == ChangeStatus.DONE and is_archived)
+
+            new_status = item.status
+            new_readiness = item.readiness_state
+            new_run_id = item.run_id
+
+            if is_done:
                 new_status = WorkItemStatus.COMPLETED
                 new_readiness = ReadinessState.READY
             elif latest_run:
