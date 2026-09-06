@@ -52,6 +52,7 @@ def session_factory() -> sessionmaker[Session]:
             "017_auth_sessions_and_operators",
             "018_widen_change_id_on_events",
             "019_work_intake_and_backlog_items",
+            "020_autonomous_intake_admission_policy",
         )
     factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     yield factory

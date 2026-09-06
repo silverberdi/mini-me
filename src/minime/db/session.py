@@ -24,6 +24,9 @@ class SchemaInvariantResult:
     reason: str | None = None
 
 
+EXPECTED_ALEMBIC_HEAD = "020_autonomous_intake_admission_policy"
+
+
 def verify_physical_schema_invariants(engine: Engine) -> SchemaInvariantResult:
     """Verify the physical PostgreSQL schema against SQLAlchemy metadata.
 
@@ -31,7 +34,7 @@ def verify_physical_schema_invariants(engine: Engine) -> SchemaInvariantResult:
     """
     from minime.db.models import Base
 
-    expected_revision = "020_autonomous_intake_admission_policy"
+    expected_revision = EXPECTED_ALEMBIC_HEAD
     inspector = inspect(engine)
 
     tables = set(inspector.get_table_names())

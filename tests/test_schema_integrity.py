@@ -1,7 +1,7 @@
 from unittest.mock import MagicMock, patch
 
 from minime.db.models import Base
-from minime.db.session import verify_physical_schema_invariants
+from minime.db.session import EXPECTED_ALEMBIC_HEAD, verify_physical_schema_invariants
 
 
 def _engine_with_schema(missing_table=None, missing_column=None):
@@ -16,7 +16,7 @@ def _engine_with_schema(missing_table=None, missing_column=None):
         if not (missing_column and table == missing_column[0] and c.name == missing_column[1])
     ]
     connection = MagicMock()
-    connection.execute.return_value.scalar.return_value = "019_work_intake_and_backlog_items"
+    connection.execute.return_value.scalar.return_value = EXPECTED_ALEMBIC_HEAD
     engine.connect.return_value.__enter__.return_value = connection
 
     return engine, inspector
