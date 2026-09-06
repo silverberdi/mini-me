@@ -27,6 +27,7 @@ from minime.domain.models import (
     OrchestrationRun,
     Project,
     ProviderEfficiencyMetrics,
+    utc_now,
 )
 from minime.logging import redact_secrets
 from minime.services.capacity_lifecycle_service import CapacityLifecycleService
@@ -108,6 +109,11 @@ class ActiveExecutionDTO(BaseModel):
     run_id: str
     job_id: str | None = None
     stage: str
+    stop_outcome: str | None = None
+    stop_reason: str | None = None
+    waiting_since: str | None = None
+    last_capacity_check: str | None = None
+    next_capacity_check: str | None = None
     current_executor: str | None = None
     generation: int = 1
     candidate_sha: str | None = None
@@ -477,6 +483,17 @@ class OperationsDashboardService:
                     if job_for_run
                     else None
                 )
+                is_waiting = r.stop_outcome in {
+                    OrchestrationStopOutcome.WAITING_CAPACITY,
+                    OrchestrationStopOutcome.WAITING_EXTERNAL,
+                }
+                progress_text = "IN_PROGRESS"
+                waiting_since_str = None
+                if is_waiting:
+                    progress_text = f"{r.stop_outcome.value}: {r.stop_reason or 'Awaiting provider capacity'}"
+                    waiting_val = r.stop_details.get("waiting_since") if r.stop_details else None
+                    waiting_since_str = _format_dt(waiting_val) if waiting_val else _format_dt(r.updated_at)
+
                 active_executions.append(
                     ActiveExecutionDTO(
                         project_id=r.project_id,
@@ -484,13 +501,18 @@ class OperationsDashboardService:
                         run_id=r.run_id,
                         job_id=r.active_job_id,
                         stage=r.current_stage.value if r.current_stage else "UNKNOWN",
+                        stop_outcome=r.stop_outcome.value if r.stop_outcome else None,
+                        stop_reason=r.stop_reason,
+                        waiting_since=waiting_since_str,
+                        last_capacity_check=_format_dt(r.updated_at),
+                        next_capacity_check=_format_dt(utc_now()),
                         current_executor=executor,
                         generation=r.current_generation,
                         candidate_sha=r.current_candidate_sha,
                         candidate_sha_short=_short_sha(r.current_candidate_sha),
                         started_at=_format_dt(r.created_at),
                         updated_at=_format_dt(r.updated_at),
-                        latest_progress="IN_PROGRESS",
+                        latest_progress=progress_text,
                     )
                 )
             elif (
@@ -867,6 +889,11 @@ class OperationsDashboardService:
             return "NOT_READY"
 
         if run.is_active:
+            if run.stop_outcome in {
+                OrchestrationStopOutcome.WAITING_CAPACITY,
+                OrchestrationStopOutcome.WAITING_EXTERNAL,
+            }:
+                return "WAITING"
             return "RUNNING"
 
         # 2. Run terminal / merge states

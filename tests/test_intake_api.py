@@ -7,19 +7,33 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 from tests.conftest import InMemoryPersistenceUnitOfWork, ReadinessGitHubStub
 
-from minime.api.app import app, get_github_adapter, get_uow
+from minime.api.app import (
+    app,
+    get_github_adapter,
+    get_intake_service,
+    get_onboarding_service,
+    get_uow,
+)
 from minime.domain.models import Project
+from minime.services.intake_service import IntakeService
+from minime.services.project_onboarding_service import ProjectOnboardingService
 
 
 def test_api_onboard_project(in_memory_uow: InMemoryPersistenceUnitOfWork, tmp_path: Path) -> None:
-    app.dependency_overrides[get_uow] = lambda: in_memory_uow
-    app.dependency_overrides[get_github_adapter] = lambda: ReadinessGitHubStub()
-    client = TestClient(app)
-
     repo_dir = tmp_path / "api-repo"
     repo_dir.mkdir()
+    (repo_dir / "README.md").write_text("# API Repo\nA test repository for onboarding.\n")
+    (repo_dir / "openspec").mkdir()
     (repo_dir / "docs").mkdir()
     (repo_dir / "docs" / "ROADMAP.md").write_text("# Roadmap\n- 030-feature: Feature A\n")
+
+    github_stub = ReadinessGitHubStub()
+    app.dependency_overrides[get_uow] = lambda: in_memory_uow
+    app.dependency_overrides[get_github_adapter] = lambda: github_stub
+    app.dependency_overrides[get_onboarding_service] = lambda: ProjectOnboardingService(
+        in_memory_uow, project_root=repo_dir, github_adapter=github_stub
+    )
+    client = TestClient(app)
 
     resp = client.post(
         "/api/v1/projects/onboard",
@@ -43,8 +57,15 @@ def test_api_onboard_project(in_memory_uow: InMemoryPersistenceUnitOfWork, tmp_p
 def test_api_backlog_crud_and_lifecycle(
     in_memory_uow: InMemoryPersistenceUnitOfWork, tmp_path: Path
 ) -> None:
+    repo_dir = tmp_path / "api-repo"
+    repo_dir.mkdir()
+
+    github_stub = ReadinessGitHubStub()
     app.dependency_overrides[get_uow] = lambda: in_memory_uow
-    app.dependency_overrides[get_github_adapter] = lambda: ReadinessGitHubStub()
+    app.dependency_overrides[get_github_adapter] = lambda: github_stub
+    app.dependency_overrides[get_intake_service] = lambda: IntakeService(
+        in_memory_uow, project_root=repo_dir, github_adapter=github_stub
+    )
     client = TestClient(app)
 
     project = Project(

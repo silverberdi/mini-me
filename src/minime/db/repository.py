@@ -1091,6 +1091,8 @@ class PostgresJobRepository(JobRepositoryInterface):
     VALID_TRANSITIONS: dict[JobStatus, set[JobStatus]] = {
         JobStatus.QUEUED: {
             JobStatus.RUNNING,
+            JobStatus.CHECKS_RUNNING,
+            JobStatus.CHECKS_PASSED,
             JobStatus.WAITING_CAPACITY,
             JobStatus.NEEDS_HUMAN,
             JobStatus.FAILED,
@@ -1120,6 +1122,7 @@ class PostgresJobRepository(JobRepositoryInterface):
             JobStatus.CANCELLED,
         },
         JobStatus.CHECKS_PASSED: {
+            JobStatus.RUNNING,
             JobStatus.REVIEW_RUNNING,
             JobStatus.CHECKS_RUNNING,
             JobStatus.CHECKS_PASSED,
@@ -1179,6 +1182,11 @@ class PostgresJobRepository(JobRepositoryInterface):
             JobStatus.CANCELLED,
         },
         JobStatus.READY_TO_MERGE: {
+            JobStatus.RUNNING,
+            JobStatus.CHECKS_RUNNING,
+            JobStatus.CHECKS_PASSED,
+            JobStatus.CHECKS_FAILED,
+            JobStatus.AUDIT_BLOCKED,
             JobStatus.POST_MERGE_RECONCILING,
             JobStatus.COMPLETED,
         },
@@ -1205,7 +1213,11 @@ class PostgresJobRepository(JobRepositoryInterface):
             JobStatus.FAILED,
             JobStatus.CANCELLED,
         },
-        JobStatus.FAILED: set(),
+        JobStatus.FAILED: {
+            JobStatus.RUNNING,
+            JobStatus.QUEUED,
+            JobStatus.CANCELLED,
+        },
         JobStatus.CANCELLED: set(),
     }
 

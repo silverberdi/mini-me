@@ -105,10 +105,12 @@ async def lifespan(app: FastAPI):
     try:
         sess = db_manager.sessionmaker()
         uow = PostgresPersistenceUnitOfWork(sess)
-        recovery_service = RestartRecoveryService(uow, project_root=".")
-        reconciled = recovery_service.reconcile_on_startup()
-        if reconciled:
-            logger.info(f"Reconciled {len(reconciled)} jobs on startup.")
+        # Startup: reconcile active jobs only if explicitly configured for API process
+        if os.environ.get("MINIME_ENABLE_API_STARTUP_RECOVERY", "false").lower() in ("true", "1"):
+            recovery_service = RestartRecoveryService(uow, project_root=".")
+            reconciled = recovery_service.reconcile_on_startup()
+            if reconciled:
+                logger.info(f"Reconciled {len(reconciled)} jobs on API startup.")
 
         # Seed authorized operators from configuration or environment
         try:
@@ -207,6 +209,31 @@ def get_github_adapter() -> GitHubAdapter:
 
 
 GitHubAdapterDep = Annotated[GitHubAdapter, Depends(get_github_adapter)]
+
+
+def get_onboarding_service(
+    uow: UowDep, github_adapter: GitHubAdapterDep
+) -> ProjectOnboardingService:
+    return ProjectOnboardingService(uow, github_adapter=github_adapter)
+
+
+OnboardingServiceDep = Annotated[ProjectOnboardingService, Depends(get_onboarding_service)]
+
+
+def get_context_service(uow: UowDep) -> ContextDiscoveryService:
+    return ContextDiscoveryService(uow)
+
+
+ContextServiceDep = Annotated[ContextDiscoveryService, Depends(get_context_service)]
+
+
+def get_intake_service(
+    uow: UowDep, github_adapter: GitHubAdapterDep
+) -> IntakeService:
+    return IntakeService(uow, github_adapter=github_adapter)
+
+
+IntakeServiceDep = Annotated[IntakeService, Depends(get_intake_service)]
 
 
 PUBLIC_EXEMPT_PATHS = {
@@ -552,13 +579,11 @@ def get_project(
 @app.post("/api/v1/projects/onboard", status_code=status.HTTP_201_CREATED, tags=["projects"])
 def onboard_project_endpoint(
     req: ProjectOnboardingInput,
-    uow: UowDep,
     request: Request,
-    github_adapter: GitHubAdapterDep,
+    onboarding_service: OnboardingServiceDep,
 ) -> ProjectOnboardingResult:
     """Onboard an external project with repository validation and context discovery."""
     operator_email = getattr(request.state, "operator_email", "operator")
-    onboarding_service = ProjectOnboardingService(uow, github_adapter=github_adapter)
     try:
         return onboarding_service.onboard_project(req, operator_email=operator_email)
     except ValueError as e:
@@ -568,10 +593,9 @@ def onboard_project_endpoint(
 @app.get("/api/v1/projects/{project_id}/context", tags=["projects"])
 def get_project_context_endpoint(
     project_id: str,
-    uow: UowDep,
+    context_service: ContextServiceDep,
 ) -> ContextDiscoveryReport:
     """Get categorized context report (discovered facts, inferred structure, missing context)."""
-    context_service = ContextDiscoveryService(uow)
     try:
         return context_service.discover_context(project_id)
     except ValueError as e:
@@ -581,10 +605,9 @@ def get_project_context_endpoint(
 @app.post("/api/v1/projects/{project_id}/context/discover", tags=["projects"])
 def discover_project_context_endpoint(
     project_id: str,
-    uow: UowDep,
+    context_service: ContextServiceDep,
 ) -> ContextDiscoveryReport:
     """Trigger fresh context and backlog discovery."""
-    context_service = ContextDiscoveryService(uow)
     try:
         return context_service.discover_context(project_id)
     except ValueError as e:
@@ -617,13 +640,11 @@ def list_backlog_items_endpoint(
 def create_backlog_item_endpoint(
     project_id: str,
     req: WorkItemCreateInput,
-    uow: UowDep,
     request: Request,
-    github_adapter: GitHubAdapterDep,
+    intake_service: IntakeServiceDep,
 ) -> BacklogItem:
     """Create a new work item in the backlog."""
     operator_email = getattr(request.state, "operator_email", "operator")
-    intake_service = IntakeService(uow, github_adapter=github_adapter)
     try:
         return intake_service.create_work_item(project_id, req, operator_email=operator_email)
     except ValueError as e:
@@ -651,13 +672,11 @@ def update_backlog_item_endpoint(
     project_id: str,
     item_key: str,
     req: WorkItemUpdateInput,
-    uow: UowDep,
     request: Request,
-    github_adapter: GitHubAdapterDep,
+    intake_service: IntakeServiceDep,
 ) -> BacklogItem:
     """Update title, description, priority, or criteria of a backlog item."""
     operator_email = getattr(request.state, "operator_email", "operator")
-    intake_service = IntakeService(uow, github_adapter=github_adapter)
     try:
         return intake_service.update_work_item(
             project_id, item_key, req, operator_email=operator_email
@@ -670,13 +689,11 @@ def update_backlog_item_endpoint(
 def prepare_backlog_item_endpoint(
     project_id: str,
     item_key: str,
-    uow: UowDep,
     request: Request,
-    github_adapter: GitHubAdapterDep,
+    intake_service: IntakeServiceDep,
 ) -> WorkItemPrepareResult:
     """Prepare canonical execution artifacts (GitHub Issue, Project Item, OpenSpec change)."""
     operator_email = getattr(request.state, "operator_email", "operator")
-    intake_service = IntakeService(uow, github_adapter=github_adapter)
     try:
         return intake_service.prepare_work_item(project_id, item_key, operator_email=operator_email)
     except ValueError as e:
@@ -688,13 +705,11 @@ def answer_backlog_item_question_endpoint(
     project_id: str,
     item_key: str,
     req: WorkItemAnswerInput,
-    uow: UowDep,
     request: Request,
-    github_adapter: GitHubAdapterDep,
+    intake_service: IntakeServiceDep,
 ) -> BacklogItem:
     """Answer a NEEDS_HUMAN question to unblock preparation and reach READY."""
     operator_email = getattr(request.state, "operator_email", "operator")
-    intake_service = IntakeService(uow, github_adapter=github_adapter)
     try:
         return intake_service.answer_human_question(
             project_id, item_key, req, operator_email=operator_email
@@ -707,13 +722,11 @@ def answer_backlog_item_question_endpoint(
 def start_backlog_item_endpoint(
     project_id: str,
     item_key: str,
-    uow: UowDep,
     request: Request,
-    github_adapter: GitHubAdapterDep,
+    intake_service: IntakeServiceDep,
 ) -> BacklogItem:
     """Start execution of a READY work item through the autonomous scheduler."""
     operator_email = getattr(request.state, "operator_email", "operator")
-    intake_service = IntakeService(uow, github_adapter=github_adapter)
     try:
         return intake_service.start_work_item(project_id, item_key, operator_email=operator_email)
     except ValueError as e:
@@ -728,13 +741,11 @@ def start_backlog_item_endpoint(
 def delete_backlog_item_endpoint(
     project_id: str,
     item_key: str,
-    uow: UowDep,
     request: Request,
-    github_adapter: GitHubAdapterDep,
+    intake_service: IntakeServiceDep,
 ) -> Response:
     """Cancel / remove a backlog item."""
     operator_email = getattr(request.state, "operator_email", "operator")
-    intake_service = IntakeService(uow, github_adapter=github_adapter)
     intake_service.delete_work_item(project_id, item_key, operator_email=operator_email)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

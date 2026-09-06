@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
@@ -21,8 +22,9 @@ class ChecksRunResult:
 
 
 class ChecksRunner:
-    def __init__(self, output_limit: int = 4000):
+    def __init__(self, output_limit: int = 4000, timeout_seconds: int = 300):
         self.output_limit = output_limit
+        self.timeout_seconds = timeout_seconds
 
     async def run(
         self,
@@ -154,6 +156,7 @@ class ChecksRunner:
                 cmd_to_run = f'{command} -o pythonpath=". src"'
 
             start = asyncio.get_running_loop().time()
+            proc = None
             try:
                 proc = await asyncio.create_subprocess_shell(
                     cmd_to_run,
@@ -161,15 +164,39 @@ class ChecksRunner:
                     env=env,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    start_new_session=True,
                 )
-                stdout, stderr = await proc.communicate()
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=self.timeout_seconds
+                )
                 duration_ms = int((asyncio.get_running_loop().time() - start) * 1000)
                 output = (stdout + stderr).decode(errors="replace")
                 exit_code = proc.returncode or 0
+            except asyncio.TimeoutError:
+                duration_ms = int((asyncio.get_running_loop().time() - start) * 1000)
+                if proc and proc.returncode is None:
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except OSError:
+                        pass
+                output = f"Environment execution failure: Check timed out after {self.timeout_seconds}s"
+                exit_code = 124
             except Exception as err:
                 duration_ms = int((asyncio.get_running_loop().time() - start) * 1000)
+                if proc and proc.returncode is None:
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except OSError:
+                        pass
                 output = f"Environment execution failure: {err}"
                 exit_code = 127
+            except BaseException:
+                if proc and proc.returncode is None:
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except OSError:
+                        pass
+                raise
 
             snippet = redact_secrets(output)[-self.output_limit :]
             result = CheckResult(

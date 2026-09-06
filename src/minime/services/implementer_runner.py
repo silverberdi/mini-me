@@ -75,23 +75,43 @@ class CliImplementerRunner(ImplementerRunnerInterface):
             start_new_session=True,
         )
         timed_out = False
+        stdout = b""
+        stderr = b""
         try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(
-                    prompt_context.encode()
-                    if not self.profile or self.profile.prompt_transport == "stdin"
-                    else None
-                ),
-                timeout=timeout_seconds,
-            )
-        except asyncio.TimeoutError:
-            timed_out = True
-            os.killpg(proc.pid, signal.SIGTERM)
             try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=5)
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(
+                        prompt_context.encode()
+                        if not self.profile or self.profile.prompt_transport == "stdin"
+                        else None
+                    ),
+                    timeout=timeout_seconds,
+                )
             except asyncio.TimeoutError:
-                os.killpg(proc.pid, signal.SIGKILL)
-                stdout, stderr = await proc.communicate()
+                timed_out = True
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                except OSError:
+                    pass
+                try:
+                    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=5)
+                except (asyncio.TimeoutError, Exception):
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except OSError:
+                        pass
+                    stdout, stderr = await proc.communicate()
+        except BaseException:
+            if proc.returncode is None:
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                except OSError:
+                    pass
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+            raise
         duration_ms = int((asyncio.get_running_loop().time() - start) * 1000)
         return ImplementerResult(
             exit_code=proc.returncode if proc.returncode is not None else -1,

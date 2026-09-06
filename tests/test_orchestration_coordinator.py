@@ -11,6 +11,7 @@ from conftest import ReadinessGitHubStub, create_isolated_openspec_change
 from minime.domain.enums import (
     AuditFindingSeverity,
     AuditStatus,
+    ExecutionOutcome,
     ExternalActionStatus,
     HumanGate,
     JobStatus,
@@ -30,6 +31,7 @@ from minime.domain.models import (
     CheckResult,
     Event,
     Job,
+    JobAttempt,
     OrchestrationCandidate,
     OrchestrationRun,
     Project,
@@ -1674,3 +1676,93 @@ def test_strict_pr_adoption_fail_closed_on_missing_or_mismatched_remote_fields(
     )
     assert valid is True
     assert reason is None
+
+
+def test_coordinator_halts_on_failed_job_without_busy_loop(
+    setup_orchestration_environment, in_memory_uow
+):
+    """When a job is marked FAILED, drive_coordinator halts monotonically with NEEDS_HUMAN."""
+    env = setup_orchestration_environment
+    service = OrchestrationService(in_memory_uow, project_root=env["project_root"])
+    job = Job(
+        job_id="job-failed-test",
+        project_id=env["project_id"],
+        change_name=env["change_name"],
+        implementer_role="codex",
+        reviewer_role="antigravity",
+        status=JobStatus.FAILED,
+        error_message="Invalid job status transition: QUEUED -> CHECKS_PASSED.",
+    )
+    in_memory_uow.jobs.save(job)
+    run = OrchestrationRun(
+        run_id="run-failed-halt",
+        project_id=env["project_id"],
+        change_name=env["change_name"],
+        base_sha="base-sha",
+        active_job_id=job.job_id,
+        current_generation=1,
+        current_stage=OrchestrationStage.IMPLEMENTING,
+    )
+    in_memory_uow.orchestration_runs.save(run)
+
+    # Mock pipeline execute_queued_job to return the failed job
+    async def mock_execute(job_id, **kwargs):
+        return job
+
+    service.pipeline.execute_queued_job = mock_execute
+
+    final_run = service.drive_coordinator(run.run_id)
+    assert final_run.is_active is False
+    assert final_run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
+    assert "Invalid job status transition" in (final_run.stop_reason or "")
+
+
+def test_coordinator_halts_on_review_remediation_retry_budget_exhaustion(
+    setup_orchestration_environment, in_memory_uow
+):
+    """When review remediation is reached and attempts >= 2, coordinator stops with NEEDS_HUMAN."""
+    env = setup_orchestration_environment
+    service = OrchestrationService(in_memory_uow, project_root=env["project_root"])
+    job = Job(
+        job_id="job-review-exhausted",
+        project_id=env["project_id"],
+        change_name=env["change_name"],
+        implementer_role="codex",
+        reviewer_role="antigravity",
+        status=JobStatus.CHECKS_PASSED,
+        attempt_count=2,
+    )
+    in_memory_uow.jobs.save(job)
+    att1 = JobAttempt(
+        job_id=job.job_id,
+        attempt_number=1,
+        executor_role="codex",
+        model_identity="codex",
+        normalized_outcome=ExecutionOutcome.COMPLETED,
+    )
+    att2 = JobAttempt(
+        job_id=job.job_id,
+        attempt_number=2,
+        executor_role="codex",
+        model_identity="codex",
+        normalized_outcome=ExecutionOutcome.COMPLETED,
+    )
+    in_memory_uow.job_attempts.save(att1)
+    in_memory_uow.job_attempts.save(att2)
+
+    run = OrchestrationRun(
+        run_id="run-review-exhausted",
+        project_id=env["project_id"],
+        change_name=env["change_name"],
+        base_sha="base-sha",
+        active_job_id=job.job_id,
+        current_generation=1,
+        current_stage=OrchestrationStage.REVIEW_REMEDIATION,
+    )
+    in_memory_uow.orchestration_runs.save(run)
+
+    final_run = service.drive_coordinator(run.run_id)
+    assert final_run.is_active is False
+    assert final_run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
+    assert final_run.stop_details.get("code") == "REVIEW_REMEDIATION_EXHAUSTED"
+

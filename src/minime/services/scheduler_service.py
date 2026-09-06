@@ -14,6 +14,8 @@ from minime.domain.enums import (
     AdmissionDecision,
     AdmissionRefusalCode,
     ChangeStatus,
+    HumanGate,
+    JobStatus,
     OrchestrationStage,
     OrchestrationStopOutcome,
     ProjectStatus,
@@ -460,6 +462,145 @@ class SchedulerService:
             self.uow.commit()
             return AdmissionDecision.REFUSED, decision_record, None
 
+    def reconcile_waiting_runs(
+        self,
+        project_id: str | None = None,
+        drive_resumed: bool = False,
+        timeout_hours: float = 2.0,
+    ) -> list[str]:
+        """Re-evaluate active orchestration runs waiting for capacity or external environment.
+
+        Automatically resumes runs when capacity/environment becomes available,
+        or transitions to NEEDS_HUMAN when the bounded waiting timeout is exceeded.
+        Does not consume retry budget merely for waiting.
+        """
+        resumed_run_ids: list[str] = []
+        now = utc_now()
+
+        all_runs = self.uow.orchestration_runs.list_runs(project_id=project_id, is_active=True)
+        waiting_runs = [
+            r
+            for r in all_runs
+            if r.stop_outcome
+            in {
+                OrchestrationStopOutcome.WAITING_CAPACITY,
+                OrchestrationStopOutcome.WAITING_EXTERNAL,
+            }
+            and (project_id is None or r.project_id == project_id)
+        ]
+
+        for run in waiting_runs:
+            # 1. Determine waiting_since
+            waiting_since = None
+            if run.stop_details and "waiting_since" in run.stop_details:
+                try:
+                    val = run.stop_details["waiting_since"]
+                    if isinstance(val, str):
+                        waiting_since = datetime.fromisoformat(val)
+                    elif isinstance(val, datetime):
+                        waiting_since = val
+                except Exception:
+                    pass
+            if not waiting_since:
+                waiting_since = run.updated_at or run.created_at or now
+
+            # 2. Check bounded timeout
+            elapsed_seconds = max(0.0, (now - waiting_since).total_seconds())
+            if elapsed_seconds > (timeout_hours * 3600.0):
+                logger.warning(
+                    "Waiting capacity timeout (%.1fh) exceeded for run '%s' (%s). Escalating to NEEDS_HUMAN.",
+                    timeout_hours,
+                    run.run_id,
+                    run.change_name,
+                )
+                run.stop_outcome = OrchestrationStopOutcome.NEEDS_HUMAN
+                run.human_gate = HumanGate.NEEDS_HUMAN
+                run.is_active = False
+                run.stop_reason = (
+                    f"Waiting capacity timeout exceeded ({elapsed_seconds / 3600.0:.1f}h). "
+                    f"Operator intervention required."
+                )
+                details = dict(run.stop_details or {})
+                details["code"] = "WAITING_CAPACITY_TIMEOUT"
+                details["timed_out_at"] = now.isoformat()
+                run.stop_details = details
+                run.updated_at = now
+                self.uow.orchestration_runs.save(run)
+
+                if run.active_job_id:
+                    job = self.uow.jobs.get_by_id(run.active_job_id)
+                    if job and job.status in {
+                        JobStatus.WAITING_CAPACITY,
+                        JobStatus.RECOVERY_BLOCKED,
+                    }:
+                        job.status = JobStatus.NEEDS_HUMAN
+                        job.escalation_reason = run.stop_reason
+                        self.uow.jobs.save(job)
+                self.uow.commit()
+                continue
+
+            # 3. Check capacity restoration
+            if self.mode == SchedulerMode.WAIT:
+                logger.debug(
+                    "Scheduler in WAIT mode: skipping capacity wake-up for run '%s'.",
+                    run.run_id,
+                )
+                continue
+
+            project = self.uow.projects.get_by_id(run.project_id)
+            if not project:
+                continue
+
+            # Determine provider being awaited
+            provider = (
+                (run.stop_details.get("provider") if run.stop_details else None)
+                or (
+                    self.uow.jobs.get_by_id(run.active_job_id).waiting_provider
+                    if run.active_job_id
+                    else None
+                )
+                or project.implementer
+                or "codex"
+            )
+
+            # Check capacity window
+            window = self.uow.capacity_windows.get_latest_for_provider(provider)
+            if window and window.capacity_reset_at and now >= window.capacity_reset_at:
+                health = self.provider_health_service.get_health(provider)
+                if health.status == ProviderHealthStatus.EXHAUSTED:
+                    health.status = ProviderHealthStatus.AVAILABLE
+                    self.uow.provider_health.save(health)
+                    self.uow.commit()
+
+            health = self.provider_health_service.get_health(provider)
+            is_available = health.status in (
+                ProviderHealthStatus.AVAILABLE,
+                ProviderHealthStatus.DEGRADED,
+            )
+
+            if is_available:
+                logger.info(
+                    "Capacity restored for provider '%s'; auto-resuming waiting run '%s' (%s).",
+                    provider,
+                    run.run_id,
+                    run.change_name,
+                )
+                try:
+                    resumed_run = self.orchestration_service.resume(
+                        run.run_id,
+                        project_root=self.project_root,
+                    )
+                    resumed_run_ids.append(run.run_id)
+                except Exception as exc:
+                    logger.error(
+                        "Error auto-resuming waiting run '%s': %s",
+                        run.run_id,
+                        exc,
+                        exc_info=True,
+                    )
+
+        return resumed_run_ids
+
     def tick(
         self, project_id: str | None = None, drive_admitted: bool = False
     ) -> list[SchedulerDecisionRecord]:
@@ -490,6 +631,9 @@ class SchedulerService:
                         )
                 except Exception as exc:
                     logger.warning("Post-merge check failed for run '%s': %s", r.run_id, exc)
+
+        # 0.1 Check and re-evaluate runs waiting for capacity or external environment
+        self.reconcile_waiting_runs(project_id=project_id, drive_resumed=drive_admitted)
 
         # 1. Discover work items
         try:

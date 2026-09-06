@@ -305,3 +305,63 @@ def test_runtime_isolation_does_not_modify_openspec(in_memory_uow, tmp_path):
     # Content and mtime must remain identical
     assert proposal_path.read_text(encoding="utf-8") == initial_content
     assert proposal_path.stat().st_mtime_ns == initial_stat
+
+
+def test_readiness_evaluation_event_deduplication(in_memory_uow, tmp_path):
+    """Proves: Repeated readiness evaluations with no state change emit only one READINESS_EVALUATED event and metric fact."""
+    create_isolated_openspec_change(tmp_path, "dedup-change")
+
+    project = Project(
+        project_id="mini-me",
+        display_name="mini me",
+        repository="silverberdi/mini-me",
+        base_branch="main",
+        openspec_path="openspec",
+    )
+    in_memory_uow.projects.save(project)
+
+    binding = ProjectBinding(
+        project_id="mini-me",
+        repository="silverberdi/mini-me",
+        github_issue_number=1,
+        openspec_change_name="dedup-change",
+    )
+    in_memory_uow.bindings.save(binding)
+
+    readiness_service = ReadinessService(in_memory_uow, github_adapter=ReadinessGitHubStub())
+
+    # First evaluation emits event & metric fact
+    eval1 = readiness_service.evaluate_change_readiness(
+        project_id="mini-me",
+        change_name="dedup-change",
+        project_root=str(tmp_path),
+    )
+    assert eval1.is_ready is True
+
+    events_after_1 = in_memory_uow.events.list_events(change_id="dedup-change")
+    metrics_after_1 = in_memory_uow.metrics.list_facts(change_id="dedup-change")
+    assert len(events_after_1) == 1
+    assert len(metrics_after_1) == 1
+
+    # Second identical evaluation must NOT emit new event or metric fact
+    eval2 = readiness_service.evaluate_change_readiness(
+        project_id="mini-me",
+        change_name="dedup-change",
+        project_root=str(tmp_path),
+    )
+    assert eval2.is_ready is True
+
+    events_after_2 = in_memory_uow.events.list_events(change_id="dedup-change")
+    metrics_after_2 = in_memory_uow.metrics.list_facts(change_id="dedup-change")
+    assert len(events_after_2) == 1
+    assert len(metrics_after_2) == 1
+
+    # Third evaluation also deduplicated
+    eval3 = readiness_service.evaluate_change_readiness(
+        project_id="mini-me",
+        change_name="dedup-change",
+        project_root=str(tmp_path),
+    )
+    assert eval3.is_ready is True
+    assert len(in_memory_uow.events.list_events(change_id="dedup-change")) == 1
+    assert len(in_memory_uow.metrics.list_facts(change_id="dedup-change")) == 1

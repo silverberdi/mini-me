@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from minime.domain.enums import (
+    ChangeStatus,
     EventType,
     ExternalActionStatus,
     GitOperationStatus,
@@ -208,6 +209,17 @@ class RestartRecoveryService:
         if pending_handoff:
             job.current_executor = pending_handoff.to_executor
             self.uow.jobs.save(job)
+
+        # 2. Check if parent change is already terminal (DONE or CANCELLED)
+        change = self.uow.changes.get_by_name(job.project_id, job.change_name)
+        if change and change.status in {ChangeStatus.DONE, ChangeStatus.CANCELLED}:
+            logger.info(
+                f"Job '{job.job_id}' belongs to {change.status.value} change '{job.change_name}'; cancelling leftover job."
+            )
+            job.status = JobStatus.CANCELLED
+            job.error_message = f"Change is already in terminal state {change.status.value}."
+            self.uow.jobs.save(job)
+            return job
 
         if job.status == JobStatus.NEEDS_HUMAN:
             logger.info(f"Job '{job.job_id}' is NEEDS_HUMAN; retaining state for human review.")

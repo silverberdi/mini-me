@@ -29,6 +29,7 @@ from minime.services.orchestration_service import OrchestrationService
 from minime.services.project_service import ProjectService
 from minime.services.provider_health_service import ProviderHealthService
 from minime.services.readiness_service import ReadinessService
+from minime.services.restart_recovery_service import RestartRecoveryService
 from minime.services.scheduler_service import SchedulerService
 from minime.services.status_service import StatusService
 
@@ -738,6 +739,13 @@ def scheduler_run_cmd(
     import time
 
     try:
+        with db_manager.session() as init_session:
+            init_uow = PostgresPersistenceUnitOfWork(init_session)
+            recovery_service = RestartRecoveryService(init_uow, project_root=".")
+            reconciled = recovery_service.reconcile_on_startup()
+            if reconciled:
+                logger.info(f"Reconciled {len(reconciled)} jobs on scheduler startup.")
+
         while True:
             with db_manager.session() as session:
                 uow = PostgresPersistenceUnitOfWork(session)

@@ -329,18 +329,30 @@ class OrchestrationService:
         if run.stop_outcome == OrchestrationStopOutcome.WAITING_CAPACITY:
             project = self.uow.projects.get_by_id(run.project_id)
             if project:
-                health = self.pipeline.health_service.get_health(project.implementer)
-                if health.status == ProviderHealthStatus.AVAILABLE:
+                provider = (
+                    (run.stop_details.get("provider") if run.stop_details else None)
+                    or project.implementer
+                    or "codex"
+                )
+                health = self.pipeline.health_service.get_health(provider)
+                if health.status in (ProviderHealthStatus.AVAILABLE, ProviderHealthStatus.DEGRADED):
                     run.stop_outcome = None
                     run.human_gate = None
                     run.is_active = True
                     run.stop_reason = None
                     run.stop_details = {}
+                    if run.active_job_id:
+                        job = self.uow.jobs.get_by_id(run.active_job_id)
+                        if job and job.status == JobStatus.WAITING_CAPACITY:
+                            job.status = JobStatus.RUNNING
+                            job.capacity_block_reason = None
+                            job.waiting_provider = None
+                            self.uow.jobs.save(job)
                     self.uow.orchestration_runs.save(run)
                     self.uow.commit()
                 else:
                     logger.info(
-                        f"Resume for run '{run_id}' skipped: provider '{project.implementer}' still {health.status.value}."
+                        f"Resume for run '{run_id}' skipped: provider '{provider}' still {health.status.value}."
                     )
                     return run
 
@@ -350,6 +362,13 @@ class OrchestrationService:
             run.is_active = True
             run.stop_reason = None
             run.stop_details = {}
+            if run.active_job_id:
+                job = self.uow.jobs.get_by_id(run.active_job_id)
+                if job and job.status in {JobStatus.WAITING_CAPACITY, JobStatus.RECOVERY_BLOCKED}:
+                    job.status = JobStatus.RUNNING
+                    job.capacity_block_reason = None
+                    job.waiting_provider = None
+                    self.uow.jobs.save(job)
             self.uow.orchestration_runs.save(run)
             self.uow.commit()
 
@@ -1474,6 +1493,27 @@ class OrchestrationService:
                     )
                     break
 
+                if job.status in {
+                    JobStatus.FAILED,
+                    JobStatus.CANCELLED,
+                    JobStatus.NEEDS_HUMAN,
+                    JobStatus.RECOVERY_BLOCKED,
+                }:
+                    self._stop_run(
+                        run,
+                        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+                        human_gate=HumanGate.NEEDS_HUMAN,
+                        stop_reason=job.error_message
+                        or job.escalation_reason
+                        or f"Job execution entered terminal status '{job.status.value}'.",
+                        stop_details={
+                            "code": f"JOB_{job.status.value}",
+                            "status": job.status.value,
+                            "error": job.error_message,
+                        },
+                    )
+                    break
+
                 self._advance_stage(run, OrchestrationStage.EVALUATING_ATTEMPT)
 
             elif stage == OrchestrationStage.EVALUATING_ATTEMPT:
@@ -1500,6 +1540,26 @@ class OrchestrationService:
                         human_gate=HumanGate.NEEDS_HUMAN,
                         stop_reason=reason,
                         stop_details={"code": "RECOVERY_BLOCKED", "reason": reason},
+                    )
+                    break
+
+                if job.status in {
+                    JobStatus.FAILED,
+                    JobStatus.CANCELLED,
+                    JobStatus.NEEDS_HUMAN,
+                }:
+                    self._stop_run(
+                        run,
+                        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+                        human_gate=HumanGate.NEEDS_HUMAN,
+                        stop_reason=job.error_message
+                        or job.escalation_reason
+                        or f"Job in evaluation entered terminal status '{job.status.value}'.",
+                        stop_details={
+                            "code": f"JOB_{job.status.value}",
+                            "status": job.status.value,
+                            "error": job.error_message,
+                        },
                     )
                     break
 
@@ -1742,6 +1802,24 @@ class OrchestrationService:
                     self._advance_stage(run, OrchestrationStage.REVIEW_REMEDIATION)
 
             elif stage == OrchestrationStage.REVIEW_REMEDIATION:
+                job = self.uow.jobs.get_by_id(run.active_job_id)
+                attempts = self.uow.job_attempts.list_by_job(job.job_id) if job else []
+                if (
+                    not job
+                    or len(attempts) >= 2
+                    or job.status in {JobStatus.FAILED, JobStatus.NEEDS_HUMAN, JobStatus.CANCELLED}
+                ):
+                    self._stop_run(
+                        run,
+                        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+                        human_gate=HumanGate.NEEDS_HUMAN,
+                        stop_reason="Review remediation retry budget exhausted or job failed.",
+                        stop_details={
+                            "code": "REVIEW_REMEDIATION_EXHAUSTED",
+                            "attempt_count": len(attempts),
+                        },
+                    )
+                    break
                 # Review changes required -> route to continuation remediation attempt
                 self._advance_stage(run, OrchestrationStage.IMPLEMENTING)
 
@@ -1765,6 +1843,24 @@ class OrchestrationService:
                     self._advance_stage(run, OrchestrationStage.AUDIT_REMEDIATION)
 
             elif stage == OrchestrationStage.AUDIT_REMEDIATION:
+                job = self.uow.jobs.get_by_id(run.active_job_id)
+                attempts = self.uow.job_attempts.list_by_job(job.job_id) if job else []
+                if (
+                    not job
+                    or len(attempts) >= 2
+                    or job.status in {JobStatus.FAILED, JobStatus.NEEDS_HUMAN, JobStatus.CANCELLED}
+                ):
+                    self._stop_run(
+                        run,
+                        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+                        human_gate=HumanGate.NEEDS_HUMAN,
+                        stop_reason="Audit remediation retry budget exhausted or job failed.",
+                        stop_details={
+                            "code": "AUDIT_REMEDIATION_EXHAUSTED",
+                            "attempt_count": len(attempts),
+                        },
+                    )
+                    break
                 # Audit failed -> feed to continuation governance for corrective remediation
                 self._advance_stage(run, OrchestrationStage.IMPLEMENTING)
 
@@ -2715,7 +2811,14 @@ class OrchestrationService:
         run.stop_outcome = stop_outcome
         run.human_gate = human_gate
         run.stop_reason = stop_reason
-        run.stop_details = stop_details or {}
+        details = dict(stop_details or {})
+        if stop_outcome in {
+            OrchestrationStopOutcome.WAITING_CAPACITY,
+            OrchestrationStopOutcome.WAITING_EXTERNAL,
+        }:
+            if "waiting_since" not in details:
+                details["waiting_since"] = utc_now().isoformat()
+        run.stop_details = details
         run.is_active = stop_outcome in {
             OrchestrationStopOutcome.WAITING_CAPACITY,
             OrchestrationStopOutcome.WAITING_EXTERNAL,

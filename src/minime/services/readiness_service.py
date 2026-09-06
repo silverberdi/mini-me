@@ -337,38 +337,58 @@ class ReadinessService:
             evaluated_at=now,
         )
 
-        # Update change record in persistence if exists
+        # Update change record in persistence if exists, or create if absent
         change_record = self.uow.changes.get_by_name(project_id, change_name)
+        state_changed = True
         if change_record:
-            change_record.last_readiness_status = status
-            change_record.last_readiness_reasons = unmet_reasons
-            change_record.status = ChangeStatus.READY if is_ready else ChangeStatus.DISCOVERED
-            change_record.updated_at = now
+            state_changed = (
+                change_record.last_readiness_status != status
+                or change_record.last_readiness_reasons != unmet_reasons
+            )
+            if state_changed:
+                change_record.last_readiness_status = status
+                change_record.last_readiness_reasons = unmet_reasons
+                change_record.status = ChangeStatus.READY if is_ready else ChangeStatus.DISCOVERED
+                change_record.updated_at = now
+                self.uow.changes.save(change_record)
+        else:
+            from minime.domain.models import Change
+
+            change_record = Change(
+                project_id=project_id,
+                name=change_name,
+                status=ChangeStatus.READY if is_ready else ChangeStatus.DISCOVERED,
+                last_readiness_status=status,
+                last_readiness_reasons=unmet_reasons,
+                discovered_at=now,
+                updated_at=now,
+            )
             self.uow.changes.save(change_record)
 
-        # Emit audit event and metric fact
-        event = Event(
-            event_type=EventType.READINESS_EVALUATED,
-            project_id=project_id,
-            change_id=change_name,
-            payload={
-                "is_ready": is_ready,
-                "status": status.value,
-                "unmet_reasons": unmet_reasons,
-            },
-            timestamp=now,
-        )
-        self.uow.events.save(event)
+        # Emit audit event and metric fact only on state transition or if no prior record
+        if state_changed:
+            event = Event(
+                event_type=EventType.READINESS_EVALUATED,
+                project_id=project_id,
+                change_id=change_name,
+                payload={
+                    "is_ready": is_ready,
+                    "status": status.value,
+                    "unmet_reasons": unmet_reasons,
+                },
+                timestamp=now,
+            )
+            self.uow.events.save(event)
 
-        metric_fact = MetricFact(
-            metric_name="readiness_evaluation",
-            project_id=project_id,
-            change_id=change_name,
-            fact_value=1.0 if is_ready else 0.0,
-            details={"is_ready": is_ready, "unmet_reasons_count": len(unmet_reasons)},
-            recorded_at=now,
-        )
-        self.uow.metrics.save(metric_fact)
-        self.uow.commit()
+            metric_fact = MetricFact(
+                metric_name="readiness_evaluation",
+                project_id=project_id,
+                change_id=change_name,
+                fact_value=1.0 if is_ready else 0.0,
+                details={"is_ready": is_ready, "unmet_reasons_count": len(unmet_reasons)},
+                recorded_at=now,
+            )
+            self.uow.metrics.save(metric_fact)
+            self.uow.commit()
 
         return evaluation

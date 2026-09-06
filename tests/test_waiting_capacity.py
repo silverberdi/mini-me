@@ -264,3 +264,195 @@ async def test_pairing_invariants_prevent_self_review_and_reviewer_replacement(
     events = in_memory_uow.events.list_events()
     viol_events = [e for e in events if e.event_type == EventType.REVIEW_POLICY_VIOLATION]
     assert len(viol_events) == 1
+
+
+def test_scheduler_reconciles_and_resumes_waiting_capacity(in_memory_uow, tmp_path):
+    """Verify that SchedulerService.tick / reconcile_waiting_runs auto-resumes WAITING_CAPACITY runs when provider is available."""
+    from datetime import timedelta
+    from minime.domain.enums import HumanGate, JobStatus, OrchestrationStage, OrchestrationStopOutcome, ProjectStatus
+    from minime.domain.models import Job, OrchestrationRun, Project, ProjectBinding, ProviderHealth, utc_now
+    from minime.services.orchestration_service import OrchestrationService
+    from minime.services.scheduler_service import SchedulerService
+
+    # Set up git repo
+    subprocess.run(["git", "init", "-b", "main"], cwd=str(tmp_path), check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=str(tmp_path), check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(tmp_path), check=True)
+    (tmp_path / "README.md").write_text("# Test\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=str(tmp_path), check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=str(tmp_path), check=True)
+    subprocess.run(["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=str(tmp_path), check=True)
+
+    project_id = "mini-me"
+    change_name = "021-test-waiting-resume"
+    seed_ready_change(
+        in_memory_uow,
+        tmp_path,
+        "# Tasks\n\n- [x] 1.1 Done\n",
+        change_name=change_name,
+    )
+
+    binding = ProjectBinding(
+        project_id=project_id,
+        openspec_change_name=change_name,
+        repository="silverberdi/mini-me",
+        github_issue_number=1,
+        is_valid=True,
+    )
+    in_memory_uow.bindings.save(binding)
+
+    from conftest import ReadinessGitHubStub
+    from minime.services.deepseek_auditor_runner import MockAuditorRunner
+
+    pipeline = ExecutionPipelineService(
+        uow=in_memory_uow,
+        project_root=tmp_path,
+        implementer_runner=MockImplementerRunner(exit_code=0, stdout=["Implementation complete"]),
+        reviewer_runner=MockReviewerRunner(
+            stdout=[
+                '```json\n{"verdict": "READY_TO_MERGE", "summary": "Looks good", "findings": []}\n```'
+            ]
+        ),
+        auditor_runner=MockAuditorRunner(output=['{"risk": "low", "summary": "Audit passed", "findings": []}']),
+    )
+    orch_svc = OrchestrationService(
+        uow=in_memory_uow,
+        project_root=tmp_path,
+        pipeline=pipeline,
+        github_adapter=ReadinessGitHubStub(),
+    )
+
+    admission = orch_svc.admit_change(project_id, change_name)
+    assert admission.admitted is True
+
+    # Put provider in EXHAUSTED and stop run in WAITING_CAPACITY
+    in_memory_uow.provider_health.save(
+        ProviderHealth(
+            provider="codex",
+            status=ProviderHealthStatus.EXHAUSTED,
+            last_error_summary="Quota exceeded",
+        )
+    )
+    run = orch_svc.drive_coordinator(admission.run.run_id)
+    assert run.stop_outcome == OrchestrationStopOutcome.WAITING_CAPACITY
+    assert run.is_active is True
+
+    # Now provider capacity recovers
+    in_memory_uow.provider_health.save(
+        ProviderHealth(
+            provider="codex",
+            status=ProviderHealthStatus.AVAILABLE,
+        )
+    )
+
+    # Reconcile waiting runs in scheduler
+    scheduler = SchedulerService(uow=in_memory_uow, project_root=tmp_path, orchestration_service=orch_svc)
+    resumed_ids = scheduler.reconcile_waiting_runs(project_id=project_id, drive_resumed=False)
+
+    assert run.run_id in resumed_ids
+    updated_run = in_memory_uow.orchestration_runs.get_by_id(run.run_id)
+    assert updated_run.stop_outcome != OrchestrationStopOutcome.WAITING_CAPACITY
+
+
+def test_scheduler_waiting_capacity_timeout_escalates_to_needs_human(in_memory_uow, tmp_path):
+    """Verify that SchedulerService escalates to NEEDS_HUMAN when waiting timeout is exceeded."""
+    from datetime import timedelta
+    from minime.domain.enums import HumanGate, JobStatus, OrchestrationStage, OrchestrationStopOutcome
+    from minime.domain.models import Job, OrchestrationRun, utc_now
+    from minime.services.scheduler_service import SchedulerService
+
+    change_name = "021-test-waiting-timeout"
+    seed_ready_change(
+        in_memory_uow,
+        tmp_path,
+        "# Tasks\n\n- [x] 1.1 Done\n",
+        change_name=change_name,
+    )
+
+    job = Job(
+        project_id="mini-me",
+        change_name=change_name,
+        implementer_role="codex",
+        status=JobStatus.WAITING_CAPACITY,
+        waiting_provider="codex",
+    )
+    in_memory_uow.jobs.save(job)
+
+    # Run waiting for 3 hours (exceeding 2h timeout)
+    run = OrchestrationRun(
+        project_id="mini-me",
+        change_name=change_name,
+        base_sha="abcdef1234567890",
+        active_job_id=job.job_id,
+        current_stage=OrchestrationStage.IMPLEMENTING,
+        stop_outcome=OrchestrationStopOutcome.WAITING_CAPACITY,
+        human_gate=None,
+        stop_reason="External execution environment is temporarily unavailable",
+        stop_details={"provider": "codex", "waiting_since": (utc_now() - timedelta(hours=3)).isoformat()},
+        is_active=True,
+    )
+    in_memory_uow.orchestration_runs.save(run)
+
+    scheduler = SchedulerService(uow=in_memory_uow, project_root=tmp_path)
+    resumed_ids = scheduler.reconcile_waiting_runs(project_id="mini-me", drive_resumed=False, timeout_hours=2.0)
+
+    assert len(resumed_ids) == 0
+    updated_run = in_memory_uow.orchestration_runs.get_by_id(run.run_id)
+    assert updated_run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
+    assert updated_run.human_gate == HumanGate.NEEDS_HUMAN
+    assert updated_run.is_active is False
+    assert "timeout exceeded" in updated_run.stop_reason.lower()
+
+    updated_job = in_memory_uow.jobs.get_by_id(job.job_id)
+    assert updated_job.status == JobStatus.NEEDS_HUMAN
+
+
+def test_restart_recovery_cancels_jobs_for_done_changes(in_memory_uow, tmp_path):
+    """Verify that RestartRecoveryService cancels leftover jobs for completed/DONE changes."""
+    from minime.domain.enums import ChangeStatus, JobStatus
+    from minime.domain.models import Change, Job
+    from minime.services.restart_recovery_service import RestartRecoveryService
+
+    change_name = "021-done-change"
+    change = Change(
+        project_id="mini-me",
+        name=change_name,
+        status=ChangeStatus.DONE,
+    )
+    in_memory_uow.changes.save(change)
+
+    job = Job(
+        project_id="mini-me",
+        change_name=change_name,
+        implementer_role="codex",
+        status=JobStatus.QUEUED,
+    )
+    in_memory_uow.jobs.save(job)
+
+    recovery = RestartRecoveryService(uow=in_memory_uow, project_root=tmp_path)
+    reconciled = recovery.reconcile_on_startup()
+
+    updated_job = in_memory_uow.jobs.get_by_id(job.job_id)
+    assert updated_job.status == JobStatus.CANCELLED
+    assert "already in terminal state" in updated_job.error_message
+
+
+@pytest.mark.asyncio
+async def test_checks_runner_timeout_cleanup(tmp_path):
+    """Verify that ChecksRunner enforces timeout and terminates long-running subprocess."""
+    from minime.services.checks_runner import ChecksRunner
+
+    runner = ChecksRunner(timeout_seconds=1)
+    checks = [
+        {
+            "name": "sleep-test",
+            "command": "python3 -c 'import time; time.sleep(10)'",
+        }
+    ]
+    res = await runner.run("job-timeout", checks, tmp_path)
+    assert res.passed is False
+    assert len(res.results) == 1
+    assert res.results[0].exit_code == 124
+    assert "timed out" in res.results[0].output_snippet.lower()
+
+
