@@ -1,4 +1,4 @@
-"""Strict 10-point eligibility evaluator for OpenRouter drain fallback."""
+"""Strict eligibility evaluator for generic drain fallback."""
 
 from __future__ import annotations
 
@@ -9,6 +9,18 @@ from minime.domain.models import Job, OpenRouterBudgetPolicy, Project, ProviderH
 from minime.services.budget_service import BudgetHeadroom
 
 
+def is_material_execution_started(job: Job | None) -> bool:
+    """Canonical backend-owned rule: verify whether material execution has already started.
+
+    Drain/fallback policy applies ONLY to work already materially in progress.
+    It does NOT apply to BACKLOG, READY, QUEUED, or newly admitted work with no provider work started.
+    """
+    if not job:
+        return False
+    # Material execution requires at least one attempt started or candidate produced
+    return job.attempt_count > 0 or job.candidate_sha is not None
+
+
 @dataclass
 class OpenRouterEligibilityResult:
     eligible: bool
@@ -17,7 +29,7 @@ class OpenRouterEligibilityResult:
 
 
 class OpenRouterEligibilityEvaluator:
-    """Evaluates all 10 OpenRouter drain fallback conditions before invocation."""
+    """Evaluates canonical drain fallback conditions before invocation."""
 
     def evaluate(self, checks: list[tuple[bool, str]]) -> OpenRouterEligibilityResult:
         """Evaluate a custom list of boolean checks."""
@@ -43,11 +55,11 @@ class OpenRouterEligibilityEvaluator:
         candidate_integrity_valid: bool = True,
         pipeline_invariants_valid: bool = True,
     ) -> OpenRouterEligibilityResult:
-        """Evaluate all 10 canonical OpenRouter fallback eligibility conditions."""
+        """Evaluate all canonical OpenRouter fallback eligibility conditions."""
         # 1. Scheduler mode in DRAIN
         check_1 = (scheduler_mode == SchedulerMode.DRAIN, "Scheduler is not in DRAIN mode")
 
-        # 2. Existing in-flight job
+        # 2. Existing in-flight job with material execution already started
         in_flight_statuses = {
             JobStatus.RUNNING,
             JobStatus.CHECKS_RUNNING,
@@ -56,8 +68,8 @@ class OpenRouterEligibilityEvaluator:
             JobStatus.WAITING_CAPACITY,
         }
         check_2 = (
-            job.status in in_flight_statuses,
-            f"Job '{job.job_id}' is not in an active in-flight status",
+            job.status in in_flight_statuses and is_material_execution_started(job),
+            f"Job '{job.job_id}' is not in an active in-flight status or has no material execution started",
         )
 
         # 3. Blocked on implementer or reviewer stage
@@ -66,10 +78,10 @@ class OpenRouterEligibilityEvaluator:
             f"Role '{role}' is not eligible for fallback",
         )
 
-        # 4. No new READY work admitted
+        # 4. No new READY / BACKLOG / QUEUED work admitted into drain fallback
         check_4 = (
             not is_new_ready_change,
-            "Cannot admit new READY change into OpenRouter fallback",
+            "Cannot admit new READY change: drain fallback applies only to in-flight work already materially started",
         )
 
         # 5. Dual-primary exhaustion verified

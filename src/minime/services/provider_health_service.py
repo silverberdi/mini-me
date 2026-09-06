@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable, Coroutine
-from datetime import UTC
+from datetime import UTC, datetime
 from typing import Any
 
+from minime.adapters.provider_adapter import get_provider_adapter
 from minime.domain.enums import (
     PRIMARY_PROVIDERS,
     CapacitySignalSource,
@@ -26,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 
 class ProviderHealthService:
-    """Manages primary provider health, exhaustion windows, and probe verification."""
+    """Manages primary and generic provider health, exhaustion windows, and probe verification."""
 
     def __init__(
         self,
@@ -37,14 +38,12 @@ class ProviderHealthService:
         self.failure_threshold = failure_threshold
 
     def _validate_primary(self, provider: str) -> None:
-        if provider not in PRIMARY_PROVIDERS:
-            raise ValueError(
-                f"Invalid primary provider '{provider}'. "
-                f"005 capacity tracking is restricted strictly to {PRIMARY_PROVIDERS}."
-            )
+        # Generic providers are permitted as long as they are non-empty strings
+        if not provider or not isinstance(provider, str):
+            raise ValueError(f"Invalid provider '{provider}'. Must be a non-empty string.")
 
     def get_health(self, provider: str) -> ProviderHealth:
-        """Get or initialize health record for a primary provider."""
+        """Get or initialize health record for a provider."""
         self._validate_primary(provider)
         health = self.uow.provider_health.get_by_provider(provider)
         if not health:
@@ -60,7 +59,7 @@ class ProviderHealthService:
         return health
 
     def list_all_health(self) -> list[ProviderHealth]:
-        """List health for all primary providers, ensuring records exist."""
+        """List health for all tracked providers, ensuring records exist."""
         results = []
         for prov in sorted(PRIMARY_PROVIDERS):
             results.append(self.get_health(prov))
@@ -72,6 +71,37 @@ class ProviderHealthService:
             (health, self.uow.capacity_windows.get_latest_for_provider(health.provider))
             for health in self.list_all_health()
         ]
+
+    def set_operator_expected_reset(
+        self, provider: str, reset_at: datetime
+    ) -> CapacityWindow:
+        """Record an operator-reported expected provider recovery time."""
+        self._validate_primary(provider)
+        now = utc_now()
+        if reset_at.tzinfo is None:
+            reset_at = reset_at.replace(tzinfo=UTC)
+
+        window = CapacityWindow(
+            provider=provider,
+            quota_exhausted_at=now,
+            capacity_reset_at=reset_at,
+            source_signal=CapacitySignalSource.OPERATOR_REPORTED,
+            created_at=now,
+        )
+        self.uow.capacity_windows.save(window)
+        self.uow.events.save(
+            Event(
+                event_type=EventType.PROVIDER_HEALTH_UPDATED,
+                payload={
+                    "provider": provider,
+                    "reset_source": "OPERATOR_REPORTED",
+                    "capacity_reset_at": reset_at.isoformat(),
+                },
+                timestamp=now,
+            )
+        )
+        self.uow.commit()
+        return window
 
     def record_outcome(
         self,
@@ -246,63 +276,81 @@ class ProviderHealthService:
                 reset_at = reset_at.replace(tzinfo=UTC)
             is_reset_elapsed = reset_at <= now
         else:
-            # Unknown reset timing must not permanently prevent recovery.
+            # Unknown reset timing must not permanently prevent probing
             is_reset_elapsed = True
 
-        if is_reset_elapsed and probe_fn:
+        if not is_reset_elapsed:
+            return False
+
+        if probe_fn is None:
+            adapter = get_provider_adapter(provider)
+
+            async def _default_probe() -> bool:
+                return await adapter.probe_availability(timeout_seconds=30.0)
+
+            probe_fn = _default_probe
+
+        logger.info(
+            f"Provider {provider} reset window elapsed or probe eligible. Executing availability probe."
+        )
+        try:
+            probe_success = await asyncio.wait_for(probe_fn(), timeout=30.0)
+        except Exception as e:
+            logger.warning(f"Availability probe for {provider} raised exception or timed out: {e}")
+            probe_success = False
+
+        if probe_success:
             logger.info(
-                f"Provider {provider} reset window elapsed or probe eligible. Executing availability probe."
+                f"Availability probe for {provider} SUCCEEDED. Transitioning to AVAILABLE."
             )
-            try:
-                probe_success = await asyncio.wait_for(probe_fn(), timeout=30)
-            except Exception as e:
-                logger.warning(f"Availability probe for {provider} raised exception: {e}")
-                probe_success = False
+            self.uow.provider_health.update_health(
+                provider=provider,
+                status=ProviderHealthStatus.AVAILABLE.value,
+                result_class=ProviderResultClass.SUCCESS.value,
+                error_summary="Recovered via successful capacity reset probe",
+                consecutive_failures=0,
+            )
+            self.uow.events.save(
+                Event(
+                    event_type=EventType.PRIMARY_CAPACITY_RECOVERED,
+                    payload={
+                        "provider": provider,
+                        "probe_verified": True,
+                        "status": ProviderHealthStatus.AVAILABLE.value,
+                    },
+                    timestamp=utc_now(),
+                )
+            )
+            self.uow.commit()
+            return True
+        else:
+            logger.warning(
+                f"Availability probe for {provider} FAILED. Provider remains unavailable."
+            )
+            self.uow.events.save(
+                Event(
+                    event_type=EventType.PROVIDER_PROBE_FAILED,
+                    payload={
+                        "provider": provider,
+                        "probe_verified": False,
+                        "status": health.status.value,
+                    },
+                    timestamp=utc_now(),
+                )
+            )
+            self.uow.commit()
+            return False
 
-            if probe_success:
-                logger.info(
-                    f"Availability probe for {provider} SUCCEEDED. Transitioning to AVAILABLE."
-                )
-                self.uow.provider_health.update_health(
-                    provider=provider,
-                    status=ProviderHealthStatus.AVAILABLE.value,
-                    result_class=ProviderResultClass.SUCCESS.value,
-                    error_summary="Recovered via successful capacity reset probe",
-                    consecutive_failures=0,
-                )
-                self.uow.events.save(
-                    Event(
-                        event_type=EventType.PRIMARY_CAPACITY_RECOVERED,
-                        payload={
-                            "provider": provider,
-                            "probe_verified": True,
-                            "status": ProviderHealthStatus.AVAILABLE.value,
-                        },
-                        timestamp=utc_now(),
-                    )
-                )
-                self.uow.commit()
-                return True
-            else:
-                logger.warning(
-                    f"Availability probe for {provider} FAILED. Provider remains unavailable."
-                )
-                self.uow.events.save(
-                    Event(
-                        event_type=EventType.PROVIDER_PROBE_FAILED,
-                        payload={
-                            "provider": provider,
-                            "probe_verified": False,
-                            "status": health.status.value,
-                        },
-                        timestamp=utc_now(),
-                    )
-                )
-                self.uow.commit()
-                return False
-
-        # Reset not elapsed or no probe executed
-        return False
+    async def probe_unavailable_providers(self) -> list[str]:
+        """Proactively probe all currently unavailable providers in background without creating Runs/Jobs."""
+        all_health = self.list_all_health()
+        recovered: list[str] = []
+        for h in all_health:
+            if h.status != ProviderHealthStatus.AVAILABLE:
+                success = await self.check_and_probe_provider(h.provider)
+                if success:
+                    recovered.append(h.provider)
+        return recovered
 
     def is_pair_available(self, implementer: str, reviewer: str) -> tuple[bool, str | None]:
         """Verify that both primary roles in the complementary pair are currently AVAILABLE."""
