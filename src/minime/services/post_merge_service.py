@@ -10,10 +10,13 @@ from pathlib import Path
 from typing import Any
 
 from minime.domain.enums import (
+    ChangeStatus,
     EventType,
     JobStatus,
     OrchestrationStage,
     OrchestrationStopOutcome,
+    ReadinessState,
+    WorkItemStatus,
 )
 from minime.domain.interfaces import GitHubAdapterInterface, PersistenceUnitOfWork
 from minime.domain.models import Event, MetricFact, utc_now
@@ -135,6 +138,7 @@ class PostMergeReconciliationService:
             and (job is None or job.status == JobStatus.COMPLETED)
         ):
             logger.info("Change '%s' (Run: %s) is already closed.", change_name, run.run_id)
+            self._reconcile_change_and_backlog_item(project_id, change_name)
             return PostMergeReconciliationResult(
                 success=True,
                 already_closed=True,
@@ -429,6 +433,8 @@ class PostMergeReconciliationService:
             job.status = JobStatus.COMPLETED
             self.uow.jobs.save(job)
 
+        self._reconcile_change_and_backlog_item(project_id, change_name)
+
         native_phases += 1  # Phase 11: Terminal Run & Job reconciliation
 
         # 13. Persist Post-Merge Metric Facts
@@ -491,3 +497,34 @@ class PostMergeReconciliationService:
             native_phases_completed=native_phases,
             total_phases=12,
         )
+
+    def _reconcile_change_and_backlog_item(self, project_id: str, change_name: str) -> None:
+        """Ensure Change and BacklogItem reflect completed post-merge status."""
+        try:
+            if hasattr(self.uow, "changes"):
+                change_record = self.uow.changes.get_by_name(project_id, change_name)
+                if change_record:
+                    change_record.status = ChangeStatus.DONE
+                    change_record.stage = None
+                    change_record.updated_at = utc_now()
+                    self.uow.changes.save(change_record)
+
+            if hasattr(self.uow, "backlog_items"):
+                backlog_item = self.uow.backlog_items.get_by_project_and_key(project_id, change_name)
+                if not backlog_item:
+                    items = self.uow.backlog_items.list_by_project(project_id)
+                    for item in items:
+                        if item.openspec_change_name == change_name or item.item_key == change_name:
+                            backlog_item = item
+                            break
+                if backlog_item:
+                    updated_bk = backlog_item.model_copy(
+                        update={
+                            "status": WorkItemStatus.COMPLETED,
+                            "readiness_state": ReadinessState.READY,
+                            "updated_at": utc_now(),
+                        }
+                    )
+                    self.uow.backlog_items.save(updated_bk)
+        except Exception as exc:
+            logger.warning("Error reconciling Change and BacklogItem for '%s': %s", change_name, exc)

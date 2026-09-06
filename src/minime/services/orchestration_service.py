@@ -31,6 +31,7 @@ from minime.domain.enums import (
     ReadinessState,
     ReviewStatus,
     ReviewVerdict,
+    WorkItemStatus,
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
@@ -2825,6 +2826,44 @@ class OrchestrationService:
         }
         run.updated_at = utc_now()
         self.uow.orchestration_runs.save(run)
+
+        # Synchronize associated BacklogItem status
+        if hasattr(self.uow, "backlog_items"):
+            try:
+                bk_item = self.uow.backlog_items.get_by_project_and_key(run.project_id, run.change_name)
+                if not bk_item:
+                    for item in self.uow.backlog_items.list_by_project(run.project_id):
+                        if item.openspec_change_name == run.change_name or item.item_key == run.change_name:
+                            bk_item = item
+                            break
+                if bk_item:
+                    new_status = None
+                    if stop_outcome == OrchestrationStopOutcome.COMPLETED:
+                        new_status = WorkItemStatus.COMPLETED
+                    elif stop_outcome in {
+                        OrchestrationStopOutcome.NEEDS_HUMAN,
+                        OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE,
+                    }:
+                        new_status = WorkItemStatus.NEEDS_HUMAN
+                    elif stop_outcome == OrchestrationStopOutcome.CANCELLED:
+                        new_status = WorkItemStatus.CANCELLED
+                    elif stop_outcome in {
+                        OrchestrationStopOutcome.WAITING_CAPACITY,
+                        OrchestrationStopOutcome.WAITING_EXTERNAL,
+                    }:
+                        new_status = WorkItemStatus.RUNNING
+
+                    if new_status and bk_item.status != new_status:
+                        updated_bk = bk_item.model_copy(
+                            update={
+                                "status": new_status,
+                                "run_id": run.run_id,
+                                "updated_at": utc_now(),
+                            }
+                        )
+                        self.uow.backlog_items.save(updated_bk)
+            except Exception as exc:
+                logger.debug(f"Non-critical backlog item sync error in _stop_run: {exc}")
 
         event_type = (
             EventType.READY_FOR_HUMAN_MERGE.value

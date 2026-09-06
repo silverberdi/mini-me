@@ -298,8 +298,14 @@ class ContextDiscoveryService:
             else:
                 # Update metadata if item is still in default backlog state without overwriting manual edits
                 if (
-                    existing.status == WorkItemStatus.BACKLOG
-                    and item.status != WorkItemStatus.BACKLOG
+                    (
+                        existing.status == WorkItemStatus.BACKLOG
+                        and item.status != WorkItemStatus.BACKLOG
+                    )
+                    or (
+                        item.status == WorkItemStatus.COMPLETED
+                        and existing.status != WorkItemStatus.COMPLETED
+                    )
                 ):
                     updated = existing.model_copy(
                         update={

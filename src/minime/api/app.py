@@ -618,6 +618,7 @@ def discover_project_context_endpoint(
 def list_backlog_items_endpoint(
     project_id: str,
     uow: UowDep,
+    intake_service: IntakeServiceDep,
     status_filter: str | None = Query(default=None, alias="status"),
     priority: str | None = None,
     limit: int = 100,
@@ -629,6 +630,8 @@ def list_backlog_items_endpoint(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Project '{project_id}' not found",
         )
+    # Reconcile projections with underlying execution/archive reality
+    intake_service.reconcile_backlog_projections(project_id)
     return uow.backlog_items.list_by_project(
         project_id, status=status_filter, priority=priority, limit=limit
     )

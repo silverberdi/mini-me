@@ -10,6 +10,8 @@ from minime.adapters.openspec import OpenSpecAdapter
 from minime.domain.enums import (
     ChangeStatus,
     EventType,
+    OrchestrationStage,
+    OrchestrationStopOutcome,
     ReadinessState,
     WorkItemStatus,
 )
@@ -549,3 +551,104 @@ class IntakeService:
         )
         self.uow.events.save(event)
         self.uow.commit()
+
+    def reconcile_backlog_projections(self, project_id: str) -> list[BacklogItem]:
+        """Reconcile and project accurate backlog item execution states against canonical runs and changes."""
+        items = self.uow.backlog_items.list_by_project(project_id)
+        if not items:
+            return []
+
+        runs = self.uow.orchestration_runs.list_runs(project_id=project_id)
+        runs_by_change: dict[str, list[Any]] = {}
+        for r in runs:
+            runs_by_change.setdefault(r.change_name, []).append(r)
+
+        changes = self.uow.changes.list_by_project(project_id)
+        changes_by_name = {c.name: c for c in changes}
+
+        # Check archived changes on disk if openspec path exists
+        project = self.uow.projects.get_by_id(project_id)
+        archived_change_names: set[str] = set()
+        if project:
+            archive_dir = Path(self.project_root) / project.openspec_path / "changes" / "archive"
+            if archive_dir.exists() and archive_dir.is_dir():
+                for p in archive_dir.iterdir():
+                    if p.is_dir():
+                        archived_change_names.add(p.name)
+                        parts = p.name.split("-", 3)
+                        if len(parts) == 4 and parts[0].isdigit() and len(parts[0]) == 4:
+                            archived_change_names.add(parts[3])
+
+        mutated = False
+        reconciled_items: list[BacklogItem] = []
+        for item in items:
+            change_name = item.openspec_change_name or item.item_key
+            item_runs = runs_by_change.get(change_name, []) or runs_by_change.get(item.item_key, [])
+            latest_run = item_runs[-1] if item_runs else None
+            change_rec = changes_by_name.get(change_name) or changes_by_name.get(item.item_key)
+
+            is_archived = (
+                change_name in archived_change_names
+                or item.item_key in archived_change_names
+                or any(change_name in a for a in archived_change_names)
+            )
+            is_done = (change_rec and change_rec.status == ChangeStatus.DONE) or is_archived
+
+            new_status = item.status
+            new_readiness = item.readiness_state
+            new_run_id = item.run_id
+
+            if is_done or (
+                latest_run
+                and (
+                    latest_run.current_stage == OrchestrationStage.COMPLETED
+                    or latest_run.stop_outcome == OrchestrationStopOutcome.COMPLETED
+                )
+            ):
+                new_status = WorkItemStatus.COMPLETED
+                new_readiness = ReadinessState.READY
+            elif latest_run:
+                new_run_id = latest_run.run_id
+                if latest_run.is_active:
+                    new_status = WorkItemStatus.RUNNING
+                elif latest_run.stop_outcome in {
+                    OrchestrationStopOutcome.NEEDS_HUMAN,
+                    OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE,
+                }:
+                    new_status = WorkItemStatus.NEEDS_HUMAN
+                elif latest_run.stop_outcome == OrchestrationStopOutcome.CANCELLED:
+                    new_status = WorkItemStatus.CANCELLED
+            elif (
+                not is_done
+                and item.status in (WorkItemStatus.RUNNING, WorkItemStatus.PREPARING)
+                and not item_runs
+            ):
+                if item.readiness_state == ReadinessState.READY:
+                    new_status = WorkItemStatus.READY
+                else:
+                    new_status = WorkItemStatus.BACKLOG
+
+            if (
+                new_status != item.status
+                or new_readiness != item.readiness_state
+                or new_run_id != item.run_id
+            ):
+                updated_item = item.model_copy(
+                    update={
+                        "status": new_status,
+                        "readiness_state": new_readiness,
+                        "run_id": new_run_id,
+                        "updated_at": utc_now(),
+                    }
+                )
+                self.uow.backlog_items.save(updated_item)
+                reconciled_items.append(updated_item)
+                mutated = True
+            else:
+                reconciled_items.append(item)
+
+        if mutated:
+            self.uow.commit()
+
+        return reconciled_items
+
