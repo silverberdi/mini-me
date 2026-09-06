@@ -104,7 +104,13 @@ def test_create_duplicate_work_item_fails(
 def test_reconcile_backlog_projections_with_terminal_and_human_states(
     in_memory_uow: InMemoryPersistenceUnitOfWork, tmp_path: Path
 ) -> None:
-    from minime.domain.enums import ChangeStatus, OrchestrationStage, OrchestrationStopOutcome, ReadinessState, WorkItemStatus
+    from minime.domain.enums import (
+        ChangeStatus,
+        OrchestrationStage,
+        OrchestrationStopOutcome,
+        ReadinessState,
+        WorkItemStatus,
+    )
     from minime.domain.models import BacklogItem, Change, OrchestrationRun, utc_now
 
     repo_dir = tmp_path / "work-repo"
@@ -196,7 +202,7 @@ def test_reconcile_backlog_projections_with_terminal_and_human_states(
     in_memory_uow.backlog_items.save(item_pristine)
 
     # Run reconciliation
-    reconciled = service.reconcile_backlog_projections("work-project")
+    service.reconcile_backlog_projections("work-project")
 
     # Verify item_merged transitioned to COMPLETED
     rec_merged = in_memory_uow.backlog_items.get_by_project_and_key("work-project", "generic-provider-capacity-recovery-drain")

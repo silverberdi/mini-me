@@ -104,6 +104,9 @@ class ProjectService:
         openrouter_drain_allowed: bool = False,
         deployment_preview: dict[str, Any] | None = None,
         deployment_production: dict[str, Any] | None = None,
+        auto_prepare: bool = True,
+        auto_admit: bool = True,
+        max_concurrent_jobs: int = 1,
     ) -> Project:
         """Register a new project with immutable project_id and validated policy."""
         set_correlation_context(project_id=project_id, operation_id="register_project")
@@ -150,6 +153,9 @@ class ProjectService:
             openrouter_drain_allowed=openrouter_drain_allowed,
             deployment_preview=deployment_preview or {},
             deployment_production=deployment_production or {},
+            auto_prepare=auto_prepare,
+            auto_admit=auto_admit,
+            max_concurrent_jobs=max(1, max_concurrent_jobs),
             status=ProjectStatus.ACTIVE,
             created_at=now,
             updated_at=now,
@@ -191,6 +197,9 @@ class ProjectService:
         openrouter_drain_allowed: bool | None = None,
         deployment_preview: dict[str, Any] | None = None,
         deployment_production: dict[str, Any] | None = None,
+        auto_prepare: bool | None = None,
+        auto_admit: bool | None = None,
+        max_concurrent_jobs: int | None = None,
         status: ProjectStatus | None = None,
     ) -> Project:
         """Update mutable fields of a registered project. The project_id remains immutable."""
@@ -224,6 +233,12 @@ class ProjectService:
             project.deployment_preview = deployment_preview
         if deployment_production is not None:
             project.deployment_production = deployment_production
+        if auto_prepare is not None:
+            project.auto_prepare = auto_prepare
+        if auto_admit is not None:
+            project.auto_admit = auto_admit
+        if max_concurrent_jobs is not None:
+            project.max_concurrent_jobs = max(1, max_concurrent_jobs)
         if status is not None:
             project.status = status
 

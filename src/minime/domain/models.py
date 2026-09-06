@@ -96,6 +96,9 @@ class Project(BaseModel):
     github_project_owner: str | None = None
     onboarding_status: ProjectOnboardingStatus = ProjectOnboardingStatus.READY_FOR_WORK
     onboarding_reasons: list[str] = Field(default_factory=list)
+    auto_prepare: bool = True
+    auto_admit: bool = True
+    max_concurrent_jobs: int = 1
     status: ProjectStatus = ProjectStatus.ACTIVE
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)

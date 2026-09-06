@@ -186,6 +186,41 @@ class PostMergeReconciliationService:
 
         is_merged = pr_details.get("is_merged", False)
         if not is_merged:
+            if pr_details.get("state") == "closed":
+                logger.info(
+                    "PR #%s for '%s' was closed without merging. Reconciling run to CANCELLED.",
+                    pr_number,
+                    change_name,
+                )
+                now = utc_now()
+                run.is_active = False
+                run.stop_outcome = OrchestrationStopOutcome.CANCELLED
+                run.stop_reason = f"Pull request #{pr_number} was closed without merge."
+                run.updated_at = now
+                self.uow.orchestration_runs.save(run)
+                if job and job.status != JobStatus.COMPLETED:
+                    job.status = JobStatus.CANCELLED
+                    job.error_message = run.stop_reason
+                    job.completed_at = now
+                    job.updated_at = now
+                    self.uow.jobs.save(job)
+                self.clean_worktree_and_branches(project_id, change_name, run.candidate_sha)
+                self._reconcile_change_and_backlog_item(project_id, change_name)
+                self.uow.commit()
+                return PostMergeReconciliationResult(
+                    success=True,
+                    already_closed=True,
+                    change_name=change_name,
+                    run_id=run.run_id,
+                    job_id=job_id,
+                    is_merged=False,
+                    worktree_cleaned=True,
+                    branch_cleaned=True,
+                    locks_cleaned=True,
+                    native_phases_completed=12,
+                    total_phases=12,
+                )
+
             logger.info("PR #%s for '%s' is not yet merged.", pr_number, change_name)
             return PostMergeReconciliationResult(
                 success=False,

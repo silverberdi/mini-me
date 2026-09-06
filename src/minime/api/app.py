@@ -30,6 +30,7 @@ from minime.domain.enums import (
     OperatorActionType,
     OperatorAuthDecision,
     PreviewStatus,
+    ProjectStatus,
     ValidationVerdict,
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
@@ -407,6 +408,26 @@ class ProjectCreateRequest(BaseModel):
     openrouter_drain_allowed: bool = False
     deployment_preview: dict[str, Any] = Field(default_factory=dict)
     deployment_production: dict[str, Any] = Field(default_factory=dict)
+    auto_prepare: bool = True
+    auto_admit: bool = True
+    max_concurrent_jobs: int = 1
+
+
+class ProjectUpdateRequest(BaseModel):
+    display_name: str | None = None
+    base_branch: str | None = None
+    openspec_path: str | None = None
+    implementer: str | None = None
+    reviewer: str | None = None
+    checks: list[dict[str, Any]] | None = None
+    external_providers_allowed: list[str] | None = None
+    openrouter_drain_allowed: bool | None = None
+    deployment_preview: dict[str, Any] | None = None
+    deployment_production: dict[str, Any] | None = None
+    auto_prepare: bool | None = None
+    auto_admit: bool | None = None
+    max_concurrent_jobs: int | None = None
+    status: ProjectStatus | None = None
 
 
 class JobRunRequest(BaseModel):
@@ -557,6 +578,7 @@ def register_project(
 
 
 @app.get("/projects/{project_id}")
+@app.get("/api/v1/projects/{project_id}", tags=["projects"])
 def get_project(
     project_id: str,
     uow: UowDep,
@@ -569,6 +591,36 @@ def get_project(
             detail=f"Project '{project_id}' not found",
         )
     return project
+
+
+@app.patch("/projects/{project_id}")
+@app.patch("/api/v1/projects/{project_id}", tags=["projects"])
+def update_project_endpoint(
+    project_id: str,
+    req: ProjectUpdateRequest,
+    uow: UowDep,
+) -> Project:
+    service = ProjectService(uow)
+    try:
+        return service.update_project(
+            project_id=project_id,
+            display_name=req.display_name,
+            base_branch=req.base_branch,
+            openspec_path=req.openspec_path,
+            implementer=req.implementer,
+            reviewer=req.reviewer,
+            checks=req.checks,
+            external_providers_allowed=req.external_providers_allowed,
+            openrouter_drain_allowed=req.openrouter_drain_allowed,
+            deployment_preview=req.deployment_preview,
+            deployment_production=req.deployment_production,
+            auto_prepare=req.auto_prepare,
+            auto_admit=req.auto_admit,
+            max_concurrent_jobs=req.max_concurrent_jobs,
+            status=req.status,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
 
 # -----------------------------------------------------------------------------
