@@ -563,15 +563,8 @@ class SchedulerService:
                 or "codex"
             )
 
-            # Check capacity window
-            window = self.uow.capacity_windows.get_latest_for_provider(provider)
-            if window and window.capacity_reset_at and now >= window.capacity_reset_at:
-                health = self.provider_health_service.get_health(provider)
-                if health.status == ProviderHealthStatus.EXHAUSTED:
-                    health.status = ProviderHealthStatus.AVAILABLE
-                    self.uow.provider_health.save(health)
-                    self.uow.commit()
-
+            # Reset timestamps are estimates, not evidence of actual recovery.
+            # Only a verified provider probe/operation restoring health to AVAILABLE may resume waiting work.
             health = self.provider_health_service.get_health(provider)
             is_available = health.status in (
                 ProviderHealthStatus.AVAILABLE,
@@ -586,7 +579,7 @@ class SchedulerService:
                     run.change_name,
                 )
                 try:
-                    resumed_run = self.orchestration_service.resume(
+                    self.orchestration_service.resume(
                         run.run_id,
                         project_root=self.project_root,
                     )
@@ -605,6 +598,17 @@ class SchedulerService:
         self, project_id: str | None = None, drive_admitted: bool = False
     ) -> list[SchedulerDecisionRecord]:
         """Execute one complete scheduler evaluation and admission cycle."""
+        # 0.0 Proactively probe unavailable providers to detect recovery without creating Runs/Jobs
+        try:
+            import asyncio
+            try:
+                asyncio.get_running_loop()
+                # If running loop exists, run probe in background task or skip blocking
+            except RuntimeError:
+                asyncio.run(self.provider_health_service.probe_unavailable_providers())
+        except Exception as exc:
+            logger.debug(f"Background provider probing during tick encountered error: {exc}")
+
         # 0. Check and reconcile any merged runs waiting at READY_FOR_HUMAN_MERGE or PR_PREPARED
         all_runs_pre = self.uow.orchestration_runs.list_runs(project_id=project_id)
         for r in all_runs_pre:

@@ -268,9 +268,13 @@ async def test_pairing_invariants_prevent_self_review_and_reviewer_replacement(
 
 def test_scheduler_reconciles_and_resumes_waiting_capacity(in_memory_uow, tmp_path):
     """Verify that SchedulerService.tick / reconcile_waiting_runs auto-resumes WAITING_CAPACITY runs when provider is available."""
-    from datetime import timedelta
-    from minime.domain.enums import HumanGate, JobStatus, OrchestrationStage, OrchestrationStopOutcome, ProjectStatus
-    from minime.domain.models import Job, OrchestrationRun, Project, ProjectBinding, ProviderHealth, utc_now
+    from minime.domain.enums import (
+        OrchestrationStopOutcome,
+    )
+    from minime.domain.models import (
+        ProjectBinding,
+        ProviderHealth,
+    )
     from minime.services.orchestration_service import OrchestrationService
     from minime.services.scheduler_service import SchedulerService
 
@@ -357,7 +361,13 @@ def test_scheduler_reconciles_and_resumes_waiting_capacity(in_memory_uow, tmp_pa
 def test_scheduler_waiting_capacity_timeout_escalates_to_needs_human(in_memory_uow, tmp_path):
     """Verify that SchedulerService escalates to NEEDS_HUMAN when waiting timeout is exceeded."""
     from datetime import timedelta
-    from minime.domain.enums import HumanGate, JobStatus, OrchestrationStage, OrchestrationStopOutcome
+
+    from minime.domain.enums import (
+        HumanGate,
+        JobStatus,
+        OrchestrationStage,
+        OrchestrationStopOutcome,
+    )
     from minime.domain.models import Job, OrchestrationRun, utc_now
     from minime.services.scheduler_service import SchedulerService
 
@@ -430,7 +440,7 @@ def test_restart_recovery_cancels_jobs_for_done_changes(in_memory_uow, tmp_path)
     in_memory_uow.jobs.save(job)
 
     recovery = RestartRecoveryService(uow=in_memory_uow, project_root=tmp_path)
-    reconciled = recovery.reconcile_on_startup()
+    recovery.reconcile_on_startup()
 
     updated_job = in_memory_uow.jobs.get_by_id(job.job_id)
     assert updated_job.status == JobStatus.CANCELLED

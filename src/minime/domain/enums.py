@@ -198,6 +198,8 @@ class ProviderResultClass(str, Enum):
 class CapacitySignalSource(str, Enum):
     HEADER_RETRY_AFTER = "header_retry_after"
     RESPONSE_BODY_TIMESTAMP = "response_body_timestamp"
+    AUTO_DISCOVERED = "auto_discovered"
+    OPERATOR_REPORTED = "operator_reported"
     UNKNOWN = "unknown"
 
 

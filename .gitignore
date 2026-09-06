@@ -31,6 +31,7 @@ eggs/
 .mypy_cache/
 .coverage
 htmlcov/
+.test-tmp/
 
 # Local runtime/logs
 logs/
