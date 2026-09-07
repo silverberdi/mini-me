@@ -684,6 +684,25 @@ class SchedulerService:
         # 0.1 Check and re-evaluate runs waiting for capacity or external environment
         self.reconcile_waiting_runs(project_id=project_id, drive_resumed=drive_admitted)
 
+        # 0.15 Check and drive active queued runs after daemon restart or in-flight continuation
+        if drive_admitted:
+            active_runs_to_drive = self.uow.orchestration_runs.list_runs(project_id=project_id, is_active=True)
+            for r in active_runs_to_drive:
+                if (
+                    r.active_job_id
+                    and r.stop_outcome is None
+                    and r.current_stage not in (OrchestrationStage.COMPLETED, OrchestrationStage.PR_PREPARED)
+                ):
+                    job = self.uow.jobs.get_by_id(r.active_job_id)
+                    if job and job.status == JobStatus.QUEUED:
+                        logger.info("Driving active queued run '%s' (%s) after restart.", r.run_id, r.change_name)
+                        try:
+                            self.orchestration_service.drive_coordinator(
+                                r.run_id, project_root=self.project_root
+                            )
+                        except Exception as exc:
+                            logger.warning("Failed driving active run '%s': %s", r.run_id, exc)
+
         # 0.2 Autonomous intake sweep for unprepared backlog items when auto_prepare is enabled
         try:
             self.intake_service.sweep_unprepared_backlog_items(project_id=project_id)
