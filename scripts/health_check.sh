@@ -45,11 +45,12 @@ if [ -f /etc/minime/minime.env ]; then
     check "PostgreSQL Connectivity & Revision" /opt/minime/runtime/venv/bin/python3 -c "
 import os
 from sqlalchemy import create_engine, text
+from minime.db.session import EXPECTED_ALEMBIC_HEAD
 url = os.environ.get('MINIME_DATABASE_URL')
 engine = create_engine(url)
 with engine.connect() as conn:
     rev = conn.execute(text('SELECT version_num FROM alembic_version')).scalar()
-    assert rev in ('016_provider_efficiency_telemetry', '017_auth_sessions_and_operators'), f'Unexpected rev: {rev}'
+    assert rev == EXPECTED_ALEMBIC_HEAD, f'Expected {EXPECTED_ALEMBIC_HEAD}, found {rev}'
 "
 fi
 
