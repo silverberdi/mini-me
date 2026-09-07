@@ -203,7 +203,7 @@ class PostMergeReconciliationService:
                     job.error_message = run.stop_reason
                     job.updated_at = now
                     self.uow.jobs.save(job)
-                self.clean_worktree_and_branches(project_id, change_name, run.candidate_sha)
+                self._clean_worktree_and_branches(project_id, change_name, job_id)
                 self._reconcile_change_and_backlog_item(project_id, change_name)
                 self.uow.commit()
                 return PostMergeReconciliationResult(
@@ -562,3 +562,47 @@ class PostMergeReconciliationService:
                     self.uow.backlog_items.save(updated_bk)
         except Exception as exc:
             logger.warning("Error reconciling Change and BacklogItem for '%s': %s", change_name, exc)
+
+    def _clean_worktree_and_branches(
+        self, project_id: str, change_name: str, job_id: str | None = None
+    ) -> None:
+        """Clean up worktrees and git branches associated with a job/change."""
+        if job_id:
+            try:
+                wt_path = self.worktree_manager.worktree_path(job_id)
+                if wt_path.exists():
+                    subprocess.run(
+                        ["git", "worktree", "remove", "--force", str(wt_path)],
+                        cwd=self.project_root,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                for child in (self.project_root / ".minime" / "worktrees").glob(f"{job_id}*"):
+                    subprocess.run(
+                        ["git", "worktree", "remove", "--force", str(child)],
+                        cwd=self.project_root,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+            except Exception as exc:
+                logger.warning("Worktree cleanup warning for job '%s': %s", job_id, exc)
+
+        try:
+            local_branches = [
+                f"minime/{change_name}-{job_id}" if job_id else None,
+                f"minime/{change_name}",
+            ]
+            for b in local_branches:
+                if b:
+                    subprocess.run(
+                        ["git", "branch", "-D", b],
+                        cwd=self.project_root,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+        except Exception as exc:
+            logger.warning("Branch cleanup warning for change '%s': %s", change_name, exc)
+
