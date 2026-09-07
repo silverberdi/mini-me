@@ -201,7 +201,6 @@ class PostMergeReconciliationService:
                 if job and job.status != JobStatus.COMPLETED:
                     job.status = JobStatus.CANCELLED
                     job.error_message = run.stop_reason
-                    job.completed_at = now
                     job.updated_at = now
                     self.uow.jobs.save(job)
                 self.clean_worktree_and_branches(project_id, change_name, run.candidate_sha)
