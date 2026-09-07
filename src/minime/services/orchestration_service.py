@@ -336,7 +336,7 @@ class OrchestrationService:
                     or "codex"
                 )
                 health = self.pipeline.health_service.get_health(provider)
-                if health.status in (ProviderHealthStatus.AVAILABLE, ProviderHealthStatus.DEGRADED):
+                if health.status in (ProviderHealthStatus.AVAILABLE, ProviderHealthStatus.DEGRADED) or force:
                     run.stop_outcome = None
                     run.human_gate = None
                     run.is_active = True

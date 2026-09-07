@@ -1094,6 +1094,7 @@ def orchestrate_start_cmd(
 def orchestrate_resume_cmd(
     run_id: str = typer.Argument(..., help="Orchestration run identifier"),
     project_root: str = typer.Option(".", "--path", "-p", help="Filesystem path to project root"),
+    force: bool = typer.Option(False, "--force", "-f", help="Force resumption even if waiting or gated"),
     json_output: bool = typer.Option(False, "--json", help="Output result as JSON"),
 ) -> None:
     """Resume an existing orchestration run from its persisted checkpoint."""
@@ -1101,7 +1102,7 @@ def orchestrate_resume_cmd(
         with db_manager.session() as session:
             uow = PostgresPersistenceUnitOfWork(session)
             service = OrchestrationService(uow, project_root=project_root)
-            run = service.resume(run_id, project_root=project_root)
+            run = service.resume(run_id, project_root=project_root, force=force)
             status_view = service.get_status(run.run_id)
 
             if json_output:
