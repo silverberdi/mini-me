@@ -244,8 +244,9 @@ class OutcomeGovernanceService:
                 ProviderResultClass.RATE_LIMIT,
             ):
                 return ExecutionOutcome.PROVIDER_EXHAUSTED
+            if provider_result.result_class == ProviderResultClass.AUTH_ERROR:
+                return ExecutionOutcome.AUTH_REQUIRED
             if provider_result.result_class in (
-                ProviderResultClass.AUTH_ERROR,
                 ProviderResultClass.TIMEOUT,
                 ProviderResultClass.UNKNOWN_ERROR,
             ):

@@ -1095,6 +1095,13 @@ class ExecutionPipelineService:
                     active_attempt.productivity_class = (
                         AttemptProductivityClass.VALID_CORRECTIVE_WORK
                     )
+                elif outcome in {
+                    ExecutionOutcome.AUTH_REQUIRED,
+                    ExecutionOutcome.PROVIDER_PREFLIGHT_FAILURE,
+                }:
+                    active_attempt.productivity_class = (
+                        AttemptProductivityClass.PROVIDER_PREFLIGHT_FAILURE
+                    )
                 elif outcome == ExecutionOutcome.PROVIDER_FAILURE:
                     active_attempt.productivity_class = AttemptProductivityClass.PROVIDER_FAILURE
                 else:

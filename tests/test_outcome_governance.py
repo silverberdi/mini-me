@@ -290,11 +290,24 @@ def test_classify_outcome_provider_exhausted():
     assert outcome == ExecutionOutcome.PROVIDER_EXHAUSTED
 
 
-def test_classify_outcome_provider_failure():
+def test_classify_outcome_auth_required():
     service = OutcomeGovernanceService()
     ver_res = CompletionVerificationResult(is_complete=False)
     prov_res = NormalizedProviderResult(
         result_class=ProviderResultClass.AUTH_ERROR,
+        provider="antigravity",
+        role="implementer",
+    )
+
+    outcome = service.classify_outcome(ver_res, provider_result=prov_res)
+    assert outcome == ExecutionOutcome.AUTH_REQUIRED
+
+
+def test_classify_outcome_provider_failure():
+    service = OutcomeGovernanceService()
+    ver_res = CompletionVerificationResult(is_complete=False)
+    prov_res = NormalizedProviderResult(
+        result_class=ProviderResultClass.TIMEOUT,
         provider="codex",
         role="implementer",
     )

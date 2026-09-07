@@ -41,6 +41,12 @@ class ProviderOutcomeParser:
     _AUTH_PATTERNS = [
         re.compile(r"invalid_api_key", re.IGNORECASE),
         re.compile(r"authentication_failed", re.IGNORECASE),
+        re.compile(r"authentication\s+required", re.IGNORECASE),
+        re.compile(r"auth[_\s-]?required", re.IGNORECASE),
+        re.compile(r"sign\s+in\s+to\s+view", re.IGNORECASE),
+        re.compile(r"please\s+sign\s+in", re.IGNORECASE),
+        re.compile(r"login\s+required", re.IGNORECASE),
+        re.compile(r"not\s+logged\s+in", re.IGNORECASE),
         re.compile(r"unauthorized", re.IGNORECASE),
         re.compile(r"http\s+401", re.IGNORECASE),
         re.compile(r"status\s+401", re.IGNORECASE),

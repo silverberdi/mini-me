@@ -126,6 +126,8 @@ class ExecutionOutcome(str, Enum):
     PROVIDER_EXHAUSTED = "PROVIDER_EXHAUSTED"
     ENVIRONMENT_UNAVAILABLE = "ENVIRONMENT_UNAVAILABLE"
     EVIDENCE_INSUFFICIENT = "EVIDENCE_INSUFFICIENT"
+    PROVIDER_PREFLIGHT_FAILURE = "PROVIDER_PREFLIGHT_FAILURE"
+    AUTH_REQUIRED = "AUTH_REQUIRED"
 
 
 class ContinuationDecision(str, Enum):
@@ -176,6 +178,9 @@ class ProviderHealthStatus(str, Enum):
     TEMPORARILY_UNAVAILABLE = "temporarily_unavailable"
     EXHAUSTED = "exhausted"
     DEGRADED = "degraded"
+    AUTH_REQUIRED = "auth_required"
+    MISCONFIGURED = "misconfigured"
+    UNREACHABLE = "unreachable"
 
 
 class ProviderResultClass(str, Enum):
@@ -584,6 +589,7 @@ class AttemptProductivityClass(str, Enum):
     UX_VISUAL_REVIEW = "UX_VISUAL_REVIEW"
     ARCHITECTURE_WORK = "ARCHITECTURE_WORK"
     PROVIDER_FAILURE = "PROVIDER_FAILURE"
+    PROVIDER_PREFLIGHT_FAILURE = "PROVIDER_PREFLIGHT_FAILURE"
     OTHER = "OTHER"
 
 

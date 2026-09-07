@@ -203,7 +203,7 @@ class ProviderHealthService:
         elif outcome.result_class == ProviderResultClass.AUTH_ERROR:
             new_health = self.uow.provider_health.update_health(
                 provider=outcome.provider,
-                status=ProviderHealthStatus.DEGRADED.value,
+                status=ProviderHealthStatus.AUTH_REQUIRED.value,
                 result_class=outcome.result_class.value,
                 error_summary=outcome.summary,
                 consecutive_failures=current.consecutive_failures + 1,
@@ -213,7 +213,7 @@ class ProviderHealthService:
                     event_type=EventType.PROVIDER_HEALTH_UPDATED,
                     payload={
                         "provider": outcome.provider,
-                        "status": ProviderHealthStatus.DEGRADED.value,
+                        "status": ProviderHealthStatus.AUTH_REQUIRED.value,
                         "result_class": outcome.result_class.value,
                         "summary": outcome.summary,
                     },

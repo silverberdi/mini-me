@@ -13,6 +13,7 @@ import logging
 from typing import Any
 
 from minime.domain.enums import (
+    AttemptProductivityClass,
     EventType,
     ExecutionOutcome,
     PremiumProviderReasonCode,
@@ -203,7 +204,8 @@ class ProviderPolicyService:
         if not attempts:
             return False
 
-        # Anti-ping-pong: Antigravity may execute at most 1 bounded recovery attempt per failure episode
+        # Anti-ping-pong: Antigravity may execute at most 1 bounded recovery attempt per failure episode.
+        # Pre-flight provider failures (AUTH_REQUIRED, PROVIDER_PREFLIGHT_FAILURE) do NOT consume the recovery budget.
         ag_recovery_attempts = [
             a
             for a in attempts
@@ -212,6 +214,15 @@ class ProviderPolicyService:
             in {
                 PremiumProviderReasonCode.CODEX_NON_CONVERGENCE,
                 PremiumProviderReasonCode.PREMIUM_RECOVERY_NON_CONVERGENCE,
+            }
+            and a.normalized_outcome
+            not in {
+                ExecutionOutcome.PROVIDER_PREFLIGHT_FAILURE,
+                ExecutionOutcome.AUTH_REQUIRED,
+            }
+            and a.productivity_class
+            not in {
+                AttemptProductivityClass.PROVIDER_PREFLIGHT_FAILURE,
             }
         ]
         if len(ag_recovery_attempts) >= 1:

@@ -132,13 +132,10 @@ class AntigravityProviderAdapter(ProviderAdapterInterface):
             return False
 
         try:
-            # Lightweight probe with plan mode
+            # Lightweight probe verifying execution and authentication readiness (agy models)
             proc = await asyncio.create_subprocess_exec(
                 resolved,
-                "--mode",
-                "plan",
-                "--dangerously-skip-permissions",
-                "--print=### PROBE ###",
+                "models",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
@@ -148,7 +145,21 @@ class AntigravityProviderAdapter(ProviderAdapterInterface):
                     proc.communicate(),
                     timeout=timeout_seconds,
                 )
-                return proc.returncode == 0
+                if proc.returncode != 0:
+                    return False
+                combined = (
+                    stdout.decode("utf-8", errors="replace")
+                    + " "
+                    + stderr.decode("utf-8", errors="replace")
+                ).lower()
+                if (
+                    "authentication required" in combined
+                    or "sign in" in combined
+                    or "not logged in" in combined
+                    or "login required" in combined
+                ):
+                    return False
+                return True
             except asyncio.TimeoutError:
                 try:
                     proc.terminate()
