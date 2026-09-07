@@ -1011,14 +1011,14 @@
         body: JSON.stringify(payload)
       });
       const result = await response.json();
-      if (response.ok && (result.status === 'SUCCESS' || result.success)) {
-        showToast(`Action ${actionType} succeeded: ${result.message || 'Execution completed'}`, 'success');
+      if (response.ok && (result.status === 'SUCCESS' || result.status === 'COMPLETED' || result.status === 'ACCEPTED' || result.success === true)) {
+        showToast(`Action ${actionType} succeeded: ${result.summary || result.message || 'Execution completed'}`, 'success');
         await fetchOverview();
         if (selectedChange && selectedChange.projectId && selectedChange.changeName) {
           await fetchChangeDetail(selectedChange.projectId, selectedChange.changeName);
         }
       } else {
-        const errMsg = result.error_message || result.detail || result.message || 'Action rejected or failed.';
+        const errMsg = result.summary || result.error_message || result.error_code || result.detail || result.message || 'Action rejected or failed.';
         showToast(`Action failed: ${errMsg}`, 'error');
         await fetchOverview();
         if (selectedChange && selectedChange.projectId && selectedChange.changeName) {

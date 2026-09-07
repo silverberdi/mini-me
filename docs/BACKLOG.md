@@ -45,4 +45,13 @@
 | MM-090 | 017 | PWA control center (rich web operator experience) | responsive web app & PWA acceptance |
 | MM-100 | 018 | End-to-end self-operating development loop & SDLC metrics | full-cycle autonomous delivery & metrics |
 
+### Adaptive AI Execution & Continuity Requirements (Planning Reconciliation)
+Future capabilities `adaptive-provider-model-routing` and `autonomous-degraded-mode-work-continuity` must explicitly model the following concepts as distinct operational domains:
+1. **Routine Provider Selection**: Baseline assignment governed by project-level configuration (e.g. Codex implementer / Antigravity reviewer).
+2. **Bounded Premium Recovery**: Specialized single-attempt escalation (`PREMIUM_RECOVERY_NON_CONVERGENCE`) triggered only when material candidate progress exists and primary executor exhibits non-convergence under exhausted budgets.
+3. **Drain Fallback**: Paid secondary provider fallback (OpenRouter) activated strictly during dual-primary exhaustion for in-flight changes, never for routine execution or new change admission.
+4. **Executor Non-Convergence**: Algorithmic classification of repetitive malformed output, premature stops, failing checks, or stagnant streaks distinct from provider unavailability.
+5. **Reviewer Independence**: Enforced structural separation guaranteeing that an implementer/recovery model identity never reviews its own candidate.
+6. **Genuine Human Gates**: Reserving `NEEDS_HUMAN` strictly for true operator decisions (product ambiguity, secret provisioning, irreversible operations, merge approval, policy changes), replacing deterministic executor non-convergence transitions with machine-operable states (`WAITING_CAPACITY`, `EXECUTOR_RECOVERY_REQUIRED`).
+
 Backlog items are planning units. OpenSpec `tasks.md` remains the implementation checklist for the active change; do not duplicate every task into GitHub Issues.

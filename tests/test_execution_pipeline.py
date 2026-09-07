@@ -294,6 +294,12 @@ async def test_recovery_evidence_failure_blocks_without_removal(in_memory_uow, t
         in_memory_uow,
         project_root=tmp_path,
         implementer_runner=MockImplementerRunner(),
+        reviewer_runner=MockReviewerRunner(
+            stdout=['```json\n{"verdict": "READY_TO_MERGE", "summary": "ok", "findings": []}\n```']
+        ),
+        auditor_runner=MockAuditorRunner(
+            output=['{"risk": "low", "summary": "ok", "findings": []}']
+        ),
         worktree_manager=worktrees,
     )
 

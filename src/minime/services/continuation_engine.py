@@ -86,7 +86,7 @@ class ContinuationEngine:
         if ctx.reassignment_count >= self.max_reassignments:
             return ContinuationDecisionResult(
                 decision=ContinuationDecision.NEEDS_HUMAN,
-                escalation_reason=f"Maximum reassignment limit ({self.max_reassignments}) reached: {reason}",
+                escalation_reason=f"NON_CONVERGENT_EXECUTION: Maximum reassignment limit ({self.max_reassignments}) reached: {reason}",
             )
         if not ctx.alternative_executor_eligible:
             return ContinuationDecisionResult(

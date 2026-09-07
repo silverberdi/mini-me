@@ -28,11 +28,14 @@ These decisions supersede the previous AgentFlow context pack.
 
 ## Agent roles
 - Normal path: Codex implementer / Antigravity reviewer, or the reverse, configured per project.
-- Same primary agent cannot implement and review the same candidate.
+- Routine implementation: Antigravity is strictly forbidden as routine implementer for Codex-designated projects.
+- Bounded Premium Recovery (`PREMIUM_RECOVERY_NON_CONVERGENCE`): When material candidate progress exists but the primary executor exhibits non-convergence (repeated malformed results, failing checks, retries/reassignments exhausted), Antigravity may be engaged for a strictly bounded recovery attempt (max 1 attempt per failure episode; anti-ping-pong enforced).
+- Reviewer independence: The same primary agent / model identity cannot implement and review the same candidate. If Antigravity performs recovery implementation, Antigravity must NOT review that candidate; review role must reassign to Codex or an independent model.
 - DeepSeek Direct: independent read-only auditor.
 - Qwen local: optional advisory helper only.
 - OpenRouter: optional paid drain fallback only.
 - In OpenRouter drain fallback, substantive implementer model and authoritative reviewer model must differ. Qwen does not review Qwen.
+- Human Gate Semantics: `NEEDS_HUMAN` is reserved strictly for genuine human-only decisions (product ambiguity, credentials/secrets, irreversible operator decisions, merge gates, business policy decisions). Deterministic executor recovery and non-convergence must use machine-operable state/reason semantics (`EXECUTOR_RECOVERY_REQUIRED`, `WAITING_CAPACITY`) without triggering false human gates.
 
 ## Capacity policy
 - When both primary subscription agents are exhausted, scheduler stops admitting new READY changes.

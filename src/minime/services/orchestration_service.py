@@ -388,21 +388,23 @@ class OrchestrationService:
                     job.status = JobStatus.RUNNING
                     job.continuation_decision = None
                     job.escalation_reason = None
-                    job.reassignment_count = 0
                     self.uow.jobs.save(job)
             self.uow.orchestration_runs.save(run)
             self.uow.commit()
 
-        transition_key = f"{run.run_id}:RESUME:{run.resumable_stage.value}:{run.current_generation}"
+        resumable_stage = (
+            run.resumable_stage or run.current_stage or OrchestrationStage.IMPLEMENTING
+        )
+        transition_key = f"{run.run_id}:RESUME:{resumable_stage.value}:{run.current_generation}"
         if not self.uow.orchestration_stage_events.get_by_transition_key(transition_key):
             self.uow.orchestration_stage_events.save(
                 OrchestrationStageEvent(
                     run_id=run.run_id,
                     from_stage=run.current_stage,
-                    to_stage=run.resumable_stage,
+                    to_stage=resumable_stage,
                     event_type=EventType.ORCHESTRATION_RESUMED.value,
                     transition_key=transition_key,
-                    evidence_references={"resumed_from": run.resumable_stage.value},
+                    evidence_references={"resumed_from": resumable_stage.value},
                     actor="operator" if force else "system",
                     created_at=utc_now(),
                 )
@@ -410,7 +412,7 @@ class OrchestrationService:
             self.uow.commit()
 
         if force:
-            run.current_stage = run.resumable_stage
+            run.current_stage = resumable_stage
             self.uow.orchestration_runs.save(run)
             self.uow.commit()
 

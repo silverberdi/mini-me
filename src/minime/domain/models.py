@@ -966,6 +966,11 @@ class OperatorActionResult(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
     executed_at: datetime = Field(default_factory=utc_now)
 
+    @computed_field
+    @property
+    def success(self) -> bool:
+        return self.status in {OperatorActionStatus.COMPLETED, OperatorActionStatus.ACCEPTED}
+
 
 class OperatorActionRecord(BaseModel):
     """Durable audit record of an operator action execution."""

@@ -1416,3 +1416,181 @@ async def test_pipeline_rule_k_structurally_ineligible_escalates_to_needs_human(
 
     assert res.status == JobStatus.NEEDS_HUMAN
     assert "Alternative executor ineligible" in (res.escalation_reason or "")
+
+
+@pytest.mark.asyncio
+async def test_pipeline_reassigns_to_antigravity_on_codex_non_convergence(tmp_path: Path):
+    """Verify that when Codex non-converges on routine task, pipeline reassigns to Antigravity under premium recovery."""
+    import subprocess
+    from minime.domain.enums import ContinuationDecision, EventType, PremiumProviderReasonCode
+    from minime.domain.models import JobAttempt
+
+    uow = MockUnitOfWork()
+    project = Project(
+        project_id="proj-rec",
+        display_name="Recovery Project",
+        repository="owner/repo",
+        base_branch="main",
+        implementer="codex",
+        reviewer="antigravity",
+    )
+    uow.projects.save(project)
+    change = Change(
+        change_id="ch-rec",
+        project_id="proj-rec",
+        name="007-recovery",
+        last_readiness_status=ReadinessState.READY,
+    )
+    uow.changes.save(change)
+
+    job_id = "job-rec-1"
+    job = Job(
+        job_id=job_id,
+        project_id="proj-rec",
+        change_name="007-recovery",
+        implementer_role="codex",
+        current_executor="codex",
+        status=JobStatus.QUEUED,
+        attempt_count=2,
+        reassignment_count=0,
+    )
+    uow.jobs.save(job)
+
+    att1 = JobAttempt(
+        attempt_id=f"att-{job_id}-1",
+        job_id=job_id,
+        attempt_number=1,
+        executor_role="codex",
+        model_identity="codex",
+        normalized_outcome=ExecutionOutcome.MALFORMED_RESULT,
+        continuation_decision=ContinuationDecision.CORRECT_AND_RETRY,
+        corrective_retries_count=0,
+        same_outcome_streak=1,
+    )
+    att2 = JobAttempt(
+        attempt_id=f"att-{job_id}-2",
+        job_id=job_id,
+        attempt_number=2,
+        executor_role="codex",
+        model_identity="codex",
+        normalized_outcome=ExecutionOutcome.MALFORMED_RESULT,
+        continuation_decision=ContinuationDecision.CORRECT_AND_RETRY,
+        corrective_retries_count=1,
+        same_outcome_streak=2,
+    )
+    uow.job_attempts.save(att1)
+    uow.job_attempts.save(att2)
+
+    wt_path = tmp_path / "wt-rec"
+    wt_path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init"], cwd=str(wt_path), check=True, capture_output=True)
+    openspec_dir = wt_path / "openspec" / "changes" / "007-recovery"
+    openspec_dir.mkdir(parents=True, exist_ok=True)
+    (openspec_dir / "proposal.md").write_text("# Proposal\n")
+    (openspec_dir / "design.md").write_text("# Design\n")
+    (openspec_dir / "tasks.md").write_text("# Tasks\n- [x] 1.1 Done\n")
+    specs_dir = openspec_dir / "specs" / "feature"
+    specs_dir.mkdir(parents=True, exist_ok=True)
+    (specs_dir / "spec.md").write_text("# Spec\n")
+
+    mock_worktree_mgr = MagicMock()
+    mock_worktree_mgr.create_worktree = AsyncMock(
+        return_value=MagicMock(path=wt_path, base_sha="base-sha")
+    )
+    mock_worktree_mgr.current_sha = AsyncMock(return_value="sha-att3")
+    mock_worktree_mgr.cleanup_worktree = AsyncMock()
+
+    mock_task_tracker = MagicMock()
+    mock_task_tracker.format_prompt_context = MagicMock(return_value="Task context")
+    mock_task_tracker.parse_tasks = MagicMock(
+        return_value=[OpenSpecTask("1.1", "T1", "Phase 1", False)]
+    )
+    mock_task_tracker.read_openspec = MagicMock(
+        return_value={"proposal": "Proposal text", "design": "Design text", "specs": {}, "tasks": []}
+    )
+
+    mock_outcome_gov = MagicMock()
+
+    def verify_side_effect(*args, **kwargs):
+        current_job = uow._jobs_dict[job_id]
+        if current_job.current_executor == "codex":
+            return CompletionVerificationResult(
+                is_complete=False,
+                reason="Malformed",
+                incomplete_tasks=[OpenSpecTask("1.1", "T1", "Phase 1", False)],
+                candidate_sha="sha-att3",
+            )
+        return CompletionVerificationResult(
+            is_complete=True,
+            reason="Complete",
+            incomplete_tasks=[],
+            candidate_sha="sha-att3",
+        )
+
+    def classify_side_effect(*args, **kwargs):
+        current_job = uow._jobs_dict[job_id]
+        if current_job.current_executor == "codex":
+            return ExecutionOutcome.MALFORMED_RESULT
+        return ExecutionOutcome.COMPLETED
+
+    mock_outcome_gov.verify_completion = MagicMock(side_effect=verify_side_effect)
+    mock_outcome_gov.classify_outcome = MagicMock(side_effect=classify_side_effect)
+    mock_outcome_gov.evaluate_progress = MagicMock(
+        side_effect=lambda *args, **kwargs: "NO_PROGRESS"
+        if uow._jobs_dict[job_id].current_executor == "codex"
+        else "FULL_COMPLETION"
+    )
+
+    mock_imp_runner = MagicMock()
+    mock_imp_runner.run = AsyncMock(
+        return_value=ImplementerResult(
+            stdout=["Done"], stderr=[], exit_code=0, duration_ms=50, timed_out=False
+        )
+    )
+    mock_checks_runner = MagicMock()
+    mock_rev_runner = MagicMock()
+    mock_rev_view_mgr = MagicMock()
+
+    pipeline = ExecutionPipelineService(
+        uow=uow,
+        project_root=tmp_path,
+        implementer_runner=mock_imp_runner,
+        reviewer_runner=mock_rev_runner,
+        worktree_manager=mock_worktree_mgr,
+        reviewer_view_manager=mock_rev_view_mgr,
+        checks_runner=mock_checks_runner,
+        task_tracker=mock_task_tracker,
+        outcome_governance=mock_outcome_gov,
+    )
+    pipeline.health_service.get_health = MagicMock(
+        return_value=MagicMock(status=ProviderHealthStatus.AVAILABLE)
+    )
+    pipeline.reconciliation_service.can_reconcile = MagicMock(return_value=False)
+
+    from unittest.mock import patch
+
+    with (
+        patch(
+            "minime.services.execution_pipeline.validate_pre_review_integrity",
+            return_value=(True, None),
+        ),
+        patch(
+            "minime.services.execution_pipeline.validate_post_review_integrity",
+            return_value=(True, None),
+        ),
+        patch.object(pipeline, "_run_audit_stage", new=AsyncMock()),
+    ):
+        mock_checks_runner.run = AsyncMock(
+            return_value=MagicMock(passed=True, results=[], diagnostics=[])
+        )
+        mock_rev_runner.run = AsyncMock(
+            return_value=MagicMock(stdout=["VERDICT: READY_TO_MERGE"], stderr=[], exit_code=0)
+        )
+        res = await pipeline.execute_queued_job(job_id)
+
+    # Verify that Antigravity was assigned under premium recovery
+    saved_events = [call[0][0].event_type for call in uow.events.save.call_args_list]
+    assert EventType.AGENT_REASSIGNED in saved_events
+    assert EventType.PREMIUM_PROVIDER_ASSIGNED in saved_events
+    assert EventType.PREMIUM_RECOVERY_ASSIGNED in saved_events
+

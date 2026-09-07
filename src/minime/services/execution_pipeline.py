@@ -23,6 +23,8 @@ from minime.domain.enums import (
     ExecutionOutcome,
     FindingSeverity,
     JobStatus,
+    PremiumProviderReasonCode,
+    PrimaryProvider,
     ProgressClassification,
     ProviderHealthStatus,
     ProviderResultClass,
@@ -407,6 +409,67 @@ class ExecutionPipelineService:
             past_attempts = self.uow.job_attempts.list_by_job(job.job_id)
             past_attempts.sort(key=lambda a: a.attempt_number)
 
+            # If resuming an episode that reached non-convergence / false human gate, transition to Antigravity recovery
+            if (
+                current_executor == PrimaryProvider.CODEX.value
+                and self.provider_policy._verify_codex_non_convergence(past_attempts)
+                and (
+                    job.reassignment_count >= 1
+                    or any(
+                        a.continuation_decision
+                        in {
+                            ContinuationDecision.REASSIGN_AGENT,
+                            ContinuationDecision.NEEDS_HUMAN,
+                        }
+                        for a in past_attempts
+                    )
+                    or self.health_service.get_health(PrimaryProvider.CODEX.value).status
+                    != ProviderHealthStatus.AVAILABLE
+                )
+            ):
+                ag_health = self.health_service.get_health(PrimaryProvider.ANTIGRAVITY.value)
+                if ag_health.status == ProviderHealthStatus.AVAILABLE:
+                    orig_executor = current_executor
+                    current_executor = PrimaryProvider.ANTIGRAVITY.value
+                    job.current_executor = current_executor
+                    self.uow.jobs.save(job)
+                    self._save_event(
+                        EventType.AGENT_REASSIGNED,
+                        job,
+                        {
+                            "from_executor": orig_executor,
+                            "to_executor": current_executor,
+                            "reassignment_count": job.reassignment_count,
+                        },
+                    )
+                    self._save_event(
+                        EventType.PREMIUM_PROVIDER_ASSIGNED,
+                        job,
+                        {
+                            "role": "implementer",
+                            "provider": current_executor,
+                            "premium_reason_code": PremiumProviderReasonCode.PREMIUM_RECOVERY_NON_CONVERGENCE.value,
+                            "originating_provider": orig_executor,
+                            "candidate_sha_before_recovery": job.candidate_sha or job.base_sha,
+                            "recovery_provider": current_executor,
+                            "attempt_id": f"att-{job.job_id}-{job.attempt_count + 1}",
+                            "attempt_number": job.attempt_count + 1,
+                        },
+                    )
+                    self._save_event(
+                        EventType.PREMIUM_RECOVERY_ASSIGNED,
+                        job,
+                        {
+                            "recovery_reason": PremiumProviderReasonCode.PREMIUM_RECOVERY_NON_CONVERGENCE.value,
+                            "originating_provider": orig_executor,
+                            "candidate_sha_before_recovery": job.candidate_sha or job.base_sha,
+                            "recovery_provider": current_executor,
+                            "attempt_id": f"att-{job.job_id}-{job.attempt_count + 1}",
+                            "attempt_number": job.attempt_count + 1,
+                        },
+                    )
+                    self.uow.commit()
+
             corrective_retries_for_current_executor = 0
             same_outcome_streak = 1
             same_blocker_fingerprint_streak = 0
@@ -464,6 +527,8 @@ class ExecutionPipelineService:
 
             # Main implementer continuation loop
             while True:
+                past_attempts = self.uow.job_attempts.list_by_job(job.job_id)
+                past_attempts.sort(key=lambda a: a.attempt_number)
                 attempt_number = job.attempt_count
                 attempt_id = f"att-{job.job_id}-{attempt_number}"
 
@@ -548,7 +613,6 @@ class ExecutionPipelineService:
                     if prov_policy_result.is_premium
                     else None
                 )
-
                 active_attempt = JobAttempt(
                     attempt_id=attempt_id,
                     job_id=job.job_id,
@@ -944,6 +1008,26 @@ class ExecutionPipelineService:
                 )
 
                 # Mandatory Rule D: In-process Lightweight Bookkeeping Reconciliation
+                only_bookkeeping = bool(
+                    ver_res.incomplete_tasks
+                    and all(
+                        is_verification_task(t)
+                        or any(
+                            kw in t.text.lower()
+                            for kw in [
+                                "test",
+                                "check",
+                                "verify",
+                                "sync",
+                                "spec",
+                                "document",
+                                "manifest",
+                                "evidence",
+                            ]
+                        )
+                        for t in ver_res.incomplete_tasks
+                    )
+                )
                 can_reconcile = self.reconciliation_service.can_reconcile(
                     code_changed=bool(
                         touched_files or (job.base_sha and current_sha != job.base_sha)
@@ -952,7 +1036,7 @@ class ExecutionPipelineService:
                         outcome == ExecutionOutcome.COMPLETED or not ver_res.failing_checks
                     ),
                     incomplete_tasks_count=len(ver_res.incomplete_tasks),
-                    only_bookkeeping_remaining=True,
+                    only_bookkeeping_remaining=only_bookkeeping,
                 )
                 if can_reconcile and ver_res.incomplete_tasks:
                     rec_res = self.reconciliation_service.reconcile_bookkeeping(
@@ -1050,11 +1134,51 @@ class ExecutionPipelineService:
                         target_executor, current_executor
                     )
                     if is_pair_valid:
-                        alt_eligible = True
-                        target_model_id = target_executor
+                        # Check provider policy for target executor eligibility
+                        # For routine tasks, Antigravity requires a verified premium reason code (e.g. non-convergence)
+                        pol_eval = self.provider_policy.evaluate_selection(
+                            task_class=task_class_result.task_class,
+                            role="implementer",
+                            project=project,
+                            attempts=past_attempts + [active_attempt],
+                        )
+                        if pol_eval.selected_provider == target_executor:
+                            alt_eligible = True
+                            target_model_id = target_executor
+                        elif target_executor == project.implementer:
+                            alt_eligible = True
+                            target_model_id = target_executor
+
+                        # Anti-ping-pong: target executor must not have previously failed without intervening substantive progress
+                        if past_attempts and alt_eligible:
+                            prior_roles = [a.executor_role for a in past_attempts]
+                            if target_executor in prior_roles:
+                                last_idx = max(
+                                    i for i, r in enumerate(prior_roles) if r == target_executor
+                                )
+                                attempts_since = past_attempts[last_idx:] + [active_attempt]
+                                made_progress = any(
+                                    a.productivity_class
+                                    in {
+                                        AttemptProductivityClass.SUBSTANTIVE_PROGRESS,
+                                        AttemptProductivityClass.VALID_CORRECTIVE_WORK,
+                                    }
+                                    for a in attempts_since
+                                )
+                                if not made_progress:
+                                    alt_eligible = False
+                                    self._save_event(
+                                        EventType.AGENT_PING_PONG_EXHAUSTED,
+                                        job,
+                                        {
+                                            "from_executor": current_executor,
+                                            "to_executor": target_executor,
+                                            "reason": "Ping-pong reassignment suppressed: target executor previously failed on unchanged failure without intervening progress.",
+                                        },
+                                    )
 
                         # Model independence check if fallback implementer was used
-                        if fallback_implementer_model:
+                        if fallback_implementer_model and alt_eligible:
                             is_indep, _ = self.independence_policy.validate(
                                 fallback_implementer_model, target_model_id
                             )
@@ -1212,6 +1336,46 @@ class ExecutionPipelineService:
                             "reassignment_count": job.reassignment_count,
                         },
                     )
+                    # If target executor is a premium provider assignment (e.g. Antigravity recovery)
+                    target_policy_eval = self.provider_policy.evaluate_selection(
+                        task_class=task_class_result.task_class,
+                        role="implementer",
+                        project=project,
+                        attempts=past_attempts + [active_attempt],
+                    )
+                    if (
+                        target_policy_eval.selected_provider == target_executor
+                        and target_policy_eval.is_premium
+                        and target_policy_eval.premium_reason_code
+                    ):
+                        self._save_event(
+                            EventType.PREMIUM_PROVIDER_ASSIGNED,
+                            job,
+                            {
+                                "role": "implementer",
+                                "provider": target_executor,
+                                "premium_reason_code": target_policy_eval.premium_reason_code.value,
+                                "originating_provider": active_attempt.executor_role,
+                                "failure_classification": outcome.value,
+                                "candidate_sha_before_recovery": current_sha,
+                                "recovery_provider": target_executor,
+                                "attempt_id": attempt_id,
+                                "attempt_number": attempt_number,
+                            },
+                        )
+                        self._save_event(
+                            EventType.PREMIUM_RECOVERY_ASSIGNED,
+                            job,
+                            {
+                                "recovery_reason": target_policy_eval.premium_reason_code.value,
+                                "originating_provider": active_attempt.executor_role,
+                                "failure_classification": outcome.value,
+                                "candidate_sha_before_recovery": current_sha,
+                                "recovery_provider": target_executor,
+                                "attempt_id": attempt_id,
+                                "attempt_number": attempt_number,
+                            },
+                        )
                     self.uow.commit()
 
                     # Check target executor capacity availability under canonical 005/006 lifecycle

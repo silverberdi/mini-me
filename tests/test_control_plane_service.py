@@ -247,3 +247,111 @@ def test_secret_redaction_in_action_records(in_memory_uow, seeded_project_and_ru
     # Secrets should be sanitized / redacted
     assert "sk-proj-123456789abcdef" not in str(stored_params)
     assert "my-secret-key" not in str(stored_params)
+
+
+def test_get_available_actions_disables_continue_for_genuine_human_gates(
+    in_memory_uow, seeded_project_and_run
+):
+    project, change, run = seeded_project_and_run
+    service = ControlPlaneService(in_memory_uow)
+
+    # 1. UI validation gate: CONTINUE should be disabled, RESOLVE_GATE enabled
+    run.human_gate = HumanGate.NEEDS_HUMAN
+    run.stop_outcome = OrchestrationStopOutcome.NEEDS_HUMAN
+    run.stop_reason = "UI_VALIDATION_REQUIRED: Human visual check needed"
+    in_memory_uow.orchestration_runs.save(run)
+    in_memory_uow.commit()
+
+    actions = service.get_available_actions(run.run_id)
+    action_map = {a.action: a for a in actions}
+    assert action_map[OperatorActionType.CONTINUE].enabled is False
+    assert "Resolve Gate" in action_map[OperatorActionType.CONTINUE].disabled_reason
+    assert action_map[OperatorActionType.RESOLVE_GATE].enabled is True
+
+    # 2. Preserved candidate conflict: CONTINUE should be disabled, RESOLVE_GATE enabled
+    run.stop_reason = "PRESERVED_CANDIDATE_CONFLICT: Base branch advanced"
+    in_memory_uow.orchestration_runs.save(run)
+    in_memory_uow.commit()
+
+    actions = service.get_available_actions(run.run_id)
+    action_map = {a.action: a for a in actions}
+    assert action_map[OperatorActionType.CONTINUE].enabled is False
+    assert "Resolve Gate" in action_map[OperatorActionType.CONTINUE].disabled_reason
+    assert action_map[OperatorActionType.RESOLVE_GATE].enabled is True
+
+    # 3. Non-convergence / automated recovery: CONTINUE enabled
+    run.stop_reason = "NON_CONVERGENT_EXECUTION: Maximum reassignment limit reached"
+    in_memory_uow.orchestration_runs.save(run)
+    in_memory_uow.commit()
+
+    actions = service.get_available_actions(run.run_id)
+    action_map = {a.action: a for a in actions}
+    assert action_map[OperatorActionType.CONTINUE].enabled is True
+
+
+def test_operator_action_result_computed_success(in_memory_uow, seeded_project_and_run):
+    project, change, run = seeded_project_and_run
+    service = ControlPlaneService(in_memory_uow)
+
+    req = OperatorActionRequest(
+        project_id="test-proj",
+        change_name="015-test-change",
+        run_id="run-101",
+        action_type=OperatorActionType.CONTINUE,
+        actor_identity="operator",
+        source_interface="pwa",
+    )
+
+    result = service.execute_action(req)
+    assert result.status == OperatorActionStatus.COMPLETED
+    assert result.success is True
+    # Test JSON / dict serialization has success=True
+    dumped = result.model_dump()
+    assert dumped["success"] is True
+
+
+def test_continue_preserves_reassignment_counters(in_memory_uow, seeded_project_and_run):
+    from minime.domain.enums import JobStatus
+    from minime.domain.models import Job
+
+    project, change, run = seeded_project_and_run
+
+    job = Job(
+        job_id="job-c-1",
+        project_id="test-proj",
+        change_name="015-test-change",
+        implementer_role="codex",
+        current_executor="codex",
+        status=JobStatus.NEEDS_HUMAN,
+        attempt_count=3,
+        reassignment_count=2,
+    )
+    in_memory_uow.jobs.save(job)
+
+    run.active_job_id = "job-c-1"
+    run.human_gate = HumanGate.NEEDS_HUMAN
+    run.stop_outcome = OrchestrationStopOutcome.NEEDS_HUMAN
+    run.stop_reason = "NON_CONVERGENT_EXECUTION"
+    run.is_active = False
+    in_memory_uow.orchestration_runs.save(run)
+    in_memory_uow.commit()
+
+    service = ControlPlaneService(in_memory_uow)
+
+    req = OperatorActionRequest(
+        project_id="test-proj",
+        change_name="015-test-change",
+        run_id="run-101",
+        action_type=OperatorActionType.CONTINUE,
+        actor_identity="operator",
+        source_interface="pwa",
+    )
+
+    result = service.execute_action(req)
+    assert result.status == OperatorActionStatus.COMPLETED
+
+    # Counter preservation check: reassignment_count must NOT be reset to 0
+    updated_job = in_memory_uow.jobs.get_by_id("job-c-1")
+    assert updated_job.reassignment_count == 2
+    assert updated_job.attempt_count == 3
+

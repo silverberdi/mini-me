@@ -285,7 +285,10 @@ def test_provider_policy_antigravity_assignment_requires_reason_code():
         attempts=past_attempts,
     )
     assert expl_escalated.selected_provider == "antigravity"
-    assert expl_escalated.premium_reason_code == PremiumProviderReasonCode.CODEX_NON_CONVERGENCE
+    assert expl_escalated.premium_reason_code in {
+        PremiumProviderReasonCode.CODEX_NON_CONVERGENCE,
+        PremiumProviderReasonCode.PREMIUM_RECOVERY_NON_CONVERGENCE,
+    }
 
 
 def test_retry_budget_enforcement_one_normal_one_corrective():
@@ -529,3 +532,139 @@ def test_efficiency_telemetry_aggregation_and_persistence():
     assert view is not None
     assert view.metrics.metrics_id == metrics.metrics_id
     assert view.metrics.self_hosting_percentage == 100.0
+
+
+def test_malformed_outputs_trigger_premium_recovery():
+    """Verify that repeated malformed execution results from Codex qualify for PREMIUM_RECOVERY_NON_CONVERGENCE."""
+    uow = MockUOW()
+    policy = ProviderPolicyService(uow)
+    project = Project(
+        project_id="proj-1",
+        display_name="Project 1",
+        repository="owner/repo",
+        base_branch="main",
+        implementer="codex",
+        reviewer="antigravity",
+    )
+
+    past_attempts = [
+        JobAttempt(
+            attempt_id="att-1",
+            job_id="job-malformed",
+            attempt_number=1,
+            executor_role="codex",
+            model_identity="codex",
+            normalized_outcome=ExecutionOutcome.MALFORMED_RESULT,
+            is_same_sha_duplicate=False,
+        ),
+        JobAttempt(
+            attempt_id="att-2",
+            job_id="job-malformed",
+            attempt_number=2,
+            executor_role="codex",
+            model_identity="codex",
+            normalized_outcome=ExecutionOutcome.MALFORMED_RESULT,
+            is_same_sha_duplicate=False,
+        ),
+    ]
+
+    expl = policy.evaluate_selection(
+        task_class=TaskClass.ROUTINE_IMPLEMENTATION,
+        project=project,
+        attempts=past_attempts,
+    )
+    assert expl.selected_provider == "antigravity"
+    assert expl.is_premium is True
+    assert expl.premium_reason_code == PremiumProviderReasonCode.PREMIUM_RECOVERY_NON_CONVERGENCE
+
+
+def test_bounded_premium_recovery_prevents_ping_pong():
+    """Verify that Antigravity is limited to 1 recovery attempt per failure episode (anti-ping-pong)."""
+    uow = MockUOW()
+    policy = ProviderPolicyService(uow)
+    project = Project(
+        project_id="proj-1",
+        display_name="Project 1",
+        repository="owner/repo",
+        base_branch="main",
+        implementer="codex",
+        reviewer="antigravity",
+    )
+
+    past_attempts = [
+        JobAttempt(
+            attempt_id="att-1",
+            job_id="job-pp",
+            attempt_number=1,
+            executor_role="codex",
+            model_identity="codex",
+            normalized_outcome=ExecutionOutcome.MALFORMED_RESULT,
+        ),
+        JobAttempt(
+            attempt_id="att-2",
+            job_id="job-pp",
+            attempt_number=2,
+            executor_role="codex",
+            model_identity="codex",
+            normalized_outcome=ExecutionOutcome.MALFORMED_RESULT,
+        ),
+        JobAttempt(
+            attempt_id="att-3",
+            job_id="job-pp",
+            attempt_number=3,
+            executor_role="antigravity",
+            model_identity="antigravity",
+            normalized_outcome=ExecutionOutcome.MALFORMED_RESULT,
+            premium_reason_code=PremiumProviderReasonCode.PREMIUM_RECOVERY_NON_CONVERGENCE,
+        ),
+    ]
+
+    # After Antigravity has already attempted recovery for this episode, another AG recovery is rejected
+    expl = policy.evaluate_selection(
+        task_class=TaskClass.ROUTINE_IMPLEMENTATION,
+        project=project,
+        attempts=past_attempts,
+    )
+    # Routine implementation excludes AG without an authorized unconsumed premium reason
+    assert expl.selected_provider == "codex"
+
+
+def test_continuation_engine_allows_premium_recovery_on_reassignment_ceiling():
+    """Verify ContinuationEngine allows bounded handoff when alternative executor is eligible despite max reassignments."""
+    engine = ContinuationEngine(max_reassignments_per_job=2)
+
+    # Reassignment count is 0, corrective retries exhausted (1/1), target executor is eligible (Antigravity recovery)
+    ctx = ContinuationContext(
+        job_id="job-1",
+        attempt_number=2,
+        current_executor_role="codex",
+        current_model_identity="codex",
+        outcome=ExecutionOutcome.MALFORMED_RESULT,
+        corrective_retries_for_current_executor=1,
+        reassignment_count=0,
+        alternative_executor_eligible=True,
+        target_executor_role="antigravity",
+        target_model_identity="antigravity",
+    )
+
+    decision = engine.decide(ctx)
+    assert decision.decision == ContinuationDecision.REASSIGN_AGENT
+    assert decision.target_executor_role == "antigravity"
+
+    # When reassignment count reaches ceiling (2), escalates with NON_CONVERGENT_EXECUTION
+    ctx_max = ContinuationContext(
+        job_id="job-1",
+        attempt_number=4,
+        current_executor_role="codex",
+        current_model_identity="codex",
+        outcome=ExecutionOutcome.MALFORMED_RESULT,
+        corrective_retries_for_current_executor=1,
+        reassignment_count=2,
+        alternative_executor_eligible=True,
+        target_executor_role="antigravity",
+        target_model_identity="antigravity",
+    )
+    decision_max = engine.decide(ctx_max)
+    assert decision_max.decision == ContinuationDecision.NEEDS_HUMAN
+    assert "NON_CONVERGENT_EXECUTION" in decision_max.escalation_reason
+

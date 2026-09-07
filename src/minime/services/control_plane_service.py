@@ -99,9 +99,32 @@ class ControlPlaneService:
         elif run.stop_outcome == OrchestrationStopOutcome.CANCELLED:
             continue_reason = "Run was cancelled"
         elif (
-            run.resumable_stage is not None
-            or run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
+            run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
+            or run.human_gate == HumanGate.NEEDS_HUMAN
         ):
+            stop_reason = run.stop_reason or ""
+            stop_details = run.stop_details or {}
+            is_preserved_conflict = (
+                "PRESERVED_CANDIDATE" in stop_reason
+                or "PRESERVED_CANDIDATE" in str(stop_details)
+                or "integration" in stop_reason.lower()
+                or "base advanced" in stop_reason.lower()
+            )
+            is_ui_validation = (
+                "UI_VALIDATION" in stop_reason
+                or "VALIDATION_REQUIRED" in str(stop_details)
+                or "validation" in stop_reason.lower()
+            )
+            if is_preserved_conflict or is_ui_validation:
+                continue_enabled = False
+                continue_reason = "Run is stopped at a human gate; use Resolve Gate instead."
+            else:
+                continue_enabled = True
+        elif run.resumable_stage is not None or run.stop_outcome in {
+            OrchestrationStopOutcome.WAITING_CAPACITY,
+            OrchestrationStopOutcome.WAITING_EXTERNAL,
+            OrchestrationStopOutcome.FAILED,
+        }:
             continue_enabled = True
         else:
             continue_reason = "Run is not in a resumable state"
@@ -633,7 +656,6 @@ class ControlPlaneService:
                     job.status = JobStatus.RUNNING
                     job.continuation_decision = None
                     job.escalation_reason = None
-                    job.reassignment_count = 0
                     self.uow.jobs.save(job)
             if run.current_stage in {
                 OrchestrationStage.EVALUATING_ATTEMPT,

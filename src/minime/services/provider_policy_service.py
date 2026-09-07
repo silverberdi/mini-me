@@ -109,7 +109,7 @@ class ProviderPolicyService:
         elif task_class == TaskClass.PLATFORM_RECOVERY:
             inferred_reason = PremiumProviderReasonCode.PLATFORM_RECOVERY
         elif self._verify_codex_non_convergence(attempts or []):
-            inferred_reason = PremiumProviderReasonCode.CODEX_NON_CONVERGENCE
+            inferred_reason = PremiumProviderReasonCode.PREMIUM_RECOVERY_NON_CONVERGENCE
 
         # -------------------------------------------------------------------------
         # MANDATORY RULE A: Routine Implementation selects Codex, excludes AG
@@ -194,34 +194,44 @@ class ProviderPolicyService:
         )
 
     def _verify_codex_non_convergence(self, attempts: list[JobAttempt]) -> bool:
-        """Verify that CODEX_NON_CONVERGENCE requirements are satisfied:
+        """Verify that CODEX_NON_CONVERGENCE / PREMIUM_RECOVERY_NON_CONVERGENCE requirements are satisfied:
         1. Normal Codex attempt occurred.
-        2. One corrective retry occurred.
-        3. Attempts did not achieve completion.
+        2. Corrective retry or reassignment occurred.
+        3. Attempts did not achieve completion (including malformed results, premature stops, failing checks).
+        4. Bounded recovery: Antigravity has not already executed a recovery attempt for this episode (anti-ping-pong).
         """
         if not attempts:
+            return False
+
+        # Anti-ping-pong: Antigravity may execute at most 1 bounded recovery attempt per failure episode
+        ag_recovery_attempts = [
+            a
+            for a in attempts
+            if a.executor_role == PrimaryProvider.ANTIGRAVITY.value
+            and a.premium_reason_code
+            in {
+                PremiumProviderReasonCode.CODEX_NON_CONVERGENCE,
+                PremiumProviderReasonCode.PREMIUM_RECOVERY_NON_CONVERGENCE,
+            }
+        ]
+        if len(ag_recovery_attempts) >= 1:
             return False
 
         codex_attempts = [a for a in attempts if a.executor_role == PrimaryProvider.CODEX.value]
         if len(codex_attempts) < 2:
             return False
 
-        # Verify initial attempt and corrective retry
-        initial = codex_attempts[0]
-        retry = codex_attempts[1]
-        if initial.attempt_number >= 1 and retry.attempt_number >= 2:
-            # Check that both attempts failed or made partial/no progress
-            if all(
-                a.normalized_outcome
-                in {
-                    ExecutionOutcome.CHANGES_REQUIRED,
-                    ExecutionOutcome.NO_PROGRESS,
-                    ExecutionOutcome.FALSE_BLOCKER,
-                    ExecutionOutcome.EVIDENCE_INSUFFICIENT,
-                }
-                for a in [initial, retry]
-            ):
-                return True
+        non_convergent_outcomes = {
+            ExecutionOutcome.CHANGES_REQUIRED,
+            ExecutionOutcome.NO_PROGRESS,
+            ExecutionOutcome.FALSE_BLOCKER,
+            ExecutionOutcome.EVIDENCE_INSUFFICIENT,
+            ExecutionOutcome.MALFORMED_RESULT,
+            ExecutionOutcome.PREMATURE_STOP,
+            ExecutionOutcome.PROVIDER_FAILURE,
+        }
+        if all(a.normalized_outcome in non_convergent_outcomes for a in codex_attempts[-2:]):
+            return True
         return False
 
     def handle_exhaustion_event(
