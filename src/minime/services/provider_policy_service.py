@@ -205,7 +205,7 @@ class ProviderPolicyService:
             return False
 
         # Anti-ping-pong: Antigravity may execute at most 1 bounded recovery attempt per failure episode.
-        # Pre-flight provider failures (AUTH_REQUIRED, PROVIDER_PREFLIGHT_FAILURE) do NOT consume the recovery budget.
+        # Pre-flight provider failures and infrastructure failures without progress do NOT consume the recovery budget.
         ag_recovery_attempts = [
             a
             for a in attempts
@@ -219,10 +219,12 @@ class ProviderPolicyService:
             not in {
                 ExecutionOutcome.PROVIDER_PREFLIGHT_FAILURE,
                 ExecutionOutcome.AUTH_REQUIRED,
+                ExecutionOutcome.PROVIDER_FAILURE,
             }
             and a.productivity_class
             not in {
                 AttemptProductivityClass.PROVIDER_PREFLIGHT_FAILURE,
+                AttemptProductivityClass.PROVIDER_FAILURE,
             }
         ]
         if len(ag_recovery_attempts) >= 1:
