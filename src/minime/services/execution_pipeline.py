@@ -302,8 +302,83 @@ class ExecutionPipelineService:
         fallback_implementer_model: str | None = None
 
         try:
+            # Continuation loop initialization & state reconstruction from durable PostgreSQL truth
+            pending_handoff = next(
+                (h for h in self.uow.job_handoffs.list_by_job(job.job_id) if not h.is_consumed),
+                None,
+            )
+            if pending_handoff:
+                current_executor = pending_handoff.to_executor
+            else:
+                current_executor = job.current_executor or project.implementer
+            job.current_executor = current_executor
+
+            past_attempts = self.uow.job_attempts.list_by_job(job.job_id)
+            past_attempts.sort(key=lambda a: a.attempt_number)
+
+            # If resuming an episode that reached non-convergence / false human gate, transition to Antigravity recovery
+            if (
+                current_executor == PrimaryProvider.CODEX.value
+                and self.provider_policy._verify_codex_non_convergence(past_attempts)
+                and (
+                    job.reassignment_count >= 1
+                    or any(
+                        a.continuation_decision
+                        in {
+                            ContinuationDecision.REASSIGN_AGENT,
+                            ContinuationDecision.NEEDS_HUMAN,
+                        }
+                        for a in past_attempts
+                    )
+                    or self.health_service.get_health(PrimaryProvider.CODEX.value).status
+                    != ProviderHealthStatus.AVAILABLE
+                )
+            ):
+                ag_health = self.health_service.get_health(PrimaryProvider.ANTIGRAVITY.value)
+                if ag_health.status == ProviderHealthStatus.AVAILABLE:
+                    orig_executor = current_executor
+                    current_executor = PrimaryProvider.ANTIGRAVITY.value
+                    job.current_executor = current_executor
+                    self.uow.jobs.save(job)
+                    self._save_event(
+                        EventType.AGENT_REASSIGNED,
+                        job,
+                        {
+                            "from_executor": orig_executor,
+                            "to_executor": current_executor,
+                            "reassignment_count": job.reassignment_count,
+                        },
+                    )
+                    self._save_event(
+                        EventType.PREMIUM_PROVIDER_ASSIGNED,
+                        job,
+                        {
+                            "role": "implementer",
+                            "provider": current_executor,
+                            "premium_reason_code": PremiumProviderReasonCode.PREMIUM_RECOVERY_NON_CONVERGENCE.value,
+                            "originating_provider": orig_executor,
+                            "candidate_sha_before_recovery": job.candidate_sha or job.base_sha,
+                            "recovery_provider": current_executor,
+                            "attempt_id": f"att-{job.job_id}-{job.attempt_count + 1}",
+                            "attempt_number": job.attempt_count + 1,
+                        },
+                    )
+                    self._save_event(
+                        EventType.PREMIUM_RECOVERY_ASSIGNED,
+                        job,
+                        {
+                            "recovery_reason": PremiumProviderReasonCode.PREMIUM_RECOVERY_NON_CONVERGENCE.value,
+                            "originating_provider": orig_executor,
+                            "candidate_sha_before_recovery": job.candidate_sha or job.base_sha,
+                            "recovery_provider": current_executor,
+                            "attempt_id": f"att-{job.job_id}-{job.attempt_count + 1}",
+                            "attempt_number": job.attempt_count + 1,
+                        },
+                    )
+                    self.uow.commit()
+
             # Check effective executor capacity availability before creating worktree / starting implementer
-            effective_implementer = job.current_executor or project.implementer
+            effective_implementer = current_executor
             imp_health = self.health_service.get_health(effective_implementer)
             is_primary_imp_available = imp_health.status == ProviderHealthStatus.AVAILABLE
 
@@ -394,81 +469,6 @@ class ExecutionPipelineService:
             self.uow.jobs.save(job)
             self._log(job.job_id, "system", f"Created worktree {worktree.path}")
             self.uow.commit()
-
-            # Continuation loop initialization & state reconstruction from durable PostgreSQL truth
-            pending_handoff = next(
-                (h for h in self.uow.job_handoffs.list_by_job(job.job_id) if not h.is_consumed),
-                None,
-            )
-            if pending_handoff:
-                current_executor = pending_handoff.to_executor
-            else:
-                current_executor = job.current_executor or project.implementer
-            job.current_executor = current_executor
-
-            past_attempts = self.uow.job_attempts.list_by_job(job.job_id)
-            past_attempts.sort(key=lambda a: a.attempt_number)
-
-            # If resuming an episode that reached non-convergence / false human gate, transition to Antigravity recovery
-            if (
-                current_executor == PrimaryProvider.CODEX.value
-                and self.provider_policy._verify_codex_non_convergence(past_attempts)
-                and (
-                    job.reassignment_count >= 1
-                    or any(
-                        a.continuation_decision
-                        in {
-                            ContinuationDecision.REASSIGN_AGENT,
-                            ContinuationDecision.NEEDS_HUMAN,
-                        }
-                        for a in past_attempts
-                    )
-                    or self.health_service.get_health(PrimaryProvider.CODEX.value).status
-                    != ProviderHealthStatus.AVAILABLE
-                )
-            ):
-                ag_health = self.health_service.get_health(PrimaryProvider.ANTIGRAVITY.value)
-                if ag_health.status == ProviderHealthStatus.AVAILABLE:
-                    orig_executor = current_executor
-                    current_executor = PrimaryProvider.ANTIGRAVITY.value
-                    job.current_executor = current_executor
-                    self.uow.jobs.save(job)
-                    self._save_event(
-                        EventType.AGENT_REASSIGNED,
-                        job,
-                        {
-                            "from_executor": orig_executor,
-                            "to_executor": current_executor,
-                            "reassignment_count": job.reassignment_count,
-                        },
-                    )
-                    self._save_event(
-                        EventType.PREMIUM_PROVIDER_ASSIGNED,
-                        job,
-                        {
-                            "role": "implementer",
-                            "provider": current_executor,
-                            "premium_reason_code": PremiumProviderReasonCode.PREMIUM_RECOVERY_NON_CONVERGENCE.value,
-                            "originating_provider": orig_executor,
-                            "candidate_sha_before_recovery": job.candidate_sha or job.base_sha,
-                            "recovery_provider": current_executor,
-                            "attempt_id": f"att-{job.job_id}-{job.attempt_count + 1}",
-                            "attempt_number": job.attempt_count + 1,
-                        },
-                    )
-                    self._save_event(
-                        EventType.PREMIUM_RECOVERY_ASSIGNED,
-                        job,
-                        {
-                            "recovery_reason": PremiumProviderReasonCode.PREMIUM_RECOVERY_NON_CONVERGENCE.value,
-                            "originating_provider": orig_executor,
-                            "candidate_sha_before_recovery": job.candidate_sha or job.base_sha,
-                            "recovery_provider": current_executor,
-                            "attempt_id": f"att-{job.job_id}-{job.attempt_count + 1}",
-                            "attempt_number": job.attempt_count + 1,
-                        },
-                    )
-                    self.uow.commit()
 
             corrective_retries_for_current_executor = 0
             same_outcome_streak = 1
