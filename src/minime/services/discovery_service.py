@@ -199,8 +199,14 @@ class WorkDiscoveryService:
                     github_issue=matched_issue_number,
                 )
 
-                # Extract declared dependencies
+                # Extract declared dependencies and priority from canonical BacklogItem if present
                 dependencies: list[str] = []
+                backlog_item = self.uow.backlog_items.get_by_openspec_change_name(
+                    project.project_id, change_name
+                )
+                if backlog_item:
+                    matched_priority = backlog_item.priority
+                    dependencies = list(backlog_item.dependencies)
 
                 # 5. Check or update existing WorkQueueItem
                 existing_queue_item = self.uow.work_queue.get_by_project_and_change(

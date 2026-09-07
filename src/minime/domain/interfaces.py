@@ -67,6 +67,11 @@ class BacklogItemRepositoryInterface(ABC):
     def get_by_project_and_key(self, project_id: str, item_key: str) -> BacklogItem | None: ...
 
     @abstractmethod
+    def get_by_openspec_change_name(
+        self, project_id: str, change_name: str
+    ) -> BacklogItem | None: ...
+
+    @abstractmethod
     def list_by_project(
         self,
         project_id: str,

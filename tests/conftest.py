@@ -1616,6 +1616,16 @@ class InMemoryBacklogItemRepository(BacklogItemRepositoryInterface):
                 return item.model_copy(deep=True)
         return None
 
+    def get_by_openspec_change_name(
+        self, project_id: str, change_name: str
+    ) -> BacklogItem | None:
+        for item in self._store.values():
+            if item.project_id == project_id and (
+                item.openspec_change_name == change_name or item.item_key == change_name
+            ):
+                return item.model_copy(deep=True)
+        return None
+
     def list_by_project(
         self,
         project_id: str,

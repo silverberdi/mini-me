@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -19,6 +20,7 @@ from minime.domain.enums import (
 )
 from minime.domain.models import (
     BacklogItem,
+    CapacityWindow,
     OrchestrationRun,
     Project,
     ProjectBinding,
@@ -369,7 +371,9 @@ def test_primary_provider_unavailable_waiting_prevents_drain(
     )
     in_memory_uow.projects.save(project)
 
-    # Set codex provider to TEMPORARILY_UNAVAILABLE
+    now = utc_now()
+
+    # Set codex provider to TEMPORARILY_UNAVAILABLE with future reset window
     in_memory_uow.provider_health.save(
         ProviderHealth(
             provider="codex",
@@ -377,8 +381,16 @@ def test_primary_provider_unavailable_waiting_prevents_drain(
             status_detail="Quota exhausted until reset window",
         )
     )
+    in_memory_uow.capacity_windows.save(
+        CapacityWindow(
+            window_id="cw-codex-test",
+            provider="codex",
+            quota_exhausted_at=now,
+            capacity_reset_at=now + timedelta(hours=2),
+            retry_after_seconds=7200,
+        )
+    )
 
-    now = utc_now()
     in_memory_uow.backlog_items.save(
         BacklogItem(
             project_id="exhausted-project",

@@ -23,6 +23,7 @@ from minime.domain.enums import (
     QueuePriority,
     ReadinessState,
     SchedulerMode,
+    WorkItemStatus,
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
@@ -34,6 +35,7 @@ from minime.domain.models import (
     utc_now,
 )
 from minime.services.discovery_service import WorkDiscoveryService, extract_roadmap_stage
+from minime.services.intake_service import IntakeService
 from minime.services.orchestration_service import OrchestrationService
 from minime.services.post_merge_service import PostMergeReconciliationService
 from minime.services.provider_health_service import ProviderHealthService
@@ -64,6 +66,7 @@ class SchedulerService:
         provider_health_service: ProviderHealthService | None = None,
         readiness_service: ReadinessService | None = None,
         post_merge_service: PostMergeReconciliationService | None = None,
+        intake_service: IntakeService | None = None,
         max_global_jobs: int = 1,
         one_active_implementation_per_project: bool = True,
         mode: SchedulerMode = SchedulerMode.RUN,
@@ -90,6 +93,13 @@ class SchedulerService:
             uow,
             project_root=self.project_root,
             github_adapter=gh_adapter,
+        )
+        self.intake_service = intake_service or IntakeService(
+            uow,
+            project_root=self.project_root,
+            github_adapter=gh_adapter,
+            openspec_adapter=os_adapter,
+            readiness_service=self.readiness_service,
         )
         self.provider_health_service = provider_health_service or ProviderHealthService(uow)
         self.max_global_jobs = max_global_jobs
@@ -255,10 +265,22 @@ class SchedulerService:
         if queue_item and queue_item.dependencies:
             for dep_name in queue_item.dependencies:
                 dep_change = self.uow.changes.get_by_name(project_id, dep_name)
-                if not dep_change or dep_change.status not in (
+                dep_backlog = self.uow.backlog_items.get_by_openspec_change_name(
+                    project_id, dep_name
+                )
+                is_complete = False
+                if dep_change and dep_change.status in (
                     ChangeStatus.DONE,
                     ChangeStatus.CANCELLED,
                 ):
+                    is_complete = True
+                elif dep_backlog and dep_backlog.status in (
+                    WorkItemStatus.COMPLETED,
+                    WorkItemStatus.CANCELLED,
+                ):
+                    is_complete = True
+
+                if not is_complete:
                     return (
                         AdmissionDecision.REFUSED,
                         AdmissionRefusalCode.DEPENDENCY_BLOCKED,
@@ -433,6 +455,20 @@ class SchedulerService:
                     }
                 )
                 self.uow.work_queue.save(updated_item)
+
+            # Update BacklogItem if present
+            backlog_item = self.uow.backlog_items.get_by_openspec_change_name(
+                project_id, change_name
+            )
+            if backlog_item:
+                updated_backlog = backlog_item.model_copy(
+                    update={
+                        "status": WorkItemStatus.RUNNING,
+                        "run_id": run.run_id,
+                        "updated_at": utc_now(),
+                    }
+                )
+                self.uow.backlog_items.save(updated_backlog)
 
             self.uow.commit()
 
@@ -647,6 +683,12 @@ class SchedulerService:
 
         # 0.1 Check and re-evaluate runs waiting for capacity or external environment
         self.reconcile_waiting_runs(project_id=project_id, drive_resumed=drive_admitted)
+
+        # 0.2 Autonomous intake sweep for unprepared backlog items when auto_prepare is enabled
+        try:
+            self.intake_service.sweep_unprepared_backlog_items(project_id=project_id)
+        except Exception as exc:
+            logger.warning(f"Autonomous intake sweep error during scheduler tick: {exc}")
 
         # 1. Discover work items
         try:

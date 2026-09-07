@@ -12,6 +12,7 @@ from minime.domain.enums import (
     EventType,
     OrchestrationStage,
     OrchestrationStopOutcome,
+    QueuePriority,
     ReadinessState,
     WorkItemStatus,
 )
@@ -694,4 +695,72 @@ class IntakeService:
             self.uow.commit()
 
         return reconciled_items
+
+    def sweep_unprepared_backlog_items(
+        self,
+        project_id: str | None = None,
+    ) -> list[BacklogItem]:
+        """Autonomously sweep and prepare eligible canonical backlog items."""
+        projects = self.uow.projects.list_all()
+        if project_id:
+            projects = [p for p in projects if p.project_id == project_id]
+
+        prepared_items: list[BacklogItem] = []
+        for project in projects:
+            if not getattr(project, "auto_prepare", True):
+                continue
+
+            items = self.uow.backlog_items.list_by_project(project.project_id)
+            unprepared = [
+                it
+                for it in items
+                if it.status
+                in (
+                    WorkItemStatus.BACKLOG,
+                    WorkItemStatus.CONTEXT_CHECK,
+                    WorkItemStatus.PREPARING,
+                )
+                and it.readiness_state != ReadinessState.READY
+                and it.status
+                not in (
+                    WorkItemStatus.NEEDS_HUMAN,
+                    WorkItemStatus.CANCELLED,
+                    WorkItemStatus.COMPLETED,
+                    WorkItemStatus.RUNNING,
+                    WorkItemStatus.ADMITTED,
+                )
+            ]
+
+            priority_order = {
+                QueuePriority.CRITICAL: 0,
+                QueuePriority.HIGH: 1,
+                QueuePriority.NORMAL: 2,
+                QueuePriority.LOW: 3,
+            }
+            unprepared.sort(key=lambda x: priority_order.get(x.priority, 99))
+
+            for item in unprepared:
+                try:
+                    logger.info(
+                        "Autonomous intake sweeping unprepared backlog item '%s' for project '%s'",
+                        item.item_key,
+                        project.project_id,
+                    )
+                    res = self.prepare_work_item(
+                        project.project_id,
+                        item.item_key,
+                        operator_email="system-autonomous-intake",
+                    )
+                    prepared_items.append(res.item)
+                except Exception as exc:
+                    logger.warning(
+                        "Autonomous intake sweep failed for item '%s' in project '%s': %s",
+                        item.item_key,
+                        project.project_id,
+                        exc,
+                        exc_info=True,
+                    )
+
+        return prepared_items
+
 

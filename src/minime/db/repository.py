@@ -3862,6 +3862,20 @@ class PostgresBacklogItemRepository(BacklogItemRepositoryInterface):
         model = self.session.scalars(stmt).first()
         return backlog_item_model_to_domain(model) if model else None
 
+    def get_by_openspec_change_name(
+        self, project_id: str, change_name: str
+    ) -> BacklogItem | None:
+        stmt = (
+            select(BacklogItemModel)
+            .where(BacklogItemModel.project_id == project_id)
+            .where(
+                (BacklogItemModel.openspec_change_name == change_name)
+                | (BacklogItemModel.item_key == change_name)
+            )
+        )
+        model = self.session.scalars(stmt).first()
+        return backlog_item_model_to_domain(model) if model else None
+
     def list_by_project(
         self,
         project_id: str,
