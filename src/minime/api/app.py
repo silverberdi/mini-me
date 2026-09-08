@@ -1131,6 +1131,36 @@ def admit_orchestration(
     return result.model_dump()
 
 
+@app.get("/api/v1/openspec/integrity", tags=["openspec"])
+def get_openspec_integrity(
+    project_id: str,
+    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
+) -> dict[str, Any]:
+    """Return the most recent OpenSpec integrity audit for a project."""
+    audit = uow.integrity_findings.get_latest(project_id)
+    if not audit:
+        return {
+            "project_id": project_id,
+            "overall_status": "UNKNOWN",
+            "findings": [],
+            "evidence_gaps": ["No integrity audit has been recorded for this project."],
+        }
+    return audit.model_dump()
+
+
+@app.post("/api/v1/openspec/integrity/audit", tags=["openspec"])
+def run_openspec_integrity_audit(
+    project_id: str,
+    uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
+) -> dict[str, Any]:
+    """Trigger a fresh OpenSpec integrity audit for a project."""
+    from minime.services.openspec_integrity import OpenSpecIntegrityService
+
+    service = OpenSpecIntegrityService(uow, project_root=".")
+    audit = service.run_audit(project_id)
+    return audit.model_dump()
+
+
 @app.post("/api/v1/orchestration/start", tags=["orchestration"])
 def start_orchestration(
     req: OrchestrationStartRequest,

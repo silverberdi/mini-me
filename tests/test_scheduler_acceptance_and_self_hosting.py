@@ -3,7 +3,11 @@
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from tests.conftest import InMemoryPersistenceUnitOfWork, create_isolated_openspec_change
+from tests.conftest import (
+    InMemoryPersistenceUnitOfWork,
+    create_isolated_openspec_change,
+    init_git_repo,
+)
 
 from minime.adapters.github import GitHubAdapter
 from minime.domain.enums import (
@@ -37,6 +41,8 @@ def test_real_scheduler_multi_item_acceptance(
         reviewer="antigravity",
     )
     in_memory_uow.projects.save(project)
+
+    init_git_repo(tmp_path)
 
     in_memory_uow.provider_health.save(
         ProviderHealth(health_id="ph-c", provider="codex", status=ProviderHealthStatus.AVAILABLE)

@@ -331,8 +331,9 @@ class PostMergeReconciliationService:
 
         native_phases += 1  # Phase 5: Project Done
 
-        # 7. OpenSpec Spec Sync
-        synced_specs = []
+        # 7. OpenSpec Spec Sync + verification
+        synced_specs: list[str] = []
+        sync_verified = False
         try:
             synced_specs = self.openspec_sync.sync_change_specs(openspec_path, change_name)
             self.uow.events.save(
@@ -344,28 +345,96 @@ class PostMergeReconciliationService:
                     timestamp=utc_now(),
                 )
             )
+            sync_verified = self.openspec_sync.verify_sync(openspec_path, change_name, synced_specs)
+            if sync_verified:
+                self.uow.events.save(
+                    Event(
+                        event_type=EventType.POST_MERGE_SYNC_VERIFIED,
+                        project_id=project_id,
+                        change_id=change_name,
+                        payload={"synced_capabilities": synced_specs},
+                        timestamp=utc_now(),
+                    )
+                )
         except Exception as exc:
             logger.warning("OpenSpec spec sync failed for '%s': %s", change_name, exc)
 
         native_phases += 1  # Phase 6: Spec sync
 
-        # 8. OpenSpec Archive
-        archived_path = None
-        try:
-            archived_path = self.openspec_sync.archive_change(openspec_path, change_name)
-            self.uow.events.save(
-                Event(
-                    event_type=EventType.OPEN_SPEC_ARCHIVED,
-                    project_id=project_id,
-                    change_id=change_name,
-                    payload={"archived_path": str(archived_path)},
-                    timestamp=utc_now(),
+        # 8. OpenSpec Archive + verification (only after sync is verified)
+        archived_path: Path | None = None
+        archive_verified = False
+        if sync_verified:
+            try:
+                archived_path = self.openspec_sync.archive_change(openspec_path, change_name)
+                self.uow.events.save(
+                    Event(
+                        event_type=EventType.OPEN_SPEC_ARCHIVED,
+                        project_id=project_id,
+                        change_id=change_name,
+                        payload={"archived_path": str(archived_path)},
+                        timestamp=utc_now(),
+                    )
                 )
-            )
-        except Exception as exc:
-            logger.warning("OpenSpec archive failed for '%s': %s", change_name, exc)
+                archive_verified = self.openspec_sync.verify_archive(
+                    openspec_path, change_name, archived_path
+                )
+                if archive_verified:
+                    self.uow.events.save(
+                        Event(
+                            event_type=EventType.POST_MERGE_ARCHIVE_VERIFIED,
+                            project_id=project_id,
+                            change_id=change_name,
+                            payload={"archived_path": str(archived_path)},
+                            timestamp=utc_now(),
+                        )
+                    )
+            except Exception as exc:
+                logger.warning("OpenSpec archive failed for '%s': %s", change_name, exc)
 
         native_phases += 1  # Phase 7: Archive
+
+        # Gate terminal completion on sync and archive verification evidence.
+        if not (sync_verified and archive_verified):
+            missing = []
+            if not sync_verified:
+                missing.append("sync")
+            if not archive_verified:
+                missing.append("archive")
+            reason = (
+                "Post-merge reconciliation blocked: missing "
+                + " and ".join(missing)
+                + " verification evidence."
+            )
+            run.stop_outcome = OrchestrationStopOutcome.WAITING_EXTERNAL
+            run.human_gate = None
+            run.stop_reason = reason
+            run.is_active = True
+            run.updated_at = utc_now()
+            self.uow.orchestration_runs.save(run)
+            self.uow.commit()
+            return PostMergeReconciliationResult(
+                success=False,
+                already_closed=False,
+                change_name=change_name,
+                run_id=run.run_id,
+                job_id=job_id,
+                is_merged=True,
+                merged_by=merged_by,
+                merged_at=merged_at,
+                merge_commit_sha=merge_commit_sha,
+                candidate_sha=cand_sha,
+                ancestry_verified=ancestry_ok,
+                issue_closed=issue_closed,
+                project_item_updated=project_item_updated,
+                openspec_synced=bool(synced_specs),
+                openspec_archived=bool(archived_path),
+                terminal_stage=OrchestrationStage.POST_MERGE_RECONCILING,
+                terminal_job_status=job.status if job else JobStatus.POST_MERGE_RECONCILING,
+                native_phases_completed=native_phases,
+                total_phases=12,
+                error_message=reason,
+            )
 
         # 9. Worktree Cleanup
         worktree_cleaned = True

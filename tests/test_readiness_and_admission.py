@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tests.conftest import InMemoryPersistenceUnitOfWork
+from tests.conftest import InMemoryPersistenceUnitOfWork, init_git_repo
 
 from minime.domain.enums import WorkItemPriority, WorkItemStatus
 from minime.domain.models import BacklogItem, Project, WorkItemAnswerInput
@@ -72,6 +72,7 @@ def test_start_work_item_and_duplicate_suppression(
 
     repo_dir = tmp_path / "app-repo"
     repo_dir.mkdir()
+    init_git_repo(repo_dir)
 
     project = Project(
         project_id="app-proj",

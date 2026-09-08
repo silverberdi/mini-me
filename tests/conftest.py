@@ -43,6 +43,7 @@ from minime.domain.interfaces import (
     EventRepositoryInterface,
     EvidenceDiagnosticRepositoryInterface,
     GitOperationRepositoryInterface,
+    IntegrityFindingRepositoryInterface,
     JobAttemptRepositoryInterface,
     JobHandoffRepositoryInterface,
     JobLogRepositoryInterface,
@@ -84,6 +85,7 @@ from minime.domain.models import (
     Event,
     EvidenceDiagnostic,
     GitOperation,
+    IntegrityAudit,
     Job,
     JobAttempt,
     JobHandoff,
@@ -1668,6 +1670,21 @@ class InMemoryBacklogItemRepository(BacklogItemRepositoryInterface):
         self._store.pop(item_id, None)
 
 
+class InMemoryIntegrityFindingRepository(IntegrityFindingRepositoryInterface):
+    def __init__(self):
+        self._store: dict[str, IntegrityAudit] = {}
+
+    def save(self, audit: IntegrityAudit) -> None:
+        self._store[audit.audit_id] = audit.model_copy(deep=True)
+
+    def get_latest(self, project_id: str) -> IntegrityAudit | None:
+        matching = [a for a in self._store.values() if a.project_id == project_id]
+        if not matching:
+            return None
+        matching.sort(key=lambda a: a.executed_at, reverse=True)
+        return matching[0].model_copy(deep=True)
+
+
 class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
     def __init__(self):
         self.projects = InMemoryProjectRepository()
@@ -1709,6 +1726,7 @@ class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.auth_sessions = InMemoryAuthSessionRepository()
         self.auth_audit_events = InMemoryAuthAuditEventRepository()
         self.backlog_items = InMemoryBacklogItemRepository()
+        self.integrity_findings = InMemoryIntegrityFindingRepository()
         self.committed = False
         self.rolled_back = False
 
@@ -1724,13 +1742,50 @@ def in_memory_uow() -> InMemoryPersistenceUnitOfWork:
     return InMemoryPersistenceUnitOfWork()
 
 
+_SYNTHETIC_SPEC_CONTENT = (
+    "## ADDED Requirements\n"
+    "\n"
+    "### Requirement: Synthetic feature\n"
+    "The system SHALL support the synthetic feature.\n"
+    "\n"
+    "#### Scenario: Works\n"
+    "- **GIVEN** a configured environment\n"
+    "- **WHEN** the capability is exercised\n"
+    "- **THEN** deterministic checks pass\n"
+)
+
+
+def init_git_repo(root: Path) -> None:
+    """Initialize a deterministic git repo with a base commit and origin/main ref.
+
+    Commits whatever files already exist under ``root`` as the base; if the
+    directory is empty, creates a minimal README so a base commit can be made.
+    """
+    import subprocess
+
+    root.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-b", "main"], cwd=root, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=root, check=True)
+    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=root, check=True)
+    if not any(root.iterdir()):
+        (root / "README.md").write_text("# repo\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "base"], cwd=root, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=root, check=True
+    )
+
+
 def create_isolated_openspec_change(
     root: Path,
     change_name: str = "synthetic-change",
     proposal_content: str = "# Proposal\n",
     tasks_content: str = "# Tasks\n",
     design_content: str = "# Design\n",
-    spec_content: str = "# Spec\n",
+    spec_content: str = _SYNTHETIC_SPEC_CONTENT,
 ) -> Path:
     """Helper to create a fully isolated OpenSpec change directory with valid standard artifacts."""
     change_dir = root / "openspec" / "changes" / change_name

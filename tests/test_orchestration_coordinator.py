@@ -252,7 +252,6 @@ def setup_orchestration_environment(tmp_path: Path, in_memory_uow):
         proposal_content="# Proposal\n\nAutonomous orchestration.\n",
         tasks_content="## 1. Foundation\n- [x] 1.1 Complete schema <!-- id: 1.1 -->\n",
         design_content="# Design\n\nState graph.\n",
-        spec_content="# Spec\n\n## Requirements\nAutonomous stop outcomes.\n",
     )
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-m", "Add OpenSpec change"], cwd=tmp_path, check=True)

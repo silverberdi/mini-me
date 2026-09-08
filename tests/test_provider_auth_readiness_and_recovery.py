@@ -1,13 +1,13 @@
 """Tests for provider health execution readiness and preflight failure recovery semantics."""
 
-import pytest
 from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from minime.adapters.provider_adapter import AntigravityProviderAdapter
 from minime.domain.enums import (
     AttemptProductivityClass,
     ExecutionOutcome,
-    JobStatus,
     PremiumProviderReasonCode,
     PrimaryProvider,
     ProviderHealthStatus,
@@ -19,7 +19,10 @@ from minime.domain.models import (
     NormalizedProviderResult,
     Project,
 )
-from minime.services.outcome_governance import CompletionVerificationResult, OutcomeGovernanceService
+from minime.services.outcome_governance import (
+    CompletionVerificationResult,
+    OutcomeGovernanceService,
+)
 from minime.services.provider_health_service import ProviderHealthService
 from minime.services.provider_outcome_parser import ProviderOutcomeParser
 from minime.services.provider_policy_service import ProviderPolicyService

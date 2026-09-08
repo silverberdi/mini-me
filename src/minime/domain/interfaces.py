@@ -31,6 +31,7 @@ from minime.domain.models import (
     Event,
     EvidenceDiagnostic,
     GitOperation,
+    IntegrityAudit,
     Job,
     JobAttempt,
     JobHandoff,
@@ -611,6 +612,14 @@ class OperatorActionRepositoryInterface(ABC):
     def list_by_project(self, project_id: str, limit: int = 50) -> list[OperatorActionRecord]: ...
 
 
+class IntegrityFindingRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, audit: IntegrityAudit) -> None: ...
+
+    @abstractmethod
+    def get_latest(self, project_id: str) -> IntegrityAudit | None: ...
+
+
 class PersistenceUnitOfWork(ABC):
     """Transactional persistence boundary: atomically persists state changes and emitted events."""
 
@@ -653,6 +662,7 @@ class PersistenceUnitOfWork(ABC):
     auth_sessions: AuthSessionRepositoryInterface
     auth_audit_events: AuthAuditEventRepositoryInterface
     backlog_items: BacklogItemRepositoryInterface
+    integrity_findings: IntegrityFindingRepositoryInterface
 
     @abstractmethod
     def commit(self) -> None: ...

@@ -15,6 +15,7 @@ from minime.domain.models import (
     utc_now,
 )
 from minime.logging import get_logger, set_correlation_context
+from minime.services.lifecycle_gates import StrictValidationGate
 
 logger = get_logger("services.readiness")
 
@@ -195,6 +196,7 @@ class ReadinessService:
                     ReadinessCheck(name="durable_project_binding", passed=False, reason=reason)
                 )
                 unmet_reasons.append(reason)
+
             elif not binding.is_valid:
                 reasons_str = (
                     "; ".join(binding.mismatch_reasons)
@@ -308,6 +310,32 @@ class ReadinessService:
                             "tasks_count": artifacts_eval["tasks_count"],
                             "tasks_remaining": artifacts_eval["tasks_remaining"],
                         },
+                    )
+                )
+
+        # Canonical CLI validation is distinct from artifact presence. UNKNOWN is
+        # deliberately blocking because readiness cannot truthfully be proven.
+        if project.strict_validation_required:
+            strict_result = StrictValidationGate(self.openspec_adapter).evaluate(
+                change_name=change_name, project_root=project_root
+            )
+            if strict_result.is_blocking:
+                reason = f"{strict_result.reason.code}: {strict_result.reason.message}"
+                checks.append(
+                    ReadinessCheck(
+                        name="openspec_strict_validation",
+                        passed=False,
+                        reason=reason,
+                        details=strict_result.reason.details,
+                    )
+                )
+                unmet_reasons.append(reason)
+            else:
+                checks.append(
+                    ReadinessCheck(
+                        name="openspec_strict_validation",
+                        passed=True,
+                        details=strict_result.reason.details,
                     )
                 )
 
