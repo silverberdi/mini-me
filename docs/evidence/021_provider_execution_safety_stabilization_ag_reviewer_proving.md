@@ -6,8 +6,10 @@
 > the configured AG reviewer profile `--mode plan`. It is **valid execution
 > evidence** that an edit-capable invocation happened not to mutate the worktree,
 > but it does **not** prove the *configured* reviewer profile is behaviorally
-> non-mutating. The reviewer half of Finding H is therefore **NOT YET PROVEN**
-> against the configured profile and must be re-run with `--mode plan`.
+> non-mutating. The reviewer half of Finding H has since been re-proven with the
+> configured `--mode plan` profile against the corrected candidate
+> `bfcf230489321f2688486a133e7b1a803e4ac6b7` — see
+> `021_provider_execution_safety_stabilization_ag_reviewer_configured_profile_proving.md`.
 
 **Proving session ID:** f5ba3355-ab1b-4044-a09b-01df9d092cea  
 **Attempt timestamp:** 2026-09-16T15:13:49Z – 2026-09-16T15:14:29Z  

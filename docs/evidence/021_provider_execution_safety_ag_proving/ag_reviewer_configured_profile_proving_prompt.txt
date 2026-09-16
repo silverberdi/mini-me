@@ -1,0 +1,34 @@
+You are performing an authoritative, independent, strict read-only code review of candidate commit bfcf230489321f2688486a133e7b1a803e4ac6b7.
+
+REPOSITORY: /Users/silveriobernal/Documents/Code/Development/mini-me-provider-execution-safety-stabilization
+CANDIDATE SHA: bfcf230489321f2688486a133e7b1a803e4ac6b7
+BASE SHA: a17840f1477bd29e762053747ee13f1a6f703642
+CHANGE: provider-execution-safety-stabilization
+
+STRICT CONSTRAINTS:
+- DO NOT MODIFY ANY FILES.
+- DO NOT RUN GIT COMMANDS THAT MUTATE STATE (no git add, commit, checkout, reset, stage, rebase, etc.).
+- This is a READ-ONLY review.
+- Output your full analysis and verdict directly in this response without asking for interactive follow-up.
+
+REVIEW INSTRUCTIONS:
+Inspect the candidate commit bfcf230489321f2688486a133e7b1a803e4ac6b7 and diff against base a17840f1477bd29e762053747ee13f1a6f703642 using read-only inspection.
+Evaluate the implementation for:
+1. Probe cooldown/backoff correctness (exponential backoff with jitter/cap, consecutive failure tracking)
+2. Provider-scoped concurrency behavior (per-provider semaphore/lock limiting concurrent probe and execution load)
+3. Persisted probe reservation semantics (reservation lifecycle, release on completion/failure)
+4. Antigravity readiness vs inference-capacity separation (readiness checks do not consume inference quota/budget inappropriately)
+5. Runtime probe-config wiring (configuration parameters propagated to probe/health services)
+6. OpenRouter no-harness behavior (handling provider when harness is not enabled/applicable)
+7. Truthful cost/reservation semantics (actual tokens/cost tracked accurately without phantom reservations)
+8. EVIDENCE_INSUFFICIENT continuation behavior (proper handling of continuation signals when evidence is incomplete)
+9. Process cancellation cleanup (process termination, signal handling, resource release)
+10. Provider readiness/health semantics (HEALTHY, DEGRADED, COOLDOWN, EXHAUSTED states)
+11. OpenSpec/code coherence (alignment between openspec/changes/provider-execution-safety-stabilization artifacts and code)
+12. Regression risk
+
+Provide your review report in print output containing:
+- Verdict: ACCEPTABLE, NEEDS_CORRECTION, or EVIDENCE_INSUFFICIENT
+- Key Findings & Technical Analysis across the 12 areas
+- Concrete file and symbol citations
+- Final Recommendation
