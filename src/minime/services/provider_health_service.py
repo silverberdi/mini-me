@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable, Coroutine
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from minime.adapters.provider_adapter import get_provider_adapter
+from minime.config import ProbeConfig
 from minime.domain.enums import (
     PRIMARY_PROVIDERS,
     CapacitySignalSource,
@@ -33,9 +34,14 @@ class ProviderHealthService:
         self,
         uow: PersistenceUnitOfWork,
         failure_threshold: int = 3,
+        probe_config: ProbeConfig | None = None,
+        probe_configs: dict[str, ProbeConfig] | None = None,
     ):
         self.uow = uow
         self.failure_threshold = failure_threshold
+        self.probe_config = probe_config
+        self.probe_configs = probe_configs or {}
+        self._probe_locks: dict[str, asyncio.Lock] = {}
 
     def _validate_primary(self, provider: str) -> None:
         # Generic providers are permitted as long as they are non-empty strings
@@ -253,6 +259,83 @@ class ProviderHealthService:
             self.uow.commit()
             return new_health
 
+    def _probe_config(self, provider: str) -> ProbeConfig:
+        if provider in self.probe_configs:
+            return self.probe_configs[provider]
+        return self.probe_config or ProbeConfig()
+
+    def _get_probe_lock(self, provider: str) -> asyncio.Lock:
+        lock = self._probe_locks.get(provider)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._probe_locks[provider] = lock
+        return lock
+
+    def _probe_eligible(
+        self,
+        provider: str,
+        health: ProviderHealth,
+        baseline_at: datetime | None = None,
+    ) -> bool:
+        cfg = self._probe_config(provider)
+        failures = max(0, health.consecutive_probe_failures)
+        backoff = 0
+        if failures >= 1:
+            backoff = min(
+                cfg.backoff_base_seconds * (2 ** (failures - 1)),
+                cfg.backoff_max_seconds,
+            )
+        interval = max(cfg.cooldown_seconds, backoff)
+
+        anchor = health.last_probe_at
+        if anchor is None:
+            # No prior probe: anchor first-probe eligibility to the exhaustion
+            # baseline (the authoritative capacity window) so the first expensive
+            # recovery probe still respects the configured cooldown rather than
+            # firing immediately on unknown reset.
+            anchor = baseline_at
+            if anchor is None:
+                return True
+        if anchor.tzinfo is None:
+            anchor = anchor.replace(tzinfo=UTC)
+        eligible_at = anchor + timedelta(seconds=interval)
+        return utc_now() >= eligible_at
+
+    def _record_probe_attempt(self, provider: str, succeeded: bool) -> None:
+        health = self.get_health(provider)
+        if succeeded:
+            health.consecutive_probe_failures = 0
+        else:
+            health.consecutive_probe_failures = health.consecutive_probe_failures + 1
+        health.last_probe_at = utc_now()
+        self.uow.provider_health.save(health)
+        self.uow.commit()
+
+    def _roll_probe_window(self, provider: str, cfg: ProbeConfig) -> ProviderHealth:
+        del cfg  # window length is fixed at one hour for the max_per_hour rate limit
+        health = self.get_health(provider)
+        now = utc_now()
+        started = health.probe_window_started_at
+        if started is not None and started.tzinfo is None:
+            started = started.replace(tzinfo=UTC)
+        if started is None or (now - started) >= timedelta(seconds=3600):
+            health.probe_window_started_at = now
+            health.probe_count_in_window = 0
+            self.uow.provider_health.save(health)
+            self.uow.commit()
+        return health
+
+    def _suppression_already_recorded(self, provider: str) -> bool:
+        cutoff = utc_now() - timedelta(seconds=3600)
+        return (
+            self.uow.events.count_events(
+                event_type=EventType.PROVIDER_PROBE_SUPPRESSED.value,
+                provider=provider,
+                since=cutoff,
+            )
+            > 0
+        )
+
     async def check_and_probe_provider(
         self,
         provider: str,
@@ -265,25 +348,105 @@ class ProviderHealthService:
         if health.status == ProviderHealthStatus.AVAILABLE:
             return True
 
-        # If exhausted or temporarily unavailable, check if reset window has elapsed
+        # Known future reset: never probe before the reset window.
         latest_window = self.uow.capacity_windows.get_latest_for_provider(provider)
-        now = utc_now()
-        is_reset_elapsed = False
-
         if latest_window and latest_window.capacity_reset_at:
             reset_at = latest_window.capacity_reset_at
             if reset_at.tzinfo is None:
                 reset_at = reset_at.replace(tzinfo=UTC)
-            is_reset_elapsed = reset_at <= now
-        else:
-            # Unknown reset timing must not permanently prevent probing
-            is_reset_elapsed = True
+            if reset_at > utc_now():
+                return False
 
-        if not is_reset_elapsed:
-            return False
+        managed_probe = probe_fn is None
+        expensive = False
 
-        if probe_fn is None:
+        if managed_probe:
             adapter = get_provider_adapter(provider)
+
+            # Readiness gate: never dispatch an inference-capable capacity probe when
+            # local CLI presence or authentication readiness is known to have failed.
+            if not await adapter.check_cli_present():
+                self.uow.provider_health.update_health(
+                    provider=provider,
+                    status=ProviderHealthStatus.MISCONFIGURED.value,
+                    result_class=ProviderResultClass.UNKNOWN_ERROR.value,
+                    error_summary=(
+                        "Provider CLI executable is not present; readiness failed without inference"
+                    ),
+                )
+                self.uow.events.save(
+                    Event(
+                        event_type=EventType.PROVIDER_HEALTH_UPDATED,
+                        payload={
+                            "provider": provider,
+                            "status": ProviderHealthStatus.MISCONFIGURED.value,
+                            "reason": "CLI_NOT_PRESENT",
+                        },
+                        timestamp=utc_now(),
+                    )
+                )
+                self.uow.commit()
+                return False
+
+            if not await adapter.check_auth_ready():
+                self.uow.provider_health.update_health(
+                    provider=provider,
+                    status=ProviderHealthStatus.AUTH_REQUIRED.value,
+                    result_class=ProviderResultClass.AUTH_ERROR.value,
+                    error_summary=(
+                        "Provider authentication is unavailable; readiness failed without inference"
+                    ),
+                )
+                self.uow.events.save(
+                    Event(
+                        event_type=EventType.PROVIDER_HEALTH_UPDATED,
+                        payload={
+                            "provider": provider,
+                            "status": ProviderHealthStatus.AUTH_REQUIRED.value,
+                            "reason": "AUTH_NOT_READY",
+                        },
+                        timestamp=utc_now(),
+                    )
+                )
+                self.uow.commit()
+                return False
+
+            if not self._probe_eligible(
+                provider,
+                health,
+                baseline_at=(
+                    latest_window.quota_exhausted_at if latest_window else None
+                ),
+            ):
+                return False
+
+            expensive = bool(adapter.probe_is_expensive)
+            if expensive:
+                cfg = self._probe_config(provider)
+                async with self._get_probe_lock(provider):
+                    windowed = self._roll_probe_window(provider, cfg)
+                    if windowed.probe_count_in_window >= cfg.max_per_hour:
+                        # Bound suppression evidence: at most one suppression event
+                        # per provider per hour, regardless of scheduler tick count.
+                        if not self._suppression_already_recorded(provider):
+                            self.uow.events.save(
+                                Event(
+                                    event_type=EventType.PROVIDER_PROBE_SUPPRESSED,
+                                    payload={
+                                        "provider": provider,
+                                        "kind": "expensive",
+                                        "reason": "MAX_PER_HOUR",
+                                    },
+                                    timestamp=utc_now(),
+                                )
+                            )
+                            self.uow.commit()
+                        return False
+                    # Reserve the dispatch slot durably before executing the probe
+                    # so concurrent eligibility checks cannot exceed max_per_hour.
+                    windowed.probe_count_in_window += 1
+                    self.uow.provider_health.save(windowed)
+                    self.uow.commit()
 
             async def _default_probe() -> bool:
                 return await adapter.probe_availability(timeout_seconds=30.0)
@@ -298,6 +461,23 @@ class ProviderHealthService:
         except Exception as e:
             logger.warning(f"Availability probe for {provider} raised exception or timed out: {e}")
             probe_success = False
+
+        if managed_probe:
+            self._record_probe_attempt(provider, succeeded=probe_success)
+            if expensive:
+                self.uow.events.save(
+                    Event(
+                        event_type=EventType.PROVIDER_PROBE_EXECUTED,
+                        payload={
+                            "provider": provider,
+                            "kind": "expensive",
+                            "result": "success" if probe_success else "failure",
+                            "expensive": True,
+                        },
+                        timestamp=utc_now(),
+                    )
+                )
+                self.uow.commit()
 
         if probe_success:
             logger.info(

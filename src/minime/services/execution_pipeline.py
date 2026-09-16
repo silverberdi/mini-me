@@ -635,6 +635,8 @@ class ExecutionPipelineService:
                 has_policy_violation = False
                 has_environment_failure = False
                 has_malformed_result = False
+                has_preflight_failure = False
+                has_insufficient_evidence = False
                 blocker_claim = None
                 runner_stdout: list[str] = []
                 runner_stderr: list[str] = []
@@ -771,37 +773,12 @@ class ExecutionPipelineService:
                             "stdout",
                             openrouter_res.summary or "OpenRouter implementer succeeded",
                         )
+                        # Textual provider success is not repository implementation success.
+                        # No repository-editing harness exists, so no candidate may be
+                        # materialized; classify as insufficient evidence (NOT capacity
+                        # exhaustion and NOT provider transport failure).
+                        has_insufficient_evidence = True
                         imp_outcome = openrouter_res
-                        try:
-                            cand_file = Path(worktree.path) / "candidate_impl.py"
-                            cand_file.write_text("# OpenRouter fallback candidate artifact\n")
-                            p1 = subprocess.run(
-                                ["git", "add", "candidate_impl.py"],
-                                cwd=str(worktree.path),
-                                capture_output=True,
-                                text=True,
-                            )
-                            p2 = subprocess.run(
-                                [
-                                    "git",
-                                    "-c",
-                                    "user.name=Test",
-                                    "-c",
-                                    "user.email=test@example.com",
-                                    "commit",
-                                    "-m",
-                                    "openrouter candidate changes",
-                                ],
-                                cwd=str(worktree.path),
-                                capture_output=True,
-                                text=True,
-                            )
-                            if p2.returncode != 0:
-                                logger.warning(
-                                    f"Git commit failed in OpenRouter fallback: {p2.stderr} (add stdout: {p1.stdout}, add stderr: {p1.stderr})"
-                                )
-                        except Exception as e:
-                            logger.warning(f"OpenRouter candidate commit exception: {e}")
                     else:
                         self.budget_service.mark_unresolved(reservation.reservation_id)
                         self.uow.commit()
@@ -816,6 +793,8 @@ class ExecutionPipelineService:
                     )
                     runner_stdout = result.stdout
                     runner_stderr = result.stderr
+                    if getattr(result, 'preflight_error', None):
+                        has_preflight_failure = True
 
                     for line in result.stdout:
                         self._log(job.job_id, "stdout", line)
@@ -842,7 +821,8 @@ class ExecutionPipelineService:
                         stdout_lines=result.stdout,
                         stderr_lines=result.stderr,
                     )
-                    self.health_service.record_outcome(imp_outcome)
+                    if not has_preflight_failure:
+                        self.health_service.record_outcome(imp_outcome)
                     if result.timed_out or imp_outcome.result_class == ProviderResultClass.TIMEOUT:
                         self._save_event(
                             EventType.JOB_TIMEOUT,
@@ -992,6 +972,8 @@ class ExecutionPipelineService:
                     has_policy_violation=has_policy_violation,
                     has_environment_failure=has_environment_failure,
                     has_malformed_result=has_malformed_result,
+                    has_preflight_failure=has_preflight_failure,
+                    has_insufficient_evidence=has_insufficient_evidence,
                 )
                 progress = self.outcome_governance.evaluate_progress(
                     ProgressSignals(
@@ -1117,7 +1099,11 @@ class ExecutionPipelineService:
                 active_attempt.duration_ms = duration_ms
                 self.uow.job_attempts.save(active_attempt)
 
-                job.candidate_sha = current_sha
+                # Candidate truth invariant: a candidate SHA may only be assigned
+                # when a candidate commit was actually materialized (COMPLETED).
+                # The base/worktree HEAD is not a candidate SHA.
+                if outcome == ExecutionOutcome.COMPLETED:
+                    job.candidate_sha = current_sha
                 job.latest_outcome = outcome
                 job.latest_progress = progress
                 self.uow.jobs.save(job)
@@ -1955,6 +1941,23 @@ class ExecutionPipelineService:
                     review_prompt,
                     timeout_seconds=self.reviewer_timeout_seconds,
                 )
+
+                # Reviewer preflight / CLI configuration incompatibility: no provider
+                # execution was attempted, provider health must not degrade, and the
+                # job must escalate (not consume corrective-retry budget).
+                preflight_err = getattr(review_result, "preflight_error", None)
+                if preflight_err:
+                    self.uow.reviews.transition(
+                        review.review_id,
+                        ReviewStatus.REVIEW_FAILED.value,
+                        error_message=f"Reviewer CLI preflight failed: {preflight_err}",
+                    )
+                    self.uow.commit()
+                    return self._transition(
+                        job,
+                        JobStatus.NEEDS_HUMAN,
+                        f"Reviewer CLI preflight failed: {preflight_err}",
+                    )
 
                 for line in review_result.stdout:
                     self._log(job.job_id, "stdout", line)

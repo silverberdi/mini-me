@@ -1,0 +1,25 @@
+You are performing an independent, strict read-only code review of candidate commit d898071d39a46d2e28115d74c4568763a04cc075.
+
+REPOSITORY: /tmp/mini-me-ag-impl-proving-fixture
+CANDIDATE SHA: d898071d39a46d2e28115d74c4568763a04cc075
+BASE SHA: a17840f1477bd29e762053747ee13f1a6f703642
+
+ASSIGNMENT CONTEXT:
+The implementer was asked to add a small, safe, assignment-relevant class-level docstring to `ProviderHealthRepositoryInterface` in `src/minime/domain/interfaces.py` documenting the D3 probe-state fields (`last_probe_at`, `consecutive_probe_failures`) and persistence semantics.
+
+STRICT CONSTRAINTS:
+- DO NOT MODIFY ANY FILES.
+- DO NOT RUN GIT COMMANDS THAT MUTATE STATE (no git commit, no git checkout/reset/stage).
+- This is a READ-ONLY review.
+
+REVIEW INSTRUCTIONS:
+Inspect the candidate commit `d898071d39a46d2e28115d74c4568763a04cc075` using read-only inspection:
+1. Verify whether the change in `src/minime/domain/interfaces.py` matches the stated assignment.
+2. Verify whether the change is scoped strictly to the intended docstring.
+3. Verify whether the docstring accurately describes the probe-state contract without misleading or contradictory statements.
+4. Verify that no executable code behavior was altered unexpectedly.
+
+Provide your review report in print output containing:
+- Verdict: ACCEPTABLE, NEEDS_CORRECTION, or EVIDENCE_INSUFFICIENT
+- Findings / Analysis
+- Final Recommendation

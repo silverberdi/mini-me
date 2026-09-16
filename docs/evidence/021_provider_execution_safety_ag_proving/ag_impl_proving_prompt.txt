@@ -1,0 +1,33 @@
+You are performing a narrowly-scoped proving task in a disposable worktree fixture.
+
+REPOSITORY: /tmp/mini-me-ag-impl-proving-fixture
+TASK: Add a class-level docstring to ProviderHealthRepositoryInterface in src/minime/domain/interfaces.py
+
+CONTEXT:
+The provider-execution-safety-stabilization change (Task 3/D3) added probe-state fields 
+`last_probe_at` and `consecutive_probe_failures` to the provider_health persistence model 
+via Alembic migration 021. The ProviderHealthRepositoryInterface class currently has no 
+docstring documenting this probe-state contract.
+
+REQUIRED CHANGE (and nothing else):
+Add a class-level docstring to `ProviderHealthRepositoryInterface` (currently at line ~261 
+in src/minime/domain/interfaces.py) that documents:
+1. The interface purpose: persistent storage contract for ProviderHealth records
+2. That implementations must persist probe-state fields: last_probe_at and consecutive_probe_failures
+3. That update_health() must not reset probe-state fields unless explicitly instructed
+
+The docstring must be exactly 3-5 sentences, placed immediately after the class definition line,
+before the first @abstractmethod.
+
+CONSTRAINTS:
+- Modify ONLY src/minime/domain/interfaces.py
+- Add ONLY the class-level docstring described above
+- Do NOT modify any other file
+- Do NOT add any other content
+- Do NOT add any module-level comments about this proving session
+- The change must pass ruff linting (standard Python docstring format)
+
+After making the change, commit it with the message:
+  docs(interfaces): add ProviderHealthRepositoryInterface docstring for probe-state contract (D3)
+
+Use git commit with -m flag. Do NOT use --author or --date flags.

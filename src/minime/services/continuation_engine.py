@@ -164,6 +164,19 @@ class ContinuationEngine:
                 ctx, "Provider failure occurred; reassigning to alternative executor."
             )
 
+        # 5b. Provider preflight / CLI configuration incompatibility.
+        # Retrying with the same broken CLI invocation cannot succeed, so this must
+        # not consume corrective-retry budget; it escalates to a human operator.
+        if outcome == ExecutionOutcome.PROVIDER_PREFLIGHT_FAILURE:
+            return ContinuationDecisionResult(
+                decision=ContinuationDecision.NEEDS_HUMAN,
+                escalation_reason=(
+                    "Provider CLI preflight failed: the configured invocation is "
+                    "unsupported or incompatible. This is a configuration error, not "
+                    "a retryable execution failure."
+                ),
+            )
+
         # 6. False Blocker
         if outcome == ExecutionOutcome.FALSE_BLOCKER:
             if ctx.same_blocker_fingerprint_streak >= self.max_same_false_blocker_streak:

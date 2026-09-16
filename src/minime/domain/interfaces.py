@@ -134,6 +134,14 @@ class EventRepositoryInterface(ABC):
         limit: int = 100,
     ) -> list[Event]: ...
 
+    @abstractmethod
+    def count_events(
+        self,
+        event_type: str,
+        provider: str | None = None,
+        since: datetime | None = None,
+    ) -> int: ...
+
 
 class MetricFactRepositoryInterface(ABC):
     @abstractmethod

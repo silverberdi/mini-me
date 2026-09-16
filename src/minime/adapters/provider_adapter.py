@@ -55,6 +55,21 @@ class ProviderAdapterInterface(ABC):
         """
         raise NotImplementedError
 
+    async def check_cli_present(self) -> bool:
+        # Local, quota-free executable/CLI presence. Subclasses override.
+        return True
+
+    async def check_auth_ready(self, timeout_seconds: float = 10.0) -> bool:
+        # Non-inference authentication readiness. Subclasses override; HTTP-only
+        # adapters cannot prove more locally and default to ready.
+        del timeout_seconds
+        return True
+
+    @property
+    def probe_is_expensive(self) -> bool:
+        # True when probe_availability() may consume provider/model inference quota.
+        return False
+
     def extract_capacity_signal(
         self, raw_output: str, exit_code: int = 0
     ) -> CapacitySignal | None:
@@ -67,6 +82,50 @@ class CodexProviderAdapter(ProviderAdapterInterface):
 
     def __init__(self, executable: str = "codex"):
         self._executable = executable
+
+    @property
+    def probe_is_expensive(self) -> bool:
+        # Codex capacity probes execute real Codex turns, so they are expensive.
+        return True
+
+    def _resolve_executable(self) -> str | None:
+        search_path = (
+            f"{Path.home()}/.local/bin:/opt/homebrew/bin:/usr/local/bin:"
+            f"{os.environ.get("PATH", "")}"
+        )
+        return shutil.which(self._executable, path=search_path)
+
+    async def check_cli_present(self) -> bool:
+        return self._resolve_executable() is not None
+
+    async def check_auth_ready(self, timeout_seconds: float = 10.0) -> bool:
+        # Non-inference auth readiness via the codex login status command.
+        # Verified against the installed codex-cli (0.147.0); never dispatches a
+        # codex exec turn for readiness.
+        resolved = self._resolve_executable()
+        if not resolved:
+            return False
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                resolved,
+                "login",
+                "status",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+            try:
+                await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
+                return proc.returncode == 0
+            except asyncio.TimeoutError:
+                try:
+                    proc.terminate()
+                except OSError:
+                    pass
+                return False
+        except Exception as exc:
+            logger.debug(f"Codex auth readiness check failed: {exc}")
+            return False
 
     @property
     def provider_name(self) -> str:
@@ -116,6 +175,22 @@ class AntigravityProviderAdapter(ProviderAdapterInterface):
 
     def __init__(self, executable: str = "agy"):
         self._executable = executable
+
+    def _resolve_executable(self) -> str | None:
+        search_path = (
+            f"{Path.home()}/.local/bin:/opt/homebrew/bin:/usr/local/bin:"
+            f"{os.environ.get("PATH", "")}"
+        )
+        return shutil.which(self._executable, path=search_path)
+
+    async def check_cli_present(self) -> bool:
+        return self._resolve_executable() is not None
+
+    async def check_auth_ready(self, timeout_seconds: float = 10.0) -> bool:
+        # agy models is non-inference: it proves the CLI runs and that the account
+        # and model catalog are reachable. It does NOT prove inference capacity;
+        # capacity probing stays a separate operation.
+        return await self.probe_availability(timeout_seconds=timeout_seconds)
 
     @property
     def provider_name(self) -> str:
@@ -182,6 +257,10 @@ class OpenRouterProviderAdapter(ProviderAdapterInterface):
         self._base_url = base_url
         self._api_key_env = api_key_env
 
+    async def check_auth_ready(self, timeout_seconds: float = 10.0) -> bool:
+        del timeout_seconds
+        return bool(os.environ.get(self._api_key_env, "").strip())
+
     @property
     def provider_name(self) -> str:
         return "openrouter"
@@ -218,6 +297,10 @@ class DeepSeekProviderAdapter(ProviderAdapterInterface):
     ):
         self._base_url = base_url
         self._api_key_env = api_key_env
+
+    async def check_auth_ready(self, timeout_seconds: float = 10.0) -> bool:
+        del timeout_seconds
+        return bool(os.environ.get(self._api_key_env, "").strip())
 
     @property
     def provider_name(self) -> str:

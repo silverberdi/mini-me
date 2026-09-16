@@ -261,6 +261,23 @@ class InMemoryEventRepository(EventRepositoryInterface):
             res = [e for e in res if e.change_id == change_id]
         return [e.model_copy(deep=True) for e in reversed(res[-limit:])]
 
+    def count_events(
+        self,
+        event_type: str,
+        provider: str | None = None,
+        since=None,
+    ) -> int:
+        count = 0
+        for e in self._store:
+            if e.event_type.value != event_type:
+                continue
+            if provider is not None and e.payload.get("provider") != provider:
+                continue
+            if since is not None and e.timestamp is not None and e.timestamp < since:
+                continue
+            count += 1
+        return count
+
 
 class InMemoryMetricFactRepository(MetricFactRepositoryInterface):
     def __init__(self):

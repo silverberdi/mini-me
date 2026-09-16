@@ -268,6 +268,8 @@ def test_known_headless_cli_contracts_are_configured():
         "--mode",
         "accept-edits",
         "--dangerously-skip-permissions",
+        "--print-timeout",
+        "1h",
         "--print={prompt}",
     ]
     assert runner_for_reviewer("antigravity", config).command == [
@@ -275,6 +277,8 @@ def test_known_headless_cli_contracts_are_configured():
         "--mode",
         "plan",
         "--dangerously-skip-permissions",
+        "--print-timeout",
+        "1h",
         "--print={prompt}",
     ]
 

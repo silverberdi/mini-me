@@ -11,6 +11,7 @@ from pathlib import Path
 
 from minime.config import AppConfig, CliInvocationProfile, resolve_cli_invocation
 from minime.logging import redact_secrets
+from minime.services.cli_preflight import preflight_cli_invocation
 
 
 @dataclass(frozen=True)
@@ -20,6 +21,7 @@ class ReviewerResult:
     stdout: list[str]
     stderr: list[str]
     duration_ms: int
+    preflight_error: str | None = None
 
 
 class ReviewerRunnerInterface:
@@ -62,6 +64,17 @@ class CliReviewerRunner(ReviewerRunnerInterface):
         self, worktree_path: Path, prompt_context: str, timeout_seconds: int
     ) -> ReviewerResult:
         start = asyncio.get_running_loop().time()
+        if self.profile is not None:
+            preflight = await preflight_cli_invocation(self.profile)
+            if not preflight.ok:
+                return ReviewerResult(
+                    exit_code=-2,
+                    timed_out=False,
+                    stdout=[],
+                    stderr=[redact_secrets(preflight.reason or 'preflight failed')],
+                    duration_ms=0,
+                    preflight_error=preflight.reason,
+                )
         proc = await asyncio.create_subprocess_exec(
             *self._command_for_prompt(prompt_context),
             cwd=str(worktree_path),
@@ -97,16 +110,23 @@ class CliReviewerRunner(ReviewerRunnerInterface):
                     except OSError:
                         pass
                     stdout, stderr = await proc.communicate()
-        except BaseException:
-            if proc.returncode is None:
-                try:
-                    os.killpg(proc.pid, signal.SIGTERM)
-                except OSError:
-                    pass
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except OSError:
-                    pass
+        except BaseException as exc:
+            # Bounded, cancellation-protected cleanup: SIGTERM -> grace -> SIGKILL,
+            # awaiting process-group termination BEFORE the exception propagates.
+            # Re-arm cancellation after cleanup so it is never silently swallowed.
+            task = asyncio.current_task()
+            was_cancelled = (
+                isinstance(exc, asyncio.CancelledError)
+                and task is not None
+                and task.cancelling() > 0
+            )
+            if was_cancelled:
+                task.uncancel()
+            try:
+                await self._terminate_process_group(proc)
+            finally:
+                if was_cancelled:
+                    task.cancel()
             raise
         duration_ms = int((asyncio.get_running_loop().time() - start) * 1000)
         return ReviewerResult(
@@ -116,6 +136,28 @@ class CliReviewerRunner(ReviewerRunnerInterface):
             stderr=self._sanitize_output(stderr),
             duration_ms=duration_ms,
         )
+
+    async def _terminate_process_group(self, proc: asyncio.subprocess.Process) -> None:
+        """Bounded, cancellation-protected process-group teardown."""
+        if proc.returncode is not None:
+            return
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except OSError:
+            pass
+        try:
+            await asyncio.wait_for(proc.communicate(), timeout=5.0)
+            return
+        except Exception:
+            pass
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        try:
+            await proc.communicate()
+        except Exception:
+            pass
 
     @classmethod
     def _sanitize_output(cls, output: bytes) -> list[str]:
