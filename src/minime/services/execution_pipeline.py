@@ -760,7 +760,10 @@ class ExecutionPipelineService:
                                 + Decimal(comp_tok) * snapshot.output_price_per_token
                                 + snapshot.additional_cost_per_request
                             )
-                        self.budget_service.settle_reservation(
+                        # The provider call genuinely consumed money, but no material
+                        # repository work was delivered (no editing harness). Record the
+                        # actual cost truthfully while leaving the reservation unresolved.
+                        self.budget_service.settle_unproductive_reservation(
                             reservation_id=reservation.reservation_id,
                             actual_cost_usd=actual_cost,
                             prompt_tokens=prompt_tok,

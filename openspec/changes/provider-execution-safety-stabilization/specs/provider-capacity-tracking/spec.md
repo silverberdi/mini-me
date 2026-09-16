@@ -52,6 +52,10 @@ The system SHALL distinguish provider local readiness (executable present) and a
 - **WHEN** provider readiness is evaluated
 - **THEN** the checks used SHALL be local and non-inference (executable presence and authentication/readiness status) and SHALL NOT consume provider/model quota.
 
+#### Scenario: Readiness success does not prove recovered capacity
+- **WHEN** an exhausted provider's non-inference readiness/auth check succeeds (for example `agy models` confirms catalog/auth reachability) but no inference-capacity recovery evidence is available
+- **THEN** the system SHALL NOT transition the provider to `available`; it SHALL preserve the exhausted/unknown-capacity state until verified inference-capacity recovery evidence is produced.
+
 #### Scenario: Expensive probes are explicitly classified
 - **WHEN** any probe is capable of consuming provider/model quota or inference capacity
 - **THEN** it SHALL be explicitly classified as expensive and governed by the expensive-probe rate limit.

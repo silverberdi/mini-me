@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from minime.adapters.provider_adapter import get_provider_adapter
-from minime.config import ProbeConfig
+from minime.config import ProbeConfig, load_config, probe_configs_from_app_config
 from minime.domain.enums import (
     PRIMARY_PROVIDERS,
     CapacitySignalSource,
@@ -40,8 +40,33 @@ class ProviderHealthService:
         self.uow = uow
         self.failure_threshold = failure_threshold
         self.probe_config = probe_config
-        self.probe_configs = probe_configs or {}
+        self.probe_configs = self._resolve_probe_configs(probe_config, probe_configs)
         self._probe_locks: dict[str, asyncio.Lock] = {}
+
+    @staticmethod
+    def _resolve_probe_configs(
+        probe_config: ProbeConfig | None,
+        probe_configs: dict[str, ProbeConfig] | None,
+    ) -> dict[str, ProbeConfig]:
+        """Resolve per-provider probe policies.
+
+        An explicit ``probe_configs`` wins outright. An explicit process-wide
+        ``probe_config`` suppresses app-config auto-wiring (embedded callers/tests
+        own their probe policy). Otherwise, derive per-provider policies from the
+        operator's app config so YAML ``probe:`` blocks actually govern runtime.
+        """
+        if probe_configs is not None:
+            return probe_configs
+        if probe_config is not None:
+            return {}
+        try:
+            return probe_configs_from_app_config(load_config())
+        except Exception:
+            logger.warning(
+                "Failed to derive probe configs from app config; using defaults.",
+                exc_info=True,
+            )
+            return {}
 
     def _validate_primary(self, provider: str) -> None:
         # Generic providers are permitted as long as they are non-empty strings
@@ -359,6 +384,7 @@ class ProviderHealthService:
 
         managed_probe = probe_fn is None
         expensive = False
+        verifies_capacity = True  # injected probe_fn: caller's probe is authoritative
 
         if managed_probe:
             adapter = get_provider_adapter(provider)
@@ -411,19 +437,26 @@ class ProviderHealthService:
                 self.uow.commit()
                 return False
 
-            if not self._probe_eligible(
-                provider,
-                health,
-                baseline_at=(
-                    latest_window.quota_exhausted_at if latest_window else None
-                ),
-            ):
-                return False
-
             expensive = bool(adapter.probe_is_expensive)
+            verifies_capacity = bool(adapter.probe_verifies_capacity)
+
             if expensive:
                 cfg = self._probe_config(provider)
                 async with self._get_probe_lock(provider):
+                    # Re-read authoritative probe state and re-evaluate cooldown/backoff
+                    # ATOMICALLY with the rate-window reservation. Without this, every
+                    # concurrent caller evaluates eligibility on the same stale state,
+                    # queues on the lock, then each reserves a slot and dispatches a
+                    # probe — bursting up to max_per_hour at one cooldown boundary.
+                    fresh = self.get_health(provider)
+                    if not self._probe_eligible(
+                        provider,
+                        fresh,
+                        baseline_at=(
+                            latest_window.quota_exhausted_at if latest_window else None
+                        ),
+                    ):
+                        return False
                     windowed = self._roll_probe_window(provider, cfg)
                     if windowed.probe_count_in_window >= cfg.max_per_hour:
                         # Bound suppression evidence: at most one suppression event
@@ -442,11 +475,22 @@ class ProviderHealthService:
                             )
                             self.uow.commit()
                         return False
-                    # Reserve the dispatch slot durably before executing the probe
-                    # so concurrent eligibility checks cannot exceed max_per_hour.
+                    # Reserve the dispatch slot AND mark the dispatch time durably so
+                    # queued callers observe an updated last_probe_at and fail the
+                    # cooldown/backoff check rather than bursting additional probes.
                     windowed.probe_count_in_window += 1
+                    windowed.last_probe_at = utc_now()
                     self.uow.provider_health.save(windowed)
                     self.uow.commit()
+            else:
+                if not self._probe_eligible(
+                    provider,
+                    health,
+                    baseline_at=(
+                        latest_window.quota_exhausted_at if latest_window else None
+                    ),
+                ):
+                    return False
 
             async def _default_probe() -> bool:
                 return await adapter.probe_availability(timeout_seconds=30.0)
@@ -479,7 +523,7 @@ class ProviderHealthService:
                 )
                 self.uow.commit()
 
-        if probe_success:
+        if probe_success and verifies_capacity:
             logger.info(
                 f"Availability probe for {provider} SUCCEEDED. Transitioning to AVAILABLE."
             )
@@ -503,6 +547,27 @@ class ProviderHealthService:
             )
             self.uow.commit()
             return True
+        elif probe_success:
+            # Readiness/reachability probe succeeded but does NOT verify inference
+            # capacity recovery (e.g. Antigravity `agy models`). Preserve UNKNOWN
+            # capacity: never promote an exhausted provider on a non-inference signal.
+            logger.info(
+                f"Readiness probe for {provider} succeeded but does not verify capacity; "
+                "provider remains in its current non-available state."
+            )
+            self.uow.events.save(
+                Event(
+                    event_type=EventType.PROVIDER_HEALTH_UPDATED,
+                    payload={
+                        "provider": provider,
+                        "status": health.status.value,
+                        "reason": "READINESS_CONFIRMED_CAPACITY_UNKNOWN",
+                    },
+                    timestamp=utc_now(),
+                )
+            )
+            self.uow.commit()
+            return False
         else:
             logger.warning(
                 f"Availability probe for {provider} FAILED. Provider remains unavailable."

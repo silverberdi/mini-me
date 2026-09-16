@@ -18,6 +18,7 @@ These map onto existing `ProviderHealthStatus` values; no new domain state is in
 - `check_cli_present() -> bool`: local and quota-free (executable resolvable).
 - `check_auth_ready() -> bool`: local/non-inference where the installed CLI supports it.
 - `probe_availability(...) -> bool`: capacity probe that SHALL declare an expensive classification when it can consume quota/inference.
+- `probe_verifies_capacity() -> bool`: True only when a successful `probe_availability()` is valid evidence that an exhausted provider's inference capacity has actually recovered. Cheap readiness/reachability probes (`agy models`, HTTP `/models`) are False and MUST NOT promote an exhausted provider back to `available`.
 Codex: implement `check_cli_present`, then investigate the installed CLI for a deterministic non-inference auth command (for example `codex login status`). Do NOT assume such a command exists - prove it during implementation. If none exists, auth readiness stays `unverified` and only the cooldown/backoff-gated capacity probe runs. Antigravity already uses `agy models` (local/auth, non-inference); that stays a cheap readiness check and is NOT an expensive probe.
 
 ### D3 - Deterministic cooldown/backoff (config-driven, no hidden magic numbers)

@@ -70,6 +70,14 @@ class ProviderAdapterInterface(ABC):
         # True when probe_availability() may consume provider/model inference quota.
         return False
 
+    @property
+    def probe_verifies_capacity(self) -> bool:
+        # True when a successful probe_availability() is valid evidence that an
+        # exhausted provider's inference capacity has actually recovered.
+        # Cheap readiness/reachability checks (CLI presence, auth, model catalog)
+        # do NOT prove capacity and must NOT promote a provider back to AVAILABLE.
+        return False
+
     def extract_capacity_signal(
         self, raw_output: str, exit_code: int = 0
     ) -> CapacitySignal | None:
@@ -86,6 +94,12 @@ class CodexProviderAdapter(ProviderAdapterInterface):
     @property
     def probe_is_expensive(self) -> bool:
         # Codex capacity probes execute real Codex turns, so they are expensive.
+        return True
+
+    @property
+    def probe_verifies_capacity(self) -> bool:
+        # codex exec is a real inference turn; a clean exit is positive evidence
+        # that inference capacity has recovered.
         return True
 
     def _resolve_executable(self) -> str | None:
@@ -349,6 +363,11 @@ class FakeProviderAdapter(ProviderAdapterInterface):
     @property
     def supported_roles(self) -> set[str]:
         return self._supported_roles
+
+    @property
+    def probe_verifies_capacity(self) -> bool:
+        # Test/future double: `available=True` simulates verified capacity recovery.
+        return True
 
     async def probe_availability(self, timeout_seconds: float = 30.0) -> bool:
         self.probe_call_count += 1

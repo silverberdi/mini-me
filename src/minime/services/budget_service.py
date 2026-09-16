@@ -294,6 +294,72 @@ class BudgetService:
         self.uow.budget_reservations.save(reservation)
         return reservation
 
+    def settle_unproductive_reservation(
+        self,
+        reservation_id: str,
+        actual_cost_usd: Decimal | str | float,
+        prompt_tokens: int | None = None,
+        completion_tokens: int | None = None,
+        total_tokens: int | None = None,
+    ) -> BudgetLedgerEntry | None:
+        """Record actual provider cost truthfully but leave the reservation unresolved.
+
+        Used when a provider call physically occurred and consumed money but
+        produced no material repository work (e.g. OpenRouter textual success with
+        no repository-editing harness). The spend is real and is recorded; the
+        reservation is NOT settled as a successful completion.
+        """
+        reservation = self.uow.budget_reservations.get_by_id(reservation_id)
+        if not reservation:
+            return None
+
+        actual_dec = (
+            actual_cost_usd
+            if isinstance(actual_cost_usd, Decimal)
+            else Decimal(str(actual_cost_usd))
+        )
+
+        entry = BudgetLedgerEntry(
+            reservation_id=reservation.reservation_id,
+            project_id=reservation.project_id,
+            job_id=reservation.job_id,
+            change_id=reservation.change_id,
+            provider="openrouter",
+            role=reservation.role,
+            canonical_model_identity=reservation.canonical_model_identity,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            amount_usd=actual_dec,
+            entry_type="UNPRODUCTIVE_SETTLEMENT",
+            created_at=utc_now(),
+        )
+        self.uow.budget_ledger.save(entry)
+
+        reservation.status = "UNRESOLVED"
+        reservation.updated_at = utc_now()
+        self.uow.budget_reservations.save(reservation)
+
+        self.uow.events.save(
+            Event(
+                event_type=EventType.BUDGET_SETTLED,
+                project_id=reservation.project_id,
+                change_id=reservation.change_id,
+                operation_id=reservation.job_id,
+                payload={
+                    "reservation_id": reservation.reservation_id,
+                    "amount_usd": str(actual_dec),
+                    "outcome": "UNPRODUCTIVE",
+                    "note": (
+                        "Provider cost incurred but no repository materialization "
+                        "delivered; reservation left unresolved."
+                    ),
+                },
+                timestamp=utc_now(),
+            )
+        )
+        return entry
+
     def release_reservation(
         self, reservation_id: str, reason: str = "cancelled"
     ) -> BudgetReservation | None:

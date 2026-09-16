@@ -1,6 +1,14 @@
 # AG Reviewer Behavioral Proving Evidence
 ## Session: provider-execution-safety-stabilization — Task 6 / Finding H
 
+> **RECONCILIATION NOTE (Finding 5 — profile discrepancy):** this proving
+> executed the AG CLI with `--mode accept-edits` (the *implementer* profile), not
+> the configured AG reviewer profile `--mode plan`. It is **valid execution
+> evidence** that an edit-capable invocation happened not to mutate the worktree,
+> but it does **not** prove the *configured* reviewer profile is behaviorally
+> non-mutating. The reviewer half of Finding H is therefore **NOT YET PROVEN**
+> against the configured profile and must be re-run with `--mode plan`.
+
 **Proving session ID:** f5ba3355-ab1b-4044-a09b-01df9d092cea  
 **Attempt timestamp:** 2026-09-16T15:13:49Z – 2026-09-16T15:14:29Z  
 **Implementer Model:** Gemini 3.6 Flash (Medium) (`gemini-3.6-flash-medium`)  

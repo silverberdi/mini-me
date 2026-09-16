@@ -421,18 +421,23 @@ async def test_fallback_implementer_execution_flow(in_memory_uow, tmp_path):
     assert result_job.status == JobStatus.NEEDS_HUMAN
     assert result_job.candidate_sha is None
 
-    # 1. OpenRouter adapter was called
-    assert len(mock_openrouter.calls) >= 1
+    # 1. OpenRouter adapter was called exactly once: the no-harness textual success
+    #    must escalate (NEEDS_HUMAN) without a wasteful corrective retry loop.
+    assert len(mock_openrouter.calls) == 1
     assert mock_openrouter.calls[0].model == "anthropic/claude-3.5-sonnet"
 
-    # 2. Reservation and settlement ledger records exist
+    # 2. Reservation is left UNRESOLVED (no material work delivered) while the
+    #    actual provider cost is still recorded truthfully in the ledger.
     reservations = in_memory_uow.budget_reservations.list_by_project(project.project_id)
     assert len(reservations) >= 1
-    assert any(r.status == "SETTLED" for r in reservations)
+    assert any(r.status == "UNRESOLVED" for r in reservations)
+    assert not any(r.status == "SETTLED" for r in reservations)
 
     ledger = in_memory_uow.budget_ledger.list_by_project(project.project_id)
     assert len(ledger) >= 1
-    assert any(e.entry_type == "SETTLEMENT" for e in ledger)
+    unproductive = [e for e in ledger if e.entry_type == "UNPRODUCTIVE_SETTLEMENT"]
+    assert len(unproductive) >= 1
+    assert all(e.amount_usd > 0 for e in unproductive)
 
     # 3. Primary provider health was NOT altered by OpenRouter outcome
     codex_health = in_memory_uow.provider_health.get_by_provider("codex")

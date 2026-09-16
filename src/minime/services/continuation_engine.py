@@ -263,7 +263,21 @@ class ContinuationEngine:
                 corrective_prompt="CORRECTIVE GUIDANCE: No progress detected. Please produce required file modifications for the active OpenSpec change.",
             )
 
-        # 10. Malformed Result / Insufficient Evidence / Other
+        # 9b. Insufficient Evidence (no verifiable candidate materialization).
+        # Fail closed: retrying an executor that produced no verifiable candidate —
+        # especially a no-repository-harness provider such as OpenRouter drain
+        # fallback — would spend budget on a path structurally incapable of
+        # materializing repository work. Escalate without consuming retry budget.
+        if outcome == ExecutionOutcome.EVIDENCE_INSUFFICIENT:
+            return ContinuationDecisionResult(
+                decision=ContinuationDecision.NEEDS_HUMAN,
+                escalation_reason=(
+                    "EVIDENCE_INSUFFICIENT: no verifiable candidate materialized; "
+                    "escalating rather than repeating a non-materializing execution path."
+                ),
+            )
+
+        # 10. Malformed Result / Other
         if ctx.corrective_retries_for_current_executor < self.max_corrective_retries:
             return ContinuationDecisionResult(
                 decision=ContinuationDecision.CORRECT_AND_RETRY,
