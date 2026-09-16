@@ -698,6 +698,12 @@ class InMemoryProviderHealthRepository(ProviderHealthRepositoryInterface):
         h = self._store.get(provider)
         return h.model_copy(deep=True) if h else None
 
+    def get_by_provider_for_update(self, provider: str) -> ProviderHealth | None:
+        # The in-memory double has no cross-session concurrency; single-instance
+        # concurrency is serialized by the provider-scoped asyncio.Lock in
+        # ProviderHealthService, so the lock-acquiring read is the plain read.
+        return self.get_by_provider(provider)
+
     def list_all(self) -> list[ProviderHealth]:
         return [h.model_copy(deep=True) for h in self._store.values()]
 

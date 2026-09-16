@@ -274,6 +274,9 @@ class ProviderHealthRepositoryInterface(ABC):
     def get_by_provider(self, provider: str) -> ProviderHealth | None: ...
 
     @abstractmethod
+    def get_by_provider_for_update(self, provider: str) -> ProviderHealth | None: ...
+
+    @abstractmethod
     def list_all(self) -> list[ProviderHealth]: ...
 
     @abstractmethod

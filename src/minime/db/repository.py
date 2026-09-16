@@ -1072,7 +1072,9 @@ class PostgresEventRepository(EventRepositoryInterface):
             EventModel.event_type == event_type
         )
         if provider is not None:
-            stmt = stmt.where(EventModel.payload["provider"].astext == provider)
+            stmt = stmt.where(
+                func.json_extract_path_text(EventModel.payload, "provider") == provider
+            )
         if since is not None:
             stmt = stmt.where(EventModel.timestamp >= since)
         return int(self.session.scalar(stmt) or 0)
@@ -1784,6 +1786,25 @@ class PostgresProviderHealthRepository(ProviderHealthRepositoryInterface):
     def get_by_provider(self, provider: str) -> ProviderHealth | None:
         self._validate_primary_provider(provider)
         stmt = select(ProviderHealthModel).where(ProviderHealthModel.provider == provider)
+        model = self.session.scalars(stmt).first()
+        return provider_health_model_to_domain(model) if model else None
+
+    def get_by_provider_for_update(self, provider: str) -> ProviderHealth | None:
+        """Lock the provider health row for update and return fresh state.
+
+        Emits ``SELECT ... FOR UPDATE`` and, via ``populate_existing``, refreshes
+        the returned domain object from the committed row rather than the session
+        identity map. The exclusive row lock is held until the surrounding
+        transaction commits or rolls back, making it the cross-session boundary
+        for atomic expensive-probe reservation.
+        """
+        self._validate_primary_provider(provider)
+        stmt = (
+            select(ProviderHealthModel)
+            .where(ProviderHealthModel.provider == provider)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
         model = self.session.scalars(stmt).first()
         return provider_health_model_to_domain(model) if model else None
 

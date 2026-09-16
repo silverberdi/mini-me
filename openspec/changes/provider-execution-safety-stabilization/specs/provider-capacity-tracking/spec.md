@@ -64,6 +64,10 @@ The system SHALL distinguish provider local readiness (executable present) and a
 - **WHEN** an expensive probe is executed
 - **THEN** the system SHALL enforce the configured cooldown/backoff bound, SHALL NOT exceed the configured maximum per window, and SHALL persist an observable event recording provider, probe kind, timestamp, and outcome.
 
+#### Scenario: Concurrent expensive-probe reservations do not exceed the per-window maximum
+- **WHEN** multiple independent scheduler/service instances concurrently evaluate and reserve an expensive probe for the same provider at the same eligibility boundary
+- **THEN** the reservation SHALL be atomic across PostgreSQL sessions such that no more than the policy-authorized number of probes dispatches and the persisted per-window probe count SHALL NOT exceed the configured maximum per window.
+
 #### Scenario: Provider recovery does not consume implementation retry budget
 - **WHEN** an availability/recovery probe is executed
 - **THEN** it SHALL NOT decrement or consume any implementation attempt retry budget and SHALL NOT create Runs or Jobs.

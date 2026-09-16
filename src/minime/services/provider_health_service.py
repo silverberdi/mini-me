@@ -336,19 +336,72 @@ class ProviderHealthService:
         self.uow.provider_health.save(health)
         self.uow.commit()
 
-    def _roll_probe_window(self, provider: str, cfg: ProbeConfig) -> ProviderHealth:
-        del cfg  # window length is fixed at one hour for the max_per_hour rate limit
-        health = self.get_health(provider)
+    def _try_reserve_expensive_probe(
+        self,
+        provider: str,
+        cfg: ProbeConfig,
+        baseline_at: datetime | None = None,
+    ) -> bool:
+        """Atomically evaluate and reserve an expensive-probe dispatch slot.
+
+        Locks the provider's health row ``FOR UPDATE`` so competing PostgreSQL
+        sessions serialize on the same physical row, then re-evaluates
+        cooldown/backoff eligibility, the rolling one-hour window, and the
+        per-window maximum against the freshly locked state. The reservation is
+        committed in the same transaction as the lock, so the lock is released
+        only after the reservation is durable and before the external probe is
+        dispatched. Returns True only when this caller durably reserved the slot.
+        """
+        fresh = self.uow.provider_health.get_by_provider_for_update(provider)
+        if fresh is None:
+            # get_health above materialized the row; a missing row means we cannot
+            # reserve. Release the (vacuous) lock and decline.
+            self.uow.rollback()
+            return False
+
+        if not self._probe_eligible(provider, fresh, baseline_at=baseline_at):
+            self.uow.rollback()
+            return False
+
         now = utc_now()
-        started = health.probe_window_started_at
+        started = fresh.probe_window_started_at
         if started is not None and started.tzinfo is None:
             started = started.replace(tzinfo=UTC)
         if started is None or (now - started) >= timedelta(seconds=3600):
-            health.probe_window_started_at = now
-            health.probe_count_in_window = 0
-            self.uow.provider_health.save(health)
-            self.uow.commit()
-        return health
+            # Roll the fixed one-hour window in place; no intermediate commit so
+            # the FOR UPDATE lock is held across the entire evaluation+reservation.
+            fresh.probe_window_started_at = now
+            fresh.probe_count_in_window = 0
+
+        if fresh.probe_count_in_window >= cfg.max_per_hour:
+            # Bound suppression evidence: at most one suppression event per
+            # provider per hour, regardless of scheduler tick count.
+            if not self._suppression_already_recorded(provider):
+                self.uow.events.save(
+                    Event(
+                        event_type=EventType.PROVIDER_PROBE_SUPPRESSED,
+                        payload={
+                            "provider": provider,
+                            "kind": "expensive",
+                            "reason": "MAX_PER_HOUR",
+                        },
+                        timestamp=now,
+                    )
+                )
+                self.uow.commit()
+            else:
+                self.uow.rollback()
+            return False
+
+        # Reserve the dispatch slot AND mark the dispatch time durably so queued
+        # callers (in-process and cross-session) observe an updated last_probe_at
+        # and probe_count_in_window and fail the cooldown/backoff or max-per-hour
+        # check rather than dispatching additional expensive probes.
+        fresh.probe_count_in_window += 1
+        fresh.last_probe_at = now
+        self.uow.provider_health.save(fresh)
+        self.uow.commit()
+        return True
 
     def _suppression_already_recorded(self, provider: str) -> bool:
         cutoff = utc_now() - timedelta(seconds=3600)
@@ -443,45 +496,19 @@ class ProviderHealthService:
             if expensive:
                 cfg = self._probe_config(provider)
                 async with self._get_probe_lock(provider):
-                    # Re-read authoritative probe state and re-evaluate cooldown/backoff
-                    # ATOMICALLY with the rate-window reservation. Without this, every
-                    # concurrent caller evaluates eligibility on the same stale state,
-                    # queues on the lock, then each reserves a slot and dispatches a
-                    # probe — bursting up to max_per_hour at one cooldown boundary.
-                    fresh = self.get_health(provider)
-                    if not self._probe_eligible(
+                    # The in-process lock serializes callers within this instance.
+                    # The FOR UPDATE row lock inside _try_reserve_expensive_probe is
+                    # the canonical cross-session boundary: it also serializes other
+                    # SchedulerService / ProviderHealthService instances sharing
+                    # PostgreSQL, so a stale shared read can never reserve twice.
+                    if not self._try_reserve_expensive_probe(
                         provider,
-                        fresh,
+                        cfg,
                         baseline_at=(
                             latest_window.quota_exhausted_at if latest_window else None
                         ),
                     ):
                         return False
-                    windowed = self._roll_probe_window(provider, cfg)
-                    if windowed.probe_count_in_window >= cfg.max_per_hour:
-                        # Bound suppression evidence: at most one suppression event
-                        # per provider per hour, regardless of scheduler tick count.
-                        if not self._suppression_already_recorded(provider):
-                            self.uow.events.save(
-                                Event(
-                                    event_type=EventType.PROVIDER_PROBE_SUPPRESSED,
-                                    payload={
-                                        "provider": provider,
-                                        "kind": "expensive",
-                                        "reason": "MAX_PER_HOUR",
-                                    },
-                                    timestamp=utc_now(),
-                                )
-                            )
-                            self.uow.commit()
-                        return False
-                    # Reserve the dispatch slot AND mark the dispatch time durably so
-                    # queued callers observe an updated last_probe_at and fail the
-                    # cooldown/backoff check rather than bursting additional probes.
-                    windowed.probe_count_in_window += 1
-                    windowed.last_probe_at = utc_now()
-                    self.uow.provider_health.save(windowed)
-                    self.uow.commit()
             else:
                 if not self._probe_eligible(
                     provider,
