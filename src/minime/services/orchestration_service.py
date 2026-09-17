@@ -35,6 +35,7 @@ from minime.domain.enums import (
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
     AdmissionResult,
+    Change,
     Event,
     Job,
     OrchestrationCandidate,
@@ -322,6 +323,9 @@ class OrchestrationService:
                 timestamp=utc_now(),
             )
         )
+
+        self._try_classify_pre_execution(change)
+
         self.uow.commit()
 
         return AdmissionResult(admitted=True, run=run)
@@ -3140,6 +3144,56 @@ class OrchestrationService:
                 False,
                 f"Existing durable binding PR #{binding.github_pr_number} differs from discovered PR #{pr_number}.",
                 {"code": "PR_NUMBER_MISMATCH"},
+            )
+
+    def _try_classify_pre_execution(self, change: Change) -> None:
+        """Perform pre-execution classification for a change, fire-and-forget.
+
+        Classification failure is logged and an error event is emitted
+        but never blocks admission.
+        """
+        try:
+            from minime.services.task_complexity_risk_classifier import (
+                TaskComplexityRiskClassifier,
+            )
+
+            classifier = TaskComplexityRiskClassifier()
+            snapshot = classifier.classify_pre_execution(
+                change=change,
+                tasks=None,
+                proposal_text=None,
+            )
+
+            self.uow.classification_snapshots.save(snapshot)
+
+            change.latest_classification_snapshot_id = snapshot.id
+            self.uow.changes.save(change)
+
+            logger.info(
+                "Pre-execution classification created: change=%s, complexity=%s, "
+                "completeness=%s, snapshot_id=%s",
+                change.name,
+                snapshot.complexity.value,
+                snapshot.classification_completeness.value,
+                snapshot.id,
+            )
+        except Exception as exc:
+            logger.error(
+                "Pre-execution classification failed (non-blocking): change=%s, error=%s",
+                change.name,
+                exc,
+            )
+            self.uow.events.save(
+                Event(
+                    event_type=EventType.JOB_FAILED,
+                    project_id=change.project_id,
+                    change_id=change.name,
+                    payload={
+                        "classification_error": str(exc),
+                        "stage": "pre_execution",
+                    },
+                    timestamp=utc_now(),
+                )
             )
 
         return True, None, {}

@@ -1112,6 +1112,8 @@ class ExecutionPipelineService:
                 self.uow.jobs.save(job)
                 self.uow.commit()
 
+                self._try_classify_post_materialization(job, worktree_path=worktree.path)
+
                 if outcome == ExecutionOutcome.COMPLETED:
                     # Implementer phase succeeded with full task completion and clean git state
                     break
@@ -2498,3 +2500,89 @@ class ExecutionPipelineService:
 
     def _log(self, job_id: str, stream: str, message: str) -> None:
         self.uow.job_logs.save(JobLog(job_id=job_id, stream=stream, message=message))
+
+    def _try_classify_post_materialization(
+        self, job: Job, worktree_path: str | Path | None = None
+    ) -> None:
+        """Perform post-materialization classification, fire-and-forget.
+
+        Classification failure is logged and an error event is emitted
+        but never blocks the pipeline.
+        """
+        try:
+            if not job.candidate_sha or not job.base_sha:
+                return
+
+            diff_paths: list[str] = []
+            if worktree_path and Path(worktree_path).exists():
+                diff = subprocess.run(
+                    ["git", "diff", "--name-only", f"{job.base_sha}..{job.candidate_sha}"],
+                    cwd=worktree_path,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if diff.returncode == 0 and diff.stdout:
+                    diff_paths = [
+                        line.strip()
+                        for line in diff.stdout.splitlines()
+                        if line.strip()
+                    ]
+
+            change = self.uow.changes.get_by_name(job.project_id, job.change_name)
+            change_id = change.change_id if change else None
+
+            pre_snapshot = None
+            if change_id:
+                try:
+                    pre_snapshot = self.uow.classification_snapshots.find_latest_by_change(
+                        change_id
+                    )
+                except Exception:
+                    pass
+
+            from minime.services.task_complexity_risk_classifier import (
+                TaskComplexityRiskClassifier,
+            )
+
+            classifier = TaskComplexityRiskClassifier()
+            snapshot = classifier.classify_post_materialization(
+                pre_execution_snapshot=pre_snapshot,
+                diff_file_paths=diff_paths,
+            )
+            snapshot.job_id = job.job_id
+            snapshot.change_id = change_id
+
+            self.uow.classification_snapshots.save(snapshot)
+
+            job.classification_snapshot_id = snapshot.id
+            self.uow.jobs.save(job)
+
+            logger.info(
+                "Post-materialization classification created: job=%s, complexity=%s, "
+                "surface=%s, mismatch=%s, snapshot_id=%s",
+                job.job_id,
+                snapshot.complexity.value,
+                snapshot.surface_kind.value,
+                snapshot.breadth_mismatch_detected,
+                snapshot.id,
+            )
+        except Exception as exc:
+            logger.error(
+                "Post-materialization classification failed (non-blocking): job=%s, error=%s",
+                job.job_id,
+                exc,
+            )
+            self.uow.events.save(
+                Event(
+                    event_type=EventType.JOB_FAILED,
+                    project_id=job.project_id,
+                    change_id=job.change_name,
+                    payload={
+                        "classification_error": str(exc),
+                        "stage": "post_materialization",
+                        "job_id": job.job_id,
+                    },
+                    timestamp=utc_now(),
+                )
+            )

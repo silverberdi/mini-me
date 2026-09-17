@@ -197,6 +197,12 @@ class ChangeModel(Base):
         DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
     )
 
+    latest_classification_snapshot_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("task_classification_snapshots.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
     project: Mapped[ProjectModel] = relationship("ProjectModel", back_populates="changes")
 
 
@@ -272,6 +278,11 @@ class JobModel(Base):
     continuation_decision: Mapped[str | None] = mapped_column(String(64), nullable=True)
     is_mixed_authorship: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     escalation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    classification_snapshot_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("task_classification_snapshots.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False, index=True
     )
@@ -1281,4 +1292,61 @@ class AuthAuditEventModel(Base):
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     timestamp: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+
+
+class TaskClassificationSnapshotModel(Base):
+    __tablename__ = "task_classification_snapshots"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    change_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("changes.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    job_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    stage: Mapped[str] = mapped_column(String(32), nullable=False)
+    classifier_version: Mapped[str] = mapped_column(String(16), nullable=False)
+    complexity: Mapped[str] = mapped_column(String(16), nullable=False)
+    risk_profile: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, server_default=sa.text("'{}'"), nullable=False
+    )
+    surface_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    surface_details: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, server_default=sa.text("'{}'"), nullable=False
+    )
+    signals: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, server_default=sa.text("'{}'"), nullable=False
+    )
+    rule_identifiers: Mapped[list[str]] = mapped_column(
+        JSON, default=list, server_default=sa.text("'[]'"), nullable=False
+    )
+    evidence_source: Mapped[str] = mapped_column(String(32), nullable=False)
+    classification_completeness: Mapped[str] = mapped_column(String(16), nullable=False)
+    missing_signals: Mapped[list[str]] = mapped_column(
+        JSON, default=list, server_default=sa.text("'[]'"), nullable=False
+    )
+    pre_execution_snapshot_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("task_classification_snapshots.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    composite_surface: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=sa.false(), nullable=False
+    )
+    breadth_mismatch_detected: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=sa.false(), nullable=False
+    )
+    is_legacy: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=sa.false(), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+
+    pre_execution_snapshot: Mapped[TaskClassificationSnapshotModel | None] = relationship(
+        "TaskClassificationSnapshotModel",
+        remote_side="TaskClassificationSnapshotModel.id",
+        foreign_keys=[pre_execution_snapshot_id],
     )

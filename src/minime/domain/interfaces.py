@@ -52,6 +52,7 @@ from minime.domain.models import (
     Review,
     ReviewFinding,
     SchedulerDecisionRecord,
+    TaskClassificationSnapshot,
     ValidationRun,
     WorkQueueItem,
 )
@@ -663,6 +664,7 @@ class PersistenceUnitOfWork(ABC):
     auth_audit_events: AuthAuditEventRepositoryInterface
     backlog_items: BacklogItemRepositoryInterface
     integrity_findings: IntegrityFindingRepositoryInterface
+    classification_snapshots: TaskClassificationSnapshotRepositoryInterface
 
     @abstractmethod
     def commit(self) -> None: ...
@@ -879,3 +881,31 @@ class AuthAuditEventRepositoryInterface(ABC):
     def list_events(
         self, operator_email: str | None = None, limit: int = 100
     ) -> list[AuthAuditEvent]: ...
+
+
+class TaskClassificationSnapshotRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, snapshot: TaskClassificationSnapshot) -> None: ...
+
+    @abstractmethod
+    def get_by_id(self, snapshot_id: str) -> TaskClassificationSnapshot | None: ...
+
+    @abstractmethod
+    def find_by_change(
+        self, change_id: str, stage: str | None = None
+    ) -> list[TaskClassificationSnapshot]: ...
+
+    @abstractmethod
+    def find_by_job(
+        self, job_id: str, stage: str | None = None
+    ) -> list[TaskClassificationSnapshot]: ...
+
+    @abstractmethod
+    def find_latest_by_change(
+        self, change_id: str
+    ) -> TaskClassificationSnapshot | None: ...
+
+    @abstractmethod
+    def find_latest_by_job(
+        self, job_id: str
+    ) -> TaskClassificationSnapshot | None: ...
