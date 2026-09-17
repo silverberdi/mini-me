@@ -64,7 +64,11 @@ def _real_change_root(tmp_path: Path, name: str) -> Path:
     source = Path(__file__).parents[1] / "openspec"
     shutil.copytree(source, tmp_path / "openspec")
     target = tmp_path / "openspec" / "changes" / name
-    shutil.copytree(source / "changes" / "strict-openspec-lifecycle-governance", target)
+    change_src = next(
+        (d for d in (source / "changes").iterdir() if d.is_dir() and d.name != "archive"),
+        source / "changes" / "task-complexity-risk-classification",
+    )
+    shutil.copytree(change_src, target)
     return target
 
 
@@ -92,7 +96,8 @@ def test_missing_artifact_blocks_composite_readiness(in_memory_uow, tmp_path: Pa
 
 def test_real_cli_malformed_spec_fails_with_evidence(tmp_path: Path):
     change = _real_change_root(tmp_path, "malformed-spec")
-    (change / "specs" / "openspec-lifecycle-governance" / "spec.md").write_text("not a valid delta spec")
+    spec_file = next((change / "specs").rglob("spec.md"))
+    spec_file.write_text("not a valid delta spec")
     from minime.services.lifecycle_gates import GateStatus, StrictValidationGate
     result = StrictValidationGate(OpenSpecAdapter()).evaluate(change_name="malformed-spec", project_root=tmp_path)
     assert result.status is GateStatus.FAIL

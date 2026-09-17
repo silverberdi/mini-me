@@ -199,7 +199,12 @@ class ChangeModel(Base):
 
     latest_classification_snapshot_id: Mapped[str | None] = mapped_column(
         String(64),
-        ForeignKey("task_classification_snapshots.id", ondelete="SET NULL"),
+        ForeignKey(
+            "task_classification_snapshots.id",
+            ondelete="SET NULL",
+            use_alter=True,
+            name="fk_changes_latest_classification_snapshot",
+        ),
         nullable=True,
     )
 
@@ -280,7 +285,12 @@ class JobModel(Base):
     escalation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     classification_snapshot_id: Mapped[str | None] = mapped_column(
         String(64),
-        ForeignKey("task_classification_snapshots.id", ondelete="SET NULL"),
+        ForeignKey(
+            "task_classification_snapshots.id",
+            ondelete="SET NULL",
+            use_alter=True,
+            name="fk_jobs_classification_snapshot",
+        ),
         nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(
@@ -1300,10 +1310,26 @@ class TaskClassificationSnapshotModel(Base):
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     change_id: Mapped[str | None] = mapped_column(
-        String(64), ForeignKey("changes.id", ondelete="SET NULL"), nullable=True, index=True
+        String(64),
+        ForeignKey(
+            "changes.id",
+            ondelete="SET NULL",
+            use_alter=True,
+            name="fk_task_classification_snapshots_change_id",
+        ),
+        nullable=True,
+        index=True,
     )
     job_id: Mapped[str | None] = mapped_column(
-        String(64), ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True, index=True
+        String(64),
+        ForeignKey(
+            "jobs.id",
+            ondelete="SET NULL",
+            use_alter=True,
+            name="fk_task_classification_snapshots_job_id",
+        ),
+        nullable=True,
+        index=True,
     )
     stage: Mapped[str] = mapped_column(String(32), nullable=False)
     classifier_version: Mapped[str] = mapped_column(String(16), nullable=False)
@@ -1328,7 +1354,12 @@ class TaskClassificationSnapshotModel(Base):
     )
     pre_execution_snapshot_id: Mapped[str | None] = mapped_column(
         String(64),
-        ForeignKey("task_classification_snapshots.id", ondelete="SET NULL"),
+        ForeignKey(
+            "task_classification_snapshots.id",
+            ondelete="SET NULL",
+            use_alter=True,
+            name="fk_task_classification_snapshots_pre_execution_snapshot_id",
+        ),
         nullable=True,
         index=True,
     )

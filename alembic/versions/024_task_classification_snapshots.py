@@ -1,13 +1,8 @@
-"""021 task classification snapshots.
+"""024 task classification snapshots.
 
-Provisional migration. The authored proposal expected revision 022
-after provider-execution-safety-stabilization (021). This is 021
-against the current base. Before merge, this must be reconciled
-after stabilization lands.
-
-Revision ID: 021_task_classification_snapshots
-Revises: 020_autonomous_intake_admission_policy
-Create Date: 2026-09-08
+Revision ID: 024_task_classification_snapshots
+Revises: 023_integrity_findings
+Create Date: 2026-09-16
 """
 
 from __future__ import annotations
@@ -17,8 +12,8 @@ from typing import Sequence, Union
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "021_task_classification_snapshots"
-down_revision: Union[str, None] = "020_autonomous_intake_admission_policy"
+revision: str = "024_task_classification_snapshots"
+down_revision: Union[str, None] = "023_integrity_findings"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

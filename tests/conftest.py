@@ -63,6 +63,7 @@ from minime.domain.interfaces import (
     ReviewFindingRepositoryInterface,
     ReviewRepositoryInterface,
     SchedulerDecisionRepositoryInterface,
+    TaskClassificationSnapshotRepositoryInterface,
     ValidationRunRepositoryInterface,
     WorkQueueRepositoryInterface,
 )
@@ -106,6 +107,7 @@ from minime.domain.models import (
     Review,
     ReviewFinding,
     SchedulerDecisionRecord,
+    TaskClassificationSnapshot,
     ValidationRun,
     WorkQueueItem,
     utc_now,
@@ -1685,6 +1687,48 @@ class InMemoryIntegrityFindingRepository(IntegrityFindingRepositoryInterface):
         return matching[0].model_copy(deep=True)
 
 
+class InMemoryTaskClassificationSnapshotRepository(TaskClassificationSnapshotRepositoryInterface):
+    def __init__(self):
+        self._store: dict[str, TaskClassificationSnapshot] = {}
+
+    def save(self, snapshot: TaskClassificationSnapshot) -> None:
+        self._store[snapshot.id] = snapshot.model_copy(deep=True)
+
+    def get_by_id(self, snapshot_id: str) -> TaskClassificationSnapshot | None:
+        item = self._store.get(snapshot_id)
+        return item.model_copy(deep=True) if item else None
+
+    def find_by_change(
+        self, change_id: str, stage: str | None = None
+    ) -> list[TaskClassificationSnapshot]:
+        items = [s for s in self._store.values() if s.change_id == change_id]
+        if stage:
+            items = [s for s in items if s.stage == stage or s.stage.value == stage]
+        items.sort(key=lambda s: s.created_at, reverse=True)
+        return [s.model_copy(deep=True) for s in items]
+
+    def find_by_job(
+        self, job_id: str, stage: str | None = None
+    ) -> list[TaskClassificationSnapshot]:
+        items = [s for s in self._store.values() if s.job_id == job_id]
+        if stage:
+            items = [s for s in items if s.stage == stage or s.stage.value == stage]
+        items.sort(key=lambda s: s.created_at, reverse=True)
+        return [s.model_copy(deep=True) for s in items]
+
+    def find_latest_by_change(
+        self, change_id: str
+    ) -> TaskClassificationSnapshot | None:
+        items = self.find_by_change(change_id)
+        return items[0] if items else None
+
+    def find_latest_by_job(
+        self, job_id: str
+    ) -> TaskClassificationSnapshot | None:
+        items = self.find_by_job(job_id)
+        return items[0] if items else None
+
+
 class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
     def __init__(self):
         self.projects = InMemoryProjectRepository()
@@ -1727,6 +1771,7 @@ class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.auth_audit_events = InMemoryAuthAuditEventRepository()
         self.backlog_items = InMemoryBacklogItemRepository()
         self.integrity_findings = InMemoryIntegrityFindingRepository()
+        self.classification_snapshots = InMemoryTaskClassificationSnapshotRepository()
         self.committed = False
         self.rolled_back = False
 

@@ -3146,6 +3146,8 @@ class OrchestrationService:
                 {"code": "PR_NUMBER_MISMATCH"},
             )
 
+        return True, None, {}
+
     def _try_classify_pre_execution(self, change: Change) -> None:
         """Perform pre-execution classification for a change, fire-and-forget.
 
@@ -3195,5 +3197,3 @@ class OrchestrationService:
                     timestamp=utc_now(),
                 )
             )
-
-        return True, None, {}
