@@ -667,13 +667,10 @@ def scheduler_status_cmd(
             if sched_status.recent_decisions:
                 typer.echo("\nRecent Decisions:")
                 for d in sched_status.recent_decisions[:5]:
-                    d_color = (
-                        typer.colors.GREEN
-                        if d.decision.value == "ADMITTED"
-                        else typer.colors.YELLOW
-                    )
+                    op = d.operational_decision.value if d.operational_decision else d.decision.value
+                    d_color = typer.colors.GREEN if op in {"RUN", "DRAIN"} else typer.colors.YELLOW
                     typer.secho(
-                        f"  • [{d.decision.value}] {d.change_name} — {d.reason_summary}", fg=d_color
+                        f"  • [{op}] {d.change_name} — {d.reason_summary}", fg=d_color
                     )
 
     except Exception as e:
@@ -709,11 +706,10 @@ def scheduler_tick_cmd(
                 bold=True,
             )
             for d in decisions:
-                d_color = (
-                    typer.colors.GREEN if d.decision.value == "ADMITTED" else typer.colors.YELLOW
-                )
+                op = d.operational_decision.value if d.operational_decision else d.decision.value
+                d_color = typer.colors.GREEN if op in {"RUN", "DRAIN"} else typer.colors.YELLOW
                 typer.secho(
-                    f"  • [{d.decision.value}] {d.change_name} (Score: {d.priority_score:.1f}) — {d.reason_summary}",
+                    f"  • [{op}] {d.change_name} (Score: {d.priority_score:.1f}) — {d.reason_summary}",
                     fg=d_color,
                 )
 
@@ -754,11 +750,21 @@ def scheduler_run_cmd(
                     decisions = scheduler.tick(project_id=project_id, drive_admitted=True)
                 else:
                     decisions = scheduler.tick(project_id=project_id)
-                admitted = [d for d in decisions if d.decision.value == "ADMITTED"]
+                admitted = [
+                    d
+                    for d in decisions
+                    if (d.operational_decision.value if d.operational_decision else d.decision.value)
+                    in {"RUN", "DRAIN"}
+                ]
                 if admitted:
                     for a in admitted:
+                        op = (
+                            a.operational_decision.value
+                            if a.operational_decision
+                            else a.decision.value
+                        )
                         typer.secho(
-                            f"[{datetime.now().strftime('%H:%M:%S')}] ADMITTED: {a.change_name} (Run ID: {a.run_id})",
+                            f"[{datetime.now().strftime('%H:%M:%S')}] {op}: {a.change_name} (Run ID: {a.run_id})",
                             fg=typer.colors.GREEN,
                             bold=True,
                         )

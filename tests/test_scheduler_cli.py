@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 from minime.cli import main
 from minime.domain.enums import (
     AdmissionDecision,
+    AdmissionDecisionKind,
     QueuePriority,
     ReadinessState,
     SchedulerMode,
@@ -145,9 +146,10 @@ def test_scheduler_tick_cli(monkeypatch, capsys):
         project_id="mini-me",
         change_name="016-autonomous-queue-work-selection",
         github_issue_number=45,
-        decision=AdmissionDecision.ADMITTED,
-        reason_summary="READY and admitted",
+        decision=AdmissionDecision.REFUSED,
+        reason_summary="Required provider capacity temporarily unavailable",
         priority_score=5000.0,
+        operational_decision=AdmissionDecisionKind.WAIT,
     )
 
     class MockSchedulerService:
@@ -168,4 +170,6 @@ def test_scheduler_tick_cli(monkeypatch, capsys):
     main.scheduler_tick_cmd(project_id="mini-me", json_output=False)
     output = capsys.readouterr().out
     assert "Scheduler tick completed: 1 items evaluated" in output
-    assert "[ADMITTED] 016-autonomous-queue-work-selection" in output
+    # Operational decision (WAIT) is surfaced, not collapsed into legacy REFUSED.
+    assert "[WAIT] 016-autonomous-queue-work-selection" in output
+    assert "[REFUSED] 016-autonomous-queue-work-selection" not in output

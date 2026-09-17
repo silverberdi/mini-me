@@ -13,6 +13,7 @@ Verifies:
 from __future__ import annotations
 
 from datetime import timedelta
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -26,6 +27,7 @@ from minime.domain.enums import (
     ChangeStatus,
     ExecutionOutcome,
     JobStatus,
+    OrchestrationStage,
     ProviderHealthStatus,
     SchedulerMode,
 )
@@ -34,6 +36,8 @@ from minime.domain.models import (
     Change,
     Job,
     JobAttempt,
+    OpenRouterBudgetPolicy,
+    OrchestrationRun,
     Project,
     ProjectBinding,
     ProviderHealth,
@@ -114,6 +118,57 @@ def setup_test_environment(
         model_independence_policy=ModelIndependencePolicy(),
     )
     return project, scheduler
+
+
+def _seed_active_inflight_run(
+    uow: InMemoryPersistenceUnitOfWork,
+    change_name: str = "016-autonomous-queue-work-selection",
+    job_status: JobStatus = JobStatus.WAITING_CAPACITY,
+    attempt_count: int = 1,
+    candidate_sha: str | None = None,
+) -> tuple[Job, OrchestrationRun]:
+    """Seed an active in-flight orchestration run with a materially-started job."""
+    job = Job(
+        job_id="job-drain-active",
+        project_id="mini-me",
+        change_name=change_name,
+        implementer_role="codex",
+        status=job_status,
+        attempt_count=attempt_count,
+        candidate_sha=candidate_sha,
+    )
+    uow.jobs.save(job)
+
+    run = OrchestrationRun(
+        run_id="run-drain-active",
+        project_id="mini-me",
+        change_name=change_name,
+        base_sha="2c476eafb1baec38e70aa51dcc239a81c6c6be69",
+        current_stage=OrchestrationStage.IMPLEMENTING,
+        active_job_id=job.job_id,
+        is_active=True,
+    )
+    uow.orchestration_runs.save(run)
+    return job, run
+
+
+def _enable_drain_budget(
+    uow: InMemoryPersistenceUnitOfWork,
+    project: Project,
+    daily_cap_usd: Decimal = Decimal("10.0"),
+    monthly_cap_usd: Decimal = Decimal("100.0"),
+) -> None:
+    """Enable drain fallback with a bounded budget headroom for a project."""
+    project.openrouter_drain_allowed = True
+    uow.projects.save(project)
+    uow.budget_policies.save(
+        OpenRouterBudgetPolicy(
+            project_id=project.project_id,
+            enabled=True,
+            daily_cap_usd=daily_cap_usd,
+            monthly_cap_usd=monthly_cap_usd,
+        )
+    )
 
 
 # 1. Implementer + independent reviewer available → RUN
@@ -318,8 +373,9 @@ def test_structural_harness_absence_yields_needs_human(
     assert res.block_condition == AdmissionBlockCondition.HARNESS_UNAVAILABLE
 
 
-# 14. One provider unavailable but safe pair exists elsewhere → RUN
-def test_fallback_safe_pair_exists_admits_run(
+# 14. Configured implementer exhausted -> WAIT; the scheduler must NOT search
+# external_providers_allowed for an alternative implementer/reviewer pair.
+def test_no_alternate_provider_fallback_for_fresh_admission(
     tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork
 ):
     _, scheduler = setup_test_environment(
@@ -337,9 +393,9 @@ def test_fallback_safe_pair_exists_admits_run(
     def mock_get_health(p: str):
         if p == "codex":
             return ProviderHealth(provider="codex", status=ProviderHealthStatus.EXHAUSTED)
-        elif p == "antigravity":
+        if p == "antigravity":
             return ProviderHealth(provider="antigravity", status=ProviderHealthStatus.AVAILABLE)
-        elif p == "anthropic/claude-3.5-sonnet":
+        if p == "anthropic/claude-3.5-sonnet":
             return ProviderHealth(
                 provider="anthropic/claude-3.5-sonnet", status=ProviderHealthStatus.AVAILABLE
             )
@@ -349,9 +405,12 @@ def test_fallback_safe_pair_exists_admits_run(
 
     res = scheduler.evaluate_admission("mini-me", "016-autonomous-queue-work-selection")
 
-    # Since antigravity is available as implementer and anthropic/claude-3.5-sonnet as reviewer (independent)
-    assert res.decision == AdmissionDecisionKind.RUN
-    assert res.safe_executable_pair_exists is True
+    # The canonically assigned implementer ("codex") is exhausted. An alternate
+    # provider ("anthropic/claude-3.5-sonnet") is available, but the scheduler must
+    # not silently substitute it: temporary capacity failure -> WAIT.
+    assert res.decision == AdmissionDecisionKind.WAIT
+    assert res.safe_executable_pair_exists is False
+    assert res.block_condition == AdmissionBlockCondition.CAPACITY_EXHAUSTED
 
 
 # 16. Predecessor progressing → WAIT
@@ -409,8 +468,48 @@ def test_unprobeable_unknown_capacity_yields_needs_human(
     assert res.block_condition == AdmissionBlockCondition.UNKNOWN_CAPACITY
 
 
-# 21. DRAIN only for material in-flight execution
-def test_drain_mode_allows_in_flight_job(
+# 20b. Provider health lookup failure must fail closed: never RUN.
+def test_provider_health_lookup_failure_never_run(
+    tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork
+):
+    _, scheduler = setup_test_environment(tmp_path, in_memory_uow)
+
+    def failing_get_health(provider: str):
+        raise RuntimeError("provider health store unavailable")
+
+    scheduler.provider_health_service.get_health = failing_get_health
+
+    res = scheduler.evaluate_admission("mini-me", "016-autonomous-queue-work-selection")
+
+    # Truth unavailable -> UNKNOWN, with an authorized probe path for primary
+    # providers -> WAIT. It must NEVER be synthesized into AVAILABLE/RUN.
+    assert res.decision == AdmissionDecisionKind.WAIT
+    assert res.safe_executable_pair_exists is False
+    assert res.block_condition == AdmissionBlockCondition.UNKNOWN_CAPACITY
+
+
+# 21. DRAIN requires an active in-flight continuation with truthful runtime state.
+def test_drain_eligible_inflight_continuation_drains(
+    tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork
+):
+    project, scheduler = setup_test_environment(
+        tmp_path,
+        in_memory_uow,
+        implementer_status=ProviderHealthStatus.EXHAUSTED,
+        reviewer_status=ProviderHealthStatus.EXHAUSTED,
+    )
+    scheduler.mode = SchedulerMode.DRAIN
+    _seed_active_inflight_run(in_memory_uow)
+    _enable_drain_budget(in_memory_uow, project)
+
+    res = scheduler.evaluate_admission("mini-me", "016-autonomous-queue-work-selection")
+
+    assert res.decision == AdmissionDecisionKind.DRAIN
+    assert res.safe_executable_pair_exists is True
+
+
+# 21a. Historical completed/materialized job without an active in-flight run -> NOT DRAIN.
+def test_drain_historical_completed_job_not_drain(
     tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork
 ):
     _, scheduler = setup_test_environment(tmp_path, in_memory_uow)
@@ -418,19 +517,92 @@ def test_drain_mode_allows_in_flight_job(
 
     change = in_memory_uow.changes.get_by_name("mini-me", "016-autonomous-queue-work-selection")
     job = Job(
-        job_id="job-active",
+        job_id="job-done",
         project_id="mini-me",
         change_name=change.name,
         implementer_role="codex",
-        status=JobStatus.RUNNING,
-        attempt_count=1,
+        status=JobStatus.COMPLETED,
+        attempt_count=2,
+        candidate_sha="0123456789abcdef",
     )
     in_memory_uow.jobs.save(job)
 
     res = scheduler.evaluate_admission("mini-me", "016-autonomous-queue-work-selection")
 
-    assert res.decision == AdmissionDecisionKind.DRAIN
-    assert res.safe_executable_pair_exists is True
+    assert res.decision != AdmissionDecisionKind.DRAIN
+    assert res.decision == AdmissionDecisionKind.WAIT
+
+
+# 21b. Active material in-flight execution but drain eligibility denied -> NOT DRAIN.
+def test_drain_active_inflight_eligibility_denied_not_drain(
+    tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork
+):
+    # Dual-primary is NOT exhausted (both AVAILABLE), so drain fallback is ineligible.
+    project, scheduler = setup_test_environment(tmp_path, in_memory_uow)
+    scheduler.mode = SchedulerMode.DRAIN
+    _seed_active_inflight_run(in_memory_uow)
+    _enable_drain_budget(in_memory_uow, project)
+
+    res = scheduler.evaluate_admission("mini-me", "016-autonomous-queue-work-selection")
+
+    assert res.decision != AdmissionDecisionKind.DRAIN
+    assert res.decision == AdmissionDecisionKind.WAIT
+
+
+# 21c. Drain budget/headroom denied -> NOT DRAIN (halt with BUDGET_EXCEEDED).
+def test_drain_budget_denied_not_drain(
+    tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork
+):
+    project, scheduler = setup_test_environment(
+        tmp_path,
+        in_memory_uow,
+        implementer_status=ProviderHealthStatus.EXHAUSTED,
+        reviewer_status=ProviderHealthStatus.EXHAUSTED,
+    )
+    scheduler.mode = SchedulerMode.DRAIN
+    _seed_active_inflight_run(in_memory_uow)
+    _enable_drain_budget(
+        in_memory_uow, project, daily_cap_usd=Decimal("0.0"), monthly_cap_usd=Decimal("0.0")
+    )
+
+    res = scheduler.evaluate_admission("mini-me", "016-autonomous-queue-work-selection")
+
+    assert res.decision != AdmissionDecisionKind.DRAIN
+    assert res.decision == AdmissionDecisionKind.NEEDS_HUMAN
+    assert res.block_condition == AdmissionBlockCondition.BUDGET_EXCEEDED
+
+
+# 21d. DRAIN must never invoke fresh admission; it routes to the existing continuation path.
+def test_drain_never_invokes_fresh_admission(
+    tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork
+):
+    project, scheduler = setup_test_environment(
+        tmp_path,
+        in_memory_uow,
+        implementer_status=ProviderHealthStatus.EXHAUSTED,
+        reviewer_status=ProviderHealthStatus.EXHAUSTED,
+    )
+    scheduler.mode = SchedulerMode.DRAIN
+    _seed_active_inflight_run(in_memory_uow)
+    _enable_drain_budget(in_memory_uow, project)
+
+    mock_run = OrchestrationRun(
+        run_id="run-drain-active",
+        project_id="mini-me",
+        change_name="016-autonomous-queue-work-selection",
+        base_sha="2c476eafb1baec38e70aa51dcc239a81c6c6be69",
+        is_active=True,
+    )
+    scheduler.orchestration_service = MagicMock()
+    scheduler.orchestration_service.resume.return_value = mock_run
+
+    dec, record, run = scheduler.admit_work_item(
+        "mini-me", "016-autonomous-queue-work-selection"
+    )
+
+    assert scheduler.orchestration_service.admit_change.call_count == 0
+    assert scheduler.orchestration_service.resume.call_count == 1
+    assert record.operational_decision == AdmissionDecisionKind.DRAIN
 
 
 # 22. New READY work never uses DRAIN
