@@ -11,9 +11,12 @@ from datetime import datetime
 from pathlib import Path
 
 from minime.domain.enums import (
+    AdmissionBlockCondition,
     AdmissionDecision,
+    AdmissionDecisionKind,
     AdmissionRefusalCode,
     ChangeStatus,
+    ExecutionOutcome,
     HumanGate,
     JobStatus,
     OrchestrationStage,
@@ -21,13 +24,14 @@ from minime.domain.enums import (
     ProjectStatus,
     ProviderHealthStatus,
     QueuePriority,
-    ReadinessState,
     SchedulerMode,
     WorkItemStatus,
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
+    AdmissionEvaluationResult,
     OrchestrationRun,
+    ProviderHealth,
     QueueExplainReport,
     SchedulerDecisionRecord,
     SchedulerStatusView,
@@ -36,6 +40,8 @@ from minime.domain.models import (
 )
 from minime.services.discovery_service import WorkDiscoveryService, extract_roadmap_stage
 from minime.services.intake_service import IntakeService
+from minime.services.model_independence_policy import ModelIndependencePolicy
+from minime.services.openrouter_eligibility import is_material_execution_started
 from minime.services.orchestration_service import OrchestrationService
 from minime.services.post_merge_service import PostMergeReconciliationService
 from minime.services.provider_health_service import ProviderHealthService
@@ -67,6 +73,7 @@ class SchedulerService:
         readiness_service: ReadinessService | None = None,
         post_merge_service: PostMergeReconciliationService | None = None,
         intake_service: IntakeService | None = None,
+        model_independence_policy: ModelIndependencePolicy | None = None,
         max_global_jobs: int = 1,
         one_active_implementation_per_project: bool = True,
         mode: SchedulerMode = SchedulerMode.RUN,
@@ -102,6 +109,7 @@ class SchedulerService:
             readiness_service=self.readiness_service,
         )
         self.provider_health_service = provider_health_service or ProviderHealthService(uow)
+        self.model_independence_policy = model_independence_policy or ModelIndependencePolicy()
         self.max_global_jobs = max_global_jobs
         self.one_active_implementation_per_project = one_active_implementation_per_project
         self.mode = mode
@@ -204,29 +212,97 @@ class SchedulerService:
 
     def evaluate_admission(
         self, project_id: str, change_name: str
-    ) -> tuple[AdmissionDecision, AdmissionRefusalCode | None, str, str | None]:
-        """Evaluate full admission criteria and determine eligibility, refusal code, and implementer."""
+    ) -> AdmissionEvaluationResult:
+        """Evaluate full admission criteria and determine converged operational decision."""
         # 1. Registered project check
         project = self.uow.projects.get_by_id(project_id)
         if not project or project.status != ProjectStatus.ACTIVE:
-            return (
-                AdmissionDecision.REFUSED,
-                AdmissionRefusalCode.INVALID_BINDING,
-                f"Project '{project_id}' is not active or registered.",
-                None,
+            return AdmissionEvaluationResult(
+                decision=AdmissionDecisionKind.NEEDS_HUMAN,
+                project_id=project_id,
+                change_name=change_name,
+                safe_executable_pair_exists=False,
+                block_condition=AdmissionBlockCondition.CONFIGURATION_INVALID,
+                rationale=f"Project '{project_id}' is not active or registered.",
+                legacy_decision=AdmissionDecision.REFUSED,
+                legacy_refusal_code=AdmissionRefusalCode.INVALID_BINDING,
             )
 
         # 2. Durable ProjectBinding check
         binding = self.uow.bindings.get_by_project_and_change(project_id, change_name)
         if not binding or not binding.is_valid or not binding.github_issue_number:
-            return (
-                AdmissionDecision.REFUSED,
-                AdmissionRefusalCode.INVALID_BINDING,
-                f"Project binding for change '{change_name}' is invalid or missing issue number.",
-                None,
+            return AdmissionEvaluationResult(
+                decision=AdmissionDecisionKind.NEEDS_HUMAN,
+                project_id=project_id,
+                change_name=change_name,
+                safe_executable_pair_exists=False,
+                block_condition=AdmissionBlockCondition.CONFIGURATION_INVALID,
+                rationale=f"Project binding for change '{change_name}' is invalid or missing issue number.",
+                legacy_decision=AdmissionDecision.REFUSED,
+                legacy_refusal_code=AdmissionRefusalCode.INVALID_BINDING,
             )
 
-        # 3. Definition of Ready (DoR) check
+        # 3. Check prior execution outcomes for this change if one exists
+        # In particular, EVIDENCE_INSUFFICIENT on latest attempt -> NEEDS_HUMAN, no auto-retry, no capacity wait
+        change_rec = self.uow.changes.get_by_name(project_id, change_name)
+        if change_rec:
+            cid = getattr(change_rec, "change_id", getattr(change_rec, "id", None))
+            jobs = [
+                j
+                for j in self.uow.jobs.list_by_project(project_id)
+                if (cid and getattr(j, "change_id", None) == cid)
+                or getattr(j, "change_name", None) == change_name
+            ]
+            if jobs:
+                latest_job = jobs[-1]
+                jid = getattr(latest_job, "job_id", getattr(latest_job, "id", None))
+                attempts = self.uow.job_attempts.list_by_job(jid)
+                if attempts:
+                    latest_attempt = attempts[-1]
+                    exec_outcome = getattr(
+                        latest_attempt,
+                        "normalized_outcome",
+                        getattr(latest_attempt, "execution_outcome", None),
+                    )
+                    fail_reason = (
+                        getattr(latest_attempt, "failure_reason", "")
+                        or str(getattr(latest_attempt, "error_details", {}))
+                    )
+                    if (
+                        exec_outcome == ExecutionOutcome.EVIDENCE_INSUFFICIENT
+                        or "EVIDENCE_INSUFFICIENT" in str(fail_reason)
+                    ):
+                        return AdmissionEvaluationResult(
+                            decision=AdmissionDecisionKind.NEEDS_HUMAN,
+                            project_id=project_id,
+                            change_name=change_name,
+                            safe_executable_pair_exists=False,
+                            block_condition=AdmissionBlockCondition.EVIDENCE_INSUFFICIENT,
+                            rationale="Previous execution attempt completed without verifiable repository-editing evidence (EVIDENCE_INSUFFICIENT). Human intervention required; automated retry prohibited.",
+                            legacy_decision=AdmissionDecision.REFUSED,
+                            legacy_refusal_code=AdmissionRefusalCode.EVALUATION_ERROR,
+                        )
+                    if (
+                        exec_outcome
+                        in (
+                            ExecutionOutcome.ENVIRONMENT_UNAVAILABLE,
+                            getattr(ExecutionOutcome, "HARNESS_UNAVAILABLE", None),
+                        )
+                        or "HARNESS_UNAVAILABLE" in str(fail_reason)
+                        or "ENVIRONMENT_UNAVAILABLE" in str(fail_reason)
+                    ):
+                        return AdmissionEvaluationResult(
+                            decision=AdmissionDecisionKind.NEEDS_HUMAN,
+                            project_id=project_id,
+                            change_name=change_name,
+                            safe_executable_pair_exists=False,
+                            block_condition=AdmissionBlockCondition.HARNESS_UNAVAILABLE,
+                            rationale="Local execution harness unavailable or structural tool defect detected. Human intervention required.",
+                            legacy_decision=AdmissionDecision.REFUSED,
+                            legacy_refusal_code=AdmissionRefusalCode.WORKSPACE_ERROR,
+                        )
+
+        # 4. Definition of Ready (DoR) check
         readiness = self.readiness_service.evaluate_change_readiness(
             project_id=project_id,
             change_name=change_name,
@@ -234,15 +310,58 @@ class SchedulerService:
             github_repo=project.repository,
             github_issue=binding.github_issue_number,
         )
-        if not readiness.is_ready or readiness.status != ReadinessState.READY:
-            return (
-                AdmissionDecision.REFUSED,
-                AdmissionRefusalCode.NOT_READY,
-                f"Definition of Ready unmet: {'; '.join(readiness.unmet_reasons)}",
-                None,
+        non_capacity_unmet = [
+            r
+            for r in readiness.unmet_reasons
+            if "primary pair capacity shortage" not in r.lower() and "capacity shortage" not in r.lower()
+        ]
+        if non_capacity_unmet:
+            reasons_str = "; ".join(non_capacity_unmet)
+            if any(
+                "complementary" in r.lower()
+                or "independent" in r.lower()
+                or "same" in r.lower()
+                for r in non_capacity_unmet
+            ):
+                block_cond = AdmissionBlockCondition.REVIEWER_INDEPENDENCE_UNAVAILABLE
+                op_decision = AdmissionDecisionKind.NEEDS_HUMAN
+            elif any(
+                "manual" in r.lower()
+                or "human" in r.lower()
+                or "approval" in r.lower()
+                or "preview" in r.lower()
+                for r in non_capacity_unmet
+            ):
+                block_cond = AdmissionBlockCondition.HUMAN_APPROVAL_REQUIRED
+                op_decision = AdmissionDecisionKind.NEEDS_HUMAN
+            elif any(
+                "spec" in r.lower() or "schema" in r.lower() or "invalid" in r.lower()
+                for r in non_capacity_unmet
+            ):
+                block_cond = AdmissionBlockCondition.LIFECYCLE_BLOCKED
+                op_decision = AdmissionDecisionKind.NEEDS_HUMAN
+            elif any(
+                "predecessor" in r.lower() or "dependency" in r.lower()
+                for r in non_capacity_unmet
+            ):
+                block_cond = AdmissionBlockCondition.LIFECYCLE_BLOCKED
+                op_decision = AdmissionDecisionKind.WAIT
+            else:
+                block_cond = AdmissionBlockCondition.LIFECYCLE_BLOCKED
+                op_decision = AdmissionDecisionKind.NEEDS_HUMAN
+
+            return AdmissionEvaluationResult(
+                decision=op_decision,
+                project_id=project_id,
+                change_name=change_name,
+                safe_executable_pair_exists=False,
+                block_condition=block_cond,
+                rationale=f"Definition of Ready unmet: {reasons_str}",
+                legacy_decision=AdmissionDecision.REFUSED,
+                legacy_refusal_code=AdmissionRefusalCode.NOT_READY,
             )
 
-        # 4. Roadmap governance: check for incomplete predecessor roadmap stages
+        # 5. Roadmap governance: check for incomplete predecessor roadmap stages
         stage_num = extract_roadmap_stage(change_name)
         if stage_num is not None:
             all_changes = self.uow.changes.list_by_project(project_id)
@@ -251,16 +370,19 @@ class SchedulerService:
                     continue
                 other_stage = extract_roadmap_stage(other_change.name)
                 if other_stage is not None and other_stage < stage_num:
-                    # If an earlier roadmap stage is not DONE/archived, block admission
                     if other_change.status not in (ChangeStatus.DONE, ChangeStatus.CANCELLED):
-                        return (
-                            AdmissionDecision.REFUSED,
-                            AdmissionRefusalCode.ROADMAP_PREDECESSOR_INCOMPLETE,
-                            f"Roadmap predecessor stage {other_stage:03d} ('{other_change.name}') is incomplete.",
-                            None,
+                        return AdmissionEvaluationResult(
+                            decision=AdmissionDecisionKind.WAIT,
+                            project_id=project_id,
+                            change_name=change_name,
+                            safe_executable_pair_exists=False,
+                            block_condition=AdmissionBlockCondition.LIFECYCLE_BLOCKED,
+                            rationale=f"Roadmap predecessor stage {other_stage:03d} ('{other_change.name}') is incomplete.",
+                            legacy_decision=AdmissionDecision.REFUSED,
+                            legacy_refusal_code=AdmissionRefusalCode.ROADMAP_PREDECESSOR_INCOMPLETE,
                         )
 
-        # 5. Dependency check
+        # 6. Dependency check
         queue_item = self.uow.work_queue.get_by_project_and_change(project_id, change_name)
         if queue_item and queue_item.dependencies:
             for dep_name in queue_item.dependencies:
@@ -281,97 +403,320 @@ class SchedulerService:
                     is_complete = True
 
                 if not is_complete:
-                    return (
-                        AdmissionDecision.REFUSED,
-                        AdmissionRefusalCode.DEPENDENCY_BLOCKED,
-                        f"Declared dependency '{dep_name}' is not complete.",
-                        None,
+                    return AdmissionEvaluationResult(
+                        decision=AdmissionDecisionKind.WAIT,
+                        project_id=project_id,
+                        change_name=change_name,
+                        safe_executable_pair_exists=False,
+                        block_condition=AdmissionBlockCondition.LIFECYCLE_BLOCKED,
+                        rationale=f"Declared dependency '{dep_name}' is not complete.",
+                        legacy_decision=AdmissionDecision.REFUSED,
+                        legacy_refusal_code=AdmissionRefusalCode.DEPENDENCY_BLOCKED,
                     )
 
-        # 6. Scheduler mode check (RUN / DRAIN / WAIT)
-        if self.mode == SchedulerMode.DRAIN:
-            return (
-                AdmissionDecision.REFUSED,
-                AdmissionRefusalCode.PROVIDER_DRAIN,
-                "Scheduler is in DRAIN mode: no new changes may be admitted.",
-                None,
-            )
-        if self.mode == SchedulerMode.WAIT:
-            return (
-                AdmissionDecision.REFUSED,
-                AdmissionRefusalCode.PROVIDER_WAIT,
-                "Scheduler is in WAIT mode: all admissions suspended.",
-                None,
-            )
-
-        # 7. Provider health check for primary implementer
-        selected_implementer = project.implementer or "codex"
-        health = self.provider_health_service.get_health(selected_implementer)
-        if health.status not in (ProviderHealthStatus.AVAILABLE, ProviderHealthStatus.DEGRADED):
-            return (
-                AdmissionDecision.REFUSED,
-                AdmissionRefusalCode.PROVIDER_UNAVAILABLE,
-                f"Configured implementer '{selected_implementer}' is {health.status.value}.",
-                None,
-            )
-
-        # 8. Project policy checks
+        # 7. Project policy checks
         if not getattr(project, "auto_admit", True):
-            return (
-                AdmissionDecision.REFUSED,
-                AdmissionRefusalCode.MANUAL_ADMISSION_POLICY,
-                f"Project '{project_id}' policy requires manual admission ('auto_admit' is disabled).",
-                None,
+            return AdmissionEvaluationResult(
+                decision=AdmissionDecisionKind.NEEDS_HUMAN,
+                project_id=project_id,
+                change_name=change_name,
+                safe_executable_pair_exists=False,
+                block_condition=AdmissionBlockCondition.HUMAN_APPROVAL_REQUIRED,
+                rationale=f"Project '{project_id}' policy requires manual admission ('auto_admit' is disabled).",
+                legacy_decision=AdmissionDecision.REFUSED,
+                legacy_refusal_code=AdmissionRefusalCode.MANUAL_ADMISSION_POLICY,
             )
 
-        # 9. Concurrency checks
-        active_runs = self.uow.orchestration_runs.list_runs(is_active=True)
+        # 8. Scheduler mode check (RUN / DRAIN / WAIT)
+        if self.mode == SchedulerMode.DRAIN:
+            # DRAIN applies only to in-flight jobs where material execution has started
+            cid = getattr(change_rec, "change_id", getattr(change_rec, "id", None)) if change_rec else None
+            jobs = [
+                j
+                for j in self.uow.jobs.list_by_project(project_id)
+                if (cid and getattr(j, "change_id", None) == cid)
+                or getattr(j, "change_name", None) == change_name
+            ]
+            job = jobs[-1] if jobs else None
+            if not is_material_execution_started(job):
+                return AdmissionEvaluationResult(
+                    decision=AdmissionDecisionKind.WAIT,
+                    project_id=project_id,
+                    change_name=change_name,
+                    safe_executable_pair_exists=False,
+                    block_condition=AdmissionBlockCondition.CAPACITY_EXHAUSTED,
+                    rationale="Scheduler is in DRAIN mode: new backlog work items may not be admitted.",
+                    legacy_decision=AdmissionDecision.REFUSED,
+                    legacy_refusal_code=AdmissionRefusalCode.PROVIDER_DRAIN,
+                )
+        elif self.mode == SchedulerMode.WAIT:
+            return AdmissionEvaluationResult(
+                decision=AdmissionDecisionKind.WAIT,
+                project_id=project_id,
+                change_name=change_name,
+                safe_executable_pair_exists=False,
+                block_condition=AdmissionBlockCondition.CAPACITY_EXHAUSTED,
+                rationale="Scheduler is in WAIT mode: all admissions suspended.",
+                legacy_decision=AdmissionDecision.REFUSED,
+                legacy_refusal_code=AdmissionRefusalCode.PROVIDER_WAIT,
+            )
 
-        # Same-change exclusivity check
-        for active_run in active_runs:
-            if active_run.project_id == project_id and active_run.change_name == change_name:
-                return (
-                    AdmissionDecision.REFUSED,
-                    AdmissionRefusalCode.CHANGE_ALREADY_ACTIVE,
-                    f"Active orchestration run '{active_run.run_id}' already executing change '{change_name}'.",
-                    None,
+        # 9. SAFE_EXECUTABLE_PAIR_EXISTS Evaluation (Implementer + Reviewer)
+        candidate_implementers: list[str] = []
+        if getattr(project, "implementer", None):
+            candidate_implementers.append(project.implementer)
+        if getattr(project, "external_providers_allowed", None):
+            for p in project.external_providers_allowed:
+                if p not in candidate_implementers:
+                    candidate_implementers.append(p)
+        if not candidate_implementers:
+            candidate_implementers = ["codex", "antigravity"]
+
+        candidate_reviewers: list[str] = []
+        if getattr(project, "reviewer", None):
+            candidate_reviewers.append(project.reviewer)
+        if getattr(project, "external_providers_allowed", None):
+            for p in project.external_providers_allowed:
+                if p not in candidate_reviewers:
+                    candidate_reviewers.append(p)
+        if not candidate_reviewers:
+            candidate_reviewers = ["antigravity", "codex"]
+
+        def _get_provider_health_safe(prov: str) -> ProviderHealth:
+            try:
+                return self.provider_health_service.get_health(prov)
+            except Exception:
+                return ProviderHealth(
+                    health_id=f"ph-{prov}",
+                    provider=prov,
+                    status=ProviderHealthStatus.AVAILABLE,
                 )
 
-        # Per-project concurrency check
+        auth_errors: list[str] = []
+        config_errors: list[str] = []
+        for p in set(candidate_implementers + candidate_reviewers):
+            h = _get_provider_health_safe(p)
+            if h.status == ProviderHealthStatus.AUTH_REQUIRED:
+                auth_errors.append(p)
+            elif h.status == ProviderHealthStatus.MISCONFIGURED:
+                config_errors.append(p)
+
+        if auth_errors:
+            return AdmissionEvaluationResult(
+                decision=AdmissionDecisionKind.NEEDS_HUMAN,
+                project_id=project_id,
+                change_name=change_name,
+                safe_executable_pair_exists=False,
+                block_condition=AdmissionBlockCondition.AUTH_REQUIRED,
+                rationale=f"Provider credentials missing or invalid for: {', '.join(auth_errors)}.",
+                legacy_decision=AdmissionDecision.REFUSED,
+                legacy_refusal_code=AdmissionRefusalCode.PROVIDER_UNAVAILABLE,
+            )
+
+        if config_errors:
+            return AdmissionEvaluationResult(
+                decision=AdmissionDecisionKind.NEEDS_HUMAN,
+                project_id=project_id,
+                change_name=change_name,
+                safe_executable_pair_exists=False,
+                block_condition=AdmissionBlockCondition.CONFIGURATION_INVALID,
+                rationale=f"Provider configuration invalid for: {', '.join(config_errors)}.",
+                legacy_decision=AdmissionDecision.REFUSED,
+                legacy_refusal_code=AdmissionRefusalCode.PROVIDER_UNAVAILABLE,
+            )
+
+        viable_pairs: list[tuple[str, str]] = []
+        exhausted_reasons: list[str] = []
+        cooldown_until: datetime | None = None
+        has_deterministic_eta: bool = False
+
+        for impl in candidate_implementers:
+            impl_health = _get_provider_health_safe(impl)
+            impl_available = impl_health.status in (
+                ProviderHealthStatus.AVAILABLE,
+                ProviderHealthStatus.DEGRADED,
+            )
+            if not impl_available:
+                exhausted_reasons.append(f"Implementer '{impl}' is {impl_health.status.value}")
+                impl_win = (
+                    self.uow.capacity_windows.get_latest_for_provider(impl)
+                    if hasattr(self.uow, "capacity_windows")
+                    else None
+                )
+                if impl_win and impl_win.capacity_reset_at:
+                    cooldown_until = impl_win.capacity_reset_at
+                    has_deterministic_eta = True
+                continue
+
+            for rev in candidate_reviewers:
+                is_indep, _ = self.model_independence_policy.validate(impl, rev)
+                if not is_indep:
+                    continue
+
+                rev_health = _get_provider_health_safe(rev)
+                rev_available = rev_health.status in (
+                    ProviderHealthStatus.AVAILABLE,
+                    ProviderHealthStatus.DEGRADED,
+                )
+                if rev_available:
+                    viable_pairs.append((impl, rev))
+                else:
+                    exhausted_reasons.append(f"Reviewer '{rev}' is {rev_health.status.value}")
+                    rev_win = (
+                        self.uow.capacity_windows.get_latest_for_provider(rev)
+                        if hasattr(self.uow, "capacity_windows")
+                        else None
+                    )
+                    if rev_win and rev_win.capacity_reset_at:
+                        cooldown_until = rev_win.capacity_reset_at
+                        has_deterministic_eta = True
+
+        if not viable_pairs:
+            all_possible_pairs = [
+                (i, r) for i in candidate_implementers for r in candidate_reviewers
+            ]
+            independent_possible = [
+                (i, r)
+                for i, r in all_possible_pairs
+                if self.model_independence_policy.validate(i, r)[0]
+            ]
+            if not independent_possible:
+                return AdmissionEvaluationResult(
+                    decision=AdmissionDecisionKind.NEEDS_HUMAN,
+                    project_id=project_id,
+                    change_name=change_name,
+                    safe_executable_pair_exists=False,
+                    block_condition=AdmissionBlockCondition.REVIEWER_INDEPENDENCE_UNAVAILABLE,
+                    rationale="Configured provider pool cannot satisfy ModelIndependencePolicy under any circumstances.",
+                    legacy_decision=AdmissionDecision.REFUSED,
+                    legacy_refusal_code=AdmissionRefusalCode.PROVIDER_UNAVAILABLE,
+                )
+
+            unprobeable = [
+                p
+                for p in set(candidate_implementers + candidate_reviewers)
+                if _get_provider_health_safe(p).status == ProviderHealthStatus.UNREACHABLE
+            ]
+            if unprobeable:
+                return AdmissionEvaluationResult(
+                    decision=AdmissionDecisionKind.NEEDS_HUMAN,
+                    project_id=project_id,
+                    change_name=change_name,
+                    safe_executable_pair_exists=False,
+                    block_condition=AdmissionBlockCondition.UNKNOWN_CAPACITY,
+                    rationale=f"Provider capacity unprobeable or unreachable: {', '.join(unprobeable)}.",
+                    legacy_decision=AdmissionDecision.REFUSED,
+                    legacy_refusal_code=AdmissionRefusalCode.PROVIDER_UNAVAILABLE,
+                )
+
+            return AdmissionEvaluationResult(
+                decision=AdmissionDecisionKind.WAIT,
+                project_id=project_id,
+                change_name=change_name,
+                safe_executable_pair_exists=False,
+                block_condition=AdmissionBlockCondition.CAPACITY_EXHAUSTED,
+                rationale=f"Required provider capacity temporarily unavailable: {'; '.join(exhausted_reasons)}.",
+                cooldown_until=cooldown_until,
+                has_deterministic_eta=has_deterministic_eta,
+                legacy_decision=AdmissionDecision.REFUSED,
+                legacy_refusal_code=AdmissionRefusalCode.PROVIDER_UNAVAILABLE,
+            )
+
+        # Select first viable pair (prefer project defaults if viable)
+        selected_impl, selected_rev = viable_pairs[0]
+        for i, r in viable_pairs:
+            if i == getattr(project, "implementer", "codex") and r == getattr(
+                project, "reviewer", "antigravity"
+            ):
+                selected_impl, selected_rev = i, r
+                break
+
+        # 10. Concurrency checks
+        active_runs = self.uow.orchestration_runs.list_runs(is_active=True)
+
+        for active_run in active_runs:
+            if active_run.project_id == project_id and active_run.change_name == change_name:
+                return AdmissionEvaluationResult(
+                    decision=AdmissionDecisionKind.WAIT,
+                    project_id=project_id,
+                    change_name=change_name,
+                    safe_executable_pair_exists=True,
+                    eligible_implementer=selected_impl,
+                    eligible_reviewer=selected_rev,
+                    block_condition=AdmissionBlockCondition.LIFECYCLE_BLOCKED,
+                    rationale=f"Active orchestration run '{active_run.run_id}' already executing change '{change_name}'.",
+                    legacy_decision=AdmissionDecision.REFUSED,
+                    legacy_refusal_code=AdmissionRefusalCode.CHANGE_ALREADY_ACTIVE,
+                )
+
         max_project_jobs = getattr(project, "max_concurrent_jobs", 1)
         project_active = [r for r in active_runs if r.project_id == project_id]
         if len(project_active) >= max_project_jobs:
-            return (
-                AdmissionDecision.REFUSED,
-                AdmissionRefusalCode.PROJECT_CONCURRENCY_LIMIT,
-                f"Project '{project_id}' concurrency limit reached ({len(project_active)}/{max_project_jobs} active runs).",
-                None,
+            return AdmissionEvaluationResult(
+                decision=AdmissionDecisionKind.WAIT,
+                project_id=project_id,
+                change_name=change_name,
+                safe_executable_pair_exists=True,
+                eligible_implementer=selected_impl,
+                eligible_reviewer=selected_rev,
+                block_condition=AdmissionBlockCondition.LIFECYCLE_BLOCKED,
+                rationale=f"Project '{project_id}' concurrency limit reached ({len(project_active)}/{max_project_jobs} active runs).",
+                legacy_decision=AdmissionDecision.REFUSED,
+                legacy_refusal_code=AdmissionRefusalCode.PROJECT_CONCURRENCY_LIMIT,
             )
 
-        # Global concurrency check
         if len(active_runs) >= self.max_global_jobs:
-            return (
-                AdmissionDecision.REFUSED,
-                AdmissionRefusalCode.GLOBAL_CONCURRENCY_LIMIT,
-                f"Global concurrency limit reached ({len(active_runs)}/{self.max_global_jobs} active runs).",
-                None,
+            return AdmissionEvaluationResult(
+                decision=AdmissionDecisionKind.WAIT,
+                project_id=project_id,
+                change_name=change_name,
+                safe_executable_pair_exists=True,
+                eligible_implementer=selected_impl,
+                eligible_reviewer=selected_rev,
+                block_condition=AdmissionBlockCondition.LIFECYCLE_BLOCKED,
+                rationale=f"Global concurrency limit reached ({len(active_runs)}/{self.max_global_jobs} active runs).",
+                legacy_decision=AdmissionDecision.REFUSED,
+                legacy_refusal_code=AdmissionRefusalCode.GLOBAL_CONCURRENCY_LIMIT,
             )
 
-        # All criteria satisfied
-        return (
-            AdmissionDecision.ADMITTED,
-            None,
-            f"Work item '{change_name}' is READY and admitted for execution.",
-            selected_implementer,
+        # 11. In-flight DRAIN mode check
+        if self.mode == SchedulerMode.DRAIN:
+            return AdmissionEvaluationResult(
+                decision=AdmissionDecisionKind.DRAIN,
+                project_id=project_id,
+                change_name=change_name,
+                safe_executable_pair_exists=True,
+                eligible_implementer=selected_impl,
+                eligible_reviewer=selected_rev,
+                block_condition=None,
+                rationale=f"In-flight work item '{change_name}' admitted for drain continuation.",
+                legacy_decision=AdmissionDecision.ADMITTED,
+                legacy_refusal_code=None,
+            )
+
+        # All criteria satisfied -> RUN
+        return AdmissionEvaluationResult(
+            decision=AdmissionDecisionKind.RUN,
+            project_id=project_id,
+            change_name=change_name,
+            safe_executable_pair_exists=True,
+            eligible_implementer=selected_impl,
+            eligible_reviewer=selected_rev,
+            block_condition=None,
+            rationale=f"Work item '{change_name}' is READY and admitted for execution.",
+            legacy_decision=AdmissionDecision.ADMITTED,
+            legacy_refusal_code=None,
         )
 
     def admit_work_item(
         self, project_id: str, change_name: str, drive_admitted: bool = False
     ) -> tuple[AdmissionDecision, SchedulerDecisionRecord, OrchestrationRun | None]:
         """Atomically evaluate admission and start native candidate execution if eligible."""
-        decision, refusal_code, reason_summary, selected_implementer = self.evaluate_admission(
-            project_id, change_name
-        )
+        eval_result = self.evaluate_admission(project_id, change_name)
+        decision = eval_result.legacy_decision
+        refusal_code = eval_result.legacy_refusal_code
+        reason_summary = eval_result.rationale
+        selected_implementer = eval_result.eligible_implementer
 
         item = self.uow.work_queue.get_by_project_and_change(project_id, change_name)
         _, _, _, priority_score = (
@@ -388,17 +733,16 @@ class SchedulerService:
         capacity_snapshot = {
             "mode": self.mode.value,
             "implementer": selected_implementer,
+            "operational_decision": eval_result.decision.value,
         }
 
         if decision == AdmissionDecision.ADMITTED:
-            # Native admission via OrchestrationService
             admission_result = self.orchestration_service.admit_change(
                 project_id=project_id,
                 change_name=change_name,
                 project_root=self.project_root,
             )
             if not admission_result.admitted or not admission_result.run:
-                # Admission failed at orchestration layer
                 refusal_code_str = (
                     admission_result.refusal_details.get("code")
                     if admission_result.refusal_details
@@ -419,6 +763,12 @@ class SchedulerService:
                     or "Orchestration admission failed",
                     priority_score=priority_score,
                     selected_implementer=selected_implementer,
+                    operational_decision=AdmissionDecisionKind.NEEDS_HUMAN,
+                    block_condition=AdmissionBlockCondition.LIFECYCLE_BLOCKED,
+                    eligible_reviewer=eval_result.eligible_reviewer,
+                    safe_executable_pair_exists=eval_result.safe_executable_pair_exists,
+                    has_deterministic_eta=eval_result.has_deterministic_eta,
+                    cooldown_until=eval_result.cooldown_until,
                     concurrency_snapshot=concurrency_snapshot,
                     capacity_snapshot=capacity_snapshot,
                     evaluated_at=utc_now(),
@@ -438,6 +788,12 @@ class SchedulerService:
                 reason_summary=reason_summary,
                 priority_score=priority_score,
                 selected_implementer=selected_implementer,
+                operational_decision=eval_result.decision,
+                block_condition=eval_result.block_condition,
+                eligible_reviewer=eval_result.eligible_reviewer,
+                safe_executable_pair_exists=eval_result.safe_executable_pair_exists,
+                has_deterministic_eta=eval_result.has_deterministic_eta,
+                cooldown_until=eval_result.cooldown_until,
                 concurrency_snapshot=concurrency_snapshot,
                 capacity_snapshot=capacity_snapshot,
                 run_id=run.run_id,
@@ -445,7 +801,6 @@ class SchedulerService:
             )
             self.uow.scheduler_decisions.save(decision_record)
 
-            # Update queue item
             if item:
                 updated_item = item.model_copy(
                     update={
@@ -456,7 +811,6 @@ class SchedulerService:
                 )
                 self.uow.work_queue.save(updated_item)
 
-            # Update BacklogItem if present
             backlog_item = self.uow.backlog_items.get_by_openspec_change_name(
                 project_id, change_name
             )
@@ -489,6 +843,12 @@ class SchedulerService:
                 reason_summary=reason_summary,
                 priority_score=priority_score,
                 selected_implementer=selected_implementer,
+                operational_decision=eval_result.decision,
+                block_condition=eval_result.block_condition,
+                eligible_reviewer=eval_result.eligible_reviewer,
+                safe_executable_pair_exists=eval_result.safe_executable_pair_exists,
+                has_deterministic_eta=eval_result.has_deterministic_eta,
+                cooldown_until=eval_result.cooldown_until,
                 concurrency_snapshot=concurrency_snapshot,
                 capacity_snapshot=capacity_snapshot,
                 evaluated_at=utc_now(),
@@ -728,9 +1088,10 @@ class SchedulerService:
 
         for candidate in ranked_candidates:
             try:
-                decision, refusal, summary, impl = self.evaluate_admission(
+                eval_result = self.evaluate_admission(
                     candidate.project_id, candidate.change_name
                 )
+                decision, refusal, summary, impl = eval_result
                 if decision == AdmissionDecision.ADMITTED and available_slots > 0:
                     dec, record, run = self.admit_work_item(
                         candidate.project_id, candidate.change_name, drive_admitted=drive_admitted
@@ -753,6 +1114,12 @@ class SchedulerService:
                         reason_summary=summary,
                         priority_score=candidate.priority_score,
                         selected_implementer=impl,
+                        operational_decision=eval_result.decision,
+                        block_condition=eval_result.block_condition,
+                        eligible_reviewer=eval_result.eligible_reviewer,
+                        safe_executable_pair_exists=eval_result.safe_executable_pair_exists,
+                        has_deterministic_eta=eval_result.has_deterministic_eta,
+                        cooldown_until=eval_result.cooldown_until,
                         concurrency_snapshot={
                             "global_active": active_runs_count,
                             "max_global_jobs": self.max_global_jobs,

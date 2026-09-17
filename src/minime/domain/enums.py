@@ -526,6 +526,32 @@ class QueuePriority(str, Enum):
     LOW = "LOW"
 
 
+class AdmissionDecisionKind(str, Enum):
+    """Operational capacity decision for a scheduler admission evaluation."""
+
+    RUN = "RUN"
+    DRAIN = "DRAIN"
+    WAIT = "WAIT"
+    NEEDS_HUMAN = "NEEDS_HUMAN"
+
+
+class AdmissionBlockCondition(str, Enum):
+    """Structured block condition for scheduler admission evaluation."""
+
+    CAPACITY_EXHAUSTED = "CAPACITY_EXHAUSTED"
+    AUTH_REQUIRED = "AUTH_REQUIRED"
+    CONFIGURATION_INVALID = "CONFIGURATION_INVALID"
+    HARNESS_UNAVAILABLE = "HARNESS_UNAVAILABLE"
+    PROVIDER_UNAVAILABLE = "PROVIDER_UNAVAILABLE"
+    EVIDENCE_INSUFFICIENT = "EVIDENCE_INSUFFICIENT"
+    REVIEWER_INDEPENDENCE_UNAVAILABLE = "REVIEWER_INDEPENDENCE_UNAVAILABLE"
+    LOCAL_RUNTIME_FAILURE = "LOCAL_RUNTIME_FAILURE"
+    LIFECYCLE_BLOCKED = "LIFECYCLE_BLOCKED"
+    HUMAN_APPROVAL_REQUIRED = "HUMAN_APPROVAL_REQUIRED"
+    UNKNOWN_CAPACITY = "UNKNOWN_CAPACITY"
+    BUDGET_EXCEEDED = "BUDGET_EXCEEDED"
+
+
 class AdmissionDecision(str, Enum):
     """Outcome decision for a scheduler admission evaluation."""
 
