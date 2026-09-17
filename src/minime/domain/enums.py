@@ -623,3 +623,57 @@ class OperatorAuthDecision(str, Enum):
 
 
 WorkItemPriority = QueuePriority
+
+
+class TaskComplexity(str, Enum):
+    """Deterministic task complexity classification based on observable structural evidence."""
+
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+    UNKNOWN = "UNKNOWN"
+
+
+class TaskSurfaceKind(str, Enum):
+    """Structural surface classification of a change from observable file paths."""
+
+    DOCS_ONLY = "DOCS_ONLY"
+    TESTS_ONLY = "TESTS_ONLY"
+    CONFIG_ONLY = "CONFIG_ONLY"
+    MIGRATION_SCHEMA = "MIGRATION_SCHEMA"
+    BACKEND_SERVICE = "BACKEND_SERVICE"
+    UI_FRONTEND = "UI_FRONTEND"
+    INFRASTRUCTURE_DEPLOYMENT = "INFRASTRUCTURE_DEPLOYMENT"
+    PROVIDER_INTEGRATION = "PROVIDER_INTEGRATION"
+    ORCHESTRATION_LIFECYCLE = "ORCHESTRATION_LIFECYCLE"
+    SECURITY_AUTH = "SECURITY_AUTH"
+    MIXED = "MIXED"
+    UNKNOWN = "UNKNOWN"
+
+
+class ClassificationStage(str, Enum):
+    """Stages at which classification occurs in the task lifecycle."""
+
+    PRE_EXECUTION = "PRE_EXECUTION"
+    POST_MATERIALIZATION = "POST_MATERIALIZATION"
+
+
+class ClassificationCompleteness(str, Enum):
+    """Degree of evidence completeness for a classification snapshot."""
+
+    COMPLETE = "COMPLETE"
+    PARTIAL = "PARTIAL"
+    MINIMAL = "MINIMAL"
+
+
+class TaskRiskDimension(str, Enum):
+    """Independent risk dimensions for multi-dimensional risk profiling."""
+
+    CODE_CHANGE_BREADTH = "CODE_CHANGE_BREADTH"
+    ARCHITECTURAL_IMPACT = "ARCHITECTURAL_IMPACT"
+    PERSISTENCE_IMPACT = "PERSISTENCE_IMPACT"
+    SECURITY_AUTH_IMPACT = "SECURITY_AUTH_IMPACT"
+    PRODUCTION_RUNTIME = "PRODUCTION_RUNTIME"
+    PROVIDER_ORCHESTRATION = "PROVIDER_ORCHESTRATION"
+    DESTRUCTIVE_OPERATIONS = "DESTRUCTIVE_OPERATIONS"
+    DEPLOYMENT_CONFIG = "DEPLOYMENT_CONFIG"

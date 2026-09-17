@@ -116,10 +116,15 @@ def pg_engine() -> Generator[Engine, None, None]:
     if not PG_TEST_URL:
         pytest.skip("PostgreSQL test database server is not reachable.")
     engine = create_engine(PG_TEST_URL, pool_size=10, max_overflow=20, pool_pre_ping=True)
-    Base.metadata.drop_all(engine)
+    from sqlalchemy import text
+    with engine.connect() as conn:
+        conn.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public;"))
+        conn.commit()
     Base.metadata.create_all(engine)
     yield engine
-    Base.metadata.drop_all(engine)
+    with engine.connect() as conn:
+        conn.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public;"))
+        conn.commit()
     engine.dispose()
 
 

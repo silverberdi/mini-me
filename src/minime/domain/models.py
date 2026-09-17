@@ -24,6 +24,8 @@ from minime.domain.enums import (
     BlockerValidationVerdict,
     CapacitySignalSource,
     ChangeStatus,
+    ClassificationCompleteness,
+    ClassificationStage,
     ContinuationDecision,
     EventType,
     EvidenceDiagnosticStatus,
@@ -56,6 +58,8 @@ from minime.domain.enums import (
     ReviewVerdict,
     SchedulerMode,
     TaskClass,
+    TaskComplexity,
+    TaskSurfaceKind,
     ValidationVerdict,
     WorkItemSource,
     WorkItemStatus,
@@ -150,6 +154,7 @@ class Change(BaseModel):
     last_readiness_reasons: list[str] = Field(default_factory=list)
     discovered_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+    latest_classification_snapshot_id: str | None = None
 
 
 class ReadinessCheck(BaseModel):
@@ -233,6 +238,7 @@ class Job(BaseModel):
     continuation_decision: ContinuationDecision | None = None
     is_mixed_authorship: bool = False
     escalation_reason: str | None = None
+    classification_snapshot_id: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
@@ -1378,3 +1384,74 @@ class WorkItemPrepareResult(BaseModel):
     readiness_state: ReadinessState
     unmet_readiness_reasons: list[str] = Field(default_factory=list)
     human_questions: list[str] = Field(default_factory=list)
+
+
+class TaskRiskProfile(BaseModel):
+    """Multi-dimensional risk profile with independently assessed dimensions.
+
+    No single composite numeric score is produced. Each dimension derives
+    deterministically from observable evidence.
+    """
+
+    code_change_breadth: str = "NONE"
+    architectural_impact: str = "NONE"
+    persistence_impact: str = "NONE"
+    security_auth_impact: str = "NONE"
+    production_runtime: str = "NONE"
+    provider_orchestration: str = "NONE"
+    destructive_operations: str = "NONE"
+    deployment_config: str = "NONE"
+
+    @computed_field
+    @property
+    def requires_review_sensitivity(self) -> bool:
+        return any(
+            v == "HIGH" or v == "PRESENT"
+            for v in [
+                self.code_change_breadth,
+                self.architectural_impact,
+                self.persistence_impact,
+                self.security_auth_impact,
+                self.production_runtime,
+                self.provider_orchestration,
+                self.destructive_operations,
+                self.deployment_config,
+            ]
+        )
+
+
+class TaskClassificationSnapshot(BaseModel):
+    """Durable, immutable classification observation for a change or job.
+
+    Stored at change/job level, not duplicated per attempt.
+    Pre-execution snapshots are historical evidence; post-materialization
+    snapshots reference their pre-execution snapshot when available.
+    """
+
+    id: str = Field(default_factory=generate_uuid)
+    change_id: str | None = None
+    job_id: str | None = None
+    stage: ClassificationStage
+    classifier_version: str
+    complexity: TaskComplexity
+    risk_profile: TaskRiskProfile = Field(default_factory=TaskRiskProfile)
+    surface_kind: TaskSurfaceKind
+    surface_details: dict[str, Any] = Field(default_factory=dict)
+    signals: dict[str, Any] = Field(default_factory=dict)
+    rule_identifiers: list[str] = Field(default_factory=list)
+    evidence_source: str
+    classification_completeness: ClassificationCompleteness
+    missing_signals: list[str] = Field(default_factory=list)
+    pre_execution_snapshot_id: str | None = None
+    breadth_mismatch_detected: bool = False
+    composite_surface: bool = False
+    is_legacy: bool = False
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class TaskClassificationProfile(BaseModel):
+    """Lightweight in-memory profile bundling complexity, risk, and surface."""
+
+    complexity: TaskComplexity
+    risk_profile: TaskRiskProfile = Field(default_factory=TaskRiskProfile)
+    surface_kind: TaskSurfaceKind

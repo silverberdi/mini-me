@@ -49,6 +49,7 @@ from minime.db.models import (
     ReviewFindingModel,
     ReviewModel,
     SchedulerDecisionRecordModel,
+    TaskClassificationSnapshotModel,
     ValidationRunModel,
     WorkQueueSnapshotModel,
 )
@@ -137,6 +138,7 @@ from minime.domain.interfaces import (
     ReviewFindingRepositoryInterface,
     ReviewRepositoryInterface,
     SchedulerDecisionRepositoryInterface,
+    TaskClassificationSnapshotRepositoryInterface,
     ValidationRunRepositoryInterface,
     WorkQueueRepositoryInterface,
 )
@@ -182,6 +184,8 @@ from minime.domain.models import (
     Review,
     ReviewFinding,
     SchedulerDecisionRecord,
+    TaskClassificationSnapshot,
+    TaskRiskProfile,
     ValidationRun,
     WorkQueueItem,
     utc_now,
@@ -3998,6 +4002,136 @@ class PostgresBacklogItemRepository(BacklogItemRepositoryInterface):
             self.session.delete(model)
 
 
+def classification_snapshot_model_to_domain(
+    model: TaskClassificationSnapshotModel,
+) -> TaskClassificationSnapshot:
+    from minime.domain.enums import (
+        ClassificationCompleteness,
+        ClassificationStage,
+        TaskComplexity,
+        TaskSurfaceKind,
+    )
+
+    return TaskClassificationSnapshot(
+        id=model.id,
+        change_id=model.change_id,
+        job_id=model.job_id,
+        stage=ClassificationStage(model.stage),
+        classifier_version=model.classifier_version,
+        complexity=TaskComplexity(model.complexity),
+        risk_profile=TaskRiskProfile(**model.risk_profile),
+        surface_kind=TaskSurfaceKind(model.surface_kind),
+        surface_details=model.surface_details,
+        signals=model.signals,
+        rule_identifiers=model.rule_identifiers,
+        evidence_source=model.evidence_source,
+        classification_completeness=ClassificationCompleteness(model.classification_completeness),
+        missing_signals=model.missing_signals,
+        pre_execution_snapshot_id=model.pre_execution_snapshot_id,
+        composite_surface=model.composite_surface,
+        breadth_mismatch_detected=model.breadth_mismatch_detected,
+        is_legacy=model.is_legacy,
+        created_at=model.created_at,
+    )
+
+
+class PostgresTaskClassificationSnapshotRepository(TaskClassificationSnapshotRepositoryInterface):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def save(self, snapshot: TaskClassificationSnapshot) -> None:
+        existing = self.session.get(TaskClassificationSnapshotModel, snapshot.id)
+        if existing:
+            existing.change_id = snapshot.change_id
+            existing.job_id = snapshot.job_id
+            existing.stage = snapshot.stage.value
+            existing.classifier_version = snapshot.classifier_version
+            existing.complexity = snapshot.complexity.value
+            existing.risk_profile = snapshot.risk_profile.model_dump()
+            existing.surface_kind = snapshot.surface_kind.value
+            existing.surface_details = snapshot.surface_details
+            existing.signals = snapshot.signals
+            existing.rule_identifiers = snapshot.rule_identifiers
+            existing.evidence_source = snapshot.evidence_source
+            existing.classification_completeness = snapshot.classification_completeness.value
+            existing.missing_signals = snapshot.missing_signals
+            existing.pre_execution_snapshot_id = snapshot.pre_execution_snapshot_id
+            existing.composite_surface = snapshot.composite_surface
+            existing.breadth_mismatch_detected = snapshot.breadth_mismatch_detected
+            existing.is_legacy = snapshot.is_legacy
+        else:
+            model = TaskClassificationSnapshotModel(
+                id=snapshot.id,
+                change_id=snapshot.change_id,
+                job_id=snapshot.job_id,
+                stage=snapshot.stage.value,
+                classifier_version=snapshot.classifier_version,
+                complexity=snapshot.complexity.value,
+                risk_profile=snapshot.risk_profile.model_dump(),
+                surface_kind=snapshot.surface_kind.value,
+                surface_details=snapshot.surface_details,
+                signals=snapshot.signals,
+                rule_identifiers=snapshot.rule_identifiers,
+                evidence_source=snapshot.evidence_source,
+                classification_completeness=snapshot.classification_completeness.value,
+                missing_signals=snapshot.missing_signals,
+                pre_execution_snapshot_id=snapshot.pre_execution_snapshot_id,
+                composite_surface=snapshot.composite_surface,
+                breadth_mismatch_detected=snapshot.breadth_mismatch_detected,
+                is_legacy=snapshot.is_legacy,
+                created_at=snapshot.created_at,
+            )
+            self.session.add(model)
+
+    def get_by_id(self, snapshot_id: str) -> TaskClassificationSnapshot | None:
+        model = self.session.get(TaskClassificationSnapshotModel, snapshot_id)
+        return classification_snapshot_model_to_domain(model) if model else None
+
+    def find_by_change(
+        self, change_id: str, stage: str | None = None
+    ) -> list[TaskClassificationSnapshot]:
+        stmt = select(TaskClassificationSnapshotModel).where(
+            TaskClassificationSnapshotModel.change_id == change_id
+        )
+        if stage:
+            stmt = stmt.where(TaskClassificationSnapshotModel.stage == stage)
+        stmt = stmt.order_by(desc(TaskClassificationSnapshotModel.created_at))
+        models = self.session.scalars(stmt).all()
+        return [classification_snapshot_model_to_domain(m) for m in models]
+
+    def find_by_job(
+        self, job_id: str, stage: str | None = None
+    ) -> list[TaskClassificationSnapshot]:
+        stmt = select(TaskClassificationSnapshotModel).where(
+            TaskClassificationSnapshotModel.job_id == job_id
+        )
+        if stage:
+            stmt = stmt.where(TaskClassificationSnapshotModel.stage == stage)
+        stmt = stmt.order_by(desc(TaskClassificationSnapshotModel.created_at))
+        models = self.session.scalars(stmt).all()
+        return [classification_snapshot_model_to_domain(m) for m in models]
+
+    def find_latest_by_change(self, change_id: str) -> TaskClassificationSnapshot | None:
+        stmt = (
+            select(TaskClassificationSnapshotModel)
+            .where(TaskClassificationSnapshotModel.change_id == change_id)
+            .order_by(desc(TaskClassificationSnapshotModel.created_at))
+            .limit(1)
+        )
+        model = self.session.scalars(stmt).first()
+        return classification_snapshot_model_to_domain(model) if model else None
+
+    def find_latest_by_job(self, job_id: str) -> TaskClassificationSnapshot | None:
+        stmt = (
+            select(TaskClassificationSnapshotModel)
+            .where(TaskClassificationSnapshotModel.job_id == job_id)
+            .order_by(desc(TaskClassificationSnapshotModel.created_at))
+            .limit(1)
+        )
+        model = self.session.scalars(stmt).first()
+        return classification_snapshot_model_to_domain(model) if model else None
+
+
 class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
     """Encapsulates a database session for atomic operations across repositories."""
 
@@ -4044,6 +4178,7 @@ class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.auth_audit_events = PostgresAuthAuditEventRepository(session)
         self.backlog_items = PostgresBacklogItemRepository(session)
         self.integrity_findings = PostgresIntegrityFindingRepository(session)
+        self.classification_snapshots = PostgresTaskClassificationSnapshotRepository(session)
 
     def commit(self) -> None:
         self.session.commit()
