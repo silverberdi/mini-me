@@ -7,18 +7,30 @@ Executes the configured primary implementer agent (Codex or Antigravity) in an i
 ## Requirements
 
 ### Requirement: Primary implementer invocation
-The system SHALL invoke the project's configured primary implementer agent as a child process inside the dedicated candidate worktree directory.
+The system SHALL invoke the project's configured primary implementer agent as a child process inside the dedicated candidate worktree directory. The configured implementer CLI invocation SHALL be proven to run headless without interactive human approval, and its flags SHALL be validated against the installed CLI version before a full attempt is consumed.
 
 #### Scenario: Configured implementer started
 - **WHEN** an execution job enters the `RUNNING` status
 - **THEN** the system SHALL launch the configured implementer agent CLI/subprocess within the candidate worktree root with appropriate prompt and task context.
 
+#### Scenario: Unsupported or deprecated CLI flags fail preflight
+- **WHEN** a configured implementer invocation uses flags unsupported or deprecated by the installed CLI version
+- **THEN** preflight SHALL fail with a deterministic reason and SHALL NOT consume a full implementation attempt.
+
+#### Scenario: Implementer runs headless without human interaction
+- **WHEN** the configured implementer invocation is executed
+- **THEN** it SHALL complete without requiring interactive human approval, and non-interactive approval behavior SHALL be proven against the installed CLI.
+
 ### Requirement: Execution timeout and process control
-The system SHALL enforce a configurable execution timeout for the implementer process, terminating any stalled process cleanly.
+The system SHALL enforce a configurable execution timeout for the implementer process, terminating any stalled process cleanly and leaving no orphan subprocesses on cancellation.
 
 #### Scenario: Implementer execution exceeds timeout
 - **WHEN** the implementer subprocess runs longer than the configured timeout duration
 - **THEN** the system SHALL terminate the subprocess group (SIGTERM followed by SIGKILL), update the job status to `FAILED`, and record a `JOB_TIMEOUT` event.
+
+#### Scenario: Implementer cancellation leaves no orphan processes
+- **WHEN** an implementer execution is cancelled or interrupted
+- **THEN** the system SHALL terminate the subprocess group (SIGTERM followed by SIGKILL after a bounded grace period) and SHALL NOT leave orphan subprocesses running.
 
 ### Requirement: Implementer log capture and secret redaction
 The system SHALL capture stdout and stderr from the implementer process, redact all sensitive patterns, and persist them in the job execution log.

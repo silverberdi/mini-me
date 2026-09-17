@@ -46,6 +46,10 @@ The system SHALL independently verify implementation completion claims by inspec
 - **WHEN** an executor reports completion but `git status --porcelain` and `git diff` against base SHA show zero candidate file modifications
 - **THEN** completion verification SHALL fail closed, classify the outcome as `NO_PROGRESS`, and prevent review invocation.
 
+#### Scenario: Placeholder-only or fabricated candidate rejected
+- **WHEN** an executor reports completion but the only worktree change is a placeholder artifact with no material implementation of the requested task
+- **THEN** completion verification SHALL fail closed, classify the outcome as `NO_PROGRESS` or `EVIDENCE_INSUFFICIENT`, and prevent review invocation and any candidate-integrity claim.
+
 ### Requirement: Durable execution attempt persistence
 The system SHALL persist every execution attempt in PostgreSQL with an incremental attempt number, executor role and model identity, worktree start/end SHAs, execution duration, raw and redacted logs, normalized outcome classification, progress metrics, and verification results.
 
