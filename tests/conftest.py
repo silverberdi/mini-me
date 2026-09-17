@@ -261,6 +261,23 @@ class InMemoryEventRepository(EventRepositoryInterface):
             res = [e for e in res if e.change_id == change_id]
         return [e.model_copy(deep=True) for e in reversed(res[-limit:])]
 
+    def count_events(
+        self,
+        event_type: str,
+        provider: str | None = None,
+        since=None,
+    ) -> int:
+        count = 0
+        for e in self._store:
+            if e.event_type.value != event_type:
+                continue
+            if provider is not None and e.payload.get("provider") != provider:
+                continue
+            if since is not None and e.timestamp is not None and e.timestamp < since:
+                continue
+            count += 1
+        return count
+
 
 class InMemoryMetricFactRepository(MetricFactRepositoryInterface):
     def __init__(self):
@@ -680,6 +697,12 @@ class InMemoryProviderHealthRepository(ProviderHealthRepositoryInterface):
         self._validate_primary_provider(provider)
         h = self._store.get(provider)
         return h.model_copy(deep=True) if h else None
+
+    def get_by_provider_for_update(self, provider: str) -> ProviderHealth | None:
+        # The in-memory double has no cross-session concurrency; single-instance
+        # concurrency is serialized by the provider-scoped asyncio.Lock in
+        # ProviderHealthService, so the lock-acquiring read is the plain read.
+        return self.get_by_provider(provider)
 
     def list_all(self) -> list[ProviderHealth]:
         return [h.model_copy(deep=True) for h in self._store.values()]

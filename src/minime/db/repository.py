@@ -6,7 +6,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
 from minime.db.models import (
@@ -498,6 +498,10 @@ def provider_health_model_to_domain(model: ProviderHealthModel) -> ProviderHealt
         model=model.model,
         status=ProviderHealthStatus(model.status),
         consecutive_failures=model.consecutive_failures,
+        last_probe_at=model.last_probe_at,
+        consecutive_probe_failures=model.consecutive_probe_failures,
+        probe_window_started_at=model.probe_window_started_at,
+        probe_count_in_window=model.probe_count_in_window,
         last_result_class=ProviderResultClass(model.last_result_class)
         if model.last_result_class
         else None,
@@ -1057,6 +1061,23 @@ class PostgresEventRepository(EventRepositoryInterface):
         stmt = stmt.order_by(desc(EventModel.timestamp)).limit(limit)
         models = self.session.scalars(stmt).all()
         return [event_model_to_domain(m) for m in models]
+
+    def count_events(
+        self,
+        event_type: str,
+        provider: str | None = None,
+        since: datetime | None = None,
+    ) -> int:
+        stmt = select(func.count()).select_from(EventModel).where(
+            EventModel.event_type == event_type
+        )
+        if provider is not None:
+            stmt = stmt.where(
+                func.json_extract_path_text(EventModel.payload, "provider") == provider
+            )
+        if since is not None:
+            stmt = stmt.where(EventModel.timestamp >= since)
+        return int(self.session.scalar(stmt) or 0)
 
 
 class PostgresMetricFactRepository(MetricFactRepositoryInterface):
@@ -1730,6 +1751,10 @@ class PostgresProviderHealthRepository(ProviderHealthRepositoryInterface):
             existing.model = health.model
             existing.status = health.status.value
             existing.consecutive_failures = health.consecutive_failures
+            existing.last_probe_at = health.last_probe_at
+            existing.consecutive_probe_failures = health.consecutive_probe_failures
+            existing.probe_window_started_at = health.probe_window_started_at
+            existing.probe_count_in_window = health.probe_count_in_window
             existing.last_result_class = (
                 health.last_result_class.value if health.last_result_class else None
             )
@@ -1744,6 +1769,10 @@ class PostgresProviderHealthRepository(ProviderHealthRepositoryInterface):
                 model=health.model,
                 status=health.status.value,
                 consecutive_failures=health.consecutive_failures,
+                last_probe_at=health.last_probe_at,
+                consecutive_probe_failures=health.consecutive_probe_failures,
+                probe_window_started_at=health.probe_window_started_at,
+                probe_count_in_window=health.probe_count_in_window,
                 last_result_class=health.last_result_class.value
                 if health.last_result_class
                 else None,
@@ -1757,6 +1786,25 @@ class PostgresProviderHealthRepository(ProviderHealthRepositoryInterface):
     def get_by_provider(self, provider: str) -> ProviderHealth | None:
         self._validate_primary_provider(provider)
         stmt = select(ProviderHealthModel).where(ProviderHealthModel.provider == provider)
+        model = self.session.scalars(stmt).first()
+        return provider_health_model_to_domain(model) if model else None
+
+    def get_by_provider_for_update(self, provider: str) -> ProviderHealth | None:
+        """Lock the provider health row for update and return fresh state.
+
+        Emits ``SELECT ... FOR UPDATE`` and, via ``populate_existing``, refreshes
+        the returned domain object from the committed row rather than the session
+        identity map. The exclusive row lock is held until the surrounding
+        transaction commits or rolls back, making it the cross-session boundary
+        for atomic expensive-probe reservation.
+        """
+        self._validate_primary_provider(provider)
+        stmt = (
+            select(ProviderHealthModel)
+            .where(ProviderHealthModel.provider == provider)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
         model = self.session.scalars(stmt).first()
         return provider_health_model_to_domain(model) if model else None
 

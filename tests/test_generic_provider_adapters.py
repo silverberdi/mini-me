@@ -9,6 +9,7 @@ from minime.adapters.provider_adapter import (
     get_provider_adapter,
     register_provider_adapter,
 )
+from minime.config import ProbeConfig
 from minime.domain.enums import (
     CapacitySignalSource,
     JobStatus,
@@ -44,7 +45,12 @@ async def test_fake_provider_adapter_registration(in_memory_uow):
 @pytest.mark.asyncio
 async def test_generic_provider_probing_lifecycle(in_memory_uow):
     """Test positive and negative probe transitions through generic health service."""
-    health_svc = ProviderHealthService(in_memory_uow)
+    health_svc = ProviderHealthService(
+        in_memory_uow,
+        probe_config=ProbeConfig(
+            cooldown_seconds=0, backoff_base_seconds=0, backoff_max_seconds=0, max_per_hour=100
+        ),
+    )
 
     # Initially unavailable
     health_svc.record_outcome(

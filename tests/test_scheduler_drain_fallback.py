@@ -18,7 +18,6 @@ from minime.domain.enums import (
     ProviderHealthStatus,
     ProviderResultClass,
     ReadinessState,
-    ReviewVerdict,
     SchedulerMode,
 )
 from minime.domain.models import (
@@ -416,24 +415,29 @@ async def test_fallback_implementer_execution_flow(in_memory_uow, tmp_path):
     )
 
     result_job = await pipeline.execute_queued_job(job.job_id)
-    assert result_job.status in {
-        JobStatus.READY_TO_MERGE,
-        JobStatus.AUDIT_BLOCKED,
-        JobStatus.CHANGES_REQUIRED,
-    }
+    # OpenRouter implementer fallback returns text but cannot materialize repository
+    # changes; classified as insufficient evidence -> governed human escalation
+    # (NOT a capacity wait, NOT a fabricated candidate).
+    assert result_job.status == JobStatus.NEEDS_HUMAN
+    assert result_job.candidate_sha is None
 
-    # 1. OpenRouter adapter was called
-    assert len(mock_openrouter.calls) >= 1
+    # 1. OpenRouter adapter was called exactly once: the no-harness textual success
+    #    must escalate (NEEDS_HUMAN) without a wasteful corrective retry loop.
+    assert len(mock_openrouter.calls) == 1
     assert mock_openrouter.calls[0].model == "anthropic/claude-3.5-sonnet"
 
-    # 2. Reservation and settlement ledger records exist
+    # 2. Reservation is left UNRESOLVED (no material work delivered) while the
+    #    actual provider cost is still recorded truthfully in the ledger.
     reservations = in_memory_uow.budget_reservations.list_by_project(project.project_id)
     assert len(reservations) >= 1
-    assert any(r.status == "SETTLED" for r in reservations)
+    assert any(r.status == "UNRESOLVED" for r in reservations)
+    assert not any(r.status == "SETTLED" for r in reservations)
 
     ledger = in_memory_uow.budget_ledger.list_by_project(project.project_id)
     assert len(ledger) >= 1
-    assert any(e.entry_type == "SETTLEMENT" for e in ledger)
+    unproductive = [e for e in ledger if e.entry_type == "UNPRODUCTIVE_SETTLEMENT"]
+    assert len(unproductive) >= 1
+    assert all(e.amount_usd > 0 for e in unproductive)
 
     # 3. Primary provider health was NOT altered by OpenRouter outcome
     codex_health = in_memory_uow.provider_health.get_by_provider("codex")
@@ -520,13 +524,11 @@ async def test_fallback_reviewer_model_independence(in_memory_uow, tmp_path):
     )
 
     result_job = await pipeline.execute_queued_job(job.job_id)
-    assert result_job.status in {JobStatus.READY_TO_MERGE, JobStatus.AUDIT_BLOCKED}
-
-    # Reviewer model selected must be distinct from implementer
-    reviews = in_memory_uow.reviews.list_by_project(project.project_id)
-    assert len(reviews) >= 1
-    assert "openrouter:" in reviews[0].reviewer_role
-    assert reviews[0].verdict == ReviewVerdict.READY_TO_MERGE
+    # OpenRouter implementer fallback cannot materialize a candidate, so no review
+    # is produced and the run escalates truthfully (EVIDENCE_INSUFFICIENT), NOT a
+    # capacity wait.
+    assert result_job.status == JobStatus.NEEDS_HUMAN
+    assert in_memory_uow.reviews.list_by_project(project.project_id) == []
 
     # Scheduler remains in DRAIN or WAIT (OpenRouter success NEVER returns scheduler to RUN)
     lifecycle = CapacityLifecycleService(in_memory_uow)
@@ -585,9 +587,10 @@ async def test_fallback_reviewer_model_collision_fails_closed(in_memory_uow, tmp
 
     result_job = await pipeline.execute_queued_job(job.job_id)
 
-    # Must fail closed with DISTINCT_REVIEWER_UNAVAILABLE in WAITING_CAPACITY
-    assert result_job.status == JobStatus.WAITING_CAPACITY
-    assert result_job.capacity_block_reason == "DISTINCT_REVIEWER_UNAVAILABLE"
+    # OpenRouter implementer fallback cannot materialize a candidate; the run
+    # escalates truthfully (EVIDENCE_INSUFFICIENT) before the reviewer-collision
+    # gate can be reached.
+    assert result_job.status == JobStatus.NEEDS_HUMAN
 
 
 @pytest.mark.asyncio

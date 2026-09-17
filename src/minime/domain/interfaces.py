@@ -134,6 +134,14 @@ class EventRepositoryInterface(ABC):
         limit: int = 100,
     ) -> list[Event]: ...
 
+    @abstractmethod
+    def count_events(
+        self,
+        event_type: str,
+        provider: str | None = None,
+        since: datetime | None = None,
+    ) -> int: ...
+
 
 class MetricFactRepositoryInterface(ABC):
     @abstractmethod
@@ -264,6 +272,9 @@ class ProviderHealthRepositoryInterface(ABC):
 
     @abstractmethod
     def get_by_provider(self, provider: str) -> ProviderHealth | None: ...
+
+    @abstractmethod
+    def get_by_provider_for_update(self, provider: str) -> ProviderHealth | None: ...
 
     @abstractmethod
     def list_all(self) -> list[ProviderHealth]: ...

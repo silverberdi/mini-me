@@ -508,6 +508,10 @@ class ProviderHealth(BaseModel):
     model: str | None = None
     status: ProviderHealthStatus = ProviderHealthStatus.AVAILABLE
     consecutive_failures: int = 0
+    last_probe_at: datetime | None = None
+    consecutive_probe_failures: int = 0
+    probe_window_started_at: datetime | None = None
+    probe_count_in_window: int = 0
     last_result_class: ProviderResultClass | None = None
     last_error_summary: str | None = None
     last_success_at: datetime | None = None

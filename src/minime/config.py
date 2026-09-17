@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class ServerConfig(BaseModel):
@@ -58,6 +58,28 @@ class SchedulerConfig(BaseModel):
     max_review_rounds: int = 2
 
 
+class ProbeConfig(BaseModel):
+    cooldown_seconds: int = 300
+    backoff_base_seconds: int = 300
+    backoff_max_seconds: int = 3600
+    max_per_hour: int = 4
+
+    @field_validator("cooldown_seconds", "backoff_base_seconds", "backoff_max_seconds", "max_per_hour")
+    @classmethod
+    def _non_negative(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("probe timing/rate values must be non-negative")
+        return v
+
+    @field_validator("backoff_max_seconds")
+    @classmethod
+    def _backoff_max_ge_base(cls, v: int, info) -> int:
+        base = info.data.get("backoff_base_seconds")
+        if base is not None and v < base:
+            raise ValueError("backoff_max_seconds must be >= backoff_base_seconds")
+        return v
+
+
 class CliInvocationConfig(BaseModel):
     args: list[str] = Field(default_factory=list)
     prompt_transport: str = "stdin"
@@ -75,6 +97,7 @@ class ProviderConfig(BaseModel):
     mode: str | None = None
     budget: dict[str, Any] = Field(default_factory=dict)
     drain: dict[str, Any] = Field(default_factory=dict)
+    probe: ProbeConfig = Field(default_factory=ProbeConfig)
 
 
 class BudgetConfig(BaseModel):
@@ -295,6 +318,16 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
             return AppConfig.model_validate(raw)
 
     return AppConfig()
+
+
+def probe_configs_from_app_config(app_config: AppConfig) -> dict[str, ProbeConfig]:
+    """Return per-provider probe policies keyed by provider name.
+
+    Provider probe policy is authoritative over the process-wide default; any
+    provider without an explicit ``probe`` block falls back to its Pydantic
+    defaults so no operator-critical timing value is ever hidden in code.
+    """
+    return {name: provider.probe for name, provider in app_config.providers.items()}
 
 
 def get_secret_patterns() -> list[str]:

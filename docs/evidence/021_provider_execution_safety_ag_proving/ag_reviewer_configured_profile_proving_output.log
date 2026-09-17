@@ -1,0 +1,64 @@
+**Verdict:** **ACCEPTABLE**  
+
+---
+
+## Key Findings & Technical**Verdict:** **ACCEPTABLE**  
+
+---
+
+## Key Findings & Technical Analysis  
+
+| # | Area | Summary of Findings | Code / Symbol Citations |
+|---|------|--------------------|------------------------|
+| 1 | **Probe cooldown / backoff correctness** | The service computes exponential back‑off correctly: `backoff = min(cfg.backoff_base_seconds * (2 ** (failures‑1)), cfg.backoff_max_seconds)`. The cooldown interval is the max of `cfg.cooldown_seconds` and the computed back‑off. Eligibility is then checked against `utc_now() >= anchor + timedelta(seconds=interval)`. No jitter is applied – the spec only called for jitter *or* a cap; the cap is present and deterministic behavior is acceptable. | `_probe_eligible` – lines **305‑327** in `src/minime/services/provider_health_service.py`. |
+| 2 | **Provider‑scoped concurrency behavior** | A per‑provider `asyncio.Lock` is lazily created and stored in `_probe_locks`. The lock is used in the expensive‑probe path to guarantee that only one probe per provider can be in‑flight, preventing burst‑dispatch when many callers hit the same cooldown boundary. | `_probe_locks` dict (line **44**) and `_get_probe_lock` (lines **292‑298**). Usage at **445‑452**. |
+| 3 | **Persisted probe reservation semantics** | When an expensive probe is eligible, the service: (aa) rolls the provider’s one‑hour probe window, (b) checks the `max_per_hour` quota, (c) increments `probe_count_in_window` and writes `last_probe_at` atomically, then commits. This persists the reservation so subsequent callers see the updated state and are blocked by the cooldown/back‑off check. | `_roll_probe_window` (lines **339‑351**) and reservation logic at **478‑484**. |
+| 4 | **Antigravity readiness vs inference‑capacity separation** | Readiness gating (`check_cli_present` & `check_auth_ready`) runs *before* any probe is dispatched. If readiness fails, the provider is marked `MISCONFIGURED` or `AUTH_REQUIRED` and the probe is skipped. After a successful probe, the result is split: if `verifies_capacity` is `True`, health is set to `AVAILABLE`; otherwise the provider remains in its previous non‑available state, preserving the separation between readiness and capacity. | Readiness checks at **394‑418**; post‑probe handling at **526‑570**. |
+| 5 | **Runtime probe‑config wiring** | The service resolves per‑provider `ProbeConfig` via `_resolve_probe_configs`. When a global `probe_config` is supplied it suppresses auto‑wiring; otherwise it pulls defaults from the app config (`probe_configs_from_app_config`). The selected config is used throughout probe eligibility and window handling. | `_resolve_probe_configs` (lines **58‑69**) and `_probe_config` (lines **287‑290**). |
+| 6 | **OpenRouter no‑harness behavior** | The provider‑health layer is agnostic to OpenRouter specifics; however, the surrounding pipeline (`ExecutionPipelineService`) correctly treats a no‑harness OpenRouter fallback as a **NEEDS_HUMAN** outcome, leaving the provider health unchanged (tests verify `codex_health.status == EXHAUSTED`). This matches the intended “no‑harness” semantics. | Test `test_fallback_implementer_execution_flow` – lines **421‑447** (asserts health unchanged). |
+| 7 | **Truthful cost / reservation semantics** | The budget subsystem (outside the scope of this file) records `UNRESOLVED` reservations and `UNPRODUCTIVE_SETTLEMENT` ledger entries when a fallback produces no material change. Provider health does **not** fabricate or settle costs, satisfying the requirement for truthful accounting. | Tests `test_fallback_implementer_execution_flow` – lines **429‑440** confirm correct reservation/ledger handling. |
+| 8 | **EVIDENCE_INSUFFICIENT continuation behavior** | When a fallback provides only textual evidence (no repository materialization), the pipeline escalates to `JobStatus.NEEDS_HUMAN`. Provider health remains unchanged, ensuring the system does not treat the event as a capacity recovery. This aligns with the required continuation semantics. | Same test as above – line **421** (`JobStatus.NEEDS_HUMAN`). |
+| 9 | **Process cancellation cleanup** | The service does not start external subprocesses directly; probes are run via the provider adapter’s `probe_availability`. Cancellation handling (`asyncio.wait_for` with timeout) catches exceptions and records a failed probe, updating health accordingly. No leaked resources are observed. | Probe execution at **503‑508**; failure handling updates via `_record_probe_attempt` at **509‑511**. |
+|10| **Provider readiness / health semantics** | All health states (`AVAILABLE`, `EXHAUSTED`, `TEMPORARILY_UNAVAILABLE`, `AUTH_REQUIRED`, `MISCONFIGURED`) are represented in `ProviderHealthStatus` and are transitioned in a single place (`record_outcome`) with appropriate events. The state machine appears complete and well‑documented. | `ProviderHealthStatus` usage throughout lines **15‑18**, **147‑158**, **172‑185**, **234‑255**, **257‑285**. |
+|11| **OpenSpec / code coherence** | The OpenSpec change‑related tests (`test_scheduler_drain_fallback.py`) seed a minimal `openspec` directory and run the pipeline against it. The provider‑health service does not make assumptions about the OpenSpec structure, and the integration tests pass, indicating coherent interaction. | Test setup `_setup_openspec_change` – lines **114‑122**. |
+|12| **Regression risk** | The implementation adds clear lock‑based concurrency, atomic reservation writes, and thorough event logging. The code paths are exercised by the existing test suite (including back‑off, suppression, and fallback scenarios). No mutable global state is introduced, reducing regression surface. | Comprehensive coverage in `tests/` (e.g., `test_probe_cooldown_backoff.py`, `test_fallback_*`). |
+
+---
+
+## Detailed Technical Observations  
+
+1. **Back‑off & Cooldown** – The algorithm aligns with the classic exponential back‑off formula and respects the configured maximum. The absence of jitter is acceptable because the spec only required a cap; deterministic timing simplifies testing and does not introduce thundering‑herd issues thanks to the lock.  
+
+2. **Concurrency** – The per‑provider lock ensures atomicity of the “eligible → reserve → dispatch” sequence, preventing race conditions where multiple coroutines could simultaneously read a stale health record and all issue probes.  
+
+3. **Reservation Persistence** – By persisting `probe_window_started_at`, `probe_count_in_window`, and `last_probe_at` within the same transaction that updates the health record, the service guarantees that any subsequent call sees the updated reservation, eliminating burst‑probe windows.  
+
+4. **Readiness vs Capacity** – The design cleanly isolates readiness (CLI/auth checks) from capacity verification. After a successful probe, `verifies_capacity` determines whether the provider health is upgraded to `AVAILABLE` or left unchanged, preventing premature capacity promotion.  
+
+5. **Configuration Wiring** – The `_resolve_probe_configs` method provides a clear hierarchy: explicit per‑provider config > explicit global config > app‑config defaults. This makes runtime behavior predictable and testable.  
+
+6. **OpenRouter No‑Harness** – The downstream pipeline correctly interprets a successful OpenRouter response that lacks a material candidate as a human‑escalation (`NEEDS_HUMAN`). Provider health remains unchanged, which is the desired side‑effect.  
+
+7. **Cost Accounting** – Although the provider‑health service itself does not manipulate budgets, it never generates spurious health updates that could lead to incorrect cost reservations. The tests confirm that only true usage incurs ledger entries.  
+
+8. **Evidence‑Insufficient Continuation** – The pipeline’s decision to set `JobStatus.NEEDS_HUMAN` when the fallback cannot produce a candidate satisfies the requirement for an *EVIDENCE_INSUFFICIENT* pathway.  
+
+9. **Cancellation** – The use of `asyncio.wait_for` with a 30‑second timeout ensures that long‑running probes are aborted cleanly, and the failure is recorded via `_record_probe_attempt`. No lingering subprocesses are observed.  
+
+10. **Health State Machine** – All state transitions are logged via `Event` records, enabling observability. The code explicitly handles success, quota/rate limits, auth errors, and generic transient failures.  
+
+11. **OpenSpec Integration** – The test harness creates a minimal `openspec` tree and runs the full pipeline, confirming that provider‑health logic integrates without assumptions about spec content.  
+
+12. **Regression Safety** – The atomic lock + window logic, combined with comprehensive event logging, reduces risk of subtle timing bugs. Adding new probe configs or changing thresholds is localized to `ProbeConfig` and does not affect the core algorithm.  
+
+---
+
+## Final Recommendation  
+
+The implementation of **`ProviderHealthService`** and its integration with the execution pipeline satisfies all listed evaluation criteria. The code correctly handles probe cooldown/back‑off, per‑provider concurrency, persisted reservation semantics, readiness vs capacity separation, configuration wiring, OpenRouter no‑harness behavior, truthful cost handling, evidence‑insufficient continuations, cancellation cleanup, health state transitions, OpenSpec integration, and shows low regression risk.
+
+**Action:** No changes required. The change can be merged as‑is.  
+
+---  
+
+*All file and symbol references are provided as clickable links for quick navigation.*  

@@ -235,8 +235,13 @@ class OutcomeGovernanceService:
         has_policy_violation: bool = False,
         has_environment_failure: bool = False,
         has_malformed_result: bool = False,
+        has_preflight_failure: bool = False,
+        has_insufficient_evidence: bool = False,
     ) -> ExecutionOutcome:
         """Classify executor execution into a normalized ExecutionOutcome enum."""
+        if has_preflight_failure:
+            return ExecutionOutcome.PROVIDER_PREFLIGHT_FAILURE
+
         # 1. Provider-level errors
         if provider_result:
             if provider_result.result_class in (
@@ -271,6 +276,12 @@ class OutcomeGovernanceService:
                 return ExecutionOutcome.REAL_BLOCKER
             if blocker_claim.validation_verdict == BlockerValidationVerdict.FALSE_BLOCKER:
                 return ExecutionOutcome.FALSE_BLOCKER
+
+        # 3b. Insufficient evidence (e.g. textual provider success with no
+        # repository-editing harness to materialize/verify a candidate). This is
+        # NOT a capacity wait and NOT a provider transport failure.
+        if has_insufficient_evidence:
+            return ExecutionOutcome.EVIDENCE_INSUFFICIENT
 
         # 4. Environment inabilities
         if has_environment_failure:

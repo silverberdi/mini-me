@@ -1,0 +1,9 @@
+root agent idle; waiting for 1 background task(s) (bounded by --print-timeout)
+Added the requested class-level docstring to `ProviderHealthRepositoryInterface` in [interfaces.py](file:///tmp/mini-me-ag-impl-proving-fixture/src/minime/domain/interfaces.py#L261-L268).
+
+### Summary of Changes
+1. **Documented Interface Purpose**: Stated the persistent storage contract for `ProviderHealth` records.
+2. **Documented Probe-State Fields**: Noted requirement to persist `last_probe_at` and `consecutive_probe_failures`.
+3. **Documented `update_health()` Behavior**: Explicitly specified that probe-state fields must not be reset unless instructed.
+4. **Git Commit**: Committed the change in `/tmp/mini-me-ag-impl-proving-fixture` with message `docs(interfaces): add ProviderHealthRepositoryInterface docstring for probe-state contract (D3)`.
+Verified that `ruff check` passes cleanly ("All checks passed!"). The task is complete.
