@@ -52,14 +52,22 @@ def _engine_at_revision(revision):
     return engine, inspector
 
 
-def test_expected_alembic_head_is_canonical_023():
-    # The runtime invariant must track the canonical migration head.
-    assert EXPECTED_ALEMBIC_HEAD == "023_integrity_findings"
+def test_expected_alembic_head_is_canonical_024():
+    assert EXPECTED_ALEMBIC_HEAD == "024_task_classification_snapshots"
     engine, inspector = _engine_with_schema()
     with patch("minime.db.session.inspect", return_value=inspector):
         result = verify_physical_schema_invariants(engine)
     assert result.valid is True
+    assert result.revision == "024_task_classification_snapshots"
+
+
+def test_023_head_is_behind_current_schema():
+    engine, inspector = _engine_at_revision("023_integrity_findings")
+    with patch("minime.db.session.inspect", return_value=inspector):
+        result = verify_physical_schema_invariants(engine)
+    assert result.valid is False
     assert result.revision == "023_integrity_findings"
+    assert "024_task_classification_snapshots" in result.reason
 
 
 def test_021_head_is_behind_current_schema():
@@ -68,7 +76,7 @@ def test_021_head_is_behind_current_schema():
         result = verify_physical_schema_invariants(engine)
     assert result.valid is False
     assert result.revision == "021_provider_probe_cooldown_state"
-    assert "023_integrity_findings" in result.reason
+    assert "024_task_classification_snapshots" in result.reason
 
 
 def test_stale_020_head_remains_invalid():
@@ -96,7 +104,7 @@ def test_wrong_head_emits_schema_invariant_violation():
     uow.projects.get_by_id.return_value = None
     failed = SchemaInvariantResult(
         valid=False,
-        reason="Expected Alembic head 023_integrity_findings, found 999_unknown_head.",
+        reason="Expected Alembic head 024_task_classification_snapshots, found 999_unknown_head.",
     )
     with patch(
         "minime.services.readiness_service.verify_physical_schema_invariants",
