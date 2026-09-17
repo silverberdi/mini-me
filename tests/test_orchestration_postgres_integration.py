@@ -53,6 +53,9 @@ def session_factory() -> sessionmaker[Session]:
             "018_widen_change_id_on_events",
             "019_work_intake_and_backlog_items",
             "020_autonomous_intake_admission_policy",
+            "021_provider_probe_cooldown_state",
+            "022_strict_openspec_lifecycle_governance",
+            "023_integrity_findings",
         )
     factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     yield factory
