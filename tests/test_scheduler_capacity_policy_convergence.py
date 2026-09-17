@@ -17,7 +17,11 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from tests.conftest import InMemoryPersistenceUnitOfWork, create_isolated_openspec_change
+from tests.conftest import (
+    InMemoryPersistenceUnitOfWork,
+    create_isolated_openspec_change,
+    init_git_repo,
+)
 
 from minime.adapters.github import GitHubAdapter
 from minime.domain.enums import (
@@ -29,6 +33,8 @@ from minime.domain.enums import (
     JobStatus,
     OrchestrationStage,
     ProviderHealthStatus,
+    QueuePriority,
+    ReadinessState,
     SchedulerMode,
 )
 from minime.domain.models import (
@@ -41,6 +47,7 @@ from minime.domain.models import (
     Project,
     ProjectBinding,
     ProviderHealth,
+    WorkQueueItem,
     utc_now,
 )
 from minime.services.model_independence_policy import ModelIndependencePolicy
@@ -663,3 +670,94 @@ def test_entry_point_convergence_consistency(
     assert record.operational_decision == eval_direct.decision
     assert record.block_condition == eval_direct.block_condition
     assert record.safe_executable_pair_exists == eval_direct.safe_executable_pair_exists
+
+
+# 24. A scheduler tick must not synthesize UNKNOWN provider health into AVAILABLE.
+def test_tick_missing_health_never_run(
+    tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork
+):
+    init_git_repo(tmp_path)
+    _, scheduler = setup_test_environment(tmp_path, in_memory_uow, save_health=False)
+
+    in_memory_uow.work_queue.save(
+        WorkQueueItem(
+            project_id="mini-me",
+            change_name="016-autonomous-queue-work-selection",
+            github_issue_number=45,
+            priority=QueuePriority.HIGH,
+            roadmap_stage=16,
+            readiness_state=ReadinessState.READY,
+            admission_eligible=True,
+        )
+    )
+
+    decisions = scheduler.tick("mini-me")
+
+    assert decisions
+    record = decisions[0]
+    # Missing provider health must fail closed, never become RUN. The admission
+    # decision reflects UNKNOWN truth (captured before readiness helpers may
+    # synthesize fresh-install defaults for their own DoR bookkeeping).
+    assert record.operational_decision != AdmissionDecisionKind.RUN
+    assert record.operational_decision == AdmissionDecisionKind.WAIT
+    assert record.block_condition == AdmissionBlockCondition.UNKNOWN_CAPACITY
+
+
+# 25. An actual existing AVAILABLE record still yields normal eligibility through tick.
+def test_tick_existing_available_yields_run(
+    tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork
+):
+    init_git_repo(tmp_path)
+    _, scheduler = setup_test_environment(tmp_path, in_memory_uow)
+
+    in_memory_uow.work_queue.save(
+        WorkQueueItem(
+            project_id="mini-me",
+            change_name="016-autonomous-queue-work-selection",
+            github_issue_number=45,
+            priority=QueuePriority.HIGH,
+            roadmap_stage=16,
+            readiness_state=ReadinessState.READY,
+            admission_eligible=True,
+        )
+    )
+
+    decisions = scheduler.tick("mini-me")
+
+    assert decisions
+    record = decisions[0]
+    assert record.operational_decision == AdmissionDecisionKind.RUN
+
+
+# 26. Existing exhausted/cooldown state remains non-RUN through tick (no probe recovery).
+def test_tick_existing_exhausted_stays_non_run(
+    tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork
+):
+    init_git_repo(tmp_path)
+    _, scheduler = setup_test_environment(
+        tmp_path, in_memory_uow, implementer_status=ProviderHealthStatus.EXHAUSTED
+    )
+
+    async def no_probe():
+        return []
+
+    scheduler.provider_health_service.probe_unavailable_providers = no_probe
+
+    in_memory_uow.work_queue.save(
+        WorkQueueItem(
+            project_id="mini-me",
+            change_name="016-autonomous-queue-work-selection",
+            github_issue_number=45,
+            priority=QueuePriority.HIGH,
+            roadmap_stage=16,
+            readiness_state=ReadinessState.READY,
+            admission_eligible=True,
+        )
+    )
+
+    decisions = scheduler.tick("mini-me")
+
+    assert decisions
+    record = decisions[0]
+    assert record.operational_decision != AdmissionDecisionKind.RUN
+    assert record.operational_decision == AdmissionDecisionKind.WAIT

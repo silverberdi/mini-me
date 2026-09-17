@@ -624,8 +624,13 @@ class ProviderHealthService:
             return False
 
     async def probe_unavailable_providers(self) -> list[str]:
-        """Proactively probe all currently unavailable providers in background without creating Runs/Jobs."""
-        all_health = self.list_all_health()
+        """Proactively probe all currently unavailable providers in background without creating Runs/Jobs.
+
+        Enumerates only existing health records: a provider with no persisted row is
+        not synthesized into AVAILABLE by observation/probe preparation. Health truth
+        is updated only from actual probe evidence.
+        """
+        all_health = self.uow.provider_health.list_all()
         recovered: list[str] = []
         for h in all_health:
             if h.status != ProviderHealthStatus.AVAILABLE:

@@ -36,6 +36,7 @@ from minime.domain.enums import (
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
     ActionDescriptor,
+    AdmissionResult,
     AuthorizedOperator,
     AuthStatusDTO,
     BacklogItem,
@@ -1121,14 +1122,33 @@ def admit_orchestration(
     req: OrchestrationAdmitRequest,
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> dict[str, Any]:
-    """Admit a single change into autonomous orchestration after verifying DoR and bindings."""
-    service = OrchestrationService(
+    """Admit a single change into autonomous orchestration via the converged scheduler authority."""
+    scheduler = SchedulerService(
         uow,
         project_root=req.project_root or ".",
-        github_adapter=getattr(app.state, "github_adapter", None),
+        readiness_service=ReadinessService(
+            uow, github_adapter=getattr(app.state, "github_adapter", None)
+        ),
     )
-    result = service.admit_change(req.project_id, req.change_name, project_root=req.project_root)
-    return result.model_dump()
+    _decision, record, run = scheduler.admit_work_item(
+        req.project_id, req.change_name, drive_admitted=False
+    )
+    if run is not None:
+        return AdmissionResult(admitted=True, run=run).model_dump()
+    return AdmissionResult(
+        admitted=False,
+        refusal_reason=(
+            record.reason_summary if record else "Admission blocked by scheduler policy."
+        ),
+        refusal_details={
+            "code": record.reason_code.value if record and record.reason_code else None,
+            "operational_decision": (
+                record.operational_decision.value
+                if record and record.operational_decision
+                else None
+            ),
+        },
+    ).model_dump()
 
 
 @app.get("/api/v1/openspec/integrity", tags=["openspec"])
@@ -1166,15 +1186,24 @@ def start_orchestration(
     req: OrchestrationStartRequest,
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> dict[str, Any]:
-    """Start autonomous orchestration for a single READY change."""
-    service = OrchestrationService(
+    """Start autonomous orchestration for a single READY change via the scheduler authority."""
+    scheduler = SchedulerService(
         uow,
         project_root=req.project_root or ".",
-        github_adapter=getattr(app.state, "github_adapter", None),
+        readiness_service=ReadinessService(
+            uow, github_adapter=getattr(app.state, "github_adapter", None)
+        ),
     )
     try:
-        run = service.start(req.project_id, req.change_name, project_root=req.project_root)
-        status_view = service.get_status(run.run_id)
+        _decision, record, run = scheduler.admit_work_item(
+            req.project_id, req.change_name, drive_admitted=True
+        )
+        if run is None:
+            reason = (
+                record.reason_summary if record else "Admission blocked by scheduler policy."
+            )
+            raise ValueError(reason)
+        status_view = scheduler.orchestration_service.get_status(run.run_id)
         return status_view.model_dump()
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))

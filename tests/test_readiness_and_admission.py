@@ -6,8 +6,8 @@ from pathlib import Path
 
 from tests.conftest import InMemoryPersistenceUnitOfWork, init_git_repo
 
-from minime.domain.enums import WorkItemPriority, WorkItemStatus
-from minime.domain.models import BacklogItem, Project, WorkItemAnswerInput
+from minime.domain.enums import ProviderHealthStatus, WorkItemPriority, WorkItemStatus
+from minime.domain.models import BacklogItem, Project, ProviderHealth, WorkItemAnswerInput
 from minime.services.intake_service import IntakeService
 
 
@@ -24,6 +24,12 @@ def test_needs_human_question_answering_flow(
         base_branch="main",
     )
     in_memory_uow.projects.save(project)
+    in_memory_uow.provider_health.save(
+        ProviderHealth(provider="codex", status=ProviderHealthStatus.AVAILABLE)
+    )
+    in_memory_uow.provider_health.save(
+        ProviderHealth(provider="antigravity", status=ProviderHealthStatus.AVAILABLE)
+    )
 
     # Underspecified item without description or acceptance criteria
     item = BacklogItem(
@@ -81,6 +87,12 @@ def test_start_work_item_and_duplicate_suppression(
         base_branch="main",
     )
     in_memory_uow.projects.save(project)
+    in_memory_uow.provider_health.save(
+        ProviderHealth(provider="codex", status=ProviderHealthStatus.AVAILABLE)
+    )
+    in_memory_uow.provider_health.save(
+        ProviderHealth(provider="antigravity", status=ProviderHealthStatus.AVAILABLE)
+    )
 
     item = BacklogItem(
         project_id="app-proj",

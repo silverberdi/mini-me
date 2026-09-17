@@ -1050,9 +1050,15 @@ def orchestrate_start_cmd(
     try:
         with db_manager.session() as session:
             uow = PostgresPersistenceUnitOfWork(session)
-            service = OrchestrationService(uow, project_root=project_root)
-            run = service.start(project_id, change_name, project_root=project_root)
-            status_view = service.get_status(run.run_id)
+            scheduler = SchedulerService(uow, project_root=project_root)
+            _decision, record, run = scheduler.admit_work_item(
+                project_id, change_name, drive_admitted=True
+            )
+            if run is None:
+                raise ValueError(
+                    record.reason_summary if record else "Admission blocked by scheduler policy."
+                )
+            status_view = scheduler.orchestration_service.get_status(run.run_id)
 
             if json_output:
                 typer.echo(json.dumps(status_view.model_dump(), indent=2, default=str))

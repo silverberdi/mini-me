@@ -121,6 +121,7 @@ class SchedulerService:
         self.max_global_jobs = max_global_jobs
         self.one_active_implementation_per_project = one_active_implementation_per_project
         self.mode = mode
+        self._admission_health_truth: dict[str, ProviderHealth | None] | None = None
 
     def compute_priority_score(
         self, item: WorkQueueItem, now: datetime | None = None
@@ -244,7 +245,16 @@ class SchedulerService:
 
         Fail-closed: a lookup exception must NEVER be synthesized into AVAILABLE.
         Callers treat None (truth unavailable) as UNKNOWN capacity.
+
+        When a tick has captured an admission-time health snapshot (before probe/
+        discovery helpers may synthesize records), that snapshot is authoritative.
         """
+        truth = self._admission_health_truth
+        if truth is not None and provider in truth:
+            return truth[provider]
+        return self._safe_lookup_provider_health(provider)
+
+    def _safe_lookup_provider_health(self, provider: str) -> ProviderHealth | None:
         try:
             return self.provider_health_service.get_existing_health(provider)
         except Exception as exc:
@@ -1184,6 +1194,14 @@ class SchedulerService:
         self, project_id: str | None = None, drive_admitted: bool = False
     ) -> list[SchedulerDecisionRecord]:
         """Execute one complete scheduler evaluation and admission cycle."""
+        # Capture authoritative existing provider-health truth BEFORE probe/discovery
+        # helpers may synthesize default records, so this tick's admission decisions
+        # reflect the true (possibly UNKNOWN) state rather than fabricated AVAILABLE.
+        self._admission_health_truth = {
+            provider: self._safe_lookup_provider_health(provider)
+            for provider in PRIMARY_PROVIDERS
+        }
+
         # 0.0 Proactively probe unavailable providers to detect recovery without creating Runs/Jobs
         try:
             import asyncio
@@ -1341,6 +1359,7 @@ class SchedulerService:
                 decision_records.append(record)
 
         self.uow.commit()
+        self._admission_health_truth = None
         return decision_records
 
     def get_status(self, project_id: str | None = None) -> SchedulerStatusView:

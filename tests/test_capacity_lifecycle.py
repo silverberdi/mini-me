@@ -7,7 +7,7 @@ from minime.domain.enums import (
     ProviderResultClass,
     SchedulerMode,
 )
-from minime.domain.models import AuditRecord, Job, NormalizedProviderResult, Project
+from minime.domain.models import AuditRecord, Job, NormalizedProviderResult, Project, ProviderHealth
 from minime.services.capacity_lifecycle_service import CapacityLifecycleService
 from minime.services.provider_health_service import ProviderHealthService
 
@@ -22,6 +22,12 @@ def test_scheduler_mode_run_when_all_primaries_available(in_memory_uow):
         reviewer="antigravity",
     )
     in_memory_uow.projects.save(project)
+    in_memory_uow.provider_health.save(
+        ProviderHealth(provider="codex", status=ProviderHealthStatus.AVAILABLE)
+    )
+    in_memory_uow.provider_health.save(
+        ProviderHealth(provider="antigravity", status=ProviderHealthStatus.AVAILABLE)
+    )
 
     lifecycle = CapacityLifecycleService(in_memory_uow)
     status = lifecycle.get_scheduler_status(project_id="mini-me")
