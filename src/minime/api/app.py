@@ -85,7 +85,6 @@ from minime.services.dashboard_service import (
     OperationsDashboardService,
     TimelineEventDTO,
 )
-from minime.services.execution_pipeline import ExecutionPipelineService
 from minime.services.intake_service import IntakeService
 from minime.services.orchestration_service import OrchestrationService
 from minime.services.project_onboarding_service import ProjectOnboardingService
@@ -862,8 +861,25 @@ async def run_project_job(
     uow: UowDep,
 ) -> Job:
     try:
-        service = ExecutionPipelineService(uow, project_root=req.project_root)
-        return await service.run_job(project_id, req.change_name)
+        scheduler = SchedulerService(
+            uow,
+            project_root=req.project_root,
+            readiness_service=ReadinessService(
+                uow, github_adapter=getattr(app.state, "github_adapter", None)
+            ),
+        )
+        _decision, record, run = scheduler.admit_work_item(
+            project_id, req.change_name, drive_admitted=True
+        )
+        if run is None:
+            reason = (
+                record.reason_summary if record else "Admission blocked by scheduler policy."
+            )
+            raise ValueError(reason)
+        job = uow.jobs.get_by_id(run.active_job_id) if run.active_job_id else None
+        if not job:
+            raise ValueError("Admitted run has no executable job.")
+        return job
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 

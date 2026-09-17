@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from datetime import datetime
 
@@ -24,7 +23,6 @@ from minime.domain.models import OperatorActionRequest
 from minime.logging import configure_logging, get_logger
 from minime.services.budget_service import BudgetService
 from minime.services.control_plane_service import ControlPlaneService
-from minime.services.execution_pipeline import ExecutionPipelineService
 from minime.services.orchestration_service import OrchestrationService
 from minime.services.project_service import ProjectService
 from minime.services.provider_health_service import ProviderHealthService
@@ -287,8 +285,17 @@ def run_cmd(
     try:
         with db_manager.session() as session:
             uow = PostgresPersistenceUnitOfWork(session)
-            service = ExecutionPipelineService(uow, project_root=project_root)
-            job = asyncio.run(service.run_job(project_id, change_name))
+            scheduler = SchedulerService(uow, project_root=project_root)
+            _decision, record, run = scheduler.admit_work_item(
+                project_id, change_name, drive_admitted=True
+            )
+            if run is None:
+                raise ValueError(
+                    record.reason_summary if record else "Admission blocked by scheduler policy."
+                )
+            job = uow.jobs.get_by_id(run.active_job_id) if run.active_job_id else None
+            if not job:
+                raise ValueError("Admitted run has no executable job.")
             typer.echo(f"Job: {job.job_id}")
             typer.echo(f"Status: {job.status.value}")
             if job.candidate_sha:
