@@ -28,6 +28,7 @@ from minime.db.models import (
     EventModel,
     EvidenceDiagnosticModel,
     GitOperationModel,
+    IntegrityFindingModel,
     JobAttemptModel,
     JobHandoffModel,
     JobLogModel,
@@ -114,6 +115,7 @@ from minime.domain.interfaces import (
     EventRepositoryInterface,
     EvidenceDiagnosticRepositoryInterface,
     GitOperationRepositoryInterface,
+    IntegrityFindingRepositoryInterface,
     JobAttemptRepositoryInterface,
     JobHandoffRepositoryInterface,
     JobLogRepositoryInterface,
@@ -159,6 +161,7 @@ from minime.domain.models import (
     EvidenceDiagnostic,
     GitOperation,
     HumanAnswerRecord,
+    IntegrityAudit,
     Job,
     JobAttempt,
     JobHandoff,
@@ -209,6 +212,10 @@ def project_model_to_domain(model: ProjectModel) -> Project:
         checks=model.checks or [],
         external_providers_allowed=model.external_providers_allowed or [],
         openrouter_drain_allowed=model.openrouter_drain_allowed,
+        strict_validation_required=getattr(model, "strict_validation_required", True),
+        verify_gate_required=getattr(model, "verify_gate_required", True),
+        sync_gate_required=getattr(model, "sync_gate_required", True),
+        archive_gate_required=getattr(model, "archive_gate_required", True),
         deployment_preview=model.deployment_preview or {},
         deployment_production=model.deployment_production or {},
         context_sources=model.context_sources or ["README.md", "docs/", "ROADMAP.md"],
@@ -332,6 +339,17 @@ def fact_model_to_domain(model: MetricFactModel) -> MetricFact:
         fact_value=model.fact_value,
         details=model.details or {},
         recorded_at=model.recorded_at,
+    )
+
+
+def integrity_finding_model_to_domain(model: IntegrityFindingModel) -> IntegrityAudit:
+    return IntegrityAudit(
+        audit_id=model.id,
+        project_id=model.project_id,
+        executed_at=model.executed_at,
+        overall_status=model.overall_status,
+        findings=model.findings or [],
+        evidence_gaps=model.evidence_gaps or [],
     )
 
 
@@ -832,6 +850,10 @@ class PostgresProjectRepository(ProjectRepositoryInterface):
             existing.checks = project.checks
             existing.external_providers_allowed = project.external_providers_allowed
             existing.openrouter_drain_allowed = project.openrouter_drain_allowed
+            existing.strict_validation_required = project.strict_validation_required
+            existing.verify_gate_required = project.verify_gate_required
+            existing.sync_gate_required = project.sync_gate_required
+            existing.archive_gate_required = project.archive_gate_required
             existing.deployment_preview = project.deployment_preview
             existing.deployment_production = project.deployment_production
             existing.context_sources = project.context_sources
@@ -858,6 +880,10 @@ class PostgresProjectRepository(ProjectRepositoryInterface):
                 checks=project.checks,
                 external_providers_allowed=project.external_providers_allowed,
                 openrouter_drain_allowed=project.openrouter_drain_allowed,
+                strict_validation_required=project.strict_validation_required,
+                verify_gate_required=project.verify_gate_required,
+                sync_gate_required=project.sync_gate_required,
+                archive_gate_required=project.archive_gate_required,
                 deployment_preview=project.deployment_preview,
                 deployment_production=project.deployment_production,
                 context_sources=project.context_sources,
@@ -1078,6 +1104,32 @@ class PostgresEventRepository(EventRepositoryInterface):
         if since is not None:
             stmt = stmt.where(EventModel.timestamp >= since)
         return int(self.session.scalar(stmt) or 0)
+
+
+class PostgresIntegrityFindingRepository(IntegrityFindingRepositoryInterface):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def save(self, audit: IntegrityAudit) -> None:
+        model = IntegrityFindingModel(
+            id=audit.audit_id,
+            project_id=audit.project_id,
+            executed_at=audit.executed_at,
+            overall_status=audit.overall_status,
+            findings=audit.findings,
+            evidence_gaps=audit.evidence_gaps,
+        )
+        self.session.add(model)
+
+    def get_latest(self, project_id: str) -> IntegrityAudit | None:
+        stmt = (
+            select(IntegrityFindingModel)
+            .where(IntegrityFindingModel.project_id == project_id)
+            .order_by(desc(IntegrityFindingModel.executed_at))
+            .limit(1)
+        )
+        model = self.session.scalars(stmt).first()
+        return integrity_finding_model_to_domain(model) if model else None
 
 
 class PostgresMetricFactRepository(MetricFactRepositoryInterface):
@@ -3991,6 +4043,7 @@ class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.auth_sessions = PostgresAuthSessionRepository(session)
         self.auth_audit_events = PostgresAuthAuditEventRepository(session)
         self.backlog_items = PostgresBacklogItemRepository(session)
+        self.integrity_findings = PostgresIntegrityFindingRepository(session)
 
     def commit(self) -> None:
         self.session.commit()

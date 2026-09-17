@@ -1422,7 +1422,8 @@ async def test_pipeline_rule_k_structurally_ineligible_escalates_to_needs_human(
 async def test_pipeline_reassigns_to_antigravity_on_codex_non_convergence(tmp_path: Path):
     """Verify that when Codex non-converges on routine task, pipeline reassigns to Antigravity under premium recovery."""
     import subprocess
-    from minime.domain.enums import ContinuationDecision, EventType, PremiumProviderReasonCode
+
+    from minime.domain.enums import ContinuationDecision, EventType
     from minime.domain.models import JobAttempt
 
     uow = MockUnitOfWork()
@@ -1586,7 +1587,7 @@ async def test_pipeline_reassigns_to_antigravity_on_codex_non_convergence(tmp_pa
         mock_rev_runner.run = AsyncMock(
             return_value=MagicMock(stdout=["VERDICT: READY_TO_MERGE"], stderr=[], exit_code=0)
         )
-        res = await pipeline.execute_queued_job(job_id)
+        await pipeline.execute_queued_job(job_id)
 
     # Verify that Antigravity was assigned under premium recovery
     saved_events = [call[0][0].event_type for call in uow.events.save.call_args_list]

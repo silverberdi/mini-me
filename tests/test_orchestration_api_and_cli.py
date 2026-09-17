@@ -78,7 +78,6 @@ def setup_api_env(tmp_path: Path, in_memory_uow):
         proposal_content="# Proposal\n\nAPI tests.\n",
         tasks_content="## 1. Foundation\n- [x] 1.1 Complete schema <!-- id: 1.1 -->\n",
         design_content="# Design\n\nAPI endpoints.\n",
-        spec_content="# Spec\n\n## Requirements\nFastAPI and CLI.\n",
     )
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-m", "Add OpenSpec change"], cwd=tmp_path, check=True)

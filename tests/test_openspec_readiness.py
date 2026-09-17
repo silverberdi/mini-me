@@ -44,6 +44,7 @@ def test_dor_missing_project_binding_blocks_ready(in_memory_uow, tmp_path):
         openspec_path="openspec",
         implementer="codex",
         reviewer="antigravity",
+        strict_validation_required=False,
     )
 
     readiness_service = ReadinessService(in_memory_uow, github_adapter=ReadinessGitHubStub())
@@ -69,6 +70,7 @@ def test_dor_missing_github_issue_blocks_ready(in_memory_uow, tmp_path):
         repository="silverberdi/mini-me",
         base_branch="main",
         openspec_path="openspec",
+        strict_validation_required=False,
         implementer="codex",
         reviewer="antigravity",
     )
@@ -104,6 +106,7 @@ def test_dor_evaluation_success(in_memory_uow, tmp_path):
         repository="silverberdi/mini-me",
         base_branch="main",
         openspec_path="openspec",
+        strict_validation_required=False,
         implementer="codex",
         reviewer="antigravity",
     )
@@ -214,6 +217,7 @@ def test_dor_missing_artifacts(in_memory_uow, tmp_path):
         repository="org/test",
         base_branch="main",
         openspec_path="openspec",
+        strict_validation_required=False,
     )
     in_memory_uow.projects.save(project)
 
@@ -246,6 +250,7 @@ def test_dor_roadmap_gating(in_memory_uow, tmp_path):
         repository="silverberdi/mini-me",
         base_branch="main",
         openspec_path="openspec",
+        strict_validation_required=False,
     )
     in_memory_uow.projects.save(project)
 
@@ -283,6 +288,7 @@ def test_runtime_isolation_does_not_modify_openspec(in_memory_uow, tmp_path):
         repository="silverberdi/mini-me",
         base_branch="main",
         openspec_path="openspec",
+        strict_validation_required=False,
     )
     in_memory_uow.projects.save(project)
 
@@ -317,6 +323,7 @@ def test_readiness_evaluation_event_deduplication(in_memory_uow, tmp_path):
         repository="silverberdi/mini-me",
         base_branch="main",
         openspec_path="openspec",
+        strict_validation_required=False,
     )
     in_memory_uow.projects.save(project)
 

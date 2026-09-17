@@ -197,6 +197,7 @@ def test_sqlite_postgres_repositories_roundtrip():
         assert saved_run is not None
         assert saved_run.current_stage == OrchestrationStage.ADMITTED
 
+
         cand = OrchestrationCandidate(
             run_id="run-pg-1",
             generation=1,
@@ -243,3 +244,18 @@ def test_sqlite_postgres_repositories_roundtrip():
         events = event_repo.list_by_run("run-pg-1")
         assert len(events) == 1
         assert events[0].to_stage == OrchestrationStage.PREPARING_EXECUTION
+
+
+def test_project_lifecycle_gate_policy_roundtrip_defaults_and_overrides():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        repository = PostgresProjectRepository(session)
+        repository.save(Project(project_id="defaults", display_name="Defaults", repository="org/defaults"))
+        repository.save(Project(project_id="overrides", display_name="Overrides", repository="org/overrides", strict_validation_required=False, verify_gate_required=False, sync_gate_required=True, archive_gate_required=False))
+        session.commit()
+        defaults = repository.get_by_id("defaults")
+        overrides = repository.get_by_id("overrides")
+        assert defaults is not None and overrides is not None
+        assert (defaults.strict_validation_required, defaults.verify_gate_required, defaults.sync_gate_required, defaults.archive_gate_required) == (True, True, True, True)
+        assert (overrides.strict_validation_required, overrides.verify_gate_required, overrides.sync_gate_required, overrides.archive_gate_required) == (False, False, True, False)

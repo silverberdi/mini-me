@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tests.conftest import InMemoryPersistenceUnitOfWork, ReadinessGitHubStub
+from tests.conftest import InMemoryPersistenceUnitOfWork, ReadinessGitHubStub, init_git_repo
 
 from minime.domain.enums import (
     ProjectOnboardingStatus,
@@ -47,6 +47,8 @@ def test_end_to_end_autonomous_intake_proving(
         "- 021-work-intake: Autonomous product intake and project onboarding (READY)\n"
         "### 022 — Greenfield Proving — NEXT\n"
     )
+
+    init_git_repo(repo_dir)
 
     github_stub = ReadinessGitHubStub()
 

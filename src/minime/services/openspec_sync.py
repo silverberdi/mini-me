@@ -131,12 +131,64 @@ class OpenSpecSyncService:
             raise FileNotFoundError(f"OpenSpec change directory not found: {change_dir}")
 
         if target_dir.exists():
-            logger.info(
-                "Target archive '%s' already exists; removing old active change.", target_dir
+            raise OpenSpecSyncError(
+                f"Archive target collision: '{target_dir}' already exists for change "
+                f"'{change_name}'. The active change was not modified."
             )
-            shutil.rmtree(change_dir)
-            return target_dir
 
         shutil.move(str(change_dir), str(target_dir))
         logger.info("Archived change '%s' -> '%s'.", change_name, target_dir)
         return target_dir
+
+    def verify_sync(
+        self,
+        openspec_path: str,
+        change_name: str,
+        synced_capabilities: list[str],
+    ) -> bool:
+        """Confirm synchronized requirements are present in the canonical specs."""
+        if not synced_capabilities:
+            return True
+
+        change_specs_dir = self.project_root / openspec_path / "changes" / change_name / "specs"
+        main_specs_dir = self.project_root / openspec_path / "specs"
+
+        for capability in synced_capabilities:
+            canonical = main_specs_dir / capability / "spec.md"
+            if not canonical.exists():
+                return False
+
+            canonical_text = canonical.read_text(encoding="utf-8")
+            delta_file = change_specs_dir / capability / "spec.md"
+            if not delta_file.exists():
+                # The delta is already gone; only non-emptiness can be confirmed.
+                if not canonical_text.strip():
+                    return False
+                continue
+
+            delta_requirements = self._requirement_titles(delta_file.read_text(encoding="utf-8"))
+            if any(title not in canonical_text for title in delta_requirements):
+                return False
+
+        return True
+
+    def verify_archive(
+        self,
+        openspec_path: str,
+        change_name: str,
+        archived_path: Path,
+    ) -> bool:
+        """Confirm the change directory is gone and the archive artifact exists."""
+        change_dir = self.project_root / openspec_path / "changes" / change_name
+        if change_dir.exists():
+            return False
+        return archived_path.exists()
+
+    @staticmethod
+    def _requirement_titles(text: str) -> list[str]:
+        titles: list[str] = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("## Requirement:") or stripped.startswith("### Requirement:"):
+                titles.append(stripped)
+        return titles

@@ -49,6 +49,7 @@ def test_ui_change_blocked_at_pr_prepared_without_validation_pass(mock_uow):
         display_name="mini me",
         repository="silverberdi/mini-me",
         deployment_preview={"required_for_ui_changes": True},
+        verify_gate_required=False,
     )
     mock_uow.projects.get_by_id.return_value = project
 
@@ -92,6 +93,7 @@ def test_ui_change_advances_to_ready_for_human_merge_when_validation_passes(mock
         display_name="mini me",
         repository="silverberdi/mini-me",
         deployment_preview={"required_for_ui_changes": True},
+        verify_gate_required=False,
     )
     mock_uow.projects.get_by_id.return_value = project
 
@@ -151,6 +153,7 @@ def test_non_ui_change_advances_directly_to_ready_for_human_merge(mock_uow):
         display_name="mini me",
         repository="silverberdi/mini-me",
         deployment_preview={"required_for_ui_changes": False},
+        verify_gate_required=False,
     )
     mock_uow.projects.get_by_id.return_value = project
 

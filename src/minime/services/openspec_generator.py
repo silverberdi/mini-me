@@ -110,10 +110,10 @@ class OpenSpecGenerator:
         spec_lines = [
             f"# Specification: {title}",
             "",
-            "## Requirements",
+            "## ADDED Requirements",
             "",
-            f"### REQ-{spec_slug.upper()}-1: Primary Capability",
-            description or f"The system MUST implement {title}.",
+            "### Requirement: Primary Capability",
+            f"The system SHALL implement {title} as described by the scenarios below.",
             "",
         ]
 

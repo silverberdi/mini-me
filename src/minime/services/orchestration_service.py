@@ -29,7 +29,6 @@ from minime.domain.enums import (
     ProviderHealthStatus,
     PullRequestLookupState,
     ReadinessState,
-    ReviewStatus,
     ReviewVerdict,
     WorkItemStatus,
 )
@@ -55,10 +54,18 @@ from minime.services.candidate_remediation import CandidateRemediationService
 from minime.services.container_preview_service import ContainerPreviewService
 from minime.services.efficiency_telemetry_service import EfficiencyTelemetryService
 from minime.services.execution_pipeline import ExecutionPipelineService
+from minime.services.lifecycle_gates import (
+    ApplyAttributionGate,
+    GateReason,
+    GateResult,
+    GateStatus,
+    VerifyGate,
+)
 from minime.services.lightweight_reconciliation_service import LightweightReconciliationService
 from minime.services.project_service import ProjectService
 from minime.services.provider_policy_service import ProviderPolicyService
 from minime.services.readiness_service import ReadinessService
+from minime.services.review_evidence import build_review_evidence_report, validate_review_authority
 from minime.services.task_classifier import TaskClassifier
 from minime.services.validation_authority_service import ValidationAuthorityService
 from minime.services.worktree_manager import WorktreeInfo
@@ -248,6 +255,27 @@ class OrchestrationService:
                     "existing_run_id": existing_active.run_id,
                 },
                 existing_run_id=existing_active.run_id,
+            )
+
+        # 7. APPLY attribution gate: implementation must be attributable to an
+        # admitted OpenSpec APPLY lifecycle, with no pre-admission drift. This
+        # composes with Phase A readiness (strict validation) and fails closed
+        # when attribution is ambiguous or unverifiable.
+        apply_result = ApplyAttributionGate(self.openspec_adapter).evaluate(
+            project=project,
+            change_name=change_name,
+            project_root=root,
+        )
+        if apply_result.is_blocking:
+            return AdmissionResult(
+                admitted=False,
+                refusal_reason=f"{apply_result.reason.code}: {apply_result.reason.message}",
+                refusal_details={
+                    "code": apply_result.reason.code,
+                    "gate": apply_result.gate_name,
+                    "status": apply_result.status.value,
+                    **apply_result.reason.details,
+                },
             )
 
         # Determine registered base SHA from repo or project
@@ -2225,6 +2253,22 @@ class OrchestrationService:
                         )
                         break
 
+                # VERIFY gate: OpenSpec coherence, task evidence, scope integrity,
+                # and review-evidence binding must pass before the human merge gate.
+                verify_result = self._evaluate_verify_gate(run, project, current_cand)
+                if verify_result is not None and verify_result.is_blocking:
+                    self._stop_run(
+                        run,
+                        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+                        human_gate=HumanGate.NEEDS_HUMAN,
+                        stop_reason=f"{verify_result.reason.code}: {verify_result.reason.message}",
+                        stop_details={
+                            "code": verify_result.reason.code,
+                            **verify_result.reason.details,
+                        },
+                    )
+                    break
+
                 # Final terminal checkpoint: set human gate to READY_FOR_HUMAN_MERGE and STOP
                 self._stop_run(
                     run,
@@ -2454,77 +2498,86 @@ class OrchestrationService:
         job: Job,
         cand: OrchestrationCandidate,
     ) -> tuple[bool, ReviewVerdict | None, str | None]:
+        """Deterministically validate review authority against the current candidate."""
+        return validate_review_authority(self.uow, run, job, cand, self.authorship_service)
+
+    def _candidate_changed_paths(
+        self,
+        run: OrchestrationRun,
+        candidate: OrchestrationCandidate | None,
+    ) -> list[str] | None:
+        """Return candidate changed paths relative to base, or None when unverifiable."""
+        import subprocess
+
+        base_sha = run.base_sha
+        candidate_sha = candidate.candidate_sha if candidate else run.current_candidate_sha
+        if not base_sha or not candidate_sha:
+            return None
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--name-only", f"{base_sha}..{candidate_sha}"],
+                cwd=str(self.project_root),
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            if result.returncode != 0:
+                return None
+            return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        except Exception:
+            return None
+
+    def _evaluate_verify_gate(
+        self,
+        run: OrchestrationRun,
+        project: Project,
+        candidate: OrchestrationCandidate | None,
+    ) -> GateResult | None:
+        """Evaluate VERIFY (OpenSpec coherence + review evidence) before human merge.
+
+        Returns None when the project policy disables the VERIFY gate; otherwise
+        returns a blocking PASS/FAIL/UNKNOWN result that the caller must honor.
         """
-        Deterministically validate review authority against current candidate.
-        Requires:
-        - candidate exists with candidate_sha
-        - review record exists for job
-        - status == REVIEW_COMPLETED
-        - exact candidate_sha == cand.candidate_sha
-        - exact base_sha == run.base_sha
-        - manifest_id/manifest_hash match when set
-        - structured verdict exists
-        Fail closed on any missing field, mismatched identity, or wrong generation.
-        """
-        if not cand or not cand.candidate_sha:
-            return False, None, "No active candidate recorded."
+        if not getattr(project, "verify_gate_required", True):
+            return None
 
-        existing_review = self.uow.reviews.get_by_job_id(job.job_id)
-        if not existing_review:
-            return False, None, f"No review record exists for job '{job.job_id}'."
+        candidate_sha = candidate.candidate_sha if candidate else run.current_candidate_sha
+        changed_paths = self._candidate_changed_paths(run, candidate)
 
-        if existing_review.status != ReviewStatus.REVIEW_COMPLETED:
-            return (
-                False,
-                None,
-                f"Review status '{existing_review.status.value}' is not REVIEW_COMPLETED.",
-            )
-
-        required_review_binding = {
-            "orchestration_run_id": (existing_review.orchestration_run_id, run.run_id),
-            "candidate_generation": (existing_review.candidate_generation, cand.generation),
-            "manifest_id": (existing_review.manifest_id, cand.manifest_id),
-            "manifest_hash": (existing_review.manifest_hash, cand.manifest_hash),
-        }
-        for field, (actual, expected) in required_review_binding.items():
-            if actual is None or actual == "":
-                return False, None, f"Review binding field '{field}' is missing."
-            if expected is None or actual != expected:
-                return (
-                    False,
-                    None,
-                    f"Review binding field '{field}' does not match current candidate.",
-                )
-
-        project = self.uow.projects.get_by_id(run.project_id)
-        if not project or existing_review.reviewer_role != project.reviewer:
-            return False, None, "Review reviewer identity does not match the assigned reviewer."
-
-        if not existing_review.candidate_sha or existing_review.candidate_sha != cand.candidate_sha:
-            return (
-                False,
-                None,
-                f"Review candidate SHA '{existing_review.candidate_sha}' does not match current candidate '{cand.candidate_sha}'.",
-            )
-
-        if not existing_review.base_sha or existing_review.base_sha != run.base_sha:
-            return (
-                False,
-                None,
-                f"Review base SHA '{existing_review.base_sha}' does not match run base '{run.base_sha}'.",
-            )
-
-        if existing_review.verdict is None:
-            return False, None, "Review has no structured verdict."
-
-        # Mandatory Rule G: Technical Reviewer Independence Enforcement
-        is_eligible, ineligibility_reason = self.authorship_service.is_reviewer_eligible(
-            job.job_id, existing_review.reviewer_role, self.uow
+        verify_result = VerifyGate(self.openspec_adapter).evaluate(
+            project=project,
+            change_name=run.change_name,
+            project_root=str(self.project_root),
+            candidate_sha=candidate_sha,
+            changed_paths=changed_paths,
         )
-        if not is_eligible:
-            return False, None, ineligibility_reason
+        if verify_result.is_blocking:
+            return verify_result
 
-        return True, existing_review.verdict, None
+        job = self.uow.jobs.get_by_id(run.active_job_id) if run.active_job_id else None
+        if not job or not candidate:
+            return GateResult(
+                "verify",
+                GateStatus.UNKNOWN,
+                GateReason(
+                    "VERIFY_UNVERIFIABLE",
+                    "Review evidence cannot be evaluated without an active job and candidate.",
+                ),
+            )
+
+        review_report = build_review_evidence_report(
+            self.uow, run, job, candidate, project, self.authorship_service
+        )
+        if not review_report.satisfied:
+            code = review_report.finding_category or "VERIFY_REVIEW_EVIDENCE_INVALID"
+            return GateResult(
+                "verify",
+                GateStatus.FAIL,
+                GateReason(code, review_report.reason or "Review evidence is not satisfied."),
+            )
+
+        return verify_result
 
     def _validate_audit_authority(
         self,

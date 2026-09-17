@@ -87,6 +87,10 @@ class Project(BaseModel):
         default_factory=lambda: ["codex", "antigravity", "deepseek"]
     )
     openrouter_drain_allowed: bool = False
+    strict_validation_required: bool = True
+    verify_gate_required: bool = True
+    sync_gate_required: bool = True
+    archive_gate_required: bool = True
     deployment_preview: dict[str, Any] = Field(default_factory=dict)
     deployment_production: dict[str, Any] = Field(default_factory=dict)
     context_sources: list[str] = Field(default_factory=lambda: ["README.md", "docs/", "ROADMAP.md"])
@@ -179,6 +183,17 @@ class Event(BaseModel):
     operation_id: str | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
     timestamp: datetime = Field(default_factory=utc_now)
+
+
+class IntegrityAudit(BaseModel):
+    """Point-in-time OpenSpec integrity audit result."""
+
+    audit_id: str = Field(default_factory=generate_uuid)
+    project_id: str
+    executed_at: datetime = Field(default_factory=utc_now)
+    overall_status: str = "UNKNOWN"
+    findings: list[dict[str, Any]] = Field(default_factory=list)
+    evidence_gaps: list[str] = Field(default_factory=list)
 
 
 class MetricFact(BaseModel):

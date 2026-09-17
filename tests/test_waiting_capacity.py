@@ -111,7 +111,18 @@ def seed_ready_change(
     (change_dir / "proposal.md").write_text("# Proposal\n", encoding="utf-8")
     (change_dir / "design.md").write_text("# Design\n", encoding="utf-8")
     (change_dir / "specs" / "feature").mkdir(parents=True, exist_ok=True)
-    (change_dir / "specs" / "feature" / "spec.md").write_text("# Spec\n", encoding="utf-8")
+    (change_dir / "specs" / "feature" / "spec.md").write_text(
+        "## ADDED Requirements\n"
+        "\n"
+        "### Requirement: Synthetic feature\n"
+        "The system SHALL support the synthetic feature.\n"
+        "\n"
+        "#### Scenario: Works\n"
+        "- **GIVEN** a configured environment\n"
+        "- **WHEN** the capability is exercised\n"
+        "- **THEN** deterministic checks pass\n",
+        encoding="utf-8",
+    )
 
     project = Project(
         project_id="mini-me",

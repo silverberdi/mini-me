@@ -3,7 +3,11 @@
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from tests.conftest import InMemoryPersistenceUnitOfWork, create_isolated_openspec_change
+from tests.conftest import (
+    InMemoryPersistenceUnitOfWork,
+    create_isolated_openspec_change,
+    init_git_repo,
+)
 
 from minime.adapters.github import GitHubAdapter
 from minime.domain.enums import (
@@ -66,6 +70,7 @@ def test_autonomous_admission_and_run_creation(
         )
     )
 
+    init_git_repo(tmp_path)
     create_isolated_openspec_change(tmp_path, change_name="016-autonomous-queue-work-selection")
 
     mock_gh = MagicMock(spec=GitHubAdapter)

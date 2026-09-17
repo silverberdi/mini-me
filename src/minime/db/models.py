@@ -47,6 +47,10 @@ class ProjectModel(Base):
         JSON, default=lambda: ["codex", "antigravity", "deepseek"], nullable=False
     )
     openrouter_drain_allowed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    strict_validation_required: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
+    verify_gate_required: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
+    sync_gate_required: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
+    archive_gate_required: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
     deployment_preview: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     deployment_production: Mapped[dict[str, Any]] = mapped_column(
         JSON, default=dict, nullable=False
@@ -224,6 +228,21 @@ class MetricFactModel(Base):
     recorded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False, index=True
     )
+
+
+class IntegrityFindingModel(Base):
+    __tablename__ = "integrity_findings"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    executed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+    overall_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    findings: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    evidence_gaps: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
 
 
 class JobModel(Base):
