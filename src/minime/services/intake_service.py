@@ -514,19 +514,19 @@ class IntakeService:
                     return updated_item
                 return item
 
-        # 3. Admit into scheduler
-        from minime.services.orchestration_service import OrchestrationService
+        # 3. Admit through the converged scheduler admission authority. Never bypass
+        # scheduler policy with a direct orchestration admit_change call.
+        from minime.services.scheduler_service import SchedulerService
 
-        orch_service = OrchestrationService(
+        scheduler = SchedulerService(
             uow=self.uow,
             project_root=self.project_root,
-            github_adapter=self.github_adapter,
-            openspec_adapter=self.openspec_adapter,
+            readiness_service=self.readiness_service,
         )
-        admission = orch_service.admit_change(project_id=project_id, change_name=change_name)
-        if not admission.admitted or not admission.run:
-            raise ValueError(f"Work item admission failed: {admission.refusal_reason}")
-        run = admission.run
+        _decision, decision_record, run = scheduler.admit_work_item(project_id, change_name)
+        if run is None:
+            reason = decision_record.reason_summary if decision_record else "admission blocked"
+            raise ValueError(f"Work item admission blocked by scheduler policy: {reason}")
 
         now = utc_now()
         updated_item = item.model_copy(

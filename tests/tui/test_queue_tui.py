@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import pytest
-from textual.widgets import DataTable, TabbedContent
+from textual.widgets import DataTable, Static, TabbedContent
 
-from minime.domain.enums import QueuePriority, ReadinessState, SchedulerMode
+from minime.domain.enums import (
+    AdmissionBlockCondition,
+    AdmissionDecisionKind,
+    QueuePriority,
+    ReadinessState,
+    SchedulerMode,
+)
 from minime.domain.models import QueueExplainReport, SchedulerStatusView, WorkQueueItem, utc_now
 from minime.tui.app import MiniMeTuiApp
 from minime.tui.client import TuiQueryClient
@@ -107,3 +113,31 @@ async def test_tui_queue_view_navigation_and_rendering():
         assert queue_view.explain_report.change_name == "016-autonomous-queue-work-selection"
         assert queue_view.explain_report.queue_position == 1
         assert queue_view.explain_report.priority == QueuePriority.HIGH
+
+
+@pytest.mark.asyncio
+async def test_tui_explain_panel_surfaces_operational_decision():
+    client = MockQueueQueryClient()
+    client.report = client.report.model_copy(
+        update={
+            "admission_eligible": False,
+            "operational_decision": AdmissionDecisionKind.WAIT,
+            "block_condition": AdmissionBlockCondition.CAPACITY_EXHAUSTED,
+        }
+    )
+    app = MiniMeTuiApp(query_client=client, refresh_interval=0)
+
+    async with app.run_test() as pilot:
+        await pilot.press("5")
+        table = app.query_one("#queue-table", DataTable)
+        table.focus()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        panel = app.query_one("#queue-explain-content", Static)
+        text = str(panel.content)
+
+        # Operational truth is surfaced (WAIT), not collapsed into ADMITTED/REFUSED.
+        assert "WAIT" in text
+        assert "ADMITTED" not in text
+        assert "CAPACITY_EXHAUSTED" in text

@@ -256,11 +256,20 @@ class QueueView(Widget):
         txt.append(f"  • Aging Starvation Bonus: {rep.aging_bonus:.1f}\n")
         txt.append(f"  • Total Score: {rep.total_score:.1f}\n\n", style="bold green")
 
-        txt.append("Admission Eligibility:\n", style="bold underline")
-        txt.append(
-            f"  • Status: {'ADMITTED' if rep.admission_eligible else 'REFUSED'}\n",
-            style="bold green" if rep.admission_eligible else "bold red",
+        txt.append("Admission Decision:\n", style="bold underline")
+        op = (
+            rep.operational_decision.value
+            if rep.operational_decision
+            else ("ADMITTED" if rep.admission_eligible else "REFUSED")
         )
+        op_style = (
+            "bold green"
+            if op in {"RUN", "DRAIN"}
+            else "bold yellow" if op == "WAIT" else "bold red"
+        )
+        txt.append(f"  • Status: {op}\n", style=op_style)
+        if rep.block_condition:
+            txt.append(f"  • Block Condition: {rep.block_condition.value}\n", style="bold red")
         if rep.refusal_code:
             txt.append(f"  • Refusal Code: {rep.refusal_code.value}\n", style="bold red")
 

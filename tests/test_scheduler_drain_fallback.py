@@ -15,6 +15,8 @@ from minime.domain.enums import (
     ChangeStatus,
     EventType,
     JobStatus,
+    OrchestrationStage,
+    OrchestrationStopOutcome,
     ProviderHealthStatus,
     ProviderResultClass,
     ReadinessState,
@@ -26,6 +28,7 @@ from minime.domain.models import (
     NormalizedProviderResult,
     OpenRouterBudgetPolicy,
     OpenRouterPricingSnapshot,
+    OrchestrationRun,
     Project,
     ProviderHealth,
 )
@@ -34,6 +37,7 @@ from minime.services.capacity_lifecycle_service import CapacityLifecycleService
 from minime.services.deepseek_auditor_runner import MockAuditorRunner
 from minime.services.execution_pipeline import ExecutionPipelineService
 from minime.services.openrouter_eligibility import OpenRouterEligibilityEvaluator
+from minime.services.orchestration_service import OrchestrationService
 from minime.services.worktree_manager import WorktreeInfo
 
 
@@ -759,3 +763,107 @@ async def test_unverified_pinned_default_snapshot_in_db_denies_fallback_with_zer
     # 2. Job paused in WAITING_CAPACITY because pinned_default cannot authorize spend
     assert result_job.status == JobStatus.WAITING_CAPACITY
     assert "PRICING_SNAPSHOT_MISSING" in result_job.capacity_block_reason
+
+
+def test_drain_resume_continues_inflight_job_through_real_runtime(
+    in_memory_uow, tmp_path
+):
+    """A valid DRAIN decision must route to a real continuation that advances.
+
+    Uses the real OrchestrationService.resume -> drive_coordinator -> pipeline
+    path (only the external OpenRouter adapter is mocked), proving that a
+    WAITING_CAPACITY in-flight job with exhausted primaries + drain budget headroom
+    actually advances instead of being skipped by resume().
+    """
+    project = _project(drain_allowed=True)
+    in_memory_uow.projects.save(project)
+    in_memory_uow.budget_policies.save(_policy())
+    _seed_verified_snapshots(in_memory_uow)
+
+    in_memory_uow.provider_health.save(
+        ProviderHealth(provider="codex", status=ProviderHealthStatus.EXHAUSTED)
+    )
+    in_memory_uow.provider_health.save(
+        ProviderHealth(provider="antigravity", status=ProviderHealthStatus.EXHAUSTED)
+    )
+
+    change_name = "in-flight-drain-change"
+    _setup_openspec_change(tmp_path, change_name)
+    change = Change(
+        project_id=project.project_id,
+        name=change_name,
+        status=ChangeStatus.IN_PROGRESS,
+        last_readiness_status=ReadinessState.READY,
+    )
+    in_memory_uow.changes.save(change)
+
+    job = Job(
+        project_id=project.project_id,
+        change_name=change_name,
+        implementer_role=project.implementer,
+        status=JobStatus.WAITING_CAPACITY,
+        attempt_count=1,
+        current_executor="codex",
+    )
+    in_memory_uow.jobs.save(job)
+
+    run = OrchestrationRun(
+        run_id="run-drain-continuation",
+        project_id=project.project_id,
+        change_name=change_name,
+        base_sha="2c476eafb1baec38e70aa51dcc239a81c6c6be69",
+        current_stage=OrchestrationStage.IMPLEMENTING,
+        resumable_stage=OrchestrationStage.IMPLEMENTING,
+        stop_outcome=OrchestrationStopOutcome.WAITING_CAPACITY,
+        active_job_id=job.job_id,
+        is_active=True,
+    )
+    in_memory_uow.orchestration_runs.save(run)
+    in_memory_uow.commit()
+
+    mock_openrouter = MockOpenRouterAdapter(
+        canned_result=NormalizedProviderResult(
+            result_class=ProviderResultClass.SUCCESS,
+            provider="openrouter",
+            role="fallback",
+            model="anthropic/claude-3.5-sonnet",
+            summary="Implementation verified.",
+            raw_output=json.dumps(
+                {
+                    "verdict": "READY_TO_MERGE",
+                    "summary": "Implementation verified.",
+                    "findings": [],
+                }
+            ),
+        ),
+        canned_meta={
+            "prompt_tokens": 500,
+            "completion_tokens": 200,
+            "total_tokens": 700,
+            "actual_cost_usd": 0.005,
+        },
+    )
+    pipeline = ExecutionPipelineService(
+        uow=in_memory_uow,
+        project_root=tmp_path,
+        worktree_manager=GitFakeWorktreeManager(tmp_path),
+        openrouter_adapter=mock_openrouter,
+        auditor_runner=MockAuditorRunner(
+            output=[json.dumps({"risk": "low", "summary": "ok", "findings": []})]
+        ),
+    )
+    orch = OrchestrationService(
+        in_memory_uow, project_root=tmp_path, pipeline=pipeline
+    )
+
+    orch.resume(run.run_id, project_root=tmp_path, drain_mode=True)
+
+    # The real continuation advanced: OpenRouter fallback was actually invoked
+    # through the pipeline (not a mocked resume()).
+    assert len(mock_openrouter.calls) >= 1
+
+    resumed = in_memory_uow.orchestration_runs.get_by_id(run.run_id)
+    assert resumed.stop_outcome != OrchestrationStopOutcome.WAITING_CAPACITY
+
+    final_job = in_memory_uow.jobs.get_by_id(job.job_id)
+    assert final_job.status != JobStatus.WAITING_CAPACITY

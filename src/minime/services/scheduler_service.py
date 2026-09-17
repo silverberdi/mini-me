@@ -223,6 +223,8 @@ class SchedulerService:
             queue_position=position,
             blockers=blockers,
             refusal_code=refusal_code,
+            operational_decision=decision,
+            block_condition=eval_result.block_condition,
             selection_rationale=rationale,
             evaluated_at=utc_now(),
         )
@@ -244,7 +246,7 @@ class SchedulerService:
         Callers treat None (truth unavailable) as UNKNOWN capacity.
         """
         try:
-            return self.provider_health_service.get_health(provider)
+            return self.provider_health_service.get_existing_health(provider)
         except Exception as exc:
             logger.warning(
                 "Provider health lookup failed for '%s': %s", provider, exc
@@ -366,6 +368,14 @@ class SchedulerService:
                 legacy_decision=AdmissionDecision.REFUSED,
                 legacy_refusal_code=AdmissionRefusalCode.INVALID_BINDING,
             )
+
+        # Capture canonical existing provider-health truth BEFORE readiness/capacity
+        # checks can synthesize records. Absent rows must remain UNKNOWN for the
+        # admission decision, never be reinterpreted as AVAILABLE.
+        configured_implementer = getattr(project, "implementer", None) or "codex"
+        configured_reviewer = getattr(project, "reviewer", None) or "antigravity"
+        impl_health = self._lookup_provider_health(configured_implementer)
+        rev_health = self._lookup_provider_health(configured_reviewer)
 
         # 3. Check prior execution outcomes for this change if one exists
         # In particular, EVIDENCE_INSUFFICIENT on latest attempt -> NEEDS_HUMAN, no auto-retry, no capacity wait
@@ -607,13 +617,15 @@ class SchedulerService:
         # The scheduler answers whether the CURRENT configured implementer/reviewer
         # path is safely executable under ModelIndependencePolicy. It does NOT search
         # external_providers_allowed for an alternative implementer/reviewer pair.
-        configured_implementer = getattr(project, "implementer", None) or "codex"
-        configured_reviewer = getattr(project, "reviewer", None) or "antigravity"
-
+        # (configured_implementer / configured_reviewer / impl_health / rev_health were
+        # captured above, before readiness checks could synthesize provider records.)
+        health_by_provider = {
+            configured_implementer: impl_health,
+            configured_reviewer: rev_health,
+        }
         auth_errors: list[str] = []
         config_errors: list[str] = []
-        for p in (configured_implementer, configured_reviewer):
-            h = self._lookup_provider_health(p)
+        for p, h in health_by_provider.items():
             if h is not None and h.status == ProviderHealthStatus.AUTH_REQUIRED:
                 auth_errors.append(p)
             elif h is not None and h.status == ProviderHealthStatus.MISCONFIGURED:
@@ -642,9 +654,6 @@ class SchedulerService:
                 legacy_decision=AdmissionDecision.REFUSED,
                 legacy_refusal_code=AdmissionRefusalCode.PROVIDER_UNAVAILABLE,
             )
-
-        impl_health = self._lookup_provider_health(configured_implementer)
-        rev_health = self._lookup_provider_health(configured_reviewer)
 
         # UNKNOWN capacity must NEVER become RUN. Fail closed.
         unreachable = [
@@ -979,7 +988,7 @@ class SchedulerService:
                 return AdmissionDecision.REFUSED, decision_record, None
 
             resumed_run = self.orchestration_service.resume(
-                run.run_id, project_root=self.project_root
+                run.run_id, project_root=self.project_root, drain_mode=True
             )
             decision_record = SchedulerDecisionRecord(
                 project_id=project_id,

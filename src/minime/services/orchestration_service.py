@@ -348,8 +348,15 @@ class OrchestrationService:
         run_id: str,
         project_root: str | Path | None = None,
         force: bool = False,
+        drain_mode: bool = False,
     ) -> OrchestrationRun:
-        """Resume an orchestration run from its persisted resumable checkpoint."""
+        """Resume an orchestration run from its persisted resumable checkpoint.
+
+        ``drain_mode`` permits resuming a WAITING_CAPACITY run even when the primary
+        provider remains unavailable, so the pipeline's canonical bounded drain
+        fallback (OpenRouterEligibilityEvaluator + BudgetService) can continue the
+        in-flight job. It does not bypass the NEEDS_HUMAN gate.
+        """
         run = self.uow.orchestration_runs.get_by_id(run_id)
         if not run:
             raise ValueError(f"Orchestration run '{run_id}' not found.")
@@ -368,7 +375,12 @@ class OrchestrationService:
                     or "codex"
                 )
                 health = self.pipeline.health_service.get_health(provider)
-                if health.status in (ProviderHealthStatus.AVAILABLE, ProviderHealthStatus.DEGRADED) or force:
+                if (
+                    health.status
+                    in (ProviderHealthStatus.AVAILABLE, ProviderHealthStatus.DEGRADED)
+                    or force
+                    or drain_mode
+                ):
                     run.stop_outcome = None
                     run.human_gate = None
                     run.is_active = True

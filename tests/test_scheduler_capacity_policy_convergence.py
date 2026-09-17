@@ -60,6 +60,7 @@ def setup_test_environment(
     reviewer_status: ProviderHealthStatus = ProviderHealthStatus.AVAILABLE,
     external_providers_allowed: list[str] | None = None,
     auto_admit: bool = True,
+    save_health: bool = True,
 ) -> tuple[Project, SchedulerService]:
     project = Project(
         project_id="mini-me",
@@ -89,20 +90,21 @@ def setup_test_environment(
     )
     uow.bindings.save(binding)
 
-    uow.provider_health.save(
-        ProviderHealth(
-            health_id=f"ph-{implementer}",
-            provider=implementer,
-            status=implementer_status,
+    if save_health:
+        uow.provider_health.save(
+            ProviderHealth(
+                health_id=f"ph-{implementer}",
+                provider=implementer,
+                status=implementer_status,
+            )
         )
-    )
-    uow.provider_health.save(
-        ProviderHealth(
-            health_id=f"ph-{reviewer}",
-            provider=reviewer,
-            status=reviewer_status,
+        uow.provider_health.save(
+            ProviderHealth(
+                health_id=f"ph-{reviewer}",
+                provider=reviewer,
+                status=reviewer_status,
+            )
         )
-    )
 
     create_isolated_openspec_change(root, change_name=change_name)
 
@@ -474,15 +476,32 @@ def test_provider_health_lookup_failure_never_run(
 ):
     _, scheduler = setup_test_environment(tmp_path, in_memory_uow)
 
-    def failing_get_health(provider: str):
+    def failing_get_existing_health(provider: str):
         raise RuntimeError("provider health store unavailable")
 
-    scheduler.provider_health_service.get_health = failing_get_health
+    scheduler.provider_health_service.get_existing_health = failing_get_existing_health
 
     res = scheduler.evaluate_admission("mini-me", "016-autonomous-queue-work-selection")
 
     # Truth unavailable -> UNKNOWN, with an authorized probe path for primary
     # providers -> WAIT. It must NEVER be synthesized into AVAILABLE/RUN.
+    assert res.decision == AdmissionDecisionKind.WAIT
+    assert res.safe_executable_pair_exists is False
+    assert res.block_condition == AdmissionBlockCondition.UNKNOWN_CAPACITY
+
+
+# 20c. Absent provider-health record must fail closed: never RUN.
+def test_missing_provider_health_record_never_run(
+    tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork
+):
+    _, scheduler = setup_test_environment(
+        tmp_path, in_memory_uow, save_health=False
+    )
+
+    res = scheduler.evaluate_admission("mini-me", "016-autonomous-queue-work-selection")
+
+    # No persisted health row -> UNKNOWN truth, not AVAILABLE. Primary providers
+    # have an authorized probe path -> WAIT. Never RUN.
     assert res.decision == AdmissionDecisionKind.WAIT
     assert res.safe_executable_pair_exists is False
     assert res.block_condition == AdmissionBlockCondition.UNKNOWN_CAPACITY

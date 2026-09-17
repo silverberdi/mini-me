@@ -1122,6 +1122,8 @@ class QueueExplainReport(BaseModel):
     queue_position: int | None = None
     blockers: list[str] = Field(default_factory=list)
     refusal_code: AdmissionRefusalCode | None = None
+    operational_decision: AdmissionDecisionKind | None = None
+    block_condition: AdmissionBlockCondition | None = None
     selection_rationale: str
     evaluated_at: datetime = Field(default_factory=utc_now)
 
