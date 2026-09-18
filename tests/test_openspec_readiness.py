@@ -2,10 +2,20 @@
 
 from conftest import ReadinessGitHubStub, create_isolated_openspec_change
 from minime.adapters.openspec import OpenSpecAdapter
-from minime.domain.enums import ReadinessState
-from minime.domain.models import Project, ProjectBinding
+from minime.domain.enums import ProviderHealthStatus, ReadinessState
+from minime.domain.models import Project, ProjectBinding, ProviderHealth
 from minime.services.project_service import ProjectService
 from minime.services.readiness_service import ReadinessService
+
+
+def _seed_primary_health(uow) -> None:
+    """Seed AVAILABLE primary-provider health so the DoR capacity check passes."""
+    uow.provider_health.save(
+        ProviderHealth(provider="codex", status=ProviderHealthStatus.AVAILABLE)
+    )
+    uow.provider_health.save(
+        ProviderHealth(provider="antigravity", status=ProviderHealthStatus.AVAILABLE)
+    )
 
 
 def test_discover_active_changes_on_disk(in_memory_uow, tmp_path):
@@ -118,6 +128,8 @@ def test_dor_evaluation_success(in_memory_uow, tmp_path):
         openspec_change_name="synthetic-change",
     )
     in_memory_uow.bindings.save(binding)
+
+    _seed_primary_health(in_memory_uow)
 
     readiness_service = ReadinessService(in_memory_uow, github_adapter=ReadinessGitHubStub())
     eval_result = readiness_service.evaluate_change_readiness(
@@ -300,6 +312,8 @@ def test_runtime_isolation_does_not_modify_openspec(in_memory_uow, tmp_path):
     )
     in_memory_uow.bindings.save(binding)
 
+    _seed_primary_health(in_memory_uow)
+
     readiness_service = ReadinessService(in_memory_uow, github_adapter=ReadinessGitHubStub())
     eval_result = readiness_service.evaluate_change_readiness(
         project_id="mini-me",
@@ -334,6 +348,8 @@ def test_readiness_evaluation_event_deduplication(in_memory_uow, tmp_path):
         openspec_change_name="dedup-change",
     )
     in_memory_uow.bindings.save(binding)
+
+    _seed_primary_health(in_memory_uow)
 
     readiness_service = ReadinessService(in_memory_uow, github_adapter=ReadinessGitHubStub())
 

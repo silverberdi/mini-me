@@ -12,6 +12,7 @@ from conftest import ReadinessGitHubStub, create_isolated_openspec_change
 from minime.api.app import app, get_uow
 from minime.cli.main import app as cli_app
 from minime.domain.enums import (
+    AdmissionDecisionKind,
     ProjectStatus,
     ProviderHealthStatus,
     ReadinessState,
@@ -148,3 +149,182 @@ def test_cli_commands(setup_api_env, in_memory_uow, monkeypatch):
     # 2. Non-existent run status returns error
     bad_res = runner.invoke(cli_app, ["orchestrate", "status", "non-existent-run-id"])
     assert bad_res.exit_code != 0
+
+
+def _exhaust_implementer(in_memory_uow):
+    in_memory_uow.provider_health.save(
+        ProviderHealth(provider="codex", status=ProviderHealthStatus.EXHAUSTED)
+    )
+
+
+def test_api_admit_blocked_when_implementer_exhausted(setup_api_env, in_memory_uow):
+    env = setup_api_env
+    _exhaust_implementer(in_memory_uow)
+
+    app.dependency_overrides[get_uow] = lambda: in_memory_uow
+    client = TestClient(app)
+
+    res = client.post(
+        "/api/v1/orchestration/admit",
+        json={
+            "project_id": env["project_id"],
+            "change_name": env["change_name"],
+            "project_root": env["project_root"],
+        },
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["admitted"] is False
+    assert data["refusal_details"]["operational_decision"] == "WAIT"
+
+    # No fresh orchestration run was created via a bypass.
+    runs = in_memory_uow.orchestration_runs.list_runs(project_id=env["project_id"])
+    assert len(runs) == 0
+
+    app.dependency_overrides.clear()
+
+
+def test_api_start_blocked_when_needs_human(setup_api_env, in_memory_uow):
+    env = setup_api_env
+    project = in_memory_uow.projects.get_by_id(env["project_id"])
+    project.auto_admit = False
+    in_memory_uow.projects.save(project)
+
+    app.dependency_overrides[get_uow] = lambda: in_memory_uow
+    client = TestClient(app)
+
+    res = client.post(
+        "/api/v1/orchestration/start",
+        json={
+            "project_id": env["project_id"],
+            "change_name": env["change_name"],
+            "project_root": env["project_root"],
+        },
+    )
+    assert res.status_code == 400
+
+    runs = in_memory_uow.orchestration_runs.list_runs(project_id=env["project_id"])
+    assert len(runs) == 0
+
+    app.dependency_overrides.clear()
+
+
+def test_api_admit_run_records_scheduler_decision(setup_api_env, in_memory_uow):
+    env = setup_api_env
+    app.dependency_overrides[get_uow] = lambda: in_memory_uow
+    client = TestClient(app)
+
+    res = client.post(
+        "/api/v1/orchestration/admit",
+        json={
+            "project_id": env["project_id"],
+            "change_name": env["change_name"],
+            "project_root": env["project_root"],
+        },
+    )
+    assert res.status_code == 200
+    assert res.json()["admitted"] is True
+
+    # The RUN path exercised the converged scheduler authority, not a raw admit.
+    recent = in_memory_uow.scheduler_decisions.list_recent(env["project_id"], limit=1)
+    assert recent
+    assert recent[0].operational_decision == AdmissionDecisionKind.RUN
+
+    app.dependency_overrides.clear()
+
+
+def test_cli_orchestrate_start_blocked(setup_api_env, in_memory_uow, monkeypatch):
+    env = setup_api_env
+    _exhaust_implementer(in_memory_uow)
+
+    class FakeSessionContext:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, *args):
+            pass
+
+    monkeypatch.setattr("minime.cli.main.db_manager.session", lambda: FakeSessionContext())
+    monkeypatch.setattr(
+        "minime.cli.main.PostgresPersistenceUnitOfWork", lambda session: in_memory_uow
+    )
+
+    res = runner.invoke(
+        cli_app,
+        [
+            "orchestrate",
+            "start",
+            env["project_id"],
+            env["change_name"],
+            "--path",
+            env["project_root"],
+        ],
+    )
+    # Blocked admission must not start execution.
+    assert res.exit_code != 0
+    runs = in_memory_uow.orchestration_runs.list_runs(project_id=env["project_id"])
+    assert len(runs) == 0
+
+
+def test_api_run_job_blocked_when_wait(setup_api_env, in_memory_uow):
+    env = setup_api_env
+    _exhaust_implementer(in_memory_uow)
+
+    app.dependency_overrides[get_uow] = lambda: in_memory_uow
+    client = TestClient(app)
+
+    res = client.post(
+        f"/projects/{env['project_id']}/jobs",
+        json={"change_name": env["change_name"], "project_root": env["project_root"]},
+    )
+    assert res.status_code == 400
+    assert len(in_memory_uow.jobs.list_by_project(env["project_id"])) == 0
+
+    recent = in_memory_uow.scheduler_decisions.list_recent(env["project_id"], limit=1)
+    assert recent
+    assert recent[0].operational_decision == AdmissionDecisionKind.WAIT
+
+    app.dependency_overrides.clear()
+
+
+def test_api_run_job_blocked_when_needs_human(setup_api_env, in_memory_uow):
+    env = setup_api_env
+    project = in_memory_uow.projects.get_by_id(env["project_id"])
+    project.auto_admit = False
+    in_memory_uow.projects.save(project)
+
+    app.dependency_overrides[get_uow] = lambda: in_memory_uow
+    client = TestClient(app)
+
+    res = client.post(
+        f"/projects/{env['project_id']}/jobs",
+        json={"change_name": env["change_name"], "project_root": env["project_root"]},
+    )
+    assert res.status_code == 400
+    assert len(in_memory_uow.jobs.list_by_project(env["project_id"])) == 0
+
+    app.dependency_overrides.clear()
+
+
+def test_cli_run_blocked_when_wait(setup_api_env, in_memory_uow, monkeypatch):
+    env = setup_api_env
+    _exhaust_implementer(in_memory_uow)
+
+    class FakeSessionContext:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, *args):
+            pass
+
+    monkeypatch.setattr("minime.cli.main.db_manager.session", lambda: FakeSessionContext())
+    monkeypatch.setattr(
+        "minime.cli.main.PostgresPersistenceUnitOfWork", lambda session: in_memory_uow
+    )
+
+    res = runner.invoke(
+        cli_app,
+        ["run", env["project_id"], env["change_name"], "--path", env["project_root"]],
+    )
+    assert res.exit_code != 0
+    assert len(in_memory_uow.jobs.list_by_project(env["project_id"])) == 0

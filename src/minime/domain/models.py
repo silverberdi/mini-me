@@ -14,7 +14,9 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validat
 from minime.domain.enums import (
     PRIMARY_PROVIDERS,
     ActionRiskLevel,
+    AdmissionBlockCondition,
     AdmissionDecision,
+    AdmissionDecisionKind,
     AdmissionRefusalCode,
     AttemptProductivityClass,
     AuditFindingSeverity,
@@ -1044,6 +1046,42 @@ class WorkQueueItem(BaseModel):
     last_evaluated_at: datetime = Field(default_factory=utc_now)
 
 
+class AdmissionEvaluationResult(BaseModel):
+    """Normalized operational result of a converged scheduler admission evaluation."""
+
+    decision: AdmissionDecisionKind
+    project_id: str
+    change_name: str
+    safe_executable_pair_exists: bool = False
+    eligible_implementer: str | None = None
+    eligible_reviewer: str | None = None
+    block_condition: AdmissionBlockCondition | None = None
+    rationale: str = ""
+    cooldown_until: datetime | None = None
+    has_deterministic_eta: bool = False
+    evidence_complete: bool = True
+    legacy_decision: AdmissionDecision = AdmissionDecision.REFUSED
+    legacy_refusal_code: AdmissionRefusalCode | None = None
+
+    def __iter__(self):
+        return iter(
+            (
+                self.legacy_decision,
+                self.legacy_refusal_code,
+                self.rationale,
+                self.eligible_implementer,
+            )
+        )
+
+    def __getitem__(self, index: int):
+        return (
+            self.legacy_decision,
+            self.legacy_refusal_code,
+            self.rationale,
+            self.eligible_implementer,
+        )[index]
+
+
 class SchedulerDecisionRecord(BaseModel):
     """Immutable audit record of a scheduler admission evaluation."""
 
@@ -1056,6 +1094,12 @@ class SchedulerDecisionRecord(BaseModel):
     reason_summary: str
     priority_score: float = 0.0
     selected_implementer: str | None = None
+    operational_decision: AdmissionDecisionKind | None = None
+    block_condition: AdmissionBlockCondition | None = None
+    eligible_reviewer: str | None = None
+    safe_executable_pair_exists: bool = False
+    has_deterministic_eta: bool = False
+    cooldown_until: datetime | None = None
     concurrency_snapshot: dict[str, Any] = Field(default_factory=dict)
     capacity_snapshot: dict[str, Any] = Field(default_factory=dict)
     run_id: str | None = None
@@ -1078,6 +1122,8 @@ class QueueExplainReport(BaseModel):
     queue_position: int | None = None
     blockers: list[str] = Field(default_factory=list)
     refusal_code: AdmissionRefusalCode | None = None
+    operational_decision: AdmissionDecisionKind | None = None
+    block_condition: AdmissionBlockCondition | None = None
     selection_rationale: str
     evaluated_at: datetime = Field(default_factory=utc_now)
 

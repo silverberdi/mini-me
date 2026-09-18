@@ -89,6 +89,16 @@ class ProviderHealthService:
             self.uow.commit()
         return health
 
+    def get_existing_health(self, provider: str) -> ProviderHealth | None:
+        """Return existing authoritative health, or None when no record exists.
+
+        Unlike ``get_health``, this never synthesizes a record: a provider with no
+        persisted health row yields ``None`` (UNKNOWN truth), so callers can fail
+        closed instead of treating absence as AVAILABLE.
+        """
+        self._validate_primary(provider)
+        return self.uow.provider_health.get_by_provider(provider)
+
     def list_all_health(self) -> list[ProviderHealth]:
         """List health for all tracked providers, ensuring records exist."""
         results = []
@@ -614,8 +624,13 @@ class ProviderHealthService:
             return False
 
     async def probe_unavailable_providers(self) -> list[str]:
-        """Proactively probe all currently unavailable providers in background without creating Runs/Jobs."""
-        all_health = self.list_all_health()
+        """Proactively probe all currently unavailable providers in background without creating Runs/Jobs.
+
+        Enumerates only existing health records: a provider with no persisted row is
+        not synthesized into AVAILABLE by observation/probe preparation. Health truth
+        is updated only from actual probe evidence.
+        """
+        all_health = self.uow.provider_health.list_all()
         recovered: list[str] = []
         for h in all_health:
             if h.status != ProviderHealthStatus.AVAILABLE:

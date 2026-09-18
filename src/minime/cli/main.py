@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from datetime import datetime
 
@@ -24,7 +23,6 @@ from minime.domain.models import OperatorActionRequest
 from minime.logging import configure_logging, get_logger
 from minime.services.budget_service import BudgetService
 from minime.services.control_plane_service import ControlPlaneService
-from minime.services.execution_pipeline import ExecutionPipelineService
 from minime.services.orchestration_service import OrchestrationService
 from minime.services.project_service import ProjectService
 from minime.services.provider_health_service import ProviderHealthService
@@ -287,8 +285,17 @@ def run_cmd(
     try:
         with db_manager.session() as session:
             uow = PostgresPersistenceUnitOfWork(session)
-            service = ExecutionPipelineService(uow, project_root=project_root)
-            job = asyncio.run(service.run_job(project_id, change_name))
+            scheduler = SchedulerService(uow, project_root=project_root)
+            _decision, record, run = scheduler.admit_work_item(
+                project_id, change_name, drive_admitted=True
+            )
+            if run is None:
+                raise ValueError(
+                    record.reason_summary if record else "Admission blocked by scheduler policy."
+                )
+            job = uow.jobs.get_by_id(run.active_job_id) if run.active_job_id else None
+            if not job:
+                raise ValueError("Admitted run has no executable job.")
             typer.echo(f"Job: {job.job_id}")
             typer.echo(f"Status: {job.status.value}")
             if job.candidate_sha:
@@ -667,13 +674,10 @@ def scheduler_status_cmd(
             if sched_status.recent_decisions:
                 typer.echo("\nRecent Decisions:")
                 for d in sched_status.recent_decisions[:5]:
-                    d_color = (
-                        typer.colors.GREEN
-                        if d.decision.value == "ADMITTED"
-                        else typer.colors.YELLOW
-                    )
+                    op = d.operational_decision.value if d.operational_decision else d.decision.value
+                    d_color = typer.colors.GREEN if op in {"RUN", "DRAIN"} else typer.colors.YELLOW
                     typer.secho(
-                        f"  • [{d.decision.value}] {d.change_name} — {d.reason_summary}", fg=d_color
+                        f"  • [{op}] {d.change_name} — {d.reason_summary}", fg=d_color
                     )
 
     except Exception as e:
@@ -709,11 +713,10 @@ def scheduler_tick_cmd(
                 bold=True,
             )
             for d in decisions:
-                d_color = (
-                    typer.colors.GREEN if d.decision.value == "ADMITTED" else typer.colors.YELLOW
-                )
+                op = d.operational_decision.value if d.operational_decision else d.decision.value
+                d_color = typer.colors.GREEN if op in {"RUN", "DRAIN"} else typer.colors.YELLOW
                 typer.secho(
-                    f"  • [{d.decision.value}] {d.change_name} (Score: {d.priority_score:.1f}) — {d.reason_summary}",
+                    f"  • [{op}] {d.change_name} (Score: {d.priority_score:.1f}) — {d.reason_summary}",
                     fg=d_color,
                 )
 
@@ -754,11 +757,21 @@ def scheduler_run_cmd(
                     decisions = scheduler.tick(project_id=project_id, drive_admitted=True)
                 else:
                     decisions = scheduler.tick(project_id=project_id)
-                admitted = [d for d in decisions if d.decision.value == "ADMITTED"]
+                admitted = [
+                    d
+                    for d in decisions
+                    if (d.operational_decision.value if d.operational_decision else d.decision.value)
+                    in {"RUN", "DRAIN"}
+                ]
                 if admitted:
                     for a in admitted:
+                        op = (
+                            a.operational_decision.value
+                            if a.operational_decision
+                            else a.decision.value
+                        )
                         typer.secho(
-                            f"[{datetime.now().strftime('%H:%M:%S')}] ADMITTED: {a.change_name} (Run ID: {a.run_id})",
+                            f"[{datetime.now().strftime('%H:%M:%S')}] {op}: {a.change_name} (Run ID: {a.run_id})",
                             fg=typer.colors.GREEN,
                             bold=True,
                         )
@@ -1044,9 +1057,15 @@ def orchestrate_start_cmd(
     try:
         with db_manager.session() as session:
             uow = PostgresPersistenceUnitOfWork(session)
-            service = OrchestrationService(uow, project_root=project_root)
-            run = service.start(project_id, change_name, project_root=project_root)
-            status_view = service.get_status(run.run_id)
+            scheduler = SchedulerService(uow, project_root=project_root)
+            _decision, record, run = scheduler.admit_work_item(
+                project_id, change_name, drive_admitted=True
+            )
+            if run is None:
+                raise ValueError(
+                    record.reason_summary if record else "Admission blocked by scheduler policy."
+                )
+            status_view = scheduler.orchestration_service.get_status(run.run_id)
 
             if json_output:
                 typer.echo(json.dumps(status_view.model_dump(), indent=2, default=str))

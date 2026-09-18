@@ -55,7 +55,9 @@ from minime.db.models import (
 )
 from minime.domain.enums import (
     PRIMARY_PROVIDERS,
+    AdmissionBlockCondition,
     AdmissionDecision,
+    AdmissionDecisionKind,
     AdmissionRefusalCode,
     AttemptProductivityClass,
     AuditFindingSeverity,
@@ -3363,6 +3365,23 @@ def work_queue_item_model_to_domain(model: WorkQueueSnapshotModel) -> WorkQueueI
 def scheduler_decision_domain_to_model(
     decision: SchedulerDecisionRecord,
 ) -> SchedulerDecisionRecordModel:
+    # The scheduler_decision_records table has no dedicated operational-decision
+    # columns; persist the canonical operational truth inside the existing
+    # capacity_snapshot JSON column (no migration) so it survives reload.
+    operational = {
+        "operational_decision": decision.operational_decision.value
+        if decision.operational_decision
+        else None,
+        "block_condition": decision.block_condition.value if decision.block_condition else None,
+        "eligible_reviewer": decision.eligible_reviewer,
+        "safe_executable_pair_exists": decision.safe_executable_pair_exists,
+        "has_deterministic_eta": decision.has_deterministic_eta,
+        "cooldown_until": decision.cooldown_until.isoformat()
+        if decision.cooldown_until
+        else None,
+    }
+    capacity_snapshot = {**(decision.capacity_snapshot or {}), "_operational": operational}
+
     return SchedulerDecisionRecordModel(
         id=decision.decision_id,
         project_id=decision.project_id,
@@ -3378,7 +3397,7 @@ def scheduler_decision_domain_to_model(
         priority_score=decision.priority_score,
         selected_implementer=decision.selected_implementer,
         concurrency_snapshot=decision.concurrency_snapshot,
-        capacity_snapshot=decision.capacity_snapshot,
+        capacity_snapshot=capacity_snapshot,
         run_id=decision.run_id,
         evaluated_at=decision.evaluated_at,
     )
@@ -3387,6 +3406,30 @@ def scheduler_decision_domain_to_model(
 def scheduler_decision_model_to_domain(
     model: SchedulerDecisionRecordModel,
 ) -> SchedulerDecisionRecord:
+    capacity_snapshot = model.capacity_snapshot or {}
+    operational = capacity_snapshot.get("_operational") or {}
+
+    operational_decision = None
+    if operational.get("operational_decision"):
+        try:
+            operational_decision = AdmissionDecisionKind(operational["operational_decision"])
+        except ValueError:
+            operational_decision = None
+
+    block_condition = None
+    if operational.get("block_condition"):
+        try:
+            block_condition = AdmissionBlockCondition(operational["block_condition"])
+        except ValueError:
+            block_condition = None
+
+    cooldown_until = None
+    if operational.get("cooldown_until"):
+        try:
+            cooldown_until = datetime.fromisoformat(operational["cooldown_until"])
+        except ValueError:
+            cooldown_until = None
+
     return SchedulerDecisionRecord(
         decision_id=model.id,
         project_id=model.project_id,
@@ -3397,8 +3440,14 @@ def scheduler_decision_model_to_domain(
         reason_summary=model.reason_summary or "",
         priority_score=float(model.priority_score or 0.0),
         selected_implementer=model.selected_implementer,
+        operational_decision=operational_decision,
+        block_condition=block_condition,
+        eligible_reviewer=operational.get("eligible_reviewer"),
+        safe_executable_pair_exists=bool(operational.get("safe_executable_pair_exists", False)),
+        has_deterministic_eta=bool(operational.get("has_deterministic_eta", False)),
+        cooldown_until=cooldown_until,
         concurrency_snapshot=model.concurrency_snapshot or {},
-        capacity_snapshot=model.capacity_snapshot or {},
+        capacity_snapshot=capacity_snapshot,
         run_id=model.run_id,
         evaluated_at=model.evaluated_at,
     )

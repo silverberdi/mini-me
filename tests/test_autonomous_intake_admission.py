@@ -236,6 +236,9 @@ def test_auto_admit_single_concurrency_deterministic_selection(
     in_memory_uow.provider_health.save(
         ProviderHealth(provider="codex", status=ProviderHealthStatus.AVAILABLE)
     )
+    in_memory_uow.provider_health.save(
+        ProviderHealth(provider="antigravity", status=ProviderHealthStatus.AVAILABLE)
+    )
 
     now = utc_now()
 
@@ -380,6 +383,9 @@ def test_primary_provider_unavailable_waiting_prevents_drain(
             status=ProviderHealthStatus.TEMPORARILY_UNAVAILABLE,
             status_detail="Quota exhausted until reset window",
         )
+    )
+    in_memory_uow.provider_health.save(
+        ProviderHealth(provider="antigravity", status=ProviderHealthStatus.AVAILABLE)
     )
     in_memory_uow.capacity_windows.save(
         CapacityWindow(
