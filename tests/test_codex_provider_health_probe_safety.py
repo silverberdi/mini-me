@@ -239,3 +239,115 @@ async def test_auth_401_transitions_health_to_auth_required(in_memory_uow):
     assert eval_res.decision == AdmissionDecisionKind.NEEDS_HUMAN
     assert eval_res.block_condition == AdmissionBlockCondition.AUTH_REQUIRED
     assert "credentials missing or invalid" in eval_res.rationale.lower()
+
+
+@pytest.mark.asyncio
+async def test_subsequent_tick_bypasses_probing_when_auth_required(in_memory_uow):
+    """Regression test: AUTH_REQUIRED is terminal for automatic probing; subsequent ticks do NOT dispatch paid probes."""
+    svc = ProviderHealthService(uow=in_memory_uow)
+
+    in_memory_uow.projects.save(
+        Project(
+            project_id="mini-me",
+            display_name="mini me",
+            repository="silverberdi/mini-me",
+            base_branch="main",
+            implementer="codex",
+            reviewer="antigravity",
+        )
+    )
+
+    in_memory_uow.bindings.save(
+        ProjectBinding(
+            project_id="mini-me",
+            repository="silverberdi/mini-me",
+            github_issue_number=1,
+            openspec_change_name="001-ready-task",
+            is_valid=True,
+        )
+    )
+
+    # 1. Codex begins non-available (TEMPORARILY_UNAVAILABLE)
+    in_memory_uow.provider_health.update_health(
+        provider="codex",
+        status=ProviderHealthStatus.TEMPORARILY_UNAVAILABLE.value,
+        result_class=ProviderResultClass.RATE_LIMIT.value,
+        error_summary="Rate limit exceeded",
+    )
+
+    # 2. Actionable READY work requiring Codex exists
+    in_memory_uow.work_queue.save(
+        WorkQueueItem(
+            project_id="mini-me",
+            change_name="001-ready-task",
+            github_issue_number=1,
+            priority=QueuePriority.HIGH,
+            readiness_state=ReadinessState.READY,
+            admission_eligible=True,
+        )
+    )
+
+    with patch(
+        "minime.services.provider_health_service.get_provider_adapter"
+    ) as mock_get_adapter:
+        mock_adapter = MagicMock()
+        mock_adapter.check_cli_present = AsyncMock(return_value=True)
+        mock_adapter.check_auth_ready = AsyncMock(return_value=True)
+        mock_adapter.probe_is_expensive = True
+        mock_adapter.probe_verifies_capacity = True
+        mock_adapter.probe_availability = AsyncMock(return_value=False)
+        mock_adapter._last_probe_output = (
+            "HTTP 401 Unauthorized: Provided authentication token is expired. Please try signing in again."
+        )
+        mock_adapter._last_exit_code = 1
+        mock_adapter.extract_capacity_signal = CodexProviderAdapter.extract_capacity_signal.__get__(
+            mock_adapter
+        )
+        mock_get_adapter.return_value = mock_adapter
+
+        # 3. First permitted expensive probe runs and returns 401
+        probed_1 = await svc.check_and_probe_provider("codex")
+        assert probed_1 is False
+        assert mock_adapter.probe_availability.call_count == 1
+        assert mock_adapter.check_auth_ready.call_count == 1
+
+        # 4. Health becomes AUTH_REQUIRED
+        health = svc.get_existing_health("codex")
+        assert health is not None
+        assert health.status == ProviderHealthStatus.AUTH_REQUIRED
+
+        # 5. Execute a SUBSEQUENT automatic provider-health / scheduler probe cycle
+        probed_2 = await svc.check_and_probe_provider("codex")
+        assert probed_2 is False
+
+        # Also test probe_unavailable_providers
+        recovered = await svc.probe_unavailable_providers()
+        assert "codex" not in recovered
+
+        # 6. Assertions for subsequent cycle:
+        # - Provider remains AUTH_REQUIRED
+        # - Expensive probe call count did NOT increase (remains 1)
+        # - check_auth_ready call count did NOT increase (remains 1)
+        # - No codex exec dispatched on subsequent ticks
+        assert mock_adapter.probe_availability.call_count == 1
+        assert mock_adapter.check_auth_ready.call_count == 1
+        health_after = svc.get_existing_health("codex")
+        assert health_after.status == ProviderHealthStatus.AUTH_REQUIRED
+
+        # - Scheduler admission remains NEEDS_HUMAN / AUTH_REQUIRED
+        mock_readiness = MagicMock()
+        mock_readiness.evaluate_change_readiness.return_value = MagicMock(
+            is_ready=True, unmet_reasons=[]
+        )
+        scheduler = SchedulerService(
+            uow=in_memory_uow,
+            provider_health_service=svc,
+            readiness_service=mock_readiness,
+        )
+        eval_res = scheduler.evaluate_admission("mini-me", "001-ready-task")
+        assert eval_res.decision == AdmissionDecisionKind.NEEDS_HUMAN
+        assert eval_res.block_condition == AdmissionBlockCondition.AUTH_REQUIRED
+
+        # - No Job or OrchestrationRun is created
+        assert len(in_memory_uow.jobs.list_by_project("mini-me")) == 0
+        assert len(in_memory_uow.orchestration_runs.list_runs("mini-me")) == 0

@@ -455,6 +455,13 @@ class ProviderHealthService:
         if health.status == ProviderHealthStatus.AVAILABLE:
             return True
 
+        if health.status == ProviderHealthStatus.AUTH_REQUIRED:
+            logger.info(
+                f"Provider '{provider}' health status is AUTH_REQUIRED; "
+                "bypassing automatic probes until explicit re-authentication."
+            )
+            return False
+
         # Known future reset: never probe before the reset window.
         latest_window = self.uow.capacity_windows.get_latest_for_provider(provider)
         if latest_window and latest_window.capacity_reset_at:
