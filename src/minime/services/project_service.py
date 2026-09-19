@@ -61,6 +61,17 @@ def validate_complementary_roles(implementer: str, reviewer: str) -> None:
         )
 
 
+def validate_admission_policy(
+    auto_prepare: bool, auto_admit: bool, max_concurrent_jobs: int
+) -> None:
+    """Reject invalid admission settings before mutating project state."""
+    for name, value in (("auto_prepare", auto_prepare), ("auto_admit", auto_admit)):
+        if type(value) is not bool:
+            raise ValueError(f"{name} must be a boolean")
+    if type(max_concurrent_jobs) is not int or max_concurrent_jobs < 1:
+        raise ValueError("max_concurrent_jobs must be a positive integer")
+
+
 def validate_project_policy(data: dict[str, Any]) -> list[str]:
     """Validate required project configuration fields and return any missing or invalid errors."""
     errors: list[str] = []
@@ -115,6 +126,8 @@ class ProjectService:
         """Register a new project with immutable project_id and validated policy."""
         set_correlation_context(project_id=project_id, operation_id="register_project")
 
+        validate_admission_policy(auto_prepare, auto_admit, max_concurrent_jobs)
+
         norm_repo = ""
         if repository and repository.strip():
             try:
@@ -163,7 +176,7 @@ class ProjectService:
             deployment_production=deployment_production or {},
             auto_prepare=auto_prepare,
             auto_admit=auto_admit,
-            max_concurrent_jobs=max(1, max_concurrent_jobs),
+            max_concurrent_jobs=max_concurrent_jobs,
             status=ProjectStatus.ACTIVE,
             created_at=now,
             updated_at=now,
@@ -217,6 +230,12 @@ class ProjectService:
         if not project:
             raise ValueError(f"Project '{project_id}' not found.")
 
+        validate_admission_policy(
+            auto_prepare if auto_prepare is not None else project.auto_prepare,
+            auto_admit if auto_admit is not None else project.auto_admit,
+            max_concurrent_jobs if max_concurrent_jobs is not None else project.max_concurrent_jobs,
+        )
+
         new_impl = implementer if implementer is not None else project.implementer
         new_rev = reviewer if reviewer is not None else project.reviewer
         validate_complementary_roles(new_impl, new_rev)
@@ -246,7 +265,7 @@ class ProjectService:
         if auto_admit is not None:
             project.auto_admit = auto_admit
         if max_concurrent_jobs is not None:
-            project.max_concurrent_jobs = max(1, max_concurrent_jobs)
+            project.max_concurrent_jobs = max_concurrent_jobs
         if status is not None:
             project.status = status
 
