@@ -11,6 +11,7 @@ from conftest import ReadinessGitHubStub, create_isolated_openspec_change
 from minime.domain.enums import (
     AuditFindingSeverity,
     AuditStatus,
+    ContinuationDecision,
     ExecutionOutcome,
     ExternalActionStatus,
     HumanGate,
@@ -1764,4 +1765,325 @@ def test_coordinator_halts_on_review_remediation_retry_budget_exhaustion(
     assert final_run.is_active is False
     assert final_run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
     assert final_run.stop_details.get("code") == "REVIEW_REMEDIATION_EXHAUSTED"
+
+
+# ---------------------------------------------------------------------------
+# CHECKS_FAILED CONTINUATION DISPATCH REGRESSION TESTS
+# ---------------------------------------------------------------------------
+
+def test_checks_failed_production_regression_falls_back_to_job_decision(
+    setup_orchestration_environment, in_memory_uow
+):
+    """CASE 1 — exact production regression:
+    latest_att.continuation_decision = None, job.continuation_decision = CORRECT_AND_RETRY,
+    job.status = CHECKS_FAILED, persisted failing check.
+    Proves: effective decision = CORRECT_AND_RETRY, does NOT transition back to RUNNING_CHECKS (no hot loop),
+    dispatches corrective attempt 2, and terminates when retry budget exhausted.
+    """
+    env = setup_orchestration_environment
+    service = OrchestrationService(in_memory_uow, project_root=env["project_root"])
+    job = Job(
+        job_id="job-prod-regression",
+        project_id=env["project_id"],
+        change_name=env["change_name"],
+        implementer_role="codex",
+        reviewer_role="antigravity",
+        status=JobStatus.CHECKS_FAILED,
+        continuation_decision=ContinuationDecision.CORRECT_AND_RETRY,
+        candidate_sha="cand-sha-1",
+        attempt_count=1,
+    )
+    in_memory_uow.jobs.save(job)
+    att1 = JobAttempt(
+        job_id=job.job_id,
+        attempt_number=1,
+        executor_role="codex",
+        model_identity="codex",
+        normalized_outcome=ExecutionOutcome.CHANGES_REQUIRED,
+        continuation_decision=None,
+    )
+    in_memory_uow.job_attempts.save(att1)
+
+    # Persist failing check
+    check_res = CheckResult(
+        job_id=job.job_id,
+        candidate_sha="cand-sha-1",
+        candidate_generation=1,
+        check_name="pytest",
+        command="pytest",
+        exit_code=1,
+        duration_ms=100,
+        output_snippet="1 failed",
+    )
+    in_memory_uow.check_results.save(check_res)
+
+    run = OrchestrationRun(
+        run_id="run-prod-regression",
+        project_id=env["project_id"],
+        change_name=env["change_name"],
+        base_sha="base-sha",
+        active_job_id=job.job_id,
+        current_generation=1,
+        current_stage=OrchestrationStage.EVALUATING_ATTEMPT,
+    )
+    in_memory_uow.orchestration_runs.save(run)
+
+    executed_jobs = []
+
+    async def mock_execute(job_id, **kwargs):
+        executed_jobs.append(job_id)
+        att2 = JobAttempt(
+            job_id=job.job_id,
+            attempt_number=2,
+            executor_role="codex",
+            model_identity="codex",
+            normalized_outcome=ExecutionOutcome.CHANGES_REQUIRED,
+            continuation_decision=None,
+        )
+        in_memory_uow.job_attempts.save(att2)
+        job.status = JobStatus.CHECKS_FAILED
+        return job
+
+    service.pipeline.execute_queued_job = mock_execute
+
+    final_run = service.drive_coordinator(run.run_id)
+    assert len(executed_jobs) == 1
+    assert final_run.is_active is False
+    assert final_run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
+    assert final_run.stop_details.get("code") == "CHECKS_FAILED_RETRY_EXHAUSTED"
+
+
+def test_checks_failed_retry_permitted_advances_to_implementing(
+    setup_orchestration_environment, in_memory_uow
+):
+    """CASE 2 — retry permitted:
+    If canonical retry governance allows another corrective attempt (len(attempts) == 1 < 2):
+    transition -> IMPLEMENTING, exactly one next corrective attempt eligible.
+    """
+    env = setup_orchestration_environment
+    service = OrchestrationService(in_memory_uow, project_root=env["project_root"])
+    job = Job(
+        job_id="job-retry-permitted",
+        project_id=env["project_id"],
+        change_name=env["change_name"],
+        implementer_role="codex",
+        reviewer_role="antigravity",
+        status=JobStatus.CHECKS_FAILED,
+        continuation_decision=ContinuationDecision.CORRECT_AND_RETRY,
+        candidate_sha="cand-sha-1",
+        attempt_count=1,
+    )
+    in_memory_uow.jobs.save(job)
+    att1 = JobAttempt(
+        job_id=job.job_id,
+        attempt_number=1,
+        executor_role="codex",
+        model_identity="codex",
+        normalized_outcome=ExecutionOutcome.CHANGES_REQUIRED,
+        continuation_decision=None,
+    )
+    in_memory_uow.job_attempts.save(att1)
+
+    run = OrchestrationRun(
+        run_id="run-retry-permitted",
+        project_id=env["project_id"],
+        change_name=env["change_name"],
+        base_sha="base-sha",
+        active_job_id=job.job_id,
+        current_generation=1,
+        current_stage=OrchestrationStage.EVALUATING_ATTEMPT,
+    )
+    in_memory_uow.orchestration_runs.save(run)
+
+    executed_jobs = []
+
+    async def mock_execute(job_id, **kwargs):
+        executed_jobs.append(job_id)
+        att2 = JobAttempt(
+            job_id=job.job_id,
+            attempt_number=2,
+            executor_role="codex",
+            model_identity="codex",
+            normalized_outcome=ExecutionOutcome.CHANGES_REQUIRED,
+            continuation_decision=None,
+        )
+        in_memory_uow.job_attempts.save(att2)
+        job.status = JobStatus.CHECKS_FAILED
+        return job
+
+    service.pipeline.execute_queued_job = mock_execute
+
+    final_run = service.drive_coordinator(run.run_id)
+    assert len(executed_jobs) == 1
+    assert final_run.stop_details.get("code") == "CHECKS_FAILED_RETRY_EXHAUSTED"
+
+
+def test_checks_failed_retry_exhausted_terminates_with_needs_human(
+    setup_orchestration_environment, in_memory_uow
+):
+    """CASE 3 — retry exhausted:
+    If retry governance says budget exhausted (len(attempts) == 2 >= 2):
+    run terminates with NEEDS_HUMAN, no new attempt, no loop to RUNNING_CHECKS.
+    """
+    env = setup_orchestration_environment
+    service = OrchestrationService(in_memory_uow, project_root=env["project_root"])
+    job = Job(
+        job_id="job-retry-exhausted",
+        project_id=env["project_id"],
+        change_name=env["change_name"],
+        implementer_role="codex",
+        reviewer_role="antigravity",
+        status=JobStatus.CHECKS_FAILED,
+        continuation_decision=ContinuationDecision.CORRECT_AND_RETRY,
+        candidate_sha="cand-sha-2",
+        attempt_count=2,
+    )
+    in_memory_uow.jobs.save(job)
+    att1 = JobAttempt(
+        job_id=job.job_id,
+        attempt_number=1,
+        executor_role="codex",
+        model_identity="codex",
+        normalized_outcome=ExecutionOutcome.CHANGES_REQUIRED,
+        continuation_decision=ContinuationDecision.CORRECT_AND_RETRY,
+    )
+    att2 = JobAttempt(
+        job_id=job.job_id,
+        attempt_number=2,
+        executor_role="codex",
+        model_identity="codex",
+        normalized_outcome=ExecutionOutcome.CHANGES_REQUIRED,
+        continuation_decision=None,
+    )
+    in_memory_uow.job_attempts.save(att1)
+    in_memory_uow.job_attempts.save(att2)
+
+    run = OrchestrationRun(
+        run_id="run-retry-exhausted",
+        project_id=env["project_id"],
+        change_name=env["change_name"],
+        base_sha="base-sha",
+        active_job_id=job.job_id,
+        current_generation=1,
+        current_stage=OrchestrationStage.EVALUATING_ATTEMPT,
+    )
+    in_memory_uow.orchestration_runs.save(run)
+
+    final_run = service.drive_coordinator(run.run_id)
+    assert final_run.is_active is False
+    assert final_run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
+    assert final_run.human_gate == HumanGate.NEEDS_HUMAN
+    assert final_run.stop_details.get("code") == "CHECKS_FAILED_RETRY_EXHAUSTED"
+
+
+def test_attempt_level_decision_wins_over_job_decision(
+    setup_orchestration_environment, in_memory_uow
+):
+    """CASE 4 — attempt-level decision wins:
+    If latest_att.continuation_decision is non-null, it remains authoritative over job.continuation_decision.
+    """
+    env = setup_orchestration_environment
+    service = OrchestrationService(in_memory_uow, project_root=env["project_root"])
+    job = Job(
+        job_id="job-att-wins",
+        project_id=env["project_id"],
+        change_name=env["change_name"],
+        implementer_role="codex",
+        reviewer_role="antigravity",
+        status=JobStatus.CHECKS_FAILED,
+        continuation_decision=ContinuationDecision.CORRECT_AND_RETRY,
+        candidate_sha="cand-sha-1",
+        attempt_count=1,
+    )
+    in_memory_uow.jobs.save(job)
+    att1 = JobAttempt(
+        job_id=job.job_id,
+        attempt_number=1,
+        executor_role="codex",
+        model_identity="codex",
+        normalized_outcome=ExecutionOutcome.REAL_BLOCKER,
+        continuation_decision=ContinuationDecision.NEEDS_HUMAN,
+    )
+    in_memory_uow.job_attempts.save(att1)
+
+    run = OrchestrationRun(
+        run_id="run-att-wins",
+        project_id=env["project_id"],
+        change_name=env["change_name"],
+        base_sha="base-sha",
+        active_job_id=job.job_id,
+        current_generation=1,
+        current_stage=OrchestrationStage.EVALUATING_ATTEMPT,
+    )
+    in_memory_uow.orchestration_runs.save(run)
+
+    final_run = service.drive_coordinator(run.run_id)
+    assert final_run.is_active is False
+    assert final_run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
+    assert final_run.stop_details.get("code") == "NEEDS_HUMAN"
+
+
+def test_no_decisions_available_preserves_bounded_remediation(
+    setup_orchestration_environment, in_memory_uow
+):
+    """CASE 5 — no decisions available:
+    Preserve existing behavior for genuinely absent continuation decisions,
+    including bounded checks-failure remediation.
+    """
+    env = setup_orchestration_environment
+    service = OrchestrationService(in_memory_uow, project_root=env["project_root"])
+    job = Job(
+        job_id="job-no-decisions",
+        project_id=env["project_id"],
+        change_name=env["change_name"],
+        implementer_role="codex",
+        reviewer_role="antigravity",
+        status=JobStatus.CHECKS_FAILED,
+        continuation_decision=None,
+        candidate_sha="cand-sha-1",
+        attempt_count=1,
+    )
+    in_memory_uow.jobs.save(job)
+    att1 = JobAttempt(
+        job_id=job.job_id,
+        attempt_number=1,
+        executor_role="codex",
+        model_identity="codex",
+        normalized_outcome=ExecutionOutcome.CHANGES_REQUIRED,
+        continuation_decision=None,
+    )
+    in_memory_uow.job_attempts.save(att1)
+
+    run = OrchestrationRun(
+        run_id="run-no-decisions",
+        project_id=env["project_id"],
+        change_name=env["change_name"],
+        base_sha="base-sha",
+        active_job_id=job.job_id,
+        current_generation=1,
+        current_stage=OrchestrationStage.EVALUATING_ATTEMPT,
+    )
+    in_memory_uow.orchestration_runs.save(run)
+
+    executed_jobs = []
+
+    async def mock_execute(job_id, **kwargs):
+        executed_jobs.append(job_id)
+        att2 = JobAttempt(
+            job_id=job.job_id,
+            attempt_number=2,
+            executor_role="codex",
+            model_identity="codex",
+            normalized_outcome=ExecutionOutcome.CHANGES_REQUIRED,
+            continuation_decision=None,
+        )
+        in_memory_uow.job_attempts.save(att2)
+        job.status = JobStatus.CHECKS_FAILED
+        return job
+
+    service.pipeline.execute_queued_job = mock_execute
+
+    _ = service.drive_coordinator(run.run_id)
+    assert len(executed_jobs) == 1
+
 

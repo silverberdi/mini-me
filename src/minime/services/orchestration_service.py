@@ -1627,16 +1627,15 @@ class OrchestrationService:
                     # Ready for checks / freeze / review / audit stages
                     self._advance_stage(run, OrchestrationStage.RUNNING_CHECKS)
                 else:
-                    decision = (
-                        latest_att.continuation_decision
-                        if latest_att
-                        else job.continuation_decision
-                    )
+                    if latest_att and latest_att.continuation_decision is not None:
+                        decision = latest_att.continuation_decision
+                    else:
+                        decision = job.continuation_decision
                     outcome = latest_att.normalized_outcome if latest_att else job.latest_outcome
 
                     if (
                         job.status in {JobStatus.RUNNING, JobStatus.CHECKS_FAILED}
-                        and job.continuation_decision is None
+                        and decision is None
                     ):
                         # Bounded checks remediation: prevent runaway loop when checks fail repeatedly
                         if job.status == JobStatus.CHECKS_FAILED and len(attempts) >= 2:
@@ -1655,6 +1654,21 @@ class OrchestrationService:
                         ContinuationDecision.CORRECT_AND_RETRY,
                         ContinuationDecision.REASSIGN_AGENT,
                     }:
+                        if len(attempts) >= 2:
+                            self._stop_run(
+                                run,
+                                stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+                                human_gate=HumanGate.NEEDS_HUMAN,
+                                stop_reason="Deterministic checks failed after retry budget exhausted."
+                                if job.status == JobStatus.CHECKS_FAILED
+                                else "Retry budget exhausted.",
+                                stop_details={
+                                    "code": "CHECKS_FAILED_RETRY_EXHAUSTED"
+                                    if job.status == JobStatus.CHECKS_FAILED
+                                    else "RETRY_EXHAUSTED"
+                                },
+                            )
+                            break
                         self._advance_stage(run, OrchestrationStage.IMPLEMENTING)
                     elif decision == ContinuationDecision.WAIT_EXTERNAL:
                         self._stop_run(
