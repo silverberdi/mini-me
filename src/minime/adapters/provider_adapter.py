@@ -153,15 +153,18 @@ class CodexProviderAdapter(ProviderAdapterInterface):
         search_path = f"{Path.home()}/.local/bin:/opt/homebrew/bin:/usr/local/bin:{os.environ.get('PATH', '')}"
         resolved = shutil.which(self._executable, path=search_path)
         if not resolved:
+            self._last_probe_output = "Codex CLI executable not found in PATH"
+            self._last_exit_code = 127
             return False
 
         try:
-            # Lightweight ephemeral probe
+            # Lightweight ephemeral probe with --skip-git-repo-check
             proc = await asyncio.create_subprocess_exec(
                 resolved,
                 "exec",
                 "-",
                 "--ephemeral",
+                "--skip-git-repo-check",
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -172,16 +175,50 @@ class CodexProviderAdapter(ProviderAdapterInterface):
                     proc.communicate(b"echo probe"),
                     timeout=timeout_seconds,
                 )
+                self._last_probe_output = (
+                    stdout.decode("utf-8", errors="replace")
+                    + "\n"
+                    + stderr.decode("utf-8", errors="replace")
+                )
+                self._last_exit_code = proc.returncode
                 return proc.returncode == 0
             except asyncio.TimeoutError:
+                self._last_probe_output = "Codex availability probe timed out after 30 seconds"
+                self._last_exit_code = 124
                 try:
                     proc.terminate()
                 except OSError:
                     pass
                 return False
         except Exception as exc:
+            self._last_probe_output = f"Codex availability probe failed with exception: {exc}"
+            self._last_exit_code = 1
             logger.debug(f"Codex availability probe failed: {exc}")
             return False
+
+    def extract_capacity_signal(
+        self, raw_output: str, exit_code: int = 0
+    ) -> CapacitySignal | None:
+        lower_out = raw_output.lower()
+        auth_keywords = [
+            "401",
+            "token_expired",
+            "token is expired",
+            "failed to refresh token",
+            "please log out and sign in again",
+            "authentication required",
+            "not logged in",
+            "login required",
+            "unauthorized",
+        ]
+        if any(kw in lower_out for kw in auth_keywords):
+            return CapacitySignal(
+                result_class=ProviderResultClass.AUTH_ERROR,
+                summary="Provider authentication token is expired or unauthorized (HTTP 401)",
+                source_signal=CapacitySignalSource.RESPONSE_BODY_TIMESTAMP,
+            )
+        return None
+
 
 
 class AntigravityProviderAdapter(ProviderAdapterInterface):

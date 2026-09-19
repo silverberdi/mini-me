@@ -424,6 +424,25 @@ class ProviderHealthService:
             > 0
         )
 
+    def _has_actionable_ready_work_for_provider(self, provider: str) -> bool:
+        """Check if there is at least one actionable READY work queue item waiting on this provider."""
+        try:
+            items = self.uow.work_queue.list_all()
+        except Exception:
+            return False
+
+        for item in items:
+            readiness_val = getattr(item.readiness_state, "value", item.readiness_state)
+            is_ready = readiness_val == "READY" or getattr(item, "admission_eligible", False)
+            if is_ready:
+                proj = self.uow.projects.get_by_id(item.project_id)
+                if proj:
+                    impl = getattr(proj, "implementer", None) or "codex"
+                    rev = getattr(proj, "reviewer", None) or "antigravity"
+                    if impl == provider or rev == provider:
+                        return True
+        return False
+
     async def check_and_probe_provider(
         self,
         provider: str,
@@ -435,6 +454,13 @@ class ProviderHealthService:
 
         if health.status == ProviderHealthStatus.AVAILABLE:
             return True
+
+        if health.status == ProviderHealthStatus.AUTH_REQUIRED:
+            logger.info(
+                f"Provider '{provider}' health status is AUTH_REQUIRED; "
+                "bypassing automatic probes until explicit re-authentication."
+            )
+            return False
 
         # Known future reset: never probe before the reset window.
         latest_window = self.uow.capacity_windows.get_latest_for_provider(provider)
@@ -448,6 +474,7 @@ class ProviderHealthService:
         managed_probe = probe_fn is None
         expensive = False
         verifies_capacity = True  # injected probe_fn: caller's probe is authoritative
+        adapter = None
 
         if managed_probe:
             adapter = get_provider_adapter(provider)
@@ -504,6 +531,13 @@ class ProviderHealthService:
             verifies_capacity = bool(adapter.probe_verifies_capacity)
 
             if expensive:
+                # Gated expensive probe check: do NOT run expensive probes continuously when no READY work exists
+                if not self._has_actionable_ready_work_for_provider(provider):
+                    logger.debug(
+                        f"Skipping expensive probe for {provider}: no actionable READY work waiting."
+                    )
+                    return False
+
                 cfg = self._probe_config(provider)
                 async with self._get_probe_lock(provider):
                     # The in-process lock serializes callers within this instance.
@@ -609,6 +643,34 @@ class ProviderHealthService:
             logger.warning(
                 f"Availability probe for {provider} FAILED. Provider remains unavailable."
             )
+            signal = None
+            if managed_probe and adapter:
+                last_output = getattr(adapter, "_last_probe_output", "")
+                last_code = getattr(adapter, "_last_exit_code", 1)
+                signal = adapter.extract_capacity_signal(last_output, exit_code=last_code)
+
+            if signal and signal.result_class == ProviderResultClass.AUTH_ERROR:
+                self.uow.provider_health.update_health(
+                    provider=provider,
+                    status=ProviderHealthStatus.AUTH_REQUIRED.value,
+                    result_class=ProviderResultClass.AUTH_ERROR.value,
+                    error_summary=signal.summary,
+                )
+                self.uow.events.save(
+                    Event(
+                        event_type=EventType.PROVIDER_HEALTH_UPDATED,
+                        payload={
+                            "provider": provider,
+                            "status": ProviderHealthStatus.AUTH_REQUIRED.value,
+                            "result_class": ProviderResultClass.AUTH_ERROR.value,
+                            "summary": signal.summary,
+                        },
+                        timestamp=utc_now(),
+                    )
+                )
+                self.uow.commit()
+                return False
+
             self.uow.events.save(
                 Event(
                     event_type=EventType.PROVIDER_PROBE_FAILED,
