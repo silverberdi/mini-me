@@ -408,9 +408,9 @@ class ProjectCreateRequest(BaseModel):
     openrouter_drain_allowed: bool = False
     deployment_preview: dict[str, Any] = Field(default_factory=dict)
     deployment_production: dict[str, Any] = Field(default_factory=dict)
-    auto_prepare: bool = True
-    auto_admit: bool = True
-    max_concurrent_jobs: int = 1
+    auto_prepare: bool = Field(default=True, strict=True)
+    auto_admit: bool = Field(default=True, strict=True)
+    max_concurrent_jobs: int = Field(default=1, strict=True, ge=1)
 
 
 class ProjectUpdateRequest(BaseModel):
@@ -424,9 +424,9 @@ class ProjectUpdateRequest(BaseModel):
     openrouter_drain_allowed: bool | None = None
     deployment_preview: dict[str, Any] | None = None
     deployment_production: dict[str, Any] | None = None
-    auto_prepare: bool | None = None
-    auto_admit: bool | None = None
-    max_concurrent_jobs: int | None = None
+    auto_prepare: bool | None = Field(default=None, strict=True)
+    auto_admit: bool | None = Field(default=None, strict=True)
+    max_concurrent_jobs: int | None = Field(default=None, strict=True, ge=1)
     status: ProjectStatus | None = None
 
 
@@ -572,6 +572,9 @@ def register_project(
             openrouter_drain_allowed=req.openrouter_drain_allowed,
             deployment_preview=req.deployment_preview,
             deployment_production=req.deployment_production,
+            auto_prepare=req.auto_prepare,
+            auto_admit=req.auto_admit,
+            max_concurrent_jobs=req.max_concurrent_jobs,
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
