@@ -25,17 +25,18 @@ Baseline audited: `8f132791131986c5b793b9e93bccf7e5e23e2df0`
 ## Program stages
 
 A. `canonical-lifecycle-transition-authority`
-   - Single transition authority for `Change` and `BacklogItem` lifecycle using existing enums.
-   - Persistence-level bypass protection (generic `save()` cannot mutate status; atomic CAS required).
+   - `LifecycleTransitionAuthority` is the SINGLE WRITER of `Change.status` and `BacklogItem.status`.
+   - Authorized callers (`SchedulerService`, `OrchestrationService`, `PostMergeService`, `IntakeService`, recovery/control plane) request transitions via `LifecycleTransitionAuthority` instead of persisting status directly.
+   - Persistence-level bypass protection: generic `save()` on existing entities receiving a status change MUST deterministically raise `LifecycleBypassError`, perform zero lifecycle mutation, and fail the entire operation without partially persisting metadata.
    - Strict `ChangeStatus` matrix (`DISCOVERED`, `READY`, `IN_PROGRESS`, `BLOCKED`, `DONE`, `CANCELLED`).
    - Strict `WorkItemStatus` matrix (`BACKLOG`, `CONTEXT_CHECK`, `PREPARING`, `NEEDS_HUMAN`, `READY`, `ADMITTED`, `RUNNING`, `BLOCKED`, `COMPLETED`, `CANCELLED`).
-   - Phase separation: `READY -> ADMITTED` (admission authority) and `ADMITTED -> RUNNING` (execution start).
-   - Non-destructive cancellation (`delete_work_item` performs transition to `CANCELLED` without hard DB delete).
-   - `PostMergeService` integrated as mandatory authority caller for `Change.DONE` and `BacklogItem.COMPLETED`.
+   - Phase separation: `READY -> ADMITTED` (authorized by `SchedulerService`) and `ADMITTED -> RUNNING` (authorized by `OrchestrationService`).
+   - Non-destructive cancellation (`delete_work_item` requests transition to `CANCELLED` without hard DB delete).
+   - `PostMergeService` integrated as authorized caller for `Change.DONE` and `BacklogItem.COMPLETED`.
    - Orthogonality: `COMPLETED` does not force or fabricate `readiness_state = READY`.
-   - `UNKNOWN` evaluation results fail closed and block state progression.
-   - Atomic lifecycle transition events in the same DB transaction.
-   - Read/GET surfaces and queue rebuilds perform zero lifecycle writes.
+   - `UNKNOWN` evaluation outcome fails closed and never authorizes `READY`, `ADMITTED`, `RUNNING`, `DONE`, or `COMPLETED`.
+   - State mutation + event emission occur atomically in the same DB transaction; failed/stale requests emit zero transition events.
+   - Specialized state machines for `Job` and `Run` are preserved.
 
 B. `fail-closed-external-evidence-and-actions`
 C. `managed-repository-runtime-isolation`

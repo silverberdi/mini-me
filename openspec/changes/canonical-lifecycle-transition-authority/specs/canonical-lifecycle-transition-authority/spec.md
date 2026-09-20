@@ -4,9 +4,7 @@
 
 ### Requirement: Single canonical lifecycle transition authority
 
-The system SHALL provide one canonical authority (`LifecycleTransitionAuthority`) for durable Change and
-BacklogItem lifecycle transitions and SHALL use existing domain enums rather than introduce a duplicate
-monolithic state machine.
+The system SHALL provide one canonical authority (`LifecycleTransitionAuthority`) as the SINGLE WRITER of durable `Change.status` and `BacklogItem.status`, with business services acting as authorized callers.
 
 #### Scenario: Stale transition request
 GIVEN a transition request expecting state READY
@@ -34,14 +32,28 @@ AND BacklogItem status SHALL remain COMPLETED.
 
 ### Requirement: Persistence-level lifecycle status protection
 
-The system SHALL prevent generic repository `save()` and update methods on existing `Change` and `BacklogItem`
-entities from mutating lifecycle status, requiring status changes to execute exclusively through the transition primitive.
+The system SHALL enforce that generic repository `save()` and `update()` methods on existing `Change` and `BacklogItem` entities deterministically reject status mutations by raising a `LifecycleBypassError` and performing zero lifecycle or metadata mutations.
 
-#### Scenario: Generic repository save cannot alter lifecycle status
-GIVEN an existing Change or BacklogItem entity in the database
-WHEN a caller attempts to modify its status field and call generic repository save()
-THEN the direct status change SHALL be blocked or ignored
-AND the durable status in PostgreSQL SHALL remain unchanged.
+#### Scenario: Generic repository save with status change fails deterministically with LifecycleBypassError
+GIVEN an existing Change or BacklogItem entity in status READY
+WHEN a caller modifies its status field to RUNNING and invokes generic repository save()
+THEN save() SHALL fail deterministically by raising LifecycleBypassError
+AND the durable status in PostgreSQL SHALL remain READY.
+
+#### Scenario: Generic repository save fails atomically without persisting metadata or emitting events
+GIVEN an existing BacklogItem in status READY
+AND a caller modifies its status to RUNNING plus unrelated metadata fields
+WHEN generic repository save() is invoked
+THEN the operation SHALL raise LifecycleBypassError
+AND durable status SHALL remain READY
+AND no unrelated metadata SHALL be persisted
+AND no lifecycle transition event SHALL be emitted.
+
+#### Scenario: Generic repository save with matching status updates metadata
+GIVEN an existing BacklogItem in status READY
+AND a caller updates non-lifecycle metadata fields while keeping status as READY
+WHEN generic repository save() is invoked
+THEN the operation SHALL succeed and update the non-lifecycle metadata.
 
 #### Scenario: Initial creation establishes initial status
 GIVEN a newly created Change or BacklogItem entity being inserted for the first time
@@ -103,11 +115,11 @@ THEN the transition SHALL be rejected as invalid.
 
 ### Requirement: Phase separation for ADMITTED and RUNNING
 
-The system SHALL separate fresh admission authorization (`READY -> ADMITTED`) from execution start (`ADMITTED -> RUNNING`), ensuring SchedulerService acts as admission authority and execution engines trigger running status.
+The system SHALL separate fresh admission authorization (`READY -> ADMITTED`) requested by `SchedulerService` from execution start (`ADMITTED -> RUNNING`) requested by `OrchestrationService`.
 
 #### Scenario: Scheduler admits READY work to ADMITTED
 GIVEN a BacklogItem in status READY
-WHEN SchedulerService authorizes fresh admission
+WHEN SchedulerService requests fresh admission authorization
 THEN status SHALL transition from READY to ADMITTED via LifecycleTransitionAuthority.
 
 #### Scenario: Execution start transitions ADMITTED to RUNNING
@@ -150,22 +162,28 @@ THEN the existing `readiness_state` SHALL be preserved without forcing `readines
 
 ### Requirement: UNKNOWN evaluation result fails closed
 
-When an evaluation cannot observe required evidence, the result SHALL be explicitly `UNKNOWN`, which fails closed and blocks transition to executable or terminal states.
+When an evaluation cannot observe required evidence, the evaluation outcome SHALL be explicitly `UNKNOWN`, which fails closed and NEVER authorizes `READY`, `ADMITTED`, `RUNNING`, `DONE`, or `COMPLETED`.
 
 #### Scenario: Unobservable evidence yields UNKNOWN and blocks progression
 GIVEN required evidence is missing or unobservable during evaluation
 WHEN readiness or intake evaluation runs
-THEN the result SHALL evaluate to UNKNOWN
+THEN the outcome SHALL evaluate to UNKNOWN
 AND transition to READY, ADMITTED, RUNNING, DONE, or COMPLETED SHALL be blocked.
 
 ### Requirement: Atomic lifecycle transition audit event
 
-Every successful lifecycle transition SHALL produce exactly one durable transition audit event within the same database transaction unit of work as the state mutation.
+Every successful lifecycle transition SHALL produce exactly one durable transition audit event within the same database transaction unit of work as the state mutation, rolling back state if event persistence fails.
 
 #### Scenario: Successful transition emits durable event in same transaction
 GIVEN a valid lifecycle transition request
 WHEN LifecycleTransitionAuthority executes the transition
 THEN status SHALL be updated and a single `LIFECYCLE_TRANSITION` event SHALL be persisted in the same DB transaction.
+
+#### Scenario: Event persistence failure rolls back state transition
+GIVEN a valid lifecycle transition request
+WHEN status is updated but event insertion fails within the transaction
+THEN the entire transaction SHALL roll back
+AND the status mutation SHALL NOT be persisted.
 
 #### Scenario: Rejected transition emits no success event
 GIVEN an invalid or stale lifecycle transition request

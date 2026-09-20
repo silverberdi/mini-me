@@ -6,28 +6,38 @@
 
 No observation, read-model generation, discovery check, or queue projection directly writes canonical lifecycle state.
 
-## Current Writers Inventory (Audited)
+## Authority Model: Single Writer vs. Authorized Callers
 
-Direct status writers in current codebase identified for migration to `LifecycleTransitionAuthority`:
+`LifecycleTransitionAuthority` is the SINGLE WRITER of `Change.status` and `BacklogItem.status`.
 
-1. **ReadinessService**: Mutates `change_record.status = ChangeStatus.READY` or `DISCOVERED` during evaluation.
-2. **ContextDiscoveryService / DiscoveryService**: Mutates `BacklogItem.status` (`BACKLOG`, `COMPLETED`, `READY`, `BLOCKED`) and `Change.status` during discovery scans and archive checks.
-3. **IntakeService**: Mutates `BacklogItem.status` across multiple states and executes physical row deletion in `delete_work_item()`.
-4. **SchedulerService**: Mutates `BacklogItem.status = RUNNING` directly upon admission.
-5. **PostMergeService**: Mutates `Change.status = ChangeStatus.DONE`, `BacklogItem.status = WorkItemStatus.COMPLETED`, and forces `readiness_state = ReadinessState.READY` inside `_reconcile_change_and_backlog_item()`.
-6. **OrchestrationService / ExecutionPipeline**: Mutates `WorkItemStatus` and `ChangeStatus` directly during execution stages.
-7. **RestartRecoveryService & ControlPlaneService**: Mutate state during process restart or manual operator overrides.
+Business services act strictly as **authorized callers**:
 
-All of the above direct status assignment paths SHALL be refactored to route exclusively through `LifecycleTransitionAuthority`.
+1. **SchedulerService**: Authorized caller requesting `READY -> ADMITTED` during fresh admission.
+2. **OrchestrationService**: Authorized caller requesting `ADMITTED -> RUNNING` when execution confirmedly starts, as well as valid execution outcome transitions (`RUNNING -> NEEDS_HUMAN`, `BLOCKED`, `COMPLETED`, `CANCELLED`).
+3. **PostMergeService**: Authorized caller requesting `Change.DONE` and `BacklogItem.COMPLETED` when Stage A post-merge gates pass.
+4. **IntakeService**: Authorized caller requesting transitions corresponding to intake commands, including `delete_work_item` requesting `-> CANCELLED`.
+5. **ReadinessService & ContextDiscoveryService**: Pure evaluation/discovery services. They DO NOT write lifecycle status; they evaluate readiness or report findings to decision surfaces.
+6. **RestartRecoveryService & ControlPlaneService**: Authorized callers for recovery or governed operator override commands.
+
+None of these business services persist `Change.status` or `BacklogItem.status` directly.
+
+### Scope Boundary: Job / Run State Machines
+
+`Job` and `Run` maintain their specialized operational state machines (`JobStatus`, `OrchestrationStage`). Stage A migrates all direct writers of `Change.status` and `BacklogItem.status`, but does NOT rewrite or alter the specialized `Job` / `Run` state machines.
 
 ## Persistence Boundary Protection (Bypass Guard)
 
 To ensure future codebase additions cannot bypass `LifecycleTransitionAuthority`:
 
-- `ChangeRepository` and `BacklogItemRepository` `save()` methods SHALL check if the target entity already exists in the database.
-- For existing entities, generic `save()` or `update()` methods SHALL block modifications to `status` (either raising a deterministic `LifecycleBypassError` or ignoring status mutations in generic save).
-- Initial entity creation (`INSERT`) SHALL set the entity's initial status (`ChangeStatus.DISCOVERED` or `WorkItemStatus.BACKLOG`).
-- All subsequent status mutations SHALL be performed strictly via `LifecycleTransitionAuthority.transition_change(...)` or `LifecycleTransitionAuthority.transition_backlog_item(...)`.
+- `ChangeRepository` and `BacklogItemRepository` `save()` and `update()` methods SHALL inspect if the target entity already exists in PostgreSQL.
+- For an existing entity, if generic `save()` or `update()` receives a `status` different from the current durable status in PostgreSQL:
+  - It MUST deterministically raise a `LifecycleBypassError`;
+  - It MUST perform zero lifecycle mutation;
+  - It MUST NOT silently ignore the requested status;
+  - It MUST NOT partially persist metadata from that operation (failing the entire transaction so callers cannot believe the write succeeded).
+- If incoming `status == durable status`, generic `save()` MAY update legitimate non-lifecycle metadata (e.g., descriptions, timestamps, tags).
+- Initial entity creation (`INSERT`) CAN set the entity's initial status (`ChangeStatus.DISCOVERED` or `WorkItemStatus.BACKLOG`).
+- All subsequent status mutations MUST be performed strictly via `LifecycleTransitionAuthority.transition_change(...)` or `LifecycleTransitionAuthority.transition_backlog_item(...)`.
 - `LifecycleTransitionAuthority` SHALL execute an atomic compare-and-set (CAS) SQL primitive:
   ```sql
   UPDATE {table}
@@ -64,20 +74,20 @@ To ensure future codebase additions cannot bypass `LifecycleTransitionAuthority`
 
 ## Phase Separation: ADMITTED vs. RUNNING
 
-- `READY -> ADMITTED`: Executed exclusively by `SchedulerService` / admission authority when fresh admission is atomically authorized under concurrency protection.
-- `ADMITTED -> RUNNING`: Executed exclusively by `OrchestrationService` / execution engine when active execution confirmedly starts.
+- `READY -> ADMITTED`: Requested exclusively by `SchedulerService` (as authorized caller) when fresh admission is atomically authorized under concurrency protection.
+- `ADMITTED -> RUNNING`: Requested exclusively by `OrchestrationService` (as authorized caller) when active execution confirmedly starts.
 - Double writing of `RUNNING` across `SchedulerService` and `IntakeService` is eliminated.
 
 ## Non-Destructive Cancellation
 
 - `IntakeService.delete_work_item()` SHALL NOT execute `self.uow.backlog_items.delete(item.item_id)`.
-- It SHALL execute `LifecycleTransitionAuthority.transition_backlog_item(..., to_state=WorkItemStatus.CANCELLED)`.
+- It SHALL request `LifecycleTransitionAuthority.transition_backlog_item(..., to_state=WorkItemStatus.CANCELLED)`.
 - The `BacklogItem` row, identity, history, links, and audit evidence SHALL be preserved in PostgreSQL.
 - Hard DB deletion / purging is removed from normal SDLC lifecycle operations.
 
 ## PostMergeService Authority Integration
 
-- `PostMergeService._reconcile_change_and_backlog_item()` SHALL route `Change.status = ChangeStatus.DONE` and `BacklogItem.status = WorkItemStatus.COMPLETED` transitions via `LifecycleTransitionAuthority`.
+- `PostMergeService._reconcile_change_and_backlog_item()` SHALL request `Change.status = ChangeStatus.DONE` and `BacklogItem.status = WorkItemStatus.COMPLETED` transitions via `LifecycleTransitionAuthority`.
 - Existing verification gates in `PostMergeService` remain temporary input gates for Stage A.
 
 ## Orthogonality of Readiness and Completion
@@ -87,8 +97,9 @@ To ensure future codebase additions cannot bypass `LifecycleTransitionAuthority`
 
 ## UNKNOWN Evaluation Semantics
 
-- When an evaluation cannot observe required evidence, the evaluation result is explicitly `UNKNOWN`.
-- `UNKNOWN` fails closed: it SHALL NOT authorize `READY`, `ADMITTED`, `RUNNING`, `DONE`, or `COMPLETED`.
+- When an evaluation cannot observe required evidence, the evaluation outcome is explicitly `UNKNOWN`.
+- `UNKNOWN` fails closed: it SHALL NEVER authorize `READY`, `ADMITTED`, `RUNNING`, `DONE`, or `COMPLETED`.
+- `NOT_READY` SHALL NOT be used as a silent alias for `UNKNOWN`.
 - `UNKNOWN` generates a blocking decision or integrity finding according to caller context.
 
 ## Atomic Lifecycle Transition Audit Event
@@ -107,11 +118,13 @@ To ensure future codebase additions cannot bypass `LifecycleTransitionAuthority`
   - `correlation_id` / `operation_id`: request context ID
   - `evidence_references`: list/dict of evidence IDs or SHAs
   - `timestamp`: UTC timestamp
-- Rejected or stale transition requests SHALL NOT emit a success transition event.
+- Transactional coupling: if transition event insertion fails, the status mutation SHALL roll back in the same transaction.
+- Rejected or stale transition requests (CAS failure = 0 rows) SHALL NOT emit a success transition event.
+- Retries of failed or stale requests SHALL NOT produce phantom transition events.
 
 ## Readiness, Discovery, and GET Purity
 
-- `ReadinessService.evaluate()` produces a pure `ReadinessEvaluationResult` without mutating `Change.status` or `BacklogItem.status`.
+- `ReadinessService.evaluate()` produces a pure evaluation result without mutating `Change.status` or `BacklogItem.status`.
 - `DiscoveryService` updates discovery metadata without reactivating terminal `DONE` or `COMPLETED` work.
 - Rebuilding `WorkQueueItem` projections creates zero lifecycle state changes.
 - GET endpoints in `DashboardService`, `StatusService`, and `api/app.py` perform zero lifecycle mutations.
