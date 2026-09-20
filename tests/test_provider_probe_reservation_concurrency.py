@@ -25,8 +25,8 @@ from minime.adapters.provider_adapter import FakeProviderAdapter
 from minime.config import ProbeConfig
 from minime.db.models import Base
 from minime.db.repository import PostgresPersistenceUnitOfWork
-from minime.domain.enums import EventType, ProviderHealthStatus
-from minime.domain.models import ProviderHealth
+from minime.domain.enums import EventType, ProviderHealthStatus, QueuePriority, ReadinessState
+from minime.domain.models import Project, ProviderHealth, WorkQueueItem, utc_now
 from minime.services.provider_health_service import ProviderHealthService
 
 
@@ -139,6 +139,16 @@ class _ExpensiveCountingFake(FakeProviderAdapter):
 def _seed_exhausted_provider(session_factory: sessionmaker[Session], provider: str) -> None:
     with session_factory() as session:
         uow = PostgresPersistenceUnitOfWork(session)
+        p = Project(project_id="test-p", display_name="Test", repository="owner/repo", implementer=provider)
+        uow.projects.save(p)
+        w = WorkQueueItem(
+            project_id="test-p",
+            change_name="test-c",
+            priority=QueuePriority.NORMAL,
+            readiness_state=ReadinessState.READY,
+            discovered_at=utc_now(),
+        )
+        uow.work_queue.save(w)
         uow.provider_health.save(
             ProviderHealth(
                 health_id=f"ph-{provider}",
