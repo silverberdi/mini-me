@@ -44,6 +44,7 @@ from minime.domain.models import (
 from minime.services.budget_service import BudgetService
 from minime.services.discovery_service import WorkDiscoveryService, extract_roadmap_stage
 from minime.services.intake_service import IntakeService
+from minime.services.lifecycle_transition_authority import LifecycleTransitionAuthority
 from minime.services.model_independence_policy import ModelIndependencePolicy
 from minime.services.openrouter_eligibility import (
     OpenRouterEligibilityEvaluator,
@@ -941,15 +942,17 @@ class SchedulerService:
             backlog_item = self.uow.backlog_items.get_by_openspec_change_name(
                 project_id, change_name
             )
-            if backlog_item:
-                updated_backlog = backlog_item.model_copy(
-                    update={
-                        "status": WorkItemStatus.RUNNING,
-                        "run_id": run.run_id,
-                        "updated_at": utc_now(),
-                    }
+            if backlog_item and backlog_item.status != WorkItemStatus.ADMITTED:
+                authority = LifecycleTransitionAuthority(self.uow)
+                authority.transition_backlog_item(
+                    project_id=project_id,
+                    item_key=backlog_item.item_key,
+                    expected_from_state=backlog_item.status,
+                    to_state=WorkItemStatus.ADMITTED,
+                    run_id=run.run_id,
+                    reason_code="scheduler_admission",
+                    actor="scheduler",
                 )
-                self.uow.backlog_items.save(updated_backlog)
 
             self.uow.commit()
 

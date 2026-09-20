@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from tests.conftest import InMemoryPersistenceUnitOfWork
 
-from minime.domain.enums import WorkItemPriority
+from minime.domain.enums import WorkItemPriority, WorkItemStatus
 from minime.domain.models import Project, WorkItemCreateInput, WorkItemUpdateInput
 from minime.services.intake_service import IntakeService
 
@@ -59,10 +59,11 @@ def test_create_and_update_work_item(
     assert updated.priority == WorkItemPriority.CRITICAL
     assert updated.description == "Updated description with security rationale."
 
-    # 3. Delete work item
+    # 3. Delete work item (non-destructive cancellation -> CANCELLED status)
     service.delete_work_item("work-project", item.item_key, operator_email="operator@example.com")
-    deleted = in_memory_uow.backlog_items.get_by_project_and_key("work-project", item.item_key)
-    assert deleted is None
+    cancelled = in_memory_uow.backlog_items.get_by_project_and_key("work-project", item.item_key)
+    assert cancelled is not None
+    assert cancelled.status == WorkItemStatus.CANCELLED
 
 
 def test_create_duplicate_work_item_fails(
@@ -208,7 +209,7 @@ def test_reconcile_backlog_projections_with_terminal_and_human_states(
     rec_merged = in_memory_uow.backlog_items.get_by_project_and_key("work-project", "generic-provider-capacity-recovery-drain")
     assert rec_merged is not None
     assert rec_merged.status == WorkItemStatus.COMPLETED
-    assert rec_merged.readiness_state == ReadinessState.READY
+    assert rec_merged.readiness_state == ReadinessState.NOT_READY
 
     # Verify item_pr transitioned to NEEDS_HUMAN
     rec_pr = in_memory_uow.backlog_items.get_by_project_and_key("work-project", "021-runtime-latency-header")

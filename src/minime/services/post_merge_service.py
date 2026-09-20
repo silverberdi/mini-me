@@ -15,11 +15,11 @@ from minime.domain.enums import (
     JobStatus,
     OrchestrationStage,
     OrchestrationStopOutcome,
-    ReadinessState,
     WorkItemStatus,
 )
 from minime.domain.interfaces import GitHubAdapterInterface, PersistenceUnitOfWork
 from minime.domain.models import Event, MetricFact, utc_now
+from minime.services.lifecycle_transition_authority import LifecycleTransitionAuthority
 from minime.services.openspec_sync import OpenSpecSyncService
 from minime.services.worktree_manager import WorktreeManager
 
@@ -602,15 +602,20 @@ class PostMergeReconciliationService:
         )
 
     def _reconcile_change_and_backlog_item(self, project_id: str, change_name: str) -> None:
-        """Ensure Change and BacklogItem reflect completed post-merge status."""
+        """Ensure Change and BacklogItem reflect completed post-merge status via LifecycleTransitionAuthority."""
         try:
+            authority = LifecycleTransitionAuthority(self.uow)
             if hasattr(self.uow, "changes"):
                 change_record = self.uow.changes.get_by_name(project_id, change_name)
-                if change_record:
-                    change_record.status = ChangeStatus.DONE
-                    change_record.stage = None
-                    change_record.updated_at = utc_now()
-                    self.uow.changes.save(change_record)
+                if change_record and change_record.status != ChangeStatus.DONE:
+                    authority.transition_change(
+                        project_id=project_id,
+                        name=change_name,
+                        expected_from_state=change_record.status,
+                        to_state=ChangeStatus.DONE,
+                        reason_code="post_merge_reconciled",
+                        actor="post_merge",
+                    )
 
             if hasattr(self.uow, "backlog_items"):
                 backlog_item = self.uow.backlog_items.get_by_project_and_key(project_id, change_name)
@@ -620,15 +625,15 @@ class PostMergeReconciliationService:
                         if item.openspec_change_name == change_name or item.item_key == change_name:
                             backlog_item = item
                             break
-                if backlog_item:
-                    updated_bk = backlog_item.model_copy(
-                        update={
-                            "status": WorkItemStatus.COMPLETED,
-                            "readiness_state": ReadinessState.READY,
-                            "updated_at": utc_now(),
-                        }
+                if backlog_item and backlog_item.status != WorkItemStatus.COMPLETED:
+                    authority.transition_backlog_item(
+                        project_id=project_id,
+                        item_key=backlog_item.item_key,
+                        expected_from_state=backlog_item.status,
+                        to_state=WorkItemStatus.COMPLETED,
+                        reason_code="post_merge_reconciled",
+                        actor="post_merge",
                     )
-                    self.uow.backlog_items.save(updated_bk)
         except Exception as exc:
             logger.warning("Error reconciling Change and BacklogItem for '%s': %s", change_name, exc)
 

@@ -100,6 +100,7 @@ from minime.domain.enums import (
     WorkItemSource,
     WorkItemStatus,
 )
+from minime.domain.exceptions import LifecycleBypassError
 from minime.domain.interfaces import (
     AuditFindingRepositoryInterface,
     AuditRepositoryInterface,
@@ -941,13 +942,14 @@ class PostgresChangeRepository(ChangeRepositoryInterface):
                 f"'{change.name}'."
             )
         if physical:
-            # A loaded domain entity carries an explicit lifecycle update.  Its
-            # physical identity and original discovery timestamp are immutable,
-            # but all caller-provided mutable state must be persisted.
             existing = physical
+            if change.status.value != existing.status:
+                raise LifecycleBypassError(
+                    f"Direct lifecycle status mutation on existing Change '{change.name}' via generic save() is forbidden. "
+                    f"Status change from '{existing.status}' to '{change.status.value}' must execute via LifecycleTransitionAuthority."
+                )
             existing.name = change.name
             existing.project_id = change.project_id
-            existing.status = change.status.value
             existing.stage = change.stage
             existing.schema_name = change.schema_name
             existing.proposal_path = change.proposal_path
@@ -958,9 +960,12 @@ class PostgresChangeRepository(ChangeRepositoryInterface):
             existing.last_readiness_reasons = change.last_readiness_reasons
             existing.updated_at = change.updated_at
         elif logical_matches:
-            # An unattached discovery object refreshes filesystem metadata but
-            # must not regress the durable lifecycle/readiness state.
             existing = logical_matches[0]
+            if change.status.value != existing.status:
+                raise LifecycleBypassError(
+                    f"Direct lifecycle status mutation on existing Change '{change.name}' via generic save() is forbidden. "
+                    f"Status change from '{existing.status}' to '{change.status.value}' must execute via LifecycleTransitionAuthority."
+                )
             existing.schema_name = change.schema_name
             existing.proposal_path = change.proposal_path
             existing.tasks_path = change.tasks_path
@@ -3957,10 +3962,14 @@ class PostgresBacklogItemRepository(BacklogItemRepositoryInterface):
             for a in item.human_answers
         ]
         if existing:
+            if item.status.value != existing.status:
+                raise LifecycleBypassError(
+                    f"Direct lifecycle status mutation on existing BacklogItem '{item.item_key}' via generic save() is forbidden. "
+                    f"Status change from '{existing.status}' to '{item.status.value}' must execute via LifecycleTransitionAuthority."
+                )
             existing.title = item.title
             existing.description = item.description
             existing.priority = item.priority.value
-            existing.status = item.status.value
             existing.source = item.source.value
             existing.source_location = item.source_location
             existing.dependencies = item.dependencies

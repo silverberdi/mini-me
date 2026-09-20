@@ -17,6 +17,7 @@ from minime.adapters.openspec import OpenSpecAdapter
 from minime.domain.enums import (
     AuditFindingSeverity,
     AuditStatus,
+    ChangeStatus,
     ContinuationDecision,
     EventType,
     ExecutionOutcome,
@@ -62,6 +63,7 @@ from minime.services.lifecycle_gates import (
     GateStatus,
     VerifyGate,
 )
+from minime.services.lifecycle_transition_authority import LifecycleTransitionAuthority
 from minime.services.lightweight_reconciliation_service import LightweightReconciliationService
 from minime.services.project_service import ProjectService
 from minime.services.provider_policy_service import ProviderPolicyService
@@ -1425,6 +1427,33 @@ class OrchestrationService:
             logger.info(f"COORDINATOR STAGE: {stage.value}")
 
             if stage == OrchestrationStage.ADMITTED:
+                authority = LifecycleTransitionAuthority(self.uow)
+                bk_item = self.uow.backlog_items.get_by_project_and_key(run.project_id, run.change_name)
+                if not bk_item:
+                    for item in self.uow.backlog_items.list_by_project(run.project_id):
+                        if item.openspec_change_name == run.change_name or item.item_key == run.change_name:
+                            bk_item = item
+                            break
+                if bk_item and bk_item.status == WorkItemStatus.ADMITTED:
+                    authority.transition_backlog_item(
+                        project_id=run.project_id,
+                        item_key=bk_item.item_key,
+                        expected_from_state=WorkItemStatus.ADMITTED,
+                        to_state=WorkItemStatus.RUNNING,
+                        run_id=run.run_id,
+                        reason_code="execution_start",
+                        actor="orchestrator",
+                    )
+                change_rec = self.uow.changes.get_by_name(run.project_id, run.change_name)
+                if change_rec and change_rec.status == ChangeStatus.READY:
+                    authority.transition_change(
+                        project_id=run.project_id,
+                        name=run.change_name,
+                        expected_from_state=ChangeStatus.READY,
+                        to_state=ChangeStatus.IN_PROGRESS,
+                        reason_code="execution_start",
+                        actor="orchestrator",
+                    )
                 self._advance_stage(run, OrchestrationStage.PREPARING_EXECUTION)
 
             elif stage == OrchestrationStage.PREPARING_EXECUTION:
@@ -2939,14 +2968,16 @@ class OrchestrationService:
                         new_status = WorkItemStatus.RUNNING
 
                     if new_status and bk_item.status != new_status:
-                        updated_bk = bk_item.model_copy(
-                            update={
-                                "status": new_status,
-                                "run_id": run.run_id,
-                                "updated_at": utc_now(),
-                            }
+                        authority = LifecycleTransitionAuthority(self.uow)
+                        authority.transition_backlog_item(
+                            project_id=run.project_id,
+                            item_key=bk_item.item_key,
+                            expected_from_state=bk_item.status,
+                            to_state=new_status,
+                            run_id=run.run_id,
+                            reason_code=f"stop_run_{stop_outcome.value}",
+                            actor="orchestrator",
                         )
-                        self.uow.backlog_items.save(updated_bk)
             except Exception as exc:
                 logger.debug(f"Non-critical backlog item sync error in _stop_run: {exc}")
 
