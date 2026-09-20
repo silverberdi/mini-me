@@ -5,8 +5,8 @@ from datetime import UTC, datetime, timedelta
 
 from minime.adapters.provider_adapter import FakeProviderAdapter
 from minime.config import ProbeConfig
-from minime.domain.enums import EventType, ProviderResultClass
-from minime.domain.models import Event, NormalizedProviderResult
+from minime.domain.enums import EventType, ProviderResultClass, QueuePriority, ReadinessState
+from minime.domain.models import Event, NormalizedProviderResult, Project, WorkQueueItem, utc_now
 from minime.services.provider_health_service import ProviderHealthService
 
 
@@ -38,10 +38,21 @@ def _service(uow, clock, monkeypatch, max_per_hour):
     return ProviderHealthService(uow, probe_config=cfg)
 
 
-def _setup_exhausted(service):
+def _setup_exhausted(service, provider: str = "codex"):
+    # Seed actionable READY work item so expensive probes are eligible under current governance contract
+    p = Project(project_id="test-p", display_name="Test", repository="owner/repo", implementer=provider)
+    service.uow.projects.save(p)
+    w = WorkQueueItem(
+        project_id="test-p",
+        change_name="test-c",
+        priority=QueuePriority.NORMAL,
+        readiness_state=ReadinessState.READY,
+        discovered_at=utc_now(),
+    )
+    service.uow.work_queue.save(w)
     service.record_outcome(
         NormalizedProviderResult(
-            provider="codex", role="implementer", result_class=ProviderResultClass.QUOTA_LIMIT
+            provider=provider, role="implementer", result_class=ProviderResultClass.QUOTA_LIMIT
         )
     )
 
@@ -242,3 +253,22 @@ async def test_repeated_suppressed_ticks_bounded_suppression_evidence(
         e for e in _events(in_memory_uow) if e.event_type.value == "PROVIDER_PROBE_SUPPRESSED"
     ]
     assert len(suppressed) == 1
+
+
+async def test_expensive_probe_skipped_when_no_actionable_ready_work(in_memory_uow, monkeypatch):
+    """Explicit contract: expensive Codex inference probes are NOT executed when no actionable READY work exists."""
+    clock = _Clock()
+    service = _service(in_memory_uow, clock, monkeypatch, max_per_hour=2)
+    # Record outcome without seeding any READY work queue items in UOW
+    service.record_outcome(
+        NormalizedProviderResult(
+            provider="codex", role="implementer", result_class=ProviderResultClass.QUOTA_LIMIT
+        )
+    )
+    adapter = _ExpensiveFake(name="codex", available=False)
+    monkeypatch.setattr(
+        "minime.services.provider_health_service.get_provider_adapter", lambda p: adapter
+    )
+    res = await service.check_and_probe_provider("codex")
+    assert res is False
+    assert adapter.probe_call_count == 0

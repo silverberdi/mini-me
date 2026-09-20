@@ -13,8 +13,13 @@ from minime.adapters.provider_adapter import (
     OpenRouterProviderAdapter,
 )
 from minime.config import AppConfig, ProbeConfig, ProviderConfig
-from minime.domain.enums import ProviderHealthStatus, ProviderResultClass
-from minime.domain.models import NormalizedProviderResult
+from minime.domain.enums import (
+    ProviderHealthStatus,
+    ProviderResultClass,
+    QueuePriority,
+    ReadinessState,
+)
+from minime.domain.models import NormalizedProviderResult, Project, WorkQueueItem, utc_now
 from minime.services.provider_health_service import ProviderHealthService
 
 
@@ -50,6 +55,17 @@ async def test_concurrent_expensive_probes_serialized_at_cooldown_boundary(
 ):
     clock = _Clock()
     monkeypatch.setattr("minime.services.provider_health_service.utc_now", clock)
+    # Seed actionable READY work queue item so expensive probe is eligible under current governance contract
+    p = Project(project_id="test-p", display_name="Test", repository="owner/repo", implementer="codex")
+    in_memory_uow.projects.save(p)
+    w = WorkQueueItem(
+        project_id="test-p",
+        change_name="test-c",
+        priority=QueuePriority.NORMAL,
+        readiness_state=ReadinessState.READY,
+        discovered_at=utc_now(),
+    )
+    in_memory_uow.work_queue.save(w)
     cfg = ProbeConfig(
         cooldown_seconds=60,
         backoff_base_seconds=60,
