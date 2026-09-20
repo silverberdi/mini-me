@@ -4,86 +4,124 @@
 
 `observation/evidence -> transition decision -> canonical state -> projection`
 
-No observation or projection writes canonical lifecycle directly.
+No observation, read-model generation, discovery check, or queue projection directly writes canonical lifecycle state.
 
-## ChangeStatus
+## Current Writers Inventory (Audited)
 
-Existing states:
-`DISCOVERED, READY, IN_PROGRESS, BLOCKED, DONE, CANCELLED`
+Direct status writers in current codebase identified for migration to `LifecycleTransitionAuthority`:
 
-Terminal:
-`DONE, CANCELLED`
+1. **ReadinessService**: Mutates `change_record.status = ChangeStatus.READY` or `DISCOVERED` during evaluation.
+2. **ContextDiscoveryService / DiscoveryService**: Mutates `BacklogItem.status` (`BACKLOG`, `COMPLETED`, `READY`, `BLOCKED`) and `Change.status` during discovery scans and archive checks.
+3. **IntakeService**: Mutates `BacklogItem.status` across multiple states and executes physical row deletion in `delete_work_item()`.
+4. **SchedulerService**: Mutates `BacklogItem.status = RUNNING` directly upon admission.
+5. **PostMergeService**: Mutates `Change.status = ChangeStatus.DONE`, `BacklogItem.status = WorkItemStatus.COMPLETED`, and forces `readiness_state = ReadinessState.READY` inside `_reconcile_change_and_backlog_item()`.
+6. **OrchestrationService / ExecutionPipeline**: Mutates `WorkItemStatus` and `ChangeStatus` directly during execution stages.
+7. **RestartRecoveryService & ControlPlaneService**: Mutate state during process restart or manual operator overrides.
 
-Allowed:
-- DISCOVERED -> READY | BLOCKED | CANCELLED
-- READY -> IN_PROGRESS | BLOCKED | CANCELLED
-- IN_PROGRESS -> BLOCKED | DONE | CANCELLED
-- BLOCKED -> READY | IN_PROGRESS | CANCELLED
-- DONE -> none
-- CANCELLED -> none
+All of the above direct status assignment paths SHALL be refactored to route exclusively through `LifecycleTransitionAuthority`.
 
-## WorkItemStatus
+## Persistence Boundary Protection (Bypass Guard)
 
-Existing states are retained. `COMPLETED` and `CANCELLED` are terminal. The implementation must
-derive the complete transition matrix from current behavior while preserving:
-- no terminal-to-nonterminal transition;
-- admission only through canonical READY -> ADMITTED authorization;
-- no projection/discovery/readiness ownership of lifecycle.
+To ensure future codebase additions cannot bypass `LifecycleTransitionAuthority`:
 
-## LifecycleTransitionAuthority
+- `ChangeRepository` and `BacklogItemRepository` `save()` methods SHALL check if the target entity already exists in the database.
+- For existing entities, generic `save()` or `update()` methods SHALL block modifications to `status` (either raising a deterministic `LifecycleBypassError` or ignoring status mutations in generic save).
+- Initial entity creation (`INSERT`) SHALL set the entity's initial status (`ChangeStatus.DISCOVERED` or `WorkItemStatus.BACKLOG`).
+- All subsequent status mutations SHALL be performed strictly via `LifecycleTransitionAuthority.transition_change(...)` or `LifecycleTransitionAuthority.transition_backlog_item(...)`.
+- `LifecycleTransitionAuthority` SHALL execute an atomic compare-and-set (CAS) SQL primitive:
+  ```sql
+  UPDATE {table}
+  SET status = :target_status, updated_at = :now
+  WHERE id = :id AND status = :expected_status
+  ```
+- The authority SHALL verify that exactly 1 row was affected. If 0 rows were affected, the transition SHALL be rejected with `STALE_STATE` / `TRANSITION_CONFLICT`. Last-write-wins is forbidden.
 
-Responsibilities:
-- validate current state;
-- validate target transition;
-- validate expected-state/version;
-- validate required evidence;
-- persist state and transition evidence atomically;
-- explicitly flush when same-UoW visibility is required.
+## Exact ChangeStatus Matrix
 
-It does NOT discover work, rank queue, call providers, mutate GitHub/OpenSpec, or repair integrity.
+- `DISCOVERED` -> `READY`, `BLOCKED`, `CANCELLED`
+- `READY` -> `IN_PROGRESS`, `BLOCKED`, `CANCELLED`
+- `IN_PROGRESS` -> `BLOCKED`, `DONE`, `CANCELLED`
+- `BLOCKED` -> `READY`, `IN_PROGRESS`, `CANCELLED`
+- `DONE` -> none (Terminal)
+- `CANCELLED` -> none (Terminal)
 
-## Readiness
+`DONE` and `CANCELLED` are strictly monotonic and terminal. No administrative or recovery bypass may reactivate them.
 
-Readiness becomes a pure evaluation result. It may report READY/NOT_READY/BLOCKED plus reasons and
-evidence refs, but it does not assign Change/Backlog status or commit lifecycle state.
+## Exact WorkItemStatus Matrix
 
-## Discovery
+- `BACKLOG` -> `CONTEXT_CHECK`, `PREPARING`, `CANCELLED`
+- `CONTEXT_CHECK` -> `PREPARING`, `NEEDS_HUMAN`, `BLOCKED`, `CANCELLED`
+- `PREPARING` -> `NEEDS_HUMAN`, `READY`, `BLOCKED`, `CANCELLED`
+- `NEEDS_HUMAN` -> `PREPARING`, `BLOCKED`, `CANCELLED`
+- `READY` -> `ADMITTED`, `NEEDS_HUMAN`, `BLOCKED`, `CANCELLED`
+- `ADMITTED` -> `RUNNING`, `NEEDS_HUMAN`, `BLOCKED`, `CANCELLED`
+- `RUNNING` -> `NEEDS_HUMAN`, `BLOCKED`, `COMPLETED`, `CANCELLED`
+- `BLOCKED` -> `PREPARING`, `READY`, `NEEDS_HUMAN`, `CANCELLED`
+- `COMPLETED` -> none (Terminal)
+- `CANCELLED` -> none (Terminal)
 
-Discovery may observe OpenSpec/GitHub and refresh discovery/projection metadata. Before admission,
-canonical lifecycle is checked. Terminal state plus active external evidence yields a blocking
-integrity contradiction, not reactivation.
+`COMPLETED` and `CANCELLED` are strictly monotonic and terminal.
 
-## Queue
+## Phase Separation: ADMITTED vs. RUNNING
 
-WorkQueueItem is disposable. Rebuilding it does not change lifecycle. `admission_eligible` is never
-sufficient authority to create a Run.
+- `READY -> ADMITTED`: Executed exclusively by `SchedulerService` / admission authority when fresh admission is atomically authorized under concurrency protection.
+- `ADMITTED -> RUNNING`: Executed exclusively by `OrchestrationService` / execution engine when active execution confirmedly starts.
+- Double writing of `RUNNING` across `SchedulerService` and `IntakeService` is eliminated.
 
-## Admission
+## Non-Destructive Cancellation
 
-Fresh admission:
-1. load canonical lifecycle under concurrency protection;
-2. reject terminal/integrity-conflicted work;
-3. evaluate existing prerequisites;
-4. atomically authorize READY -> ADMITTED;
-5. create at most one active Run/Job;
-6. persist decision evidence.
+- `IntakeService.delete_work_item()` SHALL NOT execute `self.uow.backlog_items.delete(item.item_id)`.
+- It SHALL execute `LifecycleTransitionAuthority.transition_backlog_item(..., to_state=WorkItemStatus.CANCELLED)`.
+- The `BacklogItem` row, identity, history, links, and audit evidence SHALL be preserved in PostgreSQL.
+- Hard DB deletion / purging is removed from normal SDLC lifecycle operations.
 
-## UoW
+## PostMergeService Authority Integration
 
-`autoflush=False` may remain. `save()` does not imply query visibility. Explicit flush is centralized
-at lifecycle/UoW boundaries when same-transaction reads require new state.
+- `PostMergeService._reconcile_change_and_backlog_item()` SHALL route `Change.status = ChangeStatus.DONE` and `BacklogItem.status = WorkItemStatus.COMPLETED` transitions via `LifecycleTransitionAuthority`.
+- Existing verification gates in `PostMergeService` remain temporary input gates for Stage A.
 
-## Migration
+## Orthogonality of Readiness and Completion
 
-Strangler sequence:
-1. transition authority + matrix tests;
-2. terminal regression guard;
-3. route readiness-driven transitions;
-4. route intake/backlog transitions;
-5. harden discovery/queue;
-6. harden fresh admission;
-7. route relevant recovery/control-plane writes;
-8. prevent direct lifecycle writes in migrated surfaces;
-9. remove legacy direct-write paths after parity.
+- Completing a `BacklogItem` (`COMPLETED`) SHALL NOT update or overwrite `readiness_state` to `ReadinessState.READY`.
+- `readiness_state` remains an evaluation output representing readiness/admissibility checks. Lifecycle terminal state does not alter readiness history.
 
-No phase may leave two contradictory writers active.
+## UNKNOWN Evaluation Semantics
+
+- When an evaluation cannot observe required evidence, the evaluation result is explicitly `UNKNOWN`.
+- `UNKNOWN` fails closed: it SHALL NOT authorize `READY`, `ADMITTED`, `RUNNING`, `DONE`, or `COMPLETED`.
+- `UNKNOWN` generates a blocking decision or integrity finding according to caller context.
+
+## Atomic Lifecycle Transition Audit Event
+
+- Every successful lifecycle transition SHALL produce exactly one durable transition event within the SAME database transaction unit of work as the state mutation.
+- Event structure:
+  - `event_type`: `LIFECYCLE_TRANSITION`
+  - `aggregate_type`: `"Change"` | `"BacklogItem"`
+  - `aggregate_id`: string ID of entity
+  - `project_id`: project string ID
+  - `change_name` / `item_key`: string key
+  - `from_state`: string representation of prior status
+  - `to_state`: string representation of target status
+  - `reason_code`: string code explaining transition rationale
+  - `actor` / `source`: caller identity
+  - `correlation_id` / `operation_id`: request context ID
+  - `evidence_references`: list/dict of evidence IDs or SHAs
+  - `timestamp`: UTC timestamp
+- Rejected or stale transition requests SHALL NOT emit a success transition event.
+
+## Readiness, Discovery, and GET Purity
+
+- `ReadinessService.evaluate()` produces a pure `ReadinessEvaluationResult` without mutating `Change.status` or `BacklogItem.status`.
+- `DiscoveryService` updates discovery metadata without reactivating terminal `DONE` or `COMPLETED` work.
+- Rebuilding `WorkQueueItem` projections creates zero lifecycle state changes.
+- GET endpoints in `DashboardService`, `StatusService`, and `api/app.py` perform zero lifecycle mutations.
+
+## Unit of Work & Explicit Flush
+
+- Under `autoflush=False`, any same-UoW read requiring updated lifecycle visibility following a transition command SHALL trigger an explicit flush at the boundary.
+
+## Concurrency & Atomic Admission
+
+- Fresh admission uses atomic CAS SQL primitives on PostgreSQL:
+  `UPDATE backlog_items SET status = 'ADMITTED' WHERE id = :id AND status = 'READY'`
+- When two concurrent scheduler workers attempt admission on the same item, exactly one succeeds and the other receives a deterministic `STALE_STATE` / `TRANSITION_CONFLICT` refusal.

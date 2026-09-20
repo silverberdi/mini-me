@@ -25,6 +25,18 @@ Baseline audited: `8f132791131986c5b793b9e93bccf7e5e23e2df0`
 ## Program stages
 
 A. `canonical-lifecycle-transition-authority`
+   - Single transition authority for `Change` and `BacklogItem` lifecycle using existing enums.
+   - Persistence-level bypass protection (generic `save()` cannot mutate status; atomic CAS required).
+   - Strict `ChangeStatus` matrix (`DISCOVERED`, `READY`, `IN_PROGRESS`, `BLOCKED`, `DONE`, `CANCELLED`).
+   - Strict `WorkItemStatus` matrix (`BACKLOG`, `CONTEXT_CHECK`, `PREPARING`, `NEEDS_HUMAN`, `READY`, `ADMITTED`, `RUNNING`, `BLOCKED`, `COMPLETED`, `CANCELLED`).
+   - Phase separation: `READY -> ADMITTED` (admission authority) and `ADMITTED -> RUNNING` (execution start).
+   - Non-destructive cancellation (`delete_work_item` performs transition to `CANCELLED` without hard DB delete).
+   - `PostMergeService` integrated as mandatory authority caller for `Change.DONE` and `BacklogItem.COMPLETED`.
+   - Orthogonality: `COMPLETED` does not force or fabricate `readiness_state = READY`.
+   - `UNKNOWN` evaluation results fail closed and block state progression.
+   - Atomic lifecycle transition events in the same DB transaction.
+   - Read/GET surfaces and queue rebuilds perform zero lifecycle writes.
+
 B. `fail-closed-external-evidence-and-actions`
 C. `managed-repository-runtime-isolation`
 D. `durable-intake-and-closure-sagas`
