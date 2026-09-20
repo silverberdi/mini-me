@@ -664,7 +664,6 @@ class IntakeService:
                         if len(parts) == 4 and parts[0].isdigit() and len(parts[0]) == 4:
                             archived_change_names.add(parts[3])
 
-        mutated = False
         reconciled_items: list[BacklogItem] = []
         for item in items:
             change_name = item.openspec_change_name or item.item_key
@@ -718,34 +717,16 @@ class IntakeService:
                 else:
                     new_status = WorkItemStatus.BACKLOG
 
-            if new_status != item.status:
-                authority = LifecycleTransitionAuthority(self.uow)
-                item = authority.transition_backlog_item(
-                    project_id=project_id,
-                    item_key=item.item_key,
-                    expected_from_state=item.status,
-                    to_state=new_status,
-                    run_id=new_run_id,
-                    reason_code="reconcile_projections",
-                    actor="reconciler",
-                )
-                reconciled_items.append(item)
-                mutated = True
-            elif new_run_id != item.run_id:
-                updated_item = item.model_copy(
+            if new_status != item.status or new_run_id != item.run_id:
+                projected_item = item.model_copy(
                     update={
+                        "status": new_status,
                         "run_id": new_run_id,
-                        "updated_at": utc_now(),
                     }
                 )
-                self.uow.backlog_items.save(updated_item)
-                reconciled_items.append(updated_item)
-                mutated = True
+                reconciled_items.append(projected_item)
             else:
                 reconciled_items.append(item)
-
-        if mutated:
-            self.uow.commit()
 
         return reconciled_items
 

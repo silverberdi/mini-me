@@ -2941,45 +2941,37 @@ class OrchestrationService:
         run.updated_at = utc_now()
         self.uow.orchestration_runs.save(run)
 
-        # Synchronize associated BacklogItem status
+        # Synchronize associated BacklogItem status for genuine lifecycle stop outcomes
         if hasattr(self.uow, "backlog_items"):
-            try:
-                bk_item = self.uow.backlog_items.get_by_project_and_key(run.project_id, run.change_name)
-                if not bk_item:
-                    for item in self.uow.backlog_items.list_by_project(run.project_id):
-                        if item.openspec_change_name == run.change_name or item.item_key == run.change_name:
-                            bk_item = item
-                            break
-                if bk_item:
-                    new_status = None
-                    if stop_outcome == OrchestrationStopOutcome.COMPLETED:
-                        new_status = WorkItemStatus.COMPLETED
-                    elif stop_outcome in {
-                        OrchestrationStopOutcome.NEEDS_HUMAN,
-                        OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE,
-                    }:
-                        new_status = WorkItemStatus.NEEDS_HUMAN
-                    elif stop_outcome == OrchestrationStopOutcome.CANCELLED:
-                        new_status = WorkItemStatus.CANCELLED
-                    elif stop_outcome in {
-                        OrchestrationStopOutcome.WAITING_CAPACITY,
-                        OrchestrationStopOutcome.WAITING_EXTERNAL,
-                    }:
-                        new_status = WorkItemStatus.RUNNING
+            bk_item = self.uow.backlog_items.get_by_project_and_key(run.project_id, run.change_name)
+            if not bk_item:
+                for item in self.uow.backlog_items.list_by_project(run.project_id):
+                    if item.openspec_change_name == run.change_name or item.item_key == run.change_name:
+                        bk_item = item
+                        break
+            if bk_item:
+                target_status = None
+                if stop_outcome == OrchestrationStopOutcome.CANCELLED:
+                    target_status = WorkItemStatus.CANCELLED
+                elif stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN:
+                    target_status = WorkItemStatus.NEEDS_HUMAN
 
-                    if new_status and bk_item.status != new_status:
+                if target_status and bk_item.status != target_status:
+                    from minime.services.lifecycle_transition_authority import (
+                        ALLOWED_WORK_ITEM_TRANSITIONS,
+                    )
+                    allowed = ALLOWED_WORK_ITEM_TRANSITIONS.get(bk_item.status, set())
+                    if target_status in allowed:
                         authority = LifecycleTransitionAuthority(self.uow)
                         authority.transition_backlog_item(
                             project_id=run.project_id,
                             item_key=bk_item.item_key,
                             expected_from_state=bk_item.status,
-                            to_state=new_status,
+                            to_state=target_status,
                             run_id=run.run_id,
                             reason_code=f"stop_run_{stop_outcome.value}",
                             actor="orchestrator",
                         )
-            except Exception as exc:
-                logger.debug(f"Non-critical backlog item sync error in _stop_run: {exc}")
 
         event_type = (
             EventType.READY_FOR_HUMAN_MERGE.value

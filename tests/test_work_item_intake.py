@@ -202,22 +202,32 @@ def test_reconcile_backlog_projections_with_terminal_and_human_states(
     )
     in_memory_uow.backlog_items.save(item_pristine)
 
-    # Run reconciliation
-    service.reconcile_backlog_projections("work-project")
+    # Run reconciliation (returns pure display projection list)
+    projections = service.reconcile_backlog_projections("work-project")
+    proj_map = {p.item_key: p for p in projections}
 
-    # Verify item_merged transitioned to COMPLETED
-    rec_merged = in_memory_uow.backlog_items.get_by_project_and_key("work-project", "generic-provider-capacity-recovery-drain")
+    # Verify item_merged projected to COMPLETED for display
+    rec_merged = proj_map.get("generic-provider-capacity-recovery-drain")
     assert rec_merged is not None
     assert rec_merged.status == WorkItemStatus.COMPLETED
-    assert rec_merged.readiness_state == ReadinessState.NOT_READY
 
-    # Verify item_pr transitioned to NEEDS_HUMAN
-    rec_pr = in_memory_uow.backlog_items.get_by_project_and_key("work-project", "021-runtime-latency-header")
+    # DB state remains PREPARING (pure, zero DB mutation)
+    db_merged = in_memory_uow.backlog_items.get_by_project_and_key("work-project", "generic-provider-capacity-recovery-drain")
+    assert db_merged is not None
+    assert db_merged.status == WorkItemStatus.PREPARING
+
+    # Verify item_pr projected to NEEDS_HUMAN for display
+    rec_pr = proj_map.get("021-runtime-latency-header")
     assert rec_pr is not None
     assert rec_pr.status == WorkItemStatus.NEEDS_HUMAN
 
+    # DB state remains RUNNING (pure)
+    db_pr = in_memory_uow.backlog_items.get_by_project_and_key("work-project", "021-runtime-latency-header")
+    assert db_pr is not None
+    assert db_pr.status == WorkItemStatus.RUNNING
+
     # Verify item_pristine remains strictly BACKLOG / NOT_READY
-    rec_pristine = in_memory_uow.backlog_items.get_by_project_and_key("work-project", "autonomous-intake-preparation-admission")
+    rec_pristine = proj_map.get("autonomous-intake-preparation-admission")
     assert rec_pristine is not None
     assert rec_pristine.status == WorkItemStatus.BACKLOG
     assert rec_pristine.readiness_state == ReadinessState.NOT_READY

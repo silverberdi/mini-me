@@ -33,12 +33,12 @@ ALLOWED_CHANGE_TRANSITIONS: dict[ChangeStatus, set[ChangeStatus]] = {
 ALLOWED_WORK_ITEM_TRANSITIONS: dict[WorkItemStatus, set[WorkItemStatus]] = {
     WorkItemStatus.BACKLOG: {WorkItemStatus.CONTEXT_CHECK, WorkItemStatus.PREPARING, WorkItemStatus.CANCELLED},
     WorkItemStatus.CONTEXT_CHECK: {WorkItemStatus.PREPARING, WorkItemStatus.NEEDS_HUMAN, WorkItemStatus.BLOCKED, WorkItemStatus.CANCELLED},
-    WorkItemStatus.PREPARING: {WorkItemStatus.NEEDS_HUMAN, WorkItemStatus.READY, WorkItemStatus.BLOCKED, WorkItemStatus.COMPLETED, WorkItemStatus.CANCELLED},
-    WorkItemStatus.NEEDS_HUMAN: {WorkItemStatus.PREPARING, WorkItemStatus.BLOCKED, WorkItemStatus.COMPLETED, WorkItemStatus.CANCELLED},
-    WorkItemStatus.READY: {WorkItemStatus.ADMITTED, WorkItemStatus.NEEDS_HUMAN, WorkItemStatus.BLOCKED, WorkItemStatus.COMPLETED, WorkItemStatus.CANCELLED},
-    WorkItemStatus.ADMITTED: {WorkItemStatus.RUNNING, WorkItemStatus.NEEDS_HUMAN, WorkItemStatus.BLOCKED, WorkItemStatus.COMPLETED, WorkItemStatus.CANCELLED},
+    WorkItemStatus.PREPARING: {WorkItemStatus.NEEDS_HUMAN, WorkItemStatus.READY, WorkItemStatus.BLOCKED, WorkItemStatus.CANCELLED},
+    WorkItemStatus.NEEDS_HUMAN: {WorkItemStatus.PREPARING, WorkItemStatus.BLOCKED, WorkItemStatus.CANCELLED},
+    WorkItemStatus.READY: {WorkItemStatus.ADMITTED, WorkItemStatus.NEEDS_HUMAN, WorkItemStatus.BLOCKED, WorkItemStatus.CANCELLED},
+    WorkItemStatus.ADMITTED: {WorkItemStatus.RUNNING, WorkItemStatus.NEEDS_HUMAN, WorkItemStatus.BLOCKED, WorkItemStatus.CANCELLED},
     WorkItemStatus.RUNNING: {WorkItemStatus.NEEDS_HUMAN, WorkItemStatus.BLOCKED, WorkItemStatus.COMPLETED, WorkItemStatus.CANCELLED},
-    WorkItemStatus.BLOCKED: {WorkItemStatus.PREPARING, WorkItemStatus.READY, WorkItemStatus.NEEDS_HUMAN, WorkItemStatus.COMPLETED, WorkItemStatus.CANCELLED},
+    WorkItemStatus.BLOCKED: {WorkItemStatus.PREPARING, WorkItemStatus.READY, WorkItemStatus.NEEDS_HUMAN, WorkItemStatus.CANCELLED},
     WorkItemStatus.COMPLETED: set(),
     WorkItemStatus.CANCELLED: set(),
 }

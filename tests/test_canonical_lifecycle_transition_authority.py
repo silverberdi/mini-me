@@ -1,14 +1,21 @@
-"""Comprehensive unit and integration tests for Canonical Lifecycle Transition Authority."""
+"""Comprehensive unit, integration, concurrency, and purity tests for Canonical Lifecycle Transition Authority."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
+from minime.db.models import BacklogItemModel, Base, EventModel, ProjectModel
+from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.domain.enums import (
     ChangeStatus,
     EventType,
+    OrchestrationStage,
+    OrchestrationStopOutcome,
+    ProjectStatus,
     ReadinessState,
     WorkItemSource,
     WorkItemStatus,
@@ -18,9 +25,11 @@ from minime.domain.exceptions import (
     LifecycleInvalidTransitionError,
     LifecycleTransitionConflictError,
 )
-from minime.domain.models import BacklogItem, Change, Project, utc_now
+from minime.domain.models import BacklogItem, Change, OrchestrationRun, Project, utc_now
 from minime.services.intake_service import IntakeService
 from minime.services.lifecycle_transition_authority import (
+    ALLOWED_CHANGE_TRANSITIONS,
+    ALLOWED_WORK_ITEM_TRANSITIONS,
     LifecycleTransitionAuthority,
 )
 from minime.services.post_merge_service import PostMergeReconciliationService
@@ -39,79 +48,72 @@ def _setup_project(uow, project_id="test-proj") -> Project:
     return project
 
 
-def test_valid_and_invalid_change_matrices(in_memory_uow):
-    """Test all valid Change transitions succeed and invalid transitions fail."""
+@pytest.mark.parametrize("state", list(ChangeStatus))
+def test_exhaustive_change_matrix(in_memory_uow, state):
+    """Exhaustively verify every allowed target succeeds and every disallowed target fails for ChangeStatus."""
     _setup_project(in_memory_uow)
     authority = LifecycleTransitionAuthority(in_memory_uow)
     now = utc_now()
 
-    # Initial creation
-    c = Change(project_id="test-proj", name="ch-1", status=ChangeStatus.DISCOVERED, discovered_at=now, updated_at=now)
-    in_memory_uow.changes.save(c)
+    allowed = ALLOWED_CHANGE_TRANSITIONS[state]
+    all_states = set(ChangeStatus)
+    disallowed = all_states - allowed
 
-    # Valid: DISCOVERED -> READY
-    c1 = authority.transition_change("test-proj", "ch-1", ChangeStatus.DISCOVERED, ChangeStatus.READY)
-    assert c1.status == ChangeStatus.READY
+    for target in allowed:
+        c = Change(project_id="test-proj", name=f"ch-{state.value}-{target.value}", status=state, discovered_at=now, updated_at=now)
+        in_memory_uow.changes.save(c)
+        res = authority.transition_change("test-proj", f"ch-{state.value}-{target.value}", state, target)
+        assert res.status == target
 
-    # Valid: READY -> IN_PROGRESS
-    c2 = authority.transition_change("test-proj", "ch-1", ChangeStatus.READY, ChangeStatus.IN_PROGRESS)
-    assert c2.status == ChangeStatus.IN_PROGRESS
-
-    # Valid: IN_PROGRESS -> DONE
-    c3 = authority.transition_change("test-proj", "ch-1", ChangeStatus.IN_PROGRESS, ChangeStatus.DONE)
-    assert c3.status == ChangeStatus.DONE
-
-    # Invalid: DONE -> READY (Terminal regression)
-    with pytest.raises(LifecycleInvalidTransitionError):
-        authority.transition_change("test-proj", "ch-1", ChangeStatus.DONE, ChangeStatus.READY)
+    for target in disallowed:
+        c = Change(project_id="test-proj", name=f"ch-dis-{state.value}-{target.value}", status=state, discovered_at=now, updated_at=now)
+        in_memory_uow.changes.save(c)
+        with pytest.raises(LifecycleInvalidTransitionError):
+            authority.transition_change("test-proj", f"ch-dis-{state.value}-{target.value}", state, target)
 
 
-def test_valid_and_invalid_work_item_matrices(in_memory_uow):
-    """Test all valid WorkItem transitions succeed and invalid transitions fail."""
+@pytest.mark.parametrize("state", list(WorkItemStatus))
+def test_exhaustive_work_item_matrix(in_memory_uow, state):
+    """Exhaustively verify every allowed target succeeds and every disallowed target fails for WorkItemStatus."""
     _setup_project(in_memory_uow)
     authority = LifecycleTransitionAuthority(in_memory_uow)
     now = utc_now()
 
-    # Initial creation
-    bk = BacklogItem(
-        project_id="test-proj",
-        item_key="bk-1",
-        title="Test item",
-        description="desc",
-        status=WorkItemStatus.BACKLOG,
-        source=WorkItemSource.ROADMAP,
-        created_at=now,
-        updated_at=now,
-    )
-    in_memory_uow.backlog_items.save(bk)
+    allowed = ALLOWED_WORK_ITEM_TRANSITIONS[state]
+    all_states = set(WorkItemStatus)
+    disallowed = all_states - allowed
 
-    # Valid: BACKLOG -> CONTEXT_CHECK
-    i1 = authority.transition_backlog_item("test-proj", "bk-1", WorkItemStatus.BACKLOG, WorkItemStatus.CONTEXT_CHECK)
-    assert i1.status == WorkItemStatus.CONTEXT_CHECK
+    for target in allowed:
+        key = f"bk-{state.value}-{target.value}"
+        bk = BacklogItem(
+            project_id="test-proj",
+            item_key=key,
+            title=key,
+            description="desc",
+            status=state,
+            source=WorkItemSource.ROADMAP,
+            created_at=now,
+            updated_at=now,
+        )
+        in_memory_uow.backlog_items.save(bk)
+        res = authority.transition_backlog_item("test-proj", key, state, target)
+        assert res.status == target
 
-    # Valid: CONTEXT_CHECK -> PREPARING
-    i2 = authority.transition_backlog_item("test-proj", "bk-1", WorkItemStatus.CONTEXT_CHECK, WorkItemStatus.PREPARING)
-    assert i2.status == WorkItemStatus.PREPARING
-
-    # Valid: PREPARING -> READY
-    i3 = authority.transition_backlog_item("test-proj", "bk-1", WorkItemStatus.PREPARING, WorkItemStatus.READY)
-    assert i3.status == WorkItemStatus.READY
-
-    # Valid: READY -> ADMITTED
-    i4 = authority.transition_backlog_item("test-proj", "bk-1", WorkItemStatus.READY, WorkItemStatus.ADMITTED)
-    assert i4.status == WorkItemStatus.ADMITTED
-
-    # Valid: ADMITTED -> RUNNING
-    i5 = authority.transition_backlog_item("test-proj", "bk-1", WorkItemStatus.ADMITTED, WorkItemStatus.RUNNING)
-    assert i5.status == WorkItemStatus.RUNNING
-
-    # Valid: RUNNING -> COMPLETED
-    i6 = authority.transition_backlog_item("test-proj", "bk-1", WorkItemStatus.RUNNING, WorkItemStatus.COMPLETED)
-    assert i6.status == WorkItemStatus.COMPLETED
-
-    # Invalid: COMPLETED -> READY (Terminal regression)
-    with pytest.raises(LifecycleInvalidTransitionError):
-        authority.transition_backlog_item("test-proj", "bk-1", WorkItemStatus.COMPLETED, WorkItemStatus.READY)
+    for target in disallowed:
+        key = f"bk-dis-{state.value}-{target.value}"
+        bk = BacklogItem(
+            project_id="test-proj",
+            item_key=key,
+            title=key,
+            description="desc",
+            status=state,
+            source=WorkItemSource.ROADMAP,
+            created_at=now,
+            updated_at=now,
+        )
+        in_memory_uow.backlog_items.save(bk)
+        with pytest.raises(LifecycleInvalidTransitionError):
+            authority.transition_backlog_item("test-proj", key, state, target)
 
 
 def test_generic_save_bypass_protection_change(in_memory_uow):
@@ -121,12 +123,10 @@ def test_generic_save_bypass_protection_change(in_memory_uow):
     c = Change(project_id="test-proj", name="ch-bypass", status=ChangeStatus.READY, discovered_at=now, updated_at=now)
     in_memory_uow.changes.save(c)
 
-    # Attempt to bypass authority via save() with modified status
     bypassed_c = c.model_copy(update={"status": ChangeStatus.DONE})
     with pytest.raises(LifecycleBypassError):
         in_memory_uow.changes.save(bypassed_c)
 
-    # Durable status in DB must remain READY
     db_c = in_memory_uow.changes.get_by_name("test-proj", "ch-bypass")
     assert db_c.status == ChangeStatus.READY
 
@@ -147,12 +147,10 @@ def test_generic_save_bypass_protection_backlog_item(in_memory_uow):
     )
     in_memory_uow.backlog_items.save(bk)
 
-    # Attempt to bypass authority via save() with modified status and metadata
     bypassed_bk = bk.model_copy(update={"status": WorkItemStatus.RUNNING, "description": "bypassed desc"})
     with pytest.raises(LifecycleBypassError):
         in_memory_uow.backlog_items.save(bypassed_bk)
 
-    # Durable status in DB must remain READY and metadata unchanged from failed attempt
     db_bk = in_memory_uow.backlog_items.get_by_project_and_key("test-proj", "bk-bypass")
     assert db_bk.status == WorkItemStatus.READY
     assert db_bk.description == "desc"
@@ -201,15 +199,12 @@ def test_atomic_cas_stale_conflict_and_event_exactness(in_memory_uow):
     )
     in_memory_uow.backlog_items.save(bk)
 
-    # Attempt transition expecting wrong state (ADMITTED instead of READY, but ADMITTED->RUNNING is valid in matrix)
     with pytest.raises(LifecycleTransitionConflictError):
         authority.transition_backlog_item("test-proj", "bk-cas", WorkItemStatus.ADMITTED, WorkItemStatus.RUNNING)
 
-    # Zero transition events emitted
     events = [e for e in in_memory_uow.events.list_events("test-proj") if e.event_type == EventType.LIFECYCLE_TRANSITION]
     assert len(events) == 0
 
-    # Successful transition
     authority.transition_backlog_item("test-proj", "bk-cas", WorkItemStatus.READY, WorkItemStatus.ADMITTED)
     events = [e for e in in_memory_uow.events.list_events("test-proj") if e.event_type == EventType.LIFECYCLE_TRANSITION]
     assert len(events) == 1
@@ -236,7 +231,6 @@ def test_non_destructive_cancellation(in_memory_uow):
     intake = IntakeService(in_memory_uow, project_root=".")
     intake.delete_work_item("test-proj", "bk-cancel", operator_email="operator@test.com")
 
-    # Item must still exist in DB in CANCELLED status
     db_bk = in_memory_uow.backlog_items.get_by_project_and_key("test-proj", "bk-cancel")
     assert db_bk is not None
     assert db_bk.status == WorkItemStatus.CANCELLED
@@ -252,7 +246,6 @@ def test_readiness_service_purity(in_memory_uow, tmp_path: Path):
     readiness = ReadinessService(in_memory_uow)
     eval_res = readiness.evaluate_change_readiness("test-proj", "ch-pure", project_root=str(tmp_path))
 
-    # Evaluation returns result without altering Change.status
     db_c = in_memory_uow.changes.get_by_name("test-proj", "ch-pure")
     assert db_c.status == ChangeStatus.DISCOVERED
     assert db_c.last_readiness_status == eval_res.status
@@ -285,5 +278,349 @@ def test_post_merge_authority_integration_and_readiness_orthogonality(in_memory_
 
     db_bk = in_memory_uow.backlog_items.get_by_project_and_key("test-proj", "ch-pm")
     assert db_bk.status == WorkItemStatus.COMPLETED
-    # Readiness state is preserved as NOT_READY (not forced to READY)
     assert db_bk.readiness_state == ReadinessState.NOT_READY
+
+
+# -----------------------------------------------------------------------------
+# Projection Purity Tests (Requirement 8)
+# -----------------------------------------------------------------------------
+
+def test_projection_purity_archive_directory_no_persistence(in_memory_uow, tmp_path: Path):
+    """A. Archive directory exists + Backlog nonterminal -> reconcile_backlog_projections() does NOT persist COMPLETED in DB."""
+    _setup_project(in_memory_uow)
+    now = utc_now()
+
+    openspec_dir = tmp_path / "openspec" / "changes" / "archive" / "0001-archived-change"
+    openspec_dir.mkdir(parents=True)
+
+    bk = BacklogItem(
+        project_id="test-proj",
+        item_key="archived-change",
+        title="Archived Item",
+        status=WorkItemStatus.BACKLOG,
+        openspec_change_name="archived-change",
+        created_at=now,
+        updated_at=now,
+    )
+    in_memory_uow.backlog_items.save(bk)
+
+    intake = IntakeService(in_memory_uow, project_root=tmp_path)
+    projections = intake.reconcile_backlog_projections("test-proj")
+
+    assert len(projections) == 1
+    assert projections[0].status == WorkItemStatus.COMPLETED
+
+    db_bk = in_memory_uow.backlog_items.get_by_project_and_key("test-proj", "archived-change")
+    assert db_bk.status == WorkItemStatus.BACKLOG
+
+    events = [e for e in in_memory_uow.events.list_events("test-proj") if e.event_type == EventType.LIFECYCLE_TRANSITION]
+    assert len(events) == 0
+
+
+def test_projection_purity_active_run_no_persistence(in_memory_uow):
+    """B. Latest Run active -> projection call returns RUNNING display status but does NOT persist in DB."""
+    _setup_project(in_memory_uow)
+    now = utc_now()
+    bk = BacklogItem(
+        project_id="test-proj",
+        item_key="active-item",
+        title="Active Item",
+        status=WorkItemStatus.BACKLOG,
+        openspec_change_name="active-item",
+        created_at=now,
+        updated_at=now,
+    )
+    in_memory_uow.backlog_items.save(bk)
+    in_memory_uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id="run-active",
+            project_id="test-proj",
+            change_name="active-item",
+            base_sha="base123",
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            is_active=True,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+
+    intake = IntakeService(in_memory_uow, project_root=".")
+    projections = intake.reconcile_backlog_projections("test-proj")
+
+    assert len(projections) == 1
+    assert projections[0].status == WorkItemStatus.RUNNING
+
+    db_bk = in_memory_uow.backlog_items.get_by_project_and_key("test-proj", "active-item")
+    assert db_bk.status == WorkItemStatus.BACKLOG
+
+    events = [e for e in in_memory_uow.events.list_events("test-proj") if e.event_type == EventType.LIFECYCLE_TRANSITION]
+    assert len(events) == 0
+
+
+def test_projection_purity_stop_outcome_no_persistence(in_memory_uow):
+    """C. Run stop_outcome = READY_FOR_HUMAN_MERGE -> projection returns NEEDS_HUMAN display status but does NOT persist in DB."""
+    _setup_project(in_memory_uow)
+    now = utc_now()
+    bk = BacklogItem(
+        project_id="test-proj",
+        item_key="pr-item",
+        title="PR Item",
+        status=WorkItemStatus.BACKLOG,
+        openspec_change_name="pr-item",
+        created_at=now,
+        updated_at=now,
+    )
+    in_memory_uow.backlog_items.save(bk)
+    in_memory_uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id="run-pr",
+            project_id="test-proj",
+            change_name="pr-item",
+            base_sha="base123",
+            current_stage=OrchestrationStage.PR_PREPARED,
+            stop_outcome=OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE,
+            is_active=False,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+
+    intake = IntakeService(in_memory_uow, project_root=".")
+    projections = intake.reconcile_backlog_projections("test-proj")
+
+    assert projections[0].status == WorkItemStatus.NEEDS_HUMAN
+
+    db_bk = in_memory_uow.backlog_items.get_by_project_and_key("test-proj", "pr-item")
+    assert db_bk.status == WorkItemStatus.BACKLOG
+
+    events = [e for e in in_memory_uow.events.list_events("test-proj") if e.event_type == EventType.LIFECYCLE_TRANSITION]
+    assert len(events) == 0
+
+
+def test_projection_purity_repeated_calls_zero_events(in_memory_uow):
+    """D. Repeated reconcile_backlog_projections() calls produce zero lifecycle transition events."""
+    _setup_project(in_memory_uow)
+    now = utc_now()
+    bk = BacklogItem(
+        project_id="test-proj",
+        item_key="rep-item",
+        title="Repeated Item",
+        status=WorkItemStatus.READY,
+        created_at=now,
+        updated_at=now,
+    )
+    in_memory_uow.backlog_items.save(bk)
+
+    intake = IntakeService(in_memory_uow, project_root=".")
+    for _ in range(5):
+        intake.reconcile_backlog_projections("test-proj")
+
+    events = [e for e in in_memory_uow.events.list_events("test-proj") if e.event_type == EventType.LIFECYCLE_TRANSITION]
+    assert len(events) == 0
+
+
+def test_terminal_item_no_resurrection_on_external_evidence(in_memory_uow):
+    """E. Terminal COMPLETED item must not be resurrected by active run evidence."""
+    _setup_project(in_memory_uow)
+    now = utc_now()
+    bk = BacklogItem(
+        project_id="test-proj",
+        item_key="term-item",
+        title="Terminal Item",
+        status=WorkItemStatus.COMPLETED,
+        openspec_change_name="term-item",
+        created_at=now,
+        updated_at=now,
+    )
+    in_memory_uow.backlog_items.save(bk)
+    in_memory_uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id="run-stale",
+            project_id="test-proj",
+            change_name="term-item",
+            base_sha="base123",
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            is_active=True,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+
+    intake = IntakeService(in_memory_uow, project_root=".")
+    projections = intake.reconcile_backlog_projections("test-proj")
+    assert len(projections) == 1
+
+    db_bk = in_memory_uow.backlog_items.get_by_project_and_key("test-proj", "term-item")
+    assert db_bk.status == WorkItemStatus.COMPLETED
+
+    # Authority rejects any attempt to transition from COMPLETED
+    authority = LifecycleTransitionAuthority(in_memory_uow)
+    with pytest.raises(LifecycleInvalidTransitionError):
+        authority.transition_backlog_item("test-proj", "term-item", WorkItemStatus.COMPLETED, WorkItemStatus.RUNNING)
+
+
+# -----------------------------------------------------------------------------
+# Concurrency & Event Transactionality Proofs (Requirements 6 & 9)
+# -----------------------------------------------------------------------------
+
+def test_real_persistence_concurrency_cas_conflict():
+    """Requirement 9: Prove concurrent CAS using two SQLAlchemy sessions against real persistence engine."""
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine)
+
+    with SessionLocal() as init_session:
+        init_session.add(
+            ProjectModel(
+                id="concurr-proj",
+                display_name="Concurrency Project",
+                repository="owner/repo",
+                checks=[],
+                external_providers_allowed=[],
+                deployment_preview={},
+                deployment_production={},
+                status=ProjectStatus.ACTIVE.value,
+            )
+        )
+        init_session.add(
+            BacklogItemModel(
+                id="item-conc-id",
+                project_id="concurr-proj",
+                item_key="conc-item",
+                title="Concurrent Item",
+                status=WorkItemStatus.READY.value,
+                source=WorkItemSource.ROADMAP.value,
+                dependencies=[],
+                readiness_state=ReadinessState.READY.value,
+                unmet_readiness_reasons=[],
+                human_questions=[],
+                human_answers=[],
+                acceptance_criteria=[],
+            )
+        )
+        init_session.commit()
+
+    session_a = SessionLocal()
+    session_b = SessionLocal()
+
+    uow_a = PostgresPersistenceUnitOfWork(session_a)
+    uow_b = PostgresPersistenceUnitOfWork(session_b)
+
+    auth_a = LifecycleTransitionAuthority(uow_a)
+    auth_b = LifecycleTransitionAuthority(uow_b)
+
+    # Session A executes READY -> ADMITTED successfully
+    auth_a.transition_backlog_item("concurr-proj", "conc-item", WorkItemStatus.READY, WorkItemStatus.ADMITTED)
+    session_a.commit()
+
+    # Session B attempts stale READY -> ADMITTED
+    with pytest.raises(LifecycleTransitionConflictError):
+        auth_b.transition_backlog_item("concurr-proj", "conc-item", WorkItemStatus.READY, WorkItemStatus.ADMITTED)
+        session_b.commit()
+    session_b.rollback()
+
+    session_a.close()
+    session_b.close()
+
+    with SessionLocal() as verify_session:
+        item = verify_session.query(BacklogItemModel).filter_by(item_key="conc-item").first()
+        assert item.status == WorkItemStatus.ADMITTED.value
+
+        event_count = verify_session.query(EventModel).filter_by(event_type=EventType.LIFECYCLE_TRANSITION.value).count()
+        assert event_count == 1
+
+
+def test_event_transactionality_and_rollback():
+    """Requirement 6: Prove event insert failure causes full transaction rollback leaving original status."""
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine)
+
+    with SessionLocal() as init_session:
+        init_session.add(
+            ProjectModel(
+                id="roll-proj",
+                display_name="Rollback Project",
+                repository="owner/repo",
+                checks=[],
+                external_providers_allowed=[],
+                deployment_preview={},
+                deployment_production={},
+                status=ProjectStatus.ACTIVE.value,
+            )
+        )
+        init_session.add(
+            BacklogItemModel(
+                id="item-roll-id",
+                project_id="roll-proj",
+                item_key="roll-item",
+                title="Rollback Item",
+                status=WorkItemStatus.READY.value,
+                source=WorkItemSource.ROADMAP.value,
+                dependencies=[],
+                readiness_state=ReadinessState.READY.value,
+                unmet_readiness_reasons=[],
+                human_questions=[],
+                human_answers=[],
+                acceptance_criteria=[],
+            )
+        )
+        init_session.commit()
+
+    session = SessionLocal()
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    # Mock uow.events.save to raise an exception simulating DB event insert failure
+    def failing_event_save(event):
+        raise RuntimeError("DB event write failure")
+
+    uow.events.save = failing_event_save
+
+    authority = LifecycleTransitionAuthority(uow)
+    try:
+        authority.transition_backlog_item("roll-proj", "roll-item", WorkItemStatus.READY, WorkItemStatus.ADMITTED)
+        session.commit()
+    except Exception:
+        session.rollback()
+
+    session.close()
+
+    with SessionLocal() as verify_session:
+        item = verify_session.query(BacklogItemModel).filter_by(item_key="roll-item").first()
+        assert item.status == WorkItemStatus.READY.value
+
+        event_count = verify_session.query(EventModel).filter_by(event_type=EventType.LIFECYCLE_TRANSITION.value).count()
+        assert event_count == 0
+
+
+# -----------------------------------------------------------------------------
+# GET Purity Test (Requirement 10)
+# -----------------------------------------------------------------------------
+
+def test_get_purity_endpoint_zero_mutations(in_memory_uow):
+    """Requirement 10: Prove GET requests on status/backlog produce zero lifecycle mutations or transition events."""
+    _setup_project(in_memory_uow)
+    now = utc_now()
+    bk = BacklogItem(
+        project_id="test-proj",
+        item_key="get-pure-item",
+        title="GET Pure Item",
+        status=WorkItemStatus.READY,
+        created_at=now,
+        updated_at=now,
+    )
+    in_memory_uow.backlog_items.save(bk)
+
+    initial_bk = in_memory_uow.backlog_items.get_by_project_and_key("test-proj", "get-pure-item")
+    initial_status = initial_bk.status
+    initial_events = len([e for e in in_memory_uow.events.list_events("test-proj") if e.event_type == EventType.LIFECYCLE_TRANSITION])
+
+    intake = IntakeService(in_memory_uow, project_root=".")
+    for _ in range(5):
+        intake.reconcile_backlog_projections("test-proj")
+
+    final_bk = in_memory_uow.backlog_items.get_by_project_and_key("test-proj", "get-pure-item")
+    final_events = len([e for e in in_memory_uow.events.list_events("test-proj") if e.event_type == EventType.LIFECYCLE_TRANSITION])
+
+    assert final_bk.status == initial_status
+    assert final_events == initial_events
