@@ -137,7 +137,9 @@ class WorkDiscoveryService:
             remote_issues: list[dict[str, Any]] = []
             try:
                 list_res = self.github_adapter.list_issues(project.repository, state="all")
-                if list_res.is_success and list_res.data:
+                if isinstance(list_res, list):
+                    remote_issues = list_res
+                elif getattr(list_res, "is_success", False) and list_res.data:
                     remote_issues = list_res.data
             except Exception as exc:
                 logger.debug(

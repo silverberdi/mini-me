@@ -171,7 +171,9 @@ class PostMergeReconciliationService:
         if pr_number:
             try:
                 pr_res = self.github_adapter.get_pull_request_details(repository, pr_number)
-                if pr_res.is_success and pr_res.data:
+                if isinstance(pr_res, dict):
+                    pr_details = pr_res
+                elif getattr(pr_res, "is_success", False) and pr_res.data:
                     pr_details = pr_res.data
             except Exception as exc:
                 logger.warning("Failed to fetch PR details for #%d: %s", pr_number, exc)
@@ -180,12 +182,15 @@ class PostMergeReconciliationService:
             # Fallback lookup by head branch
             branch_name = f"minime/{change_name}"
             lookup_res = self.github_adapter.get_pull_request(repository, branch_name, base_branch)
-            if lookup_res.is_success and lookup_res.data:
-                pr_num = lookup_res.data.get("number")
+            lookup_data = lookup_res if isinstance(lookup_res, dict) else (lookup_res.data if getattr(lookup_res, "is_success", False) else None)
+            if lookup_data:
+                pr_num = lookup_data.get("number")
                 if pr_num:
                     pr_number = pr_num
                     pr_details_res = self.github_adapter.get_pull_request_details(repository, pr_number)
-                    if pr_details_res.is_success and pr_details_res.data:
+                    if isinstance(pr_details_res, dict):
+                        pr_details = pr_details_res
+                    elif getattr(pr_details_res, "is_success", False) and pr_details_res.data:
                         pr_details = pr_details_res.data
 
         is_merged = pr_details.get("is_merged", False)
@@ -297,7 +302,7 @@ class PostMergeReconciliationService:
                     issue_num,
                     comment=f"Closed automatically by mini me upon post-merge reconciliation of `{change_name}`.",
                 )
-                issue_closed = close_res.is_success and close_res.data is True
+                issue_closed = close_res is True or (isinstance(close_res, dict) and bool(close_res)) or (getattr(close_res, "is_success", False) and close_res.data is True)
                 if issue_closed:
                     self.uow.events.save(
                         Event(
@@ -323,7 +328,7 @@ class PostMergeReconciliationService:
                 item_id=project_item_id or str(issue_num),
                 status="Done",
             )
-            project_item_updated = update_res.is_success and update_res.data is True
+            project_item_updated = update_res is True or (isinstance(update_res, (dict, str)) and bool(update_res)) or (getattr(update_res, "is_success", False) and update_res.data is True)
             if project_item_updated:
                 self.uow.events.save(
                     Event(
@@ -497,13 +502,15 @@ class PostMergeReconciliationService:
                 )
             # Delete remote branch
             delete_res = self.github_adapter.delete_remote_branch(repository, f"minime/{change_name}")
-            branch_cleaned = delete_res.is_success
+            branch_cleaned = delete_res is True or getattr(delete_res, "is_success", False)
+            reason_code_val = getattr(delete_res, "reason_code", None)
+            reason_str = reason_code_val.value if hasattr(reason_code_val, "value") else str(reason_code_val or "SUCCESS")
             self.uow.events.save(
                 Event(
                     event_type=EventType.BRANCH_CLEANED,
                     project_id=project_id,
                     change_id=change_name,
-                    payload={"branches": local_branches, "remote_cleaned": branch_cleaned, "reason_code": delete_res.reason_code.value},
+                    payload={"branches": local_branches, "remote_cleaned": branch_cleaned, "reason_code": reason_str},
                     timestamp=utc_now(),
                 )
             )

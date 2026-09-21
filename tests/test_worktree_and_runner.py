@@ -183,8 +183,9 @@ async def test_remote_branch_head_uses_registered_repo_not_process_cwd(tmp_path,
     observed = GitHubAdapter().get_remote_branch_head(
         repository=str(repo_a), branch="main", remote="origin"
     )
-    assert observed == sha_a
-    assert observed != sha_b
+    observed_sha = observed.data if hasattr(observed, "data") else observed
+    assert observed_sha == sha_a
+    assert observed_sha != sha_b
 
 
 async def _git_output(cmd: list[str], cwd: Path) -> str:
