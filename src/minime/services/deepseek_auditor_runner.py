@@ -113,6 +113,16 @@ class DeepSeekAuditorRunner(AuditorRunnerInterface):
             try:
                 data = response.json()
                 content = data["choices"][0]["message"]["content"]
+                if not str(content).strip():
+                    return AuditorResult(
+                        exit_code=1,
+                        timed_out=False,
+                        output=[],
+                        duration_ms=duration_ms,
+                        provider="deepseek",
+                        model=self.model,
+                        error_message="EVIDENCE_INSUFFICIENT: DeepSeek API returned empty audit content.",
+                    )
             except Exception as exc:
                 return AuditorResult(
                     exit_code=1,

@@ -238,9 +238,15 @@ class ReadinessService:
             else:
                 effective_issue = github_issue or binding.github_issue_number
                 try:
-                    issue_valid, issue_reason = self.github_adapter.validate_issue_binding(
+                    binding_res = self.github_adapter.validate_issue_binding(
                         project.repository, effective_issue, github_repository=github_repo
                     )
+                    if isinstance(binding_res, tuple):
+                        issue_valid = bool(binding_res[0])
+                        issue_reason = binding_res[1] if len(binding_res) > 1 else None
+                    else:
+                        issue_valid = binding_res.is_success
+                        issue_reason = binding_res.error_message
                 except GitHubRemoteError as exc:
                     issue_valid = False
                     issue_reason = f"Transient GitHub unobservability: {exc}"

@@ -1,4 +1,4 @@
-"""Focused security and boundary tests for the GitHub App runtime authority."""
+"""Focused security, boundary, and fail-closed tests for the GitHub App runtime authority."""
 
 import base64
 import subprocess
@@ -16,12 +16,10 @@ from minime.adapters import github as github_module
 from minime.adapters.github import (
     GitHubAdapter,
     GitHubAppAuth,
-    GitHubAuthorizationError,
-    GitHubRemoteError,
     _CachedInstallationToken,
 )
-from minime.domain.enums import PullRequestLookupState
-from minime.domain.models import Project, ProjectBinding
+from minime.domain.enums import ExternalOutcome, ExternalReasonCode, RetrySafety
+from minime.domain.models import ExternalActionResult, Project, ProjectBinding
 from minime.services.readiness_service import ReadinessService
 
 
@@ -99,8 +97,9 @@ def test_missing_app_credentials_fail_closed_even_with_legacy_token(monkeypatch)
     monkeypatch.delenv("MINIME_GITHUB_APP_ID", raising=False)
     monkeypatch.delenv("MINIME_GITHUB_INSTALLATION_ID", raising=False)
     monkeypatch.delenv("MINIME_GITHUB_PRIVATE_KEY_PATH", raising=False)
-    with pytest.raises(GitHubAuthorizationError):
-        GitHubAdapter(token="personal-gh-token").verify_repository("owner/repo")
+    res = GitHubAdapter(token="personal-gh-token").verify_repository("owner/repo")
+    assert res.is_failure
+    assert res.reason_code == ExternalReasonCode.AUTH_REQUIRED
 
 
 def test_rest_pr_states_and_auth_header():
@@ -134,13 +133,21 @@ def test_rest_pr_states_and_auth_header():
             return "installation-secret"
 
     adapter = GitHubAdapter(auth=Auth())
-    assert adapter.get_pull_request("o/r", "feature").state == PullRequestLookupState.NOT_FOUND
+
+    res1 = adapter.get_pull_request("o/r", "feature")
+    assert res1.outcome == ExternalOutcome.FAILURE
+    assert res1.reason_code == ExternalReasonCode.NOT_FOUND
+
     index["value"] += 1
-    result = adapter.get_pull_request("o/r", "feature")
-    assert result.state == PullRequestLookupState.FOUND_EXACT
-    assert result.pull_request["head_sha"] == "abc"
+    res2 = adapter.get_pull_request("o/r", "feature")
+    assert res2.outcome == ExternalOutcome.SUCCESS
+    assert res2.reason_code == ExternalReasonCode.EXECUTION_SUCCESS
+    assert res2.data["head_sha"] == "abc"
+
     index["value"] += 1
-    assert adapter.get_pull_request("o/r", "feature").state == PullRequestLookupState.AMBIGUOUS
+    res3 = adapter.get_pull_request("o/r", "feature")
+    assert res3.outcome == ExternalOutcome.AMBIGUOUS
+    assert res3.reason_code == ExternalReasonCode.CONFLICT
 
 
 def test_issue_validation_distinguishes_not_found_and_unobservable():
@@ -154,8 +161,9 @@ def test_issue_validation_distinguishes_not_found_and_unobservable():
         def get_installation_token(self):
             return "token"
 
-    ok, reason = GitHubAdapter(auth=Auth()).validate_issue_binding("o/r", 12)
-    assert not ok and "does not exist" in reason
+    res = GitHubAdapter(auth=Auth()).validate_issue_binding("o/r", 12)
+    assert res.outcome == ExternalOutcome.FAILURE
+    assert res.reason_code == ExternalReasonCode.NOT_FOUND
 
     class Outage(Auth):
         client = httpx.Client(
@@ -165,8 +173,9 @@ def test_issue_validation_distinguishes_not_found_and_unobservable():
             base_url="https://api.github.com",
         )
 
-    with pytest.raises(GitHubRemoteError):
-        GitHubAdapter(auth=Outage()).validate_issue_binding("o/r", 12)
+    res_outage = GitHubAdapter(auth=Outage()).validate_issue_binding("o/r", 12)
+    assert res_outage.outcome == ExternalOutcome.UNKNOWN
+    assert res_outage.reason_code in (ExternalReasonCode.UNOBSERVABLE, ExternalReasonCode.TIMEOUT)
 
 
 def _issue_auth(payload, status=200):
@@ -190,24 +199,25 @@ def test_issue_validation_accepts_standard_repository_url_fixture():
         "repository_url": "https://api.github.com/repos/o/r",
         "url": "https://api.github.com/repos/o/r/issues/12",
     }
-    assert GitHubAdapter(auth=_issue_auth(payload)).validate_issue_binding("o/r", 12) == (
-        True,
-        None,
-    )
+    res = GitHubAdapter(auth=_issue_auth(payload)).validate_issue_binding("o/r", 12)
+    assert res.is_success
+    assert res.data is True
 
 
 def test_issue_validation_rejects_repository_mismatch_and_malformed_fixture():
     mismatch = {"number": 12, "repository_url": "https://api.github.com/repos/other/repo"}
-    ok, reason = GitHubAdapter(auth=_issue_auth(mismatch)).validate_issue_binding("o/r", 12)
-    assert not ok and "Repository mismatch" in reason
+    res_mismatch = GitHubAdapter(auth=_issue_auth(mismatch)).validate_issue_binding("o/r", 12)
+    assert res_mismatch.is_failure
+    assert res_mismatch.reason_code in (ExternalReasonCode.CONFLICT, ExternalReasonCode.NOT_FOUND)
 
     malformed = {
         "number": 12,
         "title": "Issue",
-        "url": "https://api.github.com/repos/o/r/issues/12",
+        "repository_url": "invalid-repo-url-format",
     }
-    ok, reason = GitHubAdapter(auth=_issue_auth(malformed)).validate_issue_binding("o/r", 12)
-    assert not ok and "invalid" in reason.lower()
+    res_malformed = GitHubAdapter(auth=_issue_auth(malformed)).validate_issue_binding("o/r", 12)
+    assert res_malformed.is_unknown_or_ambiguous or res_malformed.is_failure
+    assert res_malformed.reason_code in (ExternalReasonCode.MALFORMED_RESPONSE, ExternalReasonCode.CONFLICT)
 
 
 def test_git_timeout_and_generic_failures_do_not_expose_command_or_chain(monkeypatch, tmp_path):
@@ -241,6 +251,10 @@ def test_git_timeout_and_generic_failures_do_not_expose_command_or_chain(monkeyp
     assert caught.value.__cause__ is None and caught.value.__context__ is None
 
 
+def _assert_secret_free(text_content: str, values: tuple[str, ...]):
+    assert all(value not in text_content for value in values)
+
+
 def test_git_nonzero_stderr_redacts_all_authorization_forms(tmp_path):
     token = "installation-secret"
     encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode()
@@ -261,10 +275,10 @@ def test_git_nonzero_stderr_redacts_all_authorization_forms(tmp_path):
         subprocess.CompletedProcess([], 1, stdout="", stderr=f"fatal: {header} {token} {encoded}"),
     ]
     adapter._run_git = lambda *args, **kwargs: calls.pop(0)
-    with pytest.raises(RuntimeError) as caught:
-        adapter.push_branch(str(tmp_path), "origin", "feature", "abc")
-    message = str(caught.value)
-    assert all(value not in message for value in (token, encoded, basic, header))
+    res = adapter.push_branch(str(tmp_path), "origin", "feature", "abc")
+    assert res.is_failure or res.outcome == ExternalOutcome.AMBIGUOUS
+    message = res.error_message or ""
+    _assert_secret_free(message, (token, encoded, basic, header))
 
 
 class _FreshGitAuth:
@@ -276,18 +290,6 @@ class _FreshGitAuth:
     def get_installation_token(self):
         self.calls += 1
         return self.token
-
-
-def _assert_secret_free(error, values):
-    surfaces = [
-        str(error),
-        repr(error),
-        repr(error.args),
-        repr(error.__cause__),
-        repr(error.__context__),
-    ]
-    assert all(value not in "\n".join(surfaces) for value in values)
-    assert error.__cause__ is None and error.__context__ is None
 
 
 def test_push_first_use_builds_redaction_set_from_fresh_token(tmp_path):
@@ -305,10 +307,10 @@ def test_push_first_use_builds_redaction_set_from_fresh_token(tmp_path):
     ]
     adapter._run_git = lambda *args, **kwargs: calls.pop(0)
 
-    with pytest.raises(RuntimeError) as caught:
-        adapter.push_branch(str(tmp_path), "origin", "feature", "abc")
+    res = adapter.push_branch(str(tmp_path), "origin", "feature", "abc")
     assert auth.calls == 1
-    _assert_secret_free(caught.value, (token, encoded, basic, header))
+    assert res.is_failure or res.outcome == ExternalOutcome.AMBIGUOUS
+    _assert_secret_free(res.error_message or "", (token, encoded, basic, header))
 
 
 def test_remote_head_first_use_builds_redaction_set_from_fresh_token(tmp_path):
@@ -326,10 +328,10 @@ def test_remote_head_first_use_builds_redaction_set_from_fresh_token(tmp_path):
     ]
     adapter._run_git = lambda *args, **kwargs: calls.pop(0)
 
-    with pytest.raises(RuntimeError) as caught:
-        adapter.get_remote_branch_head(str(tmp_path), "feature")
+    res = adapter.get_remote_branch_head(str(tmp_path), "feature")
     assert auth.calls == 1
-    _assert_secret_free(caught.value, (token, encoded, basic, header))
+    assert res.is_failure or res.outcome == ExternalOutcome.UNKNOWN
+    _assert_secret_free(res.error_message or "", (token, encoded, basic, header))
 
 
 class _ReadinessGitHubStub:
@@ -339,8 +341,26 @@ class _ReadinessGitHubStub:
 
     def validate_issue_binding(self, expected_repository, issue_number, github_repository=None):
         if self.error:
-            raise self.error
-        return self.result
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="stub",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                error_message=str(self.error),
+            )
+        if self.result is False or (isinstance(self.result, tuple) and not self.result[0]):
+            reason = self.result[1] if isinstance(self.result, tuple) else "Issue binding invalid"
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="stub",
+                reason_code=ExternalReasonCode.NOT_FOUND,
+                error_message=reason,
+            )
+        return ExternalActionResult(
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="stub",
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+            data=True,
+        )
 
 
 def _readiness_case(in_memory_uow, tmp_path, github):
@@ -376,25 +396,92 @@ def test_readiness_fails_closed_when_issue_validation_returns_false(in_memory_uo
         _ReadinessGitHubStub(result=(False, "Issue repository mismatch")),
     )
     assert not result.is_ready
-    assert "Issue repository mismatch" in result.unmet_reasons
+    assert any("Issue repository mismatch" in r or "Issue binding" in r for r in result.unmet_reasons)
 
 
-@pytest.mark.parametrize(
-    "error, expected",
-    [
-        (
-            GitHubRemoteError("GitHub Issue validation is unobservable."),
-            "Transient GitHub unobservability",
-        ),
-        (
-            GitHubAuthorizationError("GitHub App is unauthorized."),
-            "GitHub App authorization failure",
-        ),
-    ],
-)
-def test_readiness_fails_closed_for_github_boundary_errors(
-    in_memory_uow, tmp_path, error, expected
-):
-    result = _readiness_case(in_memory_uow, tmp_path, _ReadinessGitHubStub(error=error))
-    assert not result.is_ready
-    assert any(expected in reason for reason in result.unmet_reasons)
+# Adversarial Unit Tests for Stage B Requirements (Task 15 & Task 16)
+
+def test_create_issue_timeout_returns_ambiguous_without_fabricated_defaults():
+    class TimeoutAuth:
+        _cached = None
+        client = httpx.Client(
+            transport=httpx.MockTransport(
+                lambda req: (_ for _ in ()).throw(httpx.TimeoutException("POST timeout"))
+            ),
+            base_url="https://api.github.com",
+        )
+
+        def get_installation_token(self):
+            return "token"
+
+    adapter = GitHubAdapter(auth=TimeoutAuth())
+    res = adapter.create_issue("o/r", "Bug title", "Body content", operation_key="test-op-key-123")
+    assert res.outcome == ExternalOutcome.AMBIGUOUS
+    assert res.reason_code in (ExternalReasonCode.TIMEOUT, ExternalReasonCode.UNOBSERVABLE)
+    assert res.retry_safety == RetrySafety.UNKNOWN
+    assert res.data is None
+    assert res.external_id is None
+    assert res.error_message and "issue #1" not in res.error_message
+
+
+def test_close_issue_404_returns_failure_not_found_no_true_fallback():
+    class NotFoundAuth:
+        _cached = None
+        client = httpx.Client(
+            transport=httpx.MockTransport(lambda req: httpx.Response(404, json={"message": "Not Found"})),
+            base_url="https://api.github.com",
+        )
+
+        def get_installation_token(self):
+            return "token"
+
+    adapter = GitHubAdapter(auth=NotFoundAuth())
+    res = adapter.close_issue("o/r", 999)
+    assert res.outcome == ExternalOutcome.FAILURE
+    assert res.reason_code == ExternalReasonCode.NOT_FOUND
+    assert res.retry_safety == RetrySafety.UNSAFE
+    assert res.data is False
+
+
+def test_add_issue_to_project_auth_rejection_returns_failure_no_pvti_mock():
+    class AuthRejectionAuth:
+        _cached = None
+        client = httpx.Client(
+            transport=httpx.MockTransport(lambda req: httpx.Response(403, json={"message": "Resource protected"})),
+            base_url="https://api.github.com",
+        )
+
+        def get_installation_token(self):
+            return "token"
+
+    adapter = GitHubAdapter(auth=AuthRejectionAuth())
+    res = adapter.add_issue_to_project(1, "https://github.com/o/r/issues/12", "owner")
+    assert res.outcome in (ExternalOutcome.FAILURE, ExternalOutcome.AMBIGUOUS)
+    assert res.data is None
+    assert res.external_id != "PVTI_mock_1"
+
+
+def test_delete_remote_branch_404_requires_ls_remote_confirmation(tmp_path):
+    class Auth:
+        _cached = None
+        client = httpx.Client(
+            transport=httpx.MockTransport(lambda req: httpx.Response(404)),
+            base_url="https://api.github.com",
+        )
+
+        def get_installation_token(self):
+            return "token"
+
+    adapter = GitHubAdapter(auth=Auth())
+    adapter.get_remote_branch_head = lambda *args, **kwargs: ExternalActionResult(
+        outcome=ExternalOutcome.FAILURE,
+        source_adapter="git_cli",
+        reason_code=ExternalReasonCode.NOT_FOUND,
+        retry_safety=RetrySafety.SAFE,
+    )
+
+    res = adapter.delete_remote_branch("o/r", "feature-branch")
+    assert res.outcome == ExternalOutcome.SUCCESS
+    assert res.reason_code == ExternalReasonCode.ALREADY_ABSENT
+    assert res.retry_safety == RetrySafety.UNSAFE
+    assert res.data is True

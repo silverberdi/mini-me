@@ -170,19 +170,23 @@ class PostMergeReconciliationService:
         pr_details: dict[str, Any] = {}
         if pr_number:
             try:
-                pr_details = self.github_adapter.get_pull_request_details(repository, pr_number)
+                pr_res = self.github_adapter.get_pull_request_details(repository, pr_number)
+                if pr_res.is_success and pr_res.data:
+                    pr_details = pr_res.data
             except Exception as exc:
                 logger.warning("Failed to fetch PR details for #%d: %s", pr_number, exc)
 
         if not pr_details:
             # Fallback lookup by head branch
             branch_name = f"minime/{change_name}"
-            lookup = self.github_adapter.get_pull_request(repository, branch_name, base_branch)
-            if lookup.pull_request:
-                pr_num = lookup.pull_request.get("number")
+            lookup_res = self.github_adapter.get_pull_request(repository, branch_name, base_branch)
+            if lookup_res.is_success and lookup_res.data:
+                pr_num = lookup_res.data.get("number")
                 if pr_num:
                     pr_number = pr_num
-                    pr_details = self.github_adapter.get_pull_request_details(repository, pr_number)
+                    pr_details_res = self.github_adapter.get_pull_request_details(repository, pr_number)
+                    if pr_details_res.is_success and pr_details_res.data:
+                        pr_details = pr_details_res.data
 
         is_merged = pr_details.get("is_merged", False)
         if not is_merged:
@@ -288,20 +292,22 @@ class PostMergeReconciliationService:
         issue_num = binding.github_issue_number if binding else None
         if issue_num:
             try:
-                issue_closed = self.github_adapter.close_issue(
+                close_res = self.github_adapter.close_issue(
                     repository,
                     issue_num,
                     comment=f"Closed automatically by mini me upon post-merge reconciliation of `{change_name}`.",
                 )
-                self.uow.events.save(
-                    Event(
-                        event_type=EventType.ISSUE_CLOSED,
-                        project_id=project_id,
-                        change_id=change_name,
-                        payload={"issue_number": issue_num},
-                        timestamp=utc_now(),
+                issue_closed = close_res.is_success and close_res.data is True
+                if issue_closed:
+                    self.uow.events.save(
+                        Event(
+                            event_type=EventType.ISSUE_CLOSED,
+                            project_id=project_id,
+                            change_id=change_name,
+                            payload={"issue_number": issue_num},
+                            timestamp=utc_now(),
+                        )
                     )
-                )
             except Exception as exc:
                 logger.warning("Failed to close GitHub Issue #%d: %s", issue_num, exc)
 
@@ -311,21 +317,23 @@ class PostMergeReconciliationService:
         project_item_updated = False
         project_item_id = binding.github_project_item_id if binding else None
         try:
-            project_item_updated = self.github_adapter.update_project_item_status(
+            update_res = self.github_adapter.update_project_item_status(
                 project_number=2,
                 owner="silverberdi",
                 item_id=project_item_id or str(issue_num),
                 status="Done",
             )
-            self.uow.events.save(
-                Event(
-                    event_type=EventType.PROJECT_ITEM_DONE,
-                    project_id=project_id,
-                    change_id=change_name,
-                    payload={"project_item_id": project_item_id or issue_num, "status": "Done"},
-                    timestamp=utc_now(),
+            project_item_updated = update_res.is_success and update_res.data is True
+            if project_item_updated:
+                self.uow.events.save(
+                    Event(
+                        event_type=EventType.PROJECT_ITEM_DONE,
+                        project_id=project_id,
+                        change_id=change_name,
+                        payload={"project_item_id": project_item_id or issue_num, "status": "Done"},
+                        timestamp=utc_now(),
+                    )
                 )
-            )
         except Exception as exc:
             logger.warning("Failed to update GitHub Project item: %s", exc)
 
@@ -488,13 +496,14 @@ class PostMergeReconciliationService:
                     check=False,
                 )
             # Delete remote branch
-            self.github_adapter.delete_remote_branch(repository, f"minime/{change_name}")
+            delete_res = self.github_adapter.delete_remote_branch(repository, f"minime/{change_name}")
+            branch_cleaned = delete_res.is_success
             self.uow.events.save(
                 Event(
                     event_type=EventType.BRANCH_CLEANED,
                     project_id=project_id,
                     change_id=change_name,
-                    payload={"branches": local_branches},
+                    payload={"branches": local_branches, "remote_cleaned": branch_cleaned, "reason_code": delete_res.reason_code.value},
                     timestamp=utc_now(),
                 )
             )

@@ -2944,8 +2944,52 @@ class PostgresOrchestrationExternalActionRepository(OrchestrationExternalActionR
             ExternalActionStatus.COMPLETED,
             ExternalActionStatus.FAILED,
             ExternalActionStatus.AMBIGUOUS,
+            ExternalActionStatus.UNKNOWN,
         }:
             model.reconciled_at = utc_now()
+        model.updated_at = utc_now()
+        return orchestration_external_action_model_to_domain(model)
+
+    def reconcile_observe_before_repeat(
+        self,
+        action_key: str,
+        observed_result: Any,
+    ) -> OrchestrationExternalAction:
+        stmt = select(OrchestrationExternalActionModel).where(
+            OrchestrationExternalActionModel.action_key == action_key
+        )
+        model = self.session.scalars(stmt).first()
+        if not model:
+            raise ValueError(f"External action '{action_key}' not found")
+
+        from minime.domain.enums import ExternalOutcome, RetrySafety
+
+        # Step 1: Inspect authoritative observation result
+        outcome = getattr(observed_result, "outcome", None)
+        retry_safety = getattr(observed_result, "retry_safety", RetrySafety.UNKNOWN)
+
+        # Step 2: If postcondition positively observed -> COMPLETED
+        if outcome == ExternalOutcome.SUCCESS:
+            model.status = ExternalActionStatus.COMPLETED.value
+            model.reconciled_at = utc_now()
+            if getattr(observed_result, "external_id", None):
+                model.remote_identifier = observed_result.external_id
+            if getattr(observed_result, "observed_evidence", None):
+                model.result_payload = observed_result.observed_evidence
+
+        # Step 3: If authoritative evidence proves effect did NOT occur AND retry_safety == SAFE -> EXECUTING (retry authorized)
+        elif outcome == ExternalOutcome.FAILURE and retry_safety == RetrySafety.SAFE:
+            model.status = ExternalActionStatus.EXECUTING.value
+            model.error_message = getattr(observed_result, "error_message", None)
+
+        # Step 4 & 5: If UNKNOWN / AMBIGUOUS or retry_safety != SAFE -> Remain AMBIGUOUS (cannot repeat automatically)
+        else:
+            model.status = ExternalActionStatus.AMBIGUOUS.value
+            model.error_message = (
+                getattr(observed_result, "error_message", None)
+                or "Observe-before-repeat protocol inconclusive: automatic retry blocked fail-closed."
+            )
+
         model.updated_at = utc_now()
         return orchestration_external_action_model_to_domain(model)
 

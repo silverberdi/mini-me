@@ -30,6 +30,7 @@ from minime.domain.models import (
     CheckResult,
     Event,
     EvidenceDiagnostic,
+    ExternalActionResult,
     GitOperation,
     IntegrityAudit,
     Job,
@@ -546,6 +547,13 @@ class OrchestrationExternalActionRepositoryInterface(ABC):
         error_message: str | None = None,
     ) -> OrchestrationExternalAction: ...
 
+    @abstractmethod
+    def reconcile_observe_before_repeat(
+        self,
+        action_key: str,
+        observed_result: Any,
+    ) -> OrchestrationExternalAction: ...
+
 
 class PreviewSessionRepositoryInterface(ABC):
     @abstractmethod
@@ -751,7 +759,7 @@ class GitHubAdapterInterface(ABC):
         expected_repository: str,
         issue_number: int,
         github_repository: str | None = None,
-    ) -> tuple[bool, str | None]: ...
+    ) -> ExternalActionResult[bool]: ...
 
     @abstractmethod
     def record_sync_failure(
@@ -763,7 +771,9 @@ class GitHubAdapterInterface(ABC):
     ) -> Event: ...
 
     @abstractmethod
-    def get_pull_request(self, repository: str, branch: str, base: str = "main") -> Any: ...
+    def get_pull_request(
+        self, repository: str, branch: str, base: str = "main"
+    ) -> ExternalActionResult[dict[str, Any]]: ...
 
     @abstractmethod
     def create_pull_request(
@@ -774,7 +784,7 @@ class GitHubAdapterInterface(ABC):
         title: str,
         body: str,
         head_sha: str,
-    ) -> dict[str, Any]: ...
+    ) -> ExternalActionResult[dict[str, Any]]: ...
 
     @abstractmethod
     def push_branch(
@@ -783,51 +793,60 @@ class GitHubAdapterInterface(ABC):
         remote: str,
         branch: str,
         candidate_sha: str,
-    ) -> bool: ...
+    ) -> ExternalActionResult[str]: ...
 
     @abstractmethod
     def get_remote_branch_head(
         self, repository: str, branch: str, remote: str = "origin"
-    ) -> str | None: ...
+    ) -> ExternalActionResult[str]: ...
 
-    def verify_repository(self, repository: str) -> tuple[bool, str | None]:
-        return True, None
+    @abstractmethod
+    def verify_repository(self, repository: str) -> ExternalActionResult[bool]: ...
 
+    @abstractmethod
     def list_issues(
         self, repository: str, state: str = "open", limit: int = 50
-    ) -> list[dict[str, Any]]:
-        return []
+    ) -> ExternalActionResult[list[dict[str, Any]]]: ...
 
+    @abstractmethod
     def create_issue(
         self,
         repository: str,
         title: str,
         body: str,
         labels: list[str] | None = None,
-    ) -> dict[str, Any]:
-        return {
-            "number": 1,
-            "title": title,
-            "body": body,
-            "html_url": f"https://github.com/{repository}/issues/1",
-        }
+        operation_key: str | None = None,
+    ) -> ExternalActionResult[dict[str, Any]]: ...
 
-    def add_issue_to_project(self, project_number: int, owner: str, issue_url: str) -> str | None:
-        return "PVTI_mock123"
+    @abstractmethod
+    def add_issue_to_project(
+        self, project_number: int, owner: str, issue_url: str, operation_key: str | None = None
+    ) -> ExternalActionResult[str]: ...
 
-    def get_pull_request_details(self, repository: str, pr_number: int) -> dict[str, Any]:
-        return {"number": pr_number, "is_merged": False}
+    @abstractmethod
+    def list_project_items(
+        self, project_number: int = 2, owner: str = "silverberdi", limit: int = 50
+    ) -> ExternalActionResult[list[dict[str, Any]]]: ...
 
-    def close_issue(self, repository: str, issue_number: int, comment: str | None = None) -> bool:
-        return True
+    @abstractmethod
+    def get_pull_request_details(
+        self, repository: str, pr_number: int
+    ) -> ExternalActionResult[dict[str, Any]]: ...
 
+    @abstractmethod
+    def close_issue(
+        self, repository: str, issue_number: int, comment: str | None = None
+    ) -> ExternalActionResult[bool]: ...
+
+    @abstractmethod
     def update_project_item_status(
         self, project_number: int, owner: str, item_id: str, status: str = "Done"
-    ) -> bool:
-        return True
+    ) -> ExternalActionResult[bool]: ...
 
-    def delete_remote_branch(self, repository: str, branch: str, remote: str = "origin") -> bool:
-        return True
+    @abstractmethod
+    def delete_remote_branch(
+        self, repository: str, branch: str, remote: str = "origin"
+    ) -> ExternalActionResult[bool]: ...
 
 
 class AuthorizedOperatorRepositoryInterface(ABC):

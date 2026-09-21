@@ -356,14 +356,20 @@ class IntakeService:
         issue_url = item.github_issue_url
         if not issue_number:
             try:
+                op_key = f"issue_create:{project.project_id}:{change_name}"
                 issue_res = self.github_adapter.create_issue(
                     repository=project.repository,
                     title=f"[{change_name}] {item.title}",
                     body=f"## Work Item: {item.title}\n\n{item.description}\n\n**OpenSpec Change:** `{change_name}`",
                     labels=[f"priority:{item.priority.value.lower()}"],
+                    operation_key=op_key,
                 )
-                issue_number = issue_res.get("number")
-                issue_url = issue_res.get("html_url")
+                if isinstance(issue_res, dict):
+                    issue_number = issue_res.get("number")
+                    issue_url = issue_res.get("html_url")
+                elif getattr(issue_res, "is_success", False) and issue_res.data:
+                    issue_number = issue_res.data.get("number")
+                    issue_url = issue_res.data.get("html_url")
             except Exception as exc:
                 logger.warning(
                     "Could not create remote GitHub issue for '%s' in '%s': %s",
@@ -376,11 +382,17 @@ class IntakeService:
         project_item_id = item.github_project_item_id
         if not project_item_id and project.github_project_number and issue_url:
             try:
-                project_item_id = self.github_adapter.add_issue_to_project(
+                op_key = f"project_item_add:{project.project_id}:{change_name}"
+                project_res = self.github_adapter.add_issue_to_project(
                     project_number=project.github_project_number,
                     owner=project.github_project_owner or "silverberdi",
                     issue_url=issue_url,
+                    operation_key=op_key,
                 )
+                if isinstance(project_res, str):
+                    project_item_id = project_res
+                elif getattr(project_res, "is_success", False):
+                    project_item_id = project_res.data
             except Exception as exc:
                 logger.warning(
                     "Could not sync issue '%s' to GitHub Project %s: %s",

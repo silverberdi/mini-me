@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -17,6 +18,8 @@ from minime.domain.enums import (
     AuditRiskLevel,
     AuditStatus,
     ExternalActionStatus,
+    ExternalOutcome,
+    ExternalReasonCode,
     GitOperationStatus,
     HumanGate,
     JobStatus,
@@ -24,6 +27,7 @@ from minime.domain.enums import (
     OrchestrationStopOutcome,
     ProviderHealthStatus,
     ProviderResultClass,
+    RetrySafety,
     ReviewStatus,
     ReviewVerdict,
 )
@@ -86,6 +90,7 @@ from minime.domain.models import (
     CheckResult,
     Event,
     EvidenceDiagnostic,
+    ExternalActionResult,
     GitOperation,
     IntegrityAudit,
     Job,
@@ -118,20 +123,136 @@ from minime.domain.models import (
 class ReadinessGitHubStub:
     """Explicit offline double for legacy readiness tests; live validation is tested separately."""
 
-    def validate_issue_binding(self, expected_repository, issue_number, github_repository=None):
-        return True, None
+    def validate_issue_binding(self, expected_repository, issue_number, github_repository=None) -> ExternalActionResult[bool]:
+        return ExternalActionResult(
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="github_stub",
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+            retry_safety=RetrySafety.SAFE,
+            data=True,
+        )
 
-    def create_issue(self, repository: str, title: str, body: str, labels: list[str] | None = None):
-        return {
+    def verify_repository(self, repository: str) -> ExternalActionResult[bool]:
+        return ExternalActionResult(
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="github_stub",
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+            retry_safety=RetrySafety.SAFE,
+            data=True,
+        )
+
+    def list_issues(self, repository: str, state: str = "open", limit: int = 50) -> ExternalActionResult[list[dict]]:
+        return ExternalActionResult(
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="github_stub",
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+            retry_safety=RetrySafety.SAFE,
+            data=[],
+        )
+
+    def create_issue(self, repository: str, title: str, body: str, labels: list[str] | None = None, operation_key: str | None = None) -> ExternalActionResult[dict]:
+        issue_data = {
             "number": 42,
             "title": title,
             "body": body,
             "html_url": f"https://github.com/{repository}/issues/42",
             "labels": labels or [],
         }
+        return ExternalActionResult(
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="github_stub",
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+            retry_safety=RetrySafety.UNSAFE,
+            data=issue_data,
+            external_id="42",
+            operation_key=operation_key,
+        )
 
-    def add_issue_to_project(self, project_number: int, owner: str, issue_url: str):
-        return "PVTI_mock_12345"
+    def add_issue_to_project(self, project_number: int, owner: str, issue_url: str, operation_key: str | None = None) -> ExternalActionResult[str]:
+        return ExternalActionResult(
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="github_stub",
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+            retry_safety=RetrySafety.UNSAFE,
+            data="PVTI_12345",
+            external_id="PVTI_12345",
+            operation_key=operation_key,
+        )
+
+    def list_project_items(self, project_number: int = 2, owner: str = "silverberdi", limit: int = 50) -> ExternalActionResult[list[dict]]:
+        return ExternalActionResult(
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="github_stub",
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+            retry_safety=RetrySafety.SAFE,
+            data=[],
+        )
+
+    def get_pull_request(self, repository: str, branch: str, base: str = "main") -> ExternalActionResult[dict]:
+        return ExternalActionResult(
+            outcome=ExternalOutcome.FAILURE,
+            source_adapter="github_stub",
+            reason_code=ExternalReasonCode.NOT_FOUND,
+            retry_safety=RetrySafety.SAFE,
+            error_message="Pull request not found.",
+        )
+
+    def get_pull_request_details(self, repository: str, pr_number: int) -> ExternalActionResult[dict]:
+        return ExternalActionResult(
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="github_stub",
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+            retry_safety=RetrySafety.SAFE,
+            data={"number": pr_number, "is_merged": False, "repository": repository},
+            external_id=str(pr_number),
+        )
+
+    def close_issue(self, repository: str, issue_number: int, comment: str | None = None) -> ExternalActionResult[bool]:
+        return ExternalActionResult(
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="github_stub",
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+            retry_safety=RetrySafety.UNSAFE,
+            data=True,
+            external_id=str(issue_number),
+        )
+
+    def update_project_item_status(self, project_number: int, owner: str, item_id: str, status: str = "Done") -> ExternalActionResult[bool]:
+        return ExternalActionResult(
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="github_stub",
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+            retry_safety=RetrySafety.UNSAFE,
+            data=True,
+            external_id=item_id,
+        )
+
+    def delete_remote_branch(self, repository: str, branch: str, remote: str = "origin") -> ExternalActionResult[bool]:
+        return ExternalActionResult(
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="github_stub",
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+            retry_safety=RetrySafety.UNSAFE,
+            data=True,
+        )
+
+    def push_branch(self, worktree_path: str, remote: str, branch: str, candidate_sha: str) -> ExternalActionResult[str]:
+        return ExternalActionResult(
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="github_stub",
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+            retry_safety=RetrySafety.UNSAFE,
+            data=candidate_sha,
+        )
+
+    def get_remote_branch_head(self, repository: str, branch: str, remote: str = "origin") -> ExternalActionResult[str]:
+        return ExternalActionResult(
+            outcome=ExternalOutcome.FAILURE,
+            source_adapter="github_stub",
+            reason_code=ExternalReasonCode.NOT_FOUND,
+            retry_safety=RetrySafety.SAFE,
+            error_message="Branch absent.",
+        )
 
 
 class InMemoryProjectRepository(ProjectRepositoryInterface):
@@ -1308,6 +1429,41 @@ class InMemoryOrchestrationExternalActionRepository(OrchestrationExternalActionR
             ExternalActionStatus.AMBIGUOUS,
         }:
             target.reconciled_at = utc_now()
+        target.updated_at = utc_now()
+        return target.model_copy(deep=True)
+
+    def reconcile_observe_before_repeat(
+        self,
+        action_key: str,
+        observed_result: Any,
+    ) -> OrchestrationExternalAction:
+        target = None
+        for a in self._store.values():
+            if a.action_key == action_key:
+                target = a
+                break
+        if not target:
+            raise ValueError(f"External action '{action_key}' not found")
+
+        from minime.domain.enums import ExternalOutcome, RetrySafety
+
+        outcome = getattr(observed_result, "outcome", None)
+        retry_safety = getattr(observed_result, "retry_safety", RetrySafety.UNKNOWN)
+
+        if outcome == ExternalOutcome.SUCCESS:
+            target.status = ExternalActionStatus.COMPLETED
+            target.reconciled_at = utc_now()
+            if getattr(observed_result, "external_id", None):
+                target.remote_identifier = observed_result.external_id
+            if getattr(observed_result, "observed_evidence", None):
+                target.result_payload = observed_result.observed_evidence
+        elif outcome == ExternalOutcome.FAILURE and retry_safety == RetrySafety.SAFE:
+            target.status = ExternalActionStatus.EXECUTING
+            target.error_message = getattr(observed_result, "error_message", None)
+        else:
+            target.status = ExternalActionStatus.AMBIGUOUS
+            target.error_message = getattr(observed_result, "error_message", None) or "Observe-before-repeat protocol inconclusive."
+
         target.updated_at = utc_now()
         return target.model_copy(deep=True)
 
