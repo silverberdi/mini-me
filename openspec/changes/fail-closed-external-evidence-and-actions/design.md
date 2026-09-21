@@ -3,8 +3,8 @@
 ## Architectural Laws
 
 - **LAW 1: No external evidence -> no success.** An external operation or query MUST NOT be classified as successful without positive, verifiable evidence of postconditions (`UNKNOWN != SUCCESS`, `FAILURE != SUCCESS`, `AMBIGUOUS != SUCCESS`).
-- **LAW 2: Unknown is a first-class outcome.** Network timeouts, HTTP 50x errors, 429 rate limits, unparseable responses, missing authorizations, and unobservable states MUST produce an explicit `UNKNOWN` or `AMBIGUOUS` outcome rather than silent fallback or boolean `False`/`True`.
-- **LAW 3: Ambiguous side effects are observed before repeat.** When a prior side-effect attempt returned `UNKNOWN` or `AMBIGUOUS`, subsequent retries MUST observe remote external state before attempting to re-issue non-idempotent operations.
+- **LAW 2: Unknown is a first-class outcome.** Network timeouts, HTTP 50x errors, 429 rate limits, unparseable responses, missing authorizations, and unobservable states MUST produce an explicit `UNKNOWN` (for read queries) or `AMBIGUOUS` (for mutating requests) outcome rather than silent fallback or boolean `False`/`True`.
+- **LAW 3: Ambiguous side effects are observed before repeat.** When a prior side-effect attempt returned `AMBIGUOUS`, subsequent retries MUST observe remote external state before attempting to re-issue non-idempotent operations.
 - **LAW 4: External identity must be observed, never invented.** Adapters MUST NOT return synthetic IDs (e.g. `PVTI_mock_2`), dummy issue numbers (`issue #1`), or fake URLs (`https://github.com/.../issues/1`) in production code paths.
 - **LAW 5: Command acceptance != postcondition verification.** Subprocess return code 0 or HTTP 202 Accepted indicates request receipt, not postcondition fulfillment. Crucial side effects (e.g. deployment, PR merge, branch deletion) MUST verify postcondition state when required.
 - **LAW 6: Production/test fakes are strictly separated.** Mocks, stubs, and synthetic test fixtures are permitted exclusively within test suites (e.g. `tests/conftest.py`). Production adapters MUST NOT contain embedded fallback mocks.
@@ -94,23 +94,25 @@ Implementations MUST classify outcomes deterministically according to the follow
 | **Mutating Action** | Mutating POST/PATCH/DELETE successfully executed and verified | `SUCCESS` | `UNSAFE` | `EXECUTION_SUCCESS` or `REUSED_EXISTING` |
 | **Existing Identity Match** | Existing remote resource bound to exact `operation_key` observed | `SUCCESS` | `UNSAFE` (mutating) / `SAFE` (read) | `REUSED_EXISTING` |
 | **Confirmed Rejection** | HTTP 401/403 (unauthorized) before mutation accepted | `FAILURE` | `UNSAFE` | `AUTH_REQUIRED` |
+| **Confirmed Read Rejection** | HTTP 401/403 (unauthorized) on read-only query | `FAILURE` | `SAFE` | `AUTH_REQUIRED` |
 | **Confirmed Absence / 404** | Authoritative query confirms resource does not exist | `FAILURE` | `SAFE` (query) | `NOT_FOUND` |
 | **GET / Read Timeout** | Read-only GET query times out before response | `UNKNOWN` | `SAFE` | `TIMEOUT` |
 | **Malformed Read Query** | Read-only response JSON/payload is unparseable | `UNKNOWN` | `SAFE` | `MALFORMED_RESPONSE` |
 | **Exit 0 Missing Artifact** | Provider process exits 0 but required output file missing | `UNKNOWN` | `UNSAFE` | `EVIDENCE_INSUFFICIENT` |
 | **POST / Mutating Timeout** | POST/PATCH/DELETE request times out after transmission | `AMBIGUOUS` | `UNKNOWN` | `TIMEOUT` |
+| **Mutating CLI Abnormal Exit** | Mutating CLI execution fails after command transmission without proof of non-execution | `AMBIGUOUS` | `UNKNOWN` | `UNOBSERVABLE` |
 | **Malformed Mutating Resp** | Mutating request sent but response JSON unparseable | `AMBIGUOUS` | `UNKNOWN` | `MALFORMED_RESPONSE` |
 | **Deploy Action Success** | Deploy script returns exit 0, health endpoint unreachable | `SUCCESS` (action) / `UNKNOWN` (prod) | `UNSAFE` (deploy action) | `POSTCONDITION_NOT_PROVEN` |
 
 ## Observe-Before-Repeat Protocol
 
-When an external action is in state `AMBIGUOUS` or `UNKNOWN`, retrying or repeating the operation MUST follow this 5-step fail-closed protocol:
+When an external action is in state `AMBIGUOUS`, retrying or repeating the operation MUST follow this 5-step fail-closed protocol:
 
 1. **Perform action-specific authoritative observation**: Query remote REST API, `git ls-remote`, or filesystem using the exact `operation_key` or target ref identity.
 2. **If postcondition positively observed**: Transition action status to `COMPLETED` and return `ExternalActionResult(outcome=SUCCESS, reason_code=ExternalReasonCode.REUSED_EXISTING, retry_safety=RetrySafety.UNSAFE)`.
 3. **If authoritative evidence proves the effect did NOT occur AND `retry_safety == RetrySafety.SAFE`**: Retry MAY be authorized by re-issuing `RESERVED` -> `EXECUTING`.
-4. **If observation is `UNKNOWN` or `AMBIGUOUS`**: DO NOT repeat automatically. Action remains `AMBIGUOUS` / `UNKNOWN`.
-5. **If absence is not conclusive or operation identity is not strong enough**: DO NOT repeat automatically; remain `UNKNOWN` or `AMBIGUOUS` and escalate to caller policy / `NEEDS_HUMAN` gate.
+4. **If observation is `UNKNOWN` or `AMBIGUOUS`**: DO NOT repeat automatically. Action remains `AMBIGUOUS`.
+5. **If absence is not conclusive or operation identity is not strong enough**: DO NOT repeat automatically; remain `AMBIGUOUS` and escalate to caller policy / `NEEDS_HUMAN` gate.
 
 > [!IMPORTANT]
 > "No result found" MUST NOT automatically mean "safe to retry". Absence must be authoritatively proven under valid authentication and observable repository binding.
@@ -143,7 +145,8 @@ An HTTP 404 response alone MUST NOT automatically evaluate to `SUCCESS`.
 - **`SUCCESS` (`EXECUTION_SUCCESS`)**: Remote DELETE request returns HTTP 200 or 204 OK under valid authentication (`retry_safety = UNSAFE`).
 - **`SUCCESS` (`ALREADY_ABSENT`)**: Remote DELETE returns 404, AND subsequent `ls-remote` query under valid authorization authoritatively verifies that `refs/heads/<branch>` is absent in the target repository (`retry_safety = UNSAFE`).
 - **`FAILURE` (`AUTH_REQUIRED`)**: DELETE or observation query returns HTTP 401 or 403 (`retry_safety = UNSAFE`).
-- **`UNKNOWN` (`UNOBSERVABLE`)**: DELETE or GET query returns 404/500/timeout BUT repository access or ref identity cannot be authoritatively established (`retry_safety = UNKNOWN`).
+- **`UNKNOWN` (`UNOBSERVABLE`)**: Read-only query returns HTTP 404/500/timeout BUT repository access or ref identity cannot be established (`retry_safety = SAFE`).
+- **`AMBIGUOUS` (`UNOBSERVABLE`)**: Mutating DELETE request sent BUT response/connection drops without authoritative confirmation (`retry_safety = UNKNOWN`).
 
 ## Production Writer & Adapter Inventory
 
@@ -152,24 +155,24 @@ An HTTP 404 response alone MUST NOT automatically evaluate to `SUCCESS`.
 | Method Name | Current Signature / Behavior | Fabricated Success Default | Stage B Fail-Closed Migration |
 |---|---|---|---|
 | `verify_repository` | returns `tuple[bool, str \| None]` | None, but HTTP 500 raises | Return `ExternalActionResult[bool]`; 401/403 -> `FAILURE` (`AUTH_REQUIRED`), 500/429 -> `UNKNOWN` (`UNOBSERVABLE`) |
-| `validate_issue_binding` | returns `tuple[bool, str \| None]` | Raises exception on HTTP error | Return `ExternalActionResult[bool]`; 404 -> `FAILURE` (`NOT_FOUND`), 500/429 -> `UNKNOWN` (`UNOBSERVABLE`) |
-| `list_issues` | returns `list[dict]` | Returns empty list `[]` on REST & CLI failure | Return `ExternalActionResult[list[dict]]`; failure/unobservable -> `UNKNOWN` with `retry_safety = SAFE` |
-| `list_project_items` | returns `list[dict]` | Returns empty list `[]` on CLI failure | Return `ExternalActionResult[list[dict]]`; authoritatively confirmed missing -> `FAILURE` (`NOT_FOUND`), CLI error/timeout -> `UNKNOWN` (`UNOBSERVABLE`/`TIMEOUT`); NEVER return `PVTI_mock_*` |
+| `validate_issue_binding` | returns `tuple[bool, str \| None]` | Raises exception on HTTP error | Return `ExternalActionResult[bool]`; 401/403 -> `FAILURE` (`AUTH_REQUIRED`), 404 -> `FAILURE` (`NOT_FOUND`), 500/429 -> `UNKNOWN` (`UNOBSERVABLE`) |
+| `list_issues` | returns `list[dict]` | Returns empty list `[]` on REST & CLI failure | Return `ExternalActionResult[list[dict]]`; 401/403 -> `FAILURE` (`AUTH_REQUIRED`), timeout/unobservable -> `UNKNOWN` (`TIMEOUT`/`UNOBSERVABLE`) |
+| `list_project_items` | returns `list[dict]` | Returns empty list `[]` on CLI failure | Return `ExternalActionResult[list[dict]]`; 401/403 -> `FAILURE` (`AUTH_REQUIRED`), 404 -> `FAILURE` (`NOT_FOUND`), timeout/CLI error -> `UNKNOWN` (`UNOBSERVABLE`/`TIMEOUT`); NEVER return `PVTI_mock_*` |
 | `create_issue` | returns `dict[str, Any]` | Returns `{"number": 1, ...}` fallback double when REST & CLI fail! Title-only dedupe. | Return `ExternalActionResult[dict]`; deduct existing by `operation_key` marker; if timeout/unobservable -> `AMBIGUOUS`; NEVER return fake issue #1 or title-only match |
-| `add_issue_to_project` | returns `str \| None` | Returns `f"PVTI_mock_{project_number}"` on CLI error! | Return `ExternalActionResult[str]`; if CLI fails -> `FAILURE`/`UNKNOWN`; NEVER return `PVTI_mock_*` |
+| `add_issue_to_project` | returns `str \| None` | Returns `f"PVTI_mock_{project_number}"` on CLI error! | Return `ExternalActionResult[str]`; 401/403 -> `FAILURE` (`AUTH_REQUIRED`, `retry_safety = UNSAFE`); if CLI fails/times out after invocation -> `AMBIGUOUS` (`TIMEOUT`/`UNOBSERVABLE`, `retry_safety = UNKNOWN`); NEVER return `PVTI_mock_*` or `UNKNOWN` for uncertain mutation |
 | `get_pull_request` | returns `PullRequestLookupResult` | Uses enum lookup result | Return `ExternalActionResult[dict]`; `FOUND_EXACT` -> `SUCCESS`, `NOT_FOUND` -> `FAILURE`, `UNOBSERVABLE` -> `UNKNOWN`, `AMBIGUOUS` -> `AMBIGUOUS` |
 | `create_pull_request` | returns `dict[str, Any]` | Raises `RuntimeError` | Return `ExternalActionResult[dict]`; timeout after POST -> `AMBIGUOUS` (re-check GET PR by head/base); existing exact PR -> `SUCCESS` (`REUSED_EXISTING`, `retry_safety = UNSAFE`) |
 | `push_branch` | returns `bool` | Raises `RuntimeError` | Return `ExternalActionResult[str]` with pushed commit SHA evidence (`retry_safety = UNSAFE`) |
-| `get_remote_branch_head` | returns `str \| None` | Returns `None` on missing ref or failure | Return `ExternalActionResult[str]`; branch absent -> `FAILURE` (`NOT_FOUND`, `retry_safety = SAFE`), git error -> `UNKNOWN` (`UNOBSERVABLE`) |
+| `get_remote_branch_head` | returns `str \| None` | Returns `None` on missing ref or failure | Return `ExternalActionResult[str]`; branch absent -> `FAILURE` (`NOT_FOUND`, `retry_safety = SAFE`), 401/403 -> `FAILURE` (`AUTH_REQUIRED`), git error -> `UNKNOWN` (`UNOBSERVABLE`) |
 | `get_pull_request_details` | returns `dict[str, Any]` | Raises `RuntimeError` on 404 / 400 | Return `ExternalActionResult[dict]`; 404 -> `FAILURE` (`NOT_FOUND`), 500 -> `UNKNOWN` (`UNOBSERVABLE`) |
-| `close_issue` | returns `bool` | Returns `True` on 404 or exception! | Return `ExternalActionResult[bool]`; GET issue first: if already closed -> `SUCCESS` (`ALREADY_CLOSED`), 404 -> `FAILURE` (`NOT_FOUND`), exception -> `UNKNOWN`; NEVER return `True` on error |
-| `update_project_item_status` | returns `str \| bool` | Returns `True` even if `gh project item-edit` fails! | Return `ExternalActionResult[bool]`; check `res.returncode == 0` -> `SUCCESS`, CLI failure -> `FAILURE`/`UNKNOWN`; NEVER return `True` on error |
-| `delete_remote_branch` | returns `bool` | Returns `True` even if DELETE fails or throws! | Return `ExternalActionResult[bool]`; HTTP 200/204 -> `SUCCESS`, 404 + ls-remote absent -> `SUCCESS` (`ALREADY_ABSENT`), unobservable -> `UNKNOWN`; NEVER unconditional 404-success |
+| `close_issue` | returns `bool` | Returns `True` on 404 or exception! | Return `ExternalActionResult[bool]`; GET issue first: if already closed -> `SUCCESS` (`ALREADY_CLOSED`), 404 -> `FAILURE` (`NOT_FOUND`), PATCH timeout -> `AMBIGUOUS`; NEVER return `True` on error |
+| `update_project_item_status` | returns `str \| bool` | Returns `True` even if `gh project item-edit` fails! | Return `ExternalActionResult[bool]`; check `res.returncode == 0` -> `SUCCESS`, 401/403 -> `FAILURE` (`AUTH_REQUIRED`), CLI error/timeout -> `AMBIGUOUS`; NEVER return `True` on error |
+| `delete_remote_branch` | returns `bool` | Returns `True` even if DELETE fails or throws! | Return `ExternalActionResult[bool]`; HTTP 200/204 -> `SUCCESS`, 404 + ls-remote absent -> `SUCCESS` (`ALREADY_ABSENT`), DELETE timeout -> `AMBIGUOUS`; NEVER unconditional 404-success |
 
 ### 2. Git Execution Utilities (`src/minime/utils/git.py`, `post_merge_service.py`, `orchestration_service.py`)
 
 - `verify_candidate_ancestry`: Return `ExternalActionResult[bool]`. Explicitly verify that `git fetch origin` succeeded or that local refs are observable. If git command fails due to corrupted ref or missing commit object, report `UNKNOWN` (`UNOBSERVABLE`).
-- `push_branch`: Verify `candidate_sha` exists locally, verify remote authorization bundle, check `result.returncode == 0`, and observe remote branch head via `ls-remote` postcondition verification.
+- `push_branch`: Verify `candidate_sha` exists locally, verify remote authorization bundle, check `result.returncode == 0`, and observe remote branch head via `ls-remote` postcondition verification. If push times out, report `AMBIGUOUS`.
 - `clean_worktree_and_branches`: Check return codes for `git worktree remove` and `git branch -D`. Report explicit cleanup outcome (`ExternalActionResult[bool]`) rather than swallowing errors with logger warnings.
 
 ### 3. OpenSpec Filesystem & CLI Operations (`OpenSpecSyncService`, `OpenSpecArchiveService`, `OpenSpecValidationService`)
@@ -211,8 +214,8 @@ State machine transitions for `OrchestrationExternalAction`:
 - `RESERVED` -> `EXECUTING`
 - `EXECUTING` -> `COMPLETED` (when `ExternalOutcome.SUCCESS`)
 - `EXECUTING` -> `FAILED` (when `ExternalOutcome.FAILURE`)
-- `EXECUTING` -> `UNKNOWN` (when `ExternalOutcome.UNKNOWN`)
-- `EXECUTING` -> `AMBIGUOUS` (when `ExternalOutcome.AMBIGUOUS`)
+- `EXECUTING` -> `UNKNOWN` (when read-only query yields `ExternalOutcome.UNKNOWN`)
+- `EXECUTING` -> `AMBIGUOUS` (when mutating side effect yields `ExternalOutcome.AMBIGUOUS`)
 - `UNKNOWN` / `AMBIGUOUS` -> `EXECUTING` ONLY after observe-before-repeat protocol proves `retry_safety == RetrySafety.SAFE`.
 - `UNKNOWN` / `AMBIGUOUS` -> `COMPLETED` when observe-before-repeat protocol authoritatively proves postcondition was achieved.
 - `FAILED` MUST NOT automatically retry unless a domain caller explicitly authorizes a retry according to policy.
@@ -221,7 +224,7 @@ State machine transitions for `OrchestrationExternalAction`:
 
 In Stage B, `PostMergeService` is updated to consume `ExternalActionResult[T]` for all external operations:
 - **Historical Evidence vs Current State**: Stored `COMPLETED` action records in `OrchestrationExternalAction` prevent duplicate mutation commands. However, when reconciliation requires verifying current closure postconditions (e.g. issue closure, branch absence, sync spec presence), `PostMergeService` MUST query current remote external truth via `GitHubAdapter` and Git utilities.
-- **Fail-Closed Reporting**: If issue closure or project item update returns `UNKNOWN` or `FAILURE`, `PostMergeService` records the failure in `PostMergeReconciliationResult` and DOES NOT fabricate all phase booleans as `True`.
+- **Fail-Closed Reporting**: If issue closure or project item update returns `UNKNOWN` or `FAILURE` or `AMBIGUOUS`, `PostMergeService` records the failure in `PostMergeReconciliationResult` and DOES NOT fabricate all phase booleans as `True`.
 - **No Direct Lifecycle Writes**: PostMerge completions route strictly through `LifecycleTransitionAuthority` (Stage A).
 
 ## Test Strategy
@@ -230,7 +233,7 @@ In Stage B, `PostMergeService` is updated to consume `ExternalActionResult[T]` f
 - **Adversarial Unit Tests**:
   - Test `GitHubAdapter.create_issue` timeout -> returns `AMBIGUOUS`, zero fake issue #1, zero title-only dedupe.
   - Test `GitHubAdapter.close_issue` on 404 -> returns `FAILURE` (`NOT_FOUND`), zero `True` return.
-  - Test `GitHubAdapter.list_project_items` / `add_issue_to_project` on CLI failure -> returns `UNKNOWN` or `FAILURE`, zero `PVTI_mock_*` ID.
+  - Test `GitHubAdapter.list_project_items` / `add_issue_to_project`: 401/403 returns `FAILURE` (`AUTH_REQUIRED`), CLI timeout/failure returns `AMBIGUOUS`, zero `PVTI_mock_*` ID.
   - Test `GitHubAdapter.delete_remote_branch` 404 without repository verification -> returns `UNKNOWN`/`FAILURE`.
   - Test `GitHubAdapter.delete_remote_branch` 404 + ls-remote absent -> returns `SUCCESS` (`ALREADY_ABSENT`).
   - Test `create_pull_request` when exact PR already exists -> returns `SUCCESS` (`REUSED_EXISTING`, `retry_safety = UNSAFE`).

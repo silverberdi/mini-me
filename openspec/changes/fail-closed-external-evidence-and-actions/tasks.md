@@ -5,7 +5,7 @@
 - [ ] 3. Extend `ExternalActionType` and align `ExternalActionStatus` enums in domain and database models to support generic external side-effect tracking and state machine transitions.
 - [ ] 4. Remove all fabricated default success returns (`return True` on exception, `PVTI_mock_*`, dummy issue `#1`, synthetic URLs, default `"ok"`/`"github"` params) from `GitHubAdapter` and `ReadinessGitHubStub`.
 - [ ] 5. Implement deterministic `operation_key` generation and HTML comment marker (`<!-- minime-opkey: <key> -->`) deduplication in `GitHubAdapter`, replacing title-only issue matching.
-- [ ] 6. Migrate `GitHubAdapter` REST and CLI methods (including fail-closed Project item lookup/binding without synthetic IDs) to return typed `ExternalActionResult[T]` with deterministic outcome classification.
+- [ ] 6. Migrate `GitHubAdapter` REST and CLI methods (including fail-closed Project item lookup/binding returning `AMBIGUOUS` on mutating CLI error and `FAILURE` on auth rejection) to return typed `ExternalActionResult[T]`.
 - [ ] 7. Migrate Git operations in `src/minime/utils/git.py`, `post_merge_service.py`, and `orchestration_service.py` to verify explicit return codes, SHA ancestry, and ref presence fail-closed.
 - [ ] 8. Implement fail-closed `delete_remote_branch` logic requiring authoritative ref absence observation via `ls-remote` under valid authorization before returning `SUCCESS` (`ALREADY_ABSENT`, `retry_safety = UNSAFE`).
 - [ ] 9. Migrate OpenSpec filesystem operations (`OpenSpecSyncService`, `OpenSpecArchiveService`, `OpenSpecValidationService`) to confirm verifiable postconditions on disk.

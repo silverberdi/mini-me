@@ -60,9 +60,9 @@ AND SHALL NOT return synthetic data or default True.
 
 ### Requirement: Fail-closed GitHub Project item lookup and binding
 
-GitHub Project V2 item lookups and status edits SHALL execute fail-closed postcondition verification and return typed outcome reports without fabricating project item IDs.
+GitHub Project V2 item lookups, additions, and status edits SHALL execute fail-closed postcondition verification and return typed outcome reports without fabricating project item IDs.
 
-#### Scenario: Authoritative project item absence
+#### Scenario: Authoritative project item absence on read query
 GIVEN valid repository/project identity and authorization
 WHEN project item lookup authoritatively confirms no item is bound to the requested issue or resource
 THEN the adapter SHALL return outcome FAILURE
@@ -70,12 +70,28 @@ AND reason_code SHALL be NOT_FOUND
 AND retry_safety SHALL be marked SAFE (query)
 AND no synthetic project item ID (such as PVTI_mock_*) SHALL be returned.
 
-#### Scenario: Unobservable project item lookup
+#### Scenario: Confirmed authorization rejection on project item read query
 GIVEN a query to inspect GitHub Project item state
-WHEN gh CLI or REST API fails, times out, rate-limits, or lacks project authorization
+WHEN gh CLI or REST API returns HTTP 401 or 403 authorization rejection
+THEN the adapter SHALL return outcome FAILURE
+AND reason_code SHALL be AUTH_REQUIRED
+AND retry_safety SHALL be marked SAFE (for the read query itself)
+AND no synthetic project item ID SHALL be returned.
+
+#### Scenario: Unobservable project item read query
+GIVEN a query to inspect GitHub Project item state
+WHEN gh CLI or REST API encounters network timeout, HTTP 429 rate limit, or transport failure
 THEN the adapter SHALL return outcome UNKNOWN
-AND reason_code SHALL be TIMEOUT, RATE_LIMITED, UNOBSERVABLE, or AUTH_REQUIRED as evidence dictates
+AND reason_code SHALL be TIMEOUT, RATE_LIMITED, or UNOBSERVABLE as evidence dictates
 AND retry_safety SHALL be marked SAFE (query)
+AND no synthetic project item ID SHALL be returned.
+
+#### Scenario: Mutating project item addition CLI failure or timeout after request send
+GIVEN a request to add an issue to a GitHub Project V2 via gh project item-add
+WHEN gh CLI execution times out, loses connection, or exits abnormally after command transmission
+THEN the adapter SHALL return outcome AMBIGUOUS
+AND reason_code SHALL be TIMEOUT or UNOBSERVABLE
+AND retry_safety SHALL be marked UNKNOWN (fails closed against blind repeat)
 AND no synthetic project item ID SHALL be returned.
 
 #### Scenario: Existing project item lookup
@@ -105,14 +121,6 @@ GIVEN a request to create a GitHub Issue
 WHEN GitHub API returns HTTP 401 or 403 authorization failure
 THEN GitHubAdapter SHALL return outcome FAILURE with reason_code AUTH_REQUIRED and retry_safety UNSAFE
 AND SHALL NOT retry or fabricate success.
-
-#### Scenario: GitHub add_issue_to_project CLI failure
-GIVEN a request to add an issue to a GitHub Project V2
-WHEN gh CLI execution fails or returns non-zero exit code
-THEN GitHubAdapter SHALL return outcome FAILURE (if CLI rejected) or UNKNOWN (if unobservable)
-AND reason_code SHALL be explicitly populated
-AND retry_safety SHALL be marked UNKNOWN (if mutating attempt was sent)
-AND SHALL NOT return a synthetic mock ID like PVTI_mock_2.
 
 #### Scenario: GitHub close_issue encounters 404 or unobservable issue
 GIVEN a request to close a GitHub Issue
@@ -213,7 +221,7 @@ AND production state SHALL NOT be marked verified.
 
 ### Requirement: Observe-before-repeat idempotency protocol
 
-When an external action record is in state `AMBIGUOUS` or `UNKNOWN`, retrying or repeating the operation SHALL follow an authoritative 5-step protocol and MUST NOT treat absence alone as safe to retry.
+When an external action record is in state `AMBIGUOUS`, retrying or repeating the operation SHALL follow an authoritative 5-step protocol and MUST NOT treat absence alone as safe to retry.
 
 #### Scenario: Ambiguous action followed by UNKNOWN reconciliation prevents automatic repeat
 GIVEN a prior external action recorded in state AMBIGUOUS
