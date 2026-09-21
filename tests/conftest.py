@@ -27,6 +27,7 @@ from minime.domain.enums import (
     ReviewStatus,
     ReviewVerdict,
 )
+from minime.domain.exceptions import LifecycleBypassError
 from minime.domain.interfaces import (
     AuditFindingRepositoryInterface,
     AuditRepositoryInterface,
@@ -174,6 +175,11 @@ class InMemoryChangeRepository(ChangeRepositoryInterface):
                 f"change '{change.name}'."
             )
         if physical is not None:
+            if change.status != physical.status:
+                raise LifecycleBypassError(
+                    f"Direct lifecycle status mutation on existing Change '{change.name}' via generic save() is forbidden. "
+                    f"Status change from '{physical.status.value}' to '{change.status.value}' must execute via LifecycleTransitionAuthority."
+                )
             updated = change.model_copy(deep=True)
             updated.change_id = physical.change_id
             updated.discovered_at = physical.discovered_at
@@ -181,6 +187,11 @@ class InMemoryChangeRepository(ChangeRepositoryInterface):
             return
         if logical_matches:
             existing = logical_matches[0]
+            if change.status != existing.status:
+                raise LifecycleBypassError(
+                    f"Direct lifecycle status mutation on existing Change '{change.name}' via generic save() is forbidden. "
+                    f"Status change from '{existing.status.value}' to '{change.status.value}' must execute via LifecycleTransitionAuthority."
+                )
             updated = existing.model_copy(deep=True)
             updated.schema_name = change.schema_name
             updated.proposal_path = change.proposal_path
@@ -1631,6 +1642,18 @@ class InMemoryBacklogItemRepository(BacklogItemRepositoryInterface):
         self._store: dict[str, BacklogItem] = {}
 
     def save(self, item: BacklogItem) -> None:
+        existing = self._store.get(item.item_id)
+        if not existing:
+            for ex in self._store.values():
+                if ex.project_id == item.project_id and ex.item_key == item.item_key:
+                    existing = ex
+                    break
+        if existing is not None:
+            if item.status != existing.status:
+                raise LifecycleBypassError(
+                    f"Direct lifecycle status mutation on existing BacklogItem '{item.item_key}' via generic save() is forbidden. "
+                    f"Status change from '{existing.status.value}' to '{item.status.value}' must execute via LifecycleTransitionAuthority."
+                )
         self._store[item.item_id] = item.model_copy(deep=True)
 
     def get_by_id(self, item_id: str) -> BacklogItem | None:

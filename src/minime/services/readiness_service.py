@@ -376,7 +376,6 @@ class ReadinessService:
             if state_changed:
                 change_record.last_readiness_status = status
                 change_record.last_readiness_reasons = unmet_reasons
-                change_record.status = ChangeStatus.READY if is_ready else ChangeStatus.DISCOVERED
                 change_record.updated_at = now
                 self.uow.changes.save(change_record)
         else:
@@ -385,7 +384,7 @@ class ReadinessService:
             change_record = Change(
                 project_id=project_id,
                 name=change_name,
-                status=ChangeStatus.READY if is_ready else ChangeStatus.DISCOVERED,
+                status=ChangeStatus.DISCOVERED,
                 last_readiness_status=status,
                 last_readiness_reasons=unmet_reasons,
                 discovered_at=now,

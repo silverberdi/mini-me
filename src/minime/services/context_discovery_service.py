@@ -296,21 +296,14 @@ class ContextDiscoveryService:
             if not existing:
                 self.uow.backlog_items.save(item)
             else:
-                # Update metadata if item is still in default backlog state without overwriting manual edits
-                if (
-                    (
-                        existing.status == WorkItemStatus.BACKLOG
-                        and item.status != WorkItemStatus.BACKLOG
-                    )
-                    or (
-                        item.status == WorkItemStatus.COMPLETED
-                        and existing.status != WorkItemStatus.COMPLETED
-                    )
-                ):
+                if existing.status in (WorkItemStatus.COMPLETED, WorkItemStatus.CANCELLED):
+                    if item.status not in (WorkItemStatus.COMPLETED, WorkItemStatus.CANCELLED):
+                        logger.warning(
+                            f"Contradiction detected: BacklogItem '{item.item_key}' is terminally '{existing.status.value}' but external evidence suggests active."
+                        )
+                else:
                     updated = existing.model_copy(
                         update={
-                            "status": item.status,
-                            "readiness_state": item.readiness_state,
                             "updated_at": now,
                         }
                     )

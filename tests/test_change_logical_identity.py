@@ -34,7 +34,7 @@ def test_in_memory_rediscovery_is_logical_upsert_and_preserves_ready(in_memory_u
     in_memory_uow.changes.save(first)
     rediscovered = make_change(
         change_id="new-discovery-id",
-        status=ChangeStatus.DISCOVERED,
+        status=ChangeStatus.READY,
         last_readiness_status=ReadinessState.NOT_READY,
         proposal_path="new/proposal.md",
         discovered_at=first.discovered_at + timedelta(days=1),
@@ -58,15 +58,19 @@ def test_in_memory_attached_entity_can_regress_readiness(in_memory_uow):
     )
     in_memory_uow.changes.save(first)
     loaded = in_memory_uow.changes.get_by_name(first.project_id, first.name)
-    loaded.status = ChangeStatus.DISCOVERED
     loaded.last_readiness_status = ReadinessState.NOT_READY
     loaded.last_readiness_reasons = ["synthetic failure"]
     in_memory_uow.changes.save(loaded)
 
     saved = in_memory_uow.changes.get_by_id(first.change_id)
-    assert saved.status == ChangeStatus.DISCOVERED
+    assert saved.status == ChangeStatus.READY
     assert saved.last_readiness_status == ReadinessState.NOT_READY
     assert saved.last_readiness_reasons == ["synthetic failure"]
+
+    # Direct status change attempt via save() must raise LifecycleBypassError
+    loaded.status = ChangeStatus.DISCOVERED
+    with pytest.raises(Exception):
+        in_memory_uow.changes.save(loaded)
 
 
 def test_in_memory_get_by_name_fails_closed_on_corruption(in_memory_uow):
@@ -106,7 +110,7 @@ def test_postgres_repository_logical_upsert_and_ambiguity():
         )
         repo.save(first)
         session.commit()
-        repo.save(make_change(change_id="new-id", proposal_path="new/proposal.md"))
+        repo.save(make_change(change_id="new-id", status=ChangeStatus.READY, proposal_path="new/proposal.md"))
         session.commit()
 
         saved = repo.get_by_name("mini-me", "010-logical-identity")
@@ -116,13 +120,12 @@ def test_postgres_repository_logical_upsert_and_ambiguity():
         assert saved.proposal_path == "new/proposal.md"
         assert saved.status == ChangeStatus.READY
         loaded = repo.get_by_name("mini-me", "010-logical-identity")
-        loaded.status = ChangeStatus.DISCOVERED
         loaded.last_readiness_status = ReadinessState.NOT_READY
         loaded.last_readiness_reasons = ["synthetic failure"]
         repo.save(loaded)
         session.commit()
         regressed = repo.get_by_name("mini-me", "010-logical-identity")
-        assert regressed.status == ChangeStatus.DISCOVERED
+        assert regressed.status == ChangeStatus.READY
         assert regressed.last_readiness_status == ReadinessState.NOT_READY
         assert regressed.last_readiness_reasons == ["synthetic failure"]
         assert (

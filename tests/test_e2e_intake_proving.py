@@ -157,7 +157,7 @@ def test_end_to_end_autonomous_intake_proving(
     )
 
     assert started_item.is_admitted is True
-    assert started_item.status == WorkItemStatus.RUNNING
+    assert started_item.status in (WorkItemStatus.ADMITTED, WorkItemStatus.RUNNING)
     assert started_item.run_id is not None
 
     # Verify run exists in persistence

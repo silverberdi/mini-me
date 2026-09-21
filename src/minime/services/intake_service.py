@@ -31,6 +31,7 @@ from minime.domain.models import (
     utc_now,
 )
 from minime.logging import get_logger, set_correlation_context
+from minime.services.lifecycle_transition_authority import LifecycleTransitionAuthority
 from minime.services.openspec_generator import OpenSpecGenerator, slugify
 from minime.services.readiness_service import ReadinessService
 
@@ -225,12 +226,22 @@ class IntakeService:
             update={
                 "human_answers": new_answers,
                 "description": new_desc,
-                "status": WorkItemStatus.PREPARING,
                 "human_questions": [],
                 "updated_at": now,
             }
         )
         self.uow.backlog_items.save(updated)
+
+        if item.status != WorkItemStatus.PREPARING:
+            authority = LifecycleTransitionAuthority(self.uow)
+            updated = authority.transition_backlog_item(
+                project_id=project_id,
+                item_key=item_key,
+                expected_from_state=item.status,
+                to_state=WorkItemStatus.PREPARING,
+                reason_code="answer_human_question",
+                actor=operator_email,
+            )
 
         event = Event(
             event_type=EventType.WORK_ITEM_QUESTION_ANSWERED,
@@ -270,6 +281,17 @@ class IntakeService:
             raise ValueError(f"Work item '{item_key}' not found in project '{project_id}'.")
 
         now = utc_now()
+        if item.status in (WorkItemStatus.BACKLOG, WorkItemStatus.CONTEXT_CHECK, WorkItemStatus.BLOCKED):
+            authority = LifecycleTransitionAuthority(self.uow)
+            item = authority.transition_backlog_item(
+                project_id=project_id,
+                item_key=item_key,
+                expected_from_state=item.status,
+                to_state=WorkItemStatus.PREPARING,
+                reason_code="prepare_start",
+                actor=operator_email,
+            )
+
         change_name = item.openspec_change_name or slugify(item.item_key)
 
         # 1. Generate OpenSpec artifacts
@@ -281,7 +303,6 @@ class IntakeService:
         if not generated.is_complete:
             updated_item = item.model_copy(
                 update={
-                    "status": WorkItemStatus.NEEDS_HUMAN,
                     "readiness_state": ReadinessState.NOT_READY,
                     "unmet_readiness_reasons": generated.missing_reasons,
                     "human_questions": generated.human_questions,
@@ -289,6 +310,16 @@ class IntakeService:
                 }
             )
             self.uow.backlog_items.save(updated_item)
+            if item.status != WorkItemStatus.NEEDS_HUMAN:
+                authority = LifecycleTransitionAuthority(self.uow)
+                updated_item = authority.transition_backlog_item(
+                    project_id=project_id,
+                    item_key=item_key,
+                    expected_from_state=item.status,
+                    to_state=WorkItemStatus.NEEDS_HUMAN,
+                    reason_code="prepare_incomplete",
+                    actor=operator_email,
+                )
             self.uow.commit()
 
             return WorkItemPrepareResult(
@@ -397,7 +428,6 @@ class IntakeService:
                 "github_issue_number": issue_number,
                 "github_issue_url": issue_url,
                 "github_project_item_id": project_item_id,
-                "status": final_status,
                 "readiness_state": final_readiness,
                 "unmet_readiness_reasons": readiness_eval.unmet_reasons,
                 "human_questions": [],
@@ -405,6 +435,16 @@ class IntakeService:
             }
         )
         self.uow.backlog_items.save(updated_item)
+        if item.status != final_status:
+            authority = LifecycleTransitionAuthority(self.uow)
+            updated_item = authority.transition_backlog_item(
+                project_id=project_id,
+                item_key=item_key,
+                expected_from_state=item.status,
+                to_state=final_status,
+                reason_code="prepare_complete",
+                actor=operator_email,
+            )
 
         # 8. Update WorkQueueItem for scheduler discovery
         queue_item = self.uow.work_queue.get_by_project_and_change(project_id, change_name)
@@ -501,10 +541,9 @@ class IntakeService:
                     item_key,
                     run.run_id,
                 )
-                if item.status != WorkItemStatus.RUNNING or item.run_id != run.run_id:
+                if item.run_id != run.run_id:
                     updated_item = item.model_copy(
                         update={
-                            "status": WorkItemStatus.RUNNING,
                             "run_id": run.run_id,
                             "updated_at": utc_now(),
                         }
@@ -529,9 +568,9 @@ class IntakeService:
             raise ValueError(f"Work item admission blocked by scheduler policy: {reason}")
 
         now = utc_now()
-        updated_item = item.model_copy(
+        item_refreshed = self.uow.backlog_items.get_by_project_and_key(project_id, item_key) or item
+        updated_item = item_refreshed.model_copy(
             update={
-                "status": WorkItemStatus.RUNNING,
                 "run_id": run.run_id,
                 "updated_at": now,
             }
@@ -573,7 +612,16 @@ class IntakeService:
         if not item:
             return
 
-        self.uow.backlog_items.delete(item.item_id)
+        if item.status != WorkItemStatus.CANCELLED:
+            authority = LifecycleTransitionAuthority(self.uow)
+            authority.transition_backlog_item(
+                project_id=project_id,
+                item_key=item_key,
+                expected_from_state=item.status,
+                to_state=WorkItemStatus.CANCELLED,
+                reason_code="delete_work_item",
+                actor=operator_email,
+            )
 
         event = Event(
             event_type=EventType.WORK_ITEM_CANCELLED,
@@ -616,9 +664,12 @@ class IntakeService:
                         if len(parts) == 4 and parts[0].isdigit() and len(parts[0]) == 4:
                             archived_change_names.add(parts[3])
 
-        mutated = False
         reconciled_items: list[BacklogItem] = []
         for item in items:
+            if item.status in (WorkItemStatus.COMPLETED, WorkItemStatus.CANCELLED):
+                reconciled_items.append(item)
+                continue
+
             change_name = item.openspec_change_name or item.item_key
             item_runs = runs_by_change.get(change_name, []) or runs_by_change.get(item.item_key, [])
             latest_run = item_runs[-1] if item_runs else None
@@ -642,15 +693,13 @@ class IntakeService:
                     or latest_run.stop_outcome == OrchestrationStopOutcome.COMPLETED
                 )
             )
-            is_done = is_archived or is_run_completed or (change_rec and change_rec.status == ChangeStatus.DONE and is_archived)
+            is_done = is_archived or is_run_completed or bool(change_rec and change_rec.status == ChangeStatus.DONE)
 
             new_status = item.status
-            new_readiness = item.readiness_state
             new_run_id = item.run_id
 
             if is_done:
                 new_status = WorkItemStatus.COMPLETED
-                new_readiness = ReadinessState.READY
             elif latest_run:
                 new_run_id = latest_run.run_id
                 if latest_run.is_active:
@@ -672,27 +721,16 @@ class IntakeService:
                 else:
                     new_status = WorkItemStatus.BACKLOG
 
-            if (
-                new_status != item.status
-                or new_readiness != item.readiness_state
-                or new_run_id != item.run_id
-            ):
-                updated_item = item.model_copy(
+            if new_status != item.status or new_run_id != item.run_id:
+                projected_item = item.model_copy(
                     update={
                         "status": new_status,
-                        "readiness_state": new_readiness,
                         "run_id": new_run_id,
-                        "updated_at": utc_now(),
                     }
                 )
-                self.uow.backlog_items.save(updated_item)
-                reconciled_items.append(updated_item)
-                mutated = True
+                reconciled_items.append(projected_item)
             else:
                 reconciled_items.append(item)
-
-        if mutated:
-            self.uow.commit()
 
         return reconciled_items
 
