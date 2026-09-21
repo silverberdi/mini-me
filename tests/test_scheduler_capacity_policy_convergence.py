@@ -30,16 +30,20 @@ from minime.domain.enums import (
     CapacitySignalSource,
     ChangeStatus,
     ExecutionOutcome,
+    ExternalOutcome,
+    ExternalReasonCode,
     JobStatus,
     OrchestrationStage,
     ProviderHealthStatus,
     QueuePriority,
     ReadinessState,
+    RetrySafety,
     SchedulerMode,
 )
 from minime.domain.models import (
     CapacityWindow,
     Change,
+    ExternalActionResult,
     Job,
     JobAttempt,
     OpenRouterBudgetPolicy,
@@ -116,7 +120,13 @@ def setup_test_environment(
     create_isolated_openspec_change(root, change_name=change_name)
 
     mock_gh = MagicMock(spec=GitHubAdapter)
-    mock_gh.validate_issue_binding.return_value = (True, None)
+    mock_gh.validate_issue_binding.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="fake",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.SAFE,
+        data=True,
+    )
 
     readiness = ReadinessService(uow, github_adapter=mock_gh)
     scheduler = SchedulerService(

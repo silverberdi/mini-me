@@ -11,6 +11,7 @@ from minime.adapters.github import GitHubAdapter
 from minime.adapters.openspec import OpenSpecAdapter
 from minime.domain.enums import (
     ChangeStatus,
+    ExternalOutcome,
     QueuePriority,
     ReadinessState,
 )
@@ -137,9 +138,7 @@ class WorkDiscoveryService:
             remote_issues: list[dict[str, Any]] = []
             try:
                 list_res = self.github_adapter.list_issues(project.repository, state="all")
-                if isinstance(list_res, list):
-                    remote_issues = list_res
-                elif getattr(list_res, "is_success", False) and list_res.data:
+                if list_res.outcome == ExternalOutcome.SUCCESS and list_res.data:
                     remote_issues = list_res.data
             except Exception as exc:
                 logger.debug(

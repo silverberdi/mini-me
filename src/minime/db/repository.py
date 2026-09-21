@@ -2954,6 +2954,7 @@ class PostgresOrchestrationExternalActionRepository(OrchestrationExternalActionR
         self,
         action_key: str,
         observed_result: Any,
+        original_mutation_retry_authorized: bool = False,
     ) -> OrchestrationExternalAction:
         stmt = select(OrchestrationExternalActionModel).where(
             OrchestrationExternalActionModel.action_key == action_key
@@ -2962,11 +2963,10 @@ class PostgresOrchestrationExternalActionRepository(OrchestrationExternalActionR
         if not model:
             raise ValueError(f"External action '{action_key}' not found")
 
-        from minime.domain.enums import ExternalOutcome, RetrySafety
+        from minime.domain.enums import ExternalOutcome
 
         # Step 1: Inspect authoritative observation result
         outcome = getattr(observed_result, "outcome", None)
-        retry_safety = getattr(observed_result, "retry_safety", RetrySafety.UNKNOWN)
 
         # Step 2: If postcondition positively observed -> COMPLETED
         if outcome == ExternalOutcome.SUCCESS:
@@ -2977,12 +2977,12 @@ class PostgresOrchestrationExternalActionRepository(OrchestrationExternalActionR
             if getattr(observed_result, "observed_evidence", None):
                 model.result_payload = observed_result.observed_evidence
 
-        # Step 3: If authoritative evidence proves effect did NOT occur AND retry_safety == SAFE -> EXECUTING (retry authorized)
-        elif outcome == ExternalOutcome.FAILURE and retry_safety == RetrySafety.SAFE:
+        # Step 3: If authoritative evidence proves effect did NOT occur AND original_mutation_retry_authorized == True -> EXECUTING (retry authorized)
+        elif outcome == ExternalOutcome.FAILURE and original_mutation_retry_authorized is True:
             model.status = ExternalActionStatus.EXECUTING.value
             model.error_message = getattr(observed_result, "error_message", None)
 
-        # Step 4 & 5: If UNKNOWN / AMBIGUOUS or retry_safety != SAFE -> Remain AMBIGUOUS (cannot repeat automatically)
+        # Step 4 & 5: If UNKNOWN / AMBIGUOUS or original_mutation_retry_authorized is False -> Remain AMBIGUOUS (cannot repeat automatically)
         else:
             model.status = ExternalActionStatus.AMBIGUOUS.value
             model.error_message = (

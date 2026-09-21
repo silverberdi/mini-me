@@ -17,17 +17,21 @@ import pytest
 
 from conftest import ReadinessGitHubStub, create_isolated_openspec_change
 from minime.domain.enums import (
+    ExternalOutcome,
+    ExternalReasonCode,
     HumanGate,
     OrchestrationStage,
     OrchestrationStopOutcome,
     ProjectStatus,
     ProviderHealthStatus,
     ReadinessState,
+    RetrySafety,
 )
 from minime.domain.interfaces import GitHubAdapterInterface
 from minime.domain.models import (
     CheckResult,
     Event,
+    ExternalActionResult,
     Project,
     ProjectBinding,
     ProviderHealth,
@@ -49,12 +53,32 @@ class DeterministicGitHubAdapter(GitHubAdapterInterface):
 
     def validate_issue_binding(
         self, expected_repository: str, issue_number: int, github_repository: str | None = None
-    ) -> tuple[bool, str | None]:
+    ) -> ExternalActionResult[bool]:
         if github_repository and expected_repository != github_repository:
-            return False, "Repository mismatch"
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="fake",
+                reason_code=ExternalReasonCode.CONFLICT,
+                retry_safety=RetrySafety.SAFE,
+                data=False,
+                error_message="Repository mismatch",
+            )
         if issue_number <= 0:
-            return False, "Invalid issue number"
-        return True, None
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="fake",
+                reason_code=ExternalReasonCode.CONFLICT,
+                retry_safety=RetrySafety.SAFE,
+                data=False,
+                error_message="Invalid issue number",
+            )
+        return ExternalActionResult(
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="fake",
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+            retry_safety=RetrySafety.SAFE,
+            data=True,
+        )
 
     def record_sync_failure(
         self, project_id: str, change_id: str | None, operation: str, error_message: str
@@ -65,9 +89,25 @@ class DeterministicGitHubAdapter(GitHubAdapterInterface):
 
     def get_pull_request(
         self, repository: str, branch: str, base: str | None = None
-    ) -> dict[str, Any] | None:
+    ) -> ExternalActionResult[dict[str, Any]]:
         key = f"{repository}:{branch}"
-        return self.prs.get(key)
+        pr = self.prs.get(key)
+        if pr:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="fake",
+                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                retry_safety=RetrySafety.SAFE,
+                data=pr,
+                external_id=str(pr.get("number")),
+            )
+        return ExternalActionResult(
+            outcome=ExternalOutcome.FAILURE,
+            source_adapter="fake",
+            reason_code=ExternalReasonCode.NOT_FOUND,
+            retry_safety=RetrySafety.SAFE,
+            error_message="Pull request not found.",
+        )
 
     def create_pull_request(
         self,
@@ -77,7 +117,7 @@ class DeterministicGitHubAdapter(GitHubAdapterInterface):
         title: str,
         body: str,
         head_sha: str,
-    ) -> dict[str, Any]:
+    ) -> ExternalActionResult[dict[str, Any]]:
         key = f"{repository}:{branch}"
         pr_data = {
             "repository": repository,
@@ -91,21 +131,48 @@ class DeterministicGitHubAdapter(GitHubAdapterInterface):
             "body": body,
         }
         self.prs[key] = pr_data
-        return pr_data
+        return ExternalActionResult(
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="fake",
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+            retry_safety=RetrySafety.UNSAFE,
+            data=pr_data,
+            external_id=str(pr_data["number"]),
+        )
 
-    def push_branch(self, worktree_path: str, remote: str, branch: str, candidate_sha: str) -> bool:
+    def push_branch(
+        self, worktree_path: str, remote: str, branch: str, candidate_sha: str
+    ) -> ExternalActionResult[str]:
         self.pushed_branches.append(
             {"remote": remote, "branch": branch, "candidate_sha": candidate_sha}
         )
-        return True
+        return ExternalActionResult(
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="fake",
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+            retry_safety=RetrySafety.UNSAFE,
+            data=candidate_sha,
+        )
 
     def get_remote_branch_head(
         self, repository: str, branch: str, remote: str = "origin"
-    ) -> str | None:
+    ) -> ExternalActionResult[str]:
         for p in self.pushed_branches:
             if p.get("branch") == branch:
-                return p.get("candidate_sha")
-        return None
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.SUCCESS,
+                    source_adapter="fake",
+                    reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                    retry_safety=RetrySafety.SAFE,
+                    data=p.get("candidate_sha", ""),
+                )
+        return ExternalActionResult(
+            outcome=ExternalOutcome.FAILURE,
+            source_adapter="fake",
+            reason_code=ExternalReasonCode.NOT_FOUND,
+            retry_safety=RetrySafety.SAFE,
+            error_message="Remote branch head not found.",
+        )
 
 
 class AcceptanceChecksRunner:

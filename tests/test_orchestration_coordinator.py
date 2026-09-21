@@ -14,6 +14,8 @@ from minime.domain.enums import (
     ContinuationDecision,
     ExecutionOutcome,
     ExternalActionStatus,
+    ExternalOutcome,
+    ExternalReasonCode,
     HumanGate,
     JobStatus,
     OrchestrationStage,
@@ -22,6 +24,7 @@ from minime.domain.enums import (
     ProviderHealthStatus,
     PullRequestLookupState,
     ReadinessState,
+    RetrySafety,
     ReviewStatus,
     ReviewVerdict,
 )
@@ -31,6 +34,7 @@ from minime.domain.models import (
     AuditRecord,
     CheckResult,
     Event,
+    ExternalActionResult,
     Job,
     JobAttempt,
     OrchestrationCandidate,
@@ -38,7 +42,6 @@ from minime.domain.models import (
     Project,
     ProjectBinding,
     ProviderHealth,
-    PullRequestLookupResult,
     Review,
     utc_now,
 )
@@ -63,12 +66,32 @@ class FakeGitHubAdapter(GitHubAdapterInterface):
 
     def validate_issue_binding(
         self, expected_repository: str, issue_number: int, github_repository: str | None = None
-    ) -> tuple[bool, str | None]:
+    ) -> ExternalActionResult[bool]:
         if github_repository and expected_repository != github_repository:
-            return False, "Repository mismatch"
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="fake",
+                reason_code=ExternalReasonCode.CONFLICT,
+                retry_safety=RetrySafety.SAFE,
+                data=False,
+                error_message="Repository mismatch",
+            )
         if issue_number <= 0:
-            return False, "Invalid issue number"
-        return True, None
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="fake",
+                reason_code=ExternalReasonCode.CONFLICT,
+                retry_safety=RetrySafety.SAFE,
+                data=False,
+                error_message="Invalid issue number",
+            )
+        return ExternalActionResult(
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="fake",
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+            retry_safety=RetrySafety.SAFE,
+            data=True,
+        )
 
     def record_sync_failure(
         self, project_id: str, change_id: str | None, operation: str, error_message: str
@@ -84,11 +107,33 @@ class FakeGitHubAdapter(GitHubAdapterInterface):
 
     def get_pull_request(
         self, repository: str, branch: str, base: str = "main"
-    ) -> dict[str, Any] | None:
+    ) -> ExternalActionResult[dict[str, Any]]:
         if self.fail_pr:
-            raise RuntimeError("GitHub PR API unreachable")
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="fake",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.SAFE,
+                error_message="GitHub PR API unreachable",
+            )
         key = f"{repository}:{branch}"
-        return self.prs.get(key)
+        pr = self.prs.get(key)
+        if pr:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="fake",
+                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                retry_safety=RetrySafety.SAFE,
+                data=pr,
+                external_id=str(pr.get("number")),
+            )
+        return ExternalActionResult(
+            outcome=ExternalOutcome.FAILURE,
+            source_adapter="fake",
+            reason_code=ExternalReasonCode.NOT_FOUND,
+            retry_safety=RetrySafety.SAFE,
+            error_message="Pull request not found.",
+        )
 
     def create_pull_request(
         self,
@@ -98,10 +143,16 @@ class FakeGitHubAdapter(GitHubAdapterInterface):
         title: str,
         body: str,
         head_sha: str,
-    ) -> dict[str, Any]:
+    ) -> ExternalActionResult[dict[str, Any]]:
         self.create_calls += 1
         if self.fail_pr:
-            raise RuntimeError("GitHub PR API unreachable")
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="fake",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.UNKNOWN,
+                error_message="GitHub PR API unreachable",
+            )
         key = f"{repository}:{branch}"
         pr_data = {
             "repository": repository,
@@ -115,25 +166,64 @@ class FakeGitHubAdapter(GitHubAdapterInterface):
             "body": body,
         }
         self.prs[key] = pr_data
-        return pr_data
+        return ExternalActionResult(
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="fake",
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+            retry_safety=RetrySafety.UNSAFE,
+            data=pr_data,
+            external_id=str(pr_data["number"]),
+        )
 
-    def push_branch(self, worktree_path: str, remote: str, branch: str, candidate_sha: str) -> bool:
+    def push_branch(
+        self, worktree_path: str, remote: str, branch: str, candidate_sha: str
+    ) -> ExternalActionResult[str]:
         if self.fail_push:
-            raise RuntimeError("Git push connection timed out")
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="fake",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.UNKNOWN,
+                error_message="Git push connection timed out",
+            )
         self.pushed_branches.append(
             {"remote": remote, "branch": branch, "candidate_sha": candidate_sha}
         )
-        return True
+        return ExternalActionResult(
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="fake",
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+            retry_safety=RetrySafety.UNSAFE,
+            data=candidate_sha,
+        )
 
     def get_remote_branch_head(
         self, repository: str, branch: str, remote: str = "origin"
-    ) -> str | None:
+    ) -> ExternalActionResult[str]:
         if self.fail_push:
-            raise RuntimeError("Git ls-remote connection timed out")
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="fake",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.SAFE,
+                error_message="Git ls-remote connection timed out",
+            )
         for p in self.pushed_branches:
             if p.get("branch") == branch:
-                return p.get("candidate_sha")
-        return None
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.SUCCESS,
+                    source_adapter="fake",
+                    reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                    retry_safety=RetrySafety.SAFE,
+                    data=p.get("candidate_sha", ""),
+                )
+        return ExternalActionResult(
+            outcome=ExternalOutcome.FAILURE,
+            source_adapter="fake",
+            reason_code=ExternalReasonCode.NOT_FOUND,
+            retry_safety=RetrySafety.SAFE,
+            error_message="Remote branch head not found.",
+        )
 
 
 class FakeChecksRunner:
@@ -170,28 +260,52 @@ class StructuredLookupGitHubAdapter(FakeGitHubAdapter):
         self.lookup_state = state
         self.lookup_mismatch = mismatch
 
-    def get_pull_request(self, repository: str, branch: str, base: str = "main"):
-        if self.lookup_state != PullRequestLookupState.FOUND_EXACT:
-            return PullRequestLookupResult(
-                state=self.lookup_state,
-                detail=f"simulated {self.lookup_state.value.lower()} lookup",
+    def get_pull_request(self, repository: str, branch: str, base: str = "main") -> ExternalActionResult[dict[str, Any]]:
+        if self.lookup_state == PullRequestLookupState.NOT_FOUND:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="fake",
+                reason_code=ExternalReasonCode.NOT_FOUND,
+                retry_safety=RetrySafety.SAFE,
+                error_message="Pull request not found.",
             )
-        candidate_sha = self.pushed_branches[-1]["candidate_sha"]
+        elif self.lookup_state == PullRequestLookupState.UNOBSERVABLE:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="fake",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.SAFE,
+                error_message="Pull request lookup unobservable.",
+            )
+        elif self.lookup_state == PullRequestLookupState.AMBIGUOUS:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.AMBIGUOUS,
+                source_adapter="fake",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.SAFE,
+                error_message="Pull request lookup ambiguous.",
+            )
+        candidate_sha = self.pushed_branches[-1]["candidate_sha"] if self.pushed_branches else "test-cand-sha"
         if self.lookup_mismatch:
             candidate_sha = "different-candidate-sha"
-        return PullRequestLookupResult(
-            state=PullRequestLookupState.FOUND_EXACT,
-            pull_request={
-                "repository": repository,
-                "number": 41,
-                "url": "https://github.com/silverberdi/mini-me/pull/41",
-                "head_sha": candidate_sha,
-                "head_branch": branch,
-                "base_branch": base,
-                "state": "OPEN",
-                "title": "008-autonomous-change-orchestration",
-                "body": "Closes #16",
-            },
+        pr_dict = {
+            "repository": repository,
+            "number": 41,
+            "url": "https://github.com/silverberdi/mini-me/pull/41",
+            "head_sha": candidate_sha,
+            "head_branch": branch,
+            "base_branch": base,
+            "state": "OPEN",
+            "title": "008-autonomous-change-orchestration",
+            "body": "Closes #16",
+        }
+        return ExternalActionResult(
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="fake",
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+            retry_safety=RetrySafety.SAFE,
+            data=pr_dict,
+            external_id="41",
         )
 
 

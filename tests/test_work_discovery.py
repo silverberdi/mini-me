@@ -7,9 +7,13 @@ from tests.conftest import InMemoryPersistenceUnitOfWork, create_isolated_opensp
 
 from minime.adapters.github import GitHubAdapter
 from minime.domain.enums import (
+    ExternalOutcome,
+    ExternalReasonCode,
     QueuePriority,
+    RetrySafety,
 )
 from minime.domain.models import (
+    ExternalActionResult,
     Project,
 )
 from minime.services.discovery_service import (
@@ -63,16 +67,28 @@ def test_discover_work_creates_queue_items_and_reconciles_bindings(
 
     # Mock GitHub adapter returning matching issue
     mock_gh = MagicMock(spec=GitHubAdapter)
-    mock_gh.list_issues.return_value = [
-        {
-            "number": 45,
-            "title": "016-autonomous-queue-work-selection: Autonomous Queue + Work Selection",
-            "body": "Implements autonomous work selection.",
-            "labels": [{"name": "priority:high"}],
-            "state": "open",
-        }
-    ]
-    mock_gh.validate_issue_binding.return_value = (True, None)
+    mock_gh.list_issues.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="fake",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.SAFE,
+        data=[
+            {
+                "number": 45,
+                "title": "016-autonomous-queue-work-selection: Autonomous Queue + Work Selection",
+                "body": "Implements autonomous work selection.",
+                "labels": [{"name": "priority:high"}],
+                "state": "open",
+            }
+        ],
+    )
+    mock_gh.validate_issue_binding.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="fake",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.SAFE,
+        data=True,
+    )
 
     discovery_service = WorkDiscoveryService(
         uow=in_memory_uow,
@@ -109,10 +125,20 @@ def test_discover_work_is_idempotent(tmp_path: Path, in_memory_uow: InMemoryPers
     create_isolated_openspec_change(tmp_path, change_name="016-test-change")
 
     mock_gh = MagicMock(spec=GitHubAdapter)
-    mock_gh.list_issues.return_value = [
-        {"number": 99, "title": "016-test-change", "labels": [], "state": "open"}
-    ]
-    mock_gh.validate_issue_binding.return_value = (True, None)
+    mock_gh.list_issues.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="fake",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.SAFE,
+        data=[{"number": 99, "title": "016-test-change", "labels": [], "state": "open"}],
+    )
+    mock_gh.validate_issue_binding.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="fake",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.SAFE,
+        data=True,
+    )
 
     discovery_service = WorkDiscoveryService(
         uow=in_memory_uow,

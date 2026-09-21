@@ -1436,6 +1436,7 @@ class InMemoryOrchestrationExternalActionRepository(OrchestrationExternalActionR
         self,
         action_key: str,
         observed_result: Any,
+        original_mutation_retry_authorized: bool = False,
     ) -> OrchestrationExternalAction:
         target = None
         for a in self._store.values():
@@ -1445,10 +1446,9 @@ class InMemoryOrchestrationExternalActionRepository(OrchestrationExternalActionR
         if not target:
             raise ValueError(f"External action '{action_key}' not found")
 
-        from minime.domain.enums import ExternalOutcome, RetrySafety
+        from minime.domain.enums import ExternalOutcome
 
         outcome = getattr(observed_result, "outcome", None)
-        retry_safety = getattr(observed_result, "retry_safety", RetrySafety.UNKNOWN)
 
         if outcome == ExternalOutcome.SUCCESS:
             target.status = ExternalActionStatus.COMPLETED
@@ -1457,7 +1457,7 @@ class InMemoryOrchestrationExternalActionRepository(OrchestrationExternalActionR
                 target.remote_identifier = observed_result.external_id
             if getattr(observed_result, "observed_evidence", None):
                 target.result_payload = observed_result.observed_evidence
-        elif outcome == ExternalOutcome.FAILURE and retry_safety == RetrySafety.SAFE:
+        elif outcome == ExternalOutcome.FAILURE and original_mutation_retry_authorized is True:
             target.status = ExternalActionStatus.EXECUTING
             target.error_message = getattr(observed_result, "error_message", None)
         else:

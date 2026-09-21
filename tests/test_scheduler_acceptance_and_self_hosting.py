@@ -14,12 +14,16 @@ from minime.domain.enums import (
     AdmissionDecision,
     AdmissionRefusalCode,
     ChangeStatus,
+    ExternalOutcome,
+    ExternalReasonCode,
     ProviderHealthStatus,
     QueuePriority,
     ReadinessState,
+    RetrySafety,
 )
 from minime.domain.models import (
     Change,
+    ExternalActionResult,
     Project,
     ProjectBinding,
     ProviderHealth,
@@ -135,7 +139,13 @@ def test_real_scheduler_multi_item_acceptance(
     )
 
     mock_gh = MagicMock(spec=GitHubAdapter)
-    mock_gh.validate_issue_binding.return_value = (True, None)
+    mock_gh.validate_issue_binding.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="fake",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.SAFE,
+        data=True,
+    )
 
     scheduler = SchedulerService(
         uow=in_memory_uow,

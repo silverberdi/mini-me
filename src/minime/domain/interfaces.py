@@ -554,6 +554,7 @@ class OrchestrationExternalActionRepositoryInterface(ABC):
         self,
         action_key: str,
         observed_result: Any,
+        original_mutation_retry_authorized: bool = False,
     ) -> OrchestrationExternalAction: ...
 
 

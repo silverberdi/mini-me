@@ -9,16 +9,20 @@ import pytest
 
 from minime.domain.enums import (
     ExternalActionType,
+    ExternalOutcome,
+    ExternalReasonCode,
     HumanGate,
     OrchestrationStopOutcome,
     ProjectStatus,
     ProviderHealthStatus,
     ReadinessState,
+    RetrySafety,
 )
 from minime.domain.interfaces import GitHubAdapterInterface
 from minime.domain.models import (
     CheckResult,
     Event,
+    ExternalActionResult,
     Project,
     ProjectBinding,
     ProviderHealth,
@@ -45,8 +49,14 @@ class CountingGitHubAdapter(GitHubAdapterInterface):
 
     def validate_issue_binding(
         self, expected_repository: str, issue_number: int, github_repository: str | None = None
-    ) -> tuple[bool, str | None]:
-        return True, None
+    ) -> ExternalActionResult[bool]:
+        return ExternalActionResult(
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="fake",
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+            retry_safety=RetrySafety.SAFE,
+            data=True,
+        )
 
     def record_sync_failure(
         self, project_id: str, change_id: str | None, operation: str, error_message: str
@@ -57,9 +67,25 @@ class CountingGitHubAdapter(GitHubAdapterInterface):
 
     def get_pull_request(
         self, repository: str, branch: str, base: str | None = None
-    ) -> dict[str, Any] | None:
+    ) -> ExternalActionResult[dict[str, Any]]:
         key = f"{repository}:{branch}"
-        return self.prs.get(key)
+        pr = self.prs.get(key)
+        if pr:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="fake",
+                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                retry_safety=RetrySafety.SAFE,
+                data=pr,
+                external_id=str(pr.get("number")),
+            )
+        return ExternalActionResult(
+            outcome=ExternalOutcome.FAILURE,
+            source_adapter="fake",
+            reason_code=ExternalReasonCode.NOT_FOUND,
+            retry_safety=RetrySafety.SAFE,
+            error_message="Pull request not found.",
+        )
 
     def create_pull_request(
         self,
@@ -69,11 +95,17 @@ class CountingGitHubAdapter(GitHubAdapterInterface):
         title: str,
         body: str,
         head_sha: str,
-    ) -> dict[str, Any]:
+    ) -> ExternalActionResult[dict[str, Any]]:
         self.pr_calls += 1
         if self.fail_pr_once:
             self.fail_pr_once = False
-            raise RuntimeError("Transient GitHub PR 502 Bad Gateway")
+            return ExternalActionResult(
+                outcome=ExternalOutcome.AMBIGUOUS,
+                source_adapter="fake",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.UNKNOWN,
+                error_message="Transient GitHub PR 502 Bad Gateway",
+            )
         key = f"{repository}:{branch}"
         pr_data = {
             "repository": repository,
@@ -87,25 +119,67 @@ class CountingGitHubAdapter(GitHubAdapterInterface):
             "body": body,
         }
         self.prs[key] = pr_data
-        return pr_data
+        return ExternalActionResult(
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="fake",
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+            retry_safety=RetrySafety.UNSAFE,
+            data=pr_data,
+            external_id=str(pr_data["number"]),
+        )
 
-    def push_branch(self, worktree_path: str, remote: str, branch: str, candidate_sha: str) -> bool:
+    def push_branch(
+        self, worktree_path: str, remote: str, branch: str, candidate_sha: str
+    ) -> ExternalActionResult[str]:
         self.push_calls += 1
         if self.fail_push_once:
             self.fail_push_once = False
-            raise RuntimeError("Transient Git push network disconnect")
+            return ExternalActionResult(
+                outcome=ExternalOutcome.AMBIGUOUS,
+                source_adapter="fake",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.UNKNOWN,
+                error_message="Transient Git push network disconnect",
+            )
         # When push succeeds, update remote branch head
         self.remote_branch_heads[f"origin:{branch}"] = candidate_sha
         self.remote_branch_heads[f"{branch}"] = candidate_sha
-        return True
+        return ExternalActionResult(
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="fake",
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+            retry_safety=RetrySafety.UNSAFE,
+            data=candidate_sha,
+        )
 
     def get_remote_branch_head(
         self, repository: str, branch: str, remote: str = "origin"
-    ) -> str | None:
+    ) -> ExternalActionResult[str]:
         if self.fail_remote_head_query:
-            raise RuntimeError("Cannot reach remote repository")
-        return self.remote_branch_heads.get(f"{remote}:{branch}") or self.remote_branch_heads.get(
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="fake",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.SAFE,
+                error_message="Cannot reach remote repository",
+            )
+        sha = self.remote_branch_heads.get(f"{remote}:{branch}") or self.remote_branch_heads.get(
             branch
+        )
+        if sha:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="fake",
+                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                retry_safety=RetrySafety.SAFE,
+                data=sha,
+            )
+        return ExternalActionResult(
+            outcome=ExternalOutcome.FAILURE,
+            source_adapter="fake",
+            reason_code=ExternalReasonCode.NOT_FOUND,
+            retry_safety=RetrySafety.SAFE,
+            error_message="Remote branch head not found.",
         )
 
 

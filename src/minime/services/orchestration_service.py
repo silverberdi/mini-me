@@ -39,7 +39,6 @@ from minime.domain.models import (
     AdmissionResult,
     Change,
     Event,
-    ExternalActionResult,
     Job,
     OrchestrationCandidate,
     OrchestrationExternalAction,
@@ -2012,16 +2011,12 @@ class OrchestrationService:
                         branch=branch_name,
                         remote="origin",
                     )
-                    if isinstance(head_res, str):
-                        remote_sha = head_res
-                    elif getattr(head_res, "is_success", False):
+                    if head_res.outcome == ExternalOutcome.SUCCESS:
                         remote_sha = head_res.data
-                    elif getattr(head_res, "outcome", None) == ExternalOutcome.FAILURE and getattr(head_res, "reason_code", None) == ExternalReasonCode.NOT_FOUND:
-                        remote_sha = None
-                    elif head_res is None or (getattr(head_res, "is_failure", False) and getattr(head_res, "reason_code", None) == ExternalReasonCode.NOT_FOUND):
+                    elif head_res.outcome == ExternalOutcome.FAILURE and head_res.reason_code == ExternalReasonCode.NOT_FOUND:
                         remote_sha = None
                     else:
-                        raise RuntimeError(getattr(head_res, "error_message", None) or "Could not observe remote branch head.")
+                        raise RuntimeError(head_res.error_message or "Could not observe remote branch head.")
                 except Exception as exc:
                     logger.warning(f"Could not observe remote branch '{branch_name}': {exc}")
                     self._stop_run(
@@ -2156,45 +2151,20 @@ class OrchestrationService:
                             branch=branch_name,
                             base=project.base_branch,
                         )
-                        # Extract state from either legacy PullRequestLookupResult or ExternalActionResult
+                        reason_code_val = lookup_res.reason_code.value
+                        lookup_err = lookup_res.error_message
                         lookup_state = None
                         existing_pr = None
-                        lookup_err = None
-                        reason_code_val = "UNOBSERVABLE"
 
-                        if hasattr(lookup_res, "state"):
-                            # Legacy PullRequestLookupResult object
-                            st_val = getattr(lookup_res.state, "value", str(lookup_res.state))
-                            if st_val in ("FOUND_EXACT", "FOUND"):
-                                lookup_state = "SUCCESS"
-                                existing_pr = getattr(lookup_res, "pull_request", None)
-                            elif st_val == "NOT_FOUND":
-                                lookup_state = "NOT_FOUND"
-                            elif st_val == "AMBIGUOUS":
-                                lookup_state = "AMBIGUOUS"
-                                lookup_err = "Remote PR state is ambiguous."
-                                reason_code_val = "AMBIGUOUS"
-                            else:
-                                lookup_state = "UNKNOWN"
-                                lookup_err = "Cannot observe remote PR state."
-                                reason_code_val = "UNOBSERVABLE"
-                        elif isinstance(lookup_res, ExternalActionResult):
-                            reason_code_val = lookup_res.reason_code.value
-                            lookup_err = lookup_res.error_message
-                            if lookup_res.outcome == ExternalOutcome.SUCCESS and lookup_res.data:
-                                lookup_state = "SUCCESS"
-                                existing_pr = lookup_res.data
-                            elif lookup_res.outcome == ExternalOutcome.FAILURE and lookup_res.reason_code == ExternalReasonCode.NOT_FOUND:
-                                lookup_state = "NOT_FOUND"
-                            elif lookup_res.outcome == ExternalOutcome.AMBIGUOUS:
-                                lookup_state = "AMBIGUOUS"
-                            else:
-                                lookup_state = "UNKNOWN"
-                        elif isinstance(lookup_res, dict):
+                        if lookup_res.outcome == ExternalOutcome.SUCCESS and lookup_res.data:
                             lookup_state = "SUCCESS"
-                            existing_pr = lookup_res
-                        elif lookup_res is None:
+                            existing_pr = lookup_res.data
+                        elif lookup_res.outcome == ExternalOutcome.FAILURE and lookup_res.reason_code == ExternalReasonCode.NOT_FOUND:
                             lookup_state = "NOT_FOUND"
+                        elif lookup_res.outcome == ExternalOutcome.AMBIGUOUS:
+                            lookup_state = "AMBIGUOUS"
+                        else:
+                            lookup_state = "UNKNOWN"
 
                         if lookup_state == "UNKNOWN":
                             self._stop_run(
@@ -2266,10 +2236,10 @@ class OrchestrationService:
                                 ),
                                 head_sha=cand_sha,
                             )
-                            is_create_ok = isinstance(create_res, dict) or (getattr(create_res, "is_success", False) and bool(getattr(create_res, "data", None)))
-                            create_data = create_res if isinstance(create_res, dict) else getattr(create_res, "data", None)
-                            create_outcome = getattr(create_res, "outcome", ExternalOutcome.FAILURE)
-                            create_err = getattr(create_res, "error_message", None) or "PR creation failed"
+                            is_create_ok = create_res.outcome == ExternalOutcome.SUCCESS and bool(create_res.data)
+                            create_data = create_res.data
+                            create_outcome = create_res.outcome
+                            create_err = create_res.error_message or "PR creation failed"
 
                             if not is_create_ok or not create_data:
                                 final_status = ExternalActionStatus.AMBIGUOUS if create_outcome == ExternalOutcome.AMBIGUOUS else ExternalActionStatus.FAILED

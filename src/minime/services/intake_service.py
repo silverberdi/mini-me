@@ -10,6 +10,7 @@ from minime.adapters.openspec import OpenSpecAdapter
 from minime.domain.enums import (
     ChangeStatus,
     EventType,
+    ExternalOutcome,
     OrchestrationStage,
     OrchestrationStopOutcome,
     QueuePriority,
@@ -364,10 +365,7 @@ class IntakeService:
                     labels=[f"priority:{item.priority.value.lower()}"],
                     operation_key=op_key,
                 )
-                if isinstance(issue_res, dict):
-                    issue_number = issue_res.get("number")
-                    issue_url = issue_res.get("html_url")
-                elif getattr(issue_res, "is_success", False) and issue_res.data:
+                if issue_res.outcome == ExternalOutcome.SUCCESS and issue_res.data:
                     issue_number = issue_res.data.get("number")
                     issue_url = issue_res.data.get("html_url")
             except Exception as exc:
@@ -389,9 +387,7 @@ class IntakeService:
                     issue_url=issue_url,
                     operation_key=op_key,
                 )
-                if isinstance(project_res, str):
-                    project_item_id = project_res
-                elif getattr(project_res, "is_success", False):
+                if project_res.outcome == ExternalOutcome.SUCCESS and project_res.data:
                     project_item_id = project_res.data
             except Exception as exc:
                 logger.warning(

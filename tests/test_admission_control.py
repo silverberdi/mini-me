@@ -10,12 +10,16 @@ from minime.domain.enums import (
     AdmissionDecision,
     AdmissionRefusalCode,
     ChangeStatus,
+    ExternalOutcome,
+    ExternalReasonCode,
     OrchestrationStage,
     ProviderHealthStatus,
+    RetrySafety,
     SchedulerMode,
 )
 from minime.domain.models import (
     Change,
+    ExternalActionResult,
     OrchestrationRun,
     Project,
     ProjectBinding,
@@ -84,7 +88,13 @@ def test_admit_valid_ready_item(tmp_path: Path, in_memory_uow: InMemoryPersisten
     setup_test_project_and_change(tmp_path, in_memory_uow)
 
     mock_gh = MagicMock(spec=GitHubAdapter)
-    mock_gh.validate_issue_binding.return_value = (True, None)
+    mock_gh.validate_issue_binding.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="fake",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.SAFE,
+        data=True,
+    )
 
     scheduler = SchedulerService(
         uow=in_memory_uow,
@@ -117,7 +127,13 @@ def test_roadmap_predecessor_incomplete_blocks_future_stage(
     )
 
     mock_gh = MagicMock(spec=GitHubAdapter)
-    mock_gh.validate_issue_binding.return_value = (True, None)
+    mock_gh.validate_issue_binding.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="fake",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.SAFE,
+        data=True,
+    )
 
     scheduler = SchedulerService(
         uow=in_memory_uow,
@@ -157,7 +173,13 @@ def test_dependency_blocked_when_incomplete(
     in_memory_uow.work_queue.save(item_b)
 
     mock_gh = MagicMock(spec=GitHubAdapter)
-    mock_gh.validate_issue_binding.return_value = (True, None)
+    mock_gh.validate_issue_binding.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="fake",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.SAFE,
+        data=True,
+    )
 
     scheduler = SchedulerService(
         uow=in_memory_uow,
@@ -176,7 +198,13 @@ def test_scheduler_drain_mode_blocks_new_admissions(
     setup_test_project_and_change(tmp_path, in_memory_uow)
 
     mock_gh = MagicMock(spec=GitHubAdapter)
-    mock_gh.validate_issue_binding.return_value = (True, None)
+    mock_gh.validate_issue_binding.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="fake",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.SAFE,
+        data=True,
+    )
 
     scheduler = SchedulerService(
         uow=in_memory_uow,
@@ -209,7 +237,13 @@ def test_concurrency_limit_blocks_admission(
     in_memory_uow.orchestration_runs.save(active_run)
 
     mock_gh = MagicMock(spec=GitHubAdapter)
-    mock_gh.validate_issue_binding.return_value = (True, None)
+    mock_gh.validate_issue_binding.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="fake",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.SAFE,
+        data=True,
+    )
 
     scheduler = SchedulerService(
         uow=in_memory_uow,

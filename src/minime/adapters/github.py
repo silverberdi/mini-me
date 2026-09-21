@@ -556,17 +556,27 @@ class GitHubAdapter(GitHubAdapterInterface):
                 for issue in list_res.data:
                     issue_body = issue.get("body") or ""
                     if marker and marker in issue_body:
+                        num = issue.get("number")
+                        html_url = issue.get("html_url")
+                        if not num or not html_url:
+                            return ExternalActionResult(
+                                outcome=ExternalOutcome.UNKNOWN,
+                                source_adapter="github_rest",
+                                reason_code=ExternalReasonCode.EVIDENCE_INSUFFICIENT,
+                                retry_safety=RetrySafety.UNKNOWN,
+                                error_message=f"Observed matching issue for operation_key '{operation_key}' missing required identity fields.",
+                                operation_key=operation_key,
+                            )
                         logger.info(
                             "Reusing existing GitHub Issue #%s for operation_key '%s'",
-                            issue.get("number"),
+                            num,
                             operation_key,
                         )
                         issue_dict = {
-                            "number": issue.get("number"),
+                            "number": num,
                             "title": issue.get("title"),
                             "body": issue.get("body"),
-                            "html_url": issue.get("html_url")
-                            or f"https://github.com/{repo}/issues/{issue.get('number')}",
+                            "html_url": html_url,
                             "labels": issue.get("labels", []),
                         }
                         return ExternalActionResult(
@@ -575,7 +585,7 @@ class GitHubAdapter(GitHubAdapterInterface):
                             reason_code=ExternalReasonCode.REUSED_EXISTING,
                             retry_safety=RetrySafety.UNSAFE,
                             data=issue_dict,
-                            external_id=str(issue.get("number")),
+                            external_id=str(num),
                             operation_key=operation_key,
                         )
 
@@ -587,11 +597,22 @@ class GitHubAdapter(GitHubAdapterInterface):
             response = self._request("POST", f"/repos/{repo}/issues", json=payload)
             if response.status_code in (200, 201):
                 data = response.json()
+                num = data.get("number")
+                html_url = data.get("html_url")
+                if not num or not html_url:
+                    return ExternalActionResult(
+                        outcome=ExternalOutcome.UNKNOWN,
+                        source_adapter="github_rest",
+                        reason_code=ExternalReasonCode.EVIDENCE_INSUFFICIENT,
+                        retry_safety=RetrySafety.UNKNOWN,
+                        error_message="GitHub Issue response missing required number or html_url.",
+                        operation_key=operation_key,
+                    )
                 issue_dict = {
-                    "number": data.get("number"),
+                    "number": num,
                     "title": data.get("title"),
                     "body": data.get("body"),
-                    "html_url": data.get("html_url"),
+                    "html_url": html_url,
                     "labels": data.get("labels", []),
                 }
                 return ExternalActionResult(
@@ -600,7 +621,7 @@ class GitHubAdapter(GitHubAdapterInterface):
                     reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
                     retry_safety=RetrySafety.UNSAFE,
                     data=issue_dict,
-                    external_id=str(data.get("number")),
+                    external_id=str(num),
                     operation_key=operation_key,
                 )
             if response.status_code in (401, 403):
@@ -613,6 +634,26 @@ class GitHubAdapter(GitHubAdapterInterface):
                     error_message="GitHub API authorization failed for issue creation.",
                     operation_key=operation_key,
                 )
+            if response.status_code in (400, 422):
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.CONFLICT,
+                    retry_safety=RetrySafety.UNSAFE,
+                    provider_detail=f"HTTP {response.status_code}",
+                    error_message=f"GitHub Issue creation payload rejected (HTTP {response.status_code}).",
+                    operation_key=operation_key,
+                )
+            # HTTP 5xx or unobserved response after POST attempt -> AMBIGUOUS (DO NOT execute 2nd mutation fallback)
+            return ExternalActionResult(
+                outcome=ExternalOutcome.AMBIGUOUS,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.UNKNOWN,
+                provider_detail=f"HTTP {response.status_code}",
+                error_message=f"GitHub Issue creation status unobservable (HTTP {response.status_code}).",
+                operation_key=operation_key,
+            )
         except GitHubAuthorizationError as exc:
             return ExternalActionResult(
                 outcome=ExternalOutcome.FAILURE,
@@ -625,56 +666,16 @@ class GitHubAdapter(GitHubAdapterInterface):
             )
         except Exception as exc:
             logger.debug("Failed creating issue via GitHub API: %s", exc)
-
-        # 3. Fallback gh CLI
-        try:
-            cmd = ["gh", "issue", "create", "--repo", repo, "--title", title, "--body", formatted_body]
-            if labels:
-                for lbl in labels:
-                    cmd.extend(["--label", lbl])
-            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-            if result.returncode == 0 and result.stdout.strip():
-                url = result.stdout.strip()
-                num_match = re.search(r"/issues/(\d+)", url)
-                issue_num = int(num_match.group(1)) if num_match else None
-                if issue_num:
-                    issue_dict = {
-                        "number": issue_num,
-                        "title": title,
-                        "body": formatted_body,
-                        "html_url": url,
-                        "labels": labels or [],
-                    }
-                    return ExternalActionResult(
-                        outcome=ExternalOutcome.SUCCESS,
-                        source_adapter="github_cli",
-                        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
-                        retry_safety=RetrySafety.UNSAFE,
-                        data=issue_dict,
-                        external_id=str(issue_num),
-                        operation_key=operation_key,
-                    )
-            stderr = result.stderr.strip()
-            if "auth" in stderr.lower() or "unauthorized" in stderr.lower() or "401" in stderr or "403" in stderr:
-                return ExternalActionResult(
-                    outcome=ExternalOutcome.FAILURE,
-                    source_adapter="github_cli",
-                    reason_code=ExternalReasonCode.AUTH_REQUIRED,
-                    retry_safety=RetrySafety.UNSAFE,
-                    provider_detail=stderr,
-                    operation_key=operation_key,
-                )
-        except Exception as exc:
-            logger.debug("Failed creating issue via gh CLI: %s", exc)
-
-        return ExternalActionResult(
-            outcome=ExternalOutcome.AMBIGUOUS,
-            source_adapter="github_rest",
-            reason_code=ExternalReasonCode.UNOBSERVABLE,
-            retry_safety=RetrySafety.UNKNOWN,
-            error_message="GitHub issue creation unobservable after POST attempt.",
-            operation_key=operation_key,
-        )
+            # REST HTTP POST request attempt failed with exception -> AMBIGUOUS (DO NOT execute 2nd mutation fallback)
+            return ExternalActionResult(
+                outcome=ExternalOutcome.AMBIGUOUS,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.UNKNOWN,
+                provider_detail=str(exc),
+                error_message=f"GitHub Issue creation unobservable after POST attempt: {exc}",
+                operation_key=operation_key,
+            )
 
     def add_issue_to_project(
         self, project_number: int, owner: str, issue_url: str, operation_key: str | None = None
@@ -927,7 +928,7 @@ class GitHubAdapter(GitHubAdapterInterface):
     ) -> ExternalActionResult[dict[str, Any]]:
         repo = self._repo(repository)
         existing = self.get_pull_request(repo, branch, base)
-        if existing.is_success and existing.data:
+        if existing.outcome == ExternalOutcome.SUCCESS and existing.data:
             if existing.data.get("head_sha") == head_sha:
                 return ExternalActionResult(
                     outcome=ExternalOutcome.SUCCESS,
@@ -937,6 +938,38 @@ class GitHubAdapter(GitHubAdapterInterface):
                     data=existing.data,
                     external_id=str(existing.data.get("number")),
                 )
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.CONFLICT,
+                retry_safety=RetrySafety.UNSAFE,
+                data=existing.data,
+                error_message=f"Existing PR head '{existing.data.get('head_sha')}' differs from candidate SHA '{head_sha}'.",
+            )
+        if existing.outcome == ExternalOutcome.UNKNOWN:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.UNKNOWN,
+                error_message=existing.error_message or "PR lookup unobservable; creation POST blocked.",
+            )
+        if existing.outcome == ExternalOutcome.AMBIGUOUS:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.AMBIGUOUS,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.CONFLICT,
+                retry_safety=RetrySafety.UNKNOWN,
+                error_message=existing.error_message or "Ambiguous PR lookup state; creation POST blocked.",
+            )
+        if existing.outcome != ExternalOutcome.FAILURE or existing.reason_code != ExternalReasonCode.NOT_FOUND:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.UNKNOWN,
+                error_message="PR lookup outcome was not authoritative NOT_FOUND; creation POST blocked.",
+            )
 
         try:
             response = self._request(
@@ -1086,12 +1119,30 @@ class GitHubAdapter(GitHubAdapterInterface):
                 secrets=list(auth.secrets),
             )
             if result.returncode == 0:
+                obs_res = self.get_remote_branch_head(worktree_path, branch, remote=remote)
+                if obs_res.outcome == ExternalOutcome.SUCCESS and obs_res.data:
+                    if obs_res.data == candidate_sha:
+                        return ExternalActionResult(
+                            outcome=ExternalOutcome.SUCCESS,
+                            source_adapter="git_cli",
+                            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                            retry_safety=RetrySafety.UNSAFE,
+                            data=candidate_sha,
+                        )
+                    return ExternalActionResult(
+                        outcome=ExternalOutcome.FAILURE,
+                        source_adapter="git_cli",
+                        reason_code=ExternalReasonCode.CONFLICT,
+                        retry_safety=RetrySafety.UNSAFE,
+                        data=obs_res.data,
+                        error_message=f"Pushed branch remote SHA '{obs_res.data}' does not match candidate SHA '{candidate_sha}'.",
+                    )
                 return ExternalActionResult(
-                    outcome=ExternalOutcome.SUCCESS,
+                    outcome=ExternalOutcome.UNKNOWN,
                     source_adapter="git_cli",
-                    reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
-                    retry_safety=RetrySafety.UNSAFE,
-                    data=candidate_sha,
+                    reason_code=ExternalReasonCode.UNOBSERVABLE,
+                    retry_safety=RetrySafety.UNKNOWN,
+                    error_message="Remote branch head postcondition unobservable after git push command.",
                 )
             stderr = _safe_error(result.stderr or result.stdout, list(auth.secrets))
             if "401" in stderr or "403" in stderr or "denied" in stderr.lower():
@@ -1419,14 +1470,41 @@ class GitHubAdapter(GitHubAdapterInterface):
                 check=False,
             )
             if res.returncode == 0:
-                logger.info("Project item %s updated to status %s.", item_id, status)
+                items_res = self.list_project_items(project_number, owner)
+                if items_res.outcome == ExternalOutcome.SUCCESS and items_res.data:
+                    observed = False
+                    for itm in items_res.data:
+                        itm_id = str(itm.get("id") or "")
+                        if itm_id == str(item_id):
+                            st = str(itm.get("status") or itm.get("fieldValues", {}).get("Status") or "")
+                            if st.lower() == status.lower() or status.lower() in st.lower():
+                                observed = True
+                                break
+                    if observed:
+                        logger.info("Project item %s updated to status %s.", item_id, status)
+                        return ExternalActionResult(
+                            outcome=ExternalOutcome.SUCCESS,
+                            source_adapter="github_cli",
+                            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                            retry_safety=RetrySafety.UNSAFE,
+                            data=True,
+                            external_id=item_id,
+                        )
+                    return ExternalActionResult(
+                        outcome=ExternalOutcome.FAILURE,
+                        source_adapter="github_cli",
+                        reason_code=ExternalReasonCode.CONFLICT,
+                        retry_safety=RetrySafety.UNSAFE,
+                        data=False,
+                        error_message=f"Project item '{item_id}' status postcondition '{status}' not observed after edit.",
+                    )
                 return ExternalActionResult(
-                    outcome=ExternalOutcome.SUCCESS,
+                    outcome=ExternalOutcome.UNKNOWN,
                     source_adapter="github_cli",
-                    reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
-                    retry_safety=RetrySafety.UNSAFE,
-                    data=True,
-                    external_id=item_id,
+                    reason_code=ExternalReasonCode.UNOBSERVABLE,
+                    retry_safety=RetrySafety.UNKNOWN,
+                    data=False,
+                    error_message="Project item status update postcondition unobservable after edit command.",
                 )
             stderr = res.stderr.strip()
             if "401" in stderr or "403" in stderr or "auth" in stderr.lower() or "unauthorized" in stderr.lower():

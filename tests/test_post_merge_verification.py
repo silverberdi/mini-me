@@ -9,12 +9,21 @@ import pytest
 
 from minime.domain.enums import (
     EventType,
+    ExternalOutcome,
+    ExternalReasonCode,
     JobStatus,
     OrchestrationStage,
     OrchestrationStopOutcome,
     ProjectStatus,
+    RetrySafety,
 )
-from minime.domain.models import Job, OrchestrationRun, Project, ProjectBinding
+from minime.domain.models import (
+    ExternalActionResult,
+    Job,
+    OrchestrationRun,
+    Project,
+    ProjectBinding,
+)
 from minime.services.openspec_sync import OpenSpecSyncError, OpenSpecSyncService
 from minime.services.post_merge_service import PostMergeReconciliationService
 from test_post_merge_closure import InMemoryUnitOfWork
@@ -22,7 +31,7 @@ from test_post_merge_closure import InMemoryUnitOfWork
 
 def _github_adapter():
     adapter = MagicMock()
-    adapter.get_pull_request_details.return_value = {
+    pr_details = {
         "number": 54,
         "state": "closed",
         "is_merged": True,
@@ -31,9 +40,35 @@ def _github_adapter():
         "merge_commit_sha": "abcdef1234567890abcdef1234567890abcdef12",
         "head_sha": "695855fc6b6caf022be3f6b32c973c18c51c6afd",
     }
-    adapter.close_issue.return_value = True
-    adapter.update_project_item_status.return_value = True
-    adapter.delete_remote_branch.return_value = True
+    adapter.get_pull_request_details.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="mock",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.SAFE,
+        data=pr_details,
+        external_id="54",
+    )
+    adapter.close_issue.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="mock",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.UNSAFE,
+        data=True,
+    )
+    adapter.update_project_item_status.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="mock",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.UNSAFE,
+        data=True,
+    )
+    adapter.delete_remote_branch.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="mock",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.UNSAFE,
+        data=True,
+    )
     return adapter
 
 
