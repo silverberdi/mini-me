@@ -5,9 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from minime.api.app import app, get_uow
 from minime.db.models import BacklogItemModel, Base, EventModel, ProjectModel
 from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.domain.enums import (
@@ -420,24 +422,47 @@ def test_projection_purity_repeated_calls_zero_events(in_memory_uow):
 
 
 def test_terminal_item_no_resurrection_on_external_evidence(in_memory_uow):
-    """E. Terminal COMPLETED item must not be resurrected by active run evidence."""
+    """E. Terminal COMPLETED/CANCELLED items must not be resurrected by active run evidence."""
     _setup_project(in_memory_uow)
     now = utc_now()
-    bk = BacklogItem(
+    bk_completed = BacklogItem(
         project_id="test-proj",
-        item_key="term-item",
-        title="Terminal Item",
+        item_key="term-completed",
+        title="Completed Item",
         status=WorkItemStatus.COMPLETED,
-        openspec_change_name="term-item",
+        openspec_change_name="term-completed",
         created_at=now,
         updated_at=now,
     )
-    in_memory_uow.backlog_items.save(bk)
+    bk_cancelled = BacklogItem(
+        project_id="test-proj",
+        item_key="term-cancelled",
+        title="Cancelled Item",
+        status=WorkItemStatus.CANCELLED,
+        openspec_change_name="term-cancelled",
+        created_at=now,
+        updated_at=now,
+    )
+    in_memory_uow.backlog_items.save(bk_completed)
+    in_memory_uow.backlog_items.save(bk_cancelled)
+
     in_memory_uow.orchestration_runs.save(
         OrchestrationRun(
-            run_id="run-stale",
+            run_id="run-stale-1",
             project_id="test-proj",
-            change_name="term-item",
+            change_name="term-completed",
+            base_sha="base123",
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            is_active=True,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    in_memory_uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id="run-stale-2",
+            project_id="test-proj",
+            change_name="term-cancelled",
             base_sha="base123",
             current_stage=OrchestrationStage.IMPLEMENTING,
             is_active=True,
@@ -448,15 +473,20 @@ def test_terminal_item_no_resurrection_on_external_evidence(in_memory_uow):
 
     intake = IntakeService(in_memory_uow, project_root=".")
     projections = intake.reconcile_backlog_projections("test-proj")
-    assert len(projections) == 1
+    proj_map = {p.item_key: p.status for p in projections}
+    assert proj_map["term-completed"] == WorkItemStatus.COMPLETED
+    assert proj_map["term-cancelled"] == WorkItemStatus.CANCELLED
 
-    db_bk = in_memory_uow.backlog_items.get_by_project_and_key("test-proj", "term-item")
-    assert db_bk.status == WorkItemStatus.COMPLETED
+    db_completed = in_memory_uow.backlog_items.get_by_project_and_key("test-proj", "term-completed")
+    db_cancelled = in_memory_uow.backlog_items.get_by_project_and_key("test-proj", "term-cancelled")
+    assert db_completed.status == WorkItemStatus.COMPLETED
+    assert db_cancelled.status == WorkItemStatus.CANCELLED
 
-    # Authority rejects any attempt to transition from COMPLETED
     authority = LifecycleTransitionAuthority(in_memory_uow)
     with pytest.raises(LifecycleInvalidTransitionError):
-        authority.transition_backlog_item("test-proj", "term-item", WorkItemStatus.COMPLETED, WorkItemStatus.RUNNING)
+        authority.transition_backlog_item("test-proj", "term-completed", WorkItemStatus.COMPLETED, WorkItemStatus.RUNNING)
+    with pytest.raises(LifecycleInvalidTransitionError):
+        authority.transition_backlog_item("test-proj", "term-cancelled", WorkItemStatus.CANCELLED, WorkItemStatus.RUNNING)
 
 
 # -----------------------------------------------------------------------------
@@ -464,7 +494,7 @@ def test_terminal_item_no_resurrection_on_external_evidence(in_memory_uow):
 # -----------------------------------------------------------------------------
 
 def test_real_persistence_concurrency_cas_conflict():
-    """Requirement 9: Prove concurrent CAS using two SQLAlchemy sessions against real persistence engine."""
+    """Requirement 9: Prove concurrent CAS using two SQLAlchemy sessions against real persistence engine (stale-CAS integration proof)."""
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     SessionLocal = sessionmaker(bind=engine)
@@ -531,7 +561,7 @@ def test_real_persistence_concurrency_cas_conflict():
 
 
 def test_event_transactionality_and_rollback():
-    """Requirement 6: Prove event insert failure causes full transaction rollback leaving original status."""
+    """Requirement 6: Prove event insert failure causes automatic transaction rollback leaving original status."""
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     SessionLocal = sessionmaker(bind=engine)
@@ -577,11 +607,9 @@ def test_event_transactionality_and_rollback():
     uow.events.save = failing_event_save
 
     authority = LifecycleTransitionAuthority(uow)
-    try:
+    # Authority automatically calls session.rollback() before re-raising exception
+    with pytest.raises(RuntimeError, match="DB event write failure"):
         authority.transition_backlog_item("roll-proj", "roll-item", WorkItemStatus.READY, WorkItemStatus.ADMITTED)
-        session.commit()
-    except Exception:
-        session.rollback()
 
     session.close()
 
@@ -598,7 +626,7 @@ def test_event_transactionality_and_rollback():
 # -----------------------------------------------------------------------------
 
 def test_get_purity_endpoint_zero_mutations(in_memory_uow):
-    """Requirement 10: Prove GET requests on status/backlog produce zero lifecycle mutations or transition events."""
+    """Requirement 10: Prove HTTP GET requests on status/backlog produce zero lifecycle mutations or transition events."""
     _setup_project(in_memory_uow)
     now = utc_now()
     bk = BacklogItem(
@@ -615,12 +643,17 @@ def test_get_purity_endpoint_zero_mutations(in_memory_uow):
     initial_status = initial_bk.status
     initial_events = len([e for e in in_memory_uow.events.list_events("test-proj") if e.event_type == EventType.LIFECYCLE_TRANSITION])
 
-    intake = IntakeService(in_memory_uow, project_root=".")
-    for _ in range(5):
-        intake.reconcile_backlog_projections("test-proj")
+    app.dependency_overrides[get_uow] = lambda: in_memory_uow
+    client = TestClient(app)
+
+    # Perform HTTP GET request on project backlog endpoint
+    response = client.get("/api/v1/projects/test-proj/backlog")
+    assert response.status_code == 200
 
     final_bk = in_memory_uow.backlog_items.get_by_project_and_key("test-proj", "get-pure-item")
     final_events = len([e for e in in_memory_uow.events.list_events("test-proj") if e.event_type == EventType.LIFECYCLE_TRANSITION])
 
     assert final_bk.status == initial_status
     assert final_events == initial_events
+    app.dependency_overrides.clear()
+

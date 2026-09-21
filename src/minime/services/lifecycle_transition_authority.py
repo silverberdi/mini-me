@@ -88,61 +88,66 @@ class LifecycleTransitionAuthority:
 
         now = utc_now()
         session = self.session
-        if session is not None and hasattr(session, "execute"):
-            stmt = (
-                update(ChangeModel)
-                .where(
-                    ChangeModel.id == change.change_id,
-                    ChangeModel.status == expected_from_state.value,
+        try:
+            if session is not None and hasattr(session, "execute"):
+                stmt = (
+                    update(ChangeModel)
+                    .where(
+                        ChangeModel.id == change.change_id,
+                        ChangeModel.status == expected_from_state.value,
+                    )
+                    .values(
+                        status=to_state.value,
+                        stage=stage if stage is not None else ChangeModel.stage,
+                        updated_at=now,
+                    )
                 )
-                .values(
-                    status=to_state.value,
-                    stage=stage if stage is not None else ChangeModel.stage,
-                    updated_at=now,
-                )
-            )
-            res = session.execute(stmt)
-            if res.rowcount == 0:
-                raise LifecycleTransitionConflictError(
-                    f"Atomic CAS failed for Change '{name}': expected status '{expected_from_state.value}' conflict."
-                )
-            if hasattr(session, "flush"):
-                session.flush()
-        elif hasattr(self.uow.changes, "_store"):
-            stored = self.uow.changes._store.get(change.change_id)
-            if not stored or stored.status != expected_from_state:
-                raise LifecycleTransitionConflictError(
-                    f"Atomic CAS failed for Change '{name}': expected status '{expected_from_state.value}' conflict."
-                )
-            updated = stored.model_copy(deep=True)
-            updated.status = to_state
-            if stage is not None:
-                updated.stage = stage
-            updated.updated_at = now
-            self.uow.changes._store[change.change_id] = updated
-        else:
-            raise NotImplementedError("Unsupported UoW/Repository implementation for LifecycleTransitionAuthority")
+                res = session.execute(stmt)
+                if res.rowcount == 0:
+                    raise LifecycleTransitionConflictError(
+                        f"Atomic CAS failed for Change '{name}': expected status '{expected_from_state.value}' conflict."
+                    )
+                if hasattr(session, "flush"):
+                    session.flush()
+            elif hasattr(self.uow.changes, "_store"):
+                stored = self.uow.changes._store.get(change.change_id)
+                if not stored or stored.status != expected_from_state:
+                    raise LifecycleTransitionConflictError(
+                        f"Atomic CAS failed for Change '{name}': expected status '{expected_from_state.value}' conflict."
+                    )
+                updated = stored.model_copy(deep=True)
+                updated.status = to_state
+                if stage is not None:
+                    updated.stage = stage
+                updated.updated_at = now
+                self.uow.changes._store[change.change_id] = updated
+            else:
+                raise NotImplementedError("Unsupported UoW/Repository implementation for LifecycleTransitionAuthority")
 
-        # Atomic Event emission in same DB transaction
-        event = Event(
-            event_type=EventType.LIFECYCLE_TRANSITION,
-            project_id=project_id,
-            change_id=name,
-            payload={
-                "aggregate_type": "Change",
-                "aggregate_id": change.change_id,
-                "project_id": project_id,
-                "change_name": name,
-                "from_state": expected_from_state.value,
-                "to_state": to_state.value,
-                "reason_code": reason_code,
-                "actor": actor,
-                "correlation_id": correlation_id,
-                "evidence_references": evidence_references or {},
-            },
-            timestamp=now,
-        )
-        self.uow.events.save(event)
+            # Atomic Event emission in same DB transaction
+            event = Event(
+                event_type=EventType.LIFECYCLE_TRANSITION,
+                project_id=project_id,
+                change_id=name,
+                payload={
+                    "aggregate_type": "Change",
+                    "aggregate_id": change.change_id,
+                    "project_id": project_id,
+                    "change_name": name,
+                    "from_state": expected_from_state.value,
+                    "to_state": to_state.value,
+                    "reason_code": reason_code,
+                    "actor": actor,
+                    "correlation_id": correlation_id,
+                    "evidence_references": evidence_references or {},
+                },
+                timestamp=now,
+            )
+            self.uow.events.save(event)
+        except Exception:
+            if session is not None and hasattr(session, "rollback"):
+                session.rollback()
+            raise
 
         updated_change = self.uow.changes.get_by_name(project_id, name)
         return updated_change or change
@@ -177,61 +182,66 @@ class LifecycleTransitionAuthority:
 
         now = utc_now()
         session = self.session
-        if session is not None and hasattr(session, "execute"):
-            stmt = (
-                update(BacklogItemModel)
-                .where(
-                    BacklogItemModel.id == item.item_id,
-                    BacklogItemModel.status == expected_from_state.value,
+        try:
+            if session is not None and hasattr(session, "execute"):
+                stmt = (
+                    update(BacklogItemModel)
+                    .where(
+                        BacklogItemModel.id == item.item_id,
+                        BacklogItemModel.status == expected_from_state.value,
+                    )
+                    .values(
+                        status=to_state.value,
+                        run_id=run_id if run_id is not None else BacklogItemModel.run_id,
+                        updated_at=now,
+                    )
                 )
-                .values(
-                    status=to_state.value,
-                    run_id=run_id if run_id is not None else BacklogItemModel.run_id,
-                    updated_at=now,
-                )
-            )
-            res = session.execute(stmt)
-            if res.rowcount == 0:
-                raise LifecycleTransitionConflictError(
-                    f"Atomic CAS failed for BacklogItem '{item_key}': expected status '{expected_from_state.value}' conflict."
-                )
-            if hasattr(session, "flush"):
-                session.flush()
-        elif hasattr(self.uow.backlog_items, "_store"):
-            stored = self.uow.backlog_items._store.get(item.item_id)
-            if not stored or stored.status != expected_from_state:
-                raise LifecycleTransitionConflictError(
-                    f"Atomic CAS failed for BacklogItem '{item_key}': expected status '{expected_from_state.value}' conflict."
-                )
-            updated = stored.model_copy(deep=True)
-            updated.status = to_state
-            if run_id is not None:
-                updated.run_id = run_id
-            updated.updated_at = now
-            self.uow.backlog_items._store[item.item_id] = updated
-        else:
-            raise NotImplementedError("Unsupported UoW/Repository implementation for LifecycleTransitionAuthority")
+                res = session.execute(stmt)
+                if res.rowcount == 0:
+                    raise LifecycleTransitionConflictError(
+                        f"Atomic CAS failed for BacklogItem '{item_key}': expected status '{expected_from_state.value}' conflict."
+                    )
+                if hasattr(session, "flush"):
+                    session.flush()
+            elif hasattr(self.uow.backlog_items, "_store"):
+                stored = self.uow.backlog_items._store.get(item.item_id)
+                if not stored or stored.status != expected_from_state:
+                    raise LifecycleTransitionConflictError(
+                        f"Atomic CAS failed for BacklogItem '{item_key}': expected status '{expected_from_state.value}' conflict."
+                    )
+                updated = stored.model_copy(deep=True)
+                updated.status = to_state
+                if run_id is not None:
+                    updated.run_id = run_id
+                updated.updated_at = now
+                self.uow.backlog_items._store[item.item_id] = updated
+            else:
+                raise NotImplementedError("Unsupported UoW/Repository implementation for LifecycleTransitionAuthority")
 
-        # Atomic Event emission in same DB transaction
-        event = Event(
-            event_type=EventType.LIFECYCLE_TRANSITION,
-            project_id=project_id,
-            change_id=item.openspec_change_name or item_key,
-            payload={
-                "aggregate_type": "BacklogItem",
-                "aggregate_id": item.item_id,
-                "project_id": project_id,
-                "item_key": item_key,
-                "from_state": expected_from_state.value,
-                "to_state": to_state.value,
-                "reason_code": reason_code,
-                "actor": actor,
-                "correlation_id": correlation_id,
-                "evidence_references": evidence_references or {},
-            },
-            timestamp=now,
-        )
-        self.uow.events.save(event)
+            # Atomic Event emission in same DB transaction
+            event = Event(
+                event_type=EventType.LIFECYCLE_TRANSITION,
+                project_id=project_id,
+                change_id=item.openspec_change_name or item_key,
+                payload={
+                    "aggregate_type": "BacklogItem",
+                    "aggregate_id": item.item_id,
+                    "project_id": project_id,
+                    "item_key": item_key,
+                    "from_state": expected_from_state.value,
+                    "to_state": to_state.value,
+                    "reason_code": reason_code,
+                    "actor": actor,
+                    "correlation_id": correlation_id,
+                    "evidence_references": evidence_references or {},
+                },
+                timestamp=now,
+            )
+            self.uow.events.save(event)
+        except Exception:
+            if session is not None and hasattr(session, "rollback"):
+                session.rollback()
+            raise
 
         updated_item = self.uow.backlog_items.get_by_project_and_key(project_id, item_key)
         return updated_item or item

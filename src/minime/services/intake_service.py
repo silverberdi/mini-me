@@ -666,6 +666,10 @@ class IntakeService:
 
         reconciled_items: list[BacklogItem] = []
         for item in items:
+            if item.status in (WorkItemStatus.COMPLETED, WorkItemStatus.CANCELLED):
+                reconciled_items.append(item)
+                continue
+
             change_name = item.openspec_change_name or item.item_key
             item_runs = runs_by_change.get(change_name, []) or runs_by_change.get(item.item_key, [])
             latest_run = item_runs[-1] if item_runs else None
