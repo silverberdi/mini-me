@@ -5,7 +5,12 @@ from __future__ import annotations
 from minime.adapters.github import GitHubAdapter, GitHubAuthorizationError, GitHubRemoteError
 from minime.adapters.openspec import OpenSpecAdapter
 from minime.db.session import SchemaInvariantResult, verify_physical_schema_invariants
-from minime.domain.enums import ChangeStatus, EventType, ReadinessState
+from minime.domain.enums import (
+    ChangeStatus,
+    EventType,
+    ExternalOutcome,
+    ReadinessState,
+)
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
     Event,
@@ -238,9 +243,11 @@ class ReadinessService:
             else:
                 effective_issue = github_issue or binding.github_issue_number
                 try:
-                    issue_valid, issue_reason = self.github_adapter.validate_issue_binding(
+                    binding_res = self.github_adapter.validate_issue_binding(
                         project.repository, effective_issue, github_repository=github_repo
                     )
+                    issue_valid = binding_res.outcome == ExternalOutcome.SUCCESS and binding_res.data is True
+                    issue_reason = binding_res.error_message
                 except GitHubRemoteError as exc:
                     issue_valid = False
                     issue_reason = f"Transient GitHub unobservability: {exc}"

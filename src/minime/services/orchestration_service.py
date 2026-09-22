@@ -23,12 +23,13 @@ from minime.domain.enums import (
     ExecutionOutcome,
     ExternalActionStatus,
     ExternalActionType,
+    ExternalOutcome,
+    ExternalReasonCode,
     HumanGate,
     JobStatus,
     OrchestrationStage,
     OrchestrationStopOutcome,
     ProviderHealthStatus,
-    PullRequestLookupState,
     ReadinessState,
     ReviewVerdict,
     WorkItemStatus,
@@ -2005,11 +2006,17 @@ class OrchestrationService:
 
                 # Reconcile remote branch head before any push attempt
                 try:
-                    remote_sha = self.github_adapter.get_remote_branch_head(
+                    head_res = self.github_adapter.get_remote_branch_head(
                         repository=str(root),
                         branch=branch_name,
                         remote="origin",
                     )
+                    if head_res.outcome == ExternalOutcome.SUCCESS:
+                        remote_sha = head_res.data
+                    elif head_res.outcome == ExternalOutcome.FAILURE and head_res.reason_code == ExternalReasonCode.NOT_FOUND:
+                        remote_sha = None
+                    else:
+                        raise RuntimeError(head_res.error_message or "Could not observe remote branch head.")
                 except Exception as exc:
                     logger.warning(f"Could not observe remote branch '{branch_name}': {exc}")
                     self._stop_run(
@@ -2071,18 +2078,36 @@ class OrchestrationService:
                             )
                             break
                         try:
-                            self.github_adapter.push_branch(
+                            push_res = self.github_adapter.push_branch(
                                 worktree_path=str(repository_context),
                                 remote="origin",
                                 branch=branch_name,
                                 candidate_sha=cand_sha,
                             )
-                            self.uow.orchestration_external_actions.update_status(
-                                push_key,
-                                ExternalActionStatus.COMPLETED,
-                                remote_identifier=f"refs/heads/{branch_name}",
-                            )
-                            self.uow.commit()
+                            if push_res is True or getattr(push_res, "is_success", False):
+                                self.uow.orchestration_external_actions.update_status(
+                                    push_key,
+                                    ExternalActionStatus.COMPLETED,
+                                    remote_identifier=f"refs/heads/{branch_name}",
+                                )
+                                self.uow.commit()
+                            else:
+                                push_outcome = getattr(push_res, "outcome", ExternalOutcome.FAILURE)
+                                push_err = getattr(push_res, "error_message", None) or "Push failed."
+                                final_status = ExternalActionStatus.AMBIGUOUS if push_outcome == ExternalOutcome.AMBIGUOUS else ExternalActionStatus.FAILED
+                                self.uow.orchestration_external_actions.update_status(
+                                    push_key,
+                                    final_status,
+                                    error_message=push_err,
+                                )
+                                self._stop_run(
+                                    run,
+                                    stop_outcome=OrchestrationStopOutcome.WAITING_EXTERNAL,
+                                    human_gate=None,
+                                    stop_reason=f"Branch push temporarily failed: {push_err}",
+                                    stop_details={"action_key": push_key},
+                                )
+                                break
                         except Exception as exc:
                             logger.warning(
                                 f"Branch push transient failure for run '{run.run_id}': {exc}"
@@ -2121,36 +2146,45 @@ class OrchestrationService:
                 if pr_action.status != ExternalActionStatus.COMPLETED:
                     try:
                         # Check if PR already exists on GitHub
-                        lookup = self.github_adapter.get_pull_request(
+                        lookup_res = self.github_adapter.get_pull_request(
                             repository=project.repository,
                             branch=branch_name,
                             base=project.base_branch,
                         )
-                        lookup_state = getattr(lookup, "state", None)
-                        if lookup_state is not None:
-                            if lookup_state == PullRequestLookupState.UNOBSERVABLE:
-                                self._stop_run(
-                                    run,
-                                    stop_outcome=OrchestrationStopOutcome.WAITING_EXTERNAL,
-                                    human_gate=None,
-                                    stop_reason=lookup.detail or "Cannot observe remote PR state.",
-                                    stop_details={"action_key": pr_key, "code": lookup_state.value},
-                                )
-                                break
-                            if lookup_state == PullRequestLookupState.AMBIGUOUS:
-                                self._stop_run(
-                                    run,
-                                    stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
-                                    human_gate=HumanGate.NEEDS_HUMAN,
-                                    stop_reason=lookup.detail or "Remote PR state is ambiguous.",
-                                    stop_details={"action_key": pr_key, "code": lookup_state.value},
-                                )
-                                break
-                            existing_pr = lookup.pull_request
+                        reason_code_val = lookup_res.reason_code.value
+                        lookup_err = lookup_res.error_message
+                        lookup_state = None
+                        existing_pr = None
+
+                        if lookup_res.outcome == ExternalOutcome.SUCCESS and lookup_res.data:
+                            lookup_state = "SUCCESS"
+                            existing_pr = lookup_res.data
+                        elif lookup_res.outcome == ExternalOutcome.FAILURE and lookup_res.reason_code == ExternalReasonCode.NOT_FOUND:
+                            lookup_state = "NOT_FOUND"
+                        elif lookup_res.outcome == ExternalOutcome.AMBIGUOUS:
+                            lookup_state = "AMBIGUOUS"
                         else:
-                            # Existing deterministic test doubles return the legacy shape.  A
-                            # real GitHubAdapter always returns PullRequestLookupResult.
-                            existing_pr = lookup
+                            lookup_state = "UNKNOWN"
+
+                        if lookup_state == "UNKNOWN":
+                            self._stop_run(
+                                run,
+                                stop_outcome=OrchestrationStopOutcome.WAITING_EXTERNAL,
+                                human_gate=None,
+                                stop_reason=lookup_err or "Cannot observe remote PR state.",
+                                stop_details={"action_key": pr_key, "code": reason_code_val},
+                            )
+                            break
+                        if lookup_state == "AMBIGUOUS":
+                            self._stop_run(
+                                run,
+                                stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+                                human_gate=HumanGate.NEEDS_HUMAN,
+                                stop_reason=lookup_err or "Remote PR state is ambiguous.",
+                                stop_details={"action_key": pr_key, "code": reason_code_val},
+                            )
+                            break
+
                         if existing_pr:
                             valid_adoption, reason, details = self._verify_pr_adoption_identity(
                                 existing_pr=existing_pr,
@@ -2190,7 +2224,7 @@ class OrchestrationService:
                                 break
                         else:
                             # Create new PR
-                            new_pr = self.github_adapter.create_pull_request(
+                            create_res = self.github_adapter.create_pull_request(
                                 repository=project.repository,
                                 branch=branch_name,
                                 base=project.base_branch,
@@ -2202,6 +2236,27 @@ class OrchestrationService:
                                 ),
                                 head_sha=cand_sha,
                             )
+                            is_create_ok = create_res.outcome == ExternalOutcome.SUCCESS and bool(create_res.data)
+                            create_data = create_res.data
+                            create_outcome = create_res.outcome
+                            create_err = create_res.error_message or "PR creation failed"
+
+                            if not is_create_ok or not create_data:
+                                final_status = ExternalActionStatus.AMBIGUOUS if create_outcome == ExternalOutcome.AMBIGUOUS else ExternalActionStatus.FAILED
+                                self.uow.orchestration_external_actions.update_status(
+                                    pr_key,
+                                    final_status,
+                                    error_message=create_err,
+                                )
+                                self._stop_run(
+                                    run,
+                                    stop_outcome=OrchestrationStopOutcome.WAITING_EXTERNAL if create_outcome == ExternalOutcome.AMBIGUOUS else OrchestrationStopOutcome.NEEDS_HUMAN,
+                                    human_gate=None if create_outcome == ExternalOutcome.AMBIGUOUS else HumanGate.NEEDS_HUMAN,
+                                    stop_reason=create_err,
+                                    stop_details={"action_key": pr_key},
+                                )
+                                break
+                            new_pr = create_data
                             remote_head = new_pr.get("head_sha")
                             if remote_head and remote_head != cand_sha:
                                 error_msg = f"Created PR head '{remote_head}' differs from audited candidate '{cand_sha}'."

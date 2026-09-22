@@ -405,7 +405,7 @@ def test_matching_operation_pid_mismatch_fails_closed(in_memory_uow, tmp_path):
     worktree_git_dir = worktree_dir / ".git"
     worktree_git_dir.mkdir(parents=True, exist_ok=True)
     lock_file = worktree_git_dir / "index.lock"
-    lock_file.write_text("456\n", encoding="utf-8")
+    lock_file.write_text("999999\n", encoding="utf-8")
 
     git_op = GitOperation(
         operation_id="op-pid-123",

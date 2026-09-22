@@ -11,6 +11,7 @@ from minime.adapters.github import GitHubAdapter
 from minime.adapters.openspec import OpenSpecAdapter
 from minime.domain.enums import (
     ChangeStatus,
+    ExternalOutcome,
     QueuePriority,
     ReadinessState,
 )
@@ -136,7 +137,9 @@ class WorkDiscoveryService:
             # 2. Fetch remote issues from repository
             remote_issues: list[dict[str, Any]] = []
             try:
-                remote_issues = self.github_adapter.list_issues(project.repository, state="all")
+                list_res = self.github_adapter.list_issues(project.repository, state="all")
+                if list_res.outcome == ExternalOutcome.SUCCESS and list_res.data:
+                    remote_issues = list_res.data
             except Exception as exc:
                 logger.debug(
                     f"Remote issue discovery unavailable for '{project.repository}': {exc}"

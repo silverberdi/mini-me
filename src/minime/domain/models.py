@@ -7,7 +7,7 @@ import json
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
@@ -34,6 +34,8 @@ from minime.domain.enums import (
     ExecutionOutcome,
     ExternalActionStatus,
     ExternalActionType,
+    ExternalOutcome,
+    ExternalReasonCode,
     FindingSeverity,
     GitOperationStatus,
     HumanGate,
@@ -56,6 +58,7 @@ from minime.domain.enums import (
     ReadinessState,
     RemediationFailureCode,
     RemediationStatus,
+    RetrySafety,
     ReviewStatus,
     ReviewVerdict,
     SchedulerMode,
@@ -137,6 +140,41 @@ class PullRequestLookupResult(BaseModel):
     state: PullRequestLookupState
     pull_request: dict[str, Any] | None = None
     detail: str | None = None
+
+
+T = TypeVar("T")
+
+
+class ExternalActionResult(BaseModel, Generic[T]):
+    """Unified fail-closed result container for external operations and queries."""
+
+    outcome: ExternalOutcome
+    source_adapter: str
+    reason_code: ExternalReasonCode
+    retry_safety: RetrySafety = RetrySafety.UNKNOWN
+    provider_detail: str | None = None
+    data: T | None = None
+    observed_evidence: dict[str, Any] = Field(default_factory=dict)
+    error_message: str | None = None
+    external_id: str | None = None
+    operation_key: str | None = None
+    timestamp: datetime = Field(default_factory=utc_now)
+
+    @property
+    def is_success(self) -> bool:
+        return self.outcome == ExternalOutcome.SUCCESS
+
+    @property
+    def is_failure(self) -> bool:
+        return self.outcome == ExternalOutcome.FAILURE
+
+    @property
+    def is_unknown_or_ambiguous(self) -> bool:
+        return self.outcome in (ExternalOutcome.UNKNOWN, ExternalOutcome.AMBIGUOUS)
+
+    @property
+    def is_retry_authorized(self) -> bool:
+        return self.retry_safety == RetrySafety.SAFE
 
 
 class Change(BaseModel):

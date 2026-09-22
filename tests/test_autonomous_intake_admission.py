@@ -11,16 +11,20 @@ from tests.conftest import InMemoryPersistenceUnitOfWork
 from minime.domain.enums import (
     AdmissionDecision,
     AdmissionRefusalCode,
+    ExternalOutcome,
+    ExternalReasonCode,
     OrchestrationStage,
     ProviderHealthStatus,
     QueuePriority,
     ReadinessState,
+    RetrySafety,
     WorkItemPriority,
     WorkItemStatus,
 )
 from minime.domain.models import (
     BacklogItem,
     CapacityWindow,
+    ExternalActionResult,
     OrchestrationRun,
     Project,
     ProjectBinding,
@@ -102,12 +106,29 @@ def test_auto_prepare_on_backlog_creation_happy_path(
     )
 
     mock_gh = MagicMock()
-    mock_gh.create_issue.return_value = {
-        "number": 101,
-        "html_url": "https://github.com/silverberdi/auto-repo/issues/101",
-    }
-    mock_gh.add_issue_to_project.return_value = "PVTI_test_101"
-    mock_gh.validate_issue_binding.return_value = (True, "Valid issue")
+    mock_gh.create_issue.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="mock",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.UNSAFE,
+        data={"number": 101, "html_url": "https://github.com/silverberdi/auto-repo/issues/101"},
+        external_id="101",
+    )
+    mock_gh.add_issue_to_project.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="mock",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.UNSAFE,
+        data="PVTI_test_101",
+        external_id="PVTI_test_101",
+    )
+    mock_gh.validate_issue_binding.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="mock",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.SAFE,
+        data=True,
+    )
 
     service = IntakeService(
         in_memory_uow,
@@ -175,11 +196,21 @@ def test_auto_prepare_needs_human_on_ambiguity_and_resume(
     )
 
     mock_gh = MagicMock()
-    mock_gh.create_issue.return_value = {
-        "number": 105,
-        "html_url": "https://github.com/silverberdi/ambiguous-repo/issues/105",
-    }
-    mock_gh.validate_issue_binding.return_value = (True, "Valid issue")
+    mock_gh.create_issue.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="mock",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.UNSAFE,
+        data={"number": 105, "html_url": "https://github.com/silverberdi/ambiguous-repo/issues/105"},
+        external_id="105",
+    )
+    mock_gh.validate_issue_binding.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="mock",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.SAFE,
+        data=True,
+    )
 
     service = IntakeService(
         in_memory_uow,

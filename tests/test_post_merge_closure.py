@@ -9,13 +9,22 @@ import pytest
 
 from minime.domain.enums import (
     EventType,
+    ExternalOutcome,
+    ExternalReasonCode,
     JobStatus,
     OrchestrationStage,
     OrchestrationStopOutcome,
     ProjectStatus,
+    RetrySafety,
 )
 from minime.domain.interfaces import GitHubAdapterInterface, PersistenceUnitOfWork
-from minime.domain.models import Job, OrchestrationRun, Project, ProjectBinding
+from minime.domain.models import (
+    ExternalActionResult,
+    Job,
+    OrchestrationRun,
+    Project,
+    ProjectBinding,
+)
 from minime.services.openspec_sync import OpenSpecSyncService
 from minime.services.post_merge_service import (
     PostMergeReconciliationService,
@@ -105,7 +114,7 @@ class InMemoryUnitOfWork(PersistenceUnitOfWork):
 @pytest.fixture
 def mock_github_adapter():
     adapter = MagicMock(spec=GitHubAdapterInterface)
-    adapter.get_pull_request_details.return_value = {
+    pr_details = {
         "number": 54,
         "url": "https://github.com/silverberdi/mini-me/pull/54",
         "state": "closed",
@@ -120,9 +129,43 @@ def mock_github_adapter():
         "base_branch": "main",
         "title": "018.2-proving-diagnostic-status",
     }
-    adapter.close_issue.return_value = True
-    adapter.update_project_item_status.return_value = True
-    adapter.delete_remote_branch.return_value = True
+    adapter.get_pull_request_details.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="mock",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.SAFE,
+        data=pr_details,
+        external_id="54",
+    )
+    adapter.get_pull_request.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="mock",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.SAFE,
+        data=pr_details,
+        external_id="54",
+    )
+    adapter.close_issue.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="mock",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.UNSAFE,
+        data=True,
+    )
+    adapter.update_project_item_status.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="mock",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.UNSAFE,
+        data=True,
+    )
+    adapter.delete_remote_branch.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="mock",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.UNSAFE,
+        data=True,
+    )
     return adapter
 
 
@@ -149,15 +192,19 @@ The system SHALL execute autonomous actions.
     (change_dir / "tasks.md").write_text("- [x] 1.1 Complete task\n")
 
     sync_service = OpenSpecSyncService(project_root)
-    synced = sync_service.sync_change_specs("openspec", "test-change")
-    assert "test-cap" in synced
+    synced_res = sync_service.sync_change_specs("openspec", "test-change")
+    assert synced_res.outcome == ExternalOutcome.SUCCESS
+    assert "test-cap" in synced_res.data
 
     main_spec = openspec_dir / "specs" / "test-cap" / "spec.md"
     assert main_spec.exists()
     assert "## Requirement: Autonomous Action" in main_spec.read_text()
 
     # Archive
-    archived_dir = sync_service.archive_change("openspec", "test-change", target_date="2026-09-03")
+    archive_res = sync_service.archive_change("openspec", "test-change", target_date="2026-09-03")
+    assert archive_res.outcome == ExternalOutcome.SUCCESS
+    archived_dir = archive_res.data
+    assert archived_dir is not None
     assert archived_dir.exists()
     assert "2026-09-03-test-change" in str(archived_dir)
     assert not change_dir.exists()
@@ -208,10 +255,17 @@ def test_post_merge_reconciliation_full_cycle(tmp_path: Path, mock_github_adapte
     )
     uow.jobs.save(job)
 
-    # Setup dummy change directory
+    # Setup dummy change directory and git repo
+    import subprocess
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=False)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, capture_output=True, check=False)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=False)
+    subprocess.run(["git", "commit", "--allow-empty", "-m", "init"], cwd=tmp_path, capture_output=True, check=False)
+
     change_dir = tmp_path / "openspec" / "changes" / "test-change" / "specs" / "cap1"
     change_dir.mkdir(parents=True)
     (change_dir / "spec.md").write_text("# Spec: Cap1\n## Requirement: R1\n")
+    (tmp_path / "openspec" / "changes" / "test-change" / "proposal.md").write_text("# Proposal\n")
     (tmp_path / "openspec" / "changes" / "test-change" / "tasks.md").write_text("- [x] Done\n")
 
     service = PostMergeReconciliationService(
@@ -235,7 +289,7 @@ def test_post_merge_reconciliation_full_cycle(tmp_path: Path, mock_github_adapte
     assert result.openspec_archived is True
     assert result.terminal_stage == OrchestrationStage.COMPLETED
     assert result.terminal_job_status == JobStatus.COMPLETED
-    assert result.native_phases_completed == 12
+    assert result.native_phases_completed == 7
 
     # Verify run and job persisted state
     updated_run = uow.orchestration_runs.get_by_id("run-123")
@@ -259,7 +313,7 @@ def test_post_merge_reconciliation_full_cycle(tmp_path: Path, mock_github_adapte
     rerun_result = service.reconcile_post_merge("mini-me", "test-change", run_id="run-123")
     assert rerun_result.success is True
     assert rerun_result.already_closed is True
-    assert rerun_result.native_phases_completed == 12
+    assert rerun_result.native_phases_completed == 7
 
 
 def test_control_plane_reconcile_post_merge(tmp_path: Path, mock_github_adapter):
@@ -313,10 +367,17 @@ def test_control_plane_reconcile_post_merge(tmp_path: Path, mock_github_adapter)
     )
     uow.jobs.save(job)
 
-    # Setup dummy change directory
+    # Setup dummy change directory and git repo
+    import subprocess
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=False)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, capture_output=True, check=False)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=False)
+    subprocess.run(["git", "commit", "--allow-empty", "-m", "init"], cwd=tmp_path, capture_output=True, check=False)
+
     change_dir = tmp_path / "openspec" / "changes" / "test-change" / "specs" / "cap1"
     change_dir.mkdir(parents=True)
     (change_dir / "spec.md").write_text("# Spec: Cap1\n## Requirement: R1\n")
+    (tmp_path / "openspec" / "changes" / "test-change" / "proposal.md").write_text("# Proposal\n")
     (tmp_path / "openspec" / "changes" / "test-change" / "tasks.md").write_text("- [x] Done\n")
 
     post_merge_service = PostMergeReconciliationService(

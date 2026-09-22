@@ -17,9 +17,15 @@ from urllib.parse import urlparse
 import httpx
 import jwt
 
-from minime.domain.enums import EventType, PullRequestLookupState
+from minime.domain.enums import (
+    EventType,
+    ExternalOutcome,
+    ExternalReasonCode,
+    PullRequestLookupState,
+    RetrySafety,
+)
 from minime.domain.interfaces import GitHubAdapterInterface
-from minime.domain.models import Event, PullRequestLookupResult, utc_now
+from minime.domain.models import Event, ExternalActionResult, PullRequestLookupResult, utc_now
 from minime.logging import get_logger, redact_secrets
 from minime.services.project_service import normalize_repository_identity
 
@@ -172,74 +178,221 @@ class GitHubAdapter(GitHubAdapterInterface):
         except (httpx.HTTPError, OSError):
             raise GitHubRemoteError("GitHub API is unobservable.") from None
 
-    def verify_repository(self, repository: str) -> tuple[bool, str | None]:
-        repo = self._repo(repository)
-        response = self._request("GET", f"/repos/{repo}")
-        if response.status_code == 404:
-            return False, f"Repository '{repo}' does not exist or is not accessible."
-        if response.status_code in (401, 403):
-            raise GitHubAuthorizationError("GitHub App is unauthorized for the bound repository.")
-        if response.status_code >= 500 or response.status_code == 429:
-            raise GitHubRemoteError("GitHub repository verification is unobservable.")
-        if response.status_code >= 400:
-            return False, f"Repository verification failed (HTTP {response.status_code})."
+    def verify_repository(self, repository: str) -> ExternalActionResult[bool]:
         try:
-            actual = normalize_repository_identity(response.json()["full_name"])
-        except (KeyError, TypeError, ValueError):
-            return False, "GitHub repository response was invalid."
-        return (
-            actual == repo,
-            None
-            if actual == repo
-            else f"Repository mismatch: GitHub returned '{actual}', expected '{repo}'.",
-        )
+            repo = self._repo(repository)
+            response = self._request("GET", f"/repos/{repo}")
+            if response.status_code == 404:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.NOT_FOUND,
+                    retry_safety=RetrySafety.SAFE,
+                    data=False,
+                    provider_detail=f"HTTP {response.status_code}",
+                    error_message=f"Repository '{repo}' does not exist or is not accessible.",
+                )
+            if response.status_code in (401, 403):
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                    retry_safety=RetrySafety.SAFE,
+                    data=False,
+                    provider_detail=f"HTTP {response.status_code}",
+                    error_message="GitHub App is unauthorized for the bound repository.",
+                )
+            if response.status_code >= 500 or response.status_code == 429:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.UNKNOWN,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.RATE_LIMITED if response.status_code == 429 else ExternalReasonCode.UNOBSERVABLE,
+                    retry_safety=RetrySafety.SAFE,
+                    data=False,
+                    provider_detail=f"HTTP {response.status_code}",
+                    error_message="GitHub repository verification is unobservable.",
+                )
+            if response.status_code >= 400:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.UNOBSERVABLE,
+                    retry_safety=RetrySafety.SAFE,
+                    data=False,
+                    provider_detail=f"HTTP {response.status_code}",
+                    error_message=f"Repository verification failed (HTTP {response.status_code}).",
+                )
+            try:
+                actual = normalize_repository_identity(response.json()["full_name"])
+            except (KeyError, TypeError, ValueError):
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.UNKNOWN,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.MALFORMED_RESPONSE,
+                    retry_safety=RetrySafety.SAFE,
+                    data=False,
+                    error_message="GitHub repository response was invalid.",
+                )
+            if actual != repo:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.CONFLICT,
+                    retry_safety=RetrySafety.SAFE,
+                    data=False,
+                    error_message=f"Repository mismatch: GitHub returned '{actual}', expected '{repo}'.",
+                )
+            return ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                retry_safety=RetrySafety.SAFE,
+                data=True,
+            )
+        except GitHubAuthorizationError as exc:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                retry_safety=RetrySafety.SAFE,
+                data=False,
+                provider_detail=str(exc),
+                error_message=str(exc),
+            )
+        except Exception as exc:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.SAFE,
+                data=False,
+                provider_detail=str(exc),
+                error_message=str(exc),
+            )
 
     def validate_issue_binding(
         self, expected_repository: str, issue_number: int, github_repository: str | None = None
-    ) -> tuple[bool, str | None]:
-        repo = self._repo(expected_repository)
-        if issue_number <= 0:
-            return False, f"Invalid issue number: {issue_number} must be positive."
-        if (
-            github_repository is not None
-            and normalize_repository_identity(github_repository) != repo
-        ):
-            actual = normalize_repository_identity(github_repository)
-            return (
-                False,
-                f"Repository mismatch: GitHub Issue #{issue_number} belongs to '{actual}', not '{repo}'.",
-            )
-        response = self._request("GET", f"/repos/{repo}/issues/{issue_number}")
-        if response.status_code == 404:
-            return False, f"GitHub Issue #{issue_number} does not exist in repository '{repo}'."
-        if response.status_code in (401, 403):
-            raise GitHubAuthorizationError(
-                "GitHub App is unauthorized to validate the bound Issue."
-            )
-        if response.status_code >= 500 or response.status_code == 429:
-            raise GitHubRemoteError("GitHub Issue validation is unobservable.")
-        if response.status_code >= 400:
-            raise GitHubRemoteError(
-                f"GitHub Issue validation is unobservable (HTTP {response.status_code})."
-            )
+    ) -> ExternalActionResult[bool]:
         try:
-            payload = response.json()
-            actual = self._issue_repository_identity(payload)
-        except (KeyError, TypeError, ValueError, AttributeError):
-            return False, f"GitHub Issue #{issue_number} response was invalid."
-        if actual != repo:
-            return (
-                False,
-                f"Repository mismatch: GitHub Issue #{issue_number} belongs to '{actual}', not '{repo}'.",
+            repo = self._repo(expected_repository)
+            if issue_number <= 0:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.CONFLICT,
+                    retry_safety=RetrySafety.SAFE,
+                    data=False,
+                    error_message=f"Invalid issue number: {issue_number} must be positive.",
+                )
+            if (
+                github_repository is not None
+                and normalize_repository_identity(github_repository) != repo
+            ):
+                actual = normalize_repository_identity(github_repository)
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.CONFLICT,
+                    retry_safety=RetrySafety.SAFE,
+                    data=False,
+                    error_message=f"Repository mismatch: GitHub Issue #{issue_number} belongs to '{actual}', not '{repo}'.",
+                )
+            response = self._request("GET", f"/repos/{repo}/issues/{issue_number}")
+            if response.status_code == 404:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.NOT_FOUND,
+                    retry_safety=RetrySafety.SAFE,
+                    data=False,
+                    provider_detail=f"HTTP {response.status_code}",
+                    error_message=f"GitHub Issue #{issue_number} does not exist in repository '{repo}'.",
+                )
+            if response.status_code in (401, 403):
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                    retry_safety=RetrySafety.SAFE,
+                    data=False,
+                    provider_detail=f"HTTP {response.status_code}",
+                    error_message="GitHub App is unauthorized to validate the bound Issue.",
+                )
+            if response.status_code >= 500 or response.status_code == 429:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.UNKNOWN,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.RATE_LIMITED if response.status_code == 429 else ExternalReasonCode.UNOBSERVABLE,
+                    retry_safety=RetrySafety.SAFE,
+                    data=False,
+                    provider_detail=f"HTTP {response.status_code}",
+                    error_message="GitHub Issue validation is unobservable.",
+                )
+            if response.status_code >= 400:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.UNKNOWN,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.UNOBSERVABLE,
+                    retry_safety=RetrySafety.SAFE,
+                    data=False,
+                    provider_detail=f"HTTP {response.status_code}",
+                    error_message=f"GitHub Issue validation is unobservable (HTTP {response.status_code}).",
+                )
+            try:
+                payload = response.json()
+                actual = self._issue_repository_identity(payload)
+            except (KeyError, TypeError, ValueError, AttributeError):
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.UNKNOWN,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.MALFORMED_RESPONSE,
+                    retry_safety=RetrySafety.SAFE,
+                    data=False,
+                    error_message=f"GitHub Issue #{issue_number} response was invalid.",
+                )
+            if actual != repo:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.CONFLICT,
+                    retry_safety=RetrySafety.SAFE,
+                    data=False,
+                    error_message=f"Repository mismatch: GitHub Issue #{issue_number} belongs to '{actual}', not '{repo}'.",
+                )
+            return ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                retry_safety=RetrySafety.SAFE,
+                data=True,
             )
-        return True, None
+        except GitHubAuthorizationError as exc:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                retry_safety=RetrySafety.SAFE,
+                data=False,
+                provider_detail=str(exc),
+                error_message=str(exc),
+            )
+        except Exception as exc:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.SAFE,
+                data=False,
+                provider_detail=str(exc),
+                error_message=str(exc),
+            )
 
     def list_issues(
         self, repository: str, state: str = "open", limit: int = 50
-    ) -> list[dict[str, Any]]:
+    ) -> ExternalActionResult[list[dict[str, Any]]]:
         """List issues for a repository."""
-        repo = self._repo(repository)
         try:
+            repo = self._repo(repository)
             response = self._request(
                 "GET",
                 f"/repos/{repo}/issues",
@@ -248,12 +401,38 @@ class GitHubAdapter(GitHubAdapterInterface):
             if response.status_code == 200:
                 payload = response.json()
                 if isinstance(payload, list):
-                    return [item for item in payload if not item.get("pull_request")]
+                    items = [item for item in payload if not item.get("pull_request")]
+                    return ExternalActionResult(
+                        outcome=ExternalOutcome.SUCCESS,
+                        source_adapter="github_rest",
+                        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                        retry_safety=RetrySafety.SAFE,
+                        data=items,
+                    )
+            if response.status_code in (401, 403):
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                    retry_safety=RetrySafety.SAFE,
+                    data=[],
+                    provider_detail=f"HTTP {response.status_code}",
+                )
+        except GitHubAuthorizationError as exc:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                retry_safety=RetrySafety.SAFE,
+                data=[],
+                provider_detail=str(exc),
+            )
         except Exception as exc:
             logger.debug(f"Failed to list issues via GitHub API: {exc}")
 
         # Fallback to gh CLI if available
         try:
+            repo = self._repo(repository)
             result = subprocess.run(
                 [
                     "gh",
@@ -275,15 +454,28 @@ class GitHubAdapter(GitHubAdapterInterface):
             if result.returncode == 0 and result.stdout.strip():
                 items = json.loads(result.stdout)
                 if isinstance(items, list):
-                    return items
+                    return ExternalActionResult(
+                        outcome=ExternalOutcome.SUCCESS,
+                        source_adapter="github_cli",
+                        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                        retry_safety=RetrySafety.SAFE,
+                        data=items,
+                    )
         except Exception as exc:
             logger.debug(f"Failed to list issues via gh CLI: {exc}")
 
-        return []
+        return ExternalActionResult(
+            outcome=ExternalOutcome.UNKNOWN,
+            source_adapter="github_rest",
+            reason_code=ExternalReasonCode.UNOBSERVABLE,
+            retry_safety=RetrySafety.SAFE,
+            data=[],
+            error_message="Failed to list issues from remote GitHub.",
+        )
 
     def list_project_items(
         self, project_number: int = 2, owner: str = "silverberdi", limit: int = 50
-    ) -> list[dict[str, Any]]:
+    ) -> ExternalActionResult[list[dict[str, Any]]]:
         """List items in a GitHub Project V2."""
         try:
             result = subprocess.run(
@@ -306,10 +498,43 @@ class GitHubAdapter(GitHubAdapterInterface):
             if result.returncode == 0 and result.stdout.strip():
                 data = json.loads(result.stdout)
                 items = data.get("items", [])
-                return items if isinstance(items, list) else []
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.SUCCESS,
+                    source_adapter="github_cli",
+                    reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                    retry_safety=RetrySafety.SAFE,
+                    data=items if isinstance(items, list) else [],
+                )
+            stderr = result.stderr.strip()
+            if "could not resolve" in stderr.lower() or "not found" in stderr.lower():
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_cli",
+                    reason_code=ExternalReasonCode.NOT_FOUND,
+                    retry_safety=RetrySafety.SAFE,
+                    data=[],
+                    provider_detail=stderr,
+                )
+            if "auth" in stderr.lower() or "unauthorized" in stderr.lower() or "401" in stderr or "403" in stderr:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_cli",
+                    reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                    retry_safety=RetrySafety.SAFE,
+                    data=[],
+                    provider_detail=stderr,
+                )
         except Exception as exc:
             logger.debug(f"Failed to list project items via gh CLI: {exc}")
-        return []
+
+        return ExternalActionResult(
+            outcome=ExternalOutcome.UNKNOWN,
+            source_adapter="github_cli",
+            reason_code=ExternalReasonCode.UNOBSERVABLE,
+            retry_safety=RetrySafety.SAFE,
+            data=[],
+            error_message="GitHub project item list unobservable.",
+        )
 
     def create_issue(
         self,
@@ -317,78 +542,218 @@ class GitHubAdapter(GitHubAdapterInterface):
         title: str,
         body: str,
         labels: list[str] | None = None,
-    ) -> dict[str, Any]:
-        """Create a GitHub Issue idempotently (checks existing first by title)."""
+        operation_key: str | None = None,
+    ) -> ExternalActionResult[dict[str, Any]]:
+        """Create a GitHub Issue idempotently with deterministic operation_key comment marker deduplication."""
         repo = self._repo(repository)
-        # 1. Search for existing issue with identical title to prevent duplicates
-        try:
-            existing_issues = self.list_issues(repo, state="all", limit=50)
-            for issue in existing_issues:
-                if issue.get("title", "").strip().lower() == title.strip().lower():
-                    logger.info(
-                        "Reusing existing GitHub Issue #%s for '%s'", issue.get("number"), title
-                    )
-                    return {
-                        "number": issue.get("number"),
-                        "title": issue.get("title"),
-                        "body": issue.get("body"),
-                        "html_url": issue.get("html_url")
-                        or f"https://github.com/{repo}/issues/{issue.get('number')}",
-                        "labels": issue.get("labels", []),
-                    }
-        except Exception as exc:
-            logger.debug("Failed listing issues for deduplication check: %s", exc)
+        marker = f"<!-- minime-opkey: {operation_key} -->" if operation_key else None
+        formatted_body = f"{body}\n\n{marker}" if marker and marker not in body else body
 
-        # 2. Try REST API with App token
+        # 1. Search for existing issue with exact operation_key comment marker
+        if operation_key:
+            list_res = self.list_issues(repo, state="all", limit=100)
+            if list_res.outcome == ExternalOutcome.UNKNOWN:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.UNKNOWN,
+                    source_adapter="github_rest",
+                    reason_code=list_res.reason_code or ExternalReasonCode.UNOBSERVABLE,
+                    retry_safety=RetrySafety.SAFE,
+                    error_message=f"Pre-observation of issues unobservable for operation_key '{operation_key}': {list_res.error_message}",
+                    operation_key=operation_key,
+                )
+            if list_res.outcome == ExternalOutcome.AMBIGUOUS:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.AMBIGUOUS,
+                    source_adapter="github_rest",
+                    reason_code=list_res.reason_code or ExternalReasonCode.UNOBSERVABLE,
+                    retry_safety=RetrySafety.SAFE,
+                    error_message=f"Pre-observation of issues ambiguous for operation_key '{operation_key}': {list_res.error_message}",
+                    operation_key=operation_key,
+                )
+            if list_res.outcome == ExternalOutcome.FAILURE and list_res.reason_code == ExternalReasonCode.AUTH_REQUIRED:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                    retry_safety=RetrySafety.SAFE,
+                    provider_detail=list_res.provider_detail,
+                    error_message=f"GitHub API authorization failed during issue pre-observation: {list_res.error_message}",
+                    operation_key=operation_key,
+                )
+            if list_res.outcome == ExternalOutcome.SUCCESS and list_res.data:
+                for issue in list_res.data:
+                    issue_body = issue.get("body") or ""
+                    if marker and marker in issue_body:
+                        num = issue.get("number")
+                        html_url = issue.get("html_url")
+                        if not num or not html_url:
+                            return ExternalActionResult(
+                                outcome=ExternalOutcome.AMBIGUOUS,
+                                source_adapter="github_rest",
+                                reason_code=ExternalReasonCode.EVIDENCE_INSUFFICIENT,
+                                retry_safety=RetrySafety.UNKNOWN,
+                                error_message=f"Observed matching issue for operation_key '{operation_key}' missing required identity fields.",
+                                operation_key=operation_key,
+                            )
+                        logger.info(
+                            "Reusing existing GitHub Issue #%s for operation_key '%s'",
+                            num,
+                            operation_key,
+                        )
+                        issue_dict = {
+                            "number": num,
+                            "title": issue.get("title"),
+                            "body": issue.get("body"),
+                            "html_url": html_url,
+                            "labels": issue.get("labels", []),
+                        }
+                        return ExternalActionResult(
+                            outcome=ExternalOutcome.SUCCESS,
+                            source_adapter="github_rest",
+                            reason_code=ExternalReasonCode.REUSED_EXISTING,
+                            retry_safety=RetrySafety.UNSAFE,
+                            data=issue_dict,
+                            external_id=str(num),
+                            operation_key=operation_key,
+                        )
+
+        # 2. REST API creation
         try:
-            payload: dict[str, Any] = {"title": title, "body": body}
+            payload: dict[str, Any] = {"title": title, "body": formatted_body}
             if labels:
                 payload["labels"] = labels
             response = self._request("POST", f"/repos/{repo}/issues", json=payload)
             if response.status_code in (200, 201):
                 data = response.json()
-                return {
-                    "number": data.get("number"),
+                num = data.get("number")
+                html_url = data.get("html_url")
+                if not num or not html_url:
+                    return ExternalActionResult(
+                        outcome=ExternalOutcome.AMBIGUOUS,
+                        source_adapter="github_rest",
+                        reason_code=ExternalReasonCode.EVIDENCE_INSUFFICIENT,
+                        retry_safety=RetrySafety.UNKNOWN,
+                        error_message="GitHub Issue response missing required number or html_url.",
+                        operation_key=operation_key,
+                    )
+                issue_dict = {
+                    "number": num,
                     "title": data.get("title"),
                     "body": data.get("body"),
-                    "html_url": data.get("html_url"),
+                    "html_url": html_url,
                     "labels": data.get("labels", []),
                 }
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.SUCCESS,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                    retry_safety=RetrySafety.UNSAFE,
+                    data=issue_dict,
+                    external_id=str(num),
+                    operation_key=operation_key,
+                )
+            if response.status_code in (401, 403):
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                    retry_safety=RetrySafety.UNSAFE,
+                    provider_detail=f"HTTP {response.status_code}",
+                    error_message="GitHub API authorization failed for issue creation.",
+                    operation_key=operation_key,
+                )
+            if response.status_code in (400, 422):
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.CONFLICT,
+                    retry_safety=RetrySafety.UNSAFE,
+                    provider_detail=f"HTTP {response.status_code}",
+                    error_message=f"GitHub Issue creation payload rejected (HTTP {response.status_code}).",
+                    operation_key=operation_key,
+                )
+            # HTTP 5xx or unobserved response after POST attempt -> AMBIGUOUS (DO NOT execute 2nd mutation fallback)
+            return ExternalActionResult(
+                outcome=ExternalOutcome.AMBIGUOUS,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.UNKNOWN,
+                provider_detail=f"HTTP {response.status_code}",
+                error_message=f"GitHub Issue creation status unobservable (HTTP {response.status_code}).",
+                operation_key=operation_key,
+            )
+        except GitHubAuthorizationError as exc:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                retry_safety=RetrySafety.UNSAFE,
+                provider_detail=str(exc),
+                error_message=str(exc),
+                operation_key=operation_key,
+            )
         except Exception as exc:
             logger.debug("Failed creating issue via GitHub API: %s", exc)
+            # REST HTTP POST request attempt failed with exception -> AMBIGUOUS (DO NOT execute 2nd mutation fallback)
+            return ExternalActionResult(
+                outcome=ExternalOutcome.AMBIGUOUS,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.UNKNOWN,
+                provider_detail=str(exc),
+                error_message=f"GitHub Issue creation unobservable after POST attempt: {exc}",
+                operation_key=operation_key,
+            )
 
-        # 3. Fallback to gh CLI
-        try:
-            cmd = ["gh", "issue", "create", "--repo", repo, "--title", title, "--body", body]
-            if labels:
-                for lbl in labels:
-                    cmd.extend(["--label", lbl])
-            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-            if result.returncode == 0 and result.stdout.strip():
-                url = result.stdout.strip()
-                num_match = re.search(r"/issues/(\d+)", url)
-                issue_num = int(num_match.group(1)) if num_match else 1
-                return {
-                    "number": issue_num,
-                    "title": title,
-                    "body": body,
-                    "html_url": url,
-                    "labels": labels or [],
-                }
-        except Exception as exc:
-            logger.debug("Failed creating issue via gh CLI: %s", exc)
-
-        # Fallback double
-        return {
-            "number": 1,
-            "title": title,
-            "body": body,
-            "html_url": f"https://github.com/{repo}/issues/1",
-            "labels": labels or [],
-        }
-
-    def add_issue_to_project(self, project_number: int, owner: str, issue_url: str) -> str | None:
+    def add_issue_to_project(
+        self, project_number: int, owner: str, issue_url: str, operation_key: str | None = None
+    ) -> ExternalActionResult[str]:
         """Add an issue URL to a GitHub Project V2 and return the project item ID."""
+        list_res = self.list_project_items(project_number, owner)
+        if list_res.outcome == ExternalOutcome.UNKNOWN:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="github_cli",
+                reason_code=list_res.reason_code or ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.SAFE,
+                error_message=f"Pre-observation of project items unobservable: {list_res.error_message}",
+                operation_key=operation_key,
+            )
+        if list_res.outcome == ExternalOutcome.AMBIGUOUS:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.AMBIGUOUS,
+                source_adapter="github_cli",
+                reason_code=list_res.reason_code or ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.SAFE,
+                error_message=f"Pre-observation of project items ambiguous: {list_res.error_message}",
+                operation_key=operation_key,
+            )
+        if list_res.outcome == ExternalOutcome.FAILURE and list_res.reason_code == ExternalReasonCode.AUTH_REQUIRED:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="github_cli",
+                reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                retry_safety=RetrySafety.SAFE,
+                provider_detail=list_res.provider_detail,
+                error_message=f"GitHub Project authorization rejected during pre-observation: {list_res.error_message}",
+                operation_key=operation_key,
+            )
+        if list_res.outcome == ExternalOutcome.SUCCESS and list_res.data:
+            for item in list_res.data:
+                content = item.get("content", {})
+                if content.get("url") == issue_url or item.get("url") == issue_url:
+                    item_id = item.get("id")
+                    if item_id:
+                        return ExternalActionResult(
+                            outcome=ExternalOutcome.SUCCESS,
+                            source_adapter="github_cli",
+                            reason_code=ExternalReasonCode.REUSED_EXISTING,
+                            retry_safety=RetrySafety.UNSAFE,
+                            data=item_id,
+                            external_id=item_id,
+                            operation_key=operation_key,
+                        )
+
         try:
             result = subprocess.run(
                 [
@@ -409,10 +774,39 @@ class GitHubAdapter(GitHubAdapterInterface):
             )
             if result.returncode == 0 and result.stdout.strip():
                 data = json.loads(result.stdout)
-                return data.get("id")
+                item_id = data.get("id")
+                if item_id:
+                    return ExternalActionResult(
+                        outcome=ExternalOutcome.SUCCESS,
+                        source_adapter="github_cli",
+                        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                        retry_safety=RetrySafety.UNSAFE,
+                        data=item_id,
+                        external_id=item_id,
+                        operation_key=operation_key,
+                    )
+            stderr = result.stderr.strip()
+            if "401" in stderr or "403" in stderr or "auth" in stderr.lower() or "unauthorized" in stderr.lower():
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_cli",
+                    reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                    retry_safety=RetrySafety.UNSAFE,
+                    provider_detail=stderr,
+                    error_message=f"GitHub Project authorization rejected: {stderr}",
+                    operation_key=operation_key,
+                )
         except Exception as exc:
             logger.debug("Failed adding issue to project via gh CLI: %s", exc)
-        return f"PVTI_mock_{project_number}"
+
+        return ExternalActionResult(
+            outcome=ExternalOutcome.AMBIGUOUS,
+            source_adapter="github_cli",
+            reason_code=ExternalReasonCode.UNOBSERVABLE,
+            retry_safety=RetrySafety.UNKNOWN,
+            error_message="Adding issue to project is unobservable.",
+            operation_key=operation_key,
+        )
 
     @staticmethod
     def _issue_repository_identity(payload: dict[str, Any]) -> str:
@@ -465,7 +859,7 @@ class GitHubAdapter(GitHubAdapterInterface):
             timestamp=utc_now(),
         )
 
-    def get_pull_request(
+    def _get_pull_request_lookup(
         self, repository: str, branch: str, base: str = "main"
     ) -> PullRequestLookupResult:
         repo = self._repo(repository)
@@ -548,39 +942,147 @@ class GitHubAdapter(GitHubAdapterInterface):
                 state=PullRequestLookupState.UNOBSERVABLE, detail=_safe_error(str(exc))
             )
 
+    def get_pull_request(
+        self, repository: str, branch: str, base: str = "main"
+    ) -> ExternalActionResult[dict[str, Any]]:
+        lookup = self._get_pull_request_lookup(repository, branch, base)
+        if lookup.state == PullRequestLookupState.FOUND_EXACT and lookup.pull_request:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                retry_safety=RetrySafety.SAFE,
+                data=lookup.pull_request,
+                external_id=str(lookup.pull_request.get("number")),
+            )
+        if lookup.state == PullRequestLookupState.NOT_FOUND:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.NOT_FOUND,
+                retry_safety=RetrySafety.SAFE,
+                error_message="Pull request not found.",
+            )
+        if lookup.state == PullRequestLookupState.UNOBSERVABLE:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.SAFE,
+                error_message=lookup.detail or "Pull request lookup unobservable.",
+            )
+        return ExternalActionResult(
+            outcome=ExternalOutcome.AMBIGUOUS,
+            source_adapter="github_rest",
+            reason_code=ExternalReasonCode.CONFLICT,
+            retry_safety=RetrySafety.UNKNOWN,
+            error_message=lookup.detail or "Ambiguous pull request state.",
+        )
+
     def create_pull_request(
         self, repository: str, branch: str, base: str, title: str, body: str, head_sha: str
-    ) -> dict[str, Any]:
+    ) -> ExternalActionResult[dict[str, Any]]:
         repo = self._repo(repository)
-        response = self._request(
-            "POST",
-            f"/repos/{repo}/pulls",
-            json={"title": title, "body": body, "head": branch, "base": base},
-        )
-        if response.status_code in (401, 403):
-            raise GitHubAuthorizationError("GitHub App is unauthorized for pull-request creation.")
-        if response.status_code >= 500 or response.status_code == 429:
-            raise GitHubRemoteError("GitHub PR creation is unobservable.")
-        if response.status_code >= 400:
-            raise RuntimeError(f"GitHub PR creation failed (HTTP {response.status_code}).")
+        existing = self.get_pull_request(repo, branch, base)
+        if existing.outcome == ExternalOutcome.SUCCESS and existing.data:
+            if existing.data.get("head_sha") == head_sha:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.SUCCESS,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.REUSED_EXISTING,
+                    retry_safety=RetrySafety.UNSAFE,
+                    data=existing.data,
+                    external_id=str(existing.data.get("number")),
+                )
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.CONFLICT,
+                retry_safety=RetrySafety.UNSAFE,
+                data=existing.data,
+                error_message=f"Existing PR head '{existing.data.get('head_sha')}' differs from candidate SHA '{head_sha}'.",
+            )
+        if existing.outcome == ExternalOutcome.UNKNOWN:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.UNKNOWN,
+                error_message=existing.error_message or "PR lookup unobservable; creation POST blocked.",
+            )
+        if existing.outcome == ExternalOutcome.AMBIGUOUS:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.AMBIGUOUS,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.CONFLICT,
+                retry_safety=RetrySafety.UNKNOWN,
+                error_message=existing.error_message or "Ambiguous PR lookup state; creation POST blocked.",
+            )
+        if existing.outcome != ExternalOutcome.FAILURE or existing.reason_code != ExternalReasonCode.NOT_FOUND:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.UNKNOWN,
+                error_message="PR lookup outcome was not authoritative NOT_FOUND; creation POST blocked.",
+            )
+
         try:
-            data = response.json()
-            returned_sha = data["head"]["sha"]
-            if returned_sha != head_sha:
-                raise RuntimeError("GitHub created a pull request with a different head SHA.")
-            return {
-                "repository": repo,
-                "number": data["number"],
-                "url": data["html_url"],
-                "head_sha": returned_sha,
-                "head_branch": data["head"]["ref"],
-                "base_branch": data["base"]["ref"],
-                "state": data.get("state"),
-                "title": data.get("title"),
-                "body": data.get("body"),
-            }
-        except (KeyError, TypeError, ValueError) as exc:
-            raise RuntimeError("GitHub PR creation response was invalid.") from exc
+            response = self._request(
+                "POST",
+                f"/repos/{repo}/pulls",
+                json={"title": title, "body": body, "head": branch, "base": base},
+            )
+            if response.status_code in (401, 403):
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                    retry_safety=RetrySafety.UNSAFE,
+                    provider_detail=f"HTTP {response.status_code}",
+                    error_message="GitHub App is unauthorized for pull-request creation.",
+                )
+            if response.status_code in (200, 201):
+                data = response.json()
+                returned_sha = data["head"]["sha"]
+                pr_dict = {
+                    "repository": repo,
+                    "number": data["number"],
+                    "url": data["html_url"],
+                    "head_sha": returned_sha,
+                    "head_branch": data["head"]["ref"],
+                    "base_branch": data["base"]["ref"],
+                    "state": data.get("state"),
+                    "title": data.get("title"),
+                    "body": data.get("body"),
+                }
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.SUCCESS,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                    retry_safety=RetrySafety.UNSAFE,
+                    data=pr_dict,
+                    external_id=str(data["number"]),
+                )
+        except GitHubAuthorizationError as exc:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                retry_safety=RetrySafety.UNSAFE,
+                provider_detail=str(exc),
+                error_message=str(exc),
+            )
+        except Exception as exc:
+            logger.debug("Failed creating pull request via GitHub API: %s", exc)
+
+        return ExternalActionResult(
+            outcome=ExternalOutcome.AMBIGUOUS,
+            source_adapter="github_rest",
+            reason_code=ExternalReasonCode.TIMEOUT,
+            retry_safety=RetrySafety.UNKNOWN,
+            error_message="Pull request creation unobservable after POST attempt.",
+        )
 
     @staticmethod
     def _is_local_remote(remote_url: str) -> bool:
@@ -631,125 +1133,379 @@ class GitHubAdapter(GitHubAdapterInterface):
         if failure is not None:
             raise failure
 
-    def push_branch(self, worktree_path: str, remote: str, branch: str, candidate_sha: str) -> bool:
+    def push_branch(
+        self, worktree_path: str, remote: str, branch: str, candidate_sha: str
+    ) -> ExternalActionResult[str]:
         repo = Path(worktree_path).resolve()
         if not (repo / ".git").exists() and not (repo / "HEAD").exists():
-            raise RuntimeError(f"Push context is not a Git repository: {repo}")
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="git_cli",
+                reason_code=ExternalReasonCode.NOT_FOUND,
+                retry_safety=RetrySafety.UNSAFE,
+                error_message=f"Push context is not a Git repository: {repo}",
+            )
         remote_proc = self._run_git(["git", "remote", "get-url", remote], cwd=repo, timeout=5)
         if remote_proc.returncode != 0:
-            raise RuntimeError("Registered Git remote could not be resolved.")
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="git_cli",
+                reason_code=ExternalReasonCode.NOT_FOUND,
+                retry_safety=RetrySafety.UNSAFE,
+                error_message="Registered Git remote could not be resolved.",
+            )
         remote_url = remote_proc.stdout.strip()
         verify = self._run_git(
             ["git", "rev-parse", "--verify", f"{candidate_sha}^{{commit}}"], cwd=repo, timeout=10
         )
         if verify.returncode != 0 or verify.stdout.strip() != candidate_sha:
-            raise RuntimeError(
-                f"Candidate SHA '{candidate_sha}' is not resolvable from repository '{repo}'."
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="git_cli",
+                reason_code=ExternalReasonCode.NOT_FOUND,
+                retry_safety=RetrySafety.UNSAFE,
+                error_message=f"Candidate SHA '{candidate_sha}' is not resolvable from repository '{repo}'.",
             )
-        auth = self._git_auth_bundle(remote_url)
-        result = self._run_git(
-            ["git", *auth.args, "push", remote, f"{candidate_sha}:refs/heads/{branch}"],
-            cwd=repo,
-            timeout=30,
-            secrets=list(auth.secrets),
-        )
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"git push failed: {_safe_error(result.stderr or result.stdout, list(auth.secrets))}"
+        try:
+            auth = self._git_auth_bundle(remote_url)
+            result = self._run_git(
+                ["git", *auth.args, "push", remote, f"{candidate_sha}:refs/heads/{branch}"],
+                cwd=repo,
+                timeout=30,
+                secrets=list(auth.secrets),
             )
-        return True
+            if result.returncode == 0:
+                obs_res = self.get_remote_branch_head(worktree_path, branch, remote=remote)
+                if obs_res.outcome == ExternalOutcome.SUCCESS and obs_res.data:
+                    if obs_res.data == candidate_sha:
+                        return ExternalActionResult(
+                            outcome=ExternalOutcome.SUCCESS,
+                            source_adapter="git_cli",
+                            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                            retry_safety=RetrySafety.UNSAFE,
+                            data=candidate_sha,
+                        )
+                    return ExternalActionResult(
+                        outcome=ExternalOutcome.FAILURE,
+                        source_adapter="git_cli",
+                        reason_code=ExternalReasonCode.CONFLICT,
+                        retry_safety=RetrySafety.UNSAFE,
+                        data=obs_res.data,
+                        error_message=f"Pushed branch remote SHA '{obs_res.data}' does not match candidate SHA '{candidate_sha}'.",
+                    )
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.AMBIGUOUS,
+                    source_adapter="git_cli",
+                    reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
+                    retry_safety=RetrySafety.UNKNOWN,
+                    error_message="Remote branch head postcondition unobservable after git push command.",
+                )
+            stderr = _safe_error(result.stderr or result.stdout, list(auth.secrets))
+            if "401" in stderr or "403" in stderr or "denied" in stderr.lower():
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="git_cli",
+                    reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                    retry_safety=RetrySafety.UNSAFE,
+                    provider_detail=stderr,
+                    error_message=f"git push authorization failed: {stderr}",
+                )
+            return ExternalActionResult(
+                outcome=ExternalOutcome.AMBIGUOUS,
+                source_adapter="git_cli",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.UNKNOWN,
+                provider_detail=stderr,
+                error_message=f"git push failed: {stderr}",
+            )
+        except GitHubAuthorizationError as exc:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="git_cli",
+                reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                retry_safety=RetrySafety.UNSAFE,
+                provider_detail=str(exc),
+                error_message=str(exc),
+            )
+        except Exception as exc:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.AMBIGUOUS,
+                source_adapter="git_cli",
+                reason_code=ExternalReasonCode.TIMEOUT,
+                retry_safety=RetrySafety.UNKNOWN,
+                provider_detail=str(exc),
+                error_message=str(exc),
+            )
 
     def get_remote_branch_head(
         self, repository: str, branch: str, remote: str = "origin"
-    ) -> str | None:
+    ) -> ExternalActionResult[str]:
         repo = Path(repository).resolve()
         if not repo.exists() or not repo.is_dir():
-            raise RuntimeError(f"Registered repository path does not exist: {repo}")
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="git_cli",
+                reason_code=ExternalReasonCode.NOT_FOUND,
+                retry_safety=RetrySafety.SAFE,
+                error_message=f"Registered repository path does not exist: {repo}",
+            )
         top = self._run_git(["git", "rev-parse", "--show-toplevel"], cwd=repo, timeout=5)
         if top.returncode != 0 or Path(top.stdout.strip()).resolve() != repo:
-            raise RuntimeError(f"Registered repository path is not a Git root: {repo}")
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="git_cli",
+                reason_code=ExternalReasonCode.NOT_FOUND,
+                retry_safety=RetrySafety.SAFE,
+                error_message=f"Registered repository path is not a Git root: {repo}",
+            )
         remote_proc = self._run_git(["git", "remote", "get-url", remote], cwd=repo, timeout=5)
         if remote_proc.returncode != 0:
-            raise RuntimeError("Registered Git remote could not be resolved.")
-        remote_url = remote_proc.stdout.strip()
-        auth = self._git_auth_bundle(remote_url)
-        result = self._run_git(
-            ["git", *auth.args, "ls-remote", "--heads", remote, f"refs/heads/{branch}"],
-            cwd=repo,
-            timeout=15,
-            secrets=list(auth.secrets),
-        )
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"git ls-remote failed: {_safe_error(result.stderr or result.stdout, list(auth.secrets))}"
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="git_cli",
+                reason_code=ExternalReasonCode.NOT_FOUND,
+                retry_safety=RetrySafety.SAFE,
+                error_message="Registered Git remote could not be resolved.",
             )
-        return result.stdout.strip().split()[0] if result.stdout.strip() else None
-
-    def get_pull_request_details(self, repository: str, pr_number: int) -> dict[str, Any]:
-        """Fetch full details for a pull request including merged status and executor."""
-        repo = self._repo(repository)
-        response = self._request("GET", f"/repos/{repo}/pulls/{pr_number}")
-        if response.status_code in (401, 403):
-            raise GitHubAuthorizationError("GitHub App is unauthorized for pull-request lookup.")
-        if response.status_code == 404:
-            raise RuntimeError(f"Pull request #{pr_number} not found in '{repo}'.")
-        if response.status_code >= 400:
-            raise GitHubRemoteError(f"GitHub PR lookup failed (HTTP {response.status_code}).")
-        data = response.json()
-        head = data.get("head") or {}
-        base_data = data.get("base") or {}
-        merged_by = data.get("merged_by")
-        return {
-            "repository": repo,
-            "number": data.get("number"),
-            "url": data.get("html_url"),
-            "state": data.get("state"),
-            "is_merged": bool(data.get("merged", False)),
-            "merged_at": data.get("merged_at"),
-            "merged_by": merged_by,
-            "merged_by_login": merged_by.get("login") if isinstance(merged_by, dict) else None,
-            "merge_commit_sha": data.get("merge_commit_sha"),
-            "head_sha": head.get("sha"),
-            "head_branch": head.get("ref"),
-            "base_sha": base_data.get("sha"),
-            "base_branch": base_data.get("ref"),
-            "title": data.get("title"),
-        }
-
-    def close_issue(self, repository: str, issue_number: int, comment: str | None = None) -> bool:
-        """Close a GitHub Issue idempotently with reason 'completed'."""
-        repo = self._repo(repository)
-        response = self._request("GET", f"/repos/{repo}/issues/{issue_number}")
-        if response.status_code == 200:
-            data = response.json()
-            if data.get("state") == "closed":
-                logger.info("GitHub Issue #%d in '%s' is already closed.", issue_number, repo)
-                return True
-        patch_res = self._request(
-            "PATCH",
-            f"/repos/{repo}/issues/{issue_number}",
-            json={"state": "closed", "state_reason": "completed"},
-        )
-        if patch_res.status_code in (401, 403):
-            raise GitHubAuthorizationError("GitHub App is unauthorized to close issues.")
-        if patch_res.status_code >= 400 and patch_res.status_code != 404:
-            raise GitHubRemoteError(f"GitHub Issue closure failed (HTTP {patch_res.status_code}).")
-
-        if comment:
-            try:
-                self._request(
-                    "POST",
-                    f"/repos/{repo}/issues/{issue_number}/comments",
-                    json={"body": comment},
+        remote_url = remote_proc.stdout.strip()
+        try:
+            auth = self._git_auth_bundle(remote_url)
+            result = self._run_git(
+                ["git", *auth.args, "ls-remote", "--heads", remote, f"refs/heads/{branch}"],
+                cwd=repo,
+                timeout=15,
+                secrets=list(auth.secrets),
+            )
+            if result.returncode == 0:
+                stdout = result.stdout.strip()
+                if stdout:
+                    head_sha = stdout.split()[0]
+                    return ExternalActionResult(
+                        outcome=ExternalOutcome.SUCCESS,
+                        source_adapter="git_cli",
+                        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                        retry_safety=RetrySafety.SAFE,
+                        data=head_sha,
+                    )
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="git_cli",
+                    reason_code=ExternalReasonCode.NOT_FOUND,
+                    retry_safety=RetrySafety.SAFE,
+                    data=None,
+                    error_message=f"Branch '{branch}' is absent on remote '{remote}'.",
                 )
-            except Exception as exc:
-                logger.debug("Failed to post comment on issue #%d: %s", issue_number, exc)
-        return True
+            stderr = _safe_error(result.stderr or result.stdout, list(auth.secrets))
+            if "401" in stderr or "403" in stderr or "denied" in stderr.lower():
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="git_cli",
+                    reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                    retry_safety=RetrySafety.SAFE,
+                    provider_detail=stderr,
+                    error_message=f"ls-remote authorization failed: {stderr}",
+                )
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="git_cli",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.SAFE,
+                provider_detail=stderr,
+                error_message=f"ls-remote failed: {stderr}",
+            )
+        except GitHubAuthorizationError as exc:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="git_cli",
+                reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                retry_safety=RetrySafety.SAFE,
+                provider_detail=str(exc),
+                error_message=str(exc),
+            )
+        except Exception as exc:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="git_cli",
+                reason_code=ExternalReasonCode.TIMEOUT,
+                retry_safety=RetrySafety.SAFE,
+                provider_detail=str(exc),
+                error_message=str(exc),
+            )
+
+    def get_pull_request_details(
+        self, repository: str, pr_number: int
+    ) -> ExternalActionResult[dict[str, Any]]:
+        repo = self._repo(repository)
+        try:
+            response = self._request("GET", f"/repos/{repo}/pulls/{pr_number}")
+            if response.status_code in (401, 403):
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                    retry_safety=RetrySafety.SAFE,
+                    provider_detail=f"HTTP {response.status_code}",
+                    error_message="GitHub App is unauthorized for pull-request lookup.",
+                )
+            if response.status_code == 404:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.NOT_FOUND,
+                    retry_safety=RetrySafety.SAFE,
+                    error_message=f"Pull request #{pr_number} not found in '{repo}'.",
+                )
+            if response.status_code >= 400:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.UNKNOWN,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.UNOBSERVABLE,
+                    retry_safety=RetrySafety.SAFE,
+                    provider_detail=f"HTTP {response.status_code}",
+                    error_message=f"GitHub PR lookup failed (HTTP {response.status_code}).",
+                )
+            data = response.json()
+            head = data.get("head") or {}
+            base_data = data.get("base") or {}
+            merged_by = data.get("merged_by")
+            pr_details = {
+                "repository": repo,
+                "number": data.get("number"),
+                "url": data.get("html_url"),
+                "state": data.get("state"),
+                "is_merged": bool(data.get("merged", False)),
+                "merged_at": data.get("merged_at"),
+                "merged_by": merged_by,
+                "merged_by_login": merged_by.get("login") if isinstance(merged_by, dict) else None,
+                "merge_commit_sha": data.get("merge_commit_sha"),
+                "head_sha": head.get("sha"),
+                "head_branch": head.get("ref"),
+                "base_sha": base_data.get("sha"),
+                "base_branch": base_data.get("ref"),
+                "title": data.get("title"),
+            }
+            return ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                retry_safety=RetrySafety.SAFE,
+                data=pr_details,
+                external_id=str(data.get("number")),
+            )
+        except GitHubAuthorizationError as exc:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                retry_safety=RetrySafety.SAFE,
+                provider_detail=str(exc),
+                error_message=str(exc),
+            )
+        except Exception as exc:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.SAFE,
+                provider_detail=str(exc),
+                error_message=str(exc),
+            )
+
+    def close_issue(
+        self, repository: str, issue_number: int, comment: str | None = None
+    ) -> ExternalActionResult[bool]:
+        repo = self._repo(repository)
+        try:
+            response = self._request("GET", f"/repos/{repo}/issues/{issue_number}")
+            if response.status_code == 404:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.NOT_FOUND,
+                    retry_safety=RetrySafety.UNSAFE,
+                    data=False,
+                    error_message=f"GitHub Issue #{issue_number} not found in '{repo}'.",
+                )
+            if response.status_code in (401, 403):
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                    retry_safety=RetrySafety.UNSAFE,
+                    data=False,
+                    error_message="GitHub App unauthorized to read Issue.",
+                )
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("state") == "closed":
+                    logger.info("GitHub Issue #%d in '%s' is already closed.", issue_number, repo)
+                    return ExternalActionResult(
+                        outcome=ExternalOutcome.SUCCESS,
+                        source_adapter="github_rest",
+                        reason_code=ExternalReasonCode.ALREADY_CLOSED,
+                        retry_safety=RetrySafety.UNSAFE,
+                        data=True,
+                        external_id=str(issue_number),
+                    )
+
+            patch_res = self._request(
+                "PATCH",
+                f"/repos/{repo}/issues/{issue_number}",
+                json={"state": "closed", "state_reason": "completed"},
+            )
+            if patch_res.status_code in (401, 403):
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                    retry_safety=RetrySafety.UNSAFE,
+                    data=False,
+                    provider_detail=f"HTTP {patch_res.status_code}",
+                    error_message="GitHub App is unauthorized to close issues.",
+                )
+            if patch_res.status_code in (200, 204):
+                if comment:
+                    try:
+                        self._request(
+                            "POST",
+                            f"/repos/{repo}/issues/{issue_number}/comments",
+                            json={"body": comment},
+                        )
+                    except Exception as exc:
+                        logger.debug("Failed to post comment on issue #%d: %s", issue_number, exc)
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.SUCCESS,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                    retry_safety=RetrySafety.UNSAFE,
+                    data=True,
+                    external_id=str(issue_number),
+                )
+        except GitHubAuthorizationError as exc:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                retry_safety=RetrySafety.UNSAFE,
+                data=False,
+                provider_detail=str(exc),
+                error_message=str(exc),
+            )
+        except Exception as exc:
+            logger.debug("Close issue failed: %s", exc)
+
+        return ExternalActionResult(
+            outcome=ExternalOutcome.AMBIGUOUS,
+            source_adapter="github_rest",
+            reason_code=ExternalReasonCode.UNOBSERVABLE,
+            retry_safety=RetrySafety.UNKNOWN,
+            data=False,
+            error_message="GitHub Issue closure unobservable after request attempt.",
+        )
 
     def update_project_item_status(
         self, project_number: int, owner: str, item_id: str, status: str = "Done"
-    ) -> bool:
-        """Update the Status field of a GitHub Project V2 item."""
+    ) -> ExternalActionResult[bool]:
         try:
             res = subprocess.run(
                 [
@@ -770,20 +1526,135 @@ class GitHubAdapter(GitHubAdapterInterface):
                 check=False,
             )
             if res.returncode == 0:
-                return True
-        except Exception:
-            pass
+                items_res = self.list_project_items(project_number, owner)
+                if items_res.outcome == ExternalOutcome.SUCCESS and items_res.data:
+                    observed = False
+                    for itm in items_res.data:
+                        itm_id = str(itm.get("id") or "")
+                        if itm_id == str(item_id):
+                            st = str(itm.get("status") or itm.get("fieldValues", {}).get("Status") or "")
+                            if st.lower() == status.lower() or status.lower() in st.lower():
+                                observed = True
+                                break
+                    if observed:
+                        logger.info("Project item %s updated to status %s.", item_id, status)
+                        return ExternalActionResult(
+                            outcome=ExternalOutcome.SUCCESS,
+                            source_adapter="github_cli",
+                            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                            retry_safety=RetrySafety.UNSAFE,
+                            data=True,
+                            external_id=item_id,
+                        )
+                    return ExternalActionResult(
+                        outcome=ExternalOutcome.FAILURE,
+                        source_adapter="github_cli",
+                        reason_code=ExternalReasonCode.CONFLICT,
+                        retry_safety=RetrySafety.UNSAFE,
+                        data=False,
+                        error_message=f"Project item '{item_id}' status postcondition '{status}' not observed after edit.",
+                    )
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.AMBIGUOUS,
+                    source_adapter="github_cli",
+                    reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
+                    retry_safety=RetrySafety.UNKNOWN,
+                    data=False,
+                    error_message="Project item status update postcondition unobservable after edit command.",
+                )
+            stderr = res.stderr.strip()
+            if "401" in stderr or "403" in stderr or "auth" in stderr.lower() or "unauthorized" in stderr.lower():
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_cli",
+                    reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                    retry_safety=RetrySafety.UNSAFE,
+                    data=False,
+                    provider_detail=stderr,
+                    error_message=f"Project item status edit unauthorized: {stderr}",
+                )
+        except Exception as exc:
+            logger.debug("Update project item status failed: %s", exc)
 
-        logger.info("Project item %s updated to status %s.", item_id, status)
-        return True
+        return ExternalActionResult(
+            outcome=ExternalOutcome.AMBIGUOUS,
+            source_adapter="github_cli",
+            reason_code=ExternalReasonCode.UNOBSERVABLE,
+            retry_safety=RetrySafety.UNKNOWN,
+            data=False,
+            error_message="Project item status update unobservable.",
+        )
 
-    def delete_remote_branch(self, repository: str, branch: str, remote: str = "origin") -> bool:
-        """Delete a remote Git branch idempotently."""
+    def delete_remote_branch(
+        self, repository: str, branch: str, remote: str = "origin"
+    ) -> ExternalActionResult[bool]:
         repo = self._repo(repository)
         try:
             res = self._request("DELETE", f"/repos/{repo}/git/refs/heads/{branch}")
-            if res.status_code in (200, 204, 404, 422):
-                return True
-        except Exception:
-            pass
-        return True
+            if res.status_code in (200, 204):
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.SUCCESS,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                    retry_safety=RetrySafety.UNSAFE,
+                    data=True,
+                )
+            if res.status_code in (401, 403):
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                    retry_safety=RetrySafety.UNSAFE,
+                    data=False,
+                    provider_detail=f"HTTP {res.status_code}",
+                    error_message="GitHub App unauthorized to delete remote branch.",
+                )
+            if res.status_code == 404:
+                # Require positive ls-remote confirmation under valid authorization
+                head_res = self.get_remote_branch_head(repository, branch, remote)
+                if head_res.outcome == ExternalOutcome.FAILURE and head_res.reason_code == ExternalReasonCode.NOT_FOUND:
+                    return ExternalActionResult(
+                        outcome=ExternalOutcome.SUCCESS,
+                        source_adapter="github_rest",
+                        reason_code=ExternalReasonCode.ALREADY_ABSENT,
+                        retry_safety=RetrySafety.UNSAFE,
+                        data=True,
+                    )
+                if head_res.outcome == ExternalOutcome.FAILURE and head_res.reason_code == ExternalReasonCode.AUTH_REQUIRED:
+                    return ExternalActionResult(
+                        outcome=ExternalOutcome.FAILURE,
+                        source_adapter="github_rest",
+                        reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                        retry_safety=RetrySafety.UNSAFE,
+                        data=False,
+                        error_message="Authorization failure during branch absence check.",
+                    )
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.UNKNOWN,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.UNOBSERVABLE,
+                    retry_safety=RetrySafety.UNKNOWN,
+                    data=False,
+                    error_message="Remote branch deletion returned 404 but branch absence could not be authoritatively verified.",
+                )
+        except GitHubAuthorizationError as exc:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                retry_safety=RetrySafety.UNSAFE,
+                data=False,
+                provider_detail=str(exc),
+                error_message=str(exc),
+            )
+        except Exception as exc:
+            logger.debug("Delete remote branch failed: %s", exc)
+
+        return ExternalActionResult(
+            outcome=ExternalOutcome.AMBIGUOUS,
+            source_adapter="github_rest",
+            reason_code=ExternalReasonCode.UNOBSERVABLE,
+            retry_safety=RetrySafety.UNKNOWN,
+            data=False,
+            error_message="Remote branch deletion unobservable after DELETE attempt.",
+        )

@@ -13,11 +13,15 @@ from minime.adapters.github import GitHubAdapter
 from minime.domain.enums import (
     AdmissionDecision,
     ChangeStatus,
+    ExternalOutcome,
+    ExternalReasonCode,
     OrchestrationStage,
     ProviderHealthStatus,
+    RetrySafety,
 )
 from minime.domain.models import (
     Change,
+    ExternalActionResult,
     Project,
     ProjectBinding,
     ProviderHealth,
@@ -74,7 +78,13 @@ def test_autonomous_admission_and_run_creation(
     create_isolated_openspec_change(tmp_path, change_name="016-autonomous-queue-work-selection")
 
     mock_gh = MagicMock(spec=GitHubAdapter)
-    mock_gh.validate_issue_binding.return_value = (True, None)
+    mock_gh.validate_issue_binding.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="fake",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.SAFE,
+        data=True,
+    )
 
     scheduler = SchedulerService(
         uow=in_memory_uow,

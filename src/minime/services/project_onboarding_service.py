@@ -91,17 +91,18 @@ class ProjectOnboardingService:
 
         is_accessible = True
         try:
-            valid, mismatch_reason = self.github_adapter.verify_repository(norm_repo)
-            if not valid:
+            verify_res = self.github_adapter.verify_repository(norm_repo)
+            if verify_res.is_failure:
                 is_accessible = False
                 onboarding_status = ProjectOnboardingStatus.BLOCKED
-                reasons.append(mismatch_reason or "Repository access verification failed.")
+                reasons.append(verify_res.error_message or "Repository access verification failed.")
+            elif verify_res.is_unknown_or_ambiguous:
+                reasons.append(verify_res.error_message or "GitHub API was unobservable during repository verification.")
         except GitHubAuthorizationError as exc:
             is_accessible = False
             onboarding_status = ProjectOnboardingStatus.BLOCKED
             reasons.append(f"GitHub App authorization error: {exc}")
         except GitHubRemoteError as exc:
-            # Remote transient issue
             reasons.append(f"GitHub API was unobservable during repository verification: {exc}")
         except Exception as exc:
             logger.debug(f"Local verification mode or unobservable: {exc}")
