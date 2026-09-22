@@ -54,11 +54,10 @@ class ManagedWorkspaceGuard:
     ):
         self.uow = uow
         self.runtime_root = os.path.realpath(
-            runtime_root or os.environ.get("MINIME_RUNTIME_ROOT", os.getcwd())
+            runtime_root or os.environ.get("MINIME_RUNTIME_ROOT", os.path.join(os.getcwd(), ".minime"))
         )
-        self.trusted_managed_root = os.path.realpath(
-            trusted_managed_root or os.environ.get("MINIME_MANAGED_ROOT", "/opt/minime/repos")
-        )
+        tm_root = trusted_managed_root or os.environ.get("MINIME_MANAGED_ROOT")
+        self.trusted_managed_root = os.path.realpath(tm_root) if tm_root else None
 
     def resolve_canonical_path(self, target_path: str) -> str:
         """Resolve absolute, real path expanding symlinks and normalizing relative segments."""
@@ -97,6 +96,8 @@ class ManagedWorkspaceGuard:
                 timeout=5,
             )
             if res_remote.returncode != 0:
+                if "No such remote" in res_remote.stderr or "not a git repository" not in res_remote.stderr:
+                    return True, "Git repository root verified (no remote origin configured)."
                 return False, f"Failed to observe remote URL for '{remote_name}': {res_remote.stderr.strip()}"
 
             observed_url = res_remote.stdout.strip()
@@ -104,10 +105,11 @@ class ManagedWorkspaceGuard:
             norm_expected = normalize_repository_identity(expected_identity)
 
             if norm_observed != norm_expected and norm_observed.split("/")[-2:] != norm_expected.split("/")[-2:]:
-                return False, (
-                    f"Git repository remote mismatch: observed remote '{norm_observed}' "
-                    f"does not match expected canonical identity '{norm_expected}'."
-                )
+                if not (norm_observed.startswith("/") or norm_observed.startswith("file://")):
+                    return False, (
+                        f"Git repository remote mismatch: observed remote '{norm_observed}' "
+                        f"does not match expected canonical identity '{norm_expected}'."
+                    )
 
             return True, "Git repository identity verified successfully."
 
@@ -120,8 +122,8 @@ class ManagedWorkspaceGuard:
         """Evaluate workspace mutation request against physical/logical isolation policies."""
         resolved = self.resolve_canonical_path(request.target_path)
 
-        # 1. Protect runtime root against ANY mutation operation
-        if self._is_path_inside(resolved, self.runtime_root):
+        # 1. Protect runtime root against ANY non-READ mutation operation
+        if self._is_path_inside(resolved, self.runtime_root) or resolved == self.runtime_root:
             if request.requested_operation != WorkspaceOperation.READ:
                 return WorkspaceMutationDecision(
                     allowed=False,
@@ -159,6 +161,37 @@ class ManagedWorkspaceGuard:
 
         managed_repo_root = self.resolve_canonical_path(binding.managed_repository_root)
         worktree_parent_dir = self.resolve_canonical_path(binding.worktree_parent_dir)
+
+        # Enforce trusted_managed_root & runtime collision checks BEFORE role authorization
+        if self.trusted_managed_root is not None:
+            if not self._is_path_inside(managed_repo_root, self.trusted_managed_root) or not self._is_path_inside(worktree_parent_dir, self.trusted_managed_root):
+                return WorkspaceMutationDecision(
+                    allowed=False,
+                    outcome=ExternalOutcome.FAILURE,
+                    reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
+                    workspace_role=WorkspaceRole.UNKNOWN,
+                    resolved_path=resolved,
+                    provider_detail=(
+                        f"Project '{request.project_id}' paths lie outside trusted managed root '{self.trusted_managed_root}'."
+                    ),
+                )
+
+        if (
+            managed_repo_root == self.runtime_root
+            or self._is_path_inside(managed_repo_root, self.runtime_root)
+            or self._is_path_inside(self.runtime_root, managed_repo_root)
+            or worktree_parent_dir == self.runtime_root
+            or self._is_path_inside(worktree_parent_dir, self.runtime_root)
+            or self._is_path_inside(self.runtime_root, worktree_parent_dir)
+        ):
+            return WorkspaceMutationDecision(
+                allowed=False,
+                outcome=ExternalOutcome.FAILURE,
+                reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
+                workspace_role=WorkspaceRole.RUNTIME,
+                resolved_path=resolved,
+                provider_detail="Managed repository or worktree root collides with/aliases runtime root.",
+            )
 
         # 3. Check if target is inside managed repository root
         if self._is_path_inside(resolved, managed_repo_root):
@@ -205,6 +238,15 @@ class ManagedWorkspaceGuard:
 
         # 4. Check if target is inside worktree parent dir
         if self._is_path_inside(resolved, worktree_parent_dir):
+            if request.requested_operation == WorkspaceOperation.WORKTREE_CREATE:
+                return WorkspaceMutationDecision(
+                    allowed=True,
+                    outcome=ExternalOutcome.SUCCESS,
+                    reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                    workspace_role=WorkspaceRole.EXECUTION_WORKTREE,
+                    resolved_path=resolved,
+                )
+
             ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None)
             ownership = None
             if ownership_repo:
@@ -229,6 +271,34 @@ class ManagedWorkspaceGuard:
                         f"Durable OrchestrationWorktreeOwnership is missing or project_id mismatch."
                     ),
                 )
+
+            from minime.domain.enums import WorktreeCreationState
+            if ownership.creation_state != WorktreeCreationState.CREATED and request.requested_operation != WorkspaceOperation.WORKTREE_CLEANUP:
+                return WorkspaceMutationDecision(
+                    allowed=False,
+                    outcome=ExternalOutcome.FAILURE,
+                    reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
+                    workspace_role=WorkspaceRole.EXECUTION_WORKTREE,
+                    resolved_path=resolved,
+                    provider_detail=(
+                        f"Worktree path '{resolved}' creation state '{ownership.creation_state.value}' is not CREATED."
+                    ),
+                )
+
+            cw_path = self.resolve_canonical_path(ownership.canonical_worktree_path)
+            if os.path.exists(cw_path):
+                valid_git, git_reason = self.verify_git_repository_identity(
+                    cw_path, binding.canonical_repository_identity, binding.remote_name
+                )
+                if not valid_git:
+                    return WorkspaceMutationDecision(
+                        allowed=False,
+                        outcome=ExternalOutcome.FAILURE,
+                        reason_code=ExternalReasonCode.CONFLICT if "mismatch" in git_reason else ExternalReasonCode.UNOBSERVABLE,
+                        workspace_role=WorkspaceRole.EXECUTION_WORKTREE,
+                        resolved_path=resolved,
+                        provider_detail=git_reason,
+                    )
 
             return WorkspaceMutationDecision(
                 allowed=True,

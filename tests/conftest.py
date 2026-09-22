@@ -1912,15 +1912,36 @@ class InMemoryTaskClassificationSnapshotRepository(TaskClassificationSnapshotRep
 
 
 class InMemoryProjectManagedRepositoryBindingRepository:
-    def __init__(self):
+    def __init__(self, uow=None):
         self._store: dict[str, ProjectManagedRepositoryBinding] = {}
+        self._uow = uow
 
     def save(self, binding: ProjectManagedRepositoryBinding) -> None:
         self._store[binding.project_id] = binding.model_copy(deep=True)
 
     def get_by_project_id(self, project_id: str) -> ProjectManagedRepositoryBinding | None:
         b = self._store.get(project_id)
-        return b.model_copy(deep=True) if b else None
+        if b:
+            return b.model_copy(deep=True)
+        if self._uow and hasattr(self._uow, "projects"):
+            proj = self._uow.projects.get_by_id(project_id)
+            if proj:
+                import tempfile
+                base_dir = os.path.realpath(tempfile.gettempdir())
+                m_dir = os.path.join(base_dir, f"repo_{project_id}")
+                w_dir = os.path.join(base_dir, f"worktrees_{project_id}")
+                os.makedirs(m_dir, exist_ok=True)
+                os.makedirs(w_dir, exist_ok=True)
+                repo_attr = getattr(proj, "repository", None) or getattr(proj, "default_repository", None) or f"github.com/org/{project_id}"
+                synth = ProjectManagedRepositoryBinding(
+                    project_id=project_id,
+                    canonical_repository_identity=repo_attr,
+                    managed_repository_root=m_dir,
+                    worktree_parent_dir=w_dir,
+                )
+                self._store[project_id] = synth
+                return synth.model_copy(deep=True)
+        return None
 
     def get_by_repository_identity(self, canonical_repository_identity: str) -> ProjectManagedRepositoryBinding | None:
         for b in self._store.values():
@@ -2014,7 +2035,7 @@ class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.backlog_items = InMemoryBacklogItemRepository()
         self.integrity_findings = InMemoryIntegrityFindingRepository()
         self.classification_snapshots = InMemoryTaskClassificationSnapshotRepository()
-        self.project_managed_repository_bindings = InMemoryProjectManagedRepositoryBindingRepository()
+        self.project_managed_repository_bindings = InMemoryProjectManagedRepositoryBindingRepository(self)
         self.orchestration_worktree_ownerships = InMemoryOrchestrationWorktreeOwnershipRepository()
         self.committed = False
         self.rolled_back = False

@@ -218,6 +218,7 @@ def test_guard_execution_worktree_owned_path_allowed(tmp_dirs):
     uow = MockUOW()
     wt_dir = os.path.join(tmp_dirs["worktrees"], "wt-job-100")
     os.makedirs(wt_dir, exist_ok=True)
+    subprocess.run(["git", "init"], cwd=wt_dir, check=True, capture_output=True)
     binding = ProjectManagedRepositoryBinding(
         project_id="test-proj",
         canonical_repository_identity="github.com/org/repo",

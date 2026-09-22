@@ -13,7 +13,6 @@ from minime.domain.enums import (
     ExternalReasonCode,
     RetrySafety,
     WorkspaceOperation,
-    WorkspaceRole,
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import ExternalActionResult, WorkspaceMutationRequest
@@ -34,25 +33,42 @@ class OpenSpecSyncService:
         self.uow = uow
 
     def sync_change_specs(
-        self, openspec_path: str, change_name: str
+        self, openspec_path: str, change_name: str, project_id: str | None = None
     ) -> ExternalActionResult[list[str]]:
         """Synchronize all delta specs of a change into main specs under openspec/specs/."""
         if self.uow:
-            guard = ManagedWorkspaceGuard(self.uow, runtime_root=str(self.project_root))
-            req = WorkspaceMutationRequest(
-                project_id="unknown",
-                target_path=str(self.project_root / openspec_path),
-                requested_operation=WorkspaceOperation.OPENSPEC_SYNC,
-            )
-            decision = guard.evaluate_mutation(req)
-            if not decision.allowed and (decision.workspace_role == WorkspaceRole.RUNTIME or "runtime" in (decision.provider_detail or "").lower()):
+            eff_project_id = project_id
+            if not eff_project_id:
+                b_repo = getattr(self.uow, "project_managed_repository_bindings", None)
+                if b_repo and hasattr(b_repo, "_store"):
+                    for b in b_repo._store.values():
+                        if Path(b.managed_repository_root).resolve() == self.project_root.resolve():
+                            eff_project_id = b.project_id
+                            break
+            if not eff_project_id:
                 return ExternalActionResult(
                     outcome=ExternalOutcome.FAILURE,
                     source_adapter="openspec_sync",
                     reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
                     retry_safety=RetrySafety.SAFE,
                     data=[],
-                    error_message=f"POLICY_DENIED: OpenSpec sync target '{self.project_root / openspec_path}' is inside runtime root.",
+                    error_message=f"POLICY_DENIED: Unresolved project_id for OpenSpec sync target '{self.project_root / openspec_path}'.",
+                )
+            guard = ManagedWorkspaceGuard(self.uow, runtime_root=str(self.project_root))
+            req = WorkspaceMutationRequest(
+                project_id=eff_project_id,
+                target_path=str(self.project_root / openspec_path),
+                requested_operation=WorkspaceOperation.OPENSPEC_SYNC,
+            )
+            decision = guard.evaluate_mutation(req)
+            if not decision.allowed:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="openspec_sync",
+                    reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
+                    retry_safety=RetrySafety.SAFE,
+                    data=[],
+                    error_message=f"POLICY_DENIED: OpenSpec sync target '{self.project_root / openspec_path}' denied by guard: {decision.provider_detail}",
                 )
         change_dir = self.project_root / openspec_path / "changes" / change_name
         change_specs_dir = change_dir / "specs"
@@ -215,24 +231,42 @@ class OpenSpecSyncService:
         openspec_path: str,
         change_name: str,
         target_date: str | None = None,
+        project_id: str | None = None,
     ) -> ExternalActionResult[Path]:
         """Move active change directory to openspec/changes/archive/{date}-{change_name}."""
         if self.uow:
-            guard = ManagedWorkspaceGuard(self.uow, runtime_root=str(self.project_root))
-            req = WorkspaceMutationRequest(
-                project_id="unknown",
-                target_path=str(self.project_root / openspec_path),
-                requested_operation=WorkspaceOperation.OPENSPEC_ARCHIVE,
-            )
-            decision = guard.evaluate_mutation(req)
-            if not decision.allowed and (decision.workspace_role == WorkspaceRole.RUNTIME or "runtime" in (decision.provider_detail or "").lower()):
+            eff_project_id = project_id
+            if not eff_project_id:
+                b_repo = getattr(self.uow, "project_managed_repository_bindings", None)
+                if b_repo and hasattr(b_repo, "_store"):
+                    for b in b_repo._store.values():
+                        if Path(b.managed_repository_root).resolve() == self.project_root.resolve():
+                            eff_project_id = b.project_id
+                            break
+            if not eff_project_id:
                 return ExternalActionResult(
                     outcome=ExternalOutcome.FAILURE,
                     source_adapter="openspec_archive",
                     reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
                     retry_safety=RetrySafety.SAFE,
                     data=Path("/dev/null"),
-                    error_message=f"POLICY_DENIED: OpenSpec archive target '{self.project_root / openspec_path}' is inside runtime root.",
+                    error_message=f"POLICY_DENIED: Unresolved project_id for OpenSpec archive target '{self.project_root / openspec_path}'.",
+                )
+            guard = ManagedWorkspaceGuard(self.uow, runtime_root=str(self.project_root))
+            req = WorkspaceMutationRequest(
+                project_id=eff_project_id,
+                target_path=str(self.project_root / openspec_path),
+                requested_operation=WorkspaceOperation.OPENSPEC_ARCHIVE,
+            )
+            decision = guard.evaluate_mutation(req)
+            if not decision.allowed:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="openspec_archive",
+                    reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
+                    retry_safety=RetrySafety.SAFE,
+                    data=Path("/dev/null"),
+                    error_message=f"POLICY_DENIED: OpenSpec archive target '{self.project_root / openspec_path}' denied by guard: {decision.provider_detail}",
                 )
         change_dir = self.project_root / openspec_path / "changes" / change_name
         archive_root = self.project_root / openspec_path / "changes" / "archive"
@@ -548,4 +582,3 @@ class OpenSpecSyncService:
             if stripped.startswith("## Requirement:") or stripped.startswith("### Requirement:"):
                 titles.append(stripped)
         return titles
-

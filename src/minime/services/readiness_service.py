@@ -188,7 +188,11 @@ class ReadinessService:
         )
         confinement_ok = confinement.is_confinement_available()
 
-        if managed_binding is not None and not managed_binding.is_valid:
+        if managed_binding is None:
+            reason = f"Stage C Admission Fence: Missing managed repository binding for project '{project_id}'."
+            checks.append(ReadinessCheck(name="stage_c_workspace_isolation", passed=False, reason=reason))
+            unmet_reasons.append(reason)
+        elif not managed_binding.is_valid:
             m_reasons = managed_binding.mismatch_reasons or ["Invalid ProjectManagedRepositoryBinding"]
             reason = f"Stage C Admission Fence: Managed repository binding is invalid: {'; '.join(m_reasons)}."
             checks.append(ReadinessCheck(name="stage_c_workspace_isolation", passed=False, reason=reason))

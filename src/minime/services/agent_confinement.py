@@ -28,7 +28,7 @@ class AgentProcessConfinement:
     ):
         self.allowed_worktree_path = os.path.realpath(allowed_worktree_path)
         self.runtime_root = os.path.realpath(
-            runtime_root or os.environ.get("MINIME_RUNTIME_ROOT", os.getcwd())
+            runtime_root or os.environ.get("MINIME_RUNTIME_ROOT", os.path.join(os.getcwd(), ".minime"))
         )
         self.require_kernel_confinement = require_kernel_confinement
         self.confinement_mechanism = self._detect_confinement_mechanism()
@@ -39,8 +39,6 @@ class AgentProcessConfinement:
         if system == "linux":
             if shutil.which("bwrap"):
                 return "bubblewrap"
-            if shutil.which("docker") or shutil.which("podman"):
-                return "container"
             return "none"
         elif system == "darwin":
             if shutil.which("sandbox-exec") or os.path.exists("/usr/bin/sandbox-exec"):
@@ -104,14 +102,17 @@ class AgentProcessConfinement:
         )
 
     def _generate_darwin_sandbox_profile(self) -> str:
-        """Construct a macOS sandbox profile denying file write outside allowed_worktree_path and safe temp dirs."""
+        """Construct a macOS sandbox profile strictly denying file write outside allowed_worktree_path and temp dirs, protecting runtime_root."""
         return (
             "(version 1)\n"
             "(allow default)\n"
-            "(deny file-write* (subpath \"/\"))\n"
             f"(allow file-write* (subpath \"{self.allowed_worktree_path}\"))\n"
             "(allow file-write* (subpath \"/private/tmp\"))\n"
             "(allow file-write* (subpath \"/tmp\"))\n"
+            "(allow file-write* (regex #\"^/private/var/folders/\"))\n"
+            "(allow file-write* (literal \"/dev/null\"))\n"
+            "(allow file-write* (literal \"/dev/tty\"))\n"
+            f"(deny file-write* (subpath \"{self.runtime_root}\"))\n"
         )
 
     def wrap_command(self, cmd: Sequence[str] | str) -> list[str]:
@@ -139,20 +140,6 @@ class AgentProcessConfinement:
             profile = self._generate_darwin_sandbox_profile()
             sandbox_bin = "/usr/bin/sandbox-exec" if os.path.exists("/usr/bin/sandbox-exec") else "sandbox-exec"
             return [sandbox_bin, "-p", profile] + command_args
-
-        elif self.confinement_mechanism == "container":
-            runtime_bin = shutil.which("docker") or shutil.which("podman") or "docker"
-            return [
-                runtime_bin,
-                "run",
-                "--rm",
-                "-v",
-                f"{self.allowed_worktree_path}:{self.allowed_worktree_path}:rw",
-                "-v",
-                f"{self.runtime_root}:{self.runtime_root}:ro",
-                "-w",
-                self.allowed_worktree_path,
-            ] + command_args
 
         raise AgentConfinementError(
             f"Unsupported or fail-open confinement mechanism: '{self.confinement_mechanism}'."
