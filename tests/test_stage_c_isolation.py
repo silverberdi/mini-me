@@ -6,12 +6,14 @@ import os
 import shutil
 import subprocess
 import tempfile
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from minime.domain.enums import (
     ExternalOutcome,
+    ExternalReasonCode,
     WorkspaceOperation,
     WorkspaceRole,
     WorktreeCreationState,
@@ -345,23 +347,31 @@ def test_openspec_archive_runtime_target_denied(tmp_dirs):
 
 
 def test_worktree_manager_pending_ordering(tmp_dirs):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_dirs["repo_root"], check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_dirs["repo_root"], check=True)
+    (Path(tmp_dirs["repo_root"]) / "README.md").write_text("initial\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_dirs["repo_root"], check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+
     uow = MockUOW()
+    binding = ProjectManagedRepositoryBinding(
+        project_id="proj-1",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["repo_root"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+    )
+    uow.project_managed_repository_bindings.save(binding)
     wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
 
-    with patch.object(wt_manager, "_git", new_callable=AsyncMock) as mock_git:
-        mock_git.return_value = "abc123sha"
+    wt_path = wt_manager.worktree_path("job-test-10").resolve()
 
-        # Mock durable PENDING record saved before git invocation
-        wt_path = wt_manager.worktree_path("job-test-10").resolve()
+    asyncio.run(wt_manager.create_worktree("job-test-10", "change-1", "main", project_id="proj-1"))
 
-        # Execute create_worktree
-        asyncio.run(wt_manager.create_worktree("job-test-10", "change-1", "main", project_id="proj-1"))
-
-        # Verify DB ownership record was created with PENDING state
-        ownership = uow.orchestration_worktree_ownerships.get_by_id("wt-job-test-10")
-        assert ownership is not None
-        assert ownership.canonical_worktree_path == str(wt_path)
-        assert ownership.creation_state == WorktreeCreationState.CREATED
+    ownership = uow.orchestration_worktree_ownerships.get_by_id("wt-job-test-10")
+    assert ownership is not None
+    assert ownership.canonical_worktree_path == str(wt_path)
+    assert ownership.creation_state == WorktreeCreationState.CREATED
 
 
 def test_worktree_manager_cleanup_unowned_directory_denied(tmp_dirs):
@@ -371,15 +381,20 @@ def test_worktree_manager_cleanup_unowned_directory_denied(tmp_dirs):
     unowned_wt = wt_manager.worktrees_root / "unowned-wt-path"
     os.makedirs(unowned_wt, exist_ok=True)
 
-    # Attempt to remove clean unowned worktree path
     asyncio.run(wt_manager.remove_clean_worktree_path(unowned_wt, "job-unowned", "proj-1"))
-
-    # Unowned directory must be preserved
     assert unowned_wt.exists()
 
 
 def test_worktree_manager_cleanup_marker_conflict_denied(tmp_dirs):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
     uow = MockUOW()
+    binding = ProjectManagedRepositoryBinding(
+        project_id="proj-1",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["repo_root"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+    )
+    uow.project_managed_repository_bindings.save(binding)
     wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
 
     wt_path = wt_manager.worktrees_root / "job-marker-test"
@@ -395,12 +410,131 @@ def test_worktree_manager_cleanup_marker_conflict_denied(tmp_dirs):
     )
     uow.orchestration_worktree_ownerships.save(ownership)
 
-    # Write spoofed marker with wrong worktree_id
     marker_file = wt_path / ".minime_worktree_ownership.json"
     marker_file.write_text(json.dumps({"worktree_id": "wt-SPOOFED", "canonical_worktree_path": str(wt_path.resolve())}))
 
-    # Attempt to remove worktree path
     asyncio.run(wt_manager.remove_clean_worktree_path(wt_path, "job-marker-test", "proj-1"))
-
-    # Conflicting directory must be preserved
     assert wt_path.exists()
+
+
+def test_guard_denial_happens_before_pending(tmp_dirs):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+    uow = MockUOW()
+    binding = ProjectManagedRepositoryBinding(
+        project_id="proj-1",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["repo_root"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+    )
+    uow.project_managed_repository_bindings.save(binding)
+
+    guard = MagicMock(spec=ManagedWorkspaceGuard)
+    guard.evaluate_mutation.return_value = MagicMock(allowed=False, provider_detail="Guard Denied", reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN)
+
+    wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow, workspace_guard=guard)
+
+    with pytest.raises(RuntimeError, match="ManagedWorkspaceGuard denied WORKTREE_CREATE"):
+        asyncio.run(wt_manager.create_worktree("job-denied-1", "change-1", "main", project_id="proj-1"))
+
+    ownership = uow.orchestration_worktree_ownerships.get_by_id("wt-job-denied-1")
+    assert ownership is None
+
+
+def test_pending_persistence_failure_prevents_git_add(tmp_dirs):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+    bad_uow = MagicMock()
+    binding = ProjectManagedRepositoryBinding(
+        project_id="proj-1",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["repo_root"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+    )
+    mock_b_repo = MagicMock()
+    mock_b_repo.get_by_project_id.return_value = binding
+    bad_uow.project_managed_repository_bindings = mock_b_repo
+    bad_uow.orchestration_worktree_ownerships = None
+    wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=bad_uow)
+
+    with patch.object(wt_manager, "_git", new_callable=AsyncMock) as mock_git:
+        with pytest.raises(RuntimeError, match="orchestration_worktree_ownerships repository missing"):
+            asyncio.run(wt_manager.create_worktree("job-no-uow", "change-1", "main", project_id="proj-1"))
+
+        for call_item in mock_git.call_args_list:
+            args = call_item.args[0] if call_item.args else []
+            assert "worktree" not in args or "add" not in args
+
+
+def test_marker_only_cleanup_denied(tmp_dirs):
+    uow = MockUOW()
+    wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
+
+    marker_only_path = wt_manager.worktrees_root / "marker-only"
+    os.makedirs(marker_only_path, exist_ok=True)
+    marker_file = marker_only_path / ".minime_worktree_ownership.json"
+    marker_file.write_text(json.dumps({"worktree_id": "wt-marker-only", "job_id": "job-marker-only"}))
+
+    # Without durable DB ownership, cleanup must be denied and directory preserved
+    asyncio.run(wt_manager.remove_clean_worktree_path(marker_only_path, "job-marker-only", "proj-1"))
+    assert marker_only_path.exists()
+
+
+def test_dot_git_only_cleanup_denied(tmp_dirs):
+    uow = MockUOW()
+    wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
+
+    git_only_path = wt_manager.worktrees_root / "git-only"
+    os.makedirs(git_only_path, exist_ok=True)
+    (git_only_path / ".git").write_text("gitdir: /fake/path")
+
+    # Without durable DB ownership, cleanup must be denied and directory preserved
+    asyncio.run(wt_manager.remove_clean_worktree_path(git_only_path, "job-git-only", "proj-1"))
+    assert git_only_path.exists()
+
+
+def test_path_under_root_only_cleanup_denied(tmp_dirs):
+    uow = MockUOW()
+    wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
+
+    root_only_path = wt_manager.worktrees_root / "root-only"
+    os.makedirs(root_only_path, exist_ok=True)
+
+    # Without durable DB ownership, cleanup must be denied and directory preserved
+    asyncio.run(wt_manager.remove_clean_worktree_path(root_only_path, "job-root-only", "proj-1"))
+    assert root_only_path.exists()
+
+
+def test_pending_worktree_denied_for_mutation(tmp_dirs):
+    uow = MockUOW()
+    wt_dir = os.path.join(tmp_dirs["worktrees"], "wt-pending-job")
+    os.makedirs(wt_dir, exist_ok=True)
+
+    binding = ProjectManagedRepositoryBinding(
+        project_id="test-proj",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["repo_root"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+    )
+    uow.project_managed_repository_bindings.save(binding)
+
+    ownership = OrchestrationWorktreeOwnership(
+        worktree_id="wt-pending-job",
+        project_id="test-proj",
+        job_id="pending-job",
+        canonical_worktree_path=wt_dir,
+        branch_name="minime/change-pending-job",
+        creation_state=WorktreeCreationState.PENDING,
+    )
+    uow.orchestration_worktree_ownerships.save(ownership)
+
+    guard = ManagedWorkspaceGuard(uow, runtime_root=tmp_dirs["runtime"])
+
+    req = WorkspaceMutationRequest(
+        project_id="test-proj",
+        target_path=os.path.join(wt_dir, "src", "app.py"),
+        requested_operation=WorkspaceOperation.EDIT,
+    )
+    decision = guard.evaluate_mutation(req)
+
+    # Mutation on PENDING worktree must be denied
+    assert decision.allowed is False
+    assert "not CREATED" in decision.provider_detail

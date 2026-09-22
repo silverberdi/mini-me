@@ -1923,24 +1923,27 @@ class InMemoryProjectManagedRepositoryBindingRepository:
         b = self._store.get(project_id)
         if b:
             return b.model_copy(deep=True)
-        if self._uow and hasattr(self._uow, "projects"):
-            proj = self._uow.projects.get_by_id(project_id)
-            if proj:
+        if self._uow:
+            proj = self._uow.projects.get_by_id(project_id) if hasattr(self._uow, "projects") else None
+            repo_attr = getattr(proj, "repository", None) if proj else None
+            if repo_attr and (os.path.isabs(repo_attr) or os.path.exists(repo_attr)):
+                m_dir = os.path.realpath(repo_attr)
+                w_dir = os.path.realpath(os.path.join(m_dir, ".minime", "worktrees"))
+            else:
                 import tempfile
                 base_dir = os.path.realpath(tempfile.gettempdir())
                 m_dir = os.path.join(base_dir, f"repo_{project_id}")
                 w_dir = os.path.join(base_dir, f"worktrees_{project_id}")
-                os.makedirs(m_dir, exist_ok=True)
-                os.makedirs(w_dir, exist_ok=True)
-                repo_attr = getattr(proj, "repository", None) or getattr(proj, "default_repository", None) or f"github.com/org/{project_id}"
-                synth = ProjectManagedRepositoryBinding(
-                    project_id=project_id,
-                    canonical_repository_identity=repo_attr,
-                    managed_repository_root=m_dir,
-                    worktree_parent_dir=w_dir,
-                )
-                self._store[project_id] = synth
-                return synth.model_copy(deep=True)
+            os.makedirs(m_dir, exist_ok=True)
+            os.makedirs(w_dir, exist_ok=True)
+            synth = ProjectManagedRepositoryBinding(
+                project_id=project_id,
+                canonical_repository_identity=repo_attr or f"github.com/org/{project_id}",
+                managed_repository_root=m_dir,
+                worktree_parent_dir=w_dir,
+            )
+            self._store[project_id] = synth
+            return synth.model_copy(deep=True)
         return None
 
     def get_by_repository_identity(self, canonical_repository_identity: str) -> ProjectManagedRepositoryBinding | None:

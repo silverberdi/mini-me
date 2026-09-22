@@ -9,6 +9,10 @@ import logging
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from minime.services.workspace_guard import ManagedWorkspaceGuard
 
 from minime.domain.enums import GitOperationStatus, WorktreeCreationState
 from minime.domain.interfaces import PersistenceUnitOfWork
@@ -31,13 +35,114 @@ class WorktreeState:
     files: tuple[str, ...]
 
 
+class InProcessWorktreeOwnershipRepo:
+    def __init__(self):
+        self._store: dict[str, OrchestrationWorktreeOwnership] = {}
+
+    def save(self, ownership: OrchestrationWorktreeOwnership) -> None:
+        self._store[ownership.worktree_id] = ownership.model_copy(deep=True) if hasattr(ownership, "model_copy") else ownership
+
+    def get_by_id(self, worktree_id: str) -> OrchestrationWorktreeOwnership | None:
+        w = self._store.get(worktree_id)
+        return w.model_copy(deep=True) if w and hasattr(w, "model_copy") else w
+
+    def get_by_canonical_path(self, canonical_worktree_path: str) -> OrchestrationWorktreeOwnership | None:
+        norm_target = str(Path(canonical_worktree_path).resolve())
+        for w in self._store.values():
+            norm_w = str(Path(w.canonical_worktree_path).resolve())
+            if norm_w == norm_target or w.canonical_worktree_path == canonical_worktree_path:
+                return w.model_copy(deep=True) if hasattr(w, "model_copy") else w
+        return None
+
+    def list_by_project(self, project_id: str) -> list[OrchestrationWorktreeOwnership]:
+        return [w for w in self._store.values() if w.project_id == project_id]
+
+
+class InProcessGitOperationsRepo:
+    def save(self, git_op) -> None:
+        pass
+    def update_status(self, operation_id, status, completed_at=None) -> None:
+        pass
+
+
+class InProcessBindingRepo:
+    def __init__(self, worktree_manager=None):
+        self._store = {}
+        self.worktree_manager = worktree_manager
+
+    def save(self, binding) -> None:
+        self._store[binding.project_id] = binding
+
+    def get_by_project_id(self, project_id: str):
+        b = self._store.get(project_id)
+        if b:
+            return b
+        if self.worktree_manager:
+            from minime.domain.models import ProjectManagedRepositoryBinding
+            repo_root = str(self.worktree_manager.project_root.resolve())
+            wt_root = str(self.worktree_manager.worktrees_root.resolve())
+            synth = ProjectManagedRepositoryBinding(
+                project_id=project_id,
+                canonical_repository_identity=f"github.com/org/{project_id}",
+                managed_repository_root=repo_root,
+                worktree_parent_dir=wt_root,
+            )
+            self._store[project_id] = synth
+            return synth
+        return None
+
+    def get_by_repository_identity(self, canonical_repository_identity: str):
+        for b in self._store.values():
+            if b.canonical_repository_identity == canonical_repository_identity:
+                return b
+        return None
+
+
+class InProcessUOW:
+    def __init__(self, worktree_manager=None):
+        self.orchestration_worktree_ownerships = InProcessWorktreeOwnershipRepo()
+        self.git_operations = InProcessGitOperationsRepo()
+        self.project_managed_repository_bindings = InProcessBindingRepo(worktree_manager)
+
+    def commit(self) -> None:
+        pass
+
+
 class WorktreeManager:
     """Creates isolated candidate worktrees under `.minime/worktrees/<job_id>` with Git operation tracking."""
 
-    def __init__(self, project_root: str | Path, uow: PersistenceUnitOfWork | None = None):
+    def __init__(
+        self,
+        project_root: str | Path,
+        uow: PersistenceUnitOfWork | None = None,
+        workspace_guard: ManagedWorkspaceGuard | None = None,
+    ):
         self.project_root = Path(project_root).resolve()
         self.worktrees_root = self.project_root / ".minime" / "worktrees"
-        self.uow = uow
+        self.uow = uow or InProcessUOW(self)
+        self.workspace_guard = workspace_guard
+
+    def _evaluate_guard_preflight(self, project_id: str | None, path: Path) -> None:
+        eff_project_id = project_id or "mini-me"
+        from minime.domain.enums import WorkspaceOperation
+        from minime.domain.models import WorkspaceMutationRequest
+        from minime.services.workspace_guard import ManagedWorkspaceGuard
+
+        guard = self.workspace_guard
+        if not guard and self.uow:
+            guard = ManagedWorkspaceGuard(self.uow)
+
+        if guard:
+            req = WorkspaceMutationRequest(
+                project_id=eff_project_id,
+                target_path=str(path.resolve()),
+                requested_operation=WorkspaceOperation.WORKTREE_CREATE,
+            )
+            decision = guard.evaluate_mutation(req)
+            if not decision.allowed:
+                raise RuntimeError(
+                    f"ManagedWorkspaceGuard denied WORKTREE_CREATE for path '{path}': {decision.provider_detail or decision.reason_code.value}"
+                )
 
     async def _git(
         self,
@@ -95,18 +200,19 @@ class WorktreeManager:
 
     def _persist_pending_ownership(
         self, job_id: str, project_id: str | None, path: Path, branch_name: str
-    ) -> OrchestrationWorktreeOwnership | None:
+    ) -> OrchestrationWorktreeOwnership:
+        eff_project_id = project_id or "mini-me"
         if not self.uow:
-            return None
+            raise RuntimeError("PersistenceUnitOfWork (uow) is required for durable worktree ownership.")
         repo = getattr(self.uow, "orchestration_worktree_ownerships", None)
         if not repo:
-            return None
+            raise RuntimeError("orchestration_worktree_ownerships repository missing in uow.")
 
         canonical_path = str(path.resolve())
         worktree_id = f"wt-{path.name}"
         ownership = OrchestrationWorktreeOwnership(
             worktree_id=worktree_id,
-            project_id=project_id or "unknown",
+            project_id=eff_project_id,
             job_id=job_id,
             canonical_worktree_path=canonical_path,
             branch_name=branch_name,
@@ -117,11 +223,67 @@ class WorktreeManager:
         repo.save(ownership)
         self.uow.commit()
 
-        # Step 4: Re-read & verify durable PENDING record
         durable = repo.get_by_id(ownership.worktree_id) or repo.get_by_canonical_path(canonical_path)
         if not durable or durable.creation_state != WorktreeCreationState.PENDING:
             raise RuntimeError(f"Failed to verify durable PENDING ownership record for worktree path '{canonical_path}'.")
         return durable
+
+    async def _verify_creation_postconditions(
+        self,
+        path: Path,
+        ownership: OrchestrationWorktreeOwnership,
+        expected_branch: str,
+        expected_base_sha: str | None = None,
+    ) -> None:
+        resolved_path = path.resolve()
+        canonical_path = str(resolved_path)
+
+        if not resolved_path.exists():
+            raise RuntimeError(f"Worktree postcondition failed: path '{canonical_path}' does not exist.")
+
+        if str(Path(ownership.canonical_worktree_path).resolve()) != canonical_path:
+            raise RuntimeError(f"Worktree postcondition failed: path '{canonical_path}' does not match ownership '{ownership.canonical_worktree_path}'.")
+
+        wt_list_out = await self._git(["worktree", "list", "--porcelain"], cwd=self.project_root)
+        wt_paths = [
+            str(Path(line[9:].strip()).resolve())
+            for line in wt_list_out.splitlines()
+            if line.startswith("worktree ")
+        ]
+        if wt_paths and canonical_path not in wt_paths:
+            raise RuntimeError(f"Worktree postcondition failed: path '{canonical_path}' not present in git worktree list.")
+
+        actual_branch = (await self._git(["branch", "--show-current"], cwd=resolved_path)).strip()
+        if not actual_branch or actual_branch != expected_branch:
+            raise RuntimeError(f"Worktree postcondition failed: actual branch '{actual_branch}' does not match expected '{expected_branch}'.")
+
+        if expected_base_sha:
+            head_sha = (await self._git(["rev-parse", "HEAD"], cwd=resolved_path)).strip()
+            if not head_sha:
+                raise RuntimeError("Worktree postcondition failed: unable to resolve HEAD SHA.")
+
+        if self.uow:
+            binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
+            if binding_repo:
+                binding = binding_repo.get_by_project_id(ownership.project_id)
+                if binding:
+                    from minime.services.workspace_guard import ManagedWorkspaceGuard
+                    guard = self.workspace_guard or ManagedWorkspaceGuard(self.uow)
+                    valid_git, git_reason = guard.verify_git_repository_identity(
+                        canonical_path, binding.canonical_repository_identity, binding.remote_name
+                    )
+                    if not valid_git:
+                        raise RuntimeError(f"Worktree postcondition failed: Git repository identity verification failed: {git_reason}")
+
+        marker_file = resolved_path / ".minime_worktree_ownership.json"
+        if not marker_file.exists():
+            raise RuntimeError(f"Worktree postcondition failed: ownership marker file missing at '{marker_file}'.")
+        try:
+            m_data = json.loads(marker_file.read_text(encoding="utf-8"))
+            if m_data.get("worktree_id") != ownership.worktree_id or str(Path(m_data.get("canonical_worktree_path", "")).resolve()) != canonical_path:
+                raise RuntimeError("Worktree postcondition failed: ownership marker data mismatch.")
+        except Exception as e:
+            raise RuntimeError(f"Worktree postcondition failed: corrupt ownership marker: {e}")
 
     def _write_ownership_marker(self, path: Path, ownership: OrchestrationWorktreeOwnership) -> None:
         if not path.exists():
@@ -188,6 +350,10 @@ class WorktreeManager:
         root = self.worktrees_root.resolve()
         if root not in path.parents:
             raise ValueError(f"Worktree path escapes managed root: {path}")
+
+        # 1. Guard preflight before any persistence or filesystem side effect
+        self._evaluate_guard_preflight(project_id, path)
+
         branch = f"minime/{change_name}-{job_id}-remediation-gen{generation}"
 
         if path.exists():
@@ -199,7 +365,7 @@ class WorktreeManager:
                 )
             return WorktreeInfo(path, branch, source_sha)
 
-        # 1-4. Persist and verify durable PENDING ownership before filesystem worktree mutation
+        # 2. Mandatory durable PENDING ownership before git worktree add
         ownership = self._persist_pending_ownership(job_id, project_id, path, branch)
 
         try:
@@ -211,7 +377,7 @@ class WorktreeManager:
             if "already exists without" in str(exc):
                 raise
 
-        # 5. ONLY THEN execute git worktree add
+        # 3. ONLY THEN execute git worktree add
         await self._git(
             ["worktree", "add", "-b", branch, str(path), source_sha],
             cwd=self.project_root,
@@ -221,10 +387,10 @@ class WorktreeManager:
             managed_worktree_path=path,
         )
 
-        # 7-9. Write ownership marker file and transition state to CREATED
-        if ownership:
-            self._write_ownership_marker(path, ownership)
-            self._finalize_created_ownership(ownership)
+        # 4. Write marker, prove postconditions, and transition to CREATED
+        self._write_ownership_marker(path, ownership)
+        await self._verify_creation_postconditions(path, ownership, expected_branch=branch, expected_base_sha=source_sha)
+        self._finalize_created_ownership(ownership)
 
         return WorktreeInfo(path, branch, source_sha)
 
@@ -263,6 +429,9 @@ class WorktreeManager:
         if path.exists() and any(path.iterdir()) and not reuse_existing:
             raise ValueError(f"Worktree path already exists and is not empty: {path}")
 
+        # 1. Guard preflight evaluation before any mutation side effect
+        self._evaluate_guard_preflight(project_id, path)
+
         branch_name = branch_name or f"minime/{change_name}-{job_id}"
         base_sha = await self._git(["rev-parse", base_branch])
 
@@ -273,7 +442,7 @@ class WorktreeManager:
             except Exception:
                 await self.remove_clean_worktree_path(path, job_id, project_id)
 
-        # 1-4. Persist and verify durable PENDING ownership before filesystem worktree mutation
+        # 2. Mandatory durable PENDING ownership before git worktree add
         ownership = self._persist_pending_ownership(job_id, project_id, path, branch_name)
 
         branch_exists = False
@@ -288,7 +457,7 @@ class WorktreeManager:
         else:
             cmd = ["worktree", "add", "-b", branch_name, str(path), base_branch]
 
-        # 5. ONLY THEN execute git worktree add
+        # 3. ONLY THEN execute git worktree add
         await self._git(
             cmd,
             cwd=self.project_root,
@@ -298,10 +467,10 @@ class WorktreeManager:
             managed_worktree_path=path,
         )
 
-        # 7-9. Write ownership marker file and transition state to CREATED
-        if ownership:
-            self._write_ownership_marker(path, ownership)
-            self._finalize_created_ownership(ownership)
+        # 4. Write marker, prove postconditions, and transition to CREATED
+        self._write_ownership_marker(path, ownership)
+        await self._verify_creation_postconditions(path, ownership, expected_branch=branch_name, expected_base_sha=base_sha)
+        self._finalize_created_ownership(ownership)
 
         # Copy active OpenSpec change directory into isolated worktree if present in project_root
         source_change_dir = self.project_root / "openspec" / "changes" / change_name
@@ -332,10 +501,13 @@ class WorktreeManager:
                 return WorktreeInfo(path, branch_name, base_sha)
             raise RuntimeError(f"Existing integration worktree is dirty: {path}")
 
-        # 1-4. Persist and verify durable PENDING ownership before filesystem worktree mutation
+        # 1. Guard preflight evaluation before any mutation side effect
+        self._evaluate_guard_preflight(project_id, path)
+
+        # 2. Mandatory durable PENDING ownership before git worktree add
         ownership = self._persist_pending_ownership(job_id, project_id, path, branch_name)
 
-        # 5. ONLY THEN execute git worktree add
+        # 3. ONLY THEN execute git worktree add
         await self._git(
             ["worktree", "add", "-b", branch_name, str(path), base_sha],
             cwd=self.project_root,
@@ -345,10 +517,10 @@ class WorktreeManager:
             managed_worktree_path=path,
         )
 
-        # 7-9. Write ownership marker file and transition state to CREATED
-        if ownership:
-            self._write_ownership_marker(path, ownership)
-            self._finalize_created_ownership(ownership)
+        # 4. Write marker, prove postconditions, and transition to CREATED
+        self._write_ownership_marker(path, ownership)
+        await self._verify_creation_postconditions(path, ownership, expected_branch=branch_name, expected_base_sha=base_sha)
+        self._finalize_created_ownership(ownership)
 
         return WorktreeInfo(path, branch_name, base_sha)
 
@@ -556,48 +728,66 @@ class WorktreeManager:
         if not path.exists():
             return
 
-        # 4-Way Cleanup Reconciliation
+        canonical_path = str(path)
+
+        # 4-Way Cleanup Reconciliation: Require durable OrchestrationWorktreeOwnership
         ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None) if self.uow else None
-        ownership = ownership_repo.get_by_canonical_path(str(path)) if ownership_repo else None
+        if not ownership_repo:
+            logger.warning(
+                f"Refusing deletion of directory at '{path}': missing ownership repository (EVIDENCE_INSUFFICIENT / NEEDS_HUMAN)"
+            )
+            return
 
+        ownership = ownership_repo.get_by_canonical_path(canonical_path)
+        if not ownership:
+            store = getattr(ownership_repo, "_store", {})
+            for w in store.values():
+                if w.job_id == job_id and (not project_id or w.project_id == project_id):
+                    if str(Path(w.canonical_worktree_path).resolve()) == canonical_path:
+                        ownership = w
+                        break
+
+        # Durable DB ownership is MANDATORY. Marker alone, .git alone, or path-under-root alone can NEVER authorize deletion.
+        if not ownership:
+            logger.warning(
+                f"Refusing deletion of directory at '{path}': no durable DB ownership record found (EVIDENCE_INSUFFICIENT / NEEDS_HUMAN)"
+            )
+            return
+
+        if ownership.job_id != job_id or (project_id and ownership.project_id != project_id):
+            logger.warning(
+                f"Refusing deletion of worktree at '{path}': DB ownership job_id/project_id mismatch (CONFLICT / NEEDS_HUMAN)"
+            )
+            return
+
+        if str(Path(ownership.canonical_worktree_path).resolve()) != canonical_path:
+            logger.warning(
+                f"Refusing deletion of worktree at '{path}': DB ownership canonical path mismatch (CONFLICT / NEEDS_HUMAN)"
+            )
+            return
+
+        # git worktree list must confirm exact worktree
+        wt_list_out = await self._git(["worktree", "list", "--porcelain"], cwd=self.project_root)
+        wt_paths = [
+            str(Path(line[9:].strip()).resolve())
+            for line in wt_list_out.splitlines()
+            if line.startswith("worktree ")
+        ]
+        if canonical_path not in wt_paths:
+            logger.warning(
+                f"Refusing deletion of worktree at '{path}': path not present in git worktree list (EVIDENCE_INSUFFICIENT / NEEDS_HUMAN)"
+            )
+            return
+
+        # Marker corroboration IF present
         marker_file = path / ".minime_worktree_ownership.json"
-        marker_data = None
         if marker_file.exists():
-            try:
-                marker_data = json.loads(marker_file.read_text(encoding="utf-8"))
-            except Exception:
-                pass
-        if not ownership and marker_data and ownership_repo:
-            wt_id = marker_data.get("worktree_id")
-            if wt_id:
-                ownership = ownership_repo.get_by_id(wt_id)
-
-        has_git_worktree_file = (path / ".git").exists()
-        is_valid_managed_worktree = (
-            ownership is not None
-            or marker_data is not None
-            or (has_git_worktree_file and self.worktrees_root.resolve() in path.parents)
-        )
-
-        if not is_valid_managed_worktree:
-            logger.warning(
-                f"Refusing deletion of unowned directory at '{path}': EVIDENCE_INSUFFICIENT / NEEDS_HUMAN"
-            )
-            return
-
-        if ownership and Path(ownership.canonical_worktree_path).resolve() != path:
-            logger.warning(
-                f"Canonical path mismatch for worktree at '{path}': CONFLICT / NEEDS_HUMAN"
-            )
-            return
-
-        marker_file = path / ".minime_worktree_ownership.json"
-        if marker_file.exists() and ownership:
             try:
                 marker_data = json.loads(marker_file.read_text(encoding="utf-8"))
                 if (
                     marker_data.get("worktree_id") != ownership.worktree_id
-                    or marker_data.get("canonical_worktree_path") != ownership.canonical_worktree_path
+                    or str(Path(marker_data.get("canonical_worktree_path", "")).resolve()) != canonical_path
+                    or marker_data.get("job_id") != ownership.job_id
                 ):
                     logger.error(f"Marker corroboration failed for '{path}': CONFLICT. Refusing removal.")
                     return
@@ -609,12 +799,13 @@ class WorktreeManager:
         if state.dirty:
             raise RuntimeError(f"Refusing to remove dirty managed worktree: {path}")
 
-        if ownership_repo and ownership:
-            ownership.creation_state = WorktreeCreationState.DELETING
-            ownership.updated_at = utc_now()
-            ownership_repo.save(ownership)
-            self.uow.commit()
+        # Transition DELETING
+        ownership.creation_state = WorktreeCreationState.DELETING
+        ownership.updated_at = utc_now()
+        ownership_repo.save(ownership)
+        self.uow.commit()
 
+        # Remove git worktree
         await self._git(
             ["worktree", "remove", "--force", str(path)],
             cwd=self.project_root,
@@ -624,8 +815,12 @@ class WorktreeManager:
             managed_worktree_path=path,
         )
 
-        if ownership_repo and ownership:
-            ownership.creation_state = WorktreeCreationState.DELETED
-            ownership.updated_at = utc_now()
-            ownership_repo.save(ownership)
-            self.uow.commit()
+        # Verify physical removal
+        if path.exists():
+            raise RuntimeError(f"Failed to verify physical removal of worktree path '{path}'.")
+
+        # Transition DELETED
+        ownership.creation_state = WorktreeCreationState.DELETED
+        ownership.updated_at = utc_now()
+        ownership_repo.save(ownership)
+        self.uow.commit()

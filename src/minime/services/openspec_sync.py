@@ -54,7 +54,7 @@ class OpenSpecSyncService:
                     data=[],
                     error_message=f"POLICY_DENIED: Unresolved project_id for OpenSpec sync target '{self.project_root / openspec_path}'.",
                 )
-            guard = ManagedWorkspaceGuard(self.uow, runtime_root=str(self.project_root))
+            guard = ManagedWorkspaceGuard(self.uow)
             req = WorkspaceMutationRequest(
                 project_id=eff_project_id,
                 target_path=str(self.project_root / openspec_path),
@@ -252,7 +252,7 @@ class OpenSpecSyncService:
                     data=Path("/dev/null"),
                     error_message=f"POLICY_DENIED: Unresolved project_id for OpenSpec archive target '{self.project_root / openspec_path}'.",
                 )
-            guard = ManagedWorkspaceGuard(self.uow, runtime_root=str(self.project_root))
+            guard = ManagedWorkspaceGuard(self.uow)
             req = WorkspaceMutationRequest(
                 project_id=eff_project_id,
                 target_path=str(self.project_root / openspec_path),

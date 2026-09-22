@@ -664,6 +664,7 @@ def test_real_git_reconciliation_rejects_wrong_remediation_trailer(tmp_path, in_
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-m", "source"], cwd=tmp_path, check=True, capture_output=True)
     source_sha = git(tmp_path, "rev-parse", "HEAD")
+    in_memory_uow.projects.save(Project(project_id="p", display_name="p", repository=str(tmp_path)))
     manager = WorktreeManager(tmp_path, uow=in_memory_uow)
     workspace = asyncio.run(
         manager.create_remediation_worktree("job", "change", source_sha, 2, project_id="p")
