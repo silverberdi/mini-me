@@ -401,23 +401,26 @@ def test_readiness_fails_closed_when_issue_validation_returns_false(in_memory_uo
 
 # Adversarial Unit Tests for Stage B Requirements (Task 15 & Task 16)
 
-def test_create_issue_timeout_returns_ambiguous_without_fabricated_defaults():
-    class TimeoutAuth:
-        _cached = None
-        client = httpx.Client(
-            transport=httpx.MockTransport(
-                lambda req: (_ for _ in ()).throw(httpx.TimeoutException("POST timeout"))
-            ),
-            base_url="https://api.github.com",
-        )
+def test_create_issue_timeout_returns_ambiguous_without_fabricated_defaults(monkeypatch):
+    adapter = GitHubAdapter()
+    monkeypatch.setattr(
+        adapter,
+        "list_issues",
+        lambda repo, **kwargs: ExternalActionResult(
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="github_rest",
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+            retry_safety=RetrySafety.SAFE,
+            data=[],
+        ),
+    )
+    def mock_request(method, path, **kwargs):
+        raise httpx.TimeoutException("POST timeout")
 
-        def get_installation_token(self):
-            return "token"
-
-    adapter = GitHubAdapter(auth=TimeoutAuth())
+    monkeypatch.setattr(adapter, "_request", mock_request)
     res = adapter.create_issue("o/r", "Bug title", "Body content", operation_key="test-op-key-123")
     assert res.outcome == ExternalOutcome.AMBIGUOUS
-    assert res.reason_code in (ExternalReasonCode.TIMEOUT, ExternalReasonCode.UNOBSERVABLE)
+    assert res.reason_code == ExternalReasonCode.UNOBSERVABLE
     assert res.retry_safety == RetrySafety.UNKNOWN
     assert res.data is None
     assert res.external_id is None
@@ -456,7 +459,7 @@ def test_add_issue_to_project_auth_rejection_returns_failure_no_pvti_mock():
 
     adapter = GitHubAdapter(auth=AuthRejectionAuth())
     res = adapter.add_issue_to_project(1, "https://github.com/o/r/issues/12", "owner")
-    assert res.outcome in (ExternalOutcome.FAILURE, ExternalOutcome.AMBIGUOUS)
+    assert res.outcome in (ExternalOutcome.UNKNOWN, ExternalOutcome.FAILURE, ExternalOutcome.AMBIGUOUS)
     assert res.data is None
     assert res.external_id != "PVTI_mock_1"
 

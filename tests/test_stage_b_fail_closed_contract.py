@@ -147,7 +147,7 @@ def test_push_branch_verifies_remote_sha(tmp_path, monkeypatch):
     assert res_conflict.outcome == ExternalOutcome.FAILURE
     assert res_conflict.reason_code == ExternalReasonCode.CONFLICT
 
-    # Case C: unobservable remote SHA -> UNKNOWN
+    # Case C: unobservable remote SHA -> AMBIGUOUS (mutating effect occurred, postcondition unproven)
     monkeypatch.setattr(
         adapter,
         "get_remote_branch_head",
@@ -155,8 +155,10 @@ def test_push_branch_verifies_remote_sha(tmp_path, monkeypatch):
             outcome=ExternalOutcome.UNKNOWN, source_adapter="git_cli", reason_code=ExternalReasonCode.UNOBSERVABLE
         ),
     )
-    res_unknown = adapter.push_branch(str(tmp_path), "origin", "feat", "target_sha_123")
-    assert res_unknown.outcome == ExternalOutcome.UNKNOWN
+    res_ambiguous = adapter.push_branch(str(tmp_path), "origin", "feat", "target_sha_123")
+    assert res_ambiguous.outcome == ExternalOutcome.AMBIGUOUS
+    assert res_ambiguous.reason_code == ExternalReasonCode.POSTCONDITION_NOT_PROVEN
+    assert res_ambiguous.retry_safety == RetrySafety.UNKNOWN
 
 
 def test_update_project_item_status_verifies_postcondition(monkeypatch):
@@ -193,7 +195,7 @@ def test_update_project_item_status_verifies_postcondition(monkeypatch):
     assert res_fail.outcome == ExternalOutcome.FAILURE
     assert res_fail.reason_code == ExternalReasonCode.CONFLICT
 
-    # Case C: list_project_items unobservable -> UNKNOWN
+    # Case C: list_project_items unobservable -> AMBIGUOUS (mutating edit occurred, postcondition unproven)
     monkeypatch.setattr(
         adapter,
         "list_project_items",
@@ -203,8 +205,10 @@ def test_update_project_item_status_verifies_postcondition(monkeypatch):
             reason_code=ExternalReasonCode.UNOBSERVABLE,
         ),
     )
-    res_unknown = adapter.update_project_item_status(2, "silverberdi", "item_100", "Done")
-    assert res_unknown.outcome == ExternalOutcome.UNKNOWN
+    res_ambiguous = adapter.update_project_item_status(2, "silverberdi", "item_100", "Done")
+    assert res_ambiguous.outcome == ExternalOutcome.AMBIGUOUS
+    assert res_ambiguous.reason_code == ExternalReasonCode.POSTCONDITION_NOT_PROVEN
+    assert res_ambiguous.retry_safety == RetrySafety.UNKNOWN
 
 
 def test_adversarial_observe_before_repeat_read_safe_does_not_authorize_mutation(in_memory_uow):
@@ -253,3 +257,104 @@ def test_adversarial_observe_before_repeat_read_safe_does_not_authorize_mutation
         original_mutation_retry_authorized=True,
     )
     assert reconciled_auth.status == ExternalActionStatus.EXECUTING
+
+
+def test_create_issue_pre_observation_unknown_blocks_post(monkeypatch):
+    """create_issue pre-observation list_issues returning UNKNOWN MUST fail closed and block POST mutation."""
+    adapter = GitHubAdapter()
+
+    # Pre-observation list_issues returns UNKNOWN
+    monkeypatch.setattr(
+        adapter,
+        "list_issues",
+        lambda repo, **kwargs: ExternalActionResult(
+            outcome=ExternalOutcome.UNKNOWN,
+            source_adapter="github_rest",
+            reason_code=ExternalReasonCode.UNOBSERVABLE,
+            retry_safety=RetrySafety.SAFE,
+            error_message="GitHub list_issues unobservable",
+        ),
+    )
+
+    req_mock = MagicMock()
+    monkeypatch.setattr(adapter, "_request", req_mock)
+
+    result = adapter.create_issue(
+        repository="silverberdi/mini-me",
+        title="Test Issue",
+        body="Body",
+        operation_key="op_test_key",
+    )
+
+    assert result.outcome == ExternalOutcome.UNKNOWN
+    assert result.reason_code == ExternalReasonCode.UNOBSERVABLE
+    req_mock.assert_not_called()
+
+
+def test_add_issue_to_project_pre_observation_unknown_blocks_cli(monkeypatch):
+    """add_issue_to_project pre-observation list_project_items returning UNKNOWN MUST block CLI item-add."""
+    adapter = GitHubAdapter()
+
+    # Pre-observation list_project_items returns UNKNOWN
+    monkeypatch.setattr(
+        adapter,
+        "list_project_items",
+        lambda project_number, owner: ExternalActionResult(
+            outcome=ExternalOutcome.UNKNOWN,
+            source_adapter="github_cli",
+            reason_code=ExternalReasonCode.UNOBSERVABLE,
+            retry_safety=RetrySafety.SAFE,
+            error_message="Project list unobservable",
+        ),
+    )
+
+    sub_mock = MagicMock()
+    monkeypatch.setattr("subprocess.run", sub_mock)
+
+    result = adapter.add_issue_to_project(
+        project_number=2,
+        owner="silverberdi",
+        issue_url="https://github.com/silverberdi/mini-me/issues/101",
+    )
+
+    assert result.outcome == ExternalOutcome.UNKNOWN
+    assert result.reason_code == ExternalReasonCode.UNOBSERVABLE
+    sub_mock.assert_not_called()
+
+
+def test_create_issue_201_missing_identity_returns_ambiguous(monkeypatch):
+    """create_issue 201 response missing issue identity fields MUST return AMBIGUOUS (EVIDENCE_INSUFFICIENT, RetrySafety.UNKNOWN)."""
+    adapter = GitHubAdapter()
+
+    # Pre-observation list_issues returns no match
+    monkeypatch.setattr(
+        adapter,
+        "list_issues",
+        lambda repo, **kwargs: ExternalActionResult(
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="github_rest",
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+            retry_safety=RetrySafety.SAFE,
+            data=[],
+        ),
+    )
+
+    # REST POST returns 201 created but missing issue number and html_url
+    def mock_request(method, path, **kwargs):
+        res = MagicMock()
+        res.status_code = 201
+        res.json.return_value = {"title": "Test Issue"}  # Missing "number" and "html_url"
+        return res
+
+    monkeypatch.setattr(adapter, "_request", mock_request)
+
+    result = adapter.create_issue(
+        repository="silverberdi/mini-me",
+        title="Test Issue",
+        body="Body",
+        operation_key="op_test_key",
+    )
+
+    assert result.outcome == ExternalOutcome.AMBIGUOUS
+    assert result.reason_code == ExternalReasonCode.EVIDENCE_INSUFFICIENT
+    assert result.retry_safety == RetrySafety.UNKNOWN

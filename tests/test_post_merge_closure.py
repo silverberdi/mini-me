@@ -192,15 +192,19 @@ The system SHALL execute autonomous actions.
     (change_dir / "tasks.md").write_text("- [x] 1.1 Complete task\n")
 
     sync_service = OpenSpecSyncService(project_root)
-    synced = sync_service.sync_change_specs("openspec", "test-change")
-    assert "test-cap" in synced
+    synced_res = sync_service.sync_change_specs("openspec", "test-change")
+    assert synced_res.outcome == ExternalOutcome.SUCCESS
+    assert "test-cap" in synced_res.data
 
     main_spec = openspec_dir / "specs" / "test-cap" / "spec.md"
     assert main_spec.exists()
     assert "## Requirement: Autonomous Action" in main_spec.read_text()
 
     # Archive
-    archived_dir = sync_service.archive_change("openspec", "test-change", target_date="2026-09-03")
+    archive_res = sync_service.archive_change("openspec", "test-change", target_date="2026-09-03")
+    assert archive_res.outcome == ExternalOutcome.SUCCESS
+    archived_dir = archive_res.data
+    assert archived_dir is not None
     assert archived_dir.exists()
     assert "2026-09-03-test-change" in str(archived_dir)
     assert not change_dir.exists()

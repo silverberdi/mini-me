@@ -552,7 +552,35 @@ class GitHubAdapter(GitHubAdapterInterface):
         # 1. Search for existing issue with exact operation_key comment marker
         if operation_key:
             list_res = self.list_issues(repo, state="all", limit=100)
-            if list_res.is_success and list_res.data:
+            if list_res.outcome == ExternalOutcome.UNKNOWN:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.UNKNOWN,
+                    source_adapter="github_rest",
+                    reason_code=list_res.reason_code or ExternalReasonCode.UNOBSERVABLE,
+                    retry_safety=RetrySafety.SAFE,
+                    error_message=f"Pre-observation of issues unobservable for operation_key '{operation_key}': {list_res.error_message}",
+                    operation_key=operation_key,
+                )
+            if list_res.outcome == ExternalOutcome.AMBIGUOUS:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.AMBIGUOUS,
+                    source_adapter="github_rest",
+                    reason_code=list_res.reason_code or ExternalReasonCode.UNOBSERVABLE,
+                    retry_safety=RetrySafety.SAFE,
+                    error_message=f"Pre-observation of issues ambiguous for operation_key '{operation_key}': {list_res.error_message}",
+                    operation_key=operation_key,
+                )
+            if list_res.outcome == ExternalOutcome.FAILURE and list_res.reason_code == ExternalReasonCode.AUTH_REQUIRED:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                    retry_safety=RetrySafety.SAFE,
+                    provider_detail=list_res.provider_detail,
+                    error_message=f"GitHub API authorization failed during issue pre-observation: {list_res.error_message}",
+                    operation_key=operation_key,
+                )
+            if list_res.outcome == ExternalOutcome.SUCCESS and list_res.data:
                 for issue in list_res.data:
                     issue_body = issue.get("body") or ""
                     if marker and marker in issue_body:
@@ -560,7 +588,7 @@ class GitHubAdapter(GitHubAdapterInterface):
                         html_url = issue.get("html_url")
                         if not num or not html_url:
                             return ExternalActionResult(
-                                outcome=ExternalOutcome.UNKNOWN,
+                                outcome=ExternalOutcome.AMBIGUOUS,
                                 source_adapter="github_rest",
                                 reason_code=ExternalReasonCode.EVIDENCE_INSUFFICIENT,
                                 retry_safety=RetrySafety.UNKNOWN,
@@ -601,7 +629,7 @@ class GitHubAdapter(GitHubAdapterInterface):
                 html_url = data.get("html_url")
                 if not num or not html_url:
                     return ExternalActionResult(
-                        outcome=ExternalOutcome.UNKNOWN,
+                        outcome=ExternalOutcome.AMBIGUOUS,
                         source_adapter="github_rest",
                         reason_code=ExternalReasonCode.EVIDENCE_INSUFFICIENT,
                         retry_safety=RetrySafety.UNKNOWN,
@@ -682,7 +710,35 @@ class GitHubAdapter(GitHubAdapterInterface):
     ) -> ExternalActionResult[str]:
         """Add an issue URL to a GitHub Project V2 and return the project item ID."""
         list_res = self.list_project_items(project_number, owner)
-        if list_res.is_success and list_res.data:
+        if list_res.outcome == ExternalOutcome.UNKNOWN:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="github_cli",
+                reason_code=list_res.reason_code or ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.SAFE,
+                error_message=f"Pre-observation of project items unobservable: {list_res.error_message}",
+                operation_key=operation_key,
+            )
+        if list_res.outcome == ExternalOutcome.AMBIGUOUS:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.AMBIGUOUS,
+                source_adapter="github_cli",
+                reason_code=list_res.reason_code or ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.SAFE,
+                error_message=f"Pre-observation of project items ambiguous: {list_res.error_message}",
+                operation_key=operation_key,
+            )
+        if list_res.outcome == ExternalOutcome.FAILURE and list_res.reason_code == ExternalReasonCode.AUTH_REQUIRED:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="github_cli",
+                reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                retry_safety=RetrySafety.SAFE,
+                provider_detail=list_res.provider_detail,
+                error_message=f"GitHub Project authorization rejected during pre-observation: {list_res.error_message}",
+                operation_key=operation_key,
+            )
+        if list_res.outcome == ExternalOutcome.SUCCESS and list_res.data:
             for item in list_res.data:
                 content = item.get("content", {})
                 if content.get("url") == issue_url or item.get("url") == issue_url:
@@ -1138,9 +1194,9 @@ class GitHubAdapter(GitHubAdapterInterface):
                         error_message=f"Pushed branch remote SHA '{obs_res.data}' does not match candidate SHA '{candidate_sha}'.",
                     )
                 return ExternalActionResult(
-                    outcome=ExternalOutcome.UNKNOWN,
+                    outcome=ExternalOutcome.AMBIGUOUS,
                     source_adapter="git_cli",
-                    reason_code=ExternalReasonCode.UNOBSERVABLE,
+                    reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
                     retry_safety=RetrySafety.UNKNOWN,
                     error_message="Remote branch head postcondition unobservable after git push command.",
                 )
@@ -1499,9 +1555,9 @@ class GitHubAdapter(GitHubAdapterInterface):
                         error_message=f"Project item '{item_id}' status postcondition '{status}' not observed after edit.",
                     )
                 return ExternalActionResult(
-                    outcome=ExternalOutcome.UNKNOWN,
+                    outcome=ExternalOutcome.AMBIGUOUS,
                     source_adapter="github_cli",
-                    reason_code=ExternalReasonCode.UNOBSERVABLE,
+                    reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
                     retry_safety=RetrySafety.UNKNOWN,
                     data=False,
                     error_message="Project item status update postcondition unobservable after edit command.",

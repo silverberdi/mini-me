@@ -344,27 +344,33 @@ class PostMergeReconciliationService:
         synced_specs: list[str] = []
         sync_verified = False
         try:
-            synced_specs = self.openspec_sync.sync_change_specs(openspec_path, change_name)
-            self.uow.events.save(
-                Event(
-                    event_type=EventType.OPEN_SPEC_SYNCED,
-                    project_id=project_id,
-                    change_id=change_name,
-                    payload={"synced_capabilities": synced_specs},
-                    timestamp=utc_now(),
-                )
-            )
-            sync_verified = self.openspec_sync.verify_sync(openspec_path, change_name, synced_specs)
-            if sync_verified:
+            sync_res = self.openspec_sync.sync_change_specs(openspec_path, change_name)
+            if sync_res.outcome == ExternalOutcome.SUCCESS:
+                synced_specs = sync_res.data or []
                 self.uow.events.save(
                     Event(
-                        event_type=EventType.POST_MERGE_SYNC_VERIFIED,
+                        event_type=EventType.OPEN_SPEC_SYNCED,
                         project_id=project_id,
                         change_id=change_name,
                         payload={"synced_capabilities": synced_specs},
                         timestamp=utc_now(),
                     )
                 )
+                verify_sync_res = self.openspec_sync.verify_sync(openspec_path, change_name, sync_res)
+                sync_verified = (
+                    verify_sync_res.outcome == ExternalOutcome.SUCCESS
+                    and verify_sync_res.data is True
+                )
+                if sync_verified:
+                    self.uow.events.save(
+                        Event(
+                            event_type=EventType.POST_MERGE_SYNC_VERIFIED,
+                            project_id=project_id,
+                            change_id=change_name,
+                            payload={"synced_capabilities": synced_specs},
+                            timestamp=utc_now(),
+                        )
+                    )
         except Exception as exc:
             logger.warning("OpenSpec spec sync failed for '%s': %s", change_name, exc)
 
@@ -375,29 +381,35 @@ class PostMergeReconciliationService:
         archive_verified = False
         if sync_verified:
             try:
-                archived_path = self.openspec_sync.archive_change(openspec_path, change_name)
-                self.uow.events.save(
-                    Event(
-                        event_type=EventType.OPEN_SPEC_ARCHIVED,
-                        project_id=project_id,
-                        change_id=change_name,
-                        payload={"archived_path": str(archived_path)},
-                        timestamp=utc_now(),
-                    )
-                )
-                archive_verified = self.openspec_sync.verify_archive(
-                    openspec_path, change_name, archived_path
-                )
-                if archive_verified:
+                archive_res = self.openspec_sync.archive_change(openspec_path, change_name)
+                if archive_res.outcome == ExternalOutcome.SUCCESS:
+                    archived_path = archive_res.data
                     self.uow.events.save(
                         Event(
-                            event_type=EventType.POST_MERGE_ARCHIVE_VERIFIED,
+                            event_type=EventType.OPEN_SPEC_ARCHIVED,
                             project_id=project_id,
                             change_id=change_name,
-                            payload={"archived_path": str(archived_path)},
+                            payload={"archived_path": str(archived_path) if archived_path else ""},
                             timestamp=utc_now(),
                         )
                     )
+                    verify_arc_res = self.openspec_sync.verify_archive(
+                        openspec_path, change_name, archive_res
+                    )
+                    archive_verified = (
+                        verify_arc_res.outcome == ExternalOutcome.SUCCESS
+                        and verify_arc_res.data is True
+                    )
+                    if archive_verified:
+                        self.uow.events.save(
+                            Event(
+                                event_type=EventType.POST_MERGE_ARCHIVE_VERIFIED,
+                                project_id=project_id,
+                                change_id=change_name,
+                                payload={"archived_path": str(archived_path) if archived_path else ""},
+                                timestamp=utc_now(),
+                            )
+                        )
             except Exception as exc:
                 logger.warning("OpenSpec archive failed for '%s': %s", change_name, exc)
 

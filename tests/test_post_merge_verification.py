@@ -5,8 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
-
 from minime.domain.enums import (
     EventType,
     ExternalOutcome,
@@ -24,7 +22,7 @@ from minime.domain.models import (
     Project,
     ProjectBinding,
 )
-from minime.services.openspec_sync import OpenSpecSyncError, OpenSpecSyncService
+from minime.services.openspec_sync import OpenSpecSyncService
 from minime.services.post_merge_service import PostMergeReconciliationService
 from test_post_merge_closure import InMemoryUnitOfWork
 
@@ -137,8 +135,11 @@ def test_verify_sync_confirms_requirements(tmp_path: Path):
     _make_change(tmp_path)
     service = OpenSpecSyncService(tmp_path)
     synced = service.sync_change_specs("openspec", "test-change")
-    assert "cap1" in synced
-    assert service.verify_sync("openspec", "test-change", synced) is True
+    assert synced.outcome == ExternalOutcome.SUCCESS
+    assert "cap1" in synced.data
+    verify_res = service.verify_sync("openspec", "test-change", synced)
+    assert verify_res.outcome == ExternalOutcome.SUCCESS
+    assert verify_res.data is True
 
 
 def test_verify_sync_detects_missing_requirement(tmp_path: Path):
@@ -148,7 +149,9 @@ def test_verify_sync_detects_missing_requirement(tmp_path: Path):
     # Corrupt the canonical spec so the requirement is no longer present.
     canonical = tmp_path / "openspec" / "specs" / "cap1" / "spec.md"
     canonical.write_text("# Spec: Cap1\n\n## Requirement: DIFFERENT\n")
-    assert service.verify_sync("openspec", "test-change", synced) is False
+    verify_res = service.verify_sync("openspec", "test-change", synced)
+    assert verify_res.outcome == ExternalOutcome.FAILURE
+    assert verify_res.data is False
 
 
 def test_archive_change_raises_on_collision(tmp_path: Path):
@@ -158,8 +161,9 @@ def test_archive_change_raises_on_collision(tmp_path: Path):
     (archive_root / "spec.md").write_text("existing archive\n")
 
     service = OpenSpecSyncService(tmp_path)
-    with pytest.raises(OpenSpecSyncError):
-        service.archive_change("openspec", "test-change", target_date="2026-09-03")
+    res = service.archive_change("openspec", "test-change", target_date="2026-09-03")
+    assert res.outcome == ExternalOutcome.AMBIGUOUS
+    assert res.reason_code == ExternalReasonCode.POSTCONDITION_NOT_PROVEN
 
     # Change must remain active after the collision.
     assert change_dir.exists()
@@ -199,9 +203,28 @@ def test_post_merge_blocks_when_archive_fails(tmp_path: Path):
     _make_change(tmp_path)
 
     mock_sync = MagicMock(spec=OpenSpecSyncService)
-    mock_sync.sync_change_specs.return_value = ["cap1"]
-    mock_sync.verify_sync.return_value = True
-    mock_sync.archive_change.side_effect = OpenSpecSyncError("Archive target collision.")
+    mock_sync.sync_change_specs.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="openspec_sync",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.SAFE,
+        data=["cap1"],
+    )
+    mock_sync.verify_sync.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="openspec_sync",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.SAFE,
+        data=True,
+    )
+    mock_sync.archive_change.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.AMBIGUOUS,
+        source_adapter="openspec_archive",
+        reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
+        retry_safety=RetrySafety.UNKNOWN,
+        data=None,
+        error_message="Archive target collision.",
+    )
 
     service = PostMergeReconciliationService(
         uow=uow,
@@ -229,8 +252,20 @@ def test_post_merge_blocks_when_sync_evidence_missing(tmp_path: Path):
     _make_change(tmp_path)
 
     mock_sync = MagicMock(spec=OpenSpecSyncService)
-    mock_sync.sync_change_specs.return_value = ["cap1"]
-    mock_sync.verify_sync.return_value = False
+    mock_sync.sync_change_specs.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="openspec_sync",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        retry_safety=RetrySafety.SAFE,
+        data=["cap1"],
+    )
+    mock_sync.verify_sync.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.FAILURE,
+        source_adapter="openspec_sync",
+        reason_code=ExternalReasonCode.EVIDENCE_INSUFFICIENT,
+        retry_safety=RetrySafety.SAFE,
+        data=False,
+    )
 
     service = PostMergeReconciliationService(
         uow=uow,
