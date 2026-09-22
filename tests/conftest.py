@@ -2081,6 +2081,7 @@ def init_git_repo(root: Path) -> None:
     subprocess.run(["git", "config", "user.name", "Test User"], cwd=root, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=root, check=True)
     subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=root, check=True)
+    subprocess.run(["git", "remote", "add", "origin", f"https://github.com/org/{root.name}"], cwd=root, check=False)
     if not any(root.iterdir()):
         (root / "README.md").write_text("# repo\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=root, check=True)

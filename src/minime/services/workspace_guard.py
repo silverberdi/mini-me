@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import re
 import subprocess
-from pathlib import Path
 
 from minime.domain.enums import (
     ExternalOutcome,
@@ -87,7 +86,7 @@ class ManagedWorkspaceGuard:
                 timeout=5,
             )
             if res_top.returncode != 0:
-                return False, f"Directory '{workdir}' is not a valid Git repository root: {res_top.stderr.strip()}"
+                return False, f"Git repository unobservable at '{workdir}': {res_top.stderr.strip()}"
 
             res_remote = subprocess.run(
                 ["git", "remote", "get-url", remote_name],
@@ -97,20 +96,17 @@ class ManagedWorkspaceGuard:
                 timeout=5,
             )
             if res_remote.returncode != 0:
-                if "No such remote" in res_remote.stderr or "not a git repository" not in res_remote.stderr:
-                    return True, "Git repository root verified (no remote origin configured)."
-                return False, f"Failed to observe remote URL for '{remote_name}': {res_remote.stderr.strip()}"
+                return False, f"Configured remote '{remote_name}' missing: {res_remote.stderr.strip()}"
 
             observed_url = res_remote.stdout.strip()
             norm_observed = normalize_repository_identity(observed_url)
             norm_expected = normalize_repository_identity(expected_identity)
 
             if norm_observed != norm_expected and norm_observed.split("/")[-2:] != norm_expected.split("/")[-2:]:
-                if not (norm_observed.startswith("/") or norm_observed.startswith("file://")):
-                    return False, (
-                        f"Git repository remote mismatch: observed remote '{norm_observed}' "
-                        f"does not match expected canonical identity '{norm_expected}'."
-                    )
+                return False, (
+                    f"Git repository remote mismatch: observed remote '{norm_observed}' "
+                    f"does not match expected canonical identity '{norm_expected}'."
+                )
 
             return True, "Git repository identity verified successfully."
 
@@ -149,36 +145,11 @@ class ManagedWorkspaceGuard:
         binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
         binding = binding_repo.get_by_project_id(request.project_id) if binding_repo else None
 
-        if not binding and hasattr(self.uow, "projects"):
-            proj = self.uow.projects.get_by_id(request.project_id) if self.uow.projects else None
-            if proj and getattr(proj, "repository", None):
-                repo_dir = str(Path(proj.repository).resolve())
-                wt_dir = str((Path(repo_dir) / ".minime" / "worktrees").resolve())
-                from minime.domain.models import ProjectManagedRepositoryBinding
-                binding = ProjectManagedRepositoryBinding(
-                    project_id=request.project_id,
-                    canonical_repository_identity=getattr(proj, "default_repository", None) or f"github.com/org/{request.project_id}",
-                    managed_repository_root=repo_dir,
-                    worktree_parent_dir=wt_dir,
-                )
-
-        if not binding and ".minime" in request.target_path:
-            p_target = Path(request.target_path).resolve()
-            m_root = str(p_target.parents[2]) if len(p_target.parents) > 2 and p_target.parents[1].name == ".minime" else str(p_target.parent)
-            w_parent = str(p_target.parent)
-            from minime.domain.models import ProjectManagedRepositoryBinding
-            binding = ProjectManagedRepositoryBinding(
-                project_id=request.project_id,
-                canonical_repository_identity=f"github.com/org/{request.project_id}",
-                managed_repository_root=m_root,
-                worktree_parent_dir=w_parent,
-            )
-
         if not binding:
             return WorkspaceMutationDecision(
                 allowed=False,
                 outcome=ExternalOutcome.FAILURE,
-                reason_code=ExternalReasonCode.NOT_FOUND,
+                reason_code=ExternalReasonCode.EVIDENCE_INSUFFICIENT,
                 workspace_role=WorkspaceRole.UNKNOWN,
                 resolved_path=resolved,
                 provider_detail=f"No managed repository binding found for project '{request.project_id}'.",
@@ -187,15 +158,12 @@ class ManagedWorkspaceGuard:
         managed_repo_root = self.resolve_canonical_path(binding.managed_repository_root)
         worktree_parent_dir = self.resolve_canonical_path(binding.worktree_parent_dir)
 
-        # Enforce trusted_managed_root & runtime collision checks BEFORE role authorization
+        # Enforce trusted_managed_root for BOTH managed_repo_root and worktree_parent_dir
         if self.trusted_managed_root is not None:
-            import tempfile
-            sys_tmp = os.path.realpath(tempfile.gettempdir())
-            is_test_tmp = self._is_path_inside(managed_repo_root, sys_tmp) or managed_repo_root.startswith("/private/var/folders") or managed_repo_root.startswith("/var/folders") or managed_repo_root.startswith("/tmp")
-            if not is_test_tmp and (
-                not self._is_path_inside(managed_repo_root, self.trusted_managed_root)
-                and managed_repo_root != self.trusted_managed_root
-            ):
+            trusted = self.resolve_canonical_path(self.trusted_managed_root)
+            managed_valid = self._is_path_inside(managed_repo_root, trusted) or managed_repo_root == trusted
+            wt_parent_valid = self._is_path_inside(worktree_parent_dir, trusted) or worktree_parent_dir == trusted
+            if not managed_valid or not wt_parent_valid:
                 return WorkspaceMutationDecision(
                     allowed=False,
                     outcome=ExternalOutcome.FAILURE,
@@ -203,7 +171,7 @@ class ManagedWorkspaceGuard:
                     workspace_role=WorkspaceRole.UNKNOWN,
                     resolved_path=resolved,
                     provider_detail=(
-                        f"Project '{request.project_id}' paths lie outside trusted managed root '{self.trusted_managed_root}'."
+                        f"Project '{request.project_id}' paths ('{managed_repo_root}', '{worktree_parent_dir}') lie outside trusted managed root '{trusted}'."
                     ),
                 )
 

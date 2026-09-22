@@ -35,95 +35,25 @@ class WorktreeState:
     files: tuple[str, ...]
 
 
-class InProcessWorktreeOwnershipRepo:
-    def __init__(self):
-        self._store: dict[str, OrchestrationWorktreeOwnership] = {}
-
-    def save(self, ownership: OrchestrationWorktreeOwnership) -> None:
-        self._store[ownership.worktree_id] = ownership.model_copy(deep=True) if hasattr(ownership, "model_copy") else ownership
-
-    def get_by_id(self, worktree_id: str) -> OrchestrationWorktreeOwnership | None:
-        w = self._store.get(worktree_id)
-        return w.model_copy(deep=True) if w and hasattr(w, "model_copy") else w
-
-    def get_by_canonical_path(self, canonical_worktree_path: str) -> OrchestrationWorktreeOwnership | None:
-        norm_target = str(Path(canonical_worktree_path).resolve())
-        for w in self._store.values():
-            norm_w = str(Path(w.canonical_worktree_path).resolve())
-            if norm_w == norm_target or w.canonical_worktree_path == canonical_worktree_path:
-                return w.model_copy(deep=True) if hasattr(w, "model_copy") else w
-        return None
-
-    def list_by_project(self, project_id: str) -> list[OrchestrationWorktreeOwnership]:
-        return [w for w in self._store.values() if w.project_id == project_id]
-
-
-class InProcessGitOperationsRepo:
-    def save(self, git_op) -> None:
-        pass
-    def update_status(self, operation_id, status, completed_at=None) -> None:
-        pass
-
-
-class InProcessBindingRepo:
-    def __init__(self, worktree_manager=None):
-        self._store = {}
-        self.worktree_manager = worktree_manager
-
-    def save(self, binding) -> None:
-        self._store[binding.project_id] = binding
-
-    def get_by_project_id(self, project_id: str):
-        b = self._store.get(project_id)
-        if b:
-            return b
-        if self.worktree_manager:
-            from minime.domain.models import ProjectManagedRepositoryBinding
-            repo_root = str(self.worktree_manager.project_root.resolve())
-            wt_root = str(self.worktree_manager.worktrees_root.resolve())
-            synth = ProjectManagedRepositoryBinding(
-                project_id=project_id,
-                canonical_repository_identity=f"github.com/org/{project_id}",
-                managed_repository_root=repo_root,
-                worktree_parent_dir=wt_root,
-            )
-            self._store[project_id] = synth
-            return synth
-        return None
-
-    def get_by_repository_identity(self, canonical_repository_identity: str):
-        for b in self._store.values():
-            if b.canonical_repository_identity == canonical_repository_identity:
-                return b
-        return None
-
-
-class InProcessUOW:
-    def __init__(self, worktree_manager=None):
-        self.orchestration_worktree_ownerships = InProcessWorktreeOwnershipRepo()
-        self.git_operations = InProcessGitOperationsRepo()
-        self.project_managed_repository_bindings = InProcessBindingRepo(worktree_manager)
-
-    def commit(self) -> None:
-        pass
-
-
 class WorktreeManager:
     """Creates isolated candidate worktrees under `.minime/worktrees/<job_id>` with Git operation tracking."""
 
     def __init__(
         self,
         project_root: str | Path,
-        uow: PersistenceUnitOfWork | None = None,
+        uow: PersistenceUnitOfWork,
         workspace_guard: ManagedWorkspaceGuard | None = None,
     ):
+        if uow is None:
+            raise ValueError("PersistenceUnitOfWork (uow) is required for WorktreeManager.")
         self.project_root = Path(project_root).resolve()
         self.worktrees_root = self.project_root / ".minime" / "worktrees"
-        self.uow = uow or InProcessUOW(self)
+        self.uow = uow
         self.workspace_guard = workspace_guard
 
     def _evaluate_guard_preflight(self, project_id: str | None, path: Path) -> None:
-        eff_project_id = project_id or "mini-me"
+        if not project_id:
+            raise ValueError("project_id is mandatory for managed worktree operations.")
         from minime.domain.enums import WorkspaceOperation
         from minime.domain.models import WorkspaceMutationRequest
         from minime.services.workspace_guard import ManagedWorkspaceGuard
@@ -134,7 +64,7 @@ class WorktreeManager:
 
         if guard:
             req = WorkspaceMutationRequest(
-                project_id=eff_project_id,
+                project_id=project_id,
                 target_path=str(path.resolve()),
                 requested_operation=WorkspaceOperation.WORKTREE_CREATE,
             )
@@ -201,7 +131,8 @@ class WorktreeManager:
     def _persist_pending_ownership(
         self, job_id: str, project_id: str | None, path: Path, branch_name: str
     ) -> OrchestrationWorktreeOwnership:
-        eff_project_id = project_id or "mini-me"
+        if not project_id:
+            raise ValueError("project_id is mandatory for managed worktree operations.")
         if not self.uow:
             raise RuntimeError("PersistenceUnitOfWork (uow) is required for durable worktree ownership.")
         repo = getattr(self.uow, "orchestration_worktree_ownerships", None)
@@ -212,7 +143,7 @@ class WorktreeManager:
         worktree_id = f"wt-{path.name}"
         ownership = OrchestrationWorktreeOwnership(
             worktree_id=worktree_id,
-            project_id=eff_project_id,
+            project_id=project_id,
             job_id=job_id,
             canonical_worktree_path=canonical_path,
             branch_name=branch_name,
@@ -250,7 +181,7 @@ class WorktreeManager:
             for line in wt_list_out.splitlines()
             if line.startswith("worktree ")
         ]
-        if wt_paths and canonical_path not in wt_paths:
+        if canonical_path not in wt_paths:
             raise RuntimeError(f"Worktree postcondition failed: path '{canonical_path}' not present in git worktree list.")
 
         actual_branch = (await self._git(["branch", "--show-current"], cwd=resolved_path)).strip()
@@ -261,6 +192,14 @@ class WorktreeManager:
             head_sha = (await self._git(["rev-parse", "HEAD"], cwd=resolved_path)).strip()
             if not head_sha:
                 raise RuntimeError("Worktree postcondition failed: unable to resolve HEAD SHA.")
+            try:
+                expected_sha = (await self._git(["rev-parse", expected_base_sha], cwd=self.project_root)).strip()
+            except Exception:
+                expected_sha = expected_base_sha.strip()
+            if head_sha != expected_sha:
+                raise RuntimeError(
+                    f"Worktree postcondition failed: actual HEAD SHA '{head_sha}' does not match expected SHA '{expected_sha}'."
+                )
 
         if self.uow:
             binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
@@ -724,6 +663,8 @@ class WorktreeManager:
         job_id: str,
         project_id: str | None = None,
     ) -> None:
+        if not project_id:
+            raise ValueError("project_id is mandatory for managed worktree operations.")
         path = Path(worktree_path).resolve()
         if not path.exists():
             return
@@ -739,13 +680,10 @@ class WorktreeManager:
             return
 
         ownership = ownership_repo.get_by_canonical_path(canonical_path)
-        if not ownership:
-            store = getattr(ownership_repo, "_store", {})
-            for w in store.values():
-                if w.job_id == job_id and (not project_id or w.project_id == project_id):
-                    if str(Path(w.canonical_worktree_path).resolve()) == canonical_path:
-                        ownership = w
-                        break
+        if not ownership and hasattr(ownership_repo, "get_by_job_id"):
+            cand = ownership_repo.get_by_job_id(job_id)
+            if cand and str(Path(cand.canonical_worktree_path).resolve()) == canonical_path:
+                ownership = cand
 
         # Durable DB ownership is MANDATORY. Marker alone, .git alone, or path-under-root alone can NEVER authorize deletion.
         if not ownership:

@@ -130,6 +130,16 @@ def tmp_dirs():
     os.makedirs(runtime, exist_ok=True)
     os.makedirs(repo_root, exist_ok=True)
     os.makedirs(worktrees, exist_ok=True)
+
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo_root, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_root, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_root, check=True)
+    subprocess.run(["git", "remote", "add", "origin", "https://github.com/org/repo"], cwd=repo_root, check=True)
+    with open(os.path.join(repo_root, "README.md"), "w") as f:
+        f.write("base\n")
+    subprocess.run(["git", "add", "."], cwd=repo_root, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=repo_root, check=True, capture_output=True)
+
     yield {
         "base": base,
         "runtime": runtime,
@@ -161,10 +171,6 @@ def test_guard_runtime_protection(tmp_dirs):
 
 
 def test_guard_managed_repo_code_edit_protection(tmp_dirs):
-    # Initialize a valid Git repository in repo_root for identity verification
-    subprocess.run(["git", "init"], cwd=tmp_dirs["repo_root"], capture_output=True, check=True)
-    subprocess.run(["git", "remote", "add", "origin", "https://github.com/org/repo.git"], cwd=tmp_dirs["repo_root"], capture_output=True, check=True)
-
     uow = MockUOW()
     binding = ProjectManagedRepositoryBinding(
         project_id="test-proj",
@@ -221,6 +227,7 @@ def test_guard_execution_worktree_owned_path_allowed(tmp_dirs):
     wt_dir = os.path.join(tmp_dirs["worktrees"], "wt-job-100")
     os.makedirs(wt_dir, exist_ok=True)
     subprocess.run(["git", "init"], cwd=wt_dir, check=True, capture_output=True)
+    subprocess.run(["git", "remote", "add", "origin", "https://github.com/org/repo"], cwd=wt_dir, check=True, capture_output=True)
     binding = ProjectManagedRepositoryBinding(
         project_id="test-proj",
         canonical_repository_identity="github.com/org/repo",
@@ -538,3 +545,269 @@ def test_pending_worktree_denied_for_mutation(tmp_dirs):
     # Mutation on PENDING worktree must be denied
     assert decision.allowed is False
     assert "not CREATED" in decision.provider_detail
+
+
+def test_worktree_manager_without_uow_fails_closed(tmp_dirs):
+    with pytest.raises(ValueError, match="PersistenceUnitOfWork .* is required"):
+        WorktreeManager(project_root=tmp_dirs["repo_root"], uow=None)
+
+
+def test_missing_project_id_fails_closed(tmp_dirs):
+    uow = MockUOW()
+    wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
+    wt_path = wt_manager.worktrees_root / "wt-no-proj"
+
+    with pytest.raises(ValueError, match="project_id is mandatory"):
+        asyncio.run(wt_manager.create_worktree("job-1", "change-1", "main", project_id=None))
+
+    with pytest.raises(ValueError, match="project_id is mandatory"):
+        asyncio.run(wt_manager.remove_clean_worktree_path(wt_path, "job-1", project_id=None))
+
+
+def test_no_synthetic_binding_and_missing_binding_denies(tmp_dirs):
+    uow = MockUOW()
+    guard = ManagedWorkspaceGuard(uow, runtime_root=tmp_dirs["runtime"])
+
+    req = WorkspaceMutationRequest(
+        project_id="unbound-proj",
+        target_path=os.path.join(tmp_dirs["repo_root"], "src", "app.py"),
+        requested_operation=WorkspaceOperation.EDIT,
+    )
+    decision = guard.evaluate_mutation(req)
+
+    assert decision.allowed is False
+    assert decision.reason_code == ExternalReasonCode.EVIDENCE_INSUFFICIENT
+    assert "No managed repository binding found" in decision.provider_detail
+
+
+def test_dot_minime_path_does_not_synthesize_authorization(tmp_dirs):
+    uow = MockUOW()
+    guard = ManagedWorkspaceGuard(uow, runtime_root=tmp_dirs["runtime"])
+
+    # Path containing .minime must not synthesize authorization
+    minime_path = os.path.join(tmp_dirs["repo_root"], ".minime", "worktrees", "wt-job", "file.py")
+    req = WorkspaceMutationRequest(
+        project_id="unbound-proj",
+        target_path=minime_path,
+        requested_operation=WorkspaceOperation.EDIT,
+    )
+    decision = guard.evaluate_mutation(req)
+
+    assert decision.allowed is False
+    assert decision.reason_code == ExternalReasonCode.EVIDENCE_INSUFFICIENT
+    assert "No managed repository binding found" in decision.provider_detail
+
+
+def test_missing_git_remote_fails_identity_proof():
+    no_remote_dir = tempfile.mkdtemp()
+    try:
+        subprocess.run(["git", "init", "-b", "main"], cwd=no_remote_dir, check=True, capture_output=True)
+        uow = MockUOW()
+        guard = ManagedWorkspaceGuard(uow)
+
+        valid, reason = guard.verify_git_repository_identity(
+            no_remote_dir, "github.com/org/repo", remote_name="origin"
+        )
+        assert valid is False
+        assert "Configured remote 'origin' missing" in reason
+    finally:
+        shutil.rmtree(no_remote_dir, ignore_errors=True)
+
+
+def test_wrong_remote_fails(tmp_dirs):
+    uow = MockUOW()
+    guard = ManagedWorkspaceGuard(uow)
+
+    # Set origin remote to different repository
+    subprocess.run(["git", "remote", "set-url", "origin", "https://github.com/org/wrong-repo.git"], cwd=tmp_dirs["repo_root"], check=True)
+
+    valid, reason = guard.verify_git_repository_identity(
+        tmp_dirs["repo_root"], "github.com/org/correct-repo", remote_name="origin"
+    )
+    assert valid is False
+    assert "remote mismatch" in reason
+
+
+def test_temp_path_outside_configured_trusted_root_denied(tmp_dirs):
+    uow = MockUOW()
+    binding = ProjectManagedRepositoryBinding(
+        project_id="test-proj",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["repo_root"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+    )
+    uow.project_managed_repository_bindings.save(binding)
+
+    # Configure trusted_managed_root to a completely different path
+    other_trusted_root = tempfile.mkdtemp()
+    try:
+        guard = ManagedWorkspaceGuard(uow, runtime_root=tmp_dirs["runtime"], trusted_managed_root=other_trusted_root)
+        req = WorkspaceMutationRequest(
+            project_id="test-proj",
+            target_path=os.path.join(tmp_dirs["repo_root"], "README.md"),
+            requested_operation=WorkspaceOperation.READ,
+        )
+        decision = guard.evaluate_mutation(req)
+
+        assert decision.allowed is False
+        assert "lies outside trusted managed root" in decision.provider_detail or "outside trusted managed root" in decision.provider_detail
+    finally:
+        shutil.rmtree(other_trusted_root, ignore_errors=True)
+
+
+def test_explicit_trusted_root_allows_valid_temp_fixture(tmp_dirs):
+    uow = MockUOW()
+    binding = ProjectManagedRepositoryBinding(
+        project_id="test-proj",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["repo_root"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+    )
+    uow.project_managed_repository_bindings.save(binding)
+
+    # Configure trusted_managed_root to include parent of repo_root
+    parent_trusted = str(Path(tmp_dirs["repo_root"]).parent.resolve())
+    guard = ManagedWorkspaceGuard(uow, runtime_root=tmp_dirs["runtime"], trusted_managed_root=parent_trusted)
+    req = WorkspaceMutationRequest(
+        project_id="test-proj",
+        target_path=os.path.join(tmp_dirs["worktrees"], "wt-job", "app.py"),
+        requested_operation=WorkspaceOperation.EDIT,
+    )
+
+    # Register CREATED worktree ownership so role evaluation succeeds
+    wt_path = os.path.join(tmp_dirs["worktrees"], "wt-job")
+    os.makedirs(wt_path, exist_ok=True)
+    subprocess.run(["git", "init"], cwd=wt_path, check=True, capture_output=True)
+    subprocess.run(["git", "remote", "add", "origin", "https://github.com/org/repo"], cwd=wt_path, check=True, capture_output=True)
+    ownership = OrchestrationWorktreeOwnership(
+        worktree_id="wt-job",
+        project_id="test-proj",
+        job_id="job",
+        canonical_worktree_path=wt_path,
+        branch_name="minime/change-job",
+        creation_state=WorktreeCreationState.CREATED,
+    )
+    uow.orchestration_worktree_ownerships.save(ownership)
+
+    decision = guard.evaluate_mutation(req)
+    assert decision.allowed is True
+
+
+def test_empty_git_worktree_list_prevents_created(tmp_dirs):
+    uow = MockUOW()
+    wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
+    wt_path = Path(tmp_dirs["worktrees"]) / "wt-empty-list"
+    wt_path.mkdir(parents=True, exist_ok=True)
+
+    ownership = OrchestrationWorktreeOwnership(
+        worktree_id="wt-empty-list",
+        project_id="test-proj",
+        job_id="empty-list-job",
+        canonical_worktree_path=str(wt_path.resolve()),
+        branch_name="main",
+        creation_state=WorktreeCreationState.PENDING,
+    )
+
+    with patch.object(wt_manager, "_git") as mock_git:
+        # Simulate empty worktree list output
+        async def mock_git_impl(args, **kwargs):
+            if "worktree" in args and "list" in args:
+                return ""
+            if "branch" in args:
+                return "main"
+            if "rev-parse" in args:
+                return "1234567890abcdef"
+            return ""
+
+        mock_git.side_effect = mock_git_impl
+
+        with pytest.raises(RuntimeError, match="not present in git worktree list"):
+            asyncio.run(
+                wt_manager._verify_creation_postconditions(
+                    wt_path, ownership, expected_branch="main", expected_base_sha="1234567890abcdef"
+                )
+            )
+
+
+def test_wrong_head_sha_prevents_created(tmp_dirs):
+    uow = MockUOW()
+    wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
+    wt_path = Path(tmp_dirs["worktrees"]) / "wt-wrong-sha"
+    wt_path.mkdir(parents=True, exist_ok=True)
+
+    ownership = OrchestrationWorktreeOwnership(
+        worktree_id="wt-wrong-sha",
+        project_id="test-proj",
+        job_id="wrong-sha-job",
+        canonical_worktree_path=str(wt_path.resolve()),
+        branch_name="main",
+        creation_state=WorktreeCreationState.PENDING,
+    )
+
+    with patch.object(wt_manager, "_git") as mock_git:
+        async def mock_git_impl(args, **kwargs):
+            if "worktree" in args and "list" in args:
+                return f"worktree {wt_path.resolve()}\n"
+            if "branch" in args:
+                return "main"
+            if "rev-parse" in args:
+                if "HEAD" in args:
+                    return "actual_sha_123"
+                return "expected_sha_456"
+            return ""
+
+        mock_git.side_effect = mock_git_impl
+
+        with pytest.raises(RuntimeError, match="actual HEAD SHA 'actual_sha_123' does not match expected SHA 'expected_sha_456'"):
+            asyncio.run(
+                wt_manager._verify_creation_postconditions(
+                    wt_path, ownership, expected_branch="main", expected_base_sha="expected_sha_456"
+                )
+            )
+
+
+def test_correct_head_sha_allows_created(tmp_dirs):
+    uow = MockUOW()
+    wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
+    wt_path = Path(tmp_dirs["worktrees"]) / "wt-correct-sha"
+    wt_path.mkdir(parents=True, exist_ok=True)
+    wt_manager._write_ownership_marker(
+        wt_path,
+        OrchestrationWorktreeOwnership(
+            worktree_id="wt-correct-sha",
+            project_id="test-proj",
+            job_id="correct-sha-job",
+            canonical_worktree_path=str(wt_path.resolve()),
+            branch_name="main",
+            creation_state=WorktreeCreationState.PENDING,
+        ),
+    )
+
+    ownership = OrchestrationWorktreeOwnership(
+        worktree_id="wt-correct-sha",
+        project_id="test-proj",
+        job_id="correct-sha-job",
+        canonical_worktree_path=str(wt_path.resolve()),
+        branch_name="main",
+        creation_state=WorktreeCreationState.PENDING,
+    )
+
+    with patch.object(wt_manager, "_git") as mock_git:
+        async def mock_git_impl(args, **kwargs):
+            if "worktree" in args and "list" in args:
+                return f"worktree {wt_path.resolve()}\n"
+            if "branch" in args:
+                return "main"
+            if "rev-parse" in args:
+                return "matching_sha_789"
+            return ""
+
+        mock_git.side_effect = mock_git_impl
+
+        # Should complete without raising any exception
+        asyncio.run(
+            wt_manager._verify_creation_postconditions(
+                wt_path, ownership, expected_branch="main", expected_base_sha="matching_sha_789"
+            )
+        )
+

@@ -7,9 +7,11 @@ import sys
 from pathlib import Path
 
 import pytest
+from tests.conftest import InMemoryPersistenceUnitOfWork
 
 from minime.adapters.github import GitHubAdapter
 from minime.config import AppConfig, CliInvocationConfig, ProviderConfig, load_config
+from minime.domain.models import ProjectManagedRepositoryBinding
 from minime.services.implementer_runner import CliImplementerRunner, runner_for_implementer
 from minime.services.reviewer_runner import CliReviewerRunner, runner_for_reviewer
 from minime.services.worktree_manager import WorktreeManager
@@ -26,43 +28,53 @@ async def run(cmd: list[str], cwd: Path) -> None:
     assert proc.returncode == 0, (stdout.decode(), stderr.decode())
 
 
+async def setup_test_repo(repo_path: Path, uow: InMemoryPersistenceUnitOfWork, project_id: str = "test-project") -> None:
+    repo_path.mkdir(parents=True, exist_ok=True)
+    await run(["git", "init", "-b", "main"], repo_path)
+    await run(["git", "config", "user.email", "test@example.com"], repo_path)
+    await run(["git", "config", "user.name", "Test User"], repo_path)
+    await run(["git", "remote", "add", "origin", f"https://github.com/org/{project_id}"], repo_path)
+    (repo_path / "README.md").write_text("hello\n", encoding="utf-8")
+    await run(["git", "add", "README.md"], repo_path)
+    await run(["git", "commit", "-m", "initial"], repo_path)
+
+    binding = ProjectManagedRepositoryBinding(
+        project_id=project_id,
+        canonical_repository_identity=f"github.com/org/{project_id}",
+        managed_repository_root=str(repo_path.resolve()),
+        worktree_parent_dir=str((repo_path / ".minime" / "worktrees").resolve()),
+    )
+    uow.project_managed_repository_bindings.save(binding)
+
+
 @pytest.mark.asyncio
 async def test_worktree_manager_create_collision_and_cleanup(tmp_path):
     repo = tmp_path / "repo"
-    repo.mkdir()
-    await run(["git", "init", "-b", "main"], repo)
-    await run(["git", "config", "user.email", "test@example.com"], repo)
-    await run(["git", "config", "user.name", "Test User"], repo)
-    (repo / "README.md").write_text("hello\n", encoding="utf-8")
-    await run(["git", "add", "README.md"], repo)
-    await run(["git", "commit", "-m", "initial"], repo)
+    uow = InMemoryPersistenceUnitOfWork()
+    await setup_test_repo(repo, uow, "job-1-proj")
 
-    manager = WorktreeManager(repo)
-    info = await manager.create_worktree("job-1", "002-implementation-pipeline", "main")
+    manager = WorktreeManager(repo, uow=uow)
+    info = await manager.create_worktree("job-1", "002-implementation-pipeline", "main", project_id="job-1-proj")
 
     assert info.path.exists()
     assert info.branch_name.startswith("minime/002-implementation-pipeline-job-1")
     assert await manager.current_sha(info.path) == info.base_sha
 
     with pytest.raises(ValueError, match="not empty"):
-        await manager.create_worktree("job-1", "002-implementation-pipeline", "main")
+        await manager.create_worktree("job-1", "002-implementation-pipeline", "main", project_id="job-1-proj")
 
-    await manager.cleanup_worktree("job-1")
+    await manager.cleanup_worktree("job-1", project_id="job-1-proj")
     assert not info.path.exists()
 
 
 @pytest.mark.asyncio
 async def test_cleanup_worktree_refuses_dirty_worktree_without_deleting_it(tmp_path):
     repo = tmp_path / "repo"
-    repo.mkdir()
-    await run(["git", "init", "-b", "main"], repo)
-    await run(["git", "config", "user.email", "test@example.com"], repo)
-    await run(["git", "config", "user.name", "Test User"], repo)
-    (repo / "README.md").write_text("base\n", encoding="utf-8")
-    await run(["git", "add", "README.md"], repo)
-    await run(["git", "commit", "-m", "initial"], repo)
-    manager = WorktreeManager(repo)
-    info = await manager.create_worktree("job-recovery", "010-change", "main")
+    uow = InMemoryPersistenceUnitOfWork()
+    await setup_test_repo(repo, uow, "job-rec-proj")
+
+    manager = WorktreeManager(repo, uow=uow)
+    info = await manager.create_worktree("job-recovery", "010-change", "main", project_id="job-rec-proj")
     (info.path / "README.md").write_text("recovered\n", encoding="utf-8")
     (info.path / "new.py").write_text("candidate = True\n", encoding="utf-8")
     git_commands: list[list[str]] = []
@@ -75,7 +87,7 @@ async def test_cleanup_worktree_refuses_dirty_worktree_without_deleting_it(tmp_p
     manager._git = recording_git
 
     with pytest.raises(RuntimeError, match="Refusing to remove dirty"):
-        await manager.cleanup_worktree("job-recovery")
+        await manager.cleanup_worktree("job-recovery", project_id="job-rec-proj")
 
     assert info.path.exists()
     assert (info.path / "README.md").read_text(encoding="utf-8") == "recovered\n"
@@ -91,18 +103,13 @@ async def test_cleanup_worktree_refuses_dirty_worktree_without_deleting_it(tmp_p
 @pytest.mark.asyncio
 async def test_remove_clean_worktree_removes_clean_managed_worktree(tmp_path):
     repo = tmp_path / "repo"
-    repo.mkdir()
-    await run(["git", "init", "-b", "main"], repo)
-    await run(["git", "config", "user.email", "test@example.com"], repo)
-    await run(["git", "config", "user.name", "Test User"], repo)
-    (repo / "README.md").write_text("base\n", encoding="utf-8")
-    await run(["git", "add", "README.md"], repo)
-    await run(["git", "commit", "-m", "initial"], repo)
+    uow = InMemoryPersistenceUnitOfWork()
+    await setup_test_repo(repo, uow, "job-clean-proj")
 
-    manager = WorktreeManager(repo)
-    info = await manager.create_worktree("job-clean", "010-change", "main")
+    manager = WorktreeManager(repo, uow=uow)
+    info = await manager.create_worktree("job-clean", "010-change", "main", project_id="job-clean-proj")
 
-    await manager.remove_clean_worktree("job-clean")
+    await manager.remove_clean_worktree("job-clean", project_id="job-clean-proj")
 
     assert not info.path.exists()
 
@@ -112,23 +119,21 @@ async def test_production_push_uses_repository_root_after_worktree_cleanup(tmp_p
     """A finalized candidate remains pushable after its managed worktree is removed."""
     repo = tmp_path / "repo"
     remote = tmp_path / "remote.git"
-    repo.mkdir()
-    await run(["git", "init", "-b", "main"], repo)
-    await run(["git", "config", "user.email", "test@example.com"], repo)
-    await run(["git", "config", "user.name", "Test User"], repo)
-    (repo / "README.md").write_text("hello\n", encoding="utf-8")
-    await run(["git", "add", "README.md"], repo)
-    await run(["git", "commit", "-m", "initial"], repo)
+    uow = InMemoryPersistenceUnitOfWork()
+    await setup_test_repo(repo, uow, "job-push-proj")
     await run(["git", "init", "--bare", str(remote)], repo)
-    await run(["git", "remote", "add", "origin", str(remote)], repo)
+    await run(["git", "remote", "set-url", "origin", str(remote)], repo)
+    binding = uow.project_managed_repository_bindings.get_by_project_id("job-push-proj")
+    binding.canonical_repository_identity = str(remote.resolve())
+    uow.project_managed_repository_bindings.save(binding)
 
-    manager = WorktreeManager(repo)
-    info = await manager.create_worktree("job-push", "008-autonomous-change-orchestration", "main")
+    manager = WorktreeManager(repo, uow=uow)
+    info = await manager.create_worktree("job-push", "008-autonomous-change-orchestration", "main", project_id="job-push-proj")
     (info.path / "candidate.py").write_text("candidate = True\n", encoding="utf-8")
     await run(["git", "add", "candidate.py"], info.path)
     await run(["git", "commit", "-m", "candidate"], info.path)
     candidate_sha = (await _git_output(["git", "rev-parse", "HEAD"], info.path)).strip()
-    await manager.cleanup_worktree("job-push")
+    await manager.cleanup_worktree("job-push", project_id="job-push-proj")
     assert not info.path.exists()
 
     assert GitHubAdapter().push_branch(

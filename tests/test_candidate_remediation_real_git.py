@@ -663,8 +663,18 @@ def test_real_git_reconciliation_rejects_wrong_remediation_trailer(tmp_path, in_
     (tmp_path / "README.md").write_text("source\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-m", "source"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "remote", "add", "origin", "https://github.com/org/p"], cwd=tmp_path, check=True)
     source_sha = git(tmp_path, "rev-parse", "HEAD")
     in_memory_uow.projects.save(Project(project_id="p", display_name="p", repository=str(tmp_path)))
+    from minime.domain.models import ProjectManagedRepositoryBinding
+    in_memory_uow.project_managed_repository_bindings.save(
+        ProjectManagedRepositoryBinding(
+            project_id="p",
+            canonical_repository_identity="github.com/org/p",
+            managed_repository_root=str(tmp_path.resolve()),
+            worktree_parent_dir=str((tmp_path / ".minime" / "worktrees").resolve()),
+        )
+    )
     manager = WorktreeManager(tmp_path, uow=in_memory_uow)
     workspace = asyncio.run(
         manager.create_remediation_worktree("job", "change", source_sha, 2, project_id="p")
