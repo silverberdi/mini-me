@@ -70,6 +70,7 @@ class OpenSpecSyncService:
                     error_message="No capability directories found in delta specs.",
                 )
 
+            # Preflight validation: verify all capability directories contain readable spec.md before any write
             for cap_dir in cap_dirs:
                 delta_spec_file = cap_dir / "spec.md"
                 if not delta_spec_file.exists():
@@ -81,7 +82,25 @@ class OpenSpecSyncService:
                         data=[],
                         error_message=f"Capability directory '{cap_dir.name}' is missing required 'spec.md' artifact.",
                     )
+                try:
+                    _ = delta_spec_file.read_text(encoding="utf-8")
+                except Exception as read_exc:
+                    return ExternalActionResult(
+                        outcome=ExternalOutcome.FAILURE,
+                        source_adapter="openspec_sync",
+                        reason_code=ExternalReasonCode.EVIDENCE_INSUFFICIENT,
+                        retry_safety=RetrySafety.SAFE,
+                        data=[],
+                        error_message=f"Capability directory '{cap_dir.name}' spec.md cannot be read: {read_exc}",
+                    )
 
+            # Writes begin ONLY after complete preflight succeeds
+            synced_capabilities: list[str] = []
+            main_specs_dir = self.project_root / openspec_path / "specs"
+            main_specs_dir.mkdir(parents=True, exist_ok=True)
+
+            for cap_dir in cap_dirs:
+                delta_spec_file = cap_dir / "spec.md"
                 capability_name = cap_dir.name
                 target_cap_dir = main_specs_dir / capability_name
                 target_cap_dir.mkdir(parents=True, exist_ok=True)
@@ -195,20 +214,7 @@ class OpenSpecSyncService:
             )
 
         if not change_dir.exists():
-            expected_manifest: list[str] = []
             if target_dir.exists():
-                for std_file in ["proposal.md", "tasks.md", "design.md"]:
-                    if (target_dir / std_file).exists():
-                        expected_manifest.append(std_file)
-                specs_dir = target_dir / "specs"
-                if specs_dir.exists():
-                    for spec_file in specs_dir.rglob("spec.md"):
-                        expected_manifest.append(str(spec_file.relative_to(target_dir)))
-                if "proposal.md" not in expected_manifest:
-                    expected_manifest.append("proposal.md")
-                if "tasks.md" not in expected_manifest:
-                    expected_manifest.append("tasks.md")
-
                 logger.info("Change '%s' is already archived at '%s'.", change_name, target_dir)
                 return ExternalActionResult(
                     outcome=ExternalOutcome.SUCCESS,
@@ -216,7 +222,7 @@ class OpenSpecSyncService:
                     reason_code=ExternalReasonCode.REUSED_EXISTING,
                     retry_safety=RetrySafety.SAFE,
                     data=target_dir,
-                    provider_detail=",".join(expected_manifest),
+                    provider_detail="",
                     external_id=str(target_dir),
                 )
             alt_dir = self.project_root / openspec_path / "archive" / change_name
@@ -227,7 +233,7 @@ class OpenSpecSyncService:
                     reason_code=ExternalReasonCode.REUSED_EXISTING,
                     retry_safety=RetrySafety.SAFE,
                     data=alt_dir,
-                    provider_detail="proposal.md,tasks.md",
+                    provider_detail="",
                     external_id=str(alt_dir),
                 )
             return ExternalActionResult(
@@ -449,11 +455,14 @@ class OpenSpecSyncService:
 
         if not change_dir.exists() and target_dir and target_dir.exists():
             if not manifest:
-                manifest = ["proposal.md", "tasks.md"]
-                specs_dir = target_dir / "specs"
-                if specs_dir.exists():
-                    for spec_file in specs_dir.rglob("spec.md"):
-                        manifest.append(str(spec_file.relative_to(target_dir)))
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.UNKNOWN,
+                    source_adapter="openspec_archive",
+                    reason_code=ExternalReasonCode.EVIDENCE_INSUFFICIENT,
+                    retry_safety=RetrySafety.SAFE,
+                    data=False,
+                    error_message=f"Historical expected manifest unavailable for target archive '{target_dir}'; archive completeness cannot be proven independently.",
+                )
 
             missing_or_corrupt: list[str] = []
             for rel_path in manifest:

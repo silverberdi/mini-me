@@ -707,7 +707,7 @@ class PostMergeReconciliationService:
                 outcome=ExternalOutcome.SUCCESS,
                 source_adapter="worktree_manager",
                 reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
-                retry_safety=RetrySafety.SAFE,
+                retry_safety=RetrySafety.UNSAFE,
                 data=True,
             )
 
@@ -799,7 +799,7 @@ class PostMergeReconciliationService:
                 outcome=ExternalOutcome.SUCCESS,
                 source_adapter="git_cli",
                 reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
-                retry_safety=RetrySafety.SAFE,
+                retry_safety=RetrySafety.UNSAFE,
                 data=True,
             )
         elif post_check.returncode == 0:

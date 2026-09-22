@@ -527,9 +527,8 @@ def test_archive_verify_fails_when_historical_manifest_missing_and_canonical_art
 
     # Pass None for archived_path and no expected manifest; verify_archive MUST NOT self-prove success!
     res = service.verify_archive("openspec", "test-change", archive_dir)
-    assert res.outcome == ExternalOutcome.FAILURE
+    assert res.outcome in (ExternalOutcome.FAILURE, ExternalOutcome.UNKNOWN)
     assert res.data is False
-    assert "missing or empty expected files" in res.error_message
 
 
 def test_sync_change_specs_capability_dir_missing_spec_md_returns_failure(tmp_path: Path):
@@ -550,4 +549,54 @@ def test_sync_change_specs_capability_dir_missing_spec_md_returns_failure(tmp_pa
     assert res.reason_code == ExternalReasonCode.EVIDENCE_INSUFFICIENT
     assert res.data == []
     assert "cap2" in res.error_message
+
+    # PREFLIGHT GUARANTEE: Zero canonical files must be created or modified on disk!
+    canonical_cap1 = tmp_path / "openspec" / "specs" / "cap1" / "spec.md"
+    assert not canonical_cap1.exists()
+
+
+def test_archive_verify_reused_existing_without_independent_manifest_returns_unknown(tmp_path: Path):
+    service = OpenSpecSyncService(tmp_path)
+    archive_dir = tmp_path / "openspec" / "changes" / "archive" / "2026-09-03-test-change"
+    archive_dir.mkdir(parents=True)
+    (archive_dir / "proposal.md").write_text("# Proposal\n")
+    (archive_dir / "tasks.md").write_text("- [x] Done\n")
+
+    # Active change source dir does not exist and no independent historical manifest was passed in.
+    # verify_archive MUST NOT self-prove success by inspecting target_dir!
+    res = service.verify_archive("openspec", "test-change", archive_dir)
+    assert res.outcome == ExternalOutcome.UNKNOWN
+    assert res.reason_code == ExternalReasonCode.EVIDENCE_INSUFFICIENT
+    assert res.data is False
+    assert "Historical expected manifest unavailable" in res.error_message
+
+
+def test_cleanup_branch_and_worktree_mutations_return_retry_safety_unsafe(tmp_path: Path):
+    import subprocess
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=False)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, capture_output=True, check=False)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=False)
+    subprocess.run(["git", "commit", "--allow-empty", "-m", "init"], cwd=tmp_path, capture_output=True, check=False)
+    subprocess.run(["git", "branch", "to-delete"], cwd=tmp_path, capture_output=True, check=False)
+
+    service = PostMergeReconciliationService(uow=InMemoryUnitOfWork(), project_root=tmp_path, github_adapter=_github_adapter())
+
+    # Actual git branch -D executed and verified -> RetrySafety.UNSAFE
+    del_res = service._delete_local_branch("to-delete")
+    assert del_res.outcome == ExternalOutcome.SUCCESS
+    assert del_res.reason_code == ExternalReasonCode.EXECUTION_SUCCESS
+    assert del_res.retry_safety == RetrySafety.UNSAFE
+
+    # Pre-check proves branch already absent -> RetrySafety.SAFE
+    absent_res = service._delete_local_branch("absent-branch")
+    assert absent_res.outcome == ExternalOutcome.SUCCESS
+    assert absent_res.reason_code == ExternalReasonCode.ALREADY_ABSENT
+    assert absent_res.retry_safety == RetrySafety.SAFE
+
+    # Worktree clean with no target paths (authoritative already absent) -> RetrySafety.SAFE
+    wt_absent = service._clean_worktrees("non-existent-job")
+    assert wt_absent.outcome == ExternalOutcome.SUCCESS
+    assert wt_absent.reason_code == ExternalReasonCode.ALREADY_ABSENT
+    assert wt_absent.retry_safety == RetrySafety.SAFE
+
 
