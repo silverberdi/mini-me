@@ -22,7 +22,7 @@ AND the live RUNTIME process files SHALL remain untouched.
 
 ### Requirement: Process-level agent write confinement boundary
 
-Every agent process executing in an `EXECUTION_WORKTREE` SHALL be executed within an OS/process-level write confinement boundary (e.g. sandbox write allow-lists, mount namespaces, or file permissions) restricting file write access strictly to the assigned worktree path.
+Every agent process executing in an `EXECUTION_WORKTREE` (such as primary implementer, reviewer/auditor when writing, remediation, or integration agents) SHALL be executed within an OS/process-level write confinement boundary (e.g. sandbox write allow-lists, mount namespaces, or file permissions) restricting file write access strictly to the assigned worktree path.
 
 #### Scenario: Agent attempts shell write into RUNTIME checkout
 GIVEN an agent process executing inside an EXECUTION_WORKTREE
@@ -72,7 +72,7 @@ AND reason_code SHALL be CONFLICT.
 
 ### Requirement: Central workspace mutation authorization guard
 
-All SDLC filesystem edits, Git operations, worktree creation/deletion, and OpenSpec operations across mini me SHALL pass through a central `ManagedWorkspaceGuard` before execution.
+All SDLC filesystem edits, Git operations, worktree creation/deletion, and OpenSpec operations across mini me SHALL pass through a central `ManagedWorkspaceGuard` policy authority before execution.
 
 #### Scenario: Workspace target outside trusted managed root denied
 GIVEN a requested filesystem or Git mutation
@@ -110,15 +110,22 @@ THEN verification SHALL return outcome UNKNOWN
 AND reason_code SHALL be UNOBSERVABLE
 AND mutation SHALL be strictly BLOCKED.
 
-### Requirement: Durable worktree ownership and 4-way reconciliation protocol
+### Requirement: Pre-creation worktree ownership order and 4-way reconciliation
 
-Authoritative worktree ownership SHALL be stored in durable database storage (`OrchestrationWorktreeOwnership`) outside the mutable worktree filesystem, and cleanup operations SHALL execute 4-way reconciliation (durable DB record, canonical path, Git `worktree list` observation, and in-tree marker if present).
+Before executing any worktree creation mutation on disk (e.g. `git worktree add`), WorktreeManager SHALL persist and commit a durable `OrchestrationWorktreeOwnership` record with `creation_state = PENDING`, and cleanup operations SHALL execute 4-way reconciliation (durable DB record, canonical path, Git `worktree list` observation, and in-tree marker if present).
 
-#### Scenario: Ephemeral worktree created with durable DB ownership record
+#### Scenario: Durable PENDING ownership is committed before worktree side effect
 GIVEN a request to spawn an execution worktree for job J and run R
-WHEN WorktreeManager creates the worktree under `<managed-root>/<project-id>/worktrees/<run-id>`
-THEN it SHALL write a durable `OrchestrationWorktreeOwnership` record in DB with creation_state = "CREATED"
-AND failure to persist or verify the durable DB record SHALL abort worktree initialization with outcome FAILURE and reason_code POSTCONDITION_NOT_PROVEN.
+WHEN WorktreeManager prepares worktree initialization under `<managed-root>/<project-id>/worktrees/<run-id>`
+THEN it SHALL first persist and COMMIT a durable `OrchestrationWorktreeOwnership` record in DB with creation_state = "PENDING"
+AND only AFTER durable DB commit confirmation SHALL it execute `git worktree add` or filesystem creation mutations
+AND upon successful creation postcondition verification, it SHALL transition the DB ownership state to "CREATED".
+
+#### Scenario: Failure to persist PENDING record prevents worktree creation
+GIVEN a request to spawn an execution worktree
+WHEN persisting or committing the durable `OrchestrationWorktreeOwnership` record with creation_state = "PENDING" fails
+THEN WorktreeManager SHALL NOT execute `git worktree add` or any filesystem creation mutation
+AND the operation SHALL fail closed immediately with outcome FAILURE and reason_code POSTCONDITION_NOT_PROVEN.
 
 #### Scenario: In-tree marker alone without DB record cannot authorize deletion
 GIVEN a cleanup task inspecting directory `<managed-root>/<project-id>/worktrees/unowned-folder`

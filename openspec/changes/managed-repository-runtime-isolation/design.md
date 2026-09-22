@@ -50,7 +50,7 @@ class WorkspaceRole(str, Enum):
 |  |  +-----------------------------------------------------------------------+  |  |
 |  |  | EXECUTION WORKTREES (e.g. .../<project-id>/worktrees/<run-id>)        |  |  |
 |  |  | - Ephemeral isolated workspaces for jobs/runs/candidates               |  |  |
-|  |  | - Carries OS/process-level write confinement boundary                   |  |  |
+|  |  | - Carries OS/process-level write confinement boundary for agents        |  |  |
 |  |  | - Agent code edits & review testing executed here ONLY                |  |  |
 |  |  +-----------------------------------------------------------------------+  |  |
 |  +-----------------------------------------------------------------------------+  |
@@ -72,7 +72,7 @@ class WorkspaceRole(str, Enum):
 3. **`EXECUTION_WORKTREE`**:
    - An ephemeral Git worktree or isolated workspace derived from `MANAGED_REPOSITORY` for a specific job, run, or change.
    - Resides strictly under `<managed-root>/<project-id>/worktrees/<worktree-id>`.
-   - Bound to explicit job ownership metadata in durable DB storage and OS process write confinement.
+   - Bound to explicit job ownership metadata in durable DB storage and OS process write confinement for arbitrary-command agent subprocesses.
    - Agent code edits, pytest executions, auditor reviews, and candidate commits MUST happen strictly inside an `EXECUTION_WORKTREE`.
 
 4. **`UNKNOWN`**:
@@ -85,20 +85,92 @@ class WorkspaceRole(str, Enum):
 
 ---
 
-## Agent Write Confinement — OS & Process Enforcement Boundary
+## Dual Control Model: ManagedWorkspaceGuard vs Process Write Confinement
 
-`ManagedWorkspaceGuard` serves as the application policy authority. However, runtime immutability MUST NOT depend solely on application-level pre-checks. Once launched, an agent process (e.g., executing implementer or reviewer tool instructions) could attempt to bypass application guards by issuing explicit shell commands (`cd /opt/minime/app && touch x`), writing absolute paths outside the worktree, or traversing symlinks.
+The system separates application-level policy authorization from OS-level sub-process write confinement:
 
-### Enforcement Boundary Requirement
-Every agent process executing in an `EXECUTION_WORKTREE` MUST be executed within an OS or process-level **write confinement boundary** that restricts file write access strictly to the assigned worktree path.
+```
++-----------------------------------------------------------------------------------+
+|                                 DUAL CONTROL MODEL                                |
+|                                                                                   |
+|  +-----------------------------------------------------------------------------+  |
+|  | CONTROL 1: ManagedWorkspaceGuard (Policy Authority)                         |  |
+|  | - Applies to ALL managed SDLC writers (internal services & agent runners)    |  |
+|  | - Validates path canonicalization, trusted-root, role, & remote identity    |  |
+|  +-----------------------------------------------------------------------------+  |
+|                                        |                                          |
+|                                        v                                          |
+|  +-----------------------------------------------------------------------------+  |
+|  | CONTROL 2: OS / Process Write Confinement (Enforcement Boundary)            |  |
+|  | - Applied SPECIFICALLY to untrusted / agent-executed subprocesses             |  |
+|  | - Restricts filesystem write syscalls strictly to assigned worktree path     |  |
+|  | - Prevents sandbox escape attempts (cd /opt/minime/app, absolute path, etc)  |  |
+|  +-----------------------------------------------------------------------------+  |
++-----------------------------------------------------------------------------------+
+```
 
-Supported enforcement mechanisms include:
-- **Process Sandbox / Write Allow-list**: OS process sandboxing (e.g., macOS App Sandbox / `sandbox-exec`, Linux landlock / seccomp / bubblewrap) restricting write syscalls exclusively to `<assigned-worktree-path>`.
-- **Filesystem Permissions**: Running agent sub-processes under an execution identity/user that lacks write permissions on `RUNTIME` and host paths outside `<managed-root>`.
-- **Container / Mount Namespaces**: Mounting `RUNTIME` and host filesystem paths as read-only (`ro`), with only the assigned `EXECUTION_WORKTREE` mounted read-write (`rw`).
+### 1. `ManagedWorkspaceGuard` (Application Policy Authority)
+- **Scope**: ALL managed SDLC filesystem and Git writers across mini me MUST pass through `ManagedWorkspaceGuard` before executing a side effect.
+- **Writers Covered**: `WorktreeManager`, orchestration setup, `OpenSpecSyncService`, `OpenSpecArchiveService`, Git branch/commit operations, post-merge cleanup, restart recovery, onboarding handlers, control-plane reconciliation, and self-hosting flows.
+- **Responsibility**: Inspects project binding, canonicalizes paths (`os.path.realpath`), verifies trusted managed-root containment, rejects `..` path traversal and symlink escapes, verifies normalized Git remote identity, and checks role permissions.
 
-### Required Write Confinement Invariant
-An agent process executing in `EXECUTION_WORKTREE` MUST NOT be able to write `RUNTIME` or any filesystem path outside its authorized write scope, even if the agent explicitly attempts to do so via direct process commands or symlinks.
+### 2. OS / Process-Level Write Confinement (Execution Enforcement Boundary)
+- **Scope**: Required SPECIFICALLY for untrusted or agent-executed subprocesses that can issue arbitrary shell commands or arbitrary filesystem operations.
+- **Subprocesses Covered**:
+  - Primary implementer agent processes.
+  - Reviewer / auditor agent processes when capable of file writes.
+  - Remediation and conflict-resolution agent processes.
+  - Any future arbitrary-command execution agent runner.
+- **Mechanism**: Enforced via OS sandboxing (e.g. `sandbox-exec` / seccomp / landlock), unprivileged execution identities, or container mount namespaces mounting `RUNTIME` and host paths read-only (`ro`) and only the assigned worktree read-write (`rw`).
+- **Trusted Internal Writers**: Trusted internal service-side writers (e.g. `OpenSpecSyncService`, `WorktreeManager`) do NOT run inside an agent sandbox wrapper; they remain constrained by `ManagedWorkspaceGuard`, path canonicalization, and Stage B fail-closed postcondition verification.
+
+---
+
+## Pre-Creation Ordering & Worktree Ownership Protocol
+
+In-tree marker files like `.minime-worktree.json` reside inside the worktree directory and are writable by executing agents. Therefore, an in-tree file MUST NOT be the sole authoritative evidence authorizing worktree creation, cleanup, or recovery.
+
+### 1. Mandatory Pre-Creation Worktree Order
+Before executing ANY filesystem or Git mutation that can create a worktree on disk (such as `git worktree add`), `WorktreeManager` MUST enforce the following exact sequence:
+
+```
+[1. Resolve + Authorize Path via Guard]
+                 |
+                 v
+[2. Persist OrchestrationWorktreeOwnership in DB (creation_state = PENDING)]
+                 |
+                 v
+[3. COMMIT & Durably Verify DB PENDING Record]  <--- If fails: STOP (No git worktree add)
+                 |
+                 v
+[4. Execute git worktree add Mutation]
+                 |
+                 v
+[5. Verify Filesystem / Git Postconditions]
+                 |
+                 v
+[6. Transition DB Ownership to creation_state = CREATED]
+```
+
+#### Failure at Step 2 or 3
+If persisting or committing the `PENDING` DB record fails:
+- `WorktreeManager` MUST NOT execute `git worktree add`.
+- The operation fails closed immediately with outcome `FAILURE` and reason_code `POSTCONDITION_NOT_PROVEN` or `DATABASE_ERROR`.
+- No un-tracked directory or orphaned Git worktree is created on disk.
+
+### 2. Four-Way Reconciliation for Cleanup & Deletion
+`WorktreeManager` and post-merge cleanup tasks MUST execute 4-way reconciliation before deleting any worktree directory:
+1. **Durable Ownership Record**: Query DB for `OrchestrationWorktreeOwnership` matching `canonical_worktree_path`, `project_id`, and `job_id`.
+2. **Canonical Path Matching**: Verify actual resolved path on disk equals `durable_record.canonical_worktree_path`.
+3. **Git Worktree Observation**: Execute `git worktree list` on `MANAGED_REPOSITORY` and verify Git authoritatively recognizes the worktree.
+4. **In-Tree Marker (Corroborating)**: Inspect `.minime-worktree.json` if present. A marker corroborates ownership, but a marker ALONE without a matching DB record MUST NEVER authorize deletion.
+
+If an agent spoofs or modifies `.minime-worktree.json`, the spoofed marker is rejected during DB reconciliation. Unowned, un-matched, or ambiguous directories MUST NOT be deleted automatically; they MUST return `UNKNOWN` / `EVIDENCE_INSUFFICIENT` and be preserved for operator review (`NEEDS_HUMAN`).
+
+### 3. Fail-Closed Partial Worktree Recovery Protocol
+To resolve partial worktree cleanup after a process crash during creation:
+- **Authorized Recovery**: If a durable DB record exists with `creation_state = "PENDING"` (committed at Step 3 before crash), restart recovery authoritatively proves mini me initiated creation for that exact canonical path and `job_id`. Recovery MAY reconcile and prune the incomplete worktree directory safely after verifying path and repository identity against the DB record.
+- **Forbidden Pruning**: If no durable DB record exists (`PENDING` or `CREATED`), or if DB ownership cannot be authoritatively established, the directory MUST NOT be deleted. Recovery returns `UNKNOWN` / `EVIDENCE_INSUFFICIENT` and preserves the directory for operator attention (`NEEDS_HUMAN`).
 
 ---
 
@@ -108,7 +180,7 @@ When mini me manages its own repository (`mini-me` managing `mini-me`):
 
 1. `RUNTIME` (e.g. `/opt/minime/app`) and `MANAGED_REPOSITORY` (e.g. `/opt/minime/managed-projects/mini-me/repository`) **MUST remain two distinct filesystem and repository identities**.
 2. **Identity Equality Fallacy**: Equality of repository URL (`github.com/silverberdi/mini-me`), project name (`mini-me`), commit SHA (`1f0d15...`), or working tree contents DOES NOT authorize using `RUNTIME` as a managed workspace.
-3. Agents working on `mini-me` tasks write code inside `/opt/minime/managed-projects/mini-me/worktrees/<run-id>` under write confinement, NEVER in `/opt/minime/app`.
+3. Agents working on `mini-me` tasks write code inside `/opt/minime/managed-projects/mini-me/worktrees/<run-id>` under process write confinement, NEVER in `/opt/minime/app`.
 4. OpenSpec sync and archive for `mini-me` changes update `/opt/minime/managed-projects/mini-me/repository`, NEVER `/opt/minime/app`.
 5. Updating `/opt/minime/app` occurs ONLY via an explicit `DeploymentAuthority` flow.
 
@@ -176,46 +248,7 @@ class WorkspaceMutationDecision(BaseModel):
 
 ---
 
-## Durable Worktree Ownership & Safe Reconciliation Protocol
-
-In-tree marker files like `.minime-worktree.json` reside inside the worktree directory and are writable by executing agents. Therefore, an in-tree file MUST NOT be the sole authoritative evidence authorizing worktree deletion or cleanup.
-
-### 1. Authoritative Durable DB Record
-Authoritative worktree ownership MUST be maintained in durable database storage outside the mutable worktree filesystem:
-
-```python
-class OrchestrationWorktreeOwnership(BaseModel):
-    worktree_id: str
-    project_id: str
-    job_id: str
-    run_id: str
-    change_name: str
-    canonical_worktree_path: Path
-    source_repository_identity: str
-    source_base_sha: str
-    branch: str
-    creation_state: str  # PENDING, CREATED, DELETING, DELETED
-    created_at: datetime
-    updated_at: datetime
-```
-
-### 2. Four-Way Reconciliation for Cleanup & Deletion
-`WorktreeManager` and cleanup tasks MUST execute 4-way reconciliation before deleting any worktree directory:
-1. **Durable Ownership Record**: Query DB for `OrchestrationWorktreeOwnership` matching `canonical_worktree_path`, `project_id`, and `job_id`.
-2. **Canonical Path Matching**: Verify actual resolved path on disk equals `durable_record.canonical_worktree_path`.
-3. **Git Worktree Observation**: Execute `git worktree list` on `MANAGED_REPOSITORY` and verify Git authoritatively recognizes the worktree.
-4. **In-Tree Marker (Corroborating)**: Inspect `.minime-worktree.json` if present. A marker corroborates ownership, but a marker ALONE without a matching DB record MUST NEVER authorize deletion.
-
-If an agent spoofs or modifies `.minime-worktree.json`, the spoofed marker is rejected during DB reconciliation. Unowned, un-matched, or ambiguous directories MUST NOT be deleted automatically; they MUST return `UNKNOWN` / `EVIDENCE_INSUFFICIENT` and be preserved for operator review (`NEEDS_HUMAN`).
-
-### 3. Partial Worktree Recovery Protocol
-To resolve partial worktree cleanup after a crash during `git worktree add`:
-- **Allowed Recovery**: If a durable pre-creation DB record (`creation_state = "PENDING"`) authoritatively proves mini me initiated creation of the exact canonical path for the exact `job_id`/`run_id`, recovery MAY reconcile and prune the incomplete worktree directory after verifying path and repository identity against the DB record.
-- **Forbidden Pruning**: If no durable DB record exists for the path, or if DB ownership cannot be authoritatively established, the directory MUST NOT be deleted. Recovery returns `UNKNOWN` / `EVIDENCE_INSUFFICIENT` and preserves the directory for operator attention.
-
----
-
-## Formalized Deployment Exception to Runtime Immutability
+## Formalized Deployment Authority Boundary
 
 `ManagedWorkspaceGuard` governs **MANAGED SDLC MUTATIONS**. SDLC callers (orchestration drivers, agent runners, OpenSpec sync/archive, branch cleanup tasks) can NEVER receive authority from `ManagedWorkspaceGuard` to mutate `RUNTIME`.
 
@@ -242,23 +275,23 @@ To resolve partial worktree cleanup after a crash during `git worktree add`:
 
 ## Inventory of Covered Writers
 
-The following operations MUST pass through `ManagedWorkspaceGuard` and process write confinement before execution:
+All SDLC writers MUST pass through `ManagedWorkspaceGuard`, and arbitrary-command agent subprocesses MUST additionally execute under process write confinement:
 
-1. **`WorktreeManager`**: Creation, setup, and deletion of Git worktrees.
-2. **Orchestration Startup & Setup**: Worktree initialization and base checkout.
-3. **Primary Implementer Execution**: Agent workspace resolution and file modification tools.
-4. **Reviewer Execution**: Auditor checkout, test runner, and patch application.
-5. **Remediation & Integration Worktrees**: Worktrees created for conflict resolution or candidate remediation.
-6. **`OpenSpecSyncService`**: Reading delta specs and writing canonical main specs in `openspec/specs/`.
-7. **`OpenSpecArchiveService`**: Relocating completed change directories to `openspec/changes/archive/`.
-8. **OpenSpec Change Authoring**: `openspec new` and change proposal updates.
-9. **Git Branch Operations**: Creation, checkout, and deletion of local/remote branches.
-10. **Git Commit & Push**: Authoring candidate commits and pushing to remotes.
-11. **Post-Merge Cleanup**: Local branch deletion, worktree pruning, and archive verification.
-12. **Restart Recovery**: Re-attaching to or cleaning up worktrees after process restart.
-13. **Control Plane / Manual Reconciliation**: Manual operator actions touching workspace files.
-14. **Self-Hosting Workflows**: All SDLC operations when managing `mini-me`.
-15. **Deployment Handoff Boundary**: Promotion artifact packaging.
+1. **`WorktreeManager`**: Creation, setup, and deletion of Git worktrees (passes `ManagedWorkspaceGuard`; enforces pre-creation DB PENDING ordering).
+2. **Orchestration Startup & Setup**: Worktree initialization and base checkout (passes `ManagedWorkspaceGuard`).
+3. **Primary Implementer Execution**: Agent workspace resolution and file modification tools (passes `ManagedWorkspaceGuard` AND runs under OS process write confinement).
+4. **Reviewer Execution**: Auditor checkout, test runner, and patch application (passes `ManagedWorkspaceGuard` AND runs under OS process write confinement when capable of writes).
+5. **Remediation & Integration Worktrees**: Worktrees created for conflict resolution or candidate remediation (passes `ManagedWorkspaceGuard` AND runs under OS process write confinement for agent execution).
+6. **`OpenSpecSyncService`**: Reading delta specs and writing canonical main specs in `openspec/specs/` (passes `ManagedWorkspaceGuard`).
+7. **`OpenSpecArchiveService`**: Relocating completed change directories to `openspec/changes/archive/` (passes `ManagedWorkspaceGuard`).
+8. **OpenSpec Change Authoring**: `openspec new` and change proposal updates (passes `ManagedWorkspaceGuard`).
+9. **Git Branch Operations**: Creation, checkout, and deletion of local/remote branches (passes `ManagedWorkspaceGuard`).
+10. **Git Commit & Push**: Authoring candidate commits and pushing to remotes (passes `ManagedWorkspaceGuard`).
+11. **Post-Merge Cleanup**: Local branch deletion, worktree pruning, and archive verification (passes `ManagedWorkspaceGuard`; executes 4-way DB reconciliation).
+12. **Restart Recovery**: Re-attaching to or cleaning up worktrees after process restart (passes `ManagedWorkspaceGuard`; requires durable DB PENDING/CREATED record for recovery).
+13. **Control Plane / Manual Reconciliation**: Manual operator actions touching workspace files (passes `ManagedWorkspaceGuard`).
+14. **Self-Hosting Workflows**: All SDLC operations when managing `mini-me` (passes `ManagedWorkspaceGuard` AND process write confinement for agents).
+15. **Deployment Handoff Boundary**: Promotion artifact packaging (passes `ManagedWorkspaceGuard` for artifact creation; hands off to `DeploymentAuthority`).
 
 ---
 
@@ -285,6 +318,7 @@ Workspace identity and mutation guard decisions MUST map directly to Stage B typ
 | Workspace identity unproven or missing | `UNKNOWN` | `EVIDENCE_INSUFFICIENT` | `UNSAFE` | Block execution; request binding |
 | SDLC mutation requested against `RUNTIME` | `FAILURE` | `POLICY_DENIED` | `UNSAFE` | Block mutation; log security violation |
 | Agent process write escape attempt | `FAILURE` | `POLICY_DENIED` | `UNSAFE` | Terminate process; deny write |
+| DB PENDING persistence failure | `FAILURE` | `POSTCONDITION_NOT_PROVEN` | `UNSAFE` | Block worktree creation |
 | Symlink escape / path traversal | `FAILURE` | `POLICY_DENIED` | `UNSAFE` | Block mutation; reject path |
 | Git remote identity mismatch | `FAILURE` | `CONFLICT` | `UNSAFE` | Block mutation; reject repository |
 | Unowned/ambiguous worktree cleanup | `UNKNOWN` | `EVIDENCE_INSUFFICIENT` | `UNSAFE` | Preserve folder; require human review |
@@ -301,7 +335,7 @@ Fresh work MUST NOT advance from `READY` to `IN_PROGRESS` if any of the followin
 3. `ManagedWorkspaceGuard` fails Git remote verification against `canonical_repository_identity`.
 4. Workspace role classification yields `RUNTIME` or `UNKNOWN`.
 5. OS process write confinement boundary cannot be verified for executing agent runners.
-6. Creation of an `EXECUTION_WORKTREE` under the authorized managed root fails postcondition verification.
+6. Creation of an `EXECUTION_WORKTREE` under the authorized managed root fails pre-creation DB `PENDING` persistence or postcondition verification.
 
 ---
 
@@ -318,6 +352,7 @@ Fresh work MUST NOT advance from `READY` to `IN_PROGRESS` if any of the followin
 - **Invariant 9**: Worktree cleanup CANNOT delete an unowned, un-marked, or ambiguous directory lacking durable DB ownership proof.
 - **Invariant 10**: `ManagedWorkspaceGuard` DENIES all SDLC mutations against `RUNTIME`; only an explicit, separate `DeploymentAuthority` MAY update `RUNTIME` from a verified artifact or commit SHA without granting managed-workspace semantics to `RUNTIME`.
 - **Invariant 11**: An agent process executing in `EXECUTION_WORKTREE` MUST NOT be able to write `RUNTIME` or any path outside its assigned worktree, enforced at the OS/process level.
+- **Invariant 12**: Durable `OrchestrationWorktreeOwnership` with `creation_state = PENDING` MUST be committed to DB before `git worktree add` or any creation mutation is executed.
 
 ---
 
