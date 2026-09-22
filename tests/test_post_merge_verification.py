@@ -75,10 +75,17 @@ def _make_change(
     name: str = "test-change",
     delta: str = "# Spec: Cap1\n\n## Requirement: R1\n",
 ) -> Path:
+    import subprocess
+    if not (tmp_path / ".git").exists():
+        subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=False)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, capture_output=True, check=False)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=False)
+        subprocess.run(["git", "commit", "--allow-empty", "-m", "init"], cwd=tmp_path, capture_output=True, check=False)
     change_dir = tmp_path / "openspec" / "changes" / name
     specs_dir = change_dir / "specs" / "cap1"
-    specs_dir.mkdir(parents=True)
+    specs_dir.mkdir(parents=True, exist_ok=True)
     (specs_dir / "spec.md").write_text(delta)
+    (change_dir / "proposal.md").write_text("# Proposal\n")
     (change_dir / "tasks.md").write_text("- [x] 1.1 Done\n")
     return change_dir
 
@@ -433,4 +440,114 @@ def test_sync_and_archive_retry_safety_semantics(tmp_path: Path):
     archive_res = service.archive_change("openspec", "test-change", target_date="2026-09-03")
     assert archive_res.outcome == ExternalOutcome.SUCCESS
     assert archive_res.retry_safety == RetrySafety.UNSAFE
+
+
+def test_local_branch_authoritative_absent_returns_success_already_absent(tmp_path: Path):
+    import subprocess
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=False)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, capture_output=True, check=False)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=False)
+    subprocess.run(["git", "commit", "--allow-empty", "-m", "init"], cwd=tmp_path, capture_output=True, check=False)
+    service = PostMergeReconciliationService(uow=InMemoryUnitOfWork(), project_root=tmp_path, github_adapter=_github_adapter())
+    res = service._delete_local_branch("non-existent-branch")
+    assert res.outcome == ExternalOutcome.SUCCESS
+    assert res.reason_code == ExternalReasonCode.ALREADY_ABSENT
+
+
+def test_local_branch_show_ref_error_returns_unknown(tmp_path: Path, monkeypatch):
+    service = PostMergeReconciliationService(uow=InMemoryUnitOfWork(), project_root=tmp_path, github_adapter=_github_adapter())
+    # Mock subprocess.run for show-ref pre-check to return exit code 128 (fatal git repo error)
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *args, **kwargs: MagicMock(returncode=128, stderr="fatal: not a git repository"),
+    )
+    res = service._delete_local_branch("some-branch")
+    assert res.outcome == ExternalOutcome.UNKNOWN
+    assert res.reason_code == ExternalReasonCode.UNOBSERVABLE
+    assert res.data is False
+
+
+def test_local_branch_post_check_unobservable_returns_unknown(tmp_path: Path, monkeypatch):
+    service = PostMergeReconciliationService(uow=InMemoryUnitOfWork(), project_root=tmp_path, github_adapter=_github_adapter())
+    calls = 0
+
+    def mock_run(cmd, **kwargs):
+        nonlocal calls
+        calls += 1
+        proc = MagicMock()
+        if "branch" in cmd:
+            proc.returncode = 0
+            return proc
+        # show-ref calls: pre-check (call 1) returns 0 (branch exists), post-check (call 2) returns 128 (error)
+        if calls == 1:
+            proc.returncode = 0
+        else:
+            proc.returncode = 128
+            proc.stderr = "git error"
+        return proc
+
+    monkeypatch.setattr("subprocess.run", mock_run)
+    res = service._delete_local_branch("test-branch")
+    assert res.outcome == ExternalOutcome.UNKNOWN
+    assert res.reason_code == ExternalReasonCode.UNOBSERVABLE
+    assert res.data is False
+
+
+def test_worktree_scan_failure_returns_unknown_and_blocks_completion(tmp_path: Path, monkeypatch):
+    uow = InMemoryUnitOfWork()
+    _setup_uow(uow)
+    _make_change(tmp_path)
+
+    service = PostMergeReconciliationService(uow=uow, project_root=tmp_path, github_adapter=_github_adapter())
+    service.verify_candidate_ancestry = MagicMock(return_value=True)
+
+    # Force worktree_path scanning to throw an exception
+    monkeypatch.setattr(
+        service.worktree_manager,
+        "worktree_path",
+        MagicMock(side_effect=RuntimeError("Disk I/O failure")),
+    )
+
+    result = service.reconcile_post_merge("mini-me", "test-change", run_id="run-123")
+
+    assert result.success is False
+    assert result.worktree_cleaned is False
+    assert result.terminal_stage is not OrchestrationStage.COMPLETED
+    assert "worktree_cleanup" in result.error_message
+    event_types = [e.event_type for e in uow._events]
+    assert EventType.WORKTREE_CLEANED not in event_types
+
+
+def test_archive_verify_fails_when_historical_manifest_missing_and_canonical_artifact_absent(tmp_path: Path):
+    service = OpenSpecSyncService(tmp_path)
+    archive_dir = tmp_path / "openspec" / "changes" / "archive" / "2026-09-03-test-change"
+    archive_dir.mkdir(parents=True)
+    # Only proposal.md exists in target archive; tasks.md is missing!
+    (archive_dir / "proposal.md").write_text("# Proposal\n")
+
+    # Pass None for archived_path and no expected manifest; verify_archive MUST NOT self-prove success!
+    res = service.verify_archive("openspec", "test-change", archive_dir)
+    assert res.outcome == ExternalOutcome.FAILURE
+    assert res.data is False
+    assert "missing or empty expected files" in res.error_message
+
+
+def test_sync_change_specs_capability_dir_missing_spec_md_returns_failure(tmp_path: Path):
+    service = OpenSpecSyncService(tmp_path)
+
+    # Setup change specs with cap1 having spec.md and cap2 missing spec.md
+    change_dir = tmp_path / "openspec" / "changes" / "test-change"
+    cap1_dir = change_dir / "specs" / "cap1"
+    cap2_dir = change_dir / "specs" / "cap2"
+    cap1_dir.mkdir(parents=True)
+    cap2_dir.mkdir(parents=True)
+
+    (cap1_dir / "spec.md").write_text("# Spec Cap1\n## Requirement: R1\n")
+    # cap2_dir intentionally missing spec.md!
+
+    res = service.sync_change_specs("openspec", "test-change")
+    assert res.outcome == ExternalOutcome.FAILURE
+    assert res.reason_code == ExternalReasonCode.EVIDENCE_INSUFFICIENT
+    assert res.data == []
+    assert "cap2" in res.error_message
 

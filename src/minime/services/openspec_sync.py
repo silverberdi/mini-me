@@ -73,7 +73,14 @@ class OpenSpecSyncService:
             for cap_dir in cap_dirs:
                 delta_spec_file = cap_dir / "spec.md"
                 if not delta_spec_file.exists():
-                    continue
+                    return ExternalActionResult(
+                        outcome=ExternalOutcome.FAILURE,
+                        source_adapter="openspec_sync",
+                        reason_code=ExternalReasonCode.EVIDENCE_INSUFFICIENT,
+                        retry_safety=RetrySafety.SAFE,
+                        data=[],
+                        error_message=f"Capability directory '{cap_dir.name}' is missing required 'spec.md' artifact.",
+                    )
 
                 capability_name = cap_dir.name
                 target_cap_dir = main_specs_dir / capability_name
@@ -188,7 +195,20 @@ class OpenSpecSyncService:
             )
 
         if not change_dir.exists():
+            expected_manifest: list[str] = []
             if target_dir.exists():
+                for std_file in ["proposal.md", "tasks.md", "design.md"]:
+                    if (target_dir / std_file).exists():
+                        expected_manifest.append(std_file)
+                specs_dir = target_dir / "specs"
+                if specs_dir.exists():
+                    for spec_file in specs_dir.rglob("spec.md"):
+                        expected_manifest.append(str(spec_file.relative_to(target_dir)))
+                if "proposal.md" not in expected_manifest:
+                    expected_manifest.append("proposal.md")
+                if "tasks.md" not in expected_manifest:
+                    expected_manifest.append("tasks.md")
+
                 logger.info("Change '%s' is already archived at '%s'.", change_name, target_dir)
                 return ExternalActionResult(
                     outcome=ExternalOutcome.SUCCESS,
@@ -196,6 +216,7 @@ class OpenSpecSyncService:
                     reason_code=ExternalReasonCode.REUSED_EXISTING,
                     retry_safety=RetrySafety.SAFE,
                     data=target_dir,
+                    provider_detail=",".join(expected_manifest),
                     external_id=str(target_dir),
                 )
             alt_dir = self.project_root / openspec_path / "archive" / change_name
@@ -206,6 +227,7 @@ class OpenSpecSyncService:
                     reason_code=ExternalReasonCode.REUSED_EXISTING,
                     retry_safety=RetrySafety.SAFE,
                     data=alt_dir,
+                    provider_detail="proposal.md,tasks.md",
                     external_id=str(alt_dir),
                 )
             return ExternalActionResult(
@@ -427,9 +449,7 @@ class OpenSpecSyncService:
 
         if not change_dir.exists() and target_dir and target_dir.exists():
             if not manifest:
-                for std_file in ["proposal.md", "tasks.md"]:
-                    if (target_dir / std_file).exists():
-                        manifest.append(std_file)
+                manifest = ["proposal.md", "tasks.md"]
                 specs_dir = target_dir / "specs"
                 if specs_dir.exists():
                     for spec_file in specs_dir.rglob("spec.md"):

@@ -649,6 +649,8 @@ class PostMergeReconciliationService:
             )
 
         target_paths: list[Path] = []
+        scan_failed = False
+        scan_err: str = ""
         try:
             wt_path = self.worktree_manager.worktree_path(job_id)
             if wt_path.exists():
@@ -660,6 +662,18 @@ class PostMergeReconciliationService:
                         target_paths.append(child)
         except Exception as exc:
             logger.warning("Error scanning worktrees for job '%s': %s", job_id, exc)
+            scan_failed = True
+            scan_err = str(exc)
+
+        if scan_failed:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="worktree_manager",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.SAFE,
+                data=False,
+                error_message=f"Worktree scan failed for job '{job_id}': {scan_err}",
+            )
 
         if not target_paths:
             return ExternalActionResult(
@@ -673,16 +687,20 @@ class PostMergeReconciliationService:
         all_removed = True
         errors: list[str] = []
         for path in target_paths:
-            res = subprocess.run(
-                ["git", "worktree", "remove", "--force", str(path)],
-                cwd=self.project_root,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if path.exists() or res.returncode != 0:
+            try:
+                res = subprocess.run(
+                    ["git", "worktree", "remove", "--force", str(path)],
+                    cwd=self.project_root,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if path.exists() or res.returncode != 0:
+                    all_removed = False
+                    errors.append(f"Failed removing worktree at '{path}': rc={res.returncode}, stderr={res.stderr.strip()}")
+            except Exception as exc:
                 all_removed = False
-                errors.append(f"Failed removing worktree at '{path}': rc={res.returncode}, stderr={res.stderr.strip()}")
+                errors.append(f"Exception removing worktree at '{path}': {exc}")
 
         if all_removed:
             return ExternalActionResult(
@@ -704,14 +722,25 @@ class PostMergeReconciliationService:
 
     def _delete_local_branch(self, branch_name: str) -> ExternalActionResult[bool]:
         """Delete a local git branch fail-closed with postcondition verification."""
-        check_res = subprocess.run(
-            ["git", "show-ref", "--verify", f"refs/heads/{branch_name}"],
-            cwd=self.project_root,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if check_res.returncode != 0:
+        try:
+            check_res = subprocess.run(
+                ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch_name}"],
+                cwd=self.project_root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except Exception as exc:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="git_cli",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.SAFE,
+                data=False,
+                error_message=f"Git show-ref pre-check failed for branch '{branch_name}': {exc}",
+            )
+
+        if check_res.returncode == 1:
             return ExternalActionResult(
                 outcome=ExternalOutcome.SUCCESS,
                 source_adapter="git_cli",
@@ -719,22 +748,53 @@ class PostMergeReconciliationService:
                 retry_safety=RetrySafety.SAFE,
                 data=True,
             )
+        elif check_res.returncode != 0:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="git_cli",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.SAFE,
+                data=False,
+                error_message=f"Git show-ref pre-check failed with exit code {check_res.returncode}: {check_res.stderr.strip()}",
+            )
 
-        del_res = subprocess.run(
-            ["git", "branch", "-D", branch_name],
-            cwd=self.project_root,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        post_check = subprocess.run(
-            ["git", "show-ref", "--verify", f"refs/heads/{branch_name}"],
-            cwd=self.project_root,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if post_check.returncode != 0:
+        try:
+            del_res = subprocess.run(
+                ["git", "branch", "-D", branch_name],
+                cwd=self.project_root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except Exception as exc:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="git_cli",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.SAFE,
+                data=False,
+                error_message=f"Git branch deletion failed for '{branch_name}': {exc}",
+            )
+
+        try:
+            post_check = subprocess.run(
+                ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch_name}"],
+                cwd=self.project_root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except Exception as exc:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="git_cli",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.SAFE,
+                data=False,
+                error_message=f"Git show-ref post-check failed for branch '{branch_name}': {exc}",
+            )
+
+        if post_check.returncode == 1:
             return ExternalActionResult(
                 outcome=ExternalOutcome.SUCCESS,
                 source_adapter="git_cli",
@@ -742,15 +802,24 @@ class PostMergeReconciliationService:
                 retry_safety=RetrySafety.SAFE,
                 data=True,
             )
-
-        return ExternalActionResult(
-            outcome=ExternalOutcome.FAILURE,
-            source_adapter="git_cli",
-            reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
-            retry_safety=RetrySafety.SAFE,
-            data=False,
-            error_message=f"Local branch '{branch_name}' deletion failed (rc={del_res.returncode}): {del_res.stderr.strip()}",
-        )
+        elif post_check.returncode == 0:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="git_cli",
+                reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
+                retry_safety=RetrySafety.SAFE,
+                data=False,
+                error_message=f"Local branch '{branch_name}' still present after deletion (rc={del_res.returncode}): {del_res.stderr.strip()}",
+            )
+        else:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="git_cli",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.SAFE,
+                data=False,
+                error_message=f"Git show-ref post-check failed with exit code {post_check.returncode}: {post_check.stderr.strip()}",
+            )
 
     def _clean_worktree_and_branches(
         self, project_id: str, change_name: str, job_id: str | None = None

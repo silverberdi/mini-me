@@ -255,10 +255,17 @@ def test_post_merge_reconciliation_full_cycle(tmp_path: Path, mock_github_adapte
     )
     uow.jobs.save(job)
 
-    # Setup dummy change directory
+    # Setup dummy change directory and git repo
+    import subprocess
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=False)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, capture_output=True, check=False)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=False)
+    subprocess.run(["git", "commit", "--allow-empty", "-m", "init"], cwd=tmp_path, capture_output=True, check=False)
+
     change_dir = tmp_path / "openspec" / "changes" / "test-change" / "specs" / "cap1"
     change_dir.mkdir(parents=True)
     (change_dir / "spec.md").write_text("# Spec: Cap1\n## Requirement: R1\n")
+    (tmp_path / "openspec" / "changes" / "test-change" / "proposal.md").write_text("# Proposal\n")
     (tmp_path / "openspec" / "changes" / "test-change" / "tasks.md").write_text("- [x] Done\n")
 
     service = PostMergeReconciliationService(
@@ -360,10 +367,17 @@ def test_control_plane_reconcile_post_merge(tmp_path: Path, mock_github_adapter)
     )
     uow.jobs.save(job)
 
-    # Setup dummy change directory
+    # Setup dummy change directory and git repo
+    import subprocess
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=False)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, capture_output=True, check=False)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=False)
+    subprocess.run(["git", "commit", "--allow-empty", "-m", "init"], cwd=tmp_path, capture_output=True, check=False)
+
     change_dir = tmp_path / "openspec" / "changes" / "test-change" / "specs" / "cap1"
     change_dir.mkdir(parents=True)
     (change_dir / "spec.md").write_text("# Spec: Cap1\n## Requirement: R1\n")
+    (tmp_path / "openspec" / "changes" / "test-change" / "proposal.md").write_text("# Proposal\n")
     (tmp_path / "openspec" / "changes" / "test-change" / "tasks.md").write_text("- [x] Done\n")
 
     post_merge_service = PostMergeReconciliationService(
