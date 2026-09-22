@@ -10,13 +10,21 @@ Stage C (`managed-repository-runtime-isolation`) is governed by the foundational
 4. **External effects must be verifiable, idempotent, resumable**.
 5. **Deployed runtime must never be the managed project workspace**.
 
-Stage C focuses EXCLUSIVELY on Law 5 and its direct filesystem, repository, and operational implications.
+Stage C focuses EXCLUSIVELY on Law 5 and its direct filesystem, repository, process isolation, and operational implications.
 
 ---
 
-## Workspace Model Architecture
+## Workspace Role Model Architecture
 
-The system categorizes all filesystem paths into four explicit workspace roles:
+The system categorizes all filesystem paths into exactly four explicit workspace roles:
+
+```python
+class WorkspaceRole(str, Enum):
+    RUNTIME = "RUNTIME"
+    MANAGED_REPOSITORY = "MANAGED_REPOSITORY"
+    EXECUTION_WORKTREE = "EXECUTION_WORKTREE"
+    UNKNOWN = "UNKNOWN"
+```
 
 ```
 +-----------------------------------------------------------------------------------+
@@ -25,7 +33,7 @@ The system categorizes all filesystem paths into four explicit workspace roles:
 |  +-----------------------------------------------------------------------------+  |
 |  | [RUNTIME] Runtime Checkout (e.g. /opt/minime/app)                           |  |
 |  | - Running service binary & process code                                     |  |
-|  | - STRICTLY READ-ONLY for SDLC operations                                    |  |
+|  | - STRICTLY READ-ONLY for all SDLC operations & executing agents             |  |
 |  | - NEVER a managed workspace or worktree target                              |  |
 |  +-----------------------------------------------------------------------------+  |
 |                                                                                   |
@@ -35,39 +43,62 @@ The system categorizes all filesystem paths into four explicit workspace roles:
 |  |  +-----------------------------------------------------------------------+  |  |
 |  |  | MANAGED REPOSITORY ROOT (e.g. .../<project-id>/repository)             |  |  |
 |  |  | - Canonical base checkout & Git history for project                     |  |  |
-|  |  | - Contains Project OpenSpec Workspace (openspec/specs/, changes/)       |  |  |
+|  |  | - Hosts Project OpenSpec Workspace (openspec/specs/, changes/)          |  |  |
 |  |  | - Mutations restricted to authorized canonical sync/fetch operations    |  |  |
 |  |  +-----------------------------------------------------------------------+  |  |
 |  |                                                                             |  |
 |  |  +-----------------------------------------------------------------------+  |  |
 |  |  | EXECUTION WORKTREES (e.g. .../<project-id>/worktrees/<run-id>)        |  |  |
 |  |  | - Ephemeral isolated workspaces for jobs/runs/candidates               |  |  |
-|  |  | - Carries explicit ownership metadata (project_id, run_id, branch)     |  |  |
+|  |  | - Carries OS/process-level write confinement boundary                   |  |  |
 |  |  | - Agent code edits & review testing executed here ONLY                |  |  |
 |  |  +-----------------------------------------------------------------------+  |  |
 |  +-----------------------------------------------------------------------------+  |
 +-----------------------------------------------------------------------------------+
 ```
 
-### 1. Runtime Checkout (`RUNTIME`)
-- The active, running deployment checkout of mini me (e.g. `/opt/minime/app` or local service checkout).
-- Treated as a **read-only deployment artifact** from the perspective of project SDLC management.
-- Forbidden as an implementation target, worktree root, OpenSpec sync/archive destination, branch modification target, or agent writing workspace.
+### Role Taxonomy Definitions
 
-### 2. Managed Repository Root (`MANAGED_REPOSITORY`)
-- The canonical base checkout and Git history repository for a registered project, residing under a configured trusted managed root (e.g. `/opt/minime/managed-projects/<project-id>/repository`).
-- Physically and logically distinct from `RUNTIME`.
-- Hosts canonical project Git refs and default base branch (`main`/`master`).
+1. **`RUNTIME`**:
+   - The active, running deployment checkout of mini me (e.g. `/opt/minime/app` or local service checkout).
+   - Treated as a **read-only deployment artifact** from the perspective of project SDLC management and agent processes.
+   - Forbidden as an implementation target, worktree root, OpenSpec sync/archive destination, branch modification target, or agent writing workspace.
 
-### 3. Execution Worktree (`EXECUTION_WORKTREE`)
-- An ephemeral Git worktree or isolated workspace derived from `MANAGED_REPOSITORY` for a specific job, run, or change.
-- Resides strictly under `<managed-root>/<project-id>/worktrees/<worktree-id>`.
-- Bound to explicit job ownership metadata (`project_id`, `job_id`, `run_id`, `change_name`, `branch`, `source_base_sha`).
-- Agent code edits, pytest executions, auditor reviews, and candidate commits MUST happen strictly inside an `EXECUTION_WORKTREE`.
+2. **`MANAGED_REPOSITORY`**:
+   - The canonical base checkout and Git history repository for a registered project, residing under a configured trusted managed root (e.g. `/opt/minime/managed-projects/<project-id>/repository`).
+   - Physically and logically distinct from `RUNTIME`.
+   - Hosts canonical project Git refs, default base branch (`main`/`master`), and canonical Project OpenSpec artifacts.
 
-### 4. Project OpenSpec Workspace (`PROJECT_OPENSPEC_WORKSPACE`)
-- The OpenSpec artifacts (`openspec/specs/`, `openspec/changes/`) belonging to the managed project.
+3. **`EXECUTION_WORKTREE`**:
+   - An ephemeral Git worktree or isolated workspace derived from `MANAGED_REPOSITORY` for a specific job, run, or change.
+   - Resides strictly under `<managed-root>/<project-id>/worktrees/<worktree-id>`.
+   - Bound to explicit job ownership metadata in durable DB storage and OS process write confinement.
+   - Agent code edits, pytest executions, auditor reviews, and candidate commits MUST happen strictly inside an `EXECUTION_WORKTREE`.
+
+4. **`UNKNOWN`**:
+   - Any path whose role cannot be authoritatively established or that lies outside trusted managed roots.
+   - All mutations targeted at `UNKNOWN` paths fail closed (`EVIDENCE_INSUFFICIENT` / `POLICY_DENIED`).
+
+### Logical Subspace: Project OpenSpec Workspace
+- **Project OpenSpec Workspace** (`openspec/specs/`, `openspec/changes/`) is NOT an independent `WorkspaceRole`. It is a logical capability subtree located inside an authorized `MANAGED_REPOSITORY` or `EXECUTION_WORKTREE`.
 - All OpenSpec operations (`new`, `apply`, `verify`, `sync`, `archive`) for a managed project MUST resolve against the project's `MANAGED_REPOSITORY` or `EXECUTION_WORKTREE`, NEVER against the `RUNTIME` checkout.
+
+---
+
+## Agent Write Confinement — OS & Process Enforcement Boundary
+
+`ManagedWorkspaceGuard` serves as the application policy authority. However, runtime immutability MUST NOT depend solely on application-level pre-checks. Once launched, an agent process (e.g., executing implementer or reviewer tool instructions) could attempt to bypass application guards by issuing explicit shell commands (`cd /opt/minime/app && touch x`), writing absolute paths outside the worktree, or traversing symlinks.
+
+### Enforcement Boundary Requirement
+Every agent process executing in an `EXECUTION_WORKTREE` MUST be executed within an OS or process-level **write confinement boundary** that restricts file write access strictly to the assigned worktree path.
+
+Supported enforcement mechanisms include:
+- **Process Sandbox / Write Allow-list**: OS process sandboxing (e.g., macOS App Sandbox / `sandbox-exec`, Linux landlock / seccomp / bubblewrap) restricting write syscalls exclusively to `<assigned-worktree-path>`.
+- **Filesystem Permissions**: Running agent sub-processes under an execution identity/user that lacks write permissions on `RUNTIME` and host paths outside `<managed-root>`.
+- **Container / Mount Namespaces**: Mounting `RUNTIME` and host filesystem paths as read-only (`ro`), with only the assigned `EXECUTION_WORKTREE` mounted read-write (`rw`).
+
+### Required Write Confinement Invariant
+An agent process executing in `EXECUTION_WORKTREE` MUST NOT be able to write `RUNTIME` or any filesystem path outside its authorized write scope, even if the agent explicitly attempts to do so via direct process commands or symlinks.
 
 ---
 
@@ -77,45 +108,41 @@ When mini me manages its own repository (`mini-me` managing `mini-me`):
 
 1. `RUNTIME` (e.g. `/opt/minime/app`) and `MANAGED_REPOSITORY` (e.g. `/opt/minime/managed-projects/mini-me/repository`) **MUST remain two distinct filesystem and repository identities**.
 2. **Identity Equality Fallacy**: Equality of repository URL (`github.com/silverberdi/mini-me`), project name (`mini-me`), commit SHA (`1f0d15...`), or working tree contents DOES NOT authorize using `RUNTIME` as a managed workspace.
-3. Agents working on `mini-me` tasks write code inside `/opt/minime/managed-projects/mini-me/worktrees/<run-id>`, NEVER in `/opt/minime/app`.
+3. Agents working on `mini-me` tasks write code inside `/opt/minime/managed-projects/mini-me/worktrees/<run-id>` under write confinement, NEVER in `/opt/minime/app`.
 4. OpenSpec sync and archive for `mini-me` changes update `/opt/minime/managed-projects/mini-me/repository`, NEVER `/opt/minime/app`.
-5. Updating `/opt/minime/app` occurs ONLY via an explicit, separate deployment boundary step.
+5. Updating `/opt/minime/app` occurs ONLY via an explicit `DeploymentAuthority` flow.
 
 ---
 
-## Project Managed Repository Binding
+## Project Managed Repository Binding & Remote Identity
 
-Every managed project MUST have a persisted, verifiable binding:
+Every managed project MUST have a persisted, verifiable binding that explicitly separates Git remote alias name from normalized repository identity:
 
 ```python
-class WorkspaceRole(str, Enum):
-    RUNTIME = "RUNTIME"
-    MANAGED_REPOSITORY = "MANAGED_REPOSITORY"
-    EXECUTION_WORKTREE = "EXECUTION_WORKTREE"
-    UNKNOWN = "UNKNOWN"
-
 class ProjectManagedRepositoryBinding(BaseModel):
     project_id: str
-    repository_url: str
-    canonical_git_remote: str  # e.g. "origin", "git@github.com:org/repo.git"
-    managed_repository_root: Path  # Absolute, canonicalized path
-    worktree_parent_dir: Path      # Absolute, canonicalized path under managed root
-    default_base_branch: str       # e.g. "main"
+    canonical_repository_identity: str  # Normalized repo identity, e.g. "github.com/org/repo"
+    remote_name: str = "origin"          # Git remote alias name
+    managed_repository_root: Path        # Absolute, canonicalized path
+    worktree_parent_dir: Path            # Absolute, canonicalized path under managed root
+    default_base_branch: str             # e.g. "main"
     ownership_marker_filename: str = ".minime-managed-project.json"
     created_at: datetime
     updated_at: datetime
 ```
 
-### Binding Constraints
-- Path guessing, `cwd` inference, directory name heuristics, and title matching are **STRICTLY FORBIDDEN**.
-- If a project binding is missing or unverified, fresh execution admission is **BLOCKED**.
-- The `managed_repository_root` MUST NOT equal, contain, or be contained by `RUNTIME`.
+### Git Remote Verification & Identity Normalization
+When verifying Git repository remote identity:
+1. The guard executes `git remote get-url <remote_name>` (using `binding.remote_name`).
+2. The observed URL string is parsed and normalized to resolve protocol/format variations (e.g. `git@github.com:org/repo.git` and `https://github.com/org/repo.git` normalize to `github.com/org/repo`).
+3. The normalized observed identity MUST match `binding.canonical_repository_identity`.
+4. If parsing is unparseable or identity mismatches, verification returns `FAILURE` / `CONFLICT` or `UNKNOWN` / `UNOBSERVABLE` fail closed.
 
 ---
 
 ## Central `ManagedWorkspaceGuard` Architecture
 
-All filesystem and Git side effects across mini me MUST pass through a central authority: `ManagedWorkspaceGuard`.
+All SDLC filesystem and Git side effects across mini me MUST pass through `ManagedWorkspaceGuard`:
 
 ```python
 class WorkspaceMutationRequest(BaseModel):
@@ -140,18 +167,82 @@ class WorkspaceMutationDecision(BaseModel):
 3. **Runtime Protection Check**: Verify `resolved_path` does NOT overlap with `RUNTIME` (neither equal, prefix, nor parent).
 4. **Trusted Root Verification**: Verify `resolved_path` is strictly contained inside `managed_repository_root` or `worktree_parent_dir`. Reject symlink escapes and path traversal (`..`).
 5. **Role Classification**: Classify workspace role (`MANAGED_REPOSITORY` vs `EXECUTION_WORKTREE`). Reject `RUNTIME` or `UNKNOWN`.
-6. **Git Remote Verification**: Execute `git remote get-url origin` on target repository to verify canonical remote matches `binding.repository_url`.
+6. **Git Remote Verification**: Execute `git remote get-url <remote_name>` on target repository and compare normalized identity to `canonical_repository_identity`.
 7. **Operation Authorization**: Verify requested operation is permitted for the classified workspace role:
-   - `RUNTIME`: ALL mutations DENIED (`POLICY_DENIED`).
+   - `RUNTIME`: ALL SDLC mutations DENIED (`POLICY_DENIED`).
    - `MANAGED_REPOSITORY`: Base branch fetch, canonical OpenSpec sync/archive, and worktree spawn ALLOWED. Code edits and candidate commits DENIED.
    - `EXECUTION_WORKTREE`: Agent code edits, test execution, candidate branch/commit ALLOWED.
 8. **Return Typed Decision**: Return `WorkspaceMutationDecision` with fail-closed Stage B outcome semantics.
 
 ---
 
+## Durable Worktree Ownership & Safe Reconciliation Protocol
+
+In-tree marker files like `.minime-worktree.json` reside inside the worktree directory and are writable by executing agents. Therefore, an in-tree file MUST NOT be the sole authoritative evidence authorizing worktree deletion or cleanup.
+
+### 1. Authoritative Durable DB Record
+Authoritative worktree ownership MUST be maintained in durable database storage outside the mutable worktree filesystem:
+
+```python
+class OrchestrationWorktreeOwnership(BaseModel):
+    worktree_id: str
+    project_id: str
+    job_id: str
+    run_id: str
+    change_name: str
+    canonical_worktree_path: Path
+    source_repository_identity: str
+    source_base_sha: str
+    branch: str
+    creation_state: str  # PENDING, CREATED, DELETING, DELETED
+    created_at: datetime
+    updated_at: datetime
+```
+
+### 2. Four-Way Reconciliation for Cleanup & Deletion
+`WorktreeManager` and cleanup tasks MUST execute 4-way reconciliation before deleting any worktree directory:
+1. **Durable Ownership Record**: Query DB for `OrchestrationWorktreeOwnership` matching `canonical_worktree_path`, `project_id`, and `job_id`.
+2. **Canonical Path Matching**: Verify actual resolved path on disk equals `durable_record.canonical_worktree_path`.
+3. **Git Worktree Observation**: Execute `git worktree list` on `MANAGED_REPOSITORY` and verify Git authoritatively recognizes the worktree.
+4. **In-Tree Marker (Corroborating)**: Inspect `.minime-worktree.json` if present. A marker corroborates ownership, but a marker ALONE without a matching DB record MUST NEVER authorize deletion.
+
+If an agent spoofs or modifies `.minime-worktree.json`, the spoofed marker is rejected during DB reconciliation. Unowned, un-matched, or ambiguous directories MUST NOT be deleted automatically; they MUST return `UNKNOWN` / `EVIDENCE_INSUFFICIENT` and be preserved for operator review (`NEEDS_HUMAN`).
+
+### 3. Partial Worktree Recovery Protocol
+To resolve partial worktree cleanup after a crash during `git worktree add`:
+- **Allowed Recovery**: If a durable pre-creation DB record (`creation_state = "PENDING"`) authoritatively proves mini me initiated creation of the exact canonical path for the exact `job_id`/`run_id`, recovery MAY reconcile and prune the incomplete worktree directory after verifying path and repository identity against the DB record.
+- **Forbidden Pruning**: If no durable DB record exists for the path, or if DB ownership cannot be authoritatively established, the directory MUST NOT be deleted. Recovery returns `UNKNOWN` / `EVIDENCE_INSUFFICIENT` and preserves the directory for operator attention.
+
+---
+
+## Formalized Deployment Exception to Runtime Immutability
+
+`ManagedWorkspaceGuard` governs **MANAGED SDLC MUTATIONS**. SDLC callers (orchestration drivers, agent runners, OpenSpec sync/archive, branch cleanup tasks) can NEVER receive authority from `ManagedWorkspaceGuard` to mutate `RUNTIME`.
+
+```
++-----------------------------------------------------------------------------------+
+|                            AUTHORITY BOUNDARY SEPARATION                          |
+|                                                                                   |
+|  +-------------------------------------+   +-----------------------------------+  |
+|  | ManagedWorkspaceGuard               |   | DeploymentAuthority               |  |
+|  | - Governs SDLC mutations            |   | - Governs production deployment   |  |
+|  | - RUNTIME mutations ALWAYS DENIED   |   | - Unidirectional promotion        |  |
+|  | - SDLC callers cannot escalate      |   | - Separate explicit pipeline      |  |
+|  +-------------------------------------+   +-----------------------------------+  |
++-----------------------------------------------------------------------------------+
+```
+
+### Boundary Rules
+- SDLC callers MUST NOT impersonate, bypass, or escalate into `DeploymentAuthority`.
+- `DeploymentAuthority` executes via an explicit, separate deployment pipeline (e.g. service container replacement, artifact extraction, systemd reload).
+- Deployment MAY update `RUNTIME` files or binary state from a verified candidate commit SHA, but deployment NEVER grants `MANAGED_REPOSITORY` or `EXECUTION_WORKTREE` semantics to `RUNTIME`.
+- `RUNTIME` remains strictly read-only for all SDLC operations before, during, and after deployment.
+
+---
+
 ## Inventory of Covered Writers
 
-The following operations MUST pass through `ManagedWorkspaceGuard` before execution:
+The following operations MUST pass through `ManagedWorkspaceGuard` and process write confinement before execution:
 
 1. **`WorktreeManager`**: Creation, setup, and deletion of Git worktrees.
 2. **Orchestration Startup & Setup**: Worktree initialization and base checkout.
@@ -171,105 +262,16 @@ The following operations MUST pass through `ManagedWorkspaceGuard` before execut
 
 ---
 
-## Runtime Immutability Rules
-
-The deployed `RUNTIME` checkout is strictly immutable for SDLC activities:
-
-### Forbidden on `RUNTIME`
-- Agent file creation, modification, or deletion.
-- `git checkout`, `git branch`, `git commit`, `git push`, or `git reset`.
-- `openspec new`, `openspec sync`, `openspec archive`, or `openspec validate` targeted at runtime paths.
-- `git worktree add` deriving from runtime or pointing into runtime.
-- Branch cleanup commands inspecting or altering runtime refs.
-- Direct process self-modification or hot-patching.
-
-### Permitted on `RUNTIME`
-- Explicit, separate deployment pipeline execution (service update).
-- Read-only inspection of runtime SHA, version, or status.
-- Reading configuration or host environment secrets.
-
----
-
-## Deployment Boundary
-
-Stage C defines the boundary separating candidate development from runtime deployment:
-
-```
-+------------------------------------+           +------------------------------------+
-|         MANAGED REPOSITORY         |           |          DEPLOYED RUNTIME          |
-|                                    |           |                                    |
-| Verified Candidate SHA:            |  Deploy   | Active Runtime SHA:                |
-| 4b353cfcc31451264fd32c...          | --------> | 4b353cfcc31451264fd32c...          |
-| Location:                          |  Process  | Location:                          |
-| /opt/minime/managed/.../repository |           | /opt/minime/app                    |
-+------------------------------------+           +------------------------------------+
-```
-
-### Deployment Boundary Invariants
-- Deployment MAY fetch, copy, containerize, or promote an exact, verified candidate commit SHA to the runtime destination and restart the process.
-- Deployment MUST NOT grant managed repository or execution worktree semantics to `RUNTIME`.
-- Deployment MUST NOT use `RUNTIME` as the source worktree for the next change.
-- Equality of runtime SHA and managed candidate SHA does NOT collapse filesystem identity.
-
----
-
-## Git Identity & Remote Verification
-
-Before permitting mutations in a managed repository or worktree:
-
-1. **Repository Root Proof**: `git rev-parse --show-toplevel` MUST match the expected canonical path.
-2. **Git Remote Proof**: `git remote get-url origin` MUST match `binding.canonical_git_remote`.
-3. **Ownership Marker**: The repository directory MUST contain a valid `.minime-managed-project.json` file carrying the correct `project_id`.
-4. **Project Mismatch Denial**: A valid Git repository belonging to a different project URL or ID MUST be rejected with `FAILURE` / `CONFLICT`.
-
----
-
-## Worktree Ownership & Cleanup Safety
-
-To prevent destructive globbing or accidental deletion of unowned directories:
-
-1. **Explicit Metadata File**: Every execution worktree directory MUST contain a `.minime-worktree.json` metadata file:
-   ```json
-   {
-     "project_id": "mini-me",
-     "job_id": "job-123",
-     "run_id": "run-456",
-     "change_name": "managed-repository-runtime-isolation",
-     "source_repository": "git@github.com:silverberdi/mini-me.git",
-     "source_base_sha": "1f0d15cc31cc1fbc6f086b76b02c17706b742e51",
-     "branch": "architecture/managed-repository-runtime-isolation",
-     "created_at": "2026-09-21T21:24:00Z"
-   }
-   ```
-2. **Worktree Cleanup Rule**: `WorktreeManager` and post-merge cleanup tasks MUST ONLY delete worktrees whose `.minime-worktree.json` can be read, parsed, and authoritatively matched to `project_id` and `job_id`.
-3. **Ambiguous Folder Deletion**: Unowned, un-marked, or ambiguous folders encountered during cleanup MUST NOT be deleted automatically; they MUST be reported as `UNKNOWN` / `EVIDENCE_INSUFFICIENT` and flagged for operator review.
-
----
-
-## Legacy Workspace Aliasing Reconciliation
-
-For existing mini me installations where `RUNTIME` historically aliased the project checkout:
-
-1. **Aliasing Detection**: Startup readiness checks inspect project bindings. If `managed_repository_root` overlaps with `RUNTIME` (or if no binding exists and `cwd` is `RUNTIME`), legacy aliasing is flagged.
-2. **Admission Blocking**: Fresh work admission is strictly `BLOCKED` until reconciliation completes.
-3. **Reconciliation Process**:
-   - Create a dedicated managed repository root outside `RUNTIME` (e.g. `/opt/minime/managed-projects/<project-id>/repository`).
-   - Clone or initialize the canonical Git repository into the managed root.
-   - Verify Git remote, HEAD SHA, and ownership marker.
-   - Persist updated `ProjectManagedRepositoryBinding`.
-4. Only after successful reconciliation is admission unblocked.
-
----
-
 ## Observability & Telemetry
 
 The system MUST expose the following workspace isolation telemetry:
 
 - `project_id` and active `managed_repository_root` path.
-- Current `managed_repository` HEAD SHA and verified `canonical_git_remote`.
+- Current `managed_repository` HEAD SHA and verified `canonical_repository_identity`.
 - Deployed `RUNTIME` path and active `RUNTIME` SHA.
 - Isolation status boolean: `is_runtime_isolated` (True ONLY if `RUNTIME` and `MANAGED_REPOSITORY` paths do not overlap).
-- List of active `EXECUTION_WORKTREES` with verified ownership metadata.
+- Process write confinement status: `is_agent_confinement_active`.
+- Active worktree list backed by durable `OrchestrationWorktreeOwnership` records.
 - Metric counter: `workspace_mutation_denied_total` (labels: `project_id`, `reason_code`, `attempted_operation`).
 
 ---
@@ -281,9 +283,10 @@ Workspace identity and mutation guard decisions MUST map directly to Stage B typ
 | Failure Case | Outcome | Reason Code | Retry Safety | Action |
 | :--- | :--- | :--- | :--- | :--- |
 | Workspace identity unproven or missing | `UNKNOWN` | `EVIDENCE_INSUFFICIENT` | `UNSAFE` | Block execution; request binding |
-| Mutation requested against `RUNTIME` | `FAILURE` | `POLICY_DENIED` | `UNSAFE` | Block mutation; log security violation |
+| SDLC mutation requested against `RUNTIME` | `FAILURE` | `POLICY_DENIED` | `UNSAFE` | Block mutation; log security violation |
+| Agent process write escape attempt | `FAILURE` | `POLICY_DENIED` | `UNSAFE` | Terminate process; deny write |
 | Symlink escape / path traversal | `FAILURE` | `POLICY_DENIED` | `UNSAFE` | Block mutation; reject path |
-| Git remote mismatch | `FAILURE` | `CONFLICT` | `UNSAFE` | Block mutation; reject repository |
+| Git remote identity mismatch | `FAILURE` | `CONFLICT` | `UNSAFE` | Block mutation; reject repository |
 | Unowned/ambiguous worktree cleanup | `UNKNOWN` | `EVIDENCE_INSUFFICIENT` | `UNSAFE` | Preserve folder; require human review |
 | Filesystem I/O or stat error | `UNKNOWN` | `UNOBSERVABLE` | `SAFE` | Retry query; block mutation |
 
@@ -295,9 +298,10 @@ Fresh work MUST NOT advance from `READY` to `IN_PROGRESS` if any of the followin
 
 1. `ProjectManagedRepositoryBinding` is missing or unpersisted for the target project.
 2. `managed_repository_root` equals, contains, or is contained by `RUNTIME`.
-3. `ManagedWorkspaceGuard` fails Git remote verification against `canonical_git_remote`.
+3. `ManagedWorkspaceGuard` fails Git remote verification against `canonical_repository_identity`.
 4. Workspace role classification yields `RUNTIME` or `UNKNOWN`.
-5. Creation of an `EXECUTION_WORKTREE` under the authorized managed root fails postcondition verification.
+5. OS process write confinement boundary cannot be verified for executing agent runners.
+6. Creation of an `EXECUTION_WORKTREE` under the authorized managed root fails postcondition verification.
 
 ---
 
@@ -307,18 +311,19 @@ Fresh work MUST NOT advance from `READY` to `IN_PROGRESS` if any of the followin
 - **Invariant 2**: A mutating SDLC action against `RUNTIME` MUST ALWAYS be denied (`POLICY_DENIED`).
 - **Invariant 3**: A workspace target outside the trusted managed root MUST ALWAYS be denied (`POLICY_DENIED`).
 - **Invariant 4**: A managed path bound to a different `project_id` MUST ALWAYS be denied (`CONFLICT`).
-- **Invariant 5**: A Git repository remote mismatch MUST ALWAYS block execution (`CONFLICT`).
+- **Invariant 5**: A Git repository remote identity mismatch MUST ALWAYS block execution (`CONFLICT`).
 - **Invariant 6**: Unknown workspace identity MUST ALWAYS block mutation (`EVIDENCE_INSUFFICIENT`).
 - **Invariant 7**: OpenSpec sync and archive operations CANNOT run against `RUNTIME` paths.
 - **Invariant 8**: Self-hosting `mini-me` MUST use a separate managed repository directory distinct from `RUNTIME`.
-- **Invariant 9**: Worktree cleanup CANNOT delete an unowned, un-marked, or ambiguous directory.
-- **Invariant 10**: Deployment MAY update `RUNTIME` from a verified artifact or commit SHA without granting managed-workspace semantics to `RUNTIME`.
+- **Invariant 9**: Worktree cleanup CANNOT delete an unowned, un-marked, or ambiguous directory lacking durable DB ownership proof.
+- **Invariant 10**: `ManagedWorkspaceGuard` DENIES all SDLC mutations against `RUNTIME`; only an explicit, separate `DeploymentAuthority` MAY update `RUNTIME` from a verified artifact or commit SHA without granting managed-workspace semantics to `RUNTIME`.
+- **Invariant 11**: An agent process executing in `EXECUTION_WORKTREE` MUST NOT be able to write `RUNTIME` or any path outside its assigned worktree, enforced at the OS/process level.
 
 ---
 
 ## Adversarial Scenarios
 
-The test plan MUST validate the following 18 adversarial scenarios:
+The test plan MUST validate the following 21 adversarial scenarios:
 
 1. **Scenario: `RUNTIME` == `MANAGED_REPOSITORY` Path Attempt**
    - Attempting to bind `managed_repository_root` to `/opt/minime/app` is rejected during onboarding/readiness with `FAILURE` / `POLICY_DENIED`.
@@ -336,10 +341,10 @@ The test plan MUST validate the following 18 adversarial scenarios:
    - A worktree creation request specifying a target path escaping `<managed-root>` via symlink or `../` is rejected with `FAILURE` / `POLICY_DENIED`.
 
 6. **Scenario: Wrong Git Remote Identity**
-   - A managed repository directory whose `git remote get-url origin` returns `git@github.com:attacker/fake-repo.git` instead of `binding.canonical_git_remote` is rejected with `FAILURE` / `CONFLICT`.
+   - A managed repository directory whose `git remote get-url origin` returns `git@github.com:attacker/fake-repo.git` instead of `binding.canonical_repository_identity` is rejected with `FAILURE` / `CONFLICT`.
 
 7. **Scenario: Repo Copied from Correct Project but `.git` Points Elsewhere**
-   - A repository folder with correct code files whose `.git` file or gitdir points to a external repository is rejected during remote verification with `FAILURE` / `CONFLICT`.
+   - A repository folder with correct code files whose `.git` file or gitdir points to an external repository is rejected during remote verification with `FAILURE` / `CONFLICT`.
 
 8. **Scenario: Stale Workspace Binding**
    - A project binding pointing to a deleted or unmounted filesystem path returns `UNKNOWN` / `EVIDENCE_INSUFFICIENT` and blocks admission.
@@ -354,7 +359,7 @@ The test plan MUST validate the following 18 adversarial scenarios:
     - When filesystem `stat` or `os.listdir` encounters `EPERM` / `EACCES`, the guard returns `UNKNOWN` / `UNOBSERVABLE` without assuming default success.
 
 12. **Scenario: Existing Unmanaged Worktree with Matching Job-like Name**
-    - A directory `worktrees/job-123` lacking a valid `.minime-worktree.json` metadata file is encountered during cleanup; cleanup skips deletion and returns `UNKNOWN` / `EVIDENCE_INSUFFICIENT`.
+    - A directory `worktrees/job-123` lacking a matching `OrchestrationWorktreeOwnership` record in DB is encountered during cleanup; cleanup skips deletion and returns `UNKNOWN` / `EVIDENCE_INSUFFICIENT`.
 
 13. **Scenario: Same Repo URL Registered to Multiple Project IDs**
     - Registering `git@github.com:org/repo.git` under `project-A` and `project-B` enforces distinct managed repository roots (`managed-projects/project-A/repository` vs `managed-projects/project-B/repository`). Cross-project mutation is rejected with `FAILURE` / `CONFLICT`.
@@ -362,17 +367,26 @@ The test plan MUST validate the following 18 adversarial scenarios:
 14. **Scenario: Self-Hosting `mini-me` Execution Isolation**
     - Executing a `mini-me` self-hosting task creates worktree in `/opt/minime/managed-projects/mini-me/worktrees/run-789`. File edits by implementer alter `run-789`, while `/opt/minime/app` remains 100% unchanged.
 
-15. **Scenario: Process Restart after Partial Worktree Creation**
-    - Process crashes midway through `git worktree add`. Restart recovery inspects worktree directory: lacking completed `.minime-worktree.json`, recovery prunes partial worktree safely and re-initializes.
+15. **Scenario: Partial Worktree Recovery with Pre-Creation DB Record**
+    - Process crashes midway through `git worktree add`. Durable DB contains `OrchestrationWorktreeOwnership` record with `creation_state = "PENDING"`. Recovery verifies DB record, canonical path, and repository identity, then prunes partial worktree safely.
 
-16. **Scenario: Worktree Exists but Checked-Out SHA/Branch Mismatches Expected**
+16. **Scenario: Partial Worktree Pruning Attempt Without DB Record**
+    - An incomplete worktree directory exists on disk, but no `OrchestrationWorktreeOwnership` DB record exists. Recovery refuses deletion, returns `UNKNOWN` / `EVIDENCE_INSUFFICIENT`, and preserves directory for operator review.
+
+17. **Scenario: Spoofed In-Tree `.minime-worktree.json` Marker**
+    - An agent writes a fake `.minime-worktree.json` in an attempt to claim another project's worktree. Cleanup reconciles marker against durable DB records; mismatch causes deletion to be DENIED (`FAILURE` / `CONFLICT`).
+
+18. **Scenario: Worktree Exists but Checked-Out SHA/Branch Mismatches Expected**
     - An existing worktree whose Git HEAD is on branch `feature-X` when job expects `architecture/stage-c` is detected; guard rejects execution with `FAILURE` / `CONFLICT`.
 
-17. **Scenario: Runtime Deployed SHA Equals Managed Candidate SHA**
-    - `RUNTIME` SHA is `1f0d15...` and `MANAGED_REPOSITORY` SHA is `1f0d15...`. Guard verifies path distinction (`/opt/minime/app` vs `/opt/minime/managed-projects/...`). Mutation against `/opt/minime/app` is STILL DENIED (`POLICY_DENIED`). SHA equality does NOT grant managed-workspace status to runtime.
+19. **Scenario: Agent Shell Command `cd /opt/minime/app && touch x`**
+    - An agent sub-process attempts shell write into `RUNTIME`. OS process write confinement blocks the syscall with EPERM/EACCES, preventing live file modification.
 
-18. **Scenario: OpenSpec Sync Targeted at `RUNTIME` Path**
-    - Calling `OpenSpecSyncService` with target path `/opt/minime/app/openspec/specs` is intercepted by `ManagedWorkspaceGuard` and rejected with `FAILURE` / `POLICY_DENIED`.
+20. **Scenario: Agent Absolute Path Write Outside Worktree**
+    - An agent attempts to write to `/etc/config` or `/tmp/payload`. OS process write confinement intercepts the write syscall and denies execution.
+
+21. **Scenario: Agent Mutates Symlink inside Worktree Pointing to `RUNTIME`**
+    - An agent creates a symlink `worktree/link` -> `/opt/minime/app/main.py` and writes through the symlink. OS process write confinement resolves realpath and denies the write syscall.
 
 ---
 

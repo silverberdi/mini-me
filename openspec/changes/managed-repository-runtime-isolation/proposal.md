@@ -17,21 +17,22 @@ Under Stage C (`managed-repository-runtime-isolation`), mini me enforces strict,
 - Deployed runtime checkout (`RUNTIME`)
 - Managed repository root (`MANAGED_REPOSITORY`)
 - Ephemeral execution worktrees (`EXECUTION_WORKTREE`)
-- Managed project OpenSpec artifacts (`Project OpenSpec Workspace`)
+
+Project OpenSpec workspaces (`openspec/specs/`, `openspec/changes/`) operate strictly as authorized logical subtrees located inside a `MANAGED_REPOSITORY` or `EXECUTION_WORKTREE`, and are never permitted inside `RUNTIME`.
 
 ## What Changes
 
-- **Strict Workspace Model**: Explicitly separate `RUNTIME`, `MANAGED_REPOSITORY`, `EXECUTION_WORKTREE`, and `PROJECT_OPENSPEC_WORKSPACE` identities across all services.
+- **Strict Workspace Model**: Explicitly separate workspace roles into exactly four enums: `RUNTIME`, `MANAGED_REPOSITORY`, `EXECUTION_WORKTREE`, and `UNKNOWN`. Treat Project OpenSpec Workspace as a logical capability subtree within `MANAGED_REPOSITORY` or `EXECUTION_WORKTREE`.
 - **Self-Hosting Isolation Guarantee**: Require that when mini me manages its own repository (`mini-me`), the deployed runtime checkout (`/opt/minime/app` or equivalent) and the managed project repository (`<managed-root>/mini-me/repository`) remain strictly separate physical and logical identities. SHA equality does NOT collapse workspace identity.
-- **Project Managed Repository Binding**: Define `ProjectManagedRepositoryBinding` carrying `project_id`, `repository_url`, `managed_repository_root`, `default_base_branch`, `canonical_git_remote`, `workspace_role`, and ownership markers. Require verified binding lookup; forbid path guessing, `cwd` inference, and title-only matching.
-- **Central `ManagedWorkspaceGuard`**: Introduce a single, authoritative mutation guard (`ManagedWorkspaceGuard`) that validates workspace role, filesystem path canonicalization, trusted-root containment, Git repository remote identity, and operation permissions before ANY filesystem side effect is permitted.
-- **Runtime Immutability**: Enforce absolute immutability of the deployed runtime checkout for SDLC operations (no agent code edits, no branch manipulation, no OpenSpec sync/archive, no worktree creation).
-- **Explicit Deployment Boundary**: Define the deployment boundary as an explicit, unidirectional promotion of verified candidate commits (`managed repo candidate -> explicit deploy process -> runtime artifact`), which never grants managed workspace semantics to the runtime.
-- **Git & Worktree Ownership Verification**: Require explicit verification of Git remote identity, root path, and worktree metadata (`project_id`, `job_id`, `run_id`, `change_name`, `branch`) before creating, modifying, or cleaning up worktrees. Forbid ambiguous glob deletions.
+- **Project Managed Repository Binding**: Define `ProjectManagedRepositoryBinding` carrying `project_id`, `canonical_repository_identity`, `remote_name`, `managed_repository_root`, `default_base_branch`, and ownership metadata. Require verified binding lookup; forbid path guessing, `cwd` inference, and title-only matching.
+- **Central `ManagedWorkspaceGuard` & Process-Level Agent Write Confinement**: Introduce `ManagedWorkspaceGuard` for application policy authorization AND require an OS/process-level write confinement boundary (e.g. sandbox allow-lists, mount namespaces, or file permissions) preventing executing agent processes from writing `RUNTIME` or any path outside their assigned worktree, even if the agent explicitly attempts to escape (`cd /opt/minime/app && touch x`, absolute path writes, or symlinks).
+- **Durable Worktree Ownership & Safe Reconciliation**: Store authoritative worktree ownership in durable database storage outside the mutable worktree (`project_id`, `job_id`, `run_id`, `change_name`, `canonical_worktree_path`, `source_repository_identity`, `source_base_sha`, `branch`, `creation_state`). Require 4-way reconciliation (durable DB record, canonical path, Git `worktree list` observation, and optional filesystem marker) for deletion or partial worktree recovery. Disallow deletion based solely on a mutable in-tree file or path globbing.
+- **Runtime Immutability & Deployment Authority Boundary**: Enforce absolute immutability of the deployed runtime checkout for SDLC operations. Separate SDLC workspace mutation authority (`ManagedWorkspaceGuard`) from `DeploymentAuthority`, ensuring SDLC callers cannot escalate to deployment authority or grant managed repository semantics to `RUNTIME`.
+- **Normalized Git Identity Verification**: Separate Git remote alias (`remote_name = "origin"`) from normalized repository identity (`canonical_repository_identity`), verifying remotes fail-closed across equivalent URL formats (`git@github.com:...` vs `https://github.com/...`).
 - **Legacy Reconciliation & Admission Fence**: Block fresh execution admission if project binding is missing, if runtime aliases managed repository, or if repo remote identity is unverified.
 - **Fail-Closed Workspace Semantics**: Classify workspace identity failures, path escapes, or remote mismatches using Stage B typed outcomes (`FAILURE` / `POLICY_DENIED`, `UNKNOWN` / `EVIDENCE_INSUFFICIENT`, `FAILURE` / `CONFLICT`).
 
 ## Capabilities
 
 ### New Capability: Managed Repository Runtime Isolation
-Provides verifiable logical and physical separation between mini me's deployed runtime environment, managed project repositories, ephemeral execution worktrees, and project OpenSpec artifacts, enforcing central mutation authorization and preventing runtime workspace aliasing across all single-project and self-hosting operations.
+Provides verifiable logical and physical separation between mini me's deployed runtime environment, managed project repositories, and ephemeral execution worktrees, enforcing process-level agent write confinement, central mutation policy authorization, and durable worktree ownership across all single-project and self-hosting operations.
