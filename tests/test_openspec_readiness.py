@@ -121,6 +121,12 @@ def test_dor_evaluation_success(in_memory_uow, tmp_path):
         reviewer="antigravity",
     )
 
+    mb = in_memory_uow.project_managed_repository_bindings.get_by_project_id("mini-me")
+    if mb:
+        mb.is_valid = True
+        mb.mismatch_reasons = []
+        in_memory_uow.project_managed_repository_bindings.save(mb)
+
     binding = ProjectBinding(
         project_id="mini-me",
         repository="silverberdi/mini-me",

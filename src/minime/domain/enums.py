@@ -745,3 +745,35 @@ class TaskRiskDimension(str, Enum):
     PROVIDER_ORCHESTRATION = "PROVIDER_ORCHESTRATION"
     DESTRUCTIVE_OPERATIONS = "DESTRUCTIVE_OPERATIONS"
     DEPLOYMENT_CONFIG = "DEPLOYMENT_CONFIG"
+
+
+class WorkspaceRole(str, Enum):
+    """Explicit workspace role taxonomy for filesystem path safety."""
+
+    RUNTIME = "RUNTIME"
+    MANAGED_REPOSITORY = "MANAGED_REPOSITORY"
+    EXECUTION_WORKTREE = "EXECUTION_WORKTREE"
+    UNKNOWN = "UNKNOWN"
+
+
+class WorkspaceOperation(str, Enum):
+    """Canonical filesystem and Git operation types for workspace authorization."""
+
+    READ = "READ"
+    EDIT = "EDIT"
+    WORKTREE_CREATE = "WORKTREE_CREATE"
+    WORKTREE_DELETE = "WORKTREE_DELETE"
+    GIT_BRANCH = "GIT_BRANCH"
+    GIT_COMMIT = "GIT_COMMIT"
+    OPENSPEC_SYNC = "OPENSPEC_SYNC"
+    OPENSPEC_ARCHIVE = "OPENSPEC_ARCHIVE"
+
+
+class WorktreeCreationState(str, Enum):
+    """Durable lifecycle states for execution worktree ownership tracking."""
+
+    PENDING = "PENDING"
+    CREATED = "CREATED"
+    DELETING = "DELETING"
+    DELETED = "DELETED"
+

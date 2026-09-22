@@ -8,8 +8,16 @@ import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 
-from minime.domain.enums import ExternalOutcome, ExternalReasonCode, RetrySafety
-from minime.domain.models import ExternalActionResult
+from minime.domain.enums import (
+    ExternalOutcome,
+    ExternalReasonCode,
+    RetrySafety,
+    WorkspaceOperation,
+    WorkspaceRole,
+)
+from minime.domain.interfaces import PersistenceUnitOfWork
+from minime.domain.models import ExternalActionResult, WorkspaceMutationRequest
+from minime.services.workspace_guard import ManagedWorkspaceGuard
 
 logger = logging.getLogger(__name__)
 
@@ -21,13 +29,31 @@ class OpenSpecSyncError(RuntimeError):
 class OpenSpecSyncService:
     """Natively synchronizes delta specs and archives completed OpenSpec changes."""
 
-    def __init__(self, project_root: str | Path):
+    def __init__(self, project_root: str | Path, uow: PersistenceUnitOfWork | None = None):
         self.project_root = Path(project_root).resolve()
+        self.uow = uow
 
     def sync_change_specs(
         self, openspec_path: str, change_name: str
     ) -> ExternalActionResult[list[str]]:
         """Synchronize all delta specs of a change into main specs under openspec/specs/."""
+        if self.uow:
+            guard = ManagedWorkspaceGuard(self.uow, runtime_root=str(self.project_root))
+            req = WorkspaceMutationRequest(
+                project_id="unknown",
+                target_path=str(self.project_root / openspec_path),
+                requested_operation=WorkspaceOperation.OPENSPEC_SYNC,
+            )
+            decision = guard.evaluate_mutation(req)
+            if not decision.allowed and (decision.workspace_role == WorkspaceRole.RUNTIME or "runtime" in (decision.provider_detail or "").lower()):
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="openspec_sync",
+                    reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
+                    retry_safety=RetrySafety.SAFE,
+                    data=[],
+                    error_message=f"POLICY_DENIED: OpenSpec sync target '{self.project_root / openspec_path}' is inside runtime root.",
+                )
         change_dir = self.project_root / openspec_path / "changes" / change_name
         change_specs_dir = change_dir / "specs"
 
@@ -191,6 +217,23 @@ class OpenSpecSyncService:
         target_date: str | None = None,
     ) -> ExternalActionResult[Path]:
         """Move active change directory to openspec/changes/archive/{date}-{change_name}."""
+        if self.uow:
+            guard = ManagedWorkspaceGuard(self.uow, runtime_root=str(self.project_root))
+            req = WorkspaceMutationRequest(
+                project_id="unknown",
+                target_path=str(self.project_root / openspec_path),
+                requested_operation=WorkspaceOperation.OPENSPEC_ARCHIVE,
+            )
+            decision = guard.evaluate_mutation(req)
+            if not decision.allowed and (decision.workspace_role == WorkspaceRole.RUNTIME or "runtime" in (decision.provider_detail or "").lower()):
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="openspec_archive",
+                    reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
+                    retry_safety=RetrySafety.SAFE,
+                    data=Path("/dev/null"),
+                    error_message=f"POLICY_DENIED: OpenSpec archive target '{self.project_root / openspec_path}' is inside runtime root.",
+                )
         change_dir = self.project_root / openspec_path / "changes" / change_name
         archive_root = self.project_root / openspec_path / "changes" / "archive"
         archive_root.mkdir(parents=True, exist_ok=True)

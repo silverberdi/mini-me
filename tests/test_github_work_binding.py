@@ -60,6 +60,12 @@ def test_github_issue_number_mandatory_for_ready(in_memory_uow, tmp_path):
         reviewer="antigravity",
     )
 
+    mb = in_memory_uow.project_managed_repository_bindings.get_by_project_id("proj-a")
+    if mb:
+        mb.is_valid = True
+        mb.mismatch_reasons = []
+        in_memory_uow.project_managed_repository_bindings.save(mb)
+
     # Binding without an issue number
     binding = ProjectBinding(
         project_id="proj-a",

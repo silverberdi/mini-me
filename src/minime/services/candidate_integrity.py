@@ -146,8 +146,12 @@ def validate_post_review_integrity(
                 False,
                 f"Post-review integrity error running git status: {proc_status.stderr.strip()}",
             )
-        status_output = proc_status.stdout.strip()
-        if status_output:
+        status_lines = [
+            line for line in proc_status.stdout.splitlines()
+            if line.strip() and "minime_worktree_ownership.json" not in line
+        ]
+        if status_lines:
+            status_output = "\n".join(status_lines)
             return (
                 False,
                 f"Unauthorized reviewer mutation: uncommitted changes detected in candidate worktree: {status_output[:200]}",
@@ -225,10 +229,15 @@ def verify_pre_audit(
                 False,
                 f"Pre-audit integrity error running git status: {status_proc.stderr.strip()}",
             )
-        if status_proc.stdout.strip():
+        status_lines = [
+            line for line in status_proc.stdout.splitlines()
+            if line.strip() and "minime_worktree_ownership.json" not in line
+        ]
+        if status_lines:
+            status_output = "\n".join(status_lines)
             return (
                 False,
-                f"Pre-audit failure: candidate worktree has uncommitted changes: {status_proc.stdout.strip()[:200]}",
+                f"Pre-audit failure: candidate worktree has uncommitted changes: {status_output[:200]}",
             )
     except Exception as exc:
         return False, f"Pre-audit integrity error: {exc}"

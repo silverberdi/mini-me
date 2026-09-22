@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Any
 
@@ -181,6 +182,47 @@ class ProjectService:
             created_at=now,
             updated_at=now,
         )
+
+        from minime.domain.models import ProjectManagedRepositoryBinding
+        from minime.services.workspace_guard import ManagedWorkspaceGuard
+
+        managed_root = os.path.realpath(openspec_path if openspec_path.startswith("/") else f"/opt/minime/repos/{project_id}")
+        runtime_root = os.path.realpath(os.environ.get("MINIME_RUNTIME_ROOT", os.getcwd()))
+        trusted_root = os.path.realpath(os.environ.get("MINIME_MANAGED_ROOT", "/opt/minime/repos"))
+
+        mismatch_reasons: list[str] = []
+        # Check forward & reverse overlap
+        if managed_root == runtime_root or managed_root.startswith(runtime_root + os.sep) or runtime_root.startswith(managed_root + os.sep):
+            mismatch_reasons.append(f"Managed repository root '{managed_root}' aliases or overlaps runtime root '{runtime_root}'.")
+
+        # Check trusted root
+        if not (managed_root == trusted_root or managed_root.startswith(trusted_root + os.sep)):
+            mismatch_reasons.append(f"Managed repository root '{managed_root}' is outside trusted managed root '{trusted_root}'.")
+
+        # Check directory existence and Git repository proof
+        if not os.path.exists(managed_root):
+            mismatch_reasons.append(f"Managed repository root directory '{managed_root}' does not exist on disk.")
+        else:
+            guard = ManagedWorkspaceGuard(self.uow, runtime_root=runtime_root, trusted_managed_root=trusted_root)
+            valid_git, git_reason = guard.verify_git_repository_identity(managed_root, norm_repo, remote_name="origin")
+            if not valid_git:
+                mismatch_reasons.append(f"Git repository identity verification failed for '{managed_root}': {git_reason}")
+
+        is_valid_binding = len(mismatch_reasons) == 0
+
+        managed_binding = ProjectManagedRepositoryBinding(
+            project_id=project_id,
+            canonical_repository_identity=norm_repo,
+            remote_name="origin",
+            managed_repository_root=managed_root,
+            worktree_parent_dir=f"/opt/minime/worktrees/{project_id}",
+            default_base_branch=base_branch,
+            is_valid=is_valid_binding,
+            mismatch_reasons=mismatch_reasons,
+            created_at=now,
+            updated_at=now,
+        )
+        self.uow.project_managed_repository_bindings.save(managed_binding)
 
         event = Event(
             event_type=EventType.PROJECT_REGISTERED,

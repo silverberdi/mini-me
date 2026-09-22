@@ -68,6 +68,9 @@ from minime.domain.enums import (
     ValidationVerdict,
     WorkItemSource,
     WorkItemStatus,
+    WorkspaceOperation,
+    WorkspaceRole,
+    WorktreeCreationState,
 )
 
 
@@ -1539,3 +1542,63 @@ class TaskClassificationProfile(BaseModel):
     complexity: TaskComplexity
     risk_profile: TaskRiskProfile = Field(default_factory=TaskRiskProfile)
     surface_kind: TaskSurfaceKind
+
+
+class ProjectManagedRepositoryBinding(BaseModel):
+    """Durable project managed-repository binding model for physical/logical workspace isolation."""
+
+    binding_id: str = Field(default_factory=generate_uuid)
+    project_id: str
+    canonical_repository_identity: str
+    remote_name: str = "origin"
+    managed_repository_root: str
+    worktree_parent_dir: str
+    default_base_branch: str = "main"
+    ownership_marker_filename: str = ".minime-managed-project.json"
+    is_valid: bool = True
+    mismatch_reasons: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class OrchestrationWorktreeOwnership(BaseModel):
+    """Durable database ownership record for an execution worktree outside the mutable filesystem."""
+
+    worktree_id: str = Field(default_factory=generate_uuid)
+    project_id: str
+    job_id: str
+    run_id: str = "run-default"
+    change_name: str = "change-default"
+    canonical_worktree_path: str
+    source_repository_identity: str = "origin"
+    source_base_sha: str = "base-default"
+    branch: str = "main"
+    creation_state: WorktreeCreationState = WorktreeCreationState.PENDING
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+    @property
+    def branch_name(self) -> str:
+        return self.branch
+
+
+class WorkspaceMutationRequest(BaseModel):
+    """Request payload submitted to ManagedWorkspaceGuard for policy evaluation."""
+
+    project_id: str
+    target_path: str
+    requested_operation: WorkspaceOperation
+    job_id: str | None = None
+    run_id: str | None = None
+
+
+class WorkspaceMutationDecision(BaseModel):
+    """Policy authorization decision returned by ManagedWorkspaceGuard."""
+
+    allowed: bool
+    outcome: ExternalOutcome
+    reason_code: ExternalReasonCode
+    workspace_role: WorkspaceRole
+    resolved_path: str
+    provider_detail: str | None = None
+

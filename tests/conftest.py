@@ -30,6 +30,7 @@ from minime.domain.enums import (
     RetrySafety,
     ReviewStatus,
     ReviewVerdict,
+    WorktreeCreationState,
 )
 from minime.domain.exceptions import LifecycleBypassError
 from minime.domain.interfaces import (
@@ -105,9 +106,11 @@ from minime.domain.models import (
     OrchestrationExternalAction,
     OrchestrationRun,
     OrchestrationStageEvent,
+    OrchestrationWorktreeOwnership,
     PreviewSession,
     Project,
     ProjectBinding,
+    ProjectManagedRepositoryBinding,
     ProviderEfficiencyMetrics,
     ProviderHealth,
     Review,
@@ -1908,6 +1911,66 @@ class InMemoryTaskClassificationSnapshotRepository(TaskClassificationSnapshotRep
         return items[0] if items else None
 
 
+class InMemoryProjectManagedRepositoryBindingRepository:
+    def __init__(self):
+        self._store: dict[str, ProjectManagedRepositoryBinding] = {}
+
+    def save(self, binding: ProjectManagedRepositoryBinding) -> None:
+        self._store[binding.project_id] = binding.model_copy(deep=True)
+
+    def get_by_project_id(self, project_id: str) -> ProjectManagedRepositoryBinding | None:
+        b = self._store.get(project_id)
+        return b.model_copy(deep=True) if b else None
+
+    def get_by_repository_identity(self, canonical_repository_identity: str) -> ProjectManagedRepositoryBinding | None:
+        for b in self._store.values():
+            if b.canonical_repository_identity == canonical_repository_identity:
+                return b.model_copy(deep=True)
+        return None
+
+    def delete(self, project_id: str) -> None:
+        self._store.pop(project_id, None)
+
+
+class InMemoryOrchestrationWorktreeOwnershipRepository:
+    def __init__(self):
+        self._store: dict[str, OrchestrationWorktreeOwnership] = {}
+
+    def save(self, ownership: OrchestrationWorktreeOwnership) -> None:
+        self._store[ownership.worktree_id] = ownership.model_copy(deep=True)
+
+    def get_by_id(self, worktree_id: str) -> OrchestrationWorktreeOwnership | None:
+        w = self._store.get(worktree_id)
+        return w.model_copy(deep=True) if w else None
+
+    def get_by_canonical_path(self, canonical_worktree_path: str) -> OrchestrationWorktreeOwnership | None:
+        norm_target = os.path.realpath(canonical_worktree_path) if os.path.exists(canonical_worktree_path) else canonical_worktree_path
+        for w in self._store.values():
+            norm_w = os.path.realpath(w.canonical_worktree_path) if os.path.exists(w.canonical_worktree_path) else w.canonical_worktree_path
+            if norm_w == norm_target or w.canonical_worktree_path == canonical_worktree_path:
+                return w.model_copy(deep=True)
+        return None
+
+    def get_by_job_id(self, job_id: str) -> OrchestrationWorktreeOwnership | None:
+        for w in self._store.values():
+            if w.job_id == job_id:
+                return w.model_copy(deep=True)
+        return None
+
+    def list_by_project(self, project_id: str) -> list[OrchestrationWorktreeOwnership]:
+        return [w.model_copy(deep=True) for w in self._store.values() if w.project_id == project_id]
+
+    def list_active(self) -> list[OrchestrationWorktreeOwnership]:
+        return [
+            w.model_copy(deep=True)
+            for w in self._store.values()
+            if w.creation_state in (WorktreeCreationState.PENDING, WorktreeCreationState.CREATED)
+        ]
+
+    def delete(self, worktree_id: str) -> None:
+        self._store.pop(worktree_id, None)
+
+
 class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
     def __init__(self):
         self.projects = InMemoryProjectRepository()
@@ -1951,6 +2014,8 @@ class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.backlog_items = InMemoryBacklogItemRepository()
         self.integrity_findings = InMemoryIntegrityFindingRepository()
         self.classification_snapshots = InMemoryTaskClassificationSnapshotRepository()
+        self.project_managed_repository_bindings = InMemoryProjectManagedRepositoryBindingRepository()
+        self.orchestration_worktree_ownerships = InMemoryOrchestrationWorktreeOwnershipRepository()
         self.committed = False
         self.rolled_back = False
 

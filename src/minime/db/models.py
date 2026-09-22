@@ -1381,3 +1381,60 @@ class TaskClassificationSnapshotModel(Base):
         remote_side="TaskClassificationSnapshotModel.id",
         foreign_keys=[pre_execution_snapshot_id],
     )
+
+
+class ProjectManagedRepositoryBindingModel(Base):
+    __tablename__ = "project_managed_repository_bindings"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, unique=True, index=True
+    )
+    canonical_repository_identity: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    remote_name: Mapped[str] = mapped_column(String(64), default="origin", nullable=False)
+    managed_repository_root: Mapped[str] = mapped_column(String(512), nullable=False)
+    worktree_parent_dir: Mapped[str] = mapped_column(String(512), nullable=False)
+    default_base_branch: Mapped[str] = mapped_column(String(128), default="main", nullable=False)
+    ownership_marker_filename: Mapped[str] = mapped_column(
+        String(128), default=".minime-managed-project.json", nullable=False
+    )
+    is_valid: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
+    mismatch_reasons: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+    project: Mapped[ProjectModel] = relationship("ProjectModel")
+
+
+class OrchestrationWorktreeOwnershipModel(Base):
+    __tablename__ = "orchestration_worktree_ownerships"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    job_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    run_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    change_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    canonical_worktree_path: Mapped[str] = mapped_column(
+        String(512), nullable=False, unique=True, index=True
+    )
+    source_repository_identity: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_base_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    branch: Mapped[str] = mapped_column(String(128), nullable=False)
+    creation_state: Mapped[str] = mapped_column(
+        String(32), default="PENDING", nullable=False, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+    project: Mapped[ProjectModel] = relationship("ProjectModel")
+

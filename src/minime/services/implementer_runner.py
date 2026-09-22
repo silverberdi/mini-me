@@ -12,7 +12,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from minime.config import AppConfig, CliInvocationProfile, resolve_cli_invocation
+from minime.domain.enums import ExternalOutcome
 from minime.logging import redact_secrets
+from minime.services.agent_confinement import AgentConfinementError, AgentProcessConfinement
 from minime.services.cli_preflight import preflight_cli_invocation
 
 logger = logging.getLogger(__name__)
@@ -68,6 +70,18 @@ class CliImplementerRunner(ImplementerRunnerInterface):
         self, worktree_path: Path, prompt_context: str, timeout_seconds: int
     ) -> ImplementerResult:
         start = asyncio.get_running_loop().time()
+        confinement = AgentProcessConfinement(allowed_worktree_path=str(worktree_path))
+        preflight_check = confinement.validate_command_preflight(cwd=str(worktree_path))
+        if preflight_check.outcome != ExternalOutcome.SUCCESS:
+            return ImplementerResult(
+                exit_code=-2,
+                timed_out=False,
+                stdout=[],
+                stderr=[redact_secrets(preflight_check.error_message or 'Agent process confinement preflight failed')],
+                duration_ms=0,
+                preflight_error=preflight_check.error_message,
+            )
+
         if self.profile is not None:
             preflight = await preflight_cli_invocation(self.profile)
             if not preflight.ok:
@@ -79,12 +93,27 @@ class CliImplementerRunner(ImplementerRunnerInterface):
                     duration_ms=0,
                     preflight_error=preflight.reason,
                 )
+
+        raw_command = self._command_for_prompt(prompt_context)
+        try:
+            wrapped_command = confinement.wrap_command(raw_command)
+        except AgentConfinementError as err:
+            return ImplementerResult(
+                exit_code=-2,
+                timed_out=False,
+                stdout=[],
+                stderr=[redact_secrets(str(err))],
+                duration_ms=0,
+                preflight_error=str(err),
+            )
+
         proc = await asyncio.create_subprocess_exec(
-            *self._command_for_prompt(prompt_context),
+            *wrapped_command,
             cwd=str(worktree_path),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=confinement.prepare_environment(),
             start_new_session=True,
         )
         timed_out = False

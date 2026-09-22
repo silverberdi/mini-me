@@ -177,6 +177,38 @@ class ReadinessService:
             except Exception as e:
                 logger.warning(f"Capacity check error: {e}")
 
+        # Stage C Admission Fence: Managed Repository Binding & Process Confinement Gating
+        managed_binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
+        managed_binding = managed_binding_repo.get_by_project_id(project_id) if managed_binding_repo else None
+
+        from minime.services.agent_confinement import AgentProcessConfinement
+
+        confinement = AgentProcessConfinement(
+            allowed_worktree_path=f"/opt/minime/worktrees/{project_id}/wt-readiness-probe"
+        )
+        confinement_ok = confinement.is_confinement_available()
+
+        if managed_binding is not None and not managed_binding.is_valid:
+            m_reasons = managed_binding.mismatch_reasons or ["Invalid ProjectManagedRepositoryBinding"]
+            reason = f"Stage C Admission Fence: Managed repository binding is invalid: {'; '.join(m_reasons)}."
+            checks.append(ReadinessCheck(name="stage_c_workspace_isolation", passed=False, reason=reason))
+            unmet_reasons.append(reason)
+        elif not confinement_ok:
+            reason = "Stage C Admission Fence: Agent process confinement capability is unavailable."
+            checks.append(ReadinessCheck(name="stage_c_workspace_isolation", passed=False, reason=reason))
+            unmet_reasons.append(reason)
+        else:
+            checks.append(
+                ReadinessCheck(
+                    name="stage_c_workspace_isolation",
+                    passed=True,
+                    details={
+                        "is_runtime_isolated": True,
+                        "confinement_mechanism": confinement.confinement_mechanism,
+                    },
+                )
+            )
+
         # 4. Durable ProjectBinding & GitHub Issue validation (execution authorization)
         try:
             binding = self.uow.bindings.get_by_project_and_change(project_id, change_name)

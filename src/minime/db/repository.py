@@ -41,8 +41,10 @@ from minime.db.models import (
     OrchestrationExternalActionModel,
     OrchestrationRunModel,
     OrchestrationStageEventModel,
+    OrchestrationWorktreeOwnershipModel,
     PreviewSessionModel,
     ProjectBindingModel,
+    ProjectManagedRepositoryBindingModel,
     ProjectModel,
     ProviderEfficiencyMetricsModel,
     ProviderHealthModel,
@@ -99,6 +101,7 @@ from minime.domain.enums import (
     ValidationVerdict,
     WorkItemSource,
     WorkItemStatus,
+    WorktreeCreationState,
 )
 from minime.domain.exceptions import LifecycleBypassError
 from minime.domain.interfaces import (
@@ -132,9 +135,11 @@ from minime.domain.interfaces import (
     OrchestrationExternalActionRepositoryInterface,
     OrchestrationRunRepositoryInterface,
     OrchestrationStageEventRepositoryInterface,
+    OrchestrationWorktreeOwnershipRepositoryInterface,
     PersistenceUnitOfWork,
     PreviewSessionRepositoryInterface,
     ProjectBindingRepositoryInterface,
+    ProjectManagedRepositoryBindingRepositoryInterface,
     ProjectRepositoryInterface,
     ProviderEfficiencyMetricsRepositoryInterface,
     ProviderHealthRepositoryInterface,
@@ -179,9 +184,11 @@ from minime.domain.models import (
     OrchestrationExternalAction,
     OrchestrationRun,
     OrchestrationStageEvent,
+    OrchestrationWorktreeOwnership,
     PreviewSession,
     Project,
     ProjectBinding,
+    ProjectManagedRepositoryBinding,
     ProviderEfficiencyMetrics,
     ProviderHealth,
     Review,
@@ -4234,6 +4241,173 @@ class PostgresTaskClassificationSnapshotRepository(TaskClassificationSnapshotRep
         return classification_snapshot_model_to_domain(model) if model else None
 
 
+def project_managed_repository_binding_model_to_domain(
+    model: ProjectManagedRepositoryBindingModel,
+) -> ProjectManagedRepositoryBinding:
+    return ProjectManagedRepositoryBinding(
+        binding_id=model.id,
+        project_id=model.project_id,
+        canonical_repository_identity=model.canonical_repository_identity,
+        remote_name=model.remote_name or "origin",
+        managed_repository_root=model.managed_repository_root,
+        worktree_parent_dir=model.worktree_parent_dir,
+        default_base_branch=model.default_base_branch or "main",
+        ownership_marker_filename=model.ownership_marker_filename or ".minime-managed-project.json",
+        is_valid=model.is_valid,
+        mismatch_reasons=model.mismatch_reasons or [],
+        created_at=model.created_at,
+        updated_at=model.updated_at,
+    )
+
+
+def orchestration_worktree_ownership_model_to_domain(
+    model: OrchestrationWorktreeOwnershipModel,
+) -> OrchestrationWorktreeOwnership:
+    return OrchestrationWorktreeOwnership(
+        worktree_id=model.id,
+        project_id=model.project_id,
+        job_id=model.job_id,
+        run_id=model.run_id,
+        change_name=model.change_name,
+        canonical_worktree_path=model.canonical_worktree_path,
+        source_repository_identity=model.source_repository_identity,
+        source_base_sha=model.source_base_sha,
+        branch=model.branch,
+        creation_state=WorktreeCreationState(model.creation_state),
+        created_at=model.created_at,
+        updated_at=model.updated_at,
+    )
+
+
+class PostgresProjectManagedRepositoryBindingRepository(
+    ProjectManagedRepositoryBindingRepositoryInterface
+):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def save(self, binding: ProjectManagedRepositoryBinding) -> None:
+        existing = self.session.get(ProjectManagedRepositoryBindingModel, binding.binding_id)
+        if existing:
+            existing.project_id = binding.project_id
+            existing.canonical_repository_identity = binding.canonical_repository_identity
+            existing.remote_name = binding.remote_name
+            existing.managed_repository_root = binding.managed_repository_root
+            existing.worktree_parent_dir = binding.worktree_parent_dir
+            existing.default_base_branch = binding.default_base_branch
+            existing.ownership_marker_filename = binding.ownership_marker_filename
+            existing.is_valid = binding.is_valid
+            existing.mismatch_reasons = binding.mismatch_reasons
+        else:
+            model = ProjectManagedRepositoryBindingModel(
+                id=binding.binding_id,
+                project_id=binding.project_id,
+                canonical_repository_identity=binding.canonical_repository_identity,
+                remote_name=binding.remote_name,
+                managed_repository_root=binding.managed_repository_root,
+                worktree_parent_dir=binding.worktree_parent_dir,
+                default_base_branch=binding.default_base_branch,
+                ownership_marker_filename=binding.ownership_marker_filename,
+                is_valid=binding.is_valid,
+                mismatch_reasons=binding.mismatch_reasons,
+                created_at=binding.created_at,
+                updated_at=binding.updated_at,
+            )
+            self.session.add(model)
+
+    def get_by_project_id(self, project_id: str) -> ProjectManagedRepositoryBinding | None:
+        stmt = select(ProjectManagedRepositoryBindingModel).where(
+            ProjectManagedRepositoryBindingModel.project_id == project_id
+        )
+        model = self.session.scalars(stmt).first()
+        return project_managed_repository_binding_model_to_domain(model) if model else None
+
+    def get_by_repository_identity(
+        self, canonical_repository_identity: str
+    ) -> ProjectManagedRepositoryBinding | None:
+        stmt = select(ProjectManagedRepositoryBindingModel).where(
+            ProjectManagedRepositoryBindingModel.canonical_repository_identity == canonical_repository_identity
+        )
+        model = self.session.scalars(stmt).first()
+        return project_managed_repository_binding_model_to_domain(model) if model else None
+
+
+class PostgresOrchestrationWorktreeOwnershipRepository(
+    OrchestrationWorktreeOwnershipRepositoryInterface
+):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def save(self, ownership: OrchestrationWorktreeOwnership) -> None:
+        existing = self.session.get(OrchestrationWorktreeOwnershipModel, ownership.worktree_id)
+        if existing:
+            existing.project_id = ownership.project_id
+            existing.job_id = ownership.job_id
+            existing.run_id = ownership.run_id
+            existing.change_name = ownership.change_name
+            existing.canonical_worktree_path = ownership.canonical_worktree_path
+            existing.source_repository_identity = ownership.source_repository_identity
+            existing.source_base_sha = ownership.source_base_sha
+            existing.branch = ownership.branch
+            existing.creation_state = ownership.creation_state.value
+        else:
+            model = OrchestrationWorktreeOwnershipModel(
+                id=ownership.worktree_id,
+                project_id=ownership.project_id,
+                job_id=ownership.job_id,
+                run_id=ownership.run_id,
+                change_name=ownership.change_name,
+                canonical_worktree_path=ownership.canonical_worktree_path,
+                source_repository_identity=ownership.source_repository_identity,
+                source_base_sha=ownership.source_base_sha,
+                branch=ownership.branch,
+                creation_state=ownership.creation_state.value,
+                created_at=ownership.created_at,
+                updated_at=ownership.updated_at,
+            )
+            self.session.add(model)
+
+    def get_by_id(self, worktree_id: str) -> OrchestrationWorktreeOwnership | None:
+        model = self.session.get(OrchestrationWorktreeOwnershipModel, worktree_id)
+        return orchestration_worktree_ownership_model_to_domain(model) if model else None
+
+    def get_by_canonical_path(
+        self, canonical_worktree_path: str
+    ) -> OrchestrationWorktreeOwnership | None:
+        stmt = select(OrchestrationWorktreeOwnershipModel).where(
+            OrchestrationWorktreeOwnershipModel.canonical_worktree_path == canonical_worktree_path
+        )
+        model = self.session.scalars(stmt).first()
+        return orchestration_worktree_ownership_model_to_domain(model) if model else None
+
+    def get_by_job_id(self, job_id: str) -> OrchestrationWorktreeOwnership | None:
+        stmt = select(OrchestrationWorktreeOwnershipModel).where(
+            OrchestrationWorktreeOwnershipModel.job_id == job_id
+        )
+        model = self.session.scalars(stmt).first()
+        return orchestration_worktree_ownership_model_to_domain(model) if model else None
+
+    def list_by_project(self, project_id: str) -> list[OrchestrationWorktreeOwnership]:
+        stmt = select(OrchestrationWorktreeOwnershipModel).where(
+            OrchestrationWorktreeOwnershipModel.project_id == project_id
+        )
+        models = self.session.scalars(stmt).all()
+        return [orchestration_worktree_ownership_model_to_domain(m) for m in models]
+
+    def list_active(self) -> list[OrchestrationWorktreeOwnership]:
+        stmt = select(OrchestrationWorktreeOwnershipModel).where(
+            OrchestrationWorktreeOwnershipModel.creation_state.in_(
+                [WorktreeCreationState.PENDING.value, WorktreeCreationState.CREATED.value]
+            )
+        )
+        models = self.session.scalars(stmt).all()
+        return [orchestration_worktree_ownership_model_to_domain(m) for m in models]
+
+    def delete(self, worktree_id: str) -> None:
+        model = self.session.get(OrchestrationWorktreeOwnershipModel, worktree_id)
+        if model:
+            self.session.delete(model)
+
+
 class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
     """Encapsulates a database session for atomic operations across repositories."""
 
@@ -4281,6 +4455,12 @@ class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.backlog_items = PostgresBacklogItemRepository(session)
         self.integrity_findings = PostgresIntegrityFindingRepository(session)
         self.classification_snapshots = PostgresTaskClassificationSnapshotRepository(session)
+        self.project_managed_repository_bindings = PostgresProjectManagedRepositoryBindingRepository(
+            session
+        )
+        self.orchestration_worktree_ownerships = PostgresOrchestrationWorktreeOwnershipRepository(
+            session
+        )
 
     def commit(self) -> None:
         self.session.commit()

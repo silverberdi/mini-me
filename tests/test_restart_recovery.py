@@ -256,6 +256,7 @@ async def test_worktree_remove_records_managed_worktree_path(in_memory_uow, tmp_
     job_id = "job-wt-remove-1"
     target_worktree = (tmp_path / ".minime" / "worktrees" / job_id).resolve()
     target_worktree.mkdir(parents=True, exist_ok=True)
+    (target_worktree / ".minime_worktree_ownership.json").write_text('{"worktree_id": "wt-job-wt-remove-1"}')
 
     with patch("asyncio.create_subprocess_exec") as mock_exec:
         mock_proc = mock_exec.return_value

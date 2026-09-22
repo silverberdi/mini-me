@@ -81,6 +81,10 @@ class SystemStatusDTO(BaseModel):
     active_runs_count: int = 0
     total_changes_count: int = 0
     attention_runs_count: int = 0
+    is_runtime_isolated: bool = True
+    is_agent_confinement_active: bool = True
+    active_durable_worktrees: int = 0
+    workspace_mutation_denied_count: int = 0
     providers: list[ProviderHealthDTO] = Field(default_factory=list)
 
 
@@ -693,6 +697,13 @@ class OperationsDashboardService:
             for h in prov_health
         )
 
+        ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None)
+        active_wts = len(ownership_repo.list_active()) if ownership_repo else 0
+
+        from minime.services.agent_confinement import AgentProcessConfinement
+
+        confinement_active = AgentProcessConfinement("/tmp").is_confinement_available()
+
         system_status = SystemStatusDTO(
             healthy=is_overall_healthy,
             database_engine="PostgreSQL",
@@ -704,6 +715,10 @@ class OperationsDashboardService:
             active_runs_count=len(active_executions),
             total_changes_count=len(change_summaries),
             attention_runs_count=len(attention_items),
+            is_runtime_isolated=True,
+            is_agent_confinement_active=confinement_active,
+            active_durable_worktrees=active_wts,
+            workspace_mutation_denied_count=0,
             providers=prov_dtos,
         )
 
