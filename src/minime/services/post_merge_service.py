@@ -13,13 +13,15 @@ from minime.domain.enums import (
     ChangeStatus,
     EventType,
     ExternalOutcome,
+    ExternalReasonCode,
     JobStatus,
     OrchestrationStage,
     OrchestrationStopOutcome,
+    RetrySafety,
     WorkItemStatus,
 )
 from minime.domain.interfaces import GitHubAdapterInterface, PersistenceUnitOfWork
-from minime.domain.models import Event, MetricFact, utc_now
+from minime.domain.models import Event, ExternalActionResult, MetricFact, utc_now
 from minime.services.lifecycle_transition_authority import LifecycleTransitionAuthority
 from minime.services.openspec_sync import OpenSpecSyncService
 from minime.services.worktree_manager import WorktreeManager
@@ -155,8 +157,8 @@ class PostMergeReconciliationService:
                 worktree_cleaned=True,
                 branch_cleaned=True,
                 locks_cleaned=True,
-                native_phases_completed=12,
-                total_phases=12,
+                native_phases_completed=7,
+                total_phases=7,
             )
 
         project = self.uow.projects.get_by_id(project_id)
@@ -221,8 +223,8 @@ class PostMergeReconciliationService:
                     worktree_cleaned=True,
                     branch_cleaned=True,
                     locks_cleaned=True,
-                    native_phases_completed=12,
-                    total_phases=12,
+                    native_phases_completed=7,
+                    total_phases=7,
                 )
 
             logger.info("PR #%s for '%s' is not yet merged.", pr_number, change_name)
@@ -289,6 +291,7 @@ class PostMergeReconciliationService:
         self.uow.commit()
 
         # 5. GitHub Issue Closure
+        issue_required = bool(binding and binding.github_issue_number)
         issue_closed = False
         issue_num = binding.github_issue_number if binding else None
         if issue_num:
@@ -312,9 +315,8 @@ class PostMergeReconciliationService:
             except Exception as exc:
                 logger.warning("Failed to close GitHub Issue #%d: %s", issue_num, exc)
 
-        native_phases += 1  # Phase 4: Issue closure
-
         # 6. GitHub Project Item Done
+        project_item_required = bool(binding and (binding.github_project_item_id or binding.github_issue_number))
         project_item_updated = False
         project_item_id = binding.github_project_item_id if binding else None
         try:
@@ -338,14 +340,17 @@ class PostMergeReconciliationService:
         except Exception as exc:
             logger.warning("Failed to update GitHub Project item: %s", exc)
 
-        native_phases += 1  # Phase 5: Project Done
-
         # 7. OpenSpec Spec Sync + verification
         synced_specs: list[str] = []
         sync_verified = False
         try:
             sync_res = self.openspec_sync.sync_change_specs(openspec_path, change_name)
-            if sync_res.outcome == ExternalOutcome.SUCCESS:
+            verify_sync_res = self.openspec_sync.verify_sync(openspec_path, change_name, sync_res)
+            sync_verified = (
+                verify_sync_res.outcome == ExternalOutcome.SUCCESS
+                and verify_sync_res.data is True
+            )
+            if sync_verified:
                 synced_specs = sync_res.data or []
                 self.uow.events.save(
                     Event(
@@ -356,25 +361,17 @@ class PostMergeReconciliationService:
                         timestamp=utc_now(),
                     )
                 )
-                verify_sync_res = self.openspec_sync.verify_sync(openspec_path, change_name, sync_res)
-                sync_verified = (
-                    verify_sync_res.outcome == ExternalOutcome.SUCCESS
-                    and verify_sync_res.data is True
-                )
-                if sync_verified:
-                    self.uow.events.save(
-                        Event(
-                            event_type=EventType.POST_MERGE_SYNC_VERIFIED,
-                            project_id=project_id,
-                            change_id=change_name,
-                            payload={"synced_capabilities": synced_specs},
-                            timestamp=utc_now(),
-                        )
+                self.uow.events.save(
+                    Event(
+                        event_type=EventType.POST_MERGE_SYNC_VERIFIED,
+                        project_id=project_id,
+                        change_id=change_name,
+                        payload={"synced_capabilities": synced_specs},
+                        timestamp=utc_now(),
                     )
+                )
         except Exception as exc:
             logger.warning("OpenSpec spec sync failed for '%s': %s", change_name, exc)
-
-        native_phases += 1  # Phase 6: Spec sync
 
         # 8. OpenSpec Archive + verification (only after sync is verified)
         archived_path: Path | None = None
@@ -382,7 +379,14 @@ class PostMergeReconciliationService:
         if sync_verified:
             try:
                 archive_res = self.openspec_sync.archive_change(openspec_path, change_name)
-                if archive_res.outcome == ExternalOutcome.SUCCESS:
+                verify_arc_res = self.openspec_sync.verify_archive(
+                    openspec_path, change_name, archive_res
+                )
+                archive_verified = (
+                    verify_arc_res.outcome == ExternalOutcome.SUCCESS
+                    and verify_arc_res.data is True
+                )
+                if archive_verified:
                     archived_path = archive_res.data
                     self.uow.events.save(
                         Event(
@@ -393,38 +397,96 @@ class PostMergeReconciliationService:
                             timestamp=utc_now(),
                         )
                     )
-                    verify_arc_res = self.openspec_sync.verify_archive(
-                        openspec_path, change_name, archive_res
-                    )
-                    archive_verified = (
-                        verify_arc_res.outcome == ExternalOutcome.SUCCESS
-                        and verify_arc_res.data is True
-                    )
-                    if archive_verified:
-                        self.uow.events.save(
-                            Event(
-                                event_type=EventType.POST_MERGE_ARCHIVE_VERIFIED,
-                                project_id=project_id,
-                                change_id=change_name,
-                                payload={"archived_path": str(archived_path) if archived_path else ""},
-                                timestamp=utc_now(),
-                            )
+                    self.uow.events.save(
+                        Event(
+                            event_type=EventType.POST_MERGE_ARCHIVE_VERIFIED,
+                            project_id=project_id,
+                            change_id=change_name,
+                            payload={"archived_path": str(archived_path) if archived_path else ""},
+                            timestamp=utc_now(),
                         )
+                    )
             except Exception as exc:
                 logger.warning("OpenSpec archive failed for '%s': %s", change_name, exc)
 
-        native_phases += 1  # Phase 7: Archive
+        # 9. Worktree Cleanup
+        wt_clean_res = self._clean_worktrees(job_id)
+        worktree_cleaned = wt_clean_res.outcome == ExternalOutcome.SUCCESS
+        if worktree_cleaned:
+            self.uow.events.save(
+                Event(
+                    event_type=EventType.WORKTREE_CLEANED,
+                    project_id=project_id,
+                    change_id=change_name,
+                    payload={"job_id": job_id},
+                    timestamp=utc_now(),
+                )
+            )
 
-        # Gate terminal completion on sync and archive verification evidence.
-        if not (sync_verified and archive_verified):
-            missing = []
-            if not sync_verified:
-                missing.append("sync")
-            if not archive_verified:
-                missing.append("archive")
+        # 10. Local and Remote Branch Cleanup
+        local_branches = [
+            f"minime/{change_name}-{job_id}" if job_id else None,
+            f"minime/{change_name}",
+        ]
+        local_clean_ok = True
+        for b in local_branches:
+            if b:
+                loc_res = self._delete_local_branch(b)
+                if loc_res.outcome != ExternalOutcome.SUCCESS:
+                    local_clean_ok = False
+
+        delete_remote_res = self.github_adapter.delete_remote_branch(repository, f"minime/{change_name}")
+        remote_clean_ok = delete_remote_res.outcome == ExternalOutcome.SUCCESS
+        branch_cleaned = local_clean_ok and remote_clean_ok
+
+        if branch_cleaned:
+            self.uow.events.save(
+                Event(
+                    event_type=EventType.BRANCH_CLEANED,
+                    project_id=project_id,
+                    change_id=change_name,
+                    payload={
+                        "branches": [b for b in local_branches if b],
+                        "remote_cleaned": remote_clean_ok,
+                        "reason_code": delete_remote_res.reason_code.value,
+                    },
+                    timestamp=utc_now(),
+                )
+            )
+
+        # 11. Locks and Preview Cleanup
+        locks_cleaned = True
+        self.uow.events.save(
+            Event(
+                event_type=EventType.LOCKS_RELEASED,
+                project_id=project_id,
+                change_id=change_name,
+                payload={"run_id": run.run_id},
+                timestamp=utc_now(),
+            )
+        )
+
+        # 12. Single Explicit Terminal Gate
+        unverified_phases: list[str] = []
+        if not ancestry_ok:
+            unverified_phases.append("ancestry")
+        if issue_required and not issue_closed:
+            unverified_phases.append("issue_closure")
+        if project_item_required and not project_item_updated:
+            unverified_phases.append("project_item_done")
+        if not sync_verified:
+            unverified_phases.append("openspec_sync")
+        if not archive_verified:
+            unverified_phases.append("openspec_archive")
+        if not worktree_cleaned:
+            unverified_phases.append("worktree_cleanup")
+        if not branch_cleaned:
+            unverified_phases.append("branch_cleanup")
+
+        if unverified_phases:
             reason = (
-                "Post-merge reconciliation blocked: missing "
-                + " and ".join(missing)
+                "Post-merge reconciliation blocked: missing required "
+                + ", ".join(unverified_phases)
                 + " verification evidence."
             )
             run.stop_outcome = OrchestrationStopOutcome.WAITING_EXTERNAL
@@ -448,98 +510,19 @@ class PostMergeReconciliationService:
                 ancestry_verified=ancestry_ok,
                 issue_closed=issue_closed,
                 project_item_updated=project_item_updated,
-                openspec_synced=bool(synced_specs),
-                openspec_archived=bool(archived_path),
+                openspec_synced=sync_verified,
+                openspec_archived=archive_verified,
+                worktree_cleaned=worktree_cleaned,
+                branch_cleaned=branch_cleaned,
+                locks_cleaned=locks_cleaned,
                 terminal_stage=OrchestrationStage.POST_MERGE_RECONCILING,
                 terminal_job_status=job.status if job else JobStatus.POST_MERGE_RECONCILING,
-                native_phases_completed=native_phases,
-                total_phases=12,
+                native_phases_completed=7 - len(unverified_phases),
+                total_phases=7,
                 error_message=reason,
             )
 
-        # 9. Worktree Cleanup
-        worktree_cleaned = True
-        try:
-            wt_path = self.worktree_manager.worktree_path(job_id)
-            if wt_path.exists():
-                subprocess.run(
-                    ["git", "worktree", "remove", "--force", str(wt_path)],
-                    cwd=self.project_root,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-            # Clean remediation/integration worktrees if present
-            for child in (self.project_root / ".minime" / "worktrees").glob(f"{job_id}*"):
-                subprocess.run(
-                    ["git", "worktree", "remove", "--force", str(child)],
-                    cwd=self.project_root,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-            self.uow.events.save(
-                Event(
-                    event_type=EventType.WORKTREE_CLEANED,
-                    project_id=project_id,
-                    change_id=change_name,
-                    payload={"job_id": job_id},
-                    timestamp=utc_now(),
-                )
-            )
-        except Exception as exc:
-            logger.warning("Worktree cleanup warning for job '%s': %s", job_id, exc)
-
-        native_phases += 1  # Phase 8: Worktree cleanup
-
-        # 10. Local and Remote Branch Cleanup
-        branch_cleaned = True
-        try:
-            # Delete local branch
-            local_branches = [
-                f"minime/{change_name}-{job_id}",
-                f"minime/{change_name}",
-            ]
-            for b in local_branches:
-                subprocess.run(
-                    ["git", "branch", "-D", b],
-                    cwd=self.project_root,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-            # Delete remote branch
-            delete_res = self.github_adapter.delete_remote_branch(repository, f"minime/{change_name}")
-            branch_cleaned = delete_res.outcome == ExternalOutcome.SUCCESS
-            reason_str = delete_res.reason_code.value
-            self.uow.events.save(
-                Event(
-                    event_type=EventType.BRANCH_CLEANED,
-                    project_id=project_id,
-                    change_id=change_name,
-                    payload={"branches": local_branches, "remote_cleaned": branch_cleaned, "reason_code": reason_str},
-                    timestamp=utc_now(),
-                )
-            )
-        except Exception as exc:
-            logger.warning("Branch cleanup warning: %s", exc)
-
-        native_phases += 1  # Phase 9: Branch cleanup
-
-        # 11. Locks and Preview Cleanup
-        locks_cleaned = True
-        self.uow.events.save(
-            Event(
-                event_type=EventType.LOCKS_RELEASED,
-                project_id=project_id,
-                change_id=change_name,
-                payload={"run_id": run.run_id},
-                timestamp=utc_now(),
-            )
-        )
-        native_phases += 1  # Phase 10: Locks released
-
-        # 12. Terminal State Transitions
+        # 13. Terminal State Transitions (Only reached when all required phases are verified)
         run.current_stage = OrchestrationStage.COMPLETED
         run.resumable_stage = OrchestrationStage.COMPLETED
         run.stop_outcome = OrchestrationStopOutcome.COMPLETED
@@ -561,9 +544,7 @@ class PostMergeReconciliationService:
 
         self._reconcile_change_and_backlog_item(project_id, change_name)
 
-        native_phases += 1  # Phase 11: Terminal Run & Job reconciliation
-
-        # 13. Persist Post-Merge Metric Facts
+        # 14. Persist Post-Merge Metric Facts
         duration_ms = int((time.time() - start_time) * 1000)
         self.uow.metrics.save(
             MetricFact(
@@ -576,7 +557,7 @@ class PostMergeReconciliationService:
                     "run_id": run.run_id,
                     "merged_by": merged_by,
                     "ancestry_verified": ancestry_ok,
-                    "native_phases": native_phases + 1,
+                    "native_phases": 7,
                 },
                 recorded_at=utc_now(),
             )
@@ -596,7 +577,6 @@ class PostMergeReconciliationService:
             )
         )
         self.uow.commit()
-        native_phases += 1  # Phase 12: Telemetry & final state
 
         return PostMergeReconciliationResult(
             success=True,
@@ -612,16 +592,16 @@ class PostMergeReconciliationService:
             ancestry_verified=ancestry_ok,
             issue_closed=issue_closed,
             project_item_updated=project_item_updated,
-            openspec_synced=bool(synced_specs),
-            openspec_archived=bool(archived_path),
+            openspec_synced=sync_verified,
+            openspec_archived=archive_verified,
             worktree_cleaned=worktree_cleaned,
             branch_cleaned=branch_cleaned,
             locks_cleaned=locks_cleaned,
             terminal_stage=OrchestrationStage.COMPLETED,
             terminal_job_status=JobStatus.COMPLETED,
             post_merge_duration_ms=duration_ms,
-            native_phases_completed=native_phases,
-            total_phases=12,
+            native_phases_completed=7,
+            total_phases=7,
         )
 
     def _reconcile_change_and_backlog_item(self, project_id: str, change_name: str) -> None:
@@ -657,46 +637,131 @@ class PostMergeReconciliationService:
                     actor="post_merge",
                 )
 
+    def _clean_worktrees(self, job_id: str | None) -> ExternalActionResult[bool]:
+        """Clean worktrees associated with a job fail-closed with postcondition verification."""
+        if not job_id:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="worktree_manager",
+                reason_code=ExternalReasonCode.ALREADY_ABSENT,
+                retry_safety=RetrySafety.SAFE,
+                data=True,
+            )
+
+        target_paths: list[Path] = []
+        try:
+            wt_path = self.worktree_manager.worktree_path(job_id)
+            if wt_path.exists():
+                target_paths.append(wt_path)
+            worktrees_dir = self.project_root / ".minime" / "worktrees"
+            if worktrees_dir.exists():
+                for child in worktrees_dir.glob(f"{job_id}*"):
+                    if child.exists() and child not in target_paths:
+                        target_paths.append(child)
+        except Exception as exc:
+            logger.warning("Error scanning worktrees for job '%s': %s", job_id, exc)
+
+        if not target_paths:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="worktree_manager",
+                reason_code=ExternalReasonCode.ALREADY_ABSENT,
+                retry_safety=RetrySafety.SAFE,
+                data=True,
+            )
+
+        all_removed = True
+        errors: list[str] = []
+        for path in target_paths:
+            res = subprocess.run(
+                ["git", "worktree", "remove", "--force", str(path)],
+                cwd=self.project_root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if path.exists() or res.returncode != 0:
+                all_removed = False
+                errors.append(f"Failed removing worktree at '{path}': rc={res.returncode}, stderr={res.stderr.strip()}")
+
+        if all_removed:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="worktree_manager",
+                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                retry_safety=RetrySafety.SAFE,
+                data=True,
+            )
+
+        return ExternalActionResult(
+            outcome=ExternalOutcome.FAILURE,
+            source_adapter="worktree_manager",
+            reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
+            retry_safety=RetrySafety.SAFE,
+            data=False,
+            error_message="; ".join(errors),
+        )
+
+    def _delete_local_branch(self, branch_name: str) -> ExternalActionResult[bool]:
+        """Delete a local git branch fail-closed with postcondition verification."""
+        check_res = subprocess.run(
+            ["git", "show-ref", "--verify", f"refs/heads/{branch_name}"],
+            cwd=self.project_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if check_res.returncode != 0:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="git_cli",
+                reason_code=ExternalReasonCode.ALREADY_ABSENT,
+                retry_safety=RetrySafety.SAFE,
+                data=True,
+            )
+
+        del_res = subprocess.run(
+            ["git", "branch", "-D", branch_name],
+            cwd=self.project_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        post_check = subprocess.run(
+            ["git", "show-ref", "--verify", f"refs/heads/{branch_name}"],
+            cwd=self.project_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if post_check.returncode != 0:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="git_cli",
+                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                retry_safety=RetrySafety.SAFE,
+                data=True,
+            )
+
+        return ExternalActionResult(
+            outcome=ExternalOutcome.FAILURE,
+            source_adapter="git_cli",
+            reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
+            retry_safety=RetrySafety.SAFE,
+            data=False,
+            error_message=f"Local branch '{branch_name}' deletion failed (rc={del_res.returncode}): {del_res.stderr.strip()}",
+        )
+
     def _clean_worktree_and_branches(
         self, project_id: str, change_name: str, job_id: str | None = None
     ) -> None:
         """Clean up worktrees and git branches associated with a job/change."""
-        if job_id:
-            try:
-                wt_path = self.worktree_manager.worktree_path(job_id)
-                if wt_path.exists():
-                    subprocess.run(
-                        ["git", "worktree", "remove", "--force", str(wt_path)],
-                        cwd=self.project_root,
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                    )
-                for child in (self.project_root / ".minime" / "worktrees").glob(f"{job_id}*"):
-                    subprocess.run(
-                        ["git", "worktree", "remove", "--force", str(child)],
-                        cwd=self.project_root,
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                    )
-            except Exception as exc:
-                logger.warning("Worktree cleanup warning for job '%s': %s", job_id, exc)
-
-        try:
-            local_branches = [
-                f"minime/{change_name}-{job_id}" if job_id else None,
-                f"minime/{change_name}",
-            ]
-            for b in local_branches:
-                if b:
-                    subprocess.run(
-                        ["git", "branch", "-D", b],
-                        cwd=self.project_root,
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                    )
-        except Exception as exc:
-            logger.warning("Branch cleanup warning for change '%s': %s", change_name, exc)
+        self._clean_worktrees(job_id)
+        local_branches = [
+            f"minime/{change_name}-{job_id}" if job_id else None,
+            f"minime/{change_name}",
+        ]
+        for b in local_branches:
+            if b:
+                self._delete_local_branch(b)
 

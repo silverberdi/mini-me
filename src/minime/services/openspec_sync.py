@@ -108,7 +108,7 @@ class OpenSpecSyncService:
                 outcome=ExternalOutcome.SUCCESS,
                 source_adapter="openspec_sync",
                 reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
-                retry_safety=RetrySafety.SAFE,
+                retry_safety=RetrySafety.UNSAFE,
                 data=synced_capabilities,
                 external_id=f"{openspec_path}/changes/{change_name}",
             )
@@ -216,6 +216,18 @@ class OpenSpecSyncService:
                 error_message=f"OpenSpec change directory not found: {change_dir}",
             )
 
+        # Capture expected artifact manifest before moving active change directory
+        expected_manifest: list[str] = []
+        for std_file in ["proposal.md", "design.md", "tasks.md"]:
+            if (change_dir / std_file).exists():
+                expected_manifest.append(std_file)
+        specs_dir = change_dir / "specs"
+        if specs_dir.exists():
+            for spec_file in specs_dir.rglob("spec.md"):
+                rel_spec = str(spec_file.relative_to(change_dir))
+                if rel_spec not in expected_manifest:
+                    expected_manifest.append(rel_spec)
+
         try:
             shutil.move(str(change_dir), str(target_dir))
             if target_dir.exists() and not change_dir.exists():
@@ -224,8 +236,9 @@ class OpenSpecSyncService:
                     outcome=ExternalOutcome.SUCCESS,
                     source_adapter="openspec_archive",
                     reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
-                    retry_safety=RetrySafety.SAFE,
+                    retry_safety=RetrySafety.UNSAFE,
                     data=target_dir,
+                    provider_detail=",".join(expected_manifest),
                     external_id=str(target_dir),
                 )
             return ExternalActionResult(
@@ -350,9 +363,12 @@ class OpenSpecSyncService:
         openspec_path: str,
         change_name: str,
         archived_path: ExternalActionResult[Path] | Path | None,
+        expected_manifest: list[str] | None = None,
     ) -> ExternalActionResult[bool]:
-        """Confirm the change directory is gone and the archive artifact exists."""
+        """Confirm active change directory is gone, archive target exists, and all expected artifacts are preserved."""
         target_dir: Path | None = None
+        manifest: list[str] = expected_manifest or []
+
         if isinstance(archived_path, ExternalActionResult):
             if archived_path.outcome == ExternalOutcome.AMBIGUOUS:
                 return ExternalActionResult(
@@ -382,6 +398,8 @@ class OpenSpecSyncService:
                     error_message=f"Archive failed: {archived_path.error_message}",
                 )
             target_dir = archived_path.data
+            if not manifest and archived_path.provider_detail:
+                manifest = [f.strip() for f in archived_path.provider_detail.split(",") if f.strip()]
         elif isinstance(archived_path, Path):
             target_dir = archived_path
 
@@ -408,6 +426,31 @@ class OpenSpecSyncService:
             )
 
         if not change_dir.exists() and target_dir and target_dir.exists():
+            if not manifest:
+                for std_file in ["proposal.md", "tasks.md"]:
+                    if (target_dir / std_file).exists():
+                        manifest.append(std_file)
+                specs_dir = target_dir / "specs"
+                if specs_dir.exists():
+                    for spec_file in specs_dir.rglob("spec.md"):
+                        manifest.append(str(spec_file.relative_to(target_dir)))
+
+            missing_or_corrupt: list[str] = []
+            for rel_path in manifest:
+                artifact = target_dir / rel_path
+                if not artifact.exists() or (artifact.is_file() and artifact.stat().st_size == 0):
+                    missing_or_corrupt.append(rel_path)
+
+            if missing_or_corrupt:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="openspec_archive",
+                    reason_code=ExternalReasonCode.EVIDENCE_INSUFFICIENT,
+                    retry_safety=RetrySafety.SAFE,
+                    data=False,
+                    error_message=f"Archive artifact verification failed: missing or empty expected files: {missing_or_corrupt}",
+                )
+
             return ExternalActionResult(
                 outcome=ExternalOutcome.SUCCESS,
                 source_adapter="openspec_archive",

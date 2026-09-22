@@ -286,3 +286,151 @@ def test_post_merge_blocks_when_sync_evidence_missing(tmp_path: Path):
     # Archive must not have run when sync evidence was never verified.
     mock_sync.archive_change.assert_not_called()
 
+
+def test_post_merge_blocks_when_issue_close_unknown_or_ambiguous(tmp_path: Path):
+    uow = InMemoryUnitOfWork()
+    _setup_uow(uow)
+    _make_change(tmp_path)
+
+    adapter = _github_adapter()
+    adapter.close_issue.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.UNKNOWN,
+        source_adapter="mock",
+        reason_code=ExternalReasonCode.UNOBSERVABLE,
+        retry_safety=RetrySafety.SAFE,
+        data=False,
+    )
+
+    service = PostMergeReconciliationService(uow=uow, project_root=tmp_path, github_adapter=adapter)
+    service.verify_candidate_ancestry = MagicMock(return_value=True)
+
+    result = service.reconcile_post_merge("mini-me", "test-change", run_id="run-123")
+
+    assert result.success is False
+    assert result.issue_closed is False
+    assert result.terminal_stage is not OrchestrationStage.COMPLETED
+    updated_run = uow.orchestration_runs.get_by_id("run-123")
+    assert updated_run.stop_outcome == OrchestrationStopOutcome.WAITING_EXTERNAL
+    assert updated_run.is_active is True
+    assert "issue_closure" in result.error_message
+
+
+def test_post_merge_blocks_when_project_item_update_fails(tmp_path: Path):
+    uow = InMemoryUnitOfWork()
+    _setup_uow(uow)
+    _make_change(tmp_path)
+
+    adapter = _github_adapter()
+    adapter.update_project_item_status.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.FAILURE,
+        source_adapter="mock",
+        reason_code=ExternalReasonCode.CONFLICT,
+        retry_safety=RetrySafety.UNSAFE,
+        data=False,
+    )
+
+    service = PostMergeReconciliationService(uow=uow, project_root=tmp_path, github_adapter=adapter)
+    service.verify_candidate_ancestry = MagicMock(return_value=True)
+
+    result = service.reconcile_post_merge("mini-me", "test-change", run_id="run-123")
+
+    assert result.success is False
+    assert result.project_item_updated is False
+    assert result.terminal_stage is not OrchestrationStage.COMPLETED
+    assert "project_item_done" in result.error_message
+
+
+def test_post_merge_blocks_when_worktree_cleanup_fails(tmp_path: Path):
+    uow = InMemoryUnitOfWork()
+    _setup_uow(uow)
+    _make_change(tmp_path)
+
+    # Create a fake worktree directory that cannot be removed
+    wt_dir = tmp_path / ".minime" / "worktrees" / "job-123"
+    wt_dir.mkdir(parents=True)
+
+    service = PostMergeReconciliationService(uow=uow, project_root=tmp_path, github_adapter=_github_adapter())
+    service.verify_candidate_ancestry = MagicMock(return_value=True)
+    # Mock _clean_worktrees to return failure
+    service._clean_worktrees = MagicMock(
+        return_value=ExternalActionResult(
+            outcome=ExternalOutcome.FAILURE,
+            source_adapter="worktree_manager",
+            reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
+            retry_safety=RetrySafety.SAFE,
+            data=False,
+        )
+    )
+
+    result = service.reconcile_post_merge("mini-me", "test-change", run_id="run-123")
+
+    assert result.success is False
+    assert result.worktree_cleaned is False
+    assert result.terminal_stage is not OrchestrationStage.COMPLETED
+    assert "worktree_cleanup" in result.error_message
+    event_types = [e.event_type for e in uow._events]
+    assert EventType.WORKTREE_CLEANED not in event_types
+
+
+def test_post_merge_blocks_when_remote_branch_cleanup_fails(tmp_path: Path):
+    uow = InMemoryUnitOfWork()
+    _setup_uow(uow)
+    _make_change(tmp_path)
+
+    adapter = _github_adapter()
+    adapter.delete_remote_branch.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.UNKNOWN,
+        source_adapter="mock",
+        reason_code=ExternalReasonCode.UNOBSERVABLE,
+        retry_safety=RetrySafety.UNSAFE,
+        data=False,
+    )
+
+    service = PostMergeReconciliationService(uow=uow, project_root=tmp_path, github_adapter=adapter)
+    service.verify_candidate_ancestry = MagicMock(return_value=True)
+
+    result = service.reconcile_post_merge("mini-me", "test-change", run_id="run-123")
+
+    assert result.success is False
+    assert result.branch_cleaned is False
+    assert result.terminal_stage is not OrchestrationStage.COMPLETED
+    assert "branch_cleanup" in result.error_message
+
+
+def test_archive_preservation_manifest_verification(tmp_path: Path):
+    _make_change(tmp_path)
+    service = OpenSpecSyncService(tmp_path)
+
+    # Archive happy path
+    arc_res = service.archive_change("openspec", "test-change", target_date="2026-09-03")
+    assert arc_res.outcome == ExternalOutcome.SUCCESS
+    assert arc_res.retry_safety == RetrySafety.UNSAFE
+    archived_dir = arc_res.data
+
+    # Verify archive happy path
+    v_res = service.verify_archive("openspec", "test-change", arc_res)
+    assert v_res.outcome == ExternalOutcome.SUCCESS
+    assert v_res.data is True
+
+    # Corrupt archive by deleting expected artifact
+    (archived_dir / "tasks.md").unlink()
+    v_fail = service.verify_archive("openspec", "test-change", arc_res)
+    assert v_fail.outcome == ExternalOutcome.FAILURE
+    assert v_fail.data is False
+    assert "missing or empty expected files" in v_fail.error_message
+
+
+def test_sync_and_archive_retry_safety_semantics(tmp_path: Path):
+    _make_change(tmp_path)
+    service = OpenSpecSyncService(tmp_path)
+
+    # Mutating sync -> RetrySafety.UNSAFE
+    sync_res = service.sync_change_specs("openspec", "test-change")
+    assert sync_res.outcome == ExternalOutcome.SUCCESS
+    assert sync_res.retry_safety == RetrySafety.UNSAFE
+
+    # Mutating archive -> RetrySafety.UNSAFE
+    archive_res = service.archive_change("openspec", "test-change", target_date="2026-09-03")
+    assert archive_res.outcome == ExternalOutcome.SUCCESS
+    assert archive_res.retry_safety == RetrySafety.UNSAFE
+
