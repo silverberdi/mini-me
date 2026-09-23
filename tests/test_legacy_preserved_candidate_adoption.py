@@ -5,8 +5,13 @@ from __future__ import annotations
 import pytest
 from tests.test_human_resolution_real_git import git, make_repo, make_service
 
-from minime.domain.enums import EventType, OrchestrationStage
-from minime.domain.models import CandidateManifest, OrchestrationCandidate, OrchestrationStageEvent
+from minime.domain.enums import EventType, OrchestrationStage, WorktreeCreationState
+from minime.domain.models import (
+    CandidateManifest,
+    OrchestrationCandidate,
+    OrchestrationStageEvent,
+    OrchestrationWorktreeOwnership,
+)
 
 
 def legacy_service(in_memory_uow, repo, base_a, candidate_sha):
@@ -149,6 +154,24 @@ def test_legacy_ref_adoption_validates_real_git_and_continues_resolution(tmp_pat
         in_memory_uow.orchestration_runs.get_by_id(run_id)
     )
 
+    integration_wt_path = (
+        repo
+        / ".minime"
+        / "worktrees"
+        / f"job-human-resolution-integration-gen2-{base_b[:12]}"
+    ).resolve()
+    in_memory_uow.orchestration_worktree_ownerships.save(
+        OrchestrationWorktreeOwnership(
+            worktree_id="wt-integration-gen2",
+            project_id="mini-me",
+            job_id="job-human-resolution",
+            run_id=run_id,
+            change_name="010-governance-and-recovery-hardening",
+            canonical_worktree_path=str(integration_wt_path),
+            creation_state=WorktreeCreationState.CREATED,
+        )
+    )
+
     resolved = service.resolve_preserved_candidate(
         run_id,
         continue_preserved_candidate=True,
@@ -181,6 +204,7 @@ def test_legacy_ref_adoption_validates_real_git_and_continues_resolution(tmp_pat
         "adopted_candidate_ref": ref,
     }
 
+    git(repo, "update-ref", "refs/heads/main", in_memory_uow.orchestration_candidates.get_by_generation(run_id, 2).candidate_sha)
     again = service.resolve_preserved_candidate(
         run_id,
         continue_preserved_candidate=True,
@@ -252,11 +276,29 @@ def test_legacy_ref_adoption_rejects_wrong_sha(tmp_path, in_memory_uow):
 
 
 def test_existing_candidate_ref_does_not_trigger_adoption(tmp_path, in_memory_uow):
-    repo, base_a, candidate_sha, _ = make_repo(tmp_path, conflict=False)
+    repo, base_a, candidate_sha, base_b = make_repo(tmp_path, conflict=False)
     ref = "refs/heads/historical-candidate"
     service, run_id = make_service(in_memory_uow, repo, base_a, candidate_sha, ref)
     service.drive_coordinator = lambda run_id, project_root=None: (
         in_memory_uow.orchestration_runs.get_by_id(run_id)
+    )
+
+    integration_wt_path = (
+        repo
+        / ".minime"
+        / "worktrees"
+        / f"job-human-resolution-integration-gen2-{base_b[:12]}"
+    ).resolve()
+    in_memory_uow.orchestration_worktree_ownerships.save(
+        OrchestrationWorktreeOwnership(
+            worktree_id="wt-integration-gen2",
+            project_id="mini-me",
+            job_id="job-human-resolution",
+            run_id=run_id,
+            change_name="010-governance-and-recovery-hardening",
+            canonical_worktree_path=str(integration_wt_path),
+            creation_state=WorktreeCreationState.CREATED,
+        )
     )
 
     service.resolve_preserved_candidate(

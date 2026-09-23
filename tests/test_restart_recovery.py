@@ -1,12 +1,20 @@
 """Unit tests for RestartRecoveryService, concrete Git lock ownership evidence, and daemon restart/interruption tracking."""
 
+import json
 import os
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from minime.domain.enums import EventType, GitOperationStatus, JobStatus
-from minime.domain.models import CheckResult, GitOperation, Job, Project
+from minime.domain.enums import EventType, GitOperationStatus, JobStatus, WorktreeCreationState
+from minime.domain.models import (
+    CheckResult,
+    GitOperation,
+    Job,
+    OrchestrationWorktreeOwnership,
+    Project,
+    ProjectManagedRepositoryBinding,
+)
 from minime.services.restart_recovery_service import RestartRecoveryService
 from minime.services.worktree_manager import WorktreeManager
 
@@ -220,17 +228,56 @@ def test_interrupted_running_never_inferred_successful(in_memory_uow, tmp_path):
 @pytest.mark.asyncio
 async def test_worktree_add_records_managed_worktree_path_not_cwd(in_memory_uow, tmp_path):
     """A1. worktree_add runs with cwd=project_root but records GitOperation.worktree_path=<worktree_path>."""
+    binding = ProjectManagedRepositoryBinding(
+        project_id="mini-me",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+        managed_repository_root=str(tmp_path.resolve()),
+        worktree_parent_dir=str((tmp_path / ".minime" / "worktrees").resolve()),
+    )
+    in_memory_uow.project_managed_repository_bindings.save(binding)
     manager = WorktreeManager(project_root=tmp_path, uow=in_memory_uow)
     job_id = "job-wt-identity-1"
     target_worktree = (tmp_path / ".minime" / "worktrees" / job_id).resolve()
 
-    # Mock git execution to succeed without creating full git repo
-    with patch("asyncio.create_subprocess_exec") as mock_exec:
-        mock_proc = mock_exec.return_value
-        mock_proc.pid = 4321
-        mock_proc.returncode = 0
-        mock_proc.communicate = AsyncMock(return_value=(b"sha123\n", b""))
+    async def mock_subprocess(*args, **kwargs):
+        proc = AsyncMock()
+        proc.pid = 4321
+        proc.returncode = 0
+        cmd_args = list(args[1:])
+        if "worktree" in cmd_args and "add" in cmd_args:
+            target_worktree.mkdir(parents=True, exist_ok=True)
+            proc.communicate = AsyncMock(return_value=(b"", b""))
+        elif "worktree" in cmd_args and "list" in cmd_args:
+            proc.communicate = AsyncMock(return_value=(f"worktree {target_worktree}\n".encode(), b""))
+        elif "branch" in cmd_args and "--show-current" in cmd_args:
+            proc.communicate = AsyncMock(return_value=(b"minime/test-change-job-wt-identity-1\n", b""))
+        elif "remote" in cmd_args and "get-url" in cmd_args:
+            proc.communicate = AsyncMock(return_value=(b"https://github.com/silverberdi/mini-me.git\n", b""))
+        elif "rev-parse" in cmd_args and "--is-inside-work-tree" in cmd_args:
+            proc.communicate = AsyncMock(return_value=(b"true\n", b""))
+        else:
+            proc.communicate = AsyncMock(return_value=(b"sha123\n", b""))
+        return proc
 
+    import subprocess
+    from unittest.mock import MagicMock
+
+    orig_run = subprocess.run
+
+    def mock_run(cmd, *args, **kwargs):
+        if isinstance(cmd, (list, tuple)) and cmd and cmd[0] == "git":
+            res = MagicMock()
+            res.returncode = 0
+            if "get-url" in cmd:
+                res.stdout = "https://github.com/silverberdi/mini-me.git\n"
+            elif "--is-inside-work-tree" in cmd:
+                res.stdout = "true\n"
+            else:
+                res.stdout = "sha123\n"
+            return res
+        return orig_run(cmd, *args, **kwargs)
+
+    with patch("asyncio.create_subprocess_exec", side_effect=mock_subprocess), patch("subprocess.run", side_effect=mock_run):
         await manager.create_worktree(
             job_id=job_id,
             change_name="test-change",
@@ -252,18 +299,55 @@ async def test_worktree_add_records_managed_worktree_path_not_cwd(in_memory_uow,
 @pytest.mark.asyncio
 async def test_worktree_remove_records_managed_worktree_path(in_memory_uow, tmp_path):
     """A2. worktree_remove records the exact managed worktree path being removed."""
+    import shutil
+
+    binding = ProjectManagedRepositoryBinding(
+        project_id="mini-me",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+        managed_repository_root=str(tmp_path.resolve()),
+        worktree_parent_dir=str((tmp_path / ".minime" / "worktrees").resolve()),
+    )
+    in_memory_uow.project_managed_repository_bindings.save(binding)
+
     manager = WorktreeManager(project_root=tmp_path, uow=in_memory_uow)
     job_id = "job-wt-remove-1"
     target_worktree = (tmp_path / ".minime" / "worktrees" / job_id).resolve()
     target_worktree.mkdir(parents=True, exist_ok=True)
-    (target_worktree / ".minime_worktree_ownership.json").write_text('{"worktree_id": "wt-job-wt-remove-1"}')
+    marker_content = json.dumps({
+        "worktree_id": "wt-job-wt-remove-1",
+        "project_id": "mini-me",
+        "job_id": job_id,
+        "canonical_worktree_path": str(target_worktree),
+    })
+    (target_worktree / ".minime_worktree_ownership.json").write_text(marker_content)
+    (target_worktree / ".minime-managed-project.json").write_text(marker_content)
 
-    with patch("asyncio.create_subprocess_exec") as mock_exec:
-        mock_proc = mock_exec.return_value
-        mock_proc.pid = 4322
-        mock_proc.returncode = 0
-        mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+    ownership = OrchestrationWorktreeOwnership(
+        worktree_id="wt-job-wt-remove-1",
+        project_id="mini-me",
+        job_id=job_id,
+        run_id="run-job-wt-remove-1",
+        change_name="test-change",
+        canonical_worktree_path=str(target_worktree),
+        creation_state=WorktreeCreationState.CREATED,
+    )
+    in_memory_uow.orchestration_worktree_ownerships.save(ownership)
 
+    async def mock_subprocess_remove(*args, **kwargs):
+        proc = AsyncMock()
+        proc.pid = 4322
+        proc.returncode = 0
+        cmd_args = list(args[1:])
+        if "worktree" in cmd_args and "remove" in cmd_args:
+            shutil.rmtree(target_worktree, ignore_errors=True)
+            proc.communicate = AsyncMock(return_value=(b"", b""))
+        elif "worktree" in cmd_args and "list" in cmd_args:
+            proc.communicate = AsyncMock(return_value=(f"worktree {target_worktree}\n".encode(), b""))
+        else:
+            proc.communicate = AsyncMock(return_value=(b"", b""))
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=mock_subprocess_remove):
         await manager.cleanup_worktree(job_id=job_id, project_id="mini-me")
 
     ops = in_memory_uow.git_operations.list_by_job(job_id)

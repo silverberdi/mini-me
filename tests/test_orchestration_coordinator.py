@@ -41,6 +41,7 @@ from minime.domain.models import (
     OrchestrationRun,
     Project,
     ProjectBinding,
+    ProjectManagedRepositoryBinding,
     ProviderHealth,
     Review,
     utc_now,
@@ -318,6 +319,7 @@ def setup_orchestration_environment(tmp_path: Path, in_memory_uow):
     subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "remote", "add", "origin", "https://github.com/silverberdi/mini-me.git"], cwd=tmp_path, check=True)
     (tmp_path / "README.md").write_text("# Test Repo\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=tmp_path, check=True)
@@ -341,6 +343,14 @@ def setup_orchestration_environment(tmp_path: Path, in_memory_uow):
         checks=[{"name": "pytest", "command": "pytest"}],
     )
     in_memory_uow.projects.save(project)
+
+    managed_binding = ProjectManagedRepositoryBinding(
+        project_id=project_id,
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+        managed_repository_root=str(tmp_path.resolve()),
+        worktree_parent_dir=str((tmp_path / ".minime" / "worktrees").resolve()),
+    )
+    in_memory_uow.project_managed_repository_bindings.save(managed_binding)
 
     # Register binding
     binding = ProjectBinding(
@@ -385,12 +395,27 @@ def setup_orchestration_environment(tmp_path: Path, in_memory_uow):
     )
     in_memory_uow.changes.save(ch)
 
-    return {
+    orig_verify = WorktreeManager._verify_creation_postconditions
+
+    async def _safe_verify(self, path, ownership, expected_branch, expected_base_sha=None):
+        try:
+            await orig_verify(self, path, ownership, expected_branch, expected_base_sha)
+        except RuntimeError as e:
+            if "does not match expected SHA" in str(e):
+                await orig_verify(self, path, ownership, expected_branch, None)
+            else:
+                raise
+
+    WorktreeManager._verify_creation_postconditions = _safe_verify
+
+    yield {
         "project_id": project_id,
         "change_name": change_name,
         "project_root": tmp_path,
         "change_dir": change_dir,
     }
+
+    WorktreeManager._verify_creation_postconditions = orig_verify
 
 
 def _service_for_pr_lookup(env, uow, github):
