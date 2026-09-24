@@ -116,7 +116,7 @@ def _setup_uow(uow: InMemoryUnitOfWork, change_name: str = "test-change", run_id
     uow.project_managed_repository_bindings.save(
         ProjectManagedRepositoryBinding(
             project_id="mini-me",
-            canonical_repository_identity="silverberdi/mini-me",
+            canonical_repository_identity="github.com/silverberdi/mini-me",
             managed_repository_root=str(tmp_path) if tmp_path else "/tmp",
             worktree_parent_dir=str(tmp_path / ".minime" / "worktrees") if tmp_path else "/tmp/.minime/worktrees",
         )

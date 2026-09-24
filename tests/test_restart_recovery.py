@@ -237,6 +237,7 @@ async def test_worktree_add_records_managed_worktree_path_not_cwd(in_memory_uow,
     in_memory_uow.project_managed_repository_bindings.save(binding)
     manager = WorktreeManager(project_root=tmp_path, uow=in_memory_uow)
     job_id = "job-wt-identity-1"
+    in_memory_uow.jobs.save(Job(job_id=job_id, project_id="mini-me", change_name="test-change", implementer_role="codex"))
     target_worktree = (tmp_path / ".minime" / "worktrees" / job_id).resolve()
 
     async def mock_subprocess(*args, **kwargs):

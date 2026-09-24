@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+from typing import Any
 
 from minime.domain.enums import (
     ExternalOutcome,
@@ -19,8 +20,27 @@ from minime.domain.models import (
 )
 
 
+def is_binding_fully_valid(binding: Any) -> bool:
+    """Check if a project managed repository binding exists and meets all validity criteria."""
+    if not binding:
+        return False
+    if not getattr(binding, "is_valid", False):
+        return False
+    if getattr(binding, "mismatch_reasons", None):
+        return False
+    if not str(getattr(binding, "managed_repository_root", "") or "").strip():
+        return False
+    if not str(getattr(binding, "worktree_parent_dir", "") or "").strip():
+        return False
+    if not str(getattr(binding, "canonical_repository_identity", "") or "").strip():
+        return False
+    if not str(getattr(binding, "remote_name", "") or "").strip():
+        return False
+    return True
+
+
 def normalize_repository_identity(repo: str) -> str:
-    """Normalize repository URLs/names into canonical 'host/owner/repo' or 'owner/repo' representation."""
+    """Normalize repository URLs/names into canonical 'host/owner/repo' or 'owner/repo' representation preserving host."""
     cleaned = repo.strip()
     if not cleaned:
         return ""
@@ -28,17 +48,15 @@ def normalize_repository_identity(repo: str) -> str:
     if cleaned.endswith(".git"):
         cleaned = cleaned[:-4]
 
-    ssh_match = re.match(r"^git@[^:]+:([^/]+)/(.+)$", cleaned)
+    ssh_match = re.match(r"^git@([^:]+):([^/]+)/(.+)$", cleaned)
     if ssh_match:
-        return f"{ssh_match.group(1)}/{ssh_match.group(2)}".lower()
+        host, owner, repository = ssh_match.group(1), ssh_match.group(2), ssh_match.group(3)
+        return f"{host}/{owner}/{repository}".lower()
 
-    url_match = re.match(r"^(?:https?|ssh)://[^/]+/([^/]+)/(.+)$", cleaned)
+    url_match = re.match(r"^(?:https?|ssh)://(?:[^@]+@)?([^:/]+)(?::\d+)?/([^/]+)/(.+)$", cleaned)
     if url_match:
-        return f"{url_match.group(1)}/{url_match.group(2)}".lower()
-
-    simple_match = re.match(r"^([a-zA-Z0-9_\-\.]+)/([a-zA-Z0-9_\-\.]+)$", cleaned)
-    if simple_match:
-        return cleaned.lower()
+        host, owner, repository = url_match.group(1), url_match.group(2), url_match.group(3)
+        return f"{host}/{owner}/{repository}".lower()
 
     return cleaned.lower()
 
@@ -102,7 +120,7 @@ class ManagedWorkspaceGuard:
             norm_observed = normalize_repository_identity(observed_url)
             norm_expected = normalize_repository_identity(expected_identity)
 
-            if norm_observed != norm_expected and norm_observed.split("/")[-2:] != norm_expected.split("/")[-2:]:
+            if not norm_observed or not norm_expected or norm_observed != norm_expected:
                 return False, (
                     f"Git repository remote mismatch: observed remote '{norm_observed}' "
                     f"does not match expected canonical identity '{norm_expected}'."
@@ -145,14 +163,17 @@ class ManagedWorkspaceGuard:
         binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
         binding = binding_repo.get_by_project_id(request.project_id) if binding_repo else None
 
-        if not binding:
+        if not is_binding_fully_valid(binding):
             return WorkspaceMutationDecision(
                 allowed=False,
                 outcome=ExternalOutcome.UNKNOWN,
                 reason_code=ExternalReasonCode.EVIDENCE_INSUFFICIENT,
                 workspace_role=WorkspaceRole.UNKNOWN,
                 resolved_path=resolved,
-                provider_detail=f"No managed repository binding found for project '{request.project_id}'.",
+                provider_detail=(
+                    f"Managed repository binding for project '{request.project_id}' is missing, invalid, or unverified: "
+                    f"is_valid={getattr(binding, 'is_valid', None)}, mismatch_reasons={getattr(binding, 'mismatch_reasons', None)}."
+                ),
             )
 
         managed_repo_root = self.resolve_canonical_path(binding.managed_repository_root)

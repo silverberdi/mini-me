@@ -68,7 +68,47 @@ class WorktreeManager:
 
         canonical_path = target_path.resolve()
 
-        if require_created_ownership and self.uow:
+        if not self.uow:
+            raise RuntimeError(f"PersistenceUnitOfWork (uow) is required for workspace mutation '{operation.value}'.")
+
+        from minime.services.workspace_guard import ManagedWorkspaceGuard, is_binding_fully_valid
+        binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
+        binding = binding_repo.get_by_project_id(project_id) if binding_repo else None
+
+        if not is_binding_fully_valid(binding):
+            raise RuntimeError(
+                f"Mutating operation '{operation.value}' denied: binding for project '{project_id}' is missing, invalid, or unverified."
+            )
+
+        canonical_source = str(self.project_root.resolve())
+        canonical_binding_root = str(Path(binding.managed_repository_root).resolve())
+        if canonical_source != canonical_binding_root:
+            raise RuntimeError(
+                f"Mutating operation '{operation.value}' denied: WorktreeManager project_root '{canonical_source}' "
+                f"does not match binding managed_repository_root '{canonical_binding_root}'."
+            )
+
+        guard = self.workspace_guard or ManagedWorkspaceGuard(self.uow)
+
+        from minime.domain.enums import ExternalOutcome, WorkspaceRole
+        from minime.domain.models import WorkspaceMutationRequest
+        source_req = WorkspaceMutationRequest(
+            project_id=project_id,
+            target_path=canonical_source,
+            requested_operation=WorkspaceOperation.READ,
+        )
+        source_decision = guard.evaluate_mutation(source_req)
+        if (
+            not source_decision.allowed
+            or source_decision.workspace_role != WorkspaceRole.MANAGED_REPOSITORY
+            or source_decision.outcome != ExternalOutcome.SUCCESS
+        ):
+            raise RuntimeError(
+                f"Mutating operation '{operation.value}' denied: source managed repository '{canonical_source}' "
+                f"fails workspace guard authorization: {source_decision.provider_detail}"
+            )
+
+        if require_created_ownership:
             ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None)
             if ownership_repo:
                 ownership = ownership_repo.get_by_canonical_path(str(canonical_path))
@@ -85,15 +125,6 @@ class WorktreeManager:
                         f"Mutating operation '{operation.value}' denied: no valid worktree ownership found for '{canonical_path}'."
                     )
 
-        guard = self.workspace_guard
-        if not guard and self.uow:
-            from minime.services.workspace_guard import ManagedWorkspaceGuard
-            guard = ManagedWorkspaceGuard(self.uow)
-
-        if not guard:
-            raise RuntimeError(f"ManagedWorkspaceGuard is required for workspace mutation '{operation.value}'.")
-
-        from minime.domain.models import WorkspaceMutationRequest
         req = WorkspaceMutationRequest(
             project_id=project_id,
             target_path=str(canonical_path),
@@ -163,7 +194,8 @@ class WorktreeManager:
         if not binding_repo:
             raise RuntimeError("project_managed_repository_bindings repository is missing in uow.")
         binding = binding_repo.get_by_project_id(project_id)
-        if not binding or not binding.worktree_parent_dir:
+        from minime.services.workspace_guard import is_binding_fully_valid
+        if not is_binding_fully_valid(binding):
             raise RuntimeError(f"Failing closed: no valid durable binding or worktree_parent_dir found for project_id '{project_id}'.")
         return Path(binding.worktree_parent_dir).resolve()
 
@@ -231,172 +263,180 @@ class WorktreeManager:
 
     def _resolve_real_run_id(
         self, job_id: str, run_id: str | None = None, project_id: str | None = None, change_name: str | None = None
-    ) -> str | None:
-        if run_id:
-            return run_id
-        if not self.uow:
-            return None
+    ) -> str:
+        durable_run_id = None
+        if self.uow:
+            # 1. Check uow.orchestration_runs
+            if hasattr(self.uow, "orchestration_runs") and self.uow.orchestration_runs:
+                runs_repo = self.uow.orchestration_runs
+                if hasattr(runs_repo, "get_by_active_job_id"):
+                    try:
+                        r = runs_repo.get_by_active_job_id(job_id)
+                        if r and getattr(r, "run_id", None):
+                            durable_run_id = r.run_id
+                    except Exception:
+                        pass
+                if not durable_run_id and hasattr(runs_repo, "get_by_id"):
+                    try:
+                        r = runs_repo.get_by_id(job_id)
+                        if r and getattr(r, "run_id", None):
+                            durable_run_id = r.run_id
+                    except Exception:
+                        pass
+                if not durable_run_id and project_id and change_name and hasattr(runs_repo, "get_active_run"):
+                    try:
+                        r = runs_repo.get_active_run(project_id, change_name)
+                        if r and getattr(r, "run_id", None):
+                            durable_run_id = r.run_id
+                    except Exception:
+                        pass
 
-        # 1. Check uow.jobs
-        if hasattr(self.uow, "jobs") and self.uow.jobs:
-            try:
-                job = self.uow.jobs.get_by_id(job_id) if hasattr(self.uow.jobs, "get_by_id") else None
-                if job and getattr(job, "run_id", None):
-                    return job.run_id
-            except Exception:
-                pass
+                if not durable_run_id:
+                    runs = []
+                    if hasattr(runs_repo, "list_runs"):
+                        try:
+                            runs = runs_repo.list_runs()
+                        except Exception:
+                            pass
+                    elif hasattr(runs_repo, "list_all"):
+                        try:
+                            runs = runs_repo.list_all()
+                        except Exception:
+                            pass
+                    if not runs and hasattr(runs_repo, "_store"):
+                        store = getattr(runs_repo, "_store", {})
+                        runs = list(store.values()) if isinstance(store, dict) else []
+                    if not runs and hasattr(runs_repo, "store"):
+                        store = getattr(runs_repo, "store", {})
+                        runs = list(store.values()) if isinstance(store, dict) else []
 
-        # 2. Check uow.orchestration_runs
-        if hasattr(self.uow, "orchestration_runs") and self.uow.orchestration_runs:
-            runs_repo = self.uow.orchestration_runs
-            if hasattr(runs_repo, "get_by_active_job_id"):
+                    for r in runs:
+                        if (getattr(r, "active_job_id", None) == job_id or getattr(r, "run_id", None) == job_id) and getattr(r, "run_id", None):
+                            durable_run_id = r.run_id
+                            break
+
+            # 2. Check uow.candidate_remediations
+            if not durable_run_id and hasattr(self.uow, "candidate_remediations") and self.uow.candidate_remediations:
+                rem_repo = self.uow.candidate_remediations
+                if hasattr(rem_repo, "list_by_job"):
+                    try:
+                        rems = rem_repo.list_by_job(job_id)
+                        if rems and getattr(rems[0], "run_id", None):
+                            durable_run_id = rems[0].run_id
+                    except Exception:
+                        pass
+
+            # 3. Check uow.orchestration_worktree_ownerships
+            if not durable_run_id and hasattr(self.uow, "orchestration_worktree_ownerships") and self.uow.orchestration_worktree_ownerships:
+                ow_repo = self.uow.orchestration_worktree_ownerships
+                if hasattr(ow_repo, "get_by_job_id"):
+                    try:
+                        ow = ow_repo.get_by_job_id(job_id)
+                        if ow and getattr(ow, "run_id", None):
+                            durable_run_id = ow.run_id
+                    except Exception:
+                        pass
+
+            # 4. Check uow.jobs
+            if not durable_run_id and hasattr(self.uow, "jobs") and self.uow.jobs:
                 try:
-                    r = runs_repo.get_by_active_job_id(job_id)
-                    if r and getattr(r, "run_id", None):
-                        return r.run_id
+                    job = self.uow.jobs.get_by_id(job_id) if hasattr(self.uow.jobs, "get_by_id") else None
+                    if job:
+                        durable_run_id = getattr(job, "run_id", None) or run_id or job.job_id
                 except Exception:
                     pass
-            if hasattr(runs_repo, "get_by_id"):
-                try:
-                    r = runs_repo.get_by_id(job_id)
-                    if r and getattr(r, "run_id", None):
-                        return r.run_id
-                except Exception:
-                    pass
-            if project_id and change_name and hasattr(runs_repo, "get_active_run"):
-                try:
-                    r = runs_repo.get_active_run(project_id, change_name)
-                    if r and getattr(r, "run_id", None):
-                        return r.run_id
-                except Exception:
-                    pass
 
-            runs = []
-            if hasattr(runs_repo, "list_runs"):
-                try:
-                    runs = runs_repo.list_runs()
-                except Exception:
-                    pass
-            elif hasattr(runs_repo, "list_all"):
-                try:
-                    runs = runs_repo.list_all()
-                except Exception:
-                    pass
-            if not runs and hasattr(runs_repo, "_store"):
-                store = getattr(runs_repo, "_store", {})
-                runs = list(store.values()) if isinstance(store, dict) else []
-            if not runs and hasattr(runs_repo, "store"):
-                store = getattr(runs_repo, "store", {})
-                runs = list(store.values()) if isinstance(store, dict) else []
+        if durable_run_id:
+            if run_id and run_id != durable_run_id:
+                raise ValueError(f"CONFLICT: Caller-supplied run_id '{run_id}' conflicts with durable run_id '{durable_run_id}' for job_id '{job_id}'.")
+            return durable_run_id
 
-            for r in runs:
-                if (getattr(r, "active_job_id", None) == job_id or getattr(r, "run_id", None) == job_id) and getattr(r, "run_id", None):
-                    return r.run_id
-
-        # 3. Check uow.candidate_remediations
-        if hasattr(self.uow, "candidate_remediations") and self.uow.candidate_remediations:
-            rem_repo = self.uow.candidate_remediations
-            if hasattr(rem_repo, "list_by_job"):
-                try:
-                    rems = rem_repo.list_by_job(job_id)
-                    if rems and getattr(rems[0], "run_id", None):
-                        return rems[0].run_id
-                except Exception:
-                    pass
-
-        # 4. Check uow.orchestration_worktree_ownerships
-        if hasattr(self.uow, "orchestration_worktree_ownerships") and self.uow.orchestration_worktree_ownerships:
-            ow_repo = self.uow.orchestration_worktree_ownerships
-            if hasattr(ow_repo, "get_by_job_id"):
-                try:
-                    ow = ow_repo.get_by_job_id(job_id)
-                    if ow and getattr(ow, "run_id", None):
-                        return ow.run_id
-                except Exception:
-                    pass
-
-        return None
+        raise ValueError(f"EVIDENCE_INSUFFICIENT: Durable run_id for job_id '{job_id}' is unobservable in persistence.")
 
     def _resolve_real_change_name(
         self, job_id: str, change_name: str | None = None, project_id: str | None = None, run_id: str | None = None
-    ) -> str | None:
-        if change_name:
-            return change_name
-        if not self.uow:
-            return None
-
-        # 1. Check uow.jobs
-        if hasattr(self.uow, "jobs") and self.uow.jobs:
-            try:
-                job = self.uow.jobs.get_by_id(job_id) if hasattr(self.uow.jobs, "get_by_id") else None
-                if job and getattr(job, "change_name", None):
-                    return job.change_name
-            except Exception:
-                pass
-
-        # 2. Check uow.orchestration_runs
-        if hasattr(self.uow, "orchestration_runs") and self.uow.orchestration_runs:
-            runs_repo = self.uow.orchestration_runs
-            eff_run = run_id or self._resolve_real_run_id(job_id, run_id=run_id, project_id=project_id)
-            if eff_run and hasattr(runs_repo, "get_by_id"):
+    ) -> str:
+        durable_change_name = None
+        if self.uow:
+            # 1. Check uow.jobs
+            if hasattr(self.uow, "jobs") and self.uow.jobs:
                 try:
-                    r = runs_repo.get_by_id(eff_run)
-                    if r and getattr(r, "change_name", None):
-                        return r.change_name
-                except Exception:
-                    pass
-            if hasattr(runs_repo, "get_by_active_job_id"):
-                try:
-                    r = runs_repo.get_by_active_job_id(job_id)
-                    if r and getattr(r, "change_name", None):
-                        return r.change_name
-                except Exception:
-                    pass
-            runs = []
-            if hasattr(runs_repo, "list_runs"):
-                try:
-                    runs = runs_repo.list_runs()
-                except Exception:
-                    pass
-            elif hasattr(runs_repo, "list_all"):
-                try:
-                    runs = runs_repo.list_all()
-                except Exception:
-                    pass
-            if not runs and hasattr(runs_repo, "_store"):
-                store = getattr(runs_repo, "_store", {})
-                runs = list(store.values()) if isinstance(store, dict) else []
-            if not runs and hasattr(runs_repo, "store"):
-                store = getattr(runs_repo, "store", {})
-                runs = list(store.values()) if isinstance(store, dict) else []
-
-            for r in runs:
-                if (getattr(r, "active_job_id", None) == job_id or getattr(r, "run_id", None) == job_id or getattr(r, "run_id", None) == eff_run) and getattr(r, "change_name", None):
-                    return r.change_name
-
-        # 3. Check uow.candidate_remediations
-        if hasattr(self.uow, "candidate_remediations") and self.uow.candidate_remediations:
-            rem_repo = self.uow.candidate_remediations
-            if hasattr(rem_repo, "list_by_job"):
-                try:
-                    rems = rem_repo.list_by_job(job_id)
-                    if rems and getattr(rems[0], "change_name", None):
-                        return rems[0].change_name
+                    job = self.uow.jobs.get_by_id(job_id) if hasattr(self.uow.jobs, "get_by_id") else None
+                    if job and getattr(job, "change_name", None):
+                        durable_change_name = job.change_name
                 except Exception:
                     pass
 
-        # 4. Check uow.orchestration_worktree_ownerships
-        if hasattr(self.uow, "orchestration_worktree_ownerships") and self.uow.orchestration_worktree_ownerships:
-            ow_repo = self.uow.orchestration_worktree_ownerships
-            if hasattr(ow_repo, "get_by_job_id"):
-                try:
-                    ow = ow_repo.get_by_job_id(job_id)
-                    if ow and getattr(ow, "change_name", None):
-                        return ow.change_name
-                except Exception:
-                    pass
+            # 2. Check uow.orchestration_runs
+            if not durable_change_name and hasattr(self.uow, "orchestration_runs") and self.uow.orchestration_runs:
+                runs_repo = self.uow.orchestration_runs
+                eff_run = run_id
+                if eff_run and hasattr(runs_repo, "get_by_id"):
+                    try:
+                        r = runs_repo.get_by_id(eff_run)
+                        if r and getattr(r, "change_name", None):
+                            durable_change_name = r.change_name
+                    except Exception:
+                        pass
+                if not durable_change_name and hasattr(runs_repo, "get_by_active_job_id"):
+                    try:
+                        r = runs_repo.get_by_active_job_id(job_id)
+                        if r and getattr(r, "change_name", None):
+                            durable_change_name = r.change_name
+                    except Exception:
+                        pass
+                if not durable_change_name:
+                    runs = []
+                    if hasattr(runs_repo, "list_runs"):
+                        try:
+                            runs = runs_repo.list_runs()
+                        except Exception:
+                            pass
+                    elif hasattr(runs_repo, "list_all"):
+                        try:
+                            runs = runs_repo.list_all()
+                        except Exception:
+                            pass
+                    if not runs and hasattr(runs_repo, "_store"):
+                        store = getattr(runs_repo, "_store", {})
+                        runs = list(store.values()) if isinstance(store, dict) else []
+                    if not runs and hasattr(runs_repo, "store"):
+                        store = getattr(runs_repo, "store", {})
+                        runs = list(store.values()) if isinstance(store, dict) else []
 
-        return None
+                    for r in runs:
+                        if (getattr(r, "active_job_id", None) == job_id or getattr(r, "run_id", None) == job_id or getattr(r, "run_id", None) == eff_run) and getattr(r, "change_name", None):
+                            durable_change_name = r.change_name
+                            break
+
+            # 3. Check uow.candidate_remediations
+            if not durable_change_name and hasattr(self.uow, "candidate_remediations") and self.uow.candidate_remediations:
+                rem_repo = self.uow.candidate_remediations
+                if hasattr(rem_repo, "list_by_job"):
+                    try:
+                        rems = rem_repo.list_by_job(job_id)
+                        if rems and getattr(rems[0], "change_name", None):
+                            durable_change_name = rems[0].change_name
+                    except Exception:
+                        pass
+
+            # 4. Check uow.orchestration_worktree_ownerships
+            if not durable_change_name and hasattr(self.uow, "orchestration_worktree_ownerships") and self.uow.orchestration_worktree_ownerships:
+                ow_repo = self.uow.orchestration_worktree_ownerships
+                if hasattr(ow_repo, "get_by_job_id"):
+                    try:
+                        ow = ow_repo.get_by_job_id(job_id)
+                        if ow and getattr(ow, "change_name", None):
+                            durable_change_name = ow.change_name
+                    except Exception:
+                        pass
+
+        if durable_change_name:
+            if change_name and change_name != durable_change_name:
+                raise ValueError(f"CONFLICT: Caller-supplied change_name '{change_name}' conflicts with durable change_name '{durable_change_name}' for job_id '{job_id}'.")
+            return durable_change_name
+
+        raise ValueError(f"EVIDENCE_INSUFFICIENT: Durable change_name for job_id '{job_id}' is unobservable in persistence.")
 
     def _persist_pending_ownership(
         self,
@@ -711,12 +751,77 @@ class WorktreeManager:
         branch_name = branch_name or f"minime/{change_name}-{job_id}"
         base_sha = await self._git(["rev-parse", base_branch])
 
+        eff_project_id = self._resolve_project_id(project_id, job_id)
+        eff_run_id = self._resolve_real_run_id(job_id, run_id, project_id=eff_project_id, change_name=change_name)
+        eff_change_name = self._resolve_real_change_name(job_id, change_name, project_id=eff_project_id, run_id=eff_run_id)
+
         if path.exists():
-            try:
-                await self._git(["rev-parse", "HEAD"], cwd=path)
-                return WorktreeInfo(path=path, branch_name=branch_name, base_sha=base_sha)
-            except Exception:
-                await self.remove_clean_worktree_path(path, job_id, project_id)
+            if not reuse_existing:
+                if any(path.iterdir()):
+                    raise ValueError(f"Worktree path already exists and is not empty: {path}")
+            else:
+                ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None) if self.uow else None
+                ownership = ownership_repo.get_by_canonical_path(str(path.resolve())) if ownership_repo else None
+                if not ownership and ownership_repo and hasattr(ownership_repo, "get_by_job_id"):
+                    cand = ownership_repo.get_by_job_id(job_id)
+                    if cand and str(Path(cand.canonical_worktree_path).resolve()) == str(path.resolve()):
+                        ownership = cand
+
+                binding_repo = getattr(self.uow, "project_managed_repository_bindings", None) if self.uow else None
+                binding = binding_repo.get_by_project_id(eff_project_id) if binding_repo else None
+
+                adoption_valid = False
+                adoption_error = ""
+
+                if not ownership:
+                    adoption_error = "No durable OrchestrationWorktreeOwnership record found."
+                elif ownership.creation_state != WorktreeCreationState.CREATED:
+                    adoption_error = f"Worktree creation state is '{ownership.creation_state.value}', not CREATED."
+                elif ownership.project_id != eff_project_id:
+                    adoption_error = f"Project ID '{ownership.project_id}' does not match expected '{eff_project_id}'."
+                elif ownership.job_id != job_id:
+                    adoption_error = f"Job ID '{ownership.job_id}' does not match expected '{job_id}'."
+                elif ownership.run_id != eff_run_id:
+                    adoption_error = f"Run ID '{ownership.run_id}' does not match durable '{eff_run_id}'."
+                elif ownership.change_name != eff_change_name:
+                    adoption_error = f"Change name '{ownership.change_name}' does not match durable '{eff_change_name}'."
+                elif str(Path(ownership.canonical_worktree_path).resolve()) != str(path.resolve()):
+                    adoption_error = f"Canonical path '{ownership.canonical_worktree_path}' does not match '{path.resolve()}'."
+                elif ownership.branch != branch_name:
+                    adoption_error = f"Branch '{ownership.branch}' does not match expected '{branch_name}'."
+                elif binding and ownership.source_repository_identity != binding.canonical_repository_identity:
+                    adoption_error = f"Source repository identity '{ownership.source_repository_identity}' does not match binding '{binding.canonical_repository_identity}'."
+                else:
+                    try:
+                        wt_list_out = await self._git(["worktree", "list", "--porcelain"], cwd=self.project_root)
+                        wt_paths = [
+                            str(Path(line[9:].strip()).resolve())
+                            for line in wt_list_out.splitlines()
+                            if line.startswith("worktree ")
+                        ]
+                        if str(path.resolve()) not in wt_paths:
+                            adoption_error = f"Path '{path}' is not present in git worktree list."
+                        else:
+                            from minime.services.workspace_guard import ManagedWorkspaceGuard
+                            guard = self.workspace_guard or ManagedWorkspaceGuard(self.uow)
+                            git_ok, git_reason = guard.verify_git_repository_identity(
+                                str(path.resolve()), binding.canonical_repository_identity, binding.remote_name
+                            )
+                            if not git_ok:
+                                adoption_error = f"Git identity verification failed for adoption: {git_reason}"
+                            else:
+                                actual_branch = (await self._git(["branch", "--show-current"], cwd=path)).strip()
+                                if actual_branch != branch_name:
+                                    adoption_error = f"Actual branch '{actual_branch}' does not match expected '{branch_name}'."
+                                else:
+                                    adoption_valid = True
+                    except Exception as err:
+                        adoption_error = f"Adoption check failed with error: {err}"
+
+                if adoption_valid:
+                    return WorktreeInfo(path=path, branch_name=branch_name, base_sha=base_sha)
+                else:
+                    raise RuntimeError(f"Refusing to adopt existing worktree at '{path}': {adoption_error}")
 
         if not run_id and self.uow and hasattr(self.uow, "jobs"):
             job = self.uow.jobs.get_by_id(job_id)

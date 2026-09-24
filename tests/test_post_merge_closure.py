@@ -209,7 +209,7 @@ The system SHALL execute autonomous actions.
     uow.project_managed_repository_bindings.save(
         ProjectManagedRepositoryBinding(
             project_id="mini-me",
-            canonical_repository_identity="silverberdi/mini-me",
+            canonical_repository_identity="github.com/silverberdi/mini-me",
             managed_repository_root=str(project_root),
             worktree_parent_dir=str(project_root / ".minime" / "worktrees"),
         )
@@ -239,7 +239,7 @@ def test_post_merge_reconciliation_full_cycle(tmp_path: Path, mock_github_adapte
     uow.project_managed_repository_bindings.save(
         ProjectManagedRepositoryBinding(
             project_id="mini-me",
-            canonical_repository_identity="silverberdi/mini-me",
+            canonical_repository_identity="github.com/silverberdi/mini-me",
             managed_repository_root=str(tmp_path),
             worktree_parent_dir=str(tmp_path / ".minime" / "worktrees"),
         )
@@ -361,7 +361,7 @@ def test_control_plane_reconcile_post_merge(tmp_path: Path, mock_github_adapter)
     uow.project_managed_repository_bindings.save(
         ProjectManagedRepositoryBinding(
             project_id="mini-me",
-            canonical_repository_identity="silverberdi/mini-me",
+            canonical_repository_identity="github.com/silverberdi/mini-me",
             managed_repository_root=str(tmp_path),
             worktree_parent_dir=str(tmp_path / ".minime" / "worktrees"),
         )

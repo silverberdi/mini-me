@@ -58,7 +58,8 @@ class OpenSpecSyncService:
             if binding:
                 eff_project_id = binding.project_id
 
-        if not eff_project_id or not binding:
+        from minime.services.workspace_guard import is_binding_fully_valid
+        if not eff_project_id or not is_binding_fully_valid(binding):
             return ExternalActionResult(
                 outcome=ExternalOutcome.UNKNOWN,
                 source_adapter="openspec_sync",

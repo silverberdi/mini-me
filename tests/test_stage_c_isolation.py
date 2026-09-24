@@ -15,15 +15,19 @@ import pytest
 from minime.domain.enums import (
     ExternalOutcome,
     ExternalReasonCode,
+    OrchestrationStage,
     WorkspaceOperation,
     WorkspaceRole,
     WorktreeCreationState,
 )
 from minime.domain.models import (
+    Job,
+    OrchestrationRun,
     OrchestrationWorktreeOwnership,
     Project,
     ProjectManagedRepositoryBinding,
     WorkspaceMutationRequest,
+    utc_now,
 )
 from minime.services.agent_confinement import (
     AgentConfinementError,
@@ -109,11 +113,47 @@ class MockProjectRepo:
         return list(self.projects.values())
 
 
+class MockJobRepo:
+    def __init__(self):
+        self.jobs = {}
+
+    def save(self, job: Job) -> None:
+        self.jobs[job.job_id] = job
+
+    def get_by_id(self, job_id: str) -> Job | None:
+        return self.jobs.get(job_id)
+
+    def list_all(self):
+        return list(self.jobs.values())
+
+
+class MockOrchestrationRunRepo:
+    def __init__(self):
+        self.runs = {}
+
+    def save(self, run: OrchestrationRun) -> None:
+        self.runs[run.run_id] = run
+
+    def get_by_id(self, run_id: str) -> OrchestrationRun | None:
+        return self.runs.get(run_id)
+
+    def get_by_active_job_id(self, job_id: str) -> OrchestrationRun | None:
+        for r in self.runs.values():
+            if getattr(r, "active_job_id", None) == job_id or getattr(r, "run_id", None) == job_id:
+                return r
+        return None
+
+    def list_runs(self) -> list[OrchestrationRun]:
+        return list(self.runs.values())
+
+
 class MockUOW:
     def __init__(self):
         self.project_managed_repository_bindings = MockBindingRepo()
         self.orchestration_worktree_ownerships = MockWorktreeOwnershipRepo()
         self.projects = MockProjectRepo()
+        self.jobs = MockJobRepo()
+        self.orchestration_runs = MockOrchestrationRunRepo()
         self.git_operations = MagicMock()
         self.events = MagicMock()
         self.metrics = MagicMock()
@@ -390,6 +430,7 @@ def test_worktree_manager_pending_ordering(tmp_dirs):
         worktree_parent_dir=tmp_dirs["worktrees"],
     )
     uow.project_managed_repository_bindings.save(binding)
+    uow.jobs.save(Job(job_id="job-test-10", project_id="proj-1", change_name="change-1", run_id="run-test-10", implementer_role="codex"))
     wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
 
     wt_path = wt_manager.worktree_path("job-test-10", project_id="proj-1").resolve()
@@ -455,13 +496,27 @@ def test_guard_denial_happens_before_pending(tmp_dirs):
         worktree_parent_dir=tmp_dirs["worktrees"],
     )
     uow.project_managed_repository_bindings.save(binding)
-
+    uow.jobs.save(Job(job_id="job-denied-1", project_id="proj-1", change_name="change-1", implementer_role="codex"))
+    uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id="run-denied-1",
+            active_job_id="job-denied-1",
+            project_id="proj-1",
+            change_name="change-1",
+            base_sha="main",
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            resumable_stage=OrchestrationStage.IMPLEMENTING,
+            is_active=True,
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        )
+    )
     guard = MagicMock(spec=ManagedWorkspaceGuard)
     guard.evaluate_mutation.return_value = MagicMock(allowed=False, provider_detail="Guard Denied", reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN)
 
     wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow, workspace_guard=guard)
 
-    with pytest.raises(RuntimeError, match="ManagedWorkspaceGuard denied WORKTREE_CREATE"):
+    with pytest.raises(RuntimeError, match="fails workspace guard authorization: Guard Denied"):
         asyncio.run(wt_manager.create_worktree("job-denied-1", "change-1", "main", project_id="proj-1", run_id="run-denied-1"))
 
     ownership = uow.orchestration_worktree_ownerships.get_by_id("wt-job-denied-1")
@@ -479,7 +534,24 @@ def test_pending_persistence_failure_prevents_git_add(tmp_dirs):
     )
     mock_b_repo = MagicMock()
     mock_b_repo.get_by_project_id.return_value = binding
+    mock_j_repo = MagicMock()
+    mock_j_repo.get_by_id.return_value = Job(job_id="job-no-uow", project_id="proj-1", change_name="change-1", implementer_role="codex")
+    mock_r_repo = MagicMock()
+    mock_r_repo.get_by_active_job_id.return_value = OrchestrationRun(
+        run_id="run-no-uow",
+        active_job_id="job-no-uow",
+        project_id="proj-1",
+        change_name="change-1",
+        base_sha="main",
+        current_stage=OrchestrationStage.IMPLEMENTING,
+        resumable_stage=OrchestrationStage.IMPLEMENTING,
+        is_active=True,
+        created_at=utc_now(),
+        updated_at=utc_now(),
+    )
     bad_uow.project_managed_repository_bindings = mock_b_repo
+    bad_uow.jobs = mock_j_repo
+    bad_uow.orchestration_runs = mock_r_repo
     bad_uow.orchestration_worktree_ownerships = None
     wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=bad_uow)
 
@@ -598,7 +670,7 @@ def test_no_synthetic_binding_and_missing_binding_denies(tmp_dirs):
 
     assert decision.allowed is False
     assert decision.reason_code == ExternalReasonCode.EVIDENCE_INSUFFICIENT
-    assert "No managed repository binding found" in decision.provider_detail
+    assert "missing, invalid, or unverified" in decision.provider_detail
 
 
 def test_dot_minime_path_does_not_synthesize_authorization(tmp_dirs):
@@ -616,7 +688,7 @@ def test_dot_minime_path_does_not_synthesize_authorization(tmp_dirs):
 
     assert decision.allowed is False
     assert decision.reason_code == ExternalReasonCode.EVIDENCE_INSUFFICIENT
-    assert "No managed repository binding found" in decision.provider_detail
+    assert "missing, invalid, or unverified" in decision.provider_detail
 
 
 def test_missing_git_remote_fails_identity_proof():
@@ -893,7 +965,7 @@ def test_mutating_git_operations_require_guard_authorization(tmp_dirs):
         def get_by_project_id(self, pid):
             return ProjectManagedRepositoryBinding(
                 project_id=pid,
-                canonical_repository_identity="github.com/test/repo",
+                canonical_repository_identity="github.com/org/repo",
                 remote_name="origin",
                 managed_repository_root=tmp_dirs["repo_root"],
                 worktree_parent_dir=tmp_dirs["worktrees"],
@@ -993,9 +1065,26 @@ def test_persisted_ownership_exact_identity_fields(tmp_dirs):
         def __init__(self):
             self.project_managed_repository_bindings = MockBindingRepo()
             self.orchestration_worktree_ownerships = MockOwnershipRepo()
+            self.jobs = MockJobRepo()
+            self.orchestration_runs = MockOrchestrationRunRepo()
         def commit(self): pass
 
     uow = MockUOWExact()
+    uow.jobs.save(Job(job_id="job-exact-1", project_id="exact-proj", change_name="my-change-spec", implementer_role="codex"))
+    uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id="run-exact-100",
+            active_job_id="job-exact-1",
+            project_id="exact-proj",
+            change_name="my-change-spec",
+            base_sha="abcdef1234567890",
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            resumable_stage=OrchestrationStage.IMPLEMENTING,
+            is_active=True,
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        )
+    )
     wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
     wt_target = Path(tmp_dirs["worktrees"]) / "job-exact-1"
 
@@ -1182,7 +1271,8 @@ def test_missing_run_id_or_change_name_prevents_creation_and_matches_supplied(tm
         def __init__(self):
             self.project_managed_repository_bindings = MockBindingRepo()
             self.orchestration_worktree_ownerships = MockOwnershipRepo()
-            self.jobs = None
+            self.jobs = MockJobRepo()
+            self.orchestration_runs = MockOrchestrationRunRepo()
         def commit(self): pass
 
     uow = MockUOWStrict()
@@ -1203,6 +1293,7 @@ def test_missing_run_id_or_change_name_prevents_creation_and_matches_supplied(tm
     assert "run_id" in str(exc1.value)
 
     # 2. Missing change_name raises ValueError
+    uow.jobs.save(Job(job_id="job-strict-1", project_id="proj-1", change_name="", implementer_role="codex"))
     with pytest.raises(ValueError) as exc2:
         wt_manager._persist_pending_ownership(
             job_id="job-strict-1",
@@ -1216,6 +1307,21 @@ def test_missing_run_id_or_change_name_prevents_creation_and_matches_supplied(tm
     assert "change_name" in str(exc2.value)
 
     # 3. Valid run_id and change_name match exactly
+    uow.jobs.save(Job(job_id="job-strict-1", project_id="proj-1", change_name="change-supplied-88", implementer_role="codex"))
+    uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id="run-supplied-99",
+            active_job_id="job-strict-1",
+            project_id="proj-1",
+            change_name="change-supplied-88",
+            base_sha="sha123",
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            resumable_stage=OrchestrationStage.IMPLEMENTING,
+            is_active=True,
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        )
+    )
     ow = wt_manager._persist_pending_ownership(
         job_id="job-strict-1",
         project_id="proj-1",
@@ -1247,19 +1353,11 @@ def test_durable_job_without_run_id_fails_before_git_add(tmp_dirs):
         def get_by_id(self, wid): return self.store.get(wid)
         def get_by_canonical_path(self, path): return None
 
-    class MockJobRepo:
-        def get_by_id(self, jid):
-            # Durable Job exists, but run_id is None / missing
-            j = MagicMock()
-            j.job_id = jid
-            j.run_id = None
-            return j
-
     class MockUOWJobNoRunID:
         def __init__(self):
             self.project_managed_repository_bindings = MockBindingRepo()
             self.orchestration_worktree_ownerships = MockOwnershipRepo()
-            self.jobs = MockJobRepo()
+            self.jobs = None
             self.orchestration_runs = None
             self.candidate_remediations = None
         def commit(self): pass
@@ -1268,7 +1366,7 @@ def test_durable_job_without_run_id_fails_before_git_add(tmp_dirs):
     wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
 
     with patch.object(wt_manager, "_git", new_callable=AsyncMock) as mock_git:
-        with pytest.raises(ValueError, match="run_id"):
+        with pytest.raises(ValueError, match="EVIDENCE_INSUFFICIENT"):
             asyncio.run(
                 wt_manager.create_worktree(
                     job_id="job-no-run-id",
@@ -1330,6 +1428,202 @@ def test_missing_canonical_change_name_blocks_integration_worktree_creation(tmp_
         for call_item in mock_git.call_args_list:
             args = call_item.args[0] if call_item.args else []
             assert "worktree" not in args or "add" not in args
+
+
+def test_binding_is_valid_false_blocks_mutation(tmp_dirs):
+    uow = MockUOW()
+    binding = ProjectManagedRepositoryBinding(
+        project_id="proj-invalid",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["repo_root"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+        is_valid=False,
+        mismatch_reasons=[],
+    )
+    uow.project_managed_repository_bindings.save(binding)
+    guard = ManagedWorkspaceGuard(uow)
+    req = WorkspaceMutationRequest(
+        project_id="proj-invalid",
+        target_path=tmp_dirs["worktrees"],
+        requested_operation=WorkspaceOperation.WORKTREE_CREATE,
+    )
+    decision = guard.evaluate_mutation(req)
+    assert not decision.allowed
+    assert decision.outcome == ExternalOutcome.UNKNOWN
+    assert decision.reason_code == ExternalReasonCode.EVIDENCE_INSUFFICIENT
+
+
+def test_binding_mismatch_reasons_non_empty_blocks_mutation(tmp_dirs):
+    uow = MockUOW()
+    binding = ProjectManagedRepositoryBinding(
+        project_id="proj-mismatch",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["repo_root"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+        is_valid=True,
+        mismatch_reasons=["Repository path mismatch"],
+    )
+    uow.project_managed_repository_bindings.save(binding)
+    guard = ManagedWorkspaceGuard(uow)
+    req = WorkspaceMutationRequest(
+        project_id="proj-mismatch",
+        target_path=tmp_dirs["worktrees"],
+        requested_operation=WorkspaceOperation.WORKTREE_CREATE,
+    )
+    decision = guard.evaluate_mutation(req)
+    assert not decision.allowed
+    assert decision.outcome == ExternalOutcome.UNKNOWN
+    assert decision.reason_code == ExternalReasonCode.EVIDENCE_INSUFFICIENT
+
+
+def test_worktree_manager_refuses_path_resolution_from_invalid_binding(tmp_dirs):
+    uow = MockUOW()
+    binding = ProjectManagedRepositoryBinding(
+        project_id="proj-invalid-binding",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["repo_root"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+        is_valid=False,
+    )
+    uow.project_managed_repository_bindings.save(binding)
+    wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
+    with pytest.raises(RuntimeError, match="Failing closed: no valid durable binding"):
+        wt_manager.resolve_worktree_parent_dir("proj-invalid-binding")
+
+
+def test_source_repo_project_root_mismatch_blocks_git_mutation(tmp_dirs):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_dirs["repo_root"], check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_dirs["repo_root"], check=True)
+    (Path(tmp_dirs["repo_root"]) / "README.md").write_text("initial\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_dirs["repo_root"], check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+
+    other_repo = os.path.join(tmp_dirs["base"], "other_managed_repo")
+    os.makedirs(other_repo, exist_ok=True)
+    subprocess.run(["git", "init", "-b", "main"], cwd=other_repo, check=True, capture_output=True)
+
+    uow = MockUOW()
+    binding = ProjectManagedRepositoryBinding(
+        project_id="proj-source-mismatch",
+        canonical_repository_identity="github.com/org/other-repo",
+        managed_repository_root=other_repo,
+        worktree_parent_dir=tmp_dirs["worktrees"],
+    )
+    uow.project_managed_repository_bindings.save(binding)
+    uow.jobs.save(Job(job_id="job-source-mismatch", project_id="proj-source-mismatch", change_name="change-1", run_id="run-1", implementer_role="codex"))
+
+    wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
+
+    with patch.object(wt_manager, "_git", new_callable=AsyncMock) as mock_git:
+        with pytest.raises(RuntimeError, match="does not match binding managed_repository_root"):
+            asyncio.run(
+                wt_manager.create_worktree(
+                    job_id="job-source-mismatch",
+                    change_name="change-1",
+                    base_branch="main",
+                    project_id="proj-source-mismatch",
+                    run_id="run-1",
+                )
+            )
+
+        for call_item in mock_git.call_args_list:
+            args = call_item.args[0] if call_item.args else []
+            assert "worktree" not in args or "add" not in args
+
+
+def test_reuse_existing_rejects_unproven_worktree(tmp_dirs):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+    uow = MockUOW()
+    binding = ProjectManagedRepositoryBinding(
+        project_id="proj-reuse",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["repo_root"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+    )
+    uow.project_managed_repository_bindings.save(binding)
+    uow.jobs.save(Job(job_id="job-reuse", project_id="proj-reuse", change_name="change-reuse", run_id="run-reuse", implementer_role="codex"))
+
+    wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
+    wt_path = Path(tmp_dirs["worktrees"]) / "job-reuse"
+    wt_path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-b", "main"], cwd=wt_path, check=True, capture_output=True)
+
+    with pytest.raises(RuntimeError, match="Refusing to adopt existing worktree"):
+        asyncio.run(
+            wt_manager.create_worktree(
+                job_id="job-reuse",
+                change_name="change-reuse",
+                base_branch="main",
+                project_id="proj-reuse",
+                reuse_existing=True,
+                run_id="run-reuse",
+            )
+        )
+
+    ownership = OrchestrationWorktreeOwnership(
+        worktree_id="wt-job-reuse",
+        project_id="proj-reuse",
+        job_id="job-reuse",
+        run_id="run-reuse",
+        change_name="change-reuse",
+        canonical_worktree_path=str(wt_path.resolve()),
+        branch="minime/change-reuse-job-reuse",
+        source_repository_identity="github.com/org/repo",
+        creation_state=WorktreeCreationState.PENDING,
+    )
+    uow.orchestration_worktree_ownerships.save(ownership)
+
+    with pytest.raises(RuntimeError, match="Refusing to adopt existing worktree"):
+        asyncio.run(
+            wt_manager.create_worktree(
+                job_id="job-reuse",
+                change_name="change-reuse",
+                base_branch="main",
+                project_id="proj-reuse",
+                reuse_existing=True,
+                run_id="run-reuse",
+            )
+        )
+
+
+def test_supplied_false_run_id_and_change_name_rejected(tmp_dirs):
+    uow = MockUOW()
+    uow.jobs.save(Job(job_id="job-durable-1", project_id="proj-1", change_name="real-change", implementer_role="codex"))
+    uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id="real-run",
+            active_job_id="job-durable-1",
+            project_id="proj-1",
+            change_name="real-change",
+            base_sha="base",
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            resumable_stage=OrchestrationStage.IMPLEMENTING,
+            is_active=True,
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        )
+    )
+
+    wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
+
+    with pytest.raises(ValueError, match="CONFLICT: Caller-supplied run_id 'false-run' conflicts"):
+        wt_manager._resolve_real_run_id("job-durable-1", run_id="false-run", project_id="proj-1", change_name="real-change")
+
+    with pytest.raises(ValueError, match="CONFLICT: Caller-supplied change_name 'false-change' conflicts"):
+        wt_manager._resolve_real_change_name("job-durable-1", change_name="false-change", project_id="proj-1", run_id="real-run")
+
+    assert wt_manager._resolve_real_run_id("job-durable-1", run_id="real-run", project_id="proj-1", change_name="real-change") == "real-run"
+    assert wt_manager._resolve_real_change_name("job-durable-1", change_name="real-change", project_id="proj-1", run_id="real-run") == "real-change"
+
+
+def test_remote_identity_host_sensitive():
+    assert normalize_repository_identity("git@github.com:org/repo.git") == "github.com/org/repo"
+    assert normalize_repository_identity("https://github.com/org/repo.git") == "github.com/org/repo"
+    assert normalize_repository_identity("ssh://git@github.com/org/repo.git") == "github.com/org/repo"
+    assert normalize_repository_identity("git@evil.example:org/repo.git") == "evil.example/org/repo"
+
+    assert normalize_repository_identity("git@github.com:org/repo.git") != normalize_repository_identity("git@evil.example:org/repo.git")
 
 
 

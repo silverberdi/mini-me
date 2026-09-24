@@ -676,6 +676,7 @@ def test_real_git_reconciliation_rejects_wrong_remediation_trailer(tmp_path, in_
         )
     )
     manager = WorktreeManager(tmp_path, uow=in_memory_uow)
+    in_memory_uow.jobs.save(Job(job_id="job", project_id="p", change_name="change", run_id="run", implementer_role="codex"))
     workspace = asyncio.run(
         manager.create_remediation_worktree("job", "change", source_sha, 2, project_id="p", run_id="run")
     )
