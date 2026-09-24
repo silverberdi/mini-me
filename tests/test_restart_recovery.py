@@ -2,15 +2,23 @@
 
 import json
 import os
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from minime.domain.enums import EventType, GitOperationStatus, JobStatus, WorktreeCreationState
+from minime.domain.enums import (
+    EventType,
+    GitOperationStatus,
+    JobStatus,
+    OrchestrationStage,
+    WorktreeCreationState,
+)
 from minime.domain.models import (
     CheckResult,
     GitOperation,
     Job,
+    OrchestrationRun,
     OrchestrationWorktreeOwnership,
     Project,
     ProjectManagedRepositoryBinding,
@@ -238,6 +246,20 @@ async def test_worktree_add_records_managed_worktree_path_not_cwd(in_memory_uow,
     manager = WorktreeManager(project_root=tmp_path, uow=in_memory_uow)
     job_id = "job-wt-identity-1"
     in_memory_uow.jobs.save(Job(job_id=job_id, project_id="mini-me", change_name="test-change", implementer_role="codex"))
+    in_memory_uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id="run-wt-identity-1",
+            active_job_id=job_id,
+            project_id="mini-me",
+            change_name="test-change",
+            base_sha="sha123",
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            resumable_stage=OrchestrationStage.IMPLEMENTING,
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+    )
     target_worktree = (tmp_path / ".minime" / "worktrees" / job_id).resolve()
 
     async def mock_subprocess(*args, **kwargs):

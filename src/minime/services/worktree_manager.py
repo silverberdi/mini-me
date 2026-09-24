@@ -341,8 +341,8 @@ class WorktreeManager:
             if not durable_run_id and hasattr(self.uow, "jobs") and self.uow.jobs:
                 try:
                     job = self.uow.jobs.get_by_id(job_id) if hasattr(self.uow.jobs, "get_by_id") else None
-                    if job:
-                        durable_run_id = getattr(job, "run_id", None) or run_id or job.job_id
+                    if job and getattr(job, "run_id", None):
+                        durable_run_id = job.run_id
                 except Exception:
                     pass
 

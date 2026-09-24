@@ -430,7 +430,21 @@ def test_worktree_manager_pending_ordering(tmp_dirs):
         worktree_parent_dir=tmp_dirs["worktrees"],
     )
     uow.project_managed_repository_bindings.save(binding)
-    uow.jobs.save(Job(job_id="job-test-10", project_id="proj-1", change_name="change-1", run_id="run-test-10", implementer_role="codex"))
+    uow.jobs.save(Job(job_id="job-test-10", project_id="proj-1", change_name="change-1", implementer_role="codex"))
+    uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id="run-test-10",
+            active_job_id="job-test-10",
+            project_id="proj-1",
+            change_name="change-1",
+            base_sha="main",
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            resumable_stage=OrchestrationStage.IMPLEMENTING,
+            is_active=True,
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        )
+    )
     wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
 
     wt_path = wt_manager.worktree_path("job-test-10", project_id="proj-1").resolve()
@@ -1294,6 +1308,20 @@ def test_missing_run_id_or_change_name_prevents_creation_and_matches_supplied(tm
 
     # 2. Missing change_name raises ValueError
     uow.jobs.save(Job(job_id="job-strict-1", project_id="proj-1", change_name="", implementer_role="codex"))
+    uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id="run-1",
+            active_job_id="job-strict-1",
+            project_id="proj-1",
+            change_name="",
+            base_sha="sha123",
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            resumable_stage=OrchestrationStage.IMPLEMENTING,
+            is_active=True,
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        )
+    )
     with pytest.raises(ValueError) as exc2:
         wt_manager._persist_pending_ownership(
             job_id="job-strict-1",
@@ -1307,11 +1335,12 @@ def test_missing_run_id_or_change_name_prevents_creation_and_matches_supplied(tm
     assert "change_name" in str(exc2.value)
 
     # 3. Valid run_id and change_name match exactly
-    uow.jobs.save(Job(job_id="job-strict-1", project_id="proj-1", change_name="change-supplied-88", implementer_role="codex"))
+    target3 = Path(tmp_dirs["worktrees"]) / "job-strict-3"
+    uow.jobs.save(Job(job_id="job-strict-3", project_id="proj-1", change_name="change-supplied-88", implementer_role="codex"))
     uow.orchestration_runs.save(
         OrchestrationRun(
             run_id="run-supplied-99",
-            active_job_id="job-strict-1",
+            active_job_id="job-strict-3",
             project_id="proj-1",
             change_name="change-supplied-88",
             base_sha="sha123",
@@ -1323,9 +1352,9 @@ def test_missing_run_id_or_change_name_prevents_creation_and_matches_supplied(tm
         )
     )
     ow = wt_manager._persist_pending_ownership(
-        job_id="job-strict-1",
+        job_id="job-strict-3",
         project_id="proj-1",
-        path=target,
+        path=target3,
         branch="minime/change-1",
         run_id="run-supplied-99",
         change_name="change-supplied-88",
@@ -1511,7 +1540,21 @@ def test_source_repo_project_root_mismatch_blocks_git_mutation(tmp_dirs):
         worktree_parent_dir=tmp_dirs["worktrees"],
     )
     uow.project_managed_repository_bindings.save(binding)
-    uow.jobs.save(Job(job_id="job-source-mismatch", project_id="proj-source-mismatch", change_name="change-1", run_id="run-1", implementer_role="codex"))
+    uow.jobs.save(Job(job_id="job-source-mismatch", project_id="proj-source-mismatch", change_name="change-1", implementer_role="codex"))
+    uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id="run-1",
+            active_job_id="job-source-mismatch",
+            project_id="proj-source-mismatch",
+            change_name="change-1",
+            base_sha="main",
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            resumable_stage=OrchestrationStage.IMPLEMENTING,
+            is_active=True,
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        )
+    )
 
     wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
 
@@ -1542,7 +1585,21 @@ def test_reuse_existing_rejects_unproven_worktree(tmp_dirs):
         worktree_parent_dir=tmp_dirs["worktrees"],
     )
     uow.project_managed_repository_bindings.save(binding)
-    uow.jobs.save(Job(job_id="job-reuse", project_id="proj-reuse", change_name="change-reuse", run_id="run-reuse", implementer_role="codex"))
+    uow.jobs.save(Job(job_id="job-reuse", project_id="proj-reuse", change_name="change-reuse", implementer_role="codex"))
+    uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id="run-reuse",
+            active_job_id="job-reuse",
+            project_id="proj-reuse",
+            change_name="change-reuse",
+            base_sha="main",
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            resumable_stage=OrchestrationStage.IMPLEMENTING,
+            is_active=True,
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        )
+    )
 
     wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
     wt_path = Path(tmp_dirs["worktrees"]) / "job-reuse"
@@ -1624,6 +1681,57 @@ def test_remote_identity_host_sensitive():
     assert normalize_repository_identity("git@evil.example:org/repo.git") == "evil.example/org/repo"
 
     assert normalize_repository_identity("git@github.com:org/repo.git") != normalize_repository_identity("git@evil.example:org/repo.git")
+
+
+def test_synthetic_run_id_fallback_rejected_when_job_run_id_empty(tmp_dirs):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_dirs["repo_root"], check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_dirs["repo_root"], check=True)
+    (Path(tmp_dirs["repo_root"]) / "README.md").write_text("initial\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_dirs["repo_root"], check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+
+    uow = MockUOW()
+    binding = ProjectManagedRepositoryBinding(
+        project_id="proj-synth",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["repo_root"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+    )
+    uow.project_managed_repository_bindings.save(binding)
+
+    # Durable Job exists, but Job.run_id is None/empty
+    job = Job(job_id="job-synth-1", project_id="proj-synth", change_name="change-synth", run_id=None, implementer_role="codex")
+    uow.jobs.save(job)
+
+    wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
+
+    # 1. Direct call to _resolve_real_run_id with caller-supplied fake run_id => EVIDENCE_INSUFFICIENT
+    with pytest.raises(ValueError, match="EVIDENCE_INSUFFICIENT: Durable run_id for job_id 'job-synth-1' is unobservable"):
+        wt_manager._resolve_real_run_id("job-synth-1", run_id="fake-run", project_id="proj-synth", change_name="change-synth")
+
+    # 2. Attempting create_worktree with caller-supplied fake run_id => fails before PENDING persistence and before git worktree add
+    with patch.object(wt_manager, "_git", new_callable=AsyncMock) as mock_git:
+        with pytest.raises(ValueError, match="EVIDENCE_INSUFFICIENT"):
+            asyncio.run(
+                wt_manager.create_worktree(
+                    job_id="job-synth-1",
+                    change_name="change-synth",
+                    base_branch="main",
+                    project_id="proj-synth",
+                    run_id="fake-run",
+                )
+            )
+
+        # Confirm no PENDING ownership persisted
+        ownership = uow.orchestration_worktree_ownerships.get_by_id("wt-job-synth-1")
+        assert ownership is None
+
+        # Confirm git worktree add was never executed
+        for call_item in mock_git.call_args_list:
+            args = call_item.args[0] if call_item.args else []
+            assert "worktree" not in args or "add" not in args
+
 
 
 

@@ -2,6 +2,7 @@
 
 import asyncio
 import subprocess
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -676,7 +677,21 @@ def test_real_git_reconciliation_rejects_wrong_remediation_trailer(tmp_path, in_
         )
     )
     manager = WorktreeManager(tmp_path, uow=in_memory_uow)
-    in_memory_uow.jobs.save(Job(job_id="job", project_id="p", change_name="change", run_id="run", implementer_role="codex"))
+    in_memory_uow.jobs.save(Job(job_id="job", project_id="p", change_name="change", implementer_role="codex"))
+    in_memory_uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id="run",
+            active_job_id="job",
+            project_id="p",
+            change_name="change",
+            base_sha=source_sha,
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            resumable_stage=OrchestrationStage.IMPLEMENTING,
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+    )
     workspace = asyncio.run(
         manager.create_remediation_worktree("job", "change", source_sha, 2, project_id="p", run_id="run")
     )
