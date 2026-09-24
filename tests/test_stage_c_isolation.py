@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import platform
 import shutil
 import subprocess
 import tempfile
@@ -24,10 +25,16 @@ from minime.domain.models import (
     ProjectManagedRepositoryBinding,
     WorkspaceMutationRequest,
 )
-from minime.services.agent_confinement import AgentConfinementError, AgentProcessConfinement
+from minime.services.agent_confinement import (
+    AgentConfinementError,
+    AgentProcessConfinement,
+)
 from minime.services.deployment_authority import DeploymentAuthority
 from minime.services.openspec_sync import OpenSpecSyncService
-from minime.services.workspace_guard import ManagedWorkspaceGuard, normalize_repository_identity
+from minime.services.workspace_guard import (
+    ManagedWorkspaceGuard,
+    normalize_repository_identity,
+)
 from minime.services.worktree_manager import WorktreeManager
 
 
@@ -335,22 +342,36 @@ def test_deployment_authority_boundary(tmp_dirs):
 
 def test_openspec_sync_runtime_target_denied(tmp_dirs):
     uow = MockUOW()
+    binding = ProjectManagedRepositoryBinding(
+        project_id="proj-1",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["repo_root"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+    )
+    uow.project_managed_repository_bindings.save(binding)
     sync_service = OpenSpecSyncService(project_root=tmp_dirs["runtime"], uow=uow)
 
     # Sync into runtime root => POLICY_DENIED
-    res = sync_service.sync_change_specs(openspec_path="openspec", change_name="test-change")
+    res = sync_service.sync_change_specs(openspec_path="openspec", change_name="test-change", project_id="proj-1")
     assert res.outcome == ExternalOutcome.FAILURE
-    assert "POLICY_DENIED" in res.error_message
+    assert res.reason_code == ExternalReasonCode.POLICY_DENIED
 
 
 def test_openspec_archive_runtime_target_denied(tmp_dirs):
     uow = MockUOW()
+    binding = ProjectManagedRepositoryBinding(
+        project_id="proj-1",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["repo_root"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+    )
+    uow.project_managed_repository_bindings.save(binding)
     sync_service = OpenSpecSyncService(project_root=tmp_dirs["runtime"], uow=uow)
 
     # Archive inside runtime root => POLICY_DENIED
-    res = sync_service.archive_change(openspec_path="openspec", change_name="test-change")
+    res = sync_service.archive_change(openspec_path="openspec", change_name="test-change", project_id="proj-1")
     assert res.outcome == ExternalOutcome.FAILURE
-    assert "POLICY_DENIED" in res.error_message
+    assert res.reason_code == ExternalReasonCode.POLICY_DENIED
 
 
 def test_worktree_manager_pending_ordering(tmp_dirs):
@@ -371,7 +392,7 @@ def test_worktree_manager_pending_ordering(tmp_dirs):
     uow.project_managed_repository_bindings.save(binding)
     wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
 
-    wt_path = wt_manager.worktree_path("job-test-10").resolve()
+    wt_path = wt_manager.worktree_path("job-test-10", project_id="proj-1").resolve()
 
     asyncio.run(wt_manager.create_worktree("job-test-10", "change-1", "main", project_id="proj-1"))
 
@@ -810,4 +831,190 @@ def test_correct_head_sha_allows_created(tmp_dirs):
                 wt_path, ownership, expected_branch="main", expected_base_sha="matching_sha_789"
             )
         )
+
+
+def test_darwin_sandbox_profile_deny_by_default(tmp_dirs):
+    wt_path = os.path.realpath(tmp_dirs["worktrees"])
+    rt_path = os.path.realpath(tmp_dirs["runtime"])
+    confinement = AgentProcessConfinement(
+        allowed_worktree_path=wt_path,
+        runtime_root=rt_path,
+    )
+    profile = confinement._generate_darwin_sandbox_profile()
+    assert "(deny file-write*)" in profile
+    assert f'(allow file-write* (subpath "{wt_path}"))' in profile
+    assert f'(deny file-write* (subpath "{rt_path}"))' in profile
+    assert '(allow file-write* (subpath "/tmp"))' not in profile
+    assert '(allow file-write* (subpath "/private/tmp"))' not in profile
+
+
+def test_darwin_sandbox_executable_write_confinement(tmp_dirs):
+    if platform.system().lower() != "darwin" or not shutil.which("sandbox-exec"):
+        pytest.skip("sandbox-exec unavailable on platform")
+
+    wt_path = os.path.realpath(tmp_dirs["worktrees"])
+    rt_path = os.path.realpath(tmp_dirs["runtime"])
+    confinement = AgentProcessConfinement(
+        allowed_worktree_path=wt_path,
+        runtime_root=rt_path,
+    )
+    profile = confinement._generate_darwin_sandbox_profile()
+
+    # 1. touch inside worktree => succeeds
+    r_ok = subprocess.run(
+        ["sandbox-exec", "-p", profile, "touch", os.path.join(wt_path, "ok.txt")],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert r_ok.returncode == 0, f"Worktree write failed: {r_ok.stderr}"
+
+    # 2. touch /tmp/minime-stage-c-test => fails
+    r_tmp = subprocess.run(
+        ["sandbox-exec", "-p", profile, "touch", "/tmp/minime-stage-c-test"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert r_tmp.returncode != 0
+
+    # 3. touch <runtime_root>/forbidden => fails
+    r_rt = subprocess.run(
+        ["sandbox-exec", "-p", profile, "touch", os.path.join(rt_path, "forbidden")],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert r_rt.returncode != 0
+
+
+def test_mutating_git_operations_require_guard_authorization(tmp_dirs):
+    class MockBindingRepo:
+        def get_by_project_id(self, pid):
+            return ProjectManagedRepositoryBinding(
+                project_id=pid,
+                canonical_repository_identity="github.com/test/repo",
+                remote_name="origin",
+                managed_repository_root=tmp_dirs["repo_root"],
+                worktree_parent_dir=tmp_dirs["worktrees"],
+            )
+
+    class MockOwnershipRepo:
+        def get_by_canonical_path(self, path):
+            return None
+        def get_by_job_id(self, jid):
+            return None
+
+    class DeniedUOW:
+        def __init__(self):
+            self.project_managed_repository_bindings = MockBindingRepo()
+            self.orchestration_worktree_ownerships = MockOwnershipRepo()
+            self.git_operations = MagicMock()
+        def commit(self): pass
+
+    uow = DeniedUOW()
+    wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
+
+    # 1. Missing project_id fails closed with ValueError
+    with pytest.raises(ValueError, match="project_id is mandatory"):
+        asyncio.run(wt_manager.create_recovery_snapshot("job-123", project_id=None))
+
+    with pytest.raises(ValueError, match="project_id is mandatory"):
+        asyncio.run(wt_manager.finalize_candidate_commit(tmp_dirs["worktrees"], "job-123", project_id=None))
+
+    with pytest.raises(ValueError, match="project_id is mandatory"):
+        asyncio.run(wt_manager.cherry_pick(tmp_dirs["worktrees"], ["sha1"], "job-123", project_id=None))
+
+    # 2. Denied ownership / missing CREATED record fails closed with RuntimeError
+    with pytest.raises(RuntimeError, match="no valid worktree ownership found"):
+        asyncio.run(wt_manager.finalize_candidate_commit(tmp_dirs["worktrees"], "job-123", project_id="test-proj"))
+
+
+def test_openspec_sync_service_without_uow_fails_closed(tmp_dirs):
+    with pytest.raises(ValueError, match="PersistenceUnitOfWork \\(uow\\) is mandatory"):
+        OpenSpecSyncService(project_root=tmp_dirs["repo_root"], uow=None)
+
+
+def test_worktree_manager_uses_binding_worktree_parent_dir(tmp_dirs):
+    custom_wt_dir = os.path.join(tmp_dirs["repo_root"], "custom-worktrees")
+    os.makedirs(custom_wt_dir, exist_ok=True)
+
+    class BindingRepo:
+        def get_by_project_id(self, pid):
+            if pid == "custom-proj":
+                return ProjectManagedRepositoryBinding(
+                    project_id=pid,
+                    canonical_repository_identity="github.com/test/repo",
+                    remote_name="origin",
+                    managed_repository_root=tmp_dirs["repo_root"],
+                    worktree_parent_dir=custom_wt_dir,
+                )
+            return None
+
+    class MockUOWLocal:
+        def __init__(self):
+            self.project_managed_repository_bindings = BindingRepo()
+
+    uow = MockUOWLocal()
+    wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
+
+    resolved_path = wt_manager.worktree_path("job-999", project_id="custom-proj")
+    assert str(resolved_path.resolve()) == os.path.realpath(os.path.join(custom_wt_dir, "job-999"))
+
+    remediation_path = wt_manager.remediation_worktree_path("job-999", 1, project_id="custom-proj")
+    assert str(remediation_path.resolve()) == os.path.realpath(os.path.join(custom_wt_dir, "job-999-remediation-gen1"))
+
+
+def test_persisted_ownership_exact_identity_fields(tmp_dirs):
+    class MockBindingRepo:
+        def get_by_project_id(self, pid):
+            return ProjectManagedRepositoryBinding(
+                project_id=pid,
+                canonical_repository_identity="github.com/org/exact-repo",
+                remote_name="origin",
+                managed_repository_root=tmp_dirs["repo_root"],
+                worktree_parent_dir=tmp_dirs["worktrees"],
+            )
+
+    class MockOwnershipRepo:
+        def __init__(self):
+            self.store = {}
+        def save(self, obj):
+            self.store[obj.worktree_id] = obj
+        def get_by_id(self, wid):
+            return self.store.get(wid)
+        def get_by_canonical_path(self, path):
+            for v in self.store.values():
+                if v.canonical_worktree_path == path:
+                    return v
+            return None
+
+    class MockUOWExact:
+        def __init__(self):
+            self.project_managed_repository_bindings = MockBindingRepo()
+            self.orchestration_worktree_ownerships = MockOwnershipRepo()
+        def commit(self): pass
+
+    uow = MockUOWExact()
+    wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
+    wt_target = Path(tmp_dirs["worktrees"]) / "job-exact-1"
+
+    ownership = wt_manager._persist_pending_ownership(
+        job_id="job-exact-1",
+        project_id="exact-proj",
+        path=wt_target,
+        branch="minime/feature-x",
+        run_id="run-exact-100",
+        change_name="my-change-spec",
+        source_base_sha="abcdef1234567890",
+    )
+
+    assert ownership.branch == "minime/feature-x"
+    assert ownership.branch_name == "minime/feature-x"
+    assert ownership.run_id == "run-exact-100"
+    assert ownership.change_name == "my-change-spec"
+    assert ownership.source_repository_identity == "github.com/org/exact-repo"
+    assert ownership.source_base_sha == "abcdef1234567890"
+    assert ownership.creation_state == WorktreeCreationState.PENDING
+
 

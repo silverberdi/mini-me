@@ -85,6 +85,12 @@ class InMemoryUnitOfWork(PersistenceUnitOfWork):
         self.check_results = MagicMock()
         self.check_results.list_by_job.return_value = []
 
+        self._managed_bindings = {}
+        self.project_managed_repository_bindings = MagicMock()
+        self.project_managed_repository_bindings.get_by_project_id.side_effect = lambda pid: self._managed_bindings.get(pid)
+        self.project_managed_repository_bindings.get_by_repository_path.side_effect = lambda path: next((b for b in self._managed_bindings.values() if b.managed_repository_root == str(path)), None)
+        self.project_managed_repository_bindings.save.side_effect = lambda b: self._managed_bindings.update({b.project_id: b})
+
         self.operator_actions = MagicMock()
         self.operator_actions.get_by_request_id.return_value = None
 
@@ -171,6 +177,13 @@ def mock_github_adapter():
 
 def test_openspec_sync_and_archive(tmp_path: Path):
     project_root = tmp_path
+    import subprocess
+    subprocess.run(["git", "init"], cwd=project_root, capture_output=True, check=False)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=project_root, capture_output=True, check=False)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=project_root, capture_output=True, check=False)
+    subprocess.run(["git", "remote", "add", "origin", "https://github.com/silverberdi/mini-me.git"], cwd=project_root, capture_output=True, check=False)
+    subprocess.run(["git", "commit", "--allow-empty", "-m", "init"], cwd=project_root, capture_output=True, check=False)
+
     openspec_dir = project_root / "openspec"
     change_dir = openspec_dir / "changes" / "test-change"
     specs_dir = change_dir / "specs" / "test-cap"
@@ -191,8 +204,18 @@ The system SHALL execute autonomous actions.
     (specs_dir / "spec.md").write_text(delta_content)
     (change_dir / "tasks.md").write_text("- [x] 1.1 Complete task\n")
 
-    sync_service = OpenSpecSyncService(project_root)
-    synced_res = sync_service.sync_change_specs("openspec", "test-change")
+    uow = InMemoryUnitOfWork()
+    from minime.domain.models import ProjectManagedRepositoryBinding
+    uow.project_managed_repository_bindings.save(
+        ProjectManagedRepositoryBinding(
+            project_id="mini-me",
+            canonical_repository_identity="silverberdi/mini-me",
+            managed_repository_root=str(project_root),
+            worktree_parent_dir=str(project_root / ".minime" / "worktrees"),
+        )
+    )
+    sync_service = OpenSpecSyncService(project_root, uow=uow)
+    synced_res = sync_service.sync_change_specs("openspec", "test-change", project_id="mini-me")
     assert synced_res.outcome == ExternalOutcome.SUCCESS
     assert "test-cap" in synced_res.data
 
@@ -201,7 +224,7 @@ The system SHALL execute autonomous actions.
     assert "## Requirement: Autonomous Action" in main_spec.read_text()
 
     # Archive
-    archive_res = sync_service.archive_change("openspec", "test-change", target_date="2026-09-03")
+    archive_res = sync_service.archive_change("openspec", "test-change", target_date="2026-09-03", project_id="mini-me")
     assert archive_res.outcome == ExternalOutcome.SUCCESS
     archived_dir = archive_res.data
     assert archived_dir is not None
@@ -212,6 +235,15 @@ The system SHALL execute autonomous actions.
 
 def test_post_merge_reconciliation_full_cycle(tmp_path: Path, mock_github_adapter):
     uow = InMemoryUnitOfWork()
+    from minime.domain.models import ProjectManagedRepositoryBinding
+    uow.project_managed_repository_bindings.save(
+        ProjectManagedRepositoryBinding(
+            project_id="mini-me",
+            canonical_repository_identity="silverberdi/mini-me",
+            managed_repository_root=str(tmp_path),
+            worktree_parent_dir=str(tmp_path / ".minime" / "worktrees"),
+        )
+    )
 
     project = Project(
         project_id="mini-me",
@@ -260,6 +292,7 @@ def test_post_merge_reconciliation_full_cycle(tmp_path: Path, mock_github_adapte
     subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=False)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, capture_output=True, check=False)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=False)
+    subprocess.run(["git", "remote", "add", "origin", "https://github.com/silverberdi/mini-me.git"], cwd=tmp_path, capture_output=True, check=False)
     subprocess.run(["git", "commit", "--allow-empty", "-m", "init"], cwd=tmp_path, capture_output=True, check=False)
 
     change_dir = tmp_path / "openspec" / "changes" / "test-change" / "specs" / "cap1"
@@ -318,12 +351,21 @@ def test_post_merge_reconciliation_full_cycle(tmp_path: Path, mock_github_adapte
 
 def test_control_plane_reconcile_post_merge(tmp_path: Path, mock_github_adapter):
     from minime.domain.enums import OperatorActionStatus, OperatorActionType
-    from minime.domain.models import OperatorActionRequest
+    from minime.domain.models import OperatorActionRequest, ProjectManagedRepositoryBinding
     from minime.services.control_plane_service import ControlPlaneService
 
     uow = InMemoryUnitOfWork()
     uow.operator_actions = MagicMock()
     uow.operator_actions.get_by_request_id.return_value = None
+
+    uow.project_managed_repository_bindings.save(
+        ProjectManagedRepositoryBinding(
+            project_id="mini-me",
+            canonical_repository_identity="silverberdi/mini-me",
+            managed_repository_root=str(tmp_path),
+            worktree_parent_dir=str(tmp_path / ".minime" / "worktrees"),
+        )
+    )
 
     project = Project(
         project_id="mini-me",
@@ -372,6 +414,7 @@ def test_control_plane_reconcile_post_merge(tmp_path: Path, mock_github_adapter)
     subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=False)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, capture_output=True, check=False)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=False)
+    subprocess.run(["git", "remote", "add", "origin", "https://github.com/silverberdi/mini-me.git"], cwd=tmp_path, capture_output=True, check=False)
     subprocess.run(["git", "commit", "--allow-empty", "-m", "init"], cwd=tmp_path, capture_output=True, check=False)
 
     change_dir = tmp_path / "openspec" / "changes" / "test-change" / "specs" / "cap1"

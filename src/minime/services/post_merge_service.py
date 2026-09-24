@@ -74,7 +74,7 @@ class PostMergeReconciliationService:
         self.project_root = Path(project_root).resolve()
         self.github_adapter = github_adapter
         self.worktree_manager = worktree_manager or WorktreeManager(self.project_root, uow=uow)
-        self.openspec_sync = openspec_sync or OpenSpecSyncService(self.project_root)
+        self.openspec_sync = openspec_sync or OpenSpecSyncService(self.project_root, uow=uow)
 
     def verify_candidate_ancestry(self, candidate_sha: str, base_ref: str = "HEAD") -> bool:
         """Verify that the candidate SHA is an ancestor of the base/main branch."""
@@ -344,7 +344,7 @@ class PostMergeReconciliationService:
         synced_specs: list[str] = []
         sync_verified = False
         try:
-            sync_res = self.openspec_sync.sync_change_specs(openspec_path, change_name)
+            sync_res = self.openspec_sync.sync_change_specs(openspec_path, change_name, project_id=project_id)
             verify_sync_res = self.openspec_sync.verify_sync(openspec_path, change_name, sync_res)
             sync_verified = (
                 verify_sync_res.outcome == ExternalOutcome.SUCCESS
@@ -378,7 +378,8 @@ class PostMergeReconciliationService:
         archive_verified = False
         if sync_verified:
             try:
-                archive_res = self.openspec_sync.archive_change(openspec_path, change_name)
+                archive_res = self.openspec_sync.archive_change(openspec_path, change_name, project_id=project_id)
+
                 verify_arc_res = self.openspec_sync.verify_archive(
                     openspec_path, change_name, archive_res
                 )

@@ -477,6 +477,7 @@ class ExternalReasonCode(str, Enum):
     CONFLICT = "CONFLICT"
     REUSED_EXISTING = "REUSED_EXISTING"
     EXECUTION_SUCCESS = "EXECUTION_SUCCESS"
+    POLICY_DENIED = "POLICY_DENIED"
 
 
 class ExternalActionType(str, Enum):

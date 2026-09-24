@@ -80,6 +80,7 @@ def _make_change(
         subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=False)
         subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, capture_output=True, check=False)
         subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=False)
+        subprocess.run(["git", "remote", "add", "origin", "https://github.com/silverberdi/mini-me.git"], cwd=tmp_path, capture_output=True, check=False)
         subprocess.run(["git", "commit", "--allow-empty", "-m", "init"], cwd=tmp_path, capture_output=True, check=False)
     change_dir = tmp_path / "openspec" / "changes" / name
     specs_dir = change_dir / "specs" / "cap1"
@@ -90,7 +91,8 @@ def _make_change(
     return change_dir
 
 
-def _setup_uow(uow: InMemoryUnitOfWork, change_name: str = "test-change", run_id: str = "run-123"):
+def _setup_uow(uow: InMemoryUnitOfWork, change_name: str = "test-change", run_id: str = "run-123", tmp_path: Path | None = None):
+    from minime.domain.models import ProjectManagedRepositoryBinding
     uow.projects.save(
         Project(
             project_id="mini-me",
@@ -109,6 +111,14 @@ def _setup_uow(uow: InMemoryUnitOfWork, change_name: str = "test-change", run_id
             github_pr_number=54,
             openspec_change_name=change_name,
             is_valid=True,
+        )
+    )
+    uow.project_managed_repository_bindings.save(
+        ProjectManagedRepositoryBinding(
+            project_id="mini-me",
+            canonical_repository_identity="silverberdi/mini-me",
+            managed_repository_root=str(tmp_path) if tmp_path else "/tmp",
+            worktree_parent_dir=str(tmp_path / ".minime" / "worktrees") if tmp_path else "/tmp/.minime/worktrees",
         )
     )
     uow.orchestration_runs.save(
@@ -135,13 +145,19 @@ def _setup_uow(uow: InMemoryUnitOfWork, change_name: str = "test-change", run_id
     )
 
 
+def _make_sync_service(tmp_path: Path):
+    uow = InMemoryUnitOfWork()
+    _setup_uow(uow, tmp_path=tmp_path)
+    return OpenSpecSyncService(tmp_path, uow=uow)
+
+
 # --- OpenSpecSyncService verification ---------------------------------------
 
 
 def test_verify_sync_confirms_requirements(tmp_path: Path):
     _make_change(tmp_path)
-    service = OpenSpecSyncService(tmp_path)
-    synced = service.sync_change_specs("openspec", "test-change")
+    service = _make_sync_service(tmp_path)
+    synced = service.sync_change_specs("openspec", "test-change", project_id="mini-me")
     assert synced.outcome == ExternalOutcome.SUCCESS
     assert "cap1" in synced.data
     verify_res = service.verify_sync("openspec", "test-change", synced)
@@ -151,8 +167,8 @@ def test_verify_sync_confirms_requirements(tmp_path: Path):
 
 def test_verify_sync_detects_missing_requirement(tmp_path: Path):
     _make_change(tmp_path)
-    service = OpenSpecSyncService(tmp_path)
-    synced = service.sync_change_specs("openspec", "test-change")
+    service = _make_sync_service(tmp_path)
+    synced = service.sync_change_specs("openspec", "test-change", project_id="mini-me")
     # Corrupt the canonical spec so the requirement is no longer present.
     canonical = tmp_path / "openspec" / "specs" / "cap1" / "spec.md"
     canonical.write_text("# Spec: Cap1\n\n## Requirement: DIFFERENT\n")
@@ -167,8 +183,8 @@ def test_archive_change_raises_on_collision(tmp_path: Path):
     archive_root.mkdir(parents=True)
     (archive_root / "spec.md").write_text("existing archive\n")
 
-    service = OpenSpecSyncService(tmp_path)
-    res = service.archive_change("openspec", "test-change", target_date="2026-09-03")
+    service = _make_sync_service(tmp_path)
+    res = service.archive_change("openspec", "test-change", target_date="2026-09-03", project_id="mini-me")
     assert res.outcome == ExternalOutcome.AMBIGUOUS
     assert res.reason_code == ExternalReasonCode.POSTCONDITION_NOT_PROVEN
 
@@ -181,7 +197,7 @@ def test_archive_change_raises_on_collision(tmp_path: Path):
 
 def test_post_merge_completes_when_sync_and_archive_verified(tmp_path: Path):
     uow = InMemoryUnitOfWork()
-    _setup_uow(uow)
+    _setup_uow(uow, tmp_path=tmp_path)
     _make_change(tmp_path)
 
     service = PostMergeReconciliationService(
@@ -406,10 +422,10 @@ def test_post_merge_blocks_when_remote_branch_cleanup_fails(tmp_path: Path):
 
 def test_archive_preservation_manifest_verification(tmp_path: Path):
     _make_change(tmp_path)
-    service = OpenSpecSyncService(tmp_path)
+    service = _make_sync_service(tmp_path)
 
     # Archive happy path
-    arc_res = service.archive_change("openspec", "test-change", target_date="2026-09-03")
+    arc_res = service.archive_change("openspec", "test-change", target_date="2026-09-03", project_id="mini-me")
     assert arc_res.outcome == ExternalOutcome.SUCCESS
     assert arc_res.retry_safety == RetrySafety.UNSAFE
     archived_dir = arc_res.data
@@ -429,15 +445,15 @@ def test_archive_preservation_manifest_verification(tmp_path: Path):
 
 def test_sync_and_archive_retry_safety_semantics(tmp_path: Path):
     _make_change(tmp_path)
-    service = OpenSpecSyncService(tmp_path)
+    service = _make_sync_service(tmp_path)
 
     # Mutating sync -> RetrySafety.UNSAFE
-    sync_res = service.sync_change_specs("openspec", "test-change")
+    sync_res = service.sync_change_specs("openspec", "test-change", project_id="mini-me")
     assert sync_res.outcome == ExternalOutcome.SUCCESS
     assert sync_res.retry_safety == RetrySafety.UNSAFE
 
     # Mutating archive -> RetrySafety.UNSAFE
-    archive_res = service.archive_change("openspec", "test-change", target_date="2026-09-03")
+    archive_res = service.archive_change("openspec", "test-change", target_date="2026-09-03", project_id="mini-me")
     assert archive_res.outcome == ExternalOutcome.SUCCESS
     assert archive_res.retry_safety == RetrySafety.UNSAFE
 
@@ -519,7 +535,7 @@ def test_worktree_scan_failure_returns_unknown_and_blocks_completion(tmp_path: P
 
 
 def test_archive_verify_fails_when_historical_manifest_missing_and_canonical_artifact_absent(tmp_path: Path):
-    service = OpenSpecSyncService(tmp_path)
+    service = _make_sync_service(tmp_path)
     archive_dir = tmp_path / "openspec" / "changes" / "archive" / "2026-09-03-test-change"
     archive_dir.mkdir(parents=True)
     # Only proposal.md exists in target archive; tasks.md is missing!
@@ -532,19 +548,20 @@ def test_archive_verify_fails_when_historical_manifest_missing_and_canonical_art
 
 
 def test_sync_change_specs_capability_dir_missing_spec_md_returns_failure(tmp_path: Path):
-    service = OpenSpecSyncService(tmp_path)
+    _make_change(tmp_path)
+    service = _make_sync_service(tmp_path)
 
     # Setup change specs with cap1 having spec.md and cap2 missing spec.md
     change_dir = tmp_path / "openspec" / "changes" / "test-change"
     cap1_dir = change_dir / "specs" / "cap1"
     cap2_dir = change_dir / "specs" / "cap2"
-    cap1_dir.mkdir(parents=True)
-    cap2_dir.mkdir(parents=True)
+    cap1_dir.mkdir(parents=True, exist_ok=True)
+    cap2_dir.mkdir(parents=True, exist_ok=True)
 
     (cap1_dir / "spec.md").write_text("# Spec Cap1\n## Requirement: R1\n")
     # cap2_dir intentionally missing spec.md!
 
-    res = service.sync_change_specs("openspec", "test-change")
+    res = service.sync_change_specs("openspec", "test-change", project_id="mini-me")
     assert res.outcome == ExternalOutcome.FAILURE
     assert res.reason_code == ExternalReasonCode.EVIDENCE_INSUFFICIENT
     assert res.data == []
@@ -556,7 +573,7 @@ def test_sync_change_specs_capability_dir_missing_spec_md_returns_failure(tmp_pa
 
 
 def test_archive_verify_reused_existing_without_independent_manifest_returns_unknown(tmp_path: Path):
-    service = OpenSpecSyncService(tmp_path)
+    service = _make_sync_service(tmp_path)
     archive_dir = tmp_path / "openspec" / "changes" / "archive" / "2026-09-03-test-change"
     archive_dir.mkdir(parents=True)
     (archive_dir / "proposal.md").write_text("# Proposal\n")

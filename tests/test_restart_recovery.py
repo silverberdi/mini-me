@@ -310,9 +310,18 @@ async def test_worktree_remove_records_managed_worktree_path(in_memory_uow, tmp_
     in_memory_uow.project_managed_repository_bindings.save(binding)
 
     manager = WorktreeManager(project_root=tmp_path, uow=in_memory_uow)
+    import subprocess
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=False)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, capture_output=True, check=False)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=False)
+    subprocess.run(["git", "remote", "add", "origin", "https://github.com/silverberdi/mini-me.git"], cwd=tmp_path, capture_output=True, check=False)
+    subprocess.run(["git", "commit", "--allow-empty", "-m", "init"], cwd=tmp_path, capture_output=True, check=False)
+
     job_id = "job-wt-remove-1"
     target_worktree = (tmp_path / ".minime" / "worktrees" / job_id).resolve()
     target_worktree.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init"], cwd=target_worktree, capture_output=True, check=False)
+    subprocess.run(["git", "remote", "add", "origin", "https://github.com/silverberdi/mini-me.git"], cwd=target_worktree, capture_output=True, check=False)
     marker_content = json.dumps({
         "worktree_id": "wt-job-wt-remove-1",
         "project_id": "mini-me",
@@ -343,6 +352,8 @@ async def test_worktree_remove_records_managed_worktree_path(in_memory_uow, tmp_
             proc.communicate = AsyncMock(return_value=(b"", b""))
         elif "worktree" in cmd_args and "list" in cmd_args:
             proc.communicate = AsyncMock(return_value=(f"worktree {target_worktree}\n".encode(), b""))
+        elif "rev-parse" in cmd_args or "remote" in cmd_args:
+            proc.communicate = AsyncMock(return_value=(b"github.com/silverberdi/mini-me\n", b""))
         else:
             proc.communicate = AsyncMock(return_value=(b"", b""))
         return proc

@@ -15,6 +15,7 @@ from minime.domain.models import (
     OrchestrationRun,
     Project,
     ProjectBinding,
+    ProjectManagedRepositoryBinding,
     Review,
 )
 from minime.services.authorship_service import AuthorshipService
@@ -86,12 +87,20 @@ def test_lifecycle_gate_chain_end_to_end(in_memory_uow, tmp_path: Path):
     assert verify.status is GateStatus.PASS
 
     # 4. Sync verification (Phase D)
-    sync_service = OpenSpecSyncService(tmp_path)
-    synced = sync_service.sync_change_specs("openspec", "chain-change")
+    in_memory_uow.project_managed_repository_bindings.save(
+        ProjectManagedRepositoryBinding(
+            project_id="mini-me",
+            canonical_repository_identity="github.com/silverberdi/mini-me",
+            managed_repository_root=str(tmp_path.resolve()),
+            worktree_parent_dir=str((tmp_path / ".minime" / "worktrees").resolve()),
+        )
+    )
+    sync_service = OpenSpecSyncService(tmp_path, uow=in_memory_uow)
+    synced = sync_service.sync_change_specs("openspec", "chain-change", project_id="mini-me")
     assert sync_service.verify_sync("openspec", "chain-change", synced)
 
     # 5. Archive verification (Phase D)
-    archived = sync_service.archive_change("openspec", "chain-change")
+    archived = sync_service.archive_change("openspec", "chain-change", project_id="mini-me")
     assert sync_service.verify_archive("openspec", "chain-change", archived)
 
     # 6. Integrity audit (Phase E) — repository is now healthy.

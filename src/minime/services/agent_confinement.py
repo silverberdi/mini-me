@@ -102,18 +102,20 @@ class AgentProcessConfinement:
         )
 
     def _generate_darwin_sandbox_profile(self) -> str:
-        """Construct a macOS sandbox profile strictly denying file write outside allowed_worktree_path and temp dirs, protecting runtime_root."""
+        """Construct a macOS sandbox profile strictly denying file write outside allowed_worktree_path, protecting runtime_root."""
         return (
             "(version 1)\n"
             "(allow default)\n"
+            "(deny file-write*)\n"
             f"(allow file-write* (subpath \"{self.allowed_worktree_path}\"))\n"
-            "(allow file-write* (subpath \"/private/tmp\"))\n"
-            "(allow file-write* (subpath \"/tmp\"))\n"
-            "(allow file-write* (regex #\"^/private/var/folders/\"))\n"
             "(allow file-write* (literal \"/dev/null\"))\n"
+            "(allow file-write* (literal \"/dev/zero\"))\n"
             "(allow file-write* (literal \"/dev/tty\"))\n"
+            "(allow file-write* (regex #\"^/dev/fd/\"))\n"
+            "(allow file-write* (regex #\"^/dev/std(in|out|err)\"))\n"
             f"(deny file-write* (subpath \"{self.runtime_root}\"))\n"
         )
+
 
     def wrap_command(self, cmd: Sequence[str] | str) -> list[str]:
         """Wrap command with OS-level sandbox confinement binary (bwrap / sandbox-exec)."""

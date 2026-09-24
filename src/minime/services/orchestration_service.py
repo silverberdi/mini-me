@@ -33,6 +33,7 @@ from minime.domain.enums import (
     ReadinessState,
     ReviewVerdict,
     WorkItemStatus,
+    WorkspaceOperation,
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
@@ -1343,7 +1344,17 @@ class OrchestrationService:
             if state.dirty:
                 raise RuntimeError(f"Existing integration worktree is dirty: {path}")
             return WorktreeInfo(path, branch_name, base_sha)
+
         path.parent.mkdir(parents=True, exist_ok=True)
+        manager._authorize_mutating_operation(run.project_id, path, WorkspaceOperation.WORKTREE_CREATE)
+        ownership = manager._persist_pending_ownership(
+            job.job_id,
+            run.project_id,
+            path,
+            branch=branch_name,
+            change_name=run.change_name,
+            source_base_sha=base_sha,
+        )
         await manager._git(
             ["worktree", "add", "-b", branch_name, str(path), base_sha],
             cwd=manager.project_root,
@@ -1352,6 +1363,11 @@ class OrchestrationService:
             operation_type="candidate_base_integration_worktree_add",
             managed_worktree_path=path,
         )
+        manager._write_ownership_marker(path, ownership)
+        await manager._verify_creation_postconditions(
+            path, ownership, expected_branch=branch_name, expected_base_sha=base_sha
+        )
+        manager._finalize_created_ownership(ownership)
         return WorktreeInfo(path, branch_name, base_sha)
 
     def _find_transition_event(

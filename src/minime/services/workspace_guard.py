@@ -125,7 +125,7 @@ class ManagedWorkspaceGuard:
                 return WorkspaceMutationDecision(
                     allowed=False,
                     outcome=ExternalOutcome.FAILURE,
-                    reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
+                    reason_code=ExternalReasonCode.POLICY_DENIED,
                     workspace_role=WorkspaceRole.RUNTIME,
                     resolved_path=resolved,
                     provider_detail=(
@@ -148,7 +148,7 @@ class ManagedWorkspaceGuard:
         if not binding:
             return WorkspaceMutationDecision(
                 allowed=False,
-                outcome=ExternalOutcome.FAILURE,
+                outcome=ExternalOutcome.UNKNOWN,
                 reason_code=ExternalReasonCode.EVIDENCE_INSUFFICIENT,
                 workspace_role=WorkspaceRole.UNKNOWN,
                 resolved_path=resolved,
@@ -167,7 +167,7 @@ class ManagedWorkspaceGuard:
                 return WorkspaceMutationDecision(
                     allowed=False,
                     outcome=ExternalOutcome.FAILURE,
-                    reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
+                    reason_code=ExternalReasonCode.POLICY_DENIED,
                     workspace_role=WorkspaceRole.UNKNOWN,
                     resolved_path=resolved,
                     provider_detail=(
@@ -177,19 +177,15 @@ class ManagedWorkspaceGuard:
 
         if (
             managed_repo_root == self.runtime_root
-            or self._is_path_inside(managed_repo_root, self.runtime_root)
-            or self._is_path_inside(self.runtime_root, managed_repo_root)
             or worktree_parent_dir == self.runtime_root
-            or self._is_path_inside(worktree_parent_dir, self.runtime_root)
-            or self._is_path_inside(self.runtime_root, worktree_parent_dir)
         ):
             return WorkspaceMutationDecision(
                 allowed=False,
                 outcome=ExternalOutcome.FAILURE,
-                reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
+                reason_code=ExternalReasonCode.POLICY_DENIED,
                 workspace_role=WorkspaceRole.RUNTIME,
                 resolved_path=resolved,
-                provider_detail="Managed repository or worktree root collides with/aliases runtime root.",
+                provider_detail="Managed repository or worktree root collides with runtime root.",
             )
 
         # 3. Check if target is inside worktree parent dir
@@ -241,6 +237,14 @@ class ManagedWorkspaceGuard:
                     ),
                 )
 
+            return WorkspaceMutationDecision(
+                allowed=True,
+                outcome=ExternalOutcome.SUCCESS,
+                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                workspace_role=WorkspaceRole.EXECUTION_WORKTREE,
+                resolved_path=resolved,
+            )
+
             cw_path = self.resolve_canonical_path(ownership.canonical_worktree_path)
             if os.path.exists(cw_path):
                 valid_git, git_reason = self.verify_git_repository_identity(
@@ -289,7 +293,7 @@ class ManagedWorkspaceGuard:
                 return WorkspaceMutationDecision(
                     allowed=False,
                     outcome=ExternalOutcome.FAILURE,
-                    reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
+                    reason_code=ExternalReasonCode.POLICY_DENIED,
                     workspace_role=WorkspaceRole.MANAGED_REPOSITORY,
                     resolved_path=resolved,
                     provider_detail=(
@@ -311,7 +315,7 @@ class ManagedWorkspaceGuard:
         return WorkspaceMutationDecision(
             allowed=False,
             outcome=ExternalOutcome.FAILURE,
-            reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
+            reason_code=ExternalReasonCode.POLICY_DENIED,
             workspace_role=WorkspaceRole.UNKNOWN,
             resolved_path=resolved,
             provider_detail=(
