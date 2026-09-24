@@ -315,14 +315,86 @@ class WorktreeManager:
                 except Exception:
                     pass
 
-        # 5. Fallback for standalone jobs where job_id is the execution identity
+        return None
+
+    def _resolve_real_change_name(
+        self, job_id: str, change_name: str | None = None, project_id: str | None = None, run_id: str | None = None
+    ) -> str | None:
+        if change_name:
+            return change_name
+        if not self.uow:
+            return None
+
+        # 1. Check uow.jobs
         if hasattr(self.uow, "jobs") and self.uow.jobs:
             try:
                 job = self.uow.jobs.get_by_id(job_id) if hasattr(self.uow.jobs, "get_by_id") else None
-                if job:
-                    return job.job_id
+                if job and getattr(job, "change_name", None):
+                    return job.change_name
             except Exception:
                 pass
+
+        # 2. Check uow.orchestration_runs
+        if hasattr(self.uow, "orchestration_runs") and self.uow.orchestration_runs:
+            runs_repo = self.uow.orchestration_runs
+            eff_run = run_id or self._resolve_real_run_id(job_id, run_id=run_id, project_id=project_id)
+            if eff_run and hasattr(runs_repo, "get_by_id"):
+                try:
+                    r = runs_repo.get_by_id(eff_run)
+                    if r and getattr(r, "change_name", None):
+                        return r.change_name
+                except Exception:
+                    pass
+            if hasattr(runs_repo, "get_by_active_job_id"):
+                try:
+                    r = runs_repo.get_by_active_job_id(job_id)
+                    if r and getattr(r, "change_name", None):
+                        return r.change_name
+                except Exception:
+                    pass
+            runs = []
+            if hasattr(runs_repo, "list_runs"):
+                try:
+                    runs = runs_repo.list_runs()
+                except Exception:
+                    pass
+            elif hasattr(runs_repo, "list_all"):
+                try:
+                    runs = runs_repo.list_all()
+                except Exception:
+                    pass
+            if not runs and hasattr(runs_repo, "_store"):
+                store = getattr(runs_repo, "_store", {})
+                runs = list(store.values()) if isinstance(store, dict) else []
+            if not runs and hasattr(runs_repo, "store"):
+                store = getattr(runs_repo, "store", {})
+                runs = list(store.values()) if isinstance(store, dict) else []
+
+            for r in runs:
+                if (getattr(r, "active_job_id", None) == job_id or getattr(r, "run_id", None) == job_id or getattr(r, "run_id", None) == eff_run) and getattr(r, "change_name", None):
+                    return r.change_name
+
+        # 3. Check uow.candidate_remediations
+        if hasattr(self.uow, "candidate_remediations") and self.uow.candidate_remediations:
+            rem_repo = self.uow.candidate_remediations
+            if hasattr(rem_repo, "list_by_job"):
+                try:
+                    rems = rem_repo.list_by_job(job_id)
+                    if rems and getattr(rems[0], "change_name", None):
+                        return rems[0].change_name
+                except Exception:
+                    pass
+
+        # 4. Check uow.orchestration_worktree_ownerships
+        if hasattr(self.uow, "orchestration_worktree_ownerships") and self.uow.orchestration_worktree_ownerships:
+            ow_repo = self.uow.orchestration_worktree_ownerships
+            if hasattr(ow_repo, "get_by_job_id"):
+                try:
+                    ow = ow_repo.get_by_job_id(job_id)
+                    if ow and getattr(ow, "change_name", None):
+                        return ow.change_name
+                except Exception:
+                    pass
 
         return None
 
@@ -354,7 +426,9 @@ class WorktreeManager:
                     eff_repo_identity = binding.canonical_repository_identity
 
         eff_run_id = self._resolve_real_run_id(job_id, run_id, project_id=project_id, change_name=change_name)
-        eff_change_name = change_name
+        eff_change_name = self._resolve_real_change_name(
+            job_id, change_name, project_id=project_id, run_id=eff_run_id
+        )
         eff_base_sha = source_base_sha
 
         if not eff_run_id:
@@ -716,15 +790,11 @@ class WorktreeManager:
         # 1. Guard preflight evaluation before any mutation side effect
         self._authorize_mutating_operation(project_id, path, WorkspaceOperation.WORKTREE_CREATE)
 
-        if not run_id and self.uow and hasattr(self.uow, "jobs"):
-            job = self.uow.jobs.get_by_id(job_id)
-            if job:
-                if not run_id and hasattr(job, "run_id") and job.run_id:
-                    run_id = job.run_id
-                if not change_name and hasattr(job, "change_name") and job.change_name:
-                    change_name = job.change_name
-
-        eff_change_name = change_name or f"integration-gen{generation}"
+        eff_change_name = self._resolve_real_change_name(
+            job_id, change_name, project_id=project_id, run_id=run_id
+        )
+        if not eff_change_name:
+            raise ValueError(f"Failing closed: canonical change_name for job_id '{job_id}' cannot be observed.")
 
         # 2. Mandatory durable PENDING ownership before git worktree add
         ownership = self._persist_pending_ownership(

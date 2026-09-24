@@ -1229,4 +1229,108 @@ def test_missing_run_id_or_change_name_prevents_creation_and_matches_supplied(tm
     assert ow.change_name == "change-supplied-88"
 
 
+def test_durable_job_without_run_id_fails_before_git_add(tmp_dirs):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+    class MockBindingRepo:
+        def get_by_project_id(self, pid):
+            return ProjectManagedRepositoryBinding(
+                project_id=pid,
+                canonical_repository_identity="github.com/org/repo",
+                remote_name="origin",
+                managed_repository_root=tmp_dirs["repo_root"],
+                worktree_parent_dir=tmp_dirs["worktrees"],
+            )
+
+    class MockOwnershipRepo:
+        def __init__(self): self.store = {}
+        def save(self, obj): self.store[obj.worktree_id] = obj
+        def get_by_id(self, wid): return self.store.get(wid)
+        def get_by_canonical_path(self, path): return None
+
+    class MockJobRepo:
+        def get_by_id(self, jid):
+            # Durable Job exists, but run_id is None / missing
+            j = MagicMock()
+            j.job_id = jid
+            j.run_id = None
+            return j
+
+    class MockUOWJobNoRunID:
+        def __init__(self):
+            self.project_managed_repository_bindings = MockBindingRepo()
+            self.orchestration_worktree_ownerships = MockOwnershipRepo()
+            self.jobs = MockJobRepo()
+            self.orchestration_runs = None
+            self.candidate_remediations = None
+        def commit(self): pass
+
+    uow = MockUOWJobNoRunID()
+    wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
+
+    with patch.object(wt_manager, "_git", new_callable=AsyncMock) as mock_git:
+        with pytest.raises(ValueError, match="run_id"):
+            asyncio.run(
+                wt_manager.create_worktree(
+                    job_id="job-no-run-id",
+                    change_name="change-1",
+                    base_branch="main",
+                    project_id="proj-1",
+                )
+            )
+
+        for call_item in mock_git.call_args_list:
+            args = call_item.args[0] if call_item.args else []
+            assert "worktree" not in args or "add" not in args
+
+
+def test_missing_canonical_change_name_blocks_integration_worktree_creation(tmp_dirs):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+    class MockBindingRepo:
+        def get_by_project_id(self, pid):
+            return ProjectManagedRepositoryBinding(
+                project_id=pid,
+                canonical_repository_identity="github.com/org/repo",
+                remote_name="origin",
+                managed_repository_root=tmp_dirs["repo_root"],
+                worktree_parent_dir=tmp_dirs["worktrees"],
+            )
+
+    class MockOwnershipRepo:
+        def __init__(self): self.store = {}
+        def save(self, obj): self.store[obj.worktree_id] = obj
+        def get_by_id(self, wid): return self.store.get(wid)
+        def get_by_canonical_path(self, path): return None
+
+    class MockUOWNoChangeName:
+        def __init__(self):
+            self.project_managed_repository_bindings = MockBindingRepo()
+            self.orchestration_worktree_ownerships = MockOwnershipRepo()
+            self.jobs = None
+            self.orchestration_runs = None
+            self.candidate_remediations = None
+        def commit(self): pass
+
+    uow = MockUOWNoChangeName()
+    wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
+
+    with patch.object(wt_manager, "_git", new_callable=AsyncMock) as mock_git:
+        with pytest.raises(ValueError, match="change_name"):
+            asyncio.run(
+                wt_manager.create_integration_worktree(
+                    job_id="job-int-no-change-name",
+                    branch_name="minime/integration-gen1",
+                    base_sha="sha123",
+                    generation=1,
+                    project_id="proj-1",
+                    run_id="run-1",
+                    change_name=None,
+                )
+            )
+
+        for call_item in mock_git.call_args_list:
+            args = call_item.args[0] if call_item.args else []
+            assert "worktree" not in args or "add" not in args
+
+
+
 
