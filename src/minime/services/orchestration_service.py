@@ -1005,6 +1005,7 @@ class OrchestrationService:
                 project.base_branch,
                 project_id=run.project_id,
                 branch_name=candidate.candidate_ref.removeprefix("refs/heads/"),
+                run_id=run_id,
             )
         )
         try:

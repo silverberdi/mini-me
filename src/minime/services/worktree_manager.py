@@ -105,20 +105,75 @@ class WorktreeManager:
                 f"ManagedWorkspaceGuard denied {operation.value} for path '{canonical_path}': {decision.provider_detail or decision.reason_code.value}"
             )
 
+    def _resolve_project_id(self, project_id: str | None, job_id: str | None = None) -> str | None:
+        if project_id:
+            return project_id
+        if not self.uow or not job_id:
+            return None
+        if hasattr(self.uow, "jobs") and self.uow.jobs:
+            try:
+                job = self.uow.jobs.get_by_id(job_id) if hasattr(self.uow.jobs, "get_by_id") else None
+                if job and getattr(job, "project_id", None):
+                    return job.project_id
+            except Exception:
+                pass
+        if hasattr(self.uow, "orchestration_runs") and self.uow.orchestration_runs:
+            runs_repo = self.uow.orchestration_runs
+            if hasattr(runs_repo, "get_by_active_job_id"):
+                try:
+                    r = runs_repo.get_by_active_job_id(job_id)
+                    if r and getattr(r, "project_id", None):
+                        return r.project_id
+                except Exception:
+                    pass
+            runs = []
+            if hasattr(runs_repo, "list_runs"):
+                try:
+                    runs = runs_repo.list_runs()
+                except Exception:
+                    pass
+            elif hasattr(runs_repo, "list_all"):
+                try:
+                    runs = runs_repo.list_all()
+                except Exception:
+                    pass
+            if not runs and hasattr(runs_repo, "_store"):
+                store = getattr(runs_repo, "_store", {})
+                runs = list(store.values()) if isinstance(store, dict) else []
+            for r in runs:
+                if (getattr(r, "active_job_id", None) == job_id or getattr(r, "run_id", None) == job_id) and getattr(r, "project_id", None):
+                    return r.project_id
+        if hasattr(self.uow, "orchestration_worktree_ownerships") and self.uow.orchestration_worktree_ownerships:
+            ow_repo = self.uow.orchestration_worktree_ownerships
+            if hasattr(ow_repo, "get_by_job_id"):
+                try:
+                    ow = ow_repo.get_by_job_id(job_id)
+                    if ow and getattr(ow, "project_id", None):
+                        return ow.project_id
+                except Exception:
+                    pass
+        return None
+
     def resolve_worktree_parent_dir(self, project_id: str | None) -> Path:
-        if project_id and self.uow:
-            binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
-            if binding_repo:
-                binding = binding_repo.get_by_project_id(project_id)
-                if binding and binding.worktree_parent_dir:
-                    return Path(binding.worktree_parent_dir).resolve()
-        return self.worktrees_root.resolve()
+        if not project_id:
+            raise ValueError("project_id is mandatory to resolve worktree parent directory.")
+        if not self.uow:
+            raise RuntimeError("PersistenceUnitOfWork (uow) is required to resolve worktree parent directory.")
+        binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
+        if not binding_repo:
+            raise RuntimeError("project_managed_repository_bindings repository is missing in uow.")
+        binding = binding_repo.get_by_project_id(project_id)
+        if not binding or not binding.worktree_parent_dir:
+            raise RuntimeError(f"Failing closed: no valid durable binding or worktree_parent_dir found for project_id '{project_id}'.")
+        return Path(binding.worktree_parent_dir).resolve()
 
     def worktree_path(self, job_id: str, project_id: str | None = None) -> Path:
-        return self.resolve_worktree_parent_dir(project_id) / job_id
+        eff_project_id = self._resolve_project_id(project_id, job_id)
+        return self.resolve_worktree_parent_dir(eff_project_id) / job_id
 
     def remediation_worktree_path(self, job_id: str, generation: int, project_id: str | None = None) -> Path:
-        return self.resolve_worktree_parent_dir(project_id) / f"{job_id}-remediation-gen{generation}"
+        eff_project_id = self._resolve_project_id(project_id, job_id)
+        return self.resolve_worktree_parent_dir(eff_project_id) / f"{job_id}-remediation-gen{generation}"
 
     async def _git(
         self,
@@ -174,6 +229,103 @@ class WorktreeManager:
             raise RuntimeError(stderr.decode().strip() or stdout.decode().strip())
         return stdout.decode().strip()
 
+    def _resolve_real_run_id(
+        self, job_id: str, run_id: str | None = None, project_id: str | None = None, change_name: str | None = None
+    ) -> str | None:
+        if run_id:
+            return run_id
+        if not self.uow:
+            return None
+
+        # 1. Check uow.jobs
+        if hasattr(self.uow, "jobs") and self.uow.jobs:
+            try:
+                job = self.uow.jobs.get_by_id(job_id) if hasattr(self.uow.jobs, "get_by_id") else None
+                if job and getattr(job, "run_id", None):
+                    return job.run_id
+            except Exception:
+                pass
+
+        # 2. Check uow.orchestration_runs
+        if hasattr(self.uow, "orchestration_runs") and self.uow.orchestration_runs:
+            runs_repo = self.uow.orchestration_runs
+            if hasattr(runs_repo, "get_by_active_job_id"):
+                try:
+                    r = runs_repo.get_by_active_job_id(job_id)
+                    if r and getattr(r, "run_id", None):
+                        return r.run_id
+                except Exception:
+                    pass
+            if hasattr(runs_repo, "get_by_id"):
+                try:
+                    r = runs_repo.get_by_id(job_id)
+                    if r and getattr(r, "run_id", None):
+                        return r.run_id
+                except Exception:
+                    pass
+            if project_id and change_name and hasattr(runs_repo, "get_active_run"):
+                try:
+                    r = runs_repo.get_active_run(project_id, change_name)
+                    if r and getattr(r, "run_id", None):
+                        return r.run_id
+                except Exception:
+                    pass
+
+            runs = []
+            if hasattr(runs_repo, "list_runs"):
+                try:
+                    runs = runs_repo.list_runs()
+                except Exception:
+                    pass
+            elif hasattr(runs_repo, "list_all"):
+                try:
+                    runs = runs_repo.list_all()
+                except Exception:
+                    pass
+            if not runs and hasattr(runs_repo, "_store"):
+                store = getattr(runs_repo, "_store", {})
+                runs = list(store.values()) if isinstance(store, dict) else []
+            if not runs and hasattr(runs_repo, "store"):
+                store = getattr(runs_repo, "store", {})
+                runs = list(store.values()) if isinstance(store, dict) else []
+
+            for r in runs:
+                if (getattr(r, "active_job_id", None) == job_id or getattr(r, "run_id", None) == job_id) and getattr(r, "run_id", None):
+                    return r.run_id
+
+        # 3. Check uow.candidate_remediations
+        if hasattr(self.uow, "candidate_remediations") and self.uow.candidate_remediations:
+            rem_repo = self.uow.candidate_remediations
+            if hasattr(rem_repo, "list_by_job"):
+                try:
+                    rems = rem_repo.list_by_job(job_id)
+                    if rems and getattr(rems[0], "run_id", None):
+                        return rems[0].run_id
+                except Exception:
+                    pass
+
+        # 4. Check uow.orchestration_worktree_ownerships
+        if hasattr(self.uow, "orchestration_worktree_ownerships") and self.uow.orchestration_worktree_ownerships:
+            ow_repo = self.uow.orchestration_worktree_ownerships
+            if hasattr(ow_repo, "get_by_job_id"):
+                try:
+                    ow = ow_repo.get_by_job_id(job_id)
+                    if ow and getattr(ow, "run_id", None):
+                        return ow.run_id
+                except Exception:
+                    pass
+
+        # 5. Fallback for standalone jobs where job_id is the execution identity
+        if hasattr(self.uow, "jobs") and self.uow.jobs:
+            try:
+                job = self.uow.jobs.get_by_id(job_id) if hasattr(self.uow.jobs, "get_by_id") else None
+                if job:
+                    return job.job_id
+            except Exception:
+                pass
+
+        return None
+
     def _persist_pending_ownership(
         self,
         job_id: str,
@@ -201,10 +353,16 @@ class WorktreeManager:
                 if binding:
                     eff_repo_identity = binding.canonical_repository_identity
 
-        eff_run_id = run_id or f"run-{job_id}"
-        eff_change_name = change_name or f"change-{job_id}"
+        eff_run_id = self._resolve_real_run_id(job_id, run_id, project_id=project_id, change_name=change_name)
+        eff_change_name = change_name
         eff_base_sha = source_base_sha
 
+        if not eff_run_id:
+            raise ValueError(f"Failing closed: run_id for job_id '{job_id}' is unobservable or empty.")
+        if not eff_change_name:
+            raise ValueError(f"Failing closed: change_name for job_id '{job_id}' is unobservable or empty.")
+        if not branch:
+            raise ValueError(f"Failing closed: branch for job_id '{job_id}' is unobservable or empty.")
         if not eff_repo_identity:
             raise RuntimeError(f"Failing closed: source_repository_identity for project_id '{project_id}' is unobservable.")
         if not eff_base_sha:
@@ -379,6 +537,7 @@ class WorktreeManager:
         source_sha: str,
         generation: int,
         project_id: str | None = None,
+        run_id: str | None = None,
     ) -> WorktreeInfo:
         """Create or reconcile a remediation workspace rooted at an immutable source SHA."""
         path = self.remediation_worktree_path(job_id, generation, project_id).resolve()
@@ -400,9 +559,14 @@ class WorktreeManager:
                 )
             return WorktreeInfo(path, branch, source_sha)
 
+        if not run_id and self.uow and hasattr(self.uow, "jobs"):
+            job = self.uow.jobs.get_by_id(job_id)
+            if job and hasattr(job, "run_id") and job.run_id:
+                run_id = job.run_id
+
         # 2. Mandatory durable PENDING ownership before git worktree add
         ownership = self._persist_pending_ownership(
-            job_id, project_id, path, branch=branch, change_name=change_name, source_base_sha=source_sha
+            job_id, project_id, path, branch=branch, run_id=run_id, change_name=change_name, source_base_sha=source_sha
         )
 
         try:
@@ -458,6 +622,7 @@ class WorktreeManager:
         project_id: str | None = None,
         branch_name: str | None = None,
         reuse_existing: bool = False,
+        run_id: str | None = None,
     ) -> WorktreeInfo:
         path = self.worktree_path(job_id, project_id).resolve()
         parent = self.resolve_worktree_parent_dir(project_id).resolve()
@@ -479,9 +644,14 @@ class WorktreeManager:
             except Exception:
                 await self.remove_clean_worktree_path(path, job_id, project_id)
 
+        if not run_id and self.uow and hasattr(self.uow, "jobs"):
+            job = self.uow.jobs.get_by_id(job_id)
+            if job and hasattr(job, "run_id") and job.run_id:
+                run_id = job.run_id
+
         # 2. Mandatory durable PENDING ownership before git worktree add
         ownership = self._persist_pending_ownership(
-            job_id, project_id, path, branch=branch_name, change_name=change_name, source_base_sha=base_sha
+            job_id, project_id, path, branch=branch_name, run_id=run_id, change_name=change_name, source_base_sha=base_sha
         )
 
         branch_exists = False
@@ -530,6 +700,8 @@ class WorktreeManager:
         base_sha: str,
         generation: int,
         project_id: str | None = None,
+        run_id: str | None = None,
+        change_name: str | None = None,
     ) -> WorktreeInfo:
         path = (self.resolve_worktree_parent_dir(project_id) / f"{job_id}-integration-gen{generation}").resolve()
         parent = self.resolve_worktree_parent_dir(project_id).resolve()
@@ -544,9 +716,19 @@ class WorktreeManager:
         # 1. Guard preflight evaluation before any mutation side effect
         self._authorize_mutating_operation(project_id, path, WorkspaceOperation.WORKTREE_CREATE)
 
+        if not run_id and self.uow and hasattr(self.uow, "jobs"):
+            job = self.uow.jobs.get_by_id(job_id)
+            if job:
+                if not run_id and hasattr(job, "run_id") and job.run_id:
+                    run_id = job.run_id
+                if not change_name and hasattr(job, "change_name") and job.change_name:
+                    change_name = job.change_name
+
+        eff_change_name = change_name or f"integration-gen{generation}"
+
         # 2. Mandatory durable PENDING ownership before git worktree add
         ownership = self._persist_pending_ownership(
-            job_id, project_id, path, branch=branch_name, change_name=f"integration-gen{generation}", source_base_sha=base_sha
+            job_id, project_id, path, branch=branch_name, run_id=run_id, change_name=eff_change_name, source_base_sha=base_sha
         )
 
         # 3. ONLY THEN execute git worktree add
@@ -741,9 +923,10 @@ class WorktreeManager:
         remediation_id: str,
         contract_hash: str,
         authorized_paths: list[str],
+        project_id: str | None = None,
     ) -> WorktreeInfo | None:
         """Adopt only an exact post-commit remediation workspace after a crash."""
-        path = self.remediation_worktree_path(job_id, generation).resolve()
+        path = self.remediation_worktree_path(job_id, generation, project_id).resolve()
         if not path.exists():
             return None
         branch = f"minime/{change_name}-{job_id}-remediation-gen{generation}"
@@ -769,7 +952,7 @@ class WorktreeManager:
 
     async def remove_clean_worktree(self, job_id: str, project_id: str | None = None) -> None:
         """Remove a managed worktree only after independently proving it is clean."""
-        await self.remove_clean_worktree_path(self.worktree_path(job_id), job_id, project_id)
+        await self.remove_clean_worktree_path(self.worktree_path(job_id, project_id), job_id, project_id)
 
     async def remove_clean_worktree_path(
         self,

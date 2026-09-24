@@ -58,7 +58,7 @@ class GitFakeWorktreeManager:
         self.mutate_after_current_sha = mutate_after_current_sha
 
     async def create_worktree(
-        self, job_id: str, change_name: str, base_branch: str
+        self, job_id: str, change_name: str, base_branch: str, *args, **kwargs
     ) -> WorktreeInfo:
         del change_name, base_branch
         path = self.root / ".minime" / "worktrees" / job_id

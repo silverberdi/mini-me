@@ -66,7 +66,7 @@ class CandidateRemediationService:
         self, remediation: CandidateRemediation, job, change_name: str, generation: int
     ) -> None:
         expected_path = self.worktree_manager.remediation_worktree_path(
-            job.job_id, generation
+            job.job_id, generation, project_id=job.project_id
         ).resolve()
         expected_branch = f"minime/{change_name}-{job.job_id}-remediation-gen{generation}"
         if (
@@ -314,6 +314,7 @@ class CandidateRemediationService:
                 remediation.remediation_id,
                 contract_hash,
                 contract.allowed_paths,
+                project_id=run.project_id,
             )
         workspace_source_sha = (
             existing.result_candidate_sha
@@ -329,6 +330,7 @@ class CandidateRemediationService:
             workspace_source_sha,
             generation,
             project_id=run.project_id,
+            run_id=run_id,
         )
         if existing is None:
             remediation.status = RemediationStatus.WORKSPACE_READY

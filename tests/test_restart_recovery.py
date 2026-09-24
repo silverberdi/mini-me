@@ -283,6 +283,7 @@ async def test_worktree_add_records_managed_worktree_path_not_cwd(in_memory_uow,
             change_name="test-change",
             base_branch="main",
             project_id="mini-me",
+            run_id="run-wt-identity-1",
         )
 
     ops = in_memory_uow.git_operations.list_by_job(job_id)

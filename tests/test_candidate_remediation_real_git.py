@@ -677,7 +677,7 @@ def test_real_git_reconciliation_rejects_wrong_remediation_trailer(tmp_path, in_
     )
     manager = WorktreeManager(tmp_path, uow=in_memory_uow)
     workspace = asyncio.run(
-        manager.create_remediation_worktree("job", "change", source_sha, 2, project_id="p")
+        manager.create_remediation_worktree("job", "change", source_sha, 2, project_id="p", run_id="run")
     )
     (workspace.path / "src").mkdir()
     (workspace.path / "src" / "fix.py").write_text("fixed = True\n", encoding="utf-8")

@@ -54,14 +54,14 @@ async def test_worktree_manager_create_collision_and_cleanup(tmp_path):
     await setup_test_repo(repo, uow, "job-1-proj")
 
     manager = WorktreeManager(repo, uow=uow)
-    info = await manager.create_worktree("job-1", "002-implementation-pipeline", "main", project_id="job-1-proj")
+    info = await manager.create_worktree("job-1", "002-implementation-pipeline", "main", project_id="job-1-proj", run_id="run-1")
 
     assert info.path.exists()
     assert info.branch_name.startswith("minime/002-implementation-pipeline-job-1")
     assert await manager.current_sha(info.path) == info.base_sha
 
     with pytest.raises(ValueError, match="not empty"):
-        await manager.create_worktree("job-1", "002-implementation-pipeline", "main", project_id="job-1-proj")
+        await manager.create_worktree("job-1", "002-implementation-pipeline", "main", project_id="job-1-proj", run_id="run-1")
 
     await manager.cleanup_worktree("job-1", project_id="job-1-proj")
     assert not info.path.exists()
@@ -74,7 +74,7 @@ async def test_cleanup_worktree_refuses_dirty_worktree_without_deleting_it(tmp_p
     await setup_test_repo(repo, uow, "job-rec-proj")
 
     manager = WorktreeManager(repo, uow=uow)
-    info = await manager.create_worktree("job-recovery", "010-change", "main", project_id="job-rec-proj")
+    info = await manager.create_worktree("job-recovery", "010-change", "main", project_id="job-rec-proj", run_id="run-rec")
     (info.path / "README.md").write_text("recovered\n", encoding="utf-8")
     (info.path / "new.py").write_text("candidate = True\n", encoding="utf-8")
     git_commands: list[list[str]] = []
@@ -107,7 +107,7 @@ async def test_remove_clean_worktree_removes_clean_managed_worktree(tmp_path):
     await setup_test_repo(repo, uow, "job-clean-proj")
 
     manager = WorktreeManager(repo, uow=uow)
-    info = await manager.create_worktree("job-clean", "010-change", "main", project_id="job-clean-proj")
+    info = await manager.create_worktree("job-clean", "010-change", "main", project_id="job-clean-proj", run_id="run-clean")
 
     await manager.remove_clean_worktree("job-clean", project_id="job-clean-proj")
 
@@ -128,7 +128,7 @@ async def test_production_push_uses_repository_root_after_worktree_cleanup(tmp_p
     uow.project_managed_repository_bindings.save(binding)
 
     manager = WorktreeManager(repo, uow=uow)
-    info = await manager.create_worktree("job-push", "008-autonomous-change-orchestration", "main", project_id="job-push-proj")
+    info = await manager.create_worktree("job-push", "008-autonomous-change-orchestration", "main", project_id="job-push-proj", run_id="run-push")
     (info.path / "candidate.py").write_text("candidate = True\n", encoding="utf-8")
     await run(["git", "add", "candidate.py"], info.path)
     await run(["git", "commit", "-m", "candidate"], info.path)

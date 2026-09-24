@@ -452,18 +452,14 @@ class ExecutionPipelineService:
             # Transition to RUNNING if not already in RUNNING status
             if job.status != JobStatus.RUNNING:
                 job = self._transition(job, JobStatus.RUNNING)
-            try:
-                worktree = await self.worktree_manager.create_worktree(
-                    job.job_id,
-                    job.change_name,
-                    project.base_branch,
-                    project_id=project.project_id,
-                    reuse_existing=True,
-                )
-            except TypeError:
-                worktree = await self.worktree_manager.create_worktree(
-                    job.job_id, job.change_name, project.base_branch
-                )
+            worktree = await self.worktree_manager.create_worktree(
+                job.job_id,
+                job.change_name,
+                project.base_branch,
+                project_id=project.project_id,
+                run_id=getattr(job, "run_id", None),
+                reuse_existing=True,
+            )
             worktree_created = True
             job.base_sha = worktree.base_sha
             self.uow.jobs.save(job)

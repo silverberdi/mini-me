@@ -177,7 +177,11 @@ class ManagedWorkspaceGuard:
 
         if (
             managed_repo_root == self.runtime_root
+            or self._is_path_inside(managed_repo_root, self.runtime_root)
+            or self._is_path_inside(self.runtime_root, managed_repo_root)
             or worktree_parent_dir == self.runtime_root
+            or self._is_path_inside(worktree_parent_dir, self.runtime_root)
+            or self._is_path_inside(self.runtime_root, worktree_parent_dir)
         ):
             return WorkspaceMutationDecision(
                 allowed=False,
@@ -185,7 +189,7 @@ class ManagedWorkspaceGuard:
                 reason_code=ExternalReasonCode.POLICY_DENIED,
                 workspace_role=WorkspaceRole.RUNTIME,
                 resolved_path=resolved,
-                provider_detail="Managed repository or worktree root collides with runtime root.",
+                provider_detail="Managed repository or worktree root collides with/aliases runtime root.",
             )
 
         # 3. Check if target is inside worktree parent dir
@@ -235,6 +239,45 @@ class ManagedWorkspaceGuard:
                     provider_detail=(
                         f"Worktree path '{resolved}' creation state '{ownership.creation_state.value}' is not CREATED."
                     ),
+                )
+
+            cw_path = self.resolve_canonical_path(ownership.canonical_worktree_path)
+            if not (self._is_path_inside(resolved, cw_path) or resolved == cw_path):
+                return WorkspaceMutationDecision(
+                    allowed=False,
+                    outcome=ExternalOutcome.FAILURE,
+                    reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
+                    workspace_role=WorkspaceRole.EXECUTION_WORKTREE,
+                    resolved_path=resolved,
+                    provider_detail=f"Target path '{resolved}' does not match canonical ownership path '{cw_path}'.",
+                )
+
+            if os.path.exists(cw_path):
+                valid_git, git_reason = self.verify_git_repository_identity(
+                    cw_path, binding.canonical_repository_identity, binding.remote_name
+                )
+                if not valid_git:
+                    reason_code = (
+                        ExternalReasonCode.CONFLICT
+                        if "mismatch" in git_reason
+                        else ExternalReasonCode.UNOBSERVABLE
+                    )
+                    return WorkspaceMutationDecision(
+                        allowed=False,
+                        outcome=ExternalOutcome.FAILURE,
+                        reason_code=reason_code,
+                        workspace_role=WorkspaceRole.EXECUTION_WORKTREE,
+                        resolved_path=resolved,
+                        provider_detail=git_reason,
+                    )
+            else:
+                return WorkspaceMutationDecision(
+                    allowed=False,
+                    outcome=ExternalOutcome.FAILURE,
+                    reason_code=ExternalReasonCode.UNOBSERVABLE,
+                    workspace_role=WorkspaceRole.EXECUTION_WORKTREE,
+                    resolved_path=resolved,
+                    provider_detail=f"Worktree directory '{cw_path}' does not exist on disk.",
                 )
 
             return WorkspaceMutationDecision(

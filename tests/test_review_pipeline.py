@@ -50,7 +50,7 @@ class GitFakeWorktreeManager:
         self.cleaned: list[str] = []
 
     async def create_worktree(
-        self, job_id: str, change_name: str, base_branch: str
+        self, job_id: str, change_name: str, base_branch: str, *args, **kwargs
     ) -> WorktreeInfo:
         del change_name, base_branch
         path = self.root / ".minime" / "worktrees" / job_id
@@ -238,8 +238,8 @@ async def test_reviewer_never_starts_if_symlink_detected(in_memory_uow, tmp_path
 
     # Worktree manager that plants a symlink before review
     class WorktreeWithSymlink(GitFakeWorktreeManager):
-        async def create_worktree(self, job_id, change_name, base_branch):
-            info = await super().create_worktree(job_id, change_name, base_branch)
+        async def create_worktree(self, job_id, change_name, base_branch, *args, **kwargs):
+            info = await super().create_worktree(job_id, change_name, base_branch, *args, **kwargs)
             os.symlink("/tmp", info.path / "tmp_escape", target_is_directory=True)
             return info
 

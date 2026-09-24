@@ -411,7 +411,7 @@ class PostMergeReconciliationService:
                 logger.warning("OpenSpec archive failed for '%s': %s", change_name, exc)
 
         # 9. Worktree Cleanup
-        wt_clean_res = self._clean_worktrees(job_id)
+        wt_clean_res = self._clean_worktrees(job_id, project_id=project_id)
         worktree_cleaned = wt_clean_res.outcome == ExternalOutcome.SUCCESS
         if worktree_cleaned:
             self.uow.events.save(
@@ -638,7 +638,7 @@ class PostMergeReconciliationService:
                     actor="post_merge",
                 )
 
-    def _clean_worktrees(self, job_id: str | None) -> ExternalActionResult[bool]:
+    def _clean_worktrees(self, job_id: str | None, project_id: str | None = None) -> ExternalActionResult[bool]:
         """Clean worktrees associated with a job fail-closed with postcondition verification."""
         if not job_id:
             return ExternalActionResult(
@@ -649,18 +649,24 @@ class PostMergeReconciliationService:
                 data=True,
             )
 
+        if not project_id and self.uow:
+            job = self.uow.jobs.get_by_id(job_id)
+            if job and hasattr(job, "project_id"):
+                project_id = job.project_id
+
         target_paths: list[Path] = []
         scan_failed = False
         scan_err: str = ""
         try:
-            wt_path = self.worktree_manager.worktree_path(job_id)
-            if wt_path.exists():
-                target_paths.append(wt_path)
-            worktrees_dir = self.project_root / ".minime" / "worktrees"
-            if worktrees_dir.exists():
-                for child in worktrees_dir.glob(f"{job_id}*"):
-                    if child.exists() and child not in target_paths:
-                        target_paths.append(child)
+            if project_id:
+                wt_path = self.worktree_manager.worktree_path(job_id, project_id=project_id)
+                if wt_path.exists():
+                    target_paths.append(wt_path)
+                worktrees_parent = self.worktree_manager.resolve_worktree_parent_dir(project_id)
+                if worktrees_parent.exists():
+                    for child in worktrees_parent.glob(f"{job_id}*"):
+                        if child.exists() and child not in target_paths:
+                            target_paths.append(child)
         except Exception as exc:
             logger.warning("Error scanning worktrees for job '%s': %s", job_id, exc)
             scan_failed = True
@@ -826,7 +832,7 @@ class PostMergeReconciliationService:
         self, project_id: str, change_name: str, job_id: str | None = None
     ) -> None:
         """Clean up worktrees and git branches associated with a job/change."""
-        self._clean_worktrees(job_id)
+        self._clean_worktrees(job_id, project_id=project_id)
         local_branches = [
             f"minime/{change_name}-{job_id}" if job_id else None,
             f"minime/{change_name}",
