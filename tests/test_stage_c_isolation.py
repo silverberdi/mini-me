@@ -1929,6 +1929,97 @@ def test_remediation_worktree_reuse_requires_full_durable_adoption_proof(tmp_dir
         assert info.branch_name == "minime/change-rem-job-rem-1-remediation-gen1"
 
 
+def test_verify_candidate_ancestry_missing_project_id_fails_closed_before_fetch(tmp_dirs):
+    uow = MockUOW()
+    binding = ProjectManagedRepositoryBinding(
+        project_id="proj-ancestry-test",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["repo_root"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+    )
+    uow.project_managed_repository_bindings.save(binding)
+
+    from minime.services.post_merge_service import PostMergeReconciliationService
+    pm_service = PostMergeReconciliationService(
+        uow=uow,
+        project_root=tmp_dirs["repo_root"],
+        github_adapter=MagicMock(),
+    )
+
+    with patch("subprocess.run") as mock_sub:
+        res = pm_service.verify_candidate_ancestry("sha123", base_ref="main", project_id=None)
+
+        assert res is False
+        for call_item in mock_sub.call_args_list:
+            args = call_item.args[0] if call_item.args else []
+            assert "fetch" not in args
+            assert "merge-base" not in args
+
+
+def test_delete_local_branch_missing_project_id_fails_closed_before_deletion(tmp_dirs):
+    subprocess.run(["git", "branch", "minime/test-branch-to-del"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+
+    uow = MockUOW()
+    binding = ProjectManagedRepositoryBinding(
+        project_id="proj-branch-test",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["repo_root"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+    )
+    uow.project_managed_repository_bindings.save(binding)
+
+    from minime.services.post_merge_service import PostMergeReconciliationService
+    pm_service = PostMergeReconciliationService(
+        uow=uow,
+        project_root=tmp_dirs["repo_root"],
+        github_adapter=MagicMock(),
+    )
+
+    with patch("subprocess.run") as mock_sub:
+        res = pm_service._delete_local_branch("minime/test-branch-to-del", project_id=None)
+
+        assert res.outcome != ExternalOutcome.SUCCESS
+        assert res.outcome == ExternalOutcome.FAILURE
+        assert res.reason_code == ExternalReasonCode.POLICY_DENIED
+
+        for call_item in mock_sub.call_args_list:
+            args = call_item.args[0] if call_item.args else []
+            assert "branch" not in args or "-D" not in args
+            assert "show-ref" not in args
+
+
+def test_systemic_post_merge_entry_points_blocked_without_project_id(tmp_dirs):
+    uow = MockUOW()
+    from minime.services.post_merge_service import PostMergeReconciliationService
+    pm_service = PostMergeReconciliationService(
+        uow=uow,
+        project_root=tmp_dirs["repo_root"],
+        github_adapter=MagicMock(),
+    )
+
+    with patch("subprocess.run") as mock_sub:
+        # 1. fetch / verify_candidate_ancestry
+        ancestry_ok = pm_service.verify_candidate_ancestry("sha123", base_ref="main", project_id=None)
+        assert ancestry_ok is False
+
+        # 2. worktree remove / _clean_worktrees
+        wt_res = pm_service._clean_worktrees("job-no-pid", project_id=None)
+        assert wt_res.outcome == ExternalOutcome.FAILURE
+        assert wt_res.reason_code == ExternalReasonCode.POLICY_DENIED
+
+        # 3. branch delete / _delete_local_branch
+        br_res = pm_service._delete_local_branch("minime/some-branch", project_id=None)
+        assert br_res.outcome == ExternalOutcome.FAILURE
+        assert br_res.reason_code == ExternalReasonCode.POLICY_DENIED
+
+        for call_item in mock_sub.call_args_list:
+            args = call_item.args[0] if call_item.args else []
+            assert "fetch" not in args
+            assert "worktree" not in args or "remove" not in args
+            assert "branch" not in args or "-D" not in args
+
+
+
 
 
 

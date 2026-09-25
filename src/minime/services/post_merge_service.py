@@ -117,9 +117,11 @@ class PostMergeReconciliationService:
 
     def verify_candidate_ancestry(self, candidate_sha: str, base_ref: str = "HEAD", project_id: str | None = None) -> bool:
         """Verify that the candidate SHA is an ancestor of the base/main branch."""
+        if not project_id:
+            logger.warning("Failing closed: project_id is mandatory for verify_candidate_ancestry.")
+            return False
         try:
-            if project_id:
-                self._authorize_managed_repo_mutation(project_id)
+            self._authorize_managed_repo_mutation(project_id)
             # Fetch remote origin if base_ref references origin
             if "origin" in base_ref or base_ref in {"HEAD", "main", "origin/main"}:
                 subprocess.run(
@@ -290,8 +292,7 @@ class PostMergeReconciliationService:
 
         # 3. Ancestry verification
         # Fetch latest main in local repository
-        if project_id:
-            self._authorize_managed_repo_mutation(project_id)
+        self._authorize_managed_repo_mutation(project_id)
         subprocess.run(
             ["git", "fetch", "origin", f"{base_branch}:{base_branch}"],
             cwd=self.project_root,
@@ -475,7 +476,7 @@ class PostMergeReconciliationService:
         local_clean_ok = True
         for b in local_branches:
             if b:
-                loc_res = self._delete_local_branch(b)
+                loc_res = self._delete_local_branch(b, project_id=project_id)
                 if loc_res.outcome != ExternalOutcome.SUCCESS:
                     local_clean_ok = False
 
@@ -694,21 +695,30 @@ class PostMergeReconciliationService:
 
         if not project_id and self.uow:
             job = self.uow.jobs.get_by_id(job_id)
-            if job and hasattr(job, "project_id"):
+            if job and getattr(job, "project_id", None):
                 project_id = job.project_id
 
-        if project_id:
-            try:
-                self._authorize_managed_repo_mutation(project_id)
-            except Exception as exc:
-                return ExternalActionResult(
-                    outcome=ExternalOutcome.FAILURE,
-                    source_adapter="worktree_manager",
-                    reason_code=ExternalReasonCode.POLICY_DENIED,
-                    retry_safety=RetrySafety.SAFE,
-                    data=False,
-                    error_message=f"Post-merge worktree cleanup denied by workspace guard: {exc}",
-                )
+        if not project_id:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="worktree_manager",
+                reason_code=ExternalReasonCode.POLICY_DENIED,
+                retry_safety=RetrySafety.SAFE,
+                data=False,
+                error_message="project_id is mandatory for post-merge worktree cleanup.",
+            )
+
+        try:
+            self._authorize_managed_repo_mutation(project_id)
+        except Exception as exc:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="worktree_manager",
+                reason_code=ExternalReasonCode.POLICY_DENIED,
+                retry_safety=RetrySafety.SAFE,
+                data=False,
+                error_message=f"Post-merge worktree cleanup denied by workspace guard: {exc}",
+            )
 
         target_paths: list[Path] = []
         scan_failed = False
@@ -785,18 +795,27 @@ class PostMergeReconciliationService:
 
     def _delete_local_branch(self, branch_name: str, project_id: str | None = None) -> ExternalActionResult[bool]:
         """Delete a local git branch fail-closed with postcondition verification."""
-        if project_id:
-            try:
-                self._authorize_managed_repo_mutation(project_id)
-            except Exception as exc:
-                return ExternalActionResult(
-                    outcome=ExternalOutcome.FAILURE,
-                    source_adapter="git_cli",
-                    reason_code=ExternalReasonCode.POLICY_DENIED,
-                    retry_safety=RetrySafety.SAFE,
-                    data=False,
-                    error_message=f"Post-merge branch deletion denied by workspace guard: {exc}",
-                )
+        if not project_id:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="git_cli",
+                reason_code=ExternalReasonCode.POLICY_DENIED,
+                retry_safety=RetrySafety.SAFE,
+                data=False,
+                error_message="project_id is mandatory for post-merge branch deletion.",
+            )
+
+        try:
+            self._authorize_managed_repo_mutation(project_id)
+        except Exception as exc:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="git_cli",
+                reason_code=ExternalReasonCode.POLICY_DENIED,
+                retry_safety=RetrySafety.SAFE,
+                data=False,
+                error_message=f"Post-merge branch deletion denied by workspace guard: {exc}",
+            )
 
         try:
             check_res = subprocess.run(
