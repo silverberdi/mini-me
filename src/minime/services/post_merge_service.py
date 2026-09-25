@@ -29,6 +29,18 @@ from minime.services.worktree_manager import WorktreeManager
 logger = logging.getLogger(__name__)
 
 
+def _run_coro_sync(coro: Any) -> Any:
+    """Safely execute an async coroutine synchronously."""
+    import asyncio
+    import concurrent.futures
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()
+
+
 @dataclass
 class PostMergeReconciliationResult:
     """Detailed outcome of post-merge reconciliation."""
@@ -683,7 +695,7 @@ class PostMergeReconciliationService:
                 )
 
     def _clean_worktrees(self, job_id: str | None, project_id: str | None = None) -> ExternalActionResult[bool]:
-        """Clean worktrees associated with a job fail-closed with postcondition verification."""
+        """Clean worktrees associated with a job fail-closed using central WorktreeManager authority."""
         if not job_id:
             return ExternalActionResult(
                 outcome=ExternalOutcome.SUCCESS,
@@ -694,7 +706,7 @@ class PostMergeReconciliationService:
             )
 
         if not project_id and self.uow:
-            job = self.uow.jobs.get_by_id(job_id)
+            job = self.uow.jobs.get_by_id(job_id) if hasattr(self.uow.jobs, "get_by_id") else None
             if job and getattr(job, "project_id", None):
                 project_id = job.project_id
 
@@ -724,15 +736,15 @@ class PostMergeReconciliationService:
         scan_failed = False
         scan_err: str = ""
         try:
-            if project_id:
-                wt_path = self.worktree_manager.worktree_path(job_id, project_id=project_id)
-                if wt_path.exists():
-                    target_paths.append(wt_path)
-                worktrees_parent = self.worktree_manager.resolve_worktree_parent_dir(project_id)
-                if worktrees_parent.exists():
-                    for child in worktrees_parent.glob(f"{job_id}*"):
-                        if child.exists() and child not in target_paths:
-                            target_paths.append(child)
+            wt_path = self.worktree_manager.worktree_path(job_id, project_id=project_id)
+            if wt_path.exists():
+                target_paths.append(wt_path.resolve())
+            worktrees_parent = self.worktree_manager.resolve_worktree_parent_dir(project_id)
+            if worktrees_parent.exists():
+                for child in worktrees_parent.glob(f"{job_id}*"):
+                    resolved_child = child.resolve()
+                    if resolved_child.exists() and resolved_child not in target_paths:
+                        target_paths.append(resolved_child)
         except Exception as exc:
             logger.warning("Error scanning worktrees for job '%s': %s", job_id, exc)
             scan_failed = True
@@ -761,16 +773,14 @@ class PostMergeReconciliationService:
         errors: list[str] = []
         for path in target_paths:
             try:
-                res = subprocess.run(
-                    ["git", "worktree", "remove", "--force", str(path)],
-                    cwd=self.project_root,
-                    capture_output=True,
-                    text=True,
-                    check=False,
+                _run_coro_sync(
+                    self.worktree_manager.remove_clean_worktree_path(
+                        path, job_id, project_id=project_id
+                    )
                 )
-                if path.exists() or res.returncode != 0:
+                if path.exists():
                     all_removed = False
-                    errors.append(f"Failed removing worktree at '{path}': rc={res.returncode}, stderr={res.stderr.strip()}")
+                    errors.append(f"Worktree removal refused or unverified for path '{path}'")
             except Exception as exc:
                 all_removed = False
                 errors.append(f"Exception removing worktree at '{path}': {exc}")

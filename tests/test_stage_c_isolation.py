@@ -2019,6 +2019,242 @@ def test_systemic_post_merge_entry_points_blocked_without_project_id(tmp_dirs):
             assert "branch" not in args or "-D" not in args
 
 
+def test_post_merge_cleanup_unowned_prefix_directory_not_removed(tmp_dirs):
+    uow = MockUOW()
+    binding = ProjectManagedRepositoryBinding(
+        project_id="proj-clean-1",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["repo_root"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+    )
+    uow.project_managed_repository_bindings.save(binding)
+
+    from minime.services.post_merge_service import PostMergeReconciliationService
+    pm_service = PostMergeReconciliationService(uow=uow, project_root=tmp_dirs["repo_root"], github_adapter=MagicMock())
+
+    unowned_dir = Path(tmp_dirs["worktrees"]) / "job-unowned-123"
+    unowned_dir.mkdir(parents=True, exist_ok=True)
+    (unowned_dir / "file.txt").write_text("unowned", encoding="utf-8")
+
+    res = pm_service._clean_worktrees("job-unowned-123", project_id="proj-clean-1")
+
+    assert res.outcome == ExternalOutcome.FAILURE
+    assert res.reason_code == ExternalReasonCode.POSTCONDITION_NOT_PROVEN
+    assert unowned_dir.exists()
+
+
+def test_post_merge_cleanup_mismatched_ownership_not_removed(tmp_dirs):
+    uow = MockUOW()
+    binding = ProjectManagedRepositoryBinding(
+        project_id="proj-clean-2",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["repo_root"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+    )
+    uow.project_managed_repository_bindings.save(binding)
+
+    mismatched_dir = Path(tmp_dirs["worktrees"]) / "job-mismatch-456"
+    mismatched_dir.mkdir(parents=True, exist_ok=True)
+
+    ownership = OrchestrationWorktreeOwnership(
+        worktree_id="wt-job-mismatch-456",
+        project_id="wrong-project",
+        job_id="wrong-job",
+        canonical_worktree_path=str(mismatched_dir.resolve()),
+        creation_state=WorktreeCreationState.CREATED,
+    )
+    uow.orchestration_worktree_ownerships.save(ownership)
+
+    from minime.services.post_merge_service import PostMergeReconciliationService
+    pm_service = PostMergeReconciliationService(uow=uow, project_root=tmp_dirs["repo_root"], github_adapter=MagicMock())
+
+    res = pm_service._clean_worktrees("job-mismatch-456", project_id="proj-clean-2")
+
+    assert res.outcome == ExternalOutcome.FAILURE
+    assert mismatched_dir.exists()
+
+
+def test_post_merge_cleanup_absent_from_git_worktree_list_not_removed(tmp_dirs):
+    uow = MockUOW()
+    binding = ProjectManagedRepositoryBinding(
+        project_id="proj-clean-3",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["repo_root"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+    )
+    uow.project_managed_repository_bindings.save(binding)
+
+    wt_dir = Path(tmp_dirs["worktrees"]) / "job-no-gitlist-789"
+    wt_dir.mkdir(parents=True, exist_ok=True)
+
+    ownership = OrchestrationWorktreeOwnership(
+        worktree_id="wt-job-no-gitlist-789",
+        project_id="proj-clean-3",
+        job_id="job-no-gitlist-789",
+        canonical_worktree_path=str(wt_dir.resolve()),
+        creation_state=WorktreeCreationState.CREATED,
+    )
+    uow.orchestration_worktree_ownerships.save(ownership)
+
+    from minime.services.post_merge_service import PostMergeReconciliationService
+    pm_service = PostMergeReconciliationService(uow=uow, project_root=tmp_dirs["repo_root"], github_adapter=MagicMock())
+
+    res = pm_service._clean_worktrees("job-no-gitlist-789", project_id="proj-clean-3")
+
+    assert res.outcome == ExternalOutcome.FAILURE
+    assert wt_dir.exists()
+
+
+def test_post_merge_cleanup_dirty_managed_worktree_not_removed(tmp_dirs):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_dirs["repo_root"], check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_dirs["repo_root"], check=True)
+    (Path(tmp_dirs["repo_root"]) / "README.md").write_text("init", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_dirs["repo_root"], check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+
+    uow = MockUOW()
+    binding = ProjectManagedRepositoryBinding(
+        project_id="proj-dirty-4",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["repo_root"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+    )
+    uow.project_managed_repository_bindings.save(binding)
+    uow.jobs.save(Job(job_id="job-dirty-4", project_id="proj-dirty-4", change_name="change-dirty", implementer_role="codex"))
+    uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id="run-dirty-4",
+            active_job_id="job-dirty-4",
+            project_id="proj-dirty-4",
+            change_name="change-dirty",
+            base_sha="main",
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            resumable_stage=OrchestrationStage.IMPLEMENTING,
+            is_active=True,
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        )
+    )
+
+    wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
+    info = asyncio.run(wt_manager.create_worktree("job-dirty-4", "change-dirty", "main", project_id="proj-dirty-4", run_id="run-dirty-4"))
+    assert info.path.exists()
+
+    (info.path / "dirty.txt").write_text("untracked modifications", encoding="utf-8")
+
+    from minime.services.post_merge_service import PostMergeReconciliationService
+    pm_service = PostMergeReconciliationService(uow=uow, project_root=tmp_dirs["repo_root"], github_adapter=MagicMock(), worktree_manager=wt_manager)
+
+    res = pm_service._clean_worktrees("job-dirty-4", project_id="proj-dirty-4")
+
+    assert res.outcome == ExternalOutcome.FAILURE
+    assert info.path.exists()
+
+
+def test_post_merge_cleanup_clean_owned_worktree_successfully_removed(tmp_dirs):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_dirs["repo_root"], check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_dirs["repo_root"], check=True)
+    (Path(tmp_dirs["repo_root"]) / "README.md").write_text("init", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_dirs["repo_root"], check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+
+    uow = MockUOW()
+    binding = ProjectManagedRepositoryBinding(
+        project_id="proj-clean-5",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["repo_root"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+    )
+    uow.project_managed_repository_bindings.save(binding)
+    uow.jobs.save(Job(job_id="job-clean-5", project_id="proj-clean-5", change_name="change-clean", implementer_role="codex"))
+    uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id="run-clean-5",
+            active_job_id="job-clean-5",
+            project_id="proj-clean-5",
+            change_name="change-clean",
+            base_sha="main",
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            resumable_stage=OrchestrationStage.IMPLEMENTING,
+            is_active=True,
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        )
+    )
+
+    wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
+    info = asyncio.run(wt_manager.create_worktree("job-clean-5", "change-clean", "main", project_id="proj-clean-5", run_id="run-clean-5"))
+    assert info.path.exists()
+
+    from minime.services.post_merge_service import PostMergeReconciliationService
+    pm_service = PostMergeReconciliationService(uow=uow, project_root=tmp_dirs["repo_root"], github_adapter=MagicMock(), worktree_manager=wt_manager)
+
+    res = pm_service._clean_worktrees("job-clean-5", project_id="proj-clean-5")
+
+    assert res.outcome == ExternalOutcome.SUCCESS
+    assert not info.path.exists()
+
+    ownership = uow.orchestration_worktree_ownerships.get_by_id("wt-job-clean-5")
+    assert ownership.creation_state == WorktreeCreationState.DELETED
+
+
+def test_post_merge_reconciliation_refuses_claim_when_cleanup_fails(tmp_dirs):
+    from minime.domain.enums import JobStatus, OrchestrationStopOutcome
+    uow = MockUOW()
+    binding = ProjectManagedRepositoryBinding(
+        project_id="proj-refuse-6",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["repo_root"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+    )
+    uow.project_managed_repository_bindings.save(binding)
+    uow.jobs.save(Job(job_id="job-refuse-6", project_id="proj-refuse-6", change_name="change-refuse", status=JobStatus.READY_TO_MERGE, implementer_role="codex"))
+    uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id="run-refuse-6",
+            active_job_id="job-refuse-6",
+            project_id="proj-refuse-6",
+            change_name="change-refuse",
+            base_sha="main",
+            current_stage=OrchestrationStage.PR_PREPARED,
+            stop_outcome=OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE,
+            is_active=True,
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        )
+    )
+
+    unowned_dir = Path(tmp_dirs["worktrees"]) / "job-refuse-6-unowned"
+    unowned_dir.mkdir(parents=True, exist_ok=True)
+
+    from minime.services.post_merge_service import PostMergeReconciliationService
+    mock_gh = MagicMock()
+    mock_gh.get_pull_request_details.return_value = MagicMock(outcome=ExternalOutcome.SUCCESS, data={"is_merged": True, "merged_by_login": "user", "head_sha": "sha"})
+
+    pm_service = PostMergeReconciliationService(uow=uow, project_root=tmp_dirs["repo_root"], github_adapter=mock_gh)
+    pm_service.verify_candidate_ancestry = MagicMock(return_value=True)
+
+    result = pm_service.reconcile_post_merge("proj-refuse-6", "change-refuse", run_id="run-refuse-6")
+
+    assert result.success is False
+    assert result.worktree_cleaned is False
+    assert "worktree_cleanup" in (result.error_message or "")
+    assert unowned_dir.exists()
+
+
+def test_post_merge_service_source_code_has_no_direct_worktree_remove():
+    import inspect
+
+    from minime.services.post_merge_service import PostMergeReconciliationService
+
+    src = inspect.getsource(PostMergeReconciliationService)
+    assert 'git", "worktree", "remove"' not in src
+    assert "worktree remove --force" not in src
+
+
+
 
 
 
