@@ -1733,6 +1733,202 @@ def test_synthetic_run_id_fallback_rejected_when_job_run_id_empty(tmp_dirs):
             assert "worktree" not in args or "add" not in args
 
 
+def test_unobservable_remote_identity_returns_unknown_outcome(tmp_dirs):
+    uow = MockUOW()
+    binding = ProjectManagedRepositoryBinding(
+        project_id="proj-unobs",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["repo_root"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+    )
+    uow.project_managed_repository_bindings.save(binding)
+    guard = ManagedWorkspaceGuard(uow)
+
+    # 1. MANAGED_REPOSITORY path does not exist on disk => UNKNOWN + UNOBSERVABLE
+    nonexistent_managed = os.path.join(tmp_dirs["base"], "nonexistent_repo")
+    binding_nonexistent = ProjectManagedRepositoryBinding(
+        project_id="proj-nonexistent",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=nonexistent_managed,
+        worktree_parent_dir=tmp_dirs["worktrees"],
+    )
+    uow.project_managed_repository_bindings.save(binding_nonexistent)
+    req_managed = WorkspaceMutationRequest(
+        project_id="proj-nonexistent",
+        target_path=nonexistent_managed,
+        requested_operation=WorkspaceOperation.GIT_BRANCH,
+    )
+    decision_managed = guard.evaluate_mutation(req_managed)
+    assert not decision_managed.allowed
+    assert decision_managed.outcome == ExternalOutcome.UNKNOWN
+    assert decision_managed.reason_code == ExternalReasonCode.UNOBSERVABLE
+
+    # 2. EXECUTION_WORKTREE path does not exist on disk => UNKNOWN + UNOBSERVABLE
+    wt_path = os.path.join(tmp_dirs["worktrees"], "wt-unobs")
+    ownership = OrchestrationWorktreeOwnership(
+        worktree_id="wt-unobs",
+        project_id="proj-unobs",
+        job_id="job-unobs",
+        canonical_worktree_path=wt_path,
+        creation_state=WorktreeCreationState.CREATED,
+    )
+    uow.orchestration_worktree_ownerships.save(ownership)
+
+    req_wt = WorkspaceMutationRequest(
+        project_id="proj-unobs",
+        target_path=wt_path,
+        requested_operation=WorkspaceOperation.EDIT,
+    )
+    decision_wt = guard.evaluate_mutation(req_wt)
+    assert not decision_wt.allowed
+    assert decision_wt.outcome == ExternalOutcome.UNKNOWN
+    assert decision_wt.reason_code == ExternalReasonCode.UNOBSERVABLE
+
+    # 3. Mismatch remote URL => FAILURE + CONFLICT
+    subprocess.run(["git", "remote", "set-url", "origin", "git@evil.example:org/repo.git"], cwd=tmp_dirs["repo_root"], check=True)
+    req_mismatch = WorkspaceMutationRequest(
+        project_id="proj-unobs",
+        target_path=tmp_dirs["repo_root"],
+        requested_operation=WorkspaceOperation.GIT_BRANCH,
+    )
+    decision_mismatch = guard.evaluate_mutation(req_mismatch)
+    assert not decision_mismatch.allowed
+    assert decision_mismatch.outcome == ExternalOutcome.FAILURE
+    assert decision_mismatch.reason_code == ExternalReasonCode.CONFLICT
+
+
+def test_post_merge_git_mutations_blocked_on_unauthorized_project_root(tmp_dirs):
+    other_root = os.path.join(tmp_dirs["base"], "other_unauthorized_root")
+    os.makedirs(other_root, exist_ok=True)
+    subprocess.run(["git", "init", "-b", "main"], cwd=other_root, check=True, capture_output=True)
+
+    uow = MockUOW()
+    binding = ProjectManagedRepositoryBinding(
+        project_id="proj-pm-guard",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["repo_root"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+    )
+    uow.project_managed_repository_bindings.save(binding)
+
+    from minime.services.post_merge_service import PostMergeReconciliationService
+    pm_service = PostMergeReconciliationService(
+        uow=uow,
+        project_root=other_root,
+        github_adapter=MagicMock(),
+    )
+
+    with patch("subprocess.run") as mock_sub:
+        # 1. verify_candidate_ancestry fails closed before git fetch
+        ancestry_res = pm_service.verify_candidate_ancestry("sha123", "main", project_id="proj-pm-guard")
+        assert ancestry_res is False
+
+        # 2. _clean_worktrees fails closed before git worktree remove
+        clean_res = pm_service._clean_worktrees("job-1", project_id="proj-pm-guard")
+        assert clean_res.outcome == ExternalOutcome.FAILURE
+
+        # 3. _delete_local_branch fails closed before git branch -D
+        del_res = pm_service._delete_local_branch("minime/change-1", project_id="proj-pm-guard")
+        assert del_res.outcome == ExternalOutcome.FAILURE
+
+        for call_item in mock_sub.call_args_list:
+            args = call_item.args[0] if call_item.args else []
+            assert "fetch" not in args
+            assert "worktree" not in args or "remove" not in args
+            assert "branch" not in args or "-D" not in args
+
+
+def test_remediation_worktree_reuse_requires_full_durable_adoption_proof(tmp_dirs):
+    source_sha = (subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True, text=True)).stdout.strip()
+
+    uow = MockUOW()
+    binding = ProjectManagedRepositoryBinding(
+        project_id="proj-rem-reuse",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["repo_root"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+    )
+    uow.project_managed_repository_bindings.save(binding)
+
+    uow.jobs.save(Job(job_id="job-rem-1", project_id="proj-rem-reuse", change_name="change-rem", implementer_role="codex"))
+    uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id="run-rem-1",
+            active_job_id="job-rem-1",
+            project_id="proj-rem-reuse",
+            change_name="change-rem",
+            base_sha=source_sha,
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            resumable_stage=OrchestrationStage.IMPLEMENTING,
+            is_active=True,
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        )
+    )
+
+    wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
+    rem_path = Path(tmp_dirs["worktrees"]) / "job-rem-1-remediation-gen1"
+    rem_path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-b", "main"], cwd=rem_path, check=True, capture_output=True)
+    subprocess.run(["git", "remote", "add", "origin", "https://github.com/org/repo"], cwd=rem_path, check=True)
+
+    # 1. No ownership record => refused
+    with pytest.raises(RuntimeError, match="Refusing to adopt existing remediation worktree"):
+        asyncio.run(
+            wt_manager.create_remediation_worktree("job-rem-1", "change-rem", source_sha, 1, project_id="proj-rem-reuse", run_id="run-rem-1")
+        )
+
+    # 2. PENDING ownership => refused
+    ownership = OrchestrationWorktreeOwnership(
+        worktree_id="wt-job-rem-1-remediation-gen1",
+        project_id="proj-rem-reuse",
+        job_id="job-rem-1",
+        run_id="run-rem-1",
+        change_name="change-rem",
+        canonical_worktree_path=str(rem_path.resolve()),
+        branch="minime/change-rem-job-rem-1-remediation-gen1",
+        source_repository_identity="github.com/org/repo",
+        creation_state=WorktreeCreationState.PENDING,
+    )
+    uow.orchestration_worktree_ownerships.save(ownership)
+
+    with pytest.raises(RuntimeError, match="Refusing to adopt existing remediation worktree"):
+        asyncio.run(
+            wt_manager.create_remediation_worktree("job-rem-1", "change-rem", source_sha, 1, project_id="proj-rem-reuse", run_id="run-rem-1")
+        )
+
+    # 3. Caller conflict in run_id => CONFLICT
+    with pytest.raises(ValueError, match="CONFLICT"):
+        asyncio.run(
+            wt_manager.create_remediation_worktree("job-rem-1", "change-rem", source_sha, 1, project_id="proj-rem-reuse", run_id="wrong-run")
+        )
+
+    # 4. Valid CREATED ownership & Git identity & worktree list => Accepted
+    ownership.creation_state = WorktreeCreationState.CREATED
+    uow.orchestration_worktree_ownerships.save(ownership)
+
+    with patch.object(wt_manager, "_git") as mock_git, patch.object(wt_manager, "current_sha", new_callable=AsyncMock) as mock_sha:
+        mock_sha.return_value = source_sha
+        async def mock_git_side_effect(args, cwd=None, **kwargs):
+            if "branch" in args and "--show-current" in args:
+                return "minime/change-rem-job-rem-1-remediation-gen1"
+            if "worktree" in args and "list" in args:
+                return f"worktree {rem_path.resolve()}\n"
+            if "remote" in args and "get-url" in args:
+                return "https://github.com/org/repo.git\n"
+            if "rev-parse" in args and "--show-toplevel" in args:
+                return f"{rem_path.resolve()}\n"
+            return ""
+
+        mock_git.side_effect = mock_git_side_effect
+
+        info = asyncio.run(
+            wt_manager.create_remediation_worktree("job-rem-1", "change-rem", source_sha, 1, project_id="proj-rem-reuse", run_id="run-rem-1")
+        )
+        assert info.path.resolve() == rem_path.resolve()
+        assert info.branch_name == "minime/change-rem-job-rem-1-remediation-gen1"
+
+
 
 
 

@@ -278,14 +278,12 @@ class ManagedWorkspaceGuard:
                     cw_path, binding.canonical_repository_identity, binding.remote_name
                 )
                 if not valid_git:
-                    reason_code = (
-                        ExternalReasonCode.CONFLICT
-                        if "mismatch" in git_reason
-                        else ExternalReasonCode.UNOBSERVABLE
-                    )
+                    is_mismatch = "mismatch" in git_reason
+                    outcome = ExternalOutcome.FAILURE if is_mismatch else ExternalOutcome.UNKNOWN
+                    reason_code = ExternalReasonCode.CONFLICT if is_mismatch else ExternalReasonCode.UNOBSERVABLE
                     return WorkspaceMutationDecision(
                         allowed=False,
-                        outcome=ExternalOutcome.FAILURE,
+                        outcome=outcome,
                         reason_code=reason_code,
                         workspace_role=WorkspaceRole.EXECUTION_WORKTREE,
                         resolved_path=resolved,
@@ -294,35 +292,12 @@ class ManagedWorkspaceGuard:
             else:
                 return WorkspaceMutationDecision(
                     allowed=False,
-                    outcome=ExternalOutcome.FAILURE,
+                    outcome=ExternalOutcome.UNKNOWN,
                     reason_code=ExternalReasonCode.UNOBSERVABLE,
                     workspace_role=WorkspaceRole.EXECUTION_WORKTREE,
                     resolved_path=resolved,
                     provider_detail=f"Worktree directory '{cw_path}' does not exist on disk.",
                 )
-
-            return WorkspaceMutationDecision(
-                allowed=True,
-                outcome=ExternalOutcome.SUCCESS,
-                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
-                workspace_role=WorkspaceRole.EXECUTION_WORKTREE,
-                resolved_path=resolved,
-            )
-
-            cw_path = self.resolve_canonical_path(ownership.canonical_worktree_path)
-            if os.path.exists(cw_path):
-                valid_git, git_reason = self.verify_git_repository_identity(
-                    cw_path, binding.canonical_repository_identity, binding.remote_name
-                )
-                if not valid_git:
-                    return WorkspaceMutationDecision(
-                        allowed=False,
-                        outcome=ExternalOutcome.FAILURE,
-                        reason_code=ExternalReasonCode.CONFLICT if "mismatch" in git_reason else ExternalReasonCode.UNOBSERVABLE,
-                        workspace_role=WorkspaceRole.EXECUTION_WORKTREE,
-                        resolved_path=resolved,
-                        provider_detail=git_reason,
-                    )
 
             return WorkspaceMutationDecision(
                 allowed=True,
@@ -340,14 +315,26 @@ class ManagedWorkspaceGuard:
                     managed_repo_root, binding.canonical_repository_identity, binding.remote_name
                 )
                 if not valid_git:
+                    is_mismatch = "mismatch" in git_reason
+                    outcome = ExternalOutcome.FAILURE if is_mismatch else ExternalOutcome.UNKNOWN
+                    reason_code = ExternalReasonCode.CONFLICT if is_mismatch else ExternalReasonCode.UNOBSERVABLE
                     return WorkspaceMutationDecision(
                         allowed=False,
-                        outcome=ExternalOutcome.FAILURE,
-                        reason_code=ExternalReasonCode.CONFLICT if "mismatch" in git_reason else ExternalReasonCode.UNOBSERVABLE,
+                        outcome=outcome,
+                        reason_code=reason_code,
                         workspace_role=WorkspaceRole.MANAGED_REPOSITORY,
                         resolved_path=resolved,
                         provider_detail=git_reason,
                     )
+            else:
+                return WorkspaceMutationDecision(
+                    allowed=False,
+                    outcome=ExternalOutcome.UNKNOWN,
+                    reason_code=ExternalReasonCode.UNOBSERVABLE,
+                    workspace_role=WorkspaceRole.MANAGED_REPOSITORY,
+                    resolved_path=resolved,
+                    provider_detail=f"Managed repository root '{managed_repo_root}' does not exist on disk.",
+                )
 
             # Managed repository root is read-only for direct agent code edits
             if request.requested_operation in (

@@ -76,9 +76,50 @@ class PostMergeReconciliationService:
         self.worktree_manager = worktree_manager or WorktreeManager(self.project_root, uow=uow)
         self.openspec_sync = openspec_sync or OpenSpecSyncService(self.project_root, uow=uow)
 
-    def verify_candidate_ancestry(self, candidate_sha: str, base_ref: str = "HEAD") -> bool:
+    def _authorize_managed_repo_mutation(self, project_id: str) -> None:
+        """Verify project binding, canonical path match, and ManagedWorkspaceGuard authorization before Git mutations."""
+        if not project_id:
+            raise ValueError("project_id is mandatory for post-merge repository mutations.")
+        if not self.uow:
+            raise RuntimeError("PersistenceUnitOfWork (uow) is required for post-merge repository authorization.")
+
+        from minime.domain.enums import ExternalOutcome, WorkspaceOperation, WorkspaceRole
+        from minime.domain.models import WorkspaceMutationRequest
+        from minime.services.workspace_guard import ManagedWorkspaceGuard, is_binding_fully_valid
+
+        binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
+        binding = binding_repo.get_by_project_id(project_id) if binding_repo else None
+
+        if not is_binding_fully_valid(binding):
+            raise RuntimeError(f"Failing closed: no valid durable binding found for project_id '{project_id}'.")
+
+        guard = ManagedWorkspaceGuard(self.uow)
+        req = WorkspaceMutationRequest(
+            project_id=project_id,
+            target_path=str(self.project_root),
+            requested_operation=WorkspaceOperation.GIT_BRANCH,
+        )
+        decision = guard.evaluate_mutation(req)
+
+        if not decision.allowed or decision.outcome != ExternalOutcome.SUCCESS:
+            raise RuntimeError(f"Failing closed: post-merge Git mutation denied for project_id '{project_id}': {decision.provider_detail}")
+
+        if decision.workspace_role != WorkspaceRole.MANAGED_REPOSITORY:
+            raise RuntimeError(f"Failing closed: project_root workspace role is '{decision.workspace_role.value}', not MANAGED_REPOSITORY.")
+
+        canonical_project_root = str(self.project_root.resolve())
+        canonical_managed_root = str(Path(binding.managed_repository_root).resolve())
+
+        if canonical_project_root != canonical_managed_root:
+            raise RuntimeError(
+                f"Failing closed: self.project_root '{canonical_project_root}' does not match binding.managed_repository_root '{canonical_managed_root}'."
+            )
+
+    def verify_candidate_ancestry(self, candidate_sha: str, base_ref: str = "HEAD", project_id: str | None = None) -> bool:
         """Verify that the candidate SHA is an ancestor of the base/main branch."""
         try:
+            if project_id:
+                self._authorize_managed_repo_mutation(project_id)
             # Fetch remote origin if base_ref references origin
             if "origin" in base_ref or base_ref in {"HEAD", "main", "origin/main"}:
                 subprocess.run(
@@ -249,6 +290,8 @@ class PostMergeReconciliationService:
 
         # 3. Ancestry verification
         # Fetch latest main in local repository
+        if project_id:
+            self._authorize_managed_repo_mutation(project_id)
         subprocess.run(
             ["git", "fetch", "origin", f"{base_branch}:{base_branch}"],
             cwd=self.project_root,
@@ -256,9 +299,9 @@ class PostMergeReconciliationService:
             text=True,
             check=False,
         )
-        ancestry_ok = self.verify_candidate_ancestry(cand_sha, base_branch)
+        ancestry_ok = self.verify_candidate_ancestry(cand_sha, base_branch, project_id=project_id)
         if not ancestry_ok and merge_commit_sha:
-            ancestry_ok = self.verify_candidate_ancestry(cand_sha, merge_commit_sha)
+            ancestry_ok = self.verify_candidate_ancestry(cand_sha, merge_commit_sha, project_id=project_id)
 
         native_phases += 1  # Phase 3: Ancestry verified
 
@@ -654,6 +697,19 @@ class PostMergeReconciliationService:
             if job and hasattr(job, "project_id"):
                 project_id = job.project_id
 
+        if project_id:
+            try:
+                self._authorize_managed_repo_mutation(project_id)
+            except Exception as exc:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="worktree_manager",
+                    reason_code=ExternalReasonCode.POLICY_DENIED,
+                    retry_safety=RetrySafety.SAFE,
+                    data=False,
+                    error_message=f"Post-merge worktree cleanup denied by workspace guard: {exc}",
+                )
+
         target_paths: list[Path] = []
         scan_failed = False
         scan_err: str = ""
@@ -727,8 +783,21 @@ class PostMergeReconciliationService:
             error_message="; ".join(errors),
         )
 
-    def _delete_local_branch(self, branch_name: str) -> ExternalActionResult[bool]:
+    def _delete_local_branch(self, branch_name: str, project_id: str | None = None) -> ExternalActionResult[bool]:
         """Delete a local git branch fail-closed with postcondition verification."""
+        if project_id:
+            try:
+                self._authorize_managed_repo_mutation(project_id)
+            except Exception as exc:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="git_cli",
+                    reason_code=ExternalReasonCode.POLICY_DENIED,
+                    retry_safety=RetrySafety.SAFE,
+                    data=False,
+                    error_message=f"Post-merge branch deletion denied by workspace guard: {exc}",
+                )
+
         try:
             check_res = subprocess.run(
                 ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch_name}"],
@@ -839,5 +908,5 @@ class PostMergeReconciliationService:
         ]
         for b in local_branches:
             if b:
-                self._delete_local_branch(b)
+                self._delete_local_branch(b, project_id=project_id)
 
