@@ -747,6 +747,30 @@ class OpenSpecSyncService:
         elif isinstance(archived_path, Path):
             target_dir = archived_path
 
+        if target_dir is not None:
+            target_dir = target_dir.resolve()
+            archive_root = (openspec_root / "changes" / "archive").resolve()
+            alt_archive_root = (openspec_root / "archive").resolve()
+            is_contained = False
+            try:
+                target_dir.relative_to(archive_root)
+                is_contained = True
+            except ValueError:
+                try:
+                    target_dir.relative_to(alt_archive_root)
+                    is_contained = True
+                except ValueError:
+                    pass
+            if not is_contained:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="openspec_archive",
+                    reason_code=ExternalReasonCode.POLICY_DENIED,
+                    retry_safety=RetrySafety.SAFE,
+                    data=False,
+                    error_message=f"Archive target path '{target_dir}' escapes authorized archive root '{archive_root}'.",
+                )
+
         if change_dir.exists() and target_dir and target_dir.exists():
             return ExternalActionResult(
                 outcome=ExternalOutcome.AMBIGUOUS,

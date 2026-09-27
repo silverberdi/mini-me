@@ -79,7 +79,7 @@ def make_repo(tmp_path: Path, conflict: bool) -> tuple[Path, str, str, str]:
 
 
 def make_service(uow, repo: Path, base_a: str, candidate_sha: str, candidate_ref: str):
-    from tests.conftest import create_test_worktree_ownership, write_test_worktree_ownership_marker
+    from tests.conftest import create_test_worktree_ownership
 
     project = Project(
         project_id="mini-me",
@@ -130,7 +130,7 @@ def make_service(uow, repo: Path, base_a: str, candidate_sha: str, candidate_ref
         manifest_hash="historical-manifest",
     )
     wt_path = repo / ".minime" / "worktrees" / job.job_id
-    ownership = create_test_worktree_ownership(
+    create_test_worktree_ownership(
         uow,
         worktree_id="wt-human-resolution",
         project_id="mini-me",
@@ -141,9 +141,8 @@ def make_service(uow, repo: Path, base_a: str, candidate_sha: str, candidate_ref
         source_repository_identity="github.com/owner/repo",
         source_base_sha=base_a,
         branch="main",
-        creation_state=WorktreeCreationState.CREATED,
+        creation_state=WorktreeCreationState.PENDING,
     )
-    write_test_worktree_ownership_marker(wt_path, ownership)
     uow.projects.save(project)
     uow.project_managed_repository_bindings.save(binding)
     uow.changes.save(change)

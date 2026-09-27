@@ -565,6 +565,9 @@ def test_worktree_scan_failure_returns_unknown_and_blocks_completion(tmp_path: P
 
 
 def test_archive_verify_fails_when_historical_manifest_missing_and_canonical_artifact_absent(tmp_path: Path):
+    import shutil
+    _make_change(tmp_path)
+    shutil.rmtree(tmp_path / "openspec" / "changes" / "test-change")
     service = _make_sync_service(tmp_path)
     archive_dir = tmp_path / "openspec" / "changes" / "archive" / "2026-09-03-test-change"
     archive_dir.mkdir(parents=True)
@@ -603,6 +606,9 @@ def test_sync_change_specs_capability_dir_missing_spec_md_returns_failure(tmp_pa
 
 
 def test_archive_verify_reused_existing_without_independent_manifest_returns_unknown(tmp_path: Path):
+    import shutil
+    _make_change(tmp_path)
+    shutil.rmtree(tmp_path / "openspec" / "changes" / "test-change")
     service = _make_sync_service(tmp_path)
     archive_dir = tmp_path / "openspec" / "changes" / "archive" / "2026-09-03-test-change"
     archive_dir.mkdir(parents=True)
