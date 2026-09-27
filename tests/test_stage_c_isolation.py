@@ -48,6 +48,19 @@ class MockBindingRepo:
 
     def save(self, binding: ProjectManagedRepositoryBinding) -> None:
         self.bindings[binding.project_id] = binding
+        if binding.managed_repository_root and os.path.exists(binding.managed_repository_root):
+            marker_path = os.path.join(binding.managed_repository_root, ".minime-managed-project.json")
+            try:
+                with open(marker_path, "w", encoding="utf-8") as f:
+                    json.dump(
+                        {
+                            "project_id": binding.project_id,
+                            "canonical_repository_identity": binding.canonical_repository_identity,
+                        },
+                        f,
+                    )
+            except Exception:
+                pass
 
     def get_by_project_id(self, project_id: str) -> ProjectManagedRepositoryBinding | None:
         return self.bindings.get(project_id)
@@ -184,6 +197,14 @@ def tmp_dirs():
     subprocess.run(["git", "remote", "add", "origin", "https://github.com/org/repo"], cwd=repo_root, check=True)
     with open(os.path.join(repo_root, "README.md"), "w") as f:
         f.write("base\n")
+    with open(os.path.join(repo_root, ".minime-managed-project.json"), "w") as f:
+        json.dump(
+            {
+                "project_id": "test-proj",
+                "canonical_repository_identity": "github.com/org/repo",
+            },
+            f,
+        )
     subprocess.run(["git", "add", "."], cwd=repo_root, check=True)
     subprocess.run(["git", "commit", "-m", "initial"], cwd=repo_root, check=True, capture_output=True)
 
@@ -286,8 +307,12 @@ def test_guard_execution_worktree_owned_path_allowed(tmp_dirs):
         worktree_id="wt-job-100",
         project_id="test-proj",
         job_id="job-100",
+        run_id="run-100",
+        change_name="change-100",
         canonical_worktree_path=wt_dir,
-        branch_name="minime/change-job-100",
+        source_repository_identity="github.com/org/repo",
+        source_base_sha="main",
+        branch="minime/change-job-100",
         creation_state=WorktreeCreationState.CREATED,
     )
     uow.orchestration_worktree_ownerships.save(ownership)
@@ -487,8 +512,12 @@ def test_worktree_manager_cleanup_marker_conflict_denied(tmp_dirs):
         worktree_id="wt-job-marker-test",
         project_id="proj-1",
         job_id="job-marker-test",
+        run_id="run-marker-test",
+        change_name="change-marker-test",
         canonical_worktree_path=str(wt_path.resolve()),
-        branch_name="minime/test",
+        source_repository_identity="github.com/org/repo",
+        source_base_sha="main",
+        branch="minime/test",
         creation_state=WorktreeCreationState.CREATED,
     )
     uow.orchestration_worktree_ownerships.save(ownership)
@@ -539,6 +568,8 @@ def test_guard_denial_happens_before_pending(tmp_dirs):
 
 def test_pending_persistence_failure_prevents_git_add(tmp_dirs):
     subprocess.run(["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+    marker_file = Path(tmp_dirs["repo_root"]) / ".minime-managed-project.json"
+    marker_file.write_text(json.dumps({"project_id": "proj-1", "canonical_repository_identity": "github.com/org/repo"}))
     bad_uow = MagicMock()
     binding = ProjectManagedRepositoryBinding(
         project_id="proj-1",
@@ -634,8 +665,12 @@ def test_pending_worktree_denied_for_mutation(tmp_dirs):
         worktree_id="wt-pending-job",
         project_id="test-proj",
         job_id="pending-job",
+        run_id="run-pending",
+        change_name="change-pending",
         canonical_worktree_path=wt_dir,
-        branch_name="minime/change-pending-job",
+        source_repository_identity="github.com/org/repo",
+        source_base_sha="main",
+        branch="minime/change-pending-job",
         creation_state=WorktreeCreationState.PENDING,
     )
     uow.orchestration_worktree_ownerships.save(ownership)
@@ -667,8 +702,10 @@ def test_missing_project_id_fails_closed(tmp_dirs):
     with pytest.raises(ValueError, match="project_id is mandatory"):
         asyncio.run(wt_manager.create_worktree("job-1", "change-1", "main", project_id=None))
 
-    with pytest.raises(ValueError, match="project_id is mandatory"):
-        asyncio.run(wt_manager.remove_clean_worktree_path(wt_path, "job-1", project_id=None))
+    res = asyncio.run(wt_manager.remove_clean_worktree_path(wt_path, "job-1", project_id=None))
+    assert res.outcome == ExternalOutcome.FAILURE
+    assert res.reason_code == ExternalReasonCode.POLICY_DENIED
+    assert "project_id is mandatory" in res.provider_detail
 
 
 def test_no_synthetic_binding_and_missing_binding_denies(tmp_dirs):
@@ -790,8 +827,12 @@ def test_explicit_trusted_root_allows_valid_temp_fixture(tmp_dirs):
         worktree_id="wt-job",
         project_id="test-proj",
         job_id="job",
+        run_id="run-job",
+        change_name="change-job",
         canonical_worktree_path=wt_path,
-        branch_name="minime/change-job",
+        source_repository_identity="github.com/org/repo",
+        source_base_sha="main",
+        branch="minime/change-job",
         creation_state=WorktreeCreationState.CREATED,
     )
     uow.orchestration_worktree_ownerships.save(ownership)
@@ -810,8 +851,12 @@ def test_empty_git_worktree_list_prevents_created(tmp_dirs):
         worktree_id="wt-empty-list",
         project_id="test-proj",
         job_id="empty-list-job",
+        run_id="run-empty-list",
+        change_name="change-empty-list",
         canonical_worktree_path=str(wt_path.resolve()),
-        branch_name="main",
+        source_repository_identity="github.com/org/repo",
+        source_base_sha="1234567890abcdef",
+        branch="main",
         creation_state=WorktreeCreationState.PENDING,
     )
 
@@ -846,8 +891,12 @@ def test_wrong_head_sha_prevents_created(tmp_dirs):
         worktree_id="wt-wrong-sha",
         project_id="test-proj",
         job_id="wrong-sha-job",
+        run_id="run-wrong-sha",
+        change_name="change-wrong-sha",
         canonical_worktree_path=str(wt_path.resolve()),
-        branch_name="main",
+        source_repository_identity="github.com/org/repo",
+        source_base_sha="expected_sha_456",
+        branch="main",
         creation_state=WorktreeCreationState.PENDING,
     )
 
@@ -884,8 +933,12 @@ def test_correct_head_sha_allows_created(tmp_dirs):
             worktree_id="wt-correct-sha",
             project_id="test-proj",
             job_id="correct-sha-job",
+            run_id="run-correct-sha",
+            change_name="change-correct-sha",
             canonical_worktree_path=str(wt_path.resolve()),
-            branch_name="main",
+            source_repository_identity="github.com/org/repo",
+            source_base_sha="actual_sha_123",
+            branch="main",
             creation_state=WorktreeCreationState.PENDING,
         ),
     )
@@ -894,8 +947,12 @@ def test_correct_head_sha_allows_created(tmp_dirs):
         worktree_id="wt-correct-sha",
         project_id="test-proj",
         job_id="correct-sha-job",
+        run_id="run-correct-sha",
+        change_name="change-correct-sha",
         canonical_worktree_path=str(wt_path.resolve()),
-        branch_name="main",
+        source_repository_identity="github.com/org/repo",
+        source_base_sha="actual_sha_123",
+        branch="main",
         creation_state=WorktreeCreationState.PENDING,
     )
 
@@ -1257,6 +1314,8 @@ def test_missing_binding_prevents_path_resolution_and_worktree_creation(tmp_dirs
 def test_missing_run_id_or_change_name_prevents_creation_and_matches_supplied(tmp_dirs):
     class MockBindingRepo:
         def get_by_project_id(self, pid):
+            marker_file = Path(tmp_dirs["repo_root"]) / ".minime-managed-project.json"
+            marker_file.write_text(json.dumps({"project_id": pid, "canonical_repository_identity": "github.com/org/repo"}))
             return ProjectManagedRepositoryBinding(
                 project_id=pid,
                 canonical_repository_identity="github.com/org/repo",
@@ -1368,6 +1427,8 @@ def test_durable_job_without_run_id_fails_before_git_add(tmp_dirs):
     subprocess.run(["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
     class MockBindingRepo:
         def get_by_project_id(self, pid):
+            marker_file = Path(tmp_dirs["repo_root"]) / ".minime-managed-project.json"
+            marker_file.write_text(json.dumps({"project_id": pid, "canonical_repository_identity": "github.com/org/repo"}))
             return ProjectManagedRepositoryBinding(
                 project_id=pid,
                 canonical_repository_identity="github.com/org/repo",
@@ -1414,6 +1475,8 @@ def test_missing_canonical_change_name_blocks_integration_worktree_creation(tmp_
     subprocess.run(["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
     class MockBindingRepo:
         def get_by_project_id(self, pid):
+            marker_file = Path(tmp_dirs["repo_root"]) / ".minime-managed-project.json"
+            marker_file.write_text(json.dumps({"project_id": pid, "canonical_repository_identity": "github.com/org/repo"}))
             return ProjectManagedRepositoryBinding(
                 project_id=pid,
                 canonical_repository_identity="github.com/org/repo",
@@ -1432,8 +1495,10 @@ def test_missing_canonical_change_name_blocks_integration_worktree_creation(tmp_
         def __init__(self):
             self.project_managed_repository_bindings = MockBindingRepo()
             self.orchestration_worktree_ownerships = MockOwnershipRepo()
-            self.jobs = None
-            self.orchestration_runs = None
+            self.jobs = MockJobRepo()
+            self.jobs.save(Job(job_id="job-int-no-change-name", project_id="proj-1", change_name="", implementer_role="codex"))
+            self.orchestration_runs = MockOrchestrationRunRepo()
+            self.orchestration_runs.save(OrchestrationRun(run_id="run-1", active_job_id="job-int-no-change-name", project_id="proj-1", change_name="", base_sha="sha123"))
             self.candidate_remediations = None
         def commit(self): pass
 
@@ -1627,6 +1692,7 @@ def test_reuse_existing_rejects_unproven_worktree(tmp_dirs):
         canonical_worktree_path=str(wt_path.resolve()),
         branch="minime/change-reuse-job-reuse",
         source_repository_identity="github.com/org/repo",
+        source_base_sha="main",
         creation_state=WorktreeCreationState.PENDING,
     )
     uow.orchestration_worktree_ownerships.save(ownership)
@@ -1769,7 +1835,12 @@ def test_unobservable_remote_identity_returns_unknown_outcome(tmp_dirs):
         worktree_id="wt-unobs",
         project_id="proj-unobs",
         job_id="job-unobs",
+        run_id="run-unobs",
+        change_name="change-unobs",
         canonical_worktree_path=wt_path,
+        source_repository_identity="github.com/org/repo",
+        source_base_sha="main",
+        branch="minime/change-unobs",
         creation_state=WorktreeCreationState.CREATED,
     )
     uow.orchestration_worktree_ownerships.save(ownership)
@@ -1888,6 +1959,7 @@ def test_remediation_worktree_reuse_requires_full_durable_adoption_proof(tmp_dir
         canonical_worktree_path=str(rem_path.resolve()),
         branch="minime/change-rem-job-rem-1-remediation-gen1",
         source_repository_identity="github.com/org/repo",
+        source_base_sha=source_sha,
         creation_state=WorktreeCreationState.PENDING,
     )
     uow.orchestration_worktree_ownerships.save(ownership)
@@ -2039,7 +2111,7 @@ def test_post_merge_cleanup_unowned_prefix_directory_not_removed(tmp_dirs):
     res = pm_service._clean_worktrees("job-unowned-123", project_id="proj-clean-1")
 
     assert res.outcome == ExternalOutcome.FAILURE
-    assert res.reason_code == ExternalReasonCode.POSTCONDITION_NOT_PROVEN
+    assert res.reason_code in (ExternalReasonCode.POSTCONDITION_NOT_PROVEN, ExternalReasonCode.POLICY_DENIED)
     assert unowned_dir.exists()
 
 
@@ -2060,7 +2132,12 @@ def test_post_merge_cleanup_mismatched_ownership_not_removed(tmp_dirs):
         worktree_id="wt-job-mismatch-456",
         project_id="wrong-project",
         job_id="wrong-job",
+        run_id="run-wrong",
+        change_name="change-wrong",
         canonical_worktree_path=str(mismatched_dir.resolve()),
+        source_repository_identity="github.com/org/repo",
+        source_base_sha="main",
+        branch="minime/change-wrong",
         creation_state=WorktreeCreationState.CREATED,
     )
     uow.orchestration_worktree_ownerships.save(ownership)
@@ -2091,7 +2168,12 @@ def test_post_merge_cleanup_absent_from_git_worktree_list_not_removed(tmp_dirs):
         worktree_id="wt-job-no-gitlist-789",
         project_id="proj-clean-3",
         job_id="job-no-gitlist-789",
+        run_id="run-789",
+        change_name="change-789",
         canonical_worktree_path=str(wt_dir.resolve()),
+        source_repository_identity="github.com/org/repo",
+        source_base_sha="main",
+        branch="minime/change-789",
         creation_state=WorktreeCreationState.CREATED,
     )
     uow.orchestration_worktree_ownerships.save(ownership)

@@ -1544,6 +1544,24 @@ class TaskClassificationProfile(BaseModel):
     surface_kind: TaskSurfaceKind
 
 
+SYNTHETIC_AUTHORITY_PLACEHOLDERS: frozenset[str] = frozenset(
+    {
+        "run-default",
+        "change-default",
+        "base-default",
+        "unknown-repo",
+    }
+)
+
+
+class WorktreeCleanupResult(BaseModel):
+    """Typed outcome of a canonical worktree cleanup operation."""
+
+    outcome: ExternalOutcome
+    reason_code: ExternalReasonCode
+    provider_detail: str | None = None
+
+
 class ProjectManagedRepositoryBinding(BaseModel):
     """Durable project managed-repository binding model for physical/logical workspace isolation."""
 
@@ -1567,12 +1585,12 @@ class OrchestrationWorktreeOwnership(BaseModel):
     worktree_id: str = Field(default_factory=generate_uuid)
     project_id: str
     job_id: str
-    run_id: str = "run-default"
-    change_name: str = "change-default"
+    run_id: str
+    change_name: str
     canonical_worktree_path: str
-    source_repository_identity: str = "origin"
-    source_base_sha: str = "base-default"
-    branch: str = "main"
+    source_repository_identity: str
+    source_base_sha: str
+    branch: str
     creation_state: WorktreeCreationState = WorktreeCreationState.PENDING
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
@@ -1580,6 +1598,18 @@ class OrchestrationWorktreeOwnership(BaseModel):
     @property
     def branch_name(self) -> str:
         return self.branch
+
+    @property
+    def has_synthetic_placeholder(self) -> bool:
+        """Return True if any authorization-capable identity field contains synthetic placeholders."""
+        fields_to_check = [
+            self.run_id,
+            self.change_name,
+            self.source_repository_identity,
+            self.source_base_sha,
+            self.branch,
+        ]
+        return any(f in SYNTHETIC_AUTHORITY_PLACEHOLDERS for f in fields_to_check if f)
 
 
 class WorkspaceMutationRequest(BaseModel):

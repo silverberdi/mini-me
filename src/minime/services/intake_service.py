@@ -61,7 +61,8 @@ class IntakeService:
             github_adapter=self.github_adapter,
         )
         self.openspec_generator = openspec_generator or OpenSpecGenerator(
-            project_root=self.project_root
+            project_root=self.project_root,
+            uow=self.uow,
         )
 
     def create_work_item(
@@ -333,7 +334,7 @@ class IntakeService:
 
         # 2. Write OpenSpec files to disk
         self.openspec_generator.write_change_to_disk(
-            project.openspec_path, generated, overwrite=True
+            project.openspec_path, generated, overwrite=True, project_id=project_id
         )
 
         # Save/update Change entity in DB

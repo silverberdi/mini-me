@@ -89,7 +89,20 @@ class InMemoryUnitOfWork(PersistenceUnitOfWork):
         self.project_managed_repository_bindings = MagicMock()
         self.project_managed_repository_bindings.get_by_project_id.side_effect = lambda pid: self._managed_bindings.get(pid)
         self.project_managed_repository_bindings.get_by_repository_path.side_effect = lambda path: next((b for b in self._managed_bindings.values() if b.managed_repository_root == str(path)), None)
-        self.project_managed_repository_bindings.save.side_effect = lambda b: self._managed_bindings.update({b.project_id: b})
+        def _save_managed_binding(b):
+            self._managed_bindings[b.project_id] = b
+            if b.managed_repository_root and Path(b.managed_repository_root).exists():
+                try:
+                    import json
+                    marker_file = Path(b.managed_repository_root) / ".minime-managed-project.json"
+                    marker_file.write_text(json.dumps({
+                        "project_id": b.project_id,
+                        "canonical_repository_identity": b.canonical_repository_identity,
+                    }))
+                except Exception:
+                    pass
+
+        self.project_managed_repository_bindings.save.side_effect = _save_managed_binding
 
         self.operator_actions = MagicMock()
         self.operator_actions.get_by_request_id.return_value = None

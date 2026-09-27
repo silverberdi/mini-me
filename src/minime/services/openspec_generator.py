@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from minime.domain.models import BacklogItem
 
@@ -34,8 +35,13 @@ class GeneratedOpenSpec:
 class OpenSpecGenerator:
     """Generates standard canonical OpenSpec artifacts from normalized backlog items."""
 
-    def __init__(self, project_root: str | Path = "."):
+    def __init__(
+        self,
+        project_root: str | Path = ".",
+        uow: Any | None = None,
+    ):
         self.project_root = Path(project_root).resolve()
+        self.uow = uow
 
     def generate_from_backlog_item(
         self,
@@ -187,9 +193,38 @@ class OpenSpecGenerator:
         openspec_path: str,
         generated: GeneratedOpenSpec,
         overwrite: bool = True,
+        project_id: str | None = None,
     ) -> Path:
-        """Write the generated OpenSpec change directory and markdown files to disk."""
-        target_dir = self.project_root / openspec_path / "changes" / generated.change_name
+        """Write the generated OpenSpec change directory and markdown files to disk under authorized MANAGED_REPOSITORY workspace."""
+        base_root = self.project_root
+
+        if self.uow and project_id:
+            binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
+            binding = binding_repo.get_by_project_id(project_id) if binding_repo else None
+            from minime.services.workspace_guard import is_binding_fully_valid
+            if not is_binding_fully_valid(binding):
+                raise RuntimeError(
+                    f"OpenSpec write denied: missing or invalid ProjectManagedRepositoryBinding for project '{project_id}'."
+                )
+            base_root = Path(binding.managed_repository_root).resolve()
+
+            from minime.domain.enums import WorkspaceOperation, WorkspaceRole
+            from minime.domain.models import WorkspaceMutationRequest
+            from minime.services.workspace_guard import ManagedWorkspaceGuard
+            guard = ManagedWorkspaceGuard(self.uow)
+            target_path_str = str(base_root / openspec_path)
+            req = WorkspaceMutationRequest(
+                project_id=project_id,
+                target_path=target_path_str,
+                requested_operation=WorkspaceOperation.OPENSPEC_SYNC,
+            )
+            decision = guard.evaluate_mutation(req)
+            if not decision.allowed or decision.workspace_role == WorkspaceRole.RUNTIME:
+                raise RuntimeError(
+                    f"ManagedWorkspaceGuard denied OpenSpec generation write to '{target_path_str}': {decision.provider_detail or decision.reason_code.value}"
+                )
+
+        target_dir = base_root / openspec_path / "changes" / generated.change_name
         target_dir.mkdir(parents=True, exist_ok=True)
 
         proposal_file = target_dir / "proposal.md"
@@ -218,6 +253,7 @@ class OpenSpecGenerator:
         generated: GeneratedOpenSpec,
         openspec_path: str = "openspec",
         overwrite: bool = True,
+        project_id: str | None = None,
     ) -> Path:
         """Write generated OpenSpec artifacts to disk."""
-        return self.write_change_to_disk(openspec_path, generated, overwrite=overwrite)
+        return self.write_change_to_disk(openspec_path, generated, overwrite=overwrite, project_id=project_id)

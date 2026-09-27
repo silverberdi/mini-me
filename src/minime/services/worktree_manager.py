@@ -15,12 +15,19 @@ if TYPE_CHECKING:
     from minime.services.workspace_guard import ManagedWorkspaceGuard
 
 from minime.domain.enums import (
+    ExternalOutcome,
+    ExternalReasonCode,
     GitOperationStatus,
     WorkspaceOperation,
     WorktreeCreationState,
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
-from minime.domain.models import GitOperation, OrchestrationWorktreeOwnership, utc_now
+from minime.domain.models import (
+    GitOperation,
+    OrchestrationWorktreeOwnership,
+    WorktreeCleanupResult,
+    utc_now,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -935,29 +942,87 @@ class WorktreeManager:
         project_id: str | None = None,
         run_id: str | None = None,
         change_name: str | None = None,
+        target_short_sha: str | None = None,
     ) -> WorktreeInfo:
-        path = (self.resolve_worktree_parent_dir(project_id) / f"{job_id}-integration-gen{generation}").resolve()
-        parent = self.resolve_worktree_parent_dir(project_id).resolve()
+        eff_project_id = self._resolve_project_id(project_id, job_id)
+        if not eff_project_id:
+            raise ValueError(f"Failing closed: project_id for job_id '{job_id}' cannot be observed.")
+
+        suffix = f"-{target_short_sha}" if target_short_sha else ""
+        path = (self.resolve_worktree_parent_dir(eff_project_id) / f"{job_id}-integration-gen{generation}{suffix}").resolve()
+        parent = self.resolve_worktree_parent_dir(eff_project_id).resolve()
         if parent not in path.parents:
             raise ValueError(f"Integration worktree path escapes managed root: {path}")
-        if path.exists():
-            state = await self.inspect_worktree_state(path)
-            if not state.dirty:
-                return WorktreeInfo(path, branch_name, base_sha)
-            raise RuntimeError(f"Existing integration worktree is dirty: {path}")
 
-        # 1. Guard preflight evaluation before any mutation side effect
-        self._authorize_mutating_operation(project_id, path, WorkspaceOperation.WORKTREE_CREATE)
+        # 1. Guard preflight evaluation before any mutation side effect or directory checks
+        self._authorize_mutating_operation(eff_project_id, path, WorkspaceOperation.WORKTREE_CREATE)
 
+        eff_run_id = self._resolve_real_run_id(job_id, run_id, project_id=eff_project_id, change_name=change_name)
         eff_change_name = self._resolve_real_change_name(
-            job_id, change_name, project_id=project_id, run_id=run_id
+            job_id, change_name, project_id=eff_project_id, run_id=eff_run_id
         )
-        if not eff_change_name:
-            raise ValueError(f"Failing closed: canonical change_name for job_id '{job_id}' cannot be observed.")
+
+        if path.exists():
+            ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None) if self.uow else None
+            ownership = ownership_repo.get_by_canonical_path(str(path.resolve())) if ownership_repo else None
+            if not ownership and ownership_repo and hasattr(ownership_repo, "get_by_job_id"):
+                cand = ownership_repo.get_by_job_id(job_id)
+                if cand and str(Path(cand.canonical_worktree_path).resolve()) == str(path.resolve()):
+                    ownership = cand
+
+            binding_repo = getattr(self.uow, "project_managed_repository_bindings", None) if self.uow else None
+            binding = binding_repo.get_by_project_id(eff_project_id) if binding_repo else None
+
+            adoption_valid = False
+            adoption_error = ""
+
+            if not ownership:
+                adoption_error = "No durable OrchestrationWorktreeOwnership record found."
+            elif ownership.creation_state != WorktreeCreationState.CREATED:
+                adoption_error = f"Worktree creation state is '{ownership.creation_state.value}', not CREATED."
+            elif getattr(ownership, "has_synthetic_placeholder", False):
+                adoption_error = "Durable ownership record contains synthetic placeholders."
+            elif ownership.project_id != eff_project_id:
+                adoption_error = f"Project ID '{ownership.project_id}' does not match expected '{eff_project_id}'."
+            elif ownership.job_id != job_id:
+                adoption_error = f"Job ID '{ownership.job_id}' does not match expected '{job_id}'."
+            elif str(Path(ownership.canonical_worktree_path).resolve()) != str(path.resolve()):
+                adoption_error = f"Canonical path '{ownership.canonical_worktree_path}' does not match '{path.resolve()}'."
+            else:
+                try:
+                    wt_list_out = await self._git(["worktree", "list", "--porcelain"], cwd=self.project_root)
+                    wt_paths = [
+                        str(Path(line[9:].strip()).resolve())
+                        for line in wt_list_out.splitlines()
+                        if line.startswith("worktree ")
+                    ]
+                    if str(path.resolve()) not in wt_paths:
+                        adoption_error = f"Path '{path}' is not present in git worktree list."
+                    else:
+                        from minime.services.workspace_guard import ManagedWorkspaceGuard
+                        guard = self.workspace_guard or ManagedWorkspaceGuard(self.uow)
+                        git_ok, git_reason = guard.verify_git_repository_identity(
+                            str(path.resolve()), binding.canonical_repository_identity, binding.remote_name
+                        )
+                        if not git_ok:
+                            adoption_error = f"Git identity verification failed: {git_reason}"
+                        else:
+                            state = await self.inspect_worktree_state(path)
+                            if state.dirty:
+                                adoption_error = f"Existing integration worktree is dirty: {path}"
+                            else:
+                                adoption_valid = True
+                except Exception as err:
+                    adoption_error = f"Integration adoption check failed: {err}"
+
+            if adoption_valid:
+                return WorktreeInfo(path, branch_name, base_sha)
+            else:
+                raise RuntimeError(f"Refusing to adopt existing integration worktree at '{path}': {adoption_error}")
 
         # 2. Mandatory durable PENDING ownership before git worktree add
         ownership = self._persist_pending_ownership(
-            job_id, project_id, path, branch=branch_name, run_id=run_id, change_name=eff_change_name, source_base_sha=base_sha
+            job_id, eff_project_id, path, branch=branch_name, run_id=eff_run_id, change_name=eff_change_name, source_base_sha=base_sha
         )
 
         # 3. ONLY THEN execute git worktree add
@@ -965,7 +1030,7 @@ class WorktreeManager:
             ["worktree", "add", "-b", branch_name, str(path), base_sha],
             cwd=self.project_root,
             job_id=job_id,
-            project_id=project_id,
+            project_id=eff_project_id,
             operation_type="candidate_base_integration_worktree_add",
             managed_worktree_path=path,
         )
@@ -1109,7 +1174,6 @@ class WorktreeManager:
             )
         return await self.current_sha(path)
 
-
     async def verify_remediation_commit(
         self,
         worktree_path: str | Path,
@@ -1174,26 +1238,34 @@ class WorktreeManager:
             raise RuntimeError(error or "Remediation commit reconciliation failed.")
         return WorktreeInfo(path, branch, source_sha)
 
-    async def cleanup_worktree(self, job_id: str, project_id: str | None = None) -> str | None:
-        """Compatibility alias that refuses dirty-worktree cleanup."""
-        await self.remove_clean_worktree(job_id, project_id)
-        return None
+    async def cleanup_worktree(self, job_id: str, project_id: str | None = None) -> WorktreeCleanupResult:
+        """Compatibility alias that removes clean worktree path."""
+        return await self.remove_clean_worktree(job_id, project_id)
 
-    async def remove_clean_worktree(self, job_id: str, project_id: str | None = None) -> None:
+    async def remove_clean_worktree(self, job_id: str, project_id: str | None = None) -> WorktreeCleanupResult:
         """Remove a managed worktree only after independently proving it is clean."""
-        await self.remove_clean_worktree_path(self.worktree_path(job_id, project_id), job_id, project_id)
+        return await self.remove_clean_worktree_path(self.worktree_path(job_id, project_id), job_id, project_id)
 
     async def remove_clean_worktree_path(
         self,
         worktree_path: str | Path,
         job_id: str,
         project_id: str | None = None,
-    ) -> None:
+    ) -> WorktreeCleanupResult:
         if not project_id:
-            raise ValueError("project_id is mandatory for managed worktree operations.")
+            return WorktreeCleanupResult(
+                outcome=ExternalOutcome.FAILURE,
+                reason_code=ExternalReasonCode.POLICY_DENIED,
+                provider_detail="project_id is mandatory for managed worktree operations.",
+            )
+
         path = Path(worktree_path).resolve()
         if not path.exists():
-            return
+            return WorktreeCleanupResult(
+                outcome=ExternalOutcome.SUCCESS,
+                reason_code=ExternalReasonCode.ALREADY_ABSENT,
+                provider_detail=f"Worktree path '{path}' is already absent.",
+            )
 
         # Guard authorization before deleting
         try:
@@ -1202,18 +1274,25 @@ class WorktreeManager:
             )
         except (RuntimeError, ValueError) as exc:
             logger.warning(f"Refusing deletion of directory at '{path}': {exc}")
-            return
+            return WorktreeCleanupResult(
+                outcome=ExternalOutcome.FAILURE,
+                reason_code=ExternalReasonCode.POLICY_DENIED,
+                provider_detail=f"Guard denied deletion: {exc}",
+            )
 
         canonical_path = str(path)
-
 
         # 4-Way Cleanup Reconciliation: Require durable OrchestrationWorktreeOwnership
         ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None) if self.uow else None
         if not ownership_repo:
             logger.warning(
-                f"Refusing deletion of directory at '{path}': missing ownership repository (EVIDENCE_INSUFFICIENT / NEEDS_HUMAN)"
+                f"Refusing deletion of directory at '{path}': missing ownership repository (EVIDENCE_INSUFFICIENT)"
             )
-            return
+            return WorktreeCleanupResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                reason_code=ExternalReasonCode.EVIDENCE_INSUFFICIENT,
+                provider_detail=f"Missing ownership repository for '{path}'.",
+            )
 
         ownership = ownership_repo.get_by_canonical_path(canonical_path)
         if not ownership and hasattr(ownership_repo, "get_by_job_id"):
@@ -1224,34 +1303,65 @@ class WorktreeManager:
         # Durable DB ownership is MANDATORY. Marker alone, .git alone, or path-under-root alone can NEVER authorize deletion.
         if not ownership:
             logger.warning(
-                f"Refusing deletion of directory at '{path}': no durable DB ownership record found (EVIDENCE_INSUFFICIENT / NEEDS_HUMAN)"
+                f"Refusing deletion of directory at '{path}': no durable DB ownership record found (EVIDENCE_INSUFFICIENT)"
             )
-            return
+            return WorktreeCleanupResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                reason_code=ExternalReasonCode.EVIDENCE_INSUFFICIENT,
+                provider_detail=f"No durable DB ownership record found for '{path}'.",
+            )
+
+        if getattr(ownership, "has_synthetic_placeholder", False):
+            logger.warning(f"Refusing deletion at '{path}': DB ownership contains synthetic placeholders (POLICY_DENIED)")
+            return WorktreeCleanupResult(
+                outcome=ExternalOutcome.FAILURE,
+                reason_code=ExternalReasonCode.POLICY_DENIED,
+                provider_detail=f"Durable DB ownership contains synthetic placeholders for '{path}'.",
+            )
 
         if ownership.job_id != job_id or (project_id and ownership.project_id != project_id):
             logger.warning(
-                f"Refusing deletion of worktree at '{path}': DB ownership job_id/project_id mismatch (CONFLICT / NEEDS_HUMAN)"
+                f"Refusing deletion of worktree at '{path}': DB ownership job_id/project_id mismatch (CONFLICT)"
             )
-            return
+            return WorktreeCleanupResult(
+                outcome=ExternalOutcome.FAILURE,
+                reason_code=ExternalReasonCode.CONFLICT,
+                provider_detail=f"DB ownership job_id/project_id mismatch for '{path}'.",
+            )
 
         if str(Path(ownership.canonical_worktree_path).resolve()) != canonical_path:
             logger.warning(
-                f"Refusing deletion of worktree at '{path}': DB ownership canonical path mismatch (CONFLICT / NEEDS_HUMAN)"
+                f"Refusing deletion of worktree at '{path}': DB ownership canonical path mismatch (CONFLICT)"
             )
-            return
+            return WorktreeCleanupResult(
+                outcome=ExternalOutcome.FAILURE,
+                reason_code=ExternalReasonCode.CONFLICT,
+                provider_detail=f"DB ownership canonical path mismatch for '{path}'.",
+            )
 
         # git worktree list must confirm exact worktree
-        wt_list_out = await self._git(["worktree", "list", "--porcelain"], cwd=self.project_root)
-        wt_paths = [
-            str(Path(line[9:].strip()).resolve())
-            for line in wt_list_out.splitlines()
-            if line.startswith("worktree ")
-        ]
-        if canonical_path not in wt_paths:
-            logger.warning(
-                f"Refusing deletion of worktree at '{path}': path not present in git worktree list (EVIDENCE_INSUFFICIENT / NEEDS_HUMAN)"
+        try:
+            wt_list_out = await self._git(["worktree", "list", "--porcelain"], cwd=self.project_root)
+            wt_paths = [
+                str(Path(line[9:].strip()).resolve())
+                for line in wt_list_out.splitlines()
+                if line.startswith("worktree ")
+            ]
+            if canonical_path not in wt_paths:
+                logger.warning(
+                    f"Refusing deletion of worktree at '{path}': path not present in git worktree list (EVIDENCE_INSUFFICIENT)"
+                )
+                return WorktreeCleanupResult(
+                    outcome=ExternalOutcome.UNKNOWN,
+                    reason_code=ExternalReasonCode.EVIDENCE_INSUFFICIENT,
+                    provider_detail=f"Path '{path}' not present in git worktree list.",
+                )
+        except Exception as exc:
+            return WorktreeCleanupResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                provider_detail=f"Git worktree list query failed: {exc}",
             )
-            return
 
         # Marker corroboration IF present
         marker_file = path / ".minime_worktree_ownership.json"
@@ -1264,14 +1374,27 @@ class WorktreeManager:
                     or marker_data.get("job_id") != ownership.job_id
                 ):
                     logger.error(f"Marker corroboration failed for '{path}': CONFLICT. Refusing removal.")
-                    return
+                    return WorktreeCleanupResult(
+                        outcome=ExternalOutcome.FAILURE,
+                        reason_code=ExternalReasonCode.CONFLICT,
+                        provider_detail=f"Marker corroboration failed for '{path}'.",
+                    )
             except Exception as e:
                 logger.error(f"Corrupted ownership marker at '{path}': {e}. Refusing removal.")
-                return
+                return WorktreeCleanupResult(
+                    outcome=ExternalOutcome.UNKNOWN,
+                    reason_code=ExternalReasonCode.EVIDENCE_INSUFFICIENT,
+                    provider_detail=f"Corrupted ownership marker at '{path}': {e}.",
+                )
 
         state = await self.inspect_worktree_state(path)
         if state.dirty:
-            raise RuntimeError(f"Refusing to remove dirty managed worktree: {path}")
+            logger.warning(f"Refusing to remove dirty managed worktree at '{path}': POLICY_DENIED.")
+            return WorktreeCleanupResult(
+                outcome=ExternalOutcome.FAILURE,
+                reason_code=ExternalReasonCode.POLICY_DENIED,
+                provider_detail=f"Managed worktree at '{path}' is dirty.",
+            )
 
         # Transition DELETING
         ownership.creation_state = WorktreeCreationState.DELETING
@@ -1291,10 +1414,20 @@ class WorktreeManager:
 
         # Verify physical removal
         if path.exists():
-            raise RuntimeError(f"Failed to verify physical removal of worktree path '{path}'.")
+            return WorktreeCleanupResult(
+                outcome=ExternalOutcome.FAILURE,
+                reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
+                provider_detail=f"Failed to verify physical removal of worktree path '{path}'.",
+            )
 
         # Transition DELETED
         ownership.creation_state = WorktreeCreationState.DELETED
         ownership.updated_at = utc_now()
         ownership_repo.save(ownership)
         self.uow.commit()
+
+        return WorktreeCleanupResult(
+            outcome=ExternalOutcome.SUCCESS,
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+            provider_detail=f"Successfully removed clean worktree at '{path}'.",
+        )

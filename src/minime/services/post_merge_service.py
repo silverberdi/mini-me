@@ -769,38 +769,47 @@ class PostMergeReconciliationService:
                 data=True,
             )
 
-        all_removed = True
-        errors: list[str] = []
         for path in target_paths:
             try:
-                _run_coro_sync(
+                cleanup_res = _run_coro_sync(
                     self.worktree_manager.remove_clean_worktree_path(
                         path, job_id, project_id=project_id
                     )
                 )
+                if cleanup_res and cleanup_res.outcome in (ExternalOutcome.UNKNOWN, ExternalOutcome.FAILURE):
+                    return ExternalActionResult(
+                        outcome=cleanup_res.outcome,
+                        source_adapter="worktree_manager",
+                        reason_code=cleanup_res.reason_code,
+                        retry_safety=RetrySafety.SAFE,
+                        data=False,
+                        error_message=cleanup_res.provider_detail or f"Worktree cleanup failed for '{path}'.",
+                    )
                 if path.exists():
-                    all_removed = False
-                    errors.append(f"Worktree removal refused or unverified for path '{path}'")
+                    return ExternalActionResult(
+                        outcome=ExternalOutcome.FAILURE,
+                        source_adapter="worktree_manager",
+                        reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
+                        retry_safety=RetrySafety.SAFE,
+                        data=False,
+                        error_message=f"Worktree path '{path}' still exists after cleanup.",
+                    )
             except Exception as exc:
-                all_removed = False
-                errors.append(f"Exception removing worktree at '{path}': {exc}")
-
-        if all_removed:
-            return ExternalActionResult(
-                outcome=ExternalOutcome.SUCCESS,
-                source_adapter="worktree_manager",
-                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
-                retry_safety=RetrySafety.UNSAFE,
-                data=True,
-            )
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="worktree_manager",
+                    reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
+                    retry_safety=RetrySafety.SAFE,
+                    data=False,
+                    error_message=f"Exception removing worktree at '{path}': {exc}",
+                )
 
         return ExternalActionResult(
-            outcome=ExternalOutcome.FAILURE,
+            outcome=ExternalOutcome.SUCCESS,
             source_adapter="worktree_manager",
-            reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
-            retry_safety=RetrySafety.SAFE,
-            data=False,
-            error_message="; ".join(errors),
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+            retry_safety=RetrySafety.UNSAFE,
+            data=True,
         )
 
     def _delete_local_branch(self, branch_name: str, project_id: str | None = None) -> ExternalActionResult[bool]:

@@ -33,7 +33,6 @@ from minime.domain.enums import (
     ReadinessState,
     ReviewVerdict,
     WorkItemStatus,
-    WorkspaceOperation,
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
@@ -821,13 +820,11 @@ class OrchestrationService:
                 f"minime/{run.change_name}-{job.job_id}-integration-gen{next_generation}-"
                 f"{target_short_sha}"
             )
-            integration_path = (
-                root
-                / ".minime"
-                / "worktrees"
-                / f"{job.job_id}-integration-gen{next_generation}-{target_short_sha}"
-            )
             manager = self.pipeline.worktree_manager
+            integration_path = (
+                manager.resolve_worktree_parent_dir(run.project_id)
+                / f"{job.job_id}-integration-gen{next_generation}-{target_short_sha}"
+            ).resolve()
             try:
                 ancestry = subprocess.run(
                     [
@@ -1151,9 +1148,7 @@ class OrchestrationService:
         if details["integration_branch"] != branch_name:
             raise ValueError("Human integration branch is not the deterministic expected branch.")
         integration_path = (
-            root
-            / ".minime"
-            / "worktrees"
+            self.pipeline.worktree_manager.resolve_worktree_parent_dir(run.project_id)
             / f"{job.job_id}-integration-gen{next_generation}-{target_short_sha}"
         ).resolve()
         recorded_path = details.get("worktree_path")
@@ -1339,37 +1334,28 @@ class OrchestrationService:
         job: Job,
         run: OrchestrationRun,
     ) -> WorktreeInfo:
-        """Create a managed integration worktree whose identity includes its target base."""
-        if path.exists():
-            state = await manager.inspect_worktree_state(path)
-            if state.dirty:
-                raise RuntimeError(f"Existing integration worktree is dirty: {path}")
-            return WorktreeInfo(path, branch_name, base_sha)
+        """Create a managed integration worktree using central WorktreeManager authority."""
+        gen = 1
+        sha_suffix = None
+        if "-integration-gen" in path.name:
+            try:
+                parts = path.name.split("-integration-gen", 1)[1].split("-")
+                gen = int(parts[0])
+                if len(parts) > 1:
+                    sha_suffix = parts[1]
+            except Exception:
+                pass
 
-        path.parent.mkdir(parents=True, exist_ok=True)
-        manager._authorize_mutating_operation(run.project_id, path, WorkspaceOperation.WORKTREE_CREATE)
-        ownership = manager._persist_pending_ownership(
-            job.job_id,
-            run.project_id,
-            path,
-            branch=branch_name,
-            change_name=run.change_name,
-            source_base_sha=base_sha,
-        )
-        await manager._git(
-            ["worktree", "add", "-b", branch_name, str(path), base_sha],
-            cwd=manager.project_root,
+        return await manager.create_integration_worktree(
             job_id=job.job_id,
+            branch_name=branch_name,
+            base_sha=base_sha,
+            generation=gen,
             project_id=run.project_id,
-            operation_type="candidate_base_integration_worktree_add",
-            managed_worktree_path=path,
+            run_id=run.run_id,
+            change_name=run.change_name,
+            target_short_sha=sha_suffix,
         )
-        manager._write_ownership_marker(path, ownership)
-        await manager._verify_creation_postconditions(
-            path, ownership, expected_branch=branch_name, expected_base_sha=base_sha
-        )
-        manager._finalize_created_ownership(ownership)
-        return WorktreeInfo(path, branch_name, base_sha)
 
     def _find_transition_event(
         self,

@@ -82,6 +82,55 @@ class ManagedWorkspaceGuard:
         abs_path = os.path.abspath(target_path)
         return os.path.realpath(abs_path)
 
+    def verify_managed_repository_ownership_marker(
+        self, managed_root: str, expected_project_id: str, expected_repo_identity: str, marker_filename: str = ".minime-managed-project.json"
+    ) -> tuple[bool, str, ExternalReasonCode, ExternalOutcome]:
+        """Verify the managed repository ownership marker file fail-closed."""
+        marker_path = os.path.join(managed_root, marker_filename)
+        if not os.path.exists(marker_path):
+            return (
+                False,
+                f"Managed repository ownership marker missing at '{marker_path}'.",
+                ExternalReasonCode.EVIDENCE_INSUFFICIENT,
+                ExternalOutcome.UNKNOWN,
+            )
+
+        try:
+            import json
+            with open(marker_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            proj_id = data.get("project_id")
+            repo_id = data.get("canonical_repository_identity") or data.get("repository")
+
+            if proj_id != expected_project_id:
+                return (
+                    False,
+                    f"Managed repository ownership marker project_id mismatch: observed '{proj_id}', expected '{expected_project_id}'.",
+                    ExternalReasonCode.CONFLICT,
+                    ExternalOutcome.FAILURE,
+                )
+
+            if repo_id:
+                norm_obs = normalize_repository_identity(repo_id)
+                norm_exp = normalize_repository_identity(expected_repo_identity)
+                if norm_obs != norm_exp:
+                    return (
+                        False,
+                        f"Managed repository ownership marker repository identity mismatch: observed '{norm_obs}', expected '{norm_exp}'.",
+                        ExternalReasonCode.CONFLICT,
+                        ExternalOutcome.FAILURE,
+                    )
+
+            return True, "Managed repository ownership marker verified successfully.", ExternalReasonCode.EXECUTION_SUCCESS, ExternalOutcome.SUCCESS
+        except Exception as err:
+            return (
+                False,
+                f"Managed repository ownership marker corrupted or unreadable at '{marker_path}': {err}",
+                ExternalReasonCode.EVIDENCE_INSUFFICIENT,
+                ExternalOutcome.UNKNOWN,
+            )
+
     def verify_git_repository_identity(
         self, workdir: str, expected_identity: str, remote_name: str = "origin"
     ) -> tuple[bool, str]:
@@ -249,6 +298,18 @@ class ManagedWorkspaceGuard:
                     ),
                 )
 
+            if getattr(ownership, "has_synthetic_placeholder", False):
+                return WorkspaceMutationDecision(
+                    allowed=False,
+                    outcome=ExternalOutcome.FAILURE,
+                    reason_code=ExternalReasonCode.POLICY_DENIED,
+                    workspace_role=WorkspaceRole.UNKNOWN,
+                    resolved_path=resolved,
+                    provider_detail=(
+                        f"Durable OrchestrationWorktreeOwnership record for '{resolved}' contains synthetic placeholders and cannot authorize mutation."
+                    ),
+                )
+
             from minime.domain.enums import WorktreeCreationState
             if ownership.creation_state != WorktreeCreationState.CREATED and request.requested_operation != WorkspaceOperation.WORKTREE_DELETE:
                 return WorkspaceMutationDecision(
@@ -309,7 +370,7 @@ class ManagedWorkspaceGuard:
 
         # 4. Check if target is inside managed repository root
         if self._is_path_inside(resolved, managed_repo_root):
-            # Verify Git identity if managed repository exists
+            # Verify Git identity and ownership marker if managed repository exists
             if os.path.exists(managed_repo_root):
                 valid_git, git_reason = self.verify_git_repository_identity(
                     managed_repo_root, binding.canonical_repository_identity, binding.remote_name
@@ -325,6 +386,19 @@ class ManagedWorkspaceGuard:
                         workspace_role=WorkspaceRole.MANAGED_REPOSITORY,
                         resolved_path=resolved,
                         provider_detail=git_reason,
+                    )
+
+                valid_marker, marker_reason, m_code, m_outcome = self.verify_managed_repository_ownership_marker(
+                    managed_repo_root, binding.project_id, binding.canonical_repository_identity, binding.ownership_marker_filename
+                )
+                if not valid_marker:
+                    return WorkspaceMutationDecision(
+                        allowed=False,
+                        outcome=m_outcome,
+                        reason_code=m_code,
+                        workspace_role=WorkspaceRole.MANAGED_REPOSITORY,
+                        resolved_path=resolved,
+                        provider_detail=marker_reason,
                     )
             else:
                 return WorkspaceMutationDecision(

@@ -75,12 +75,19 @@ def _make_change(
     name: str = "test-change",
     delta: str = "# Spec: Cap1\n\n## Requirement: R1\n",
 ) -> Path:
+    import json
     import subprocess
     if not (tmp_path / ".git").exists():
         subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=False)
         subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, capture_output=True, check=False)
         subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=False)
         subprocess.run(["git", "remote", "add", "origin", "https://github.com/silverberdi/mini-me.git"], cwd=tmp_path, capture_output=True, check=False)
+        marker_file = tmp_path / ".minime-managed-project.json"
+        marker_file.write_text(json.dumps({
+            "project_id": "mini-me",
+            "canonical_repository_identity": "github.com/silverberdi/mini-me",
+        }))
+        subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=False)
         subprocess.run(["git", "commit", "--allow-empty", "-m", "init"], cwd=tmp_path, capture_output=True, check=False)
     change_dir = tmp_path / "openspec" / "changes" / name
     specs_dir = change_dir / "specs" / "cap1"
@@ -92,7 +99,16 @@ def _make_change(
 
 
 def _setup_uow(uow: InMemoryUnitOfWork, change_name: str = "test-change", run_id: str = "run-123", tmp_path: Path | None = None):
+    import json
+
     from minime.domain.models import ProjectManagedRepositoryBinding
+    if tmp_path and (tmp_path / ".git").exists():
+        marker_file = tmp_path / ".minime-managed-project.json"
+        if not marker_file.exists():
+            marker_file.write_text(json.dumps({
+                "project_id": "mini-me",
+                "canonical_repository_identity": "github.com/silverberdi/mini-me",
+            }))
     uow.projects.save(
         Project(
             project_id="mini-me",
