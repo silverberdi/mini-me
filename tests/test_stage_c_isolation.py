@@ -2549,6 +2549,209 @@ def test_managed_repository_marker_missing_repository_identity_fails_closed(tmp_
     assert "missing mandatory canonical repository identity" in msg
 
 
+def test_create_worktree_reuse_requires_source_base_sha_and_proven_head(tmp_dirs):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_dirs["repo_root"], check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_dirs["repo_root"], check=True)
+    (Path(tmp_dirs["repo_root"]) / "README.md").write_text("init", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_dirs["repo_root"], check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+    base_sha = (subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True, text=True)).stdout.strip()
+
+    uow = MockUOW()
+    binding = ProjectManagedRepositoryBinding(
+        project_id="proj-reuse-sha",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["repo_root"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+    )
+    uow.project_managed_repository_bindings.save(binding)
+    uow.jobs.save(Job(job_id="job-reuse-sha", project_id="proj-reuse-sha", change_name="change-reuse", implementer_role="codex"))
+    uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id="run-reuse-sha",
+            active_job_id="job-reuse-sha",
+            project_id="proj-reuse-sha",
+            change_name="change-reuse",
+            base_sha=base_sha,
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            resumable_stage=OrchestrationStage.IMPLEMENTING,
+            is_active=True,
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        )
+    )
+
+    wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
+    wt_path = Path(tmp_dirs["worktrees"]) / "job-reuse-sha"
+    subprocess.run(["git", "worktree", "add", "-b", "minime/change-reuse-job-reuse-sha", str(wt_path), "HEAD"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+
+    ownership = OrchestrationWorktreeOwnership(
+        worktree_id="wt-job-reuse-sha",
+        project_id="proj-reuse-sha",
+        job_id="job-reuse-sha",
+        run_id="run-reuse-sha",
+        change_name="change-reuse",
+        canonical_worktree_path=str(wt_path.resolve()),
+        branch="minime/change-reuse-job-reuse-sha",
+        source_repository_identity="github.com/org/repo",
+        source_base_sha="wrong-base-sha-1234567890",
+        creation_state=WorktreeCreationState.CREATED,
+    )
+    uow.orchestration_worktree_ownerships.save(ownership)
+    wt_manager._write_ownership_marker(wt_path, ownership)
+
+    # 1. Wrong source_base_sha in DB ownership => Refused
+    with pytest.raises(RuntimeError, match="Source base SHA .* does not match expected"):
+        asyncio.run(
+            wt_manager.create_worktree(
+                job_id="job-reuse-sha",
+                change_name="change-reuse",
+                base_branch="main",
+                project_id="proj-reuse-sha",
+                reuse_existing=True,
+                run_id="run-reuse-sha",
+            )
+        )
+
+    # Correct source_base_sha in DB ownership & marker
+    ownership.source_base_sha = base_sha
+    uow.orchestration_worktree_ownerships.save(ownership)
+    wt_manager._write_ownership_marker(wt_path, ownership)
+
+    # Add an unproven commit to wt_path HEAD
+    (wt_path / "extra.txt").write_text("extra", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=wt_path, check=True)
+    subprocess.run(["git", "commit", "-m", "extra unproven"], cwd=wt_path, check=True, capture_output=True)
+    unproven_head = (subprocess.run(["git", "rev-parse", "HEAD"], cwd=wt_path, check=True, capture_output=True, text=True)).stdout.strip()
+
+    # 2. Unproven HEAD (not equal to base SHA and not in DB candidate evidence) => Refused
+    with pytest.raises(RuntimeError, match="and is not backed by durable candidate evidence"):
+        asyncio.run(
+            wt_manager.create_worktree(
+                job_id="job-reuse-sha",
+                change_name="change-reuse",
+                base_branch="main",
+                project_id="proj-reuse-sha",
+                reuse_existing=True,
+                run_id="run-reuse-sha",
+            )
+        )
+
+    # Record unproven_head as candidate_sha in job => Proven => Accepted
+    job = uow.jobs.get_by_id("job-reuse-sha")
+    job.candidate_sha = unproven_head
+    uow.jobs.save(job)
+
+    info = asyncio.run(
+        wt_manager.create_worktree(
+            job_id="job-reuse-sha",
+            change_name="change-reuse",
+            base_branch="main",
+            project_id="proj-reuse-sha",
+            reuse_existing=True,
+            run_id="run-reuse-sha",
+        )
+    )
+    assert info.path.resolve() == wt_path.resolve()
+
+
+def test_worktree_ownership_marker_corroborates_all_durable_fields(tmp_dirs):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+    base_sha = (subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True, text=True)).stdout.strip()
+
+    uow = MockUOW()
+    binding = ProjectManagedRepositoryBinding(
+        project_id="proj-marker-adv",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["repo_root"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+    )
+    uow.project_managed_repository_bindings.save(binding)
+
+    ownership = OrchestrationWorktreeOwnership(
+        worktree_id="wt-marker-adv",
+        project_id="proj-marker-adv",
+        job_id="job-marker-adv",
+        run_id="run-marker-adv",
+        change_name="change-marker-adv",
+        canonical_worktree_path=str((Path(tmp_dirs["worktrees"]) / "wt-marker-adv").resolve()),
+        branch="minime/change-marker-adv-job-marker-adv",
+        source_repository_identity="github.com/org/repo",
+        source_base_sha=base_sha,
+        creation_state=WorktreeCreationState.CREATED,
+    )
+    uow.orchestration_worktree_ownerships.save(ownership)
+
+    wt_path = Path(tmp_dirs["worktrees"]) / "wt-marker-adv"
+    subprocess.run(["git", "worktree", "add", "-b", ownership.branch, str(wt_path), "HEAD"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+
+    wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
+
+    # Write full valid marker
+    wt_manager._write_ownership_marker(wt_path, ownership)
+    wt_manager._verify_ownership_marker(wt_path, ownership)
+
+    marker_file = wt_path / ".minime_worktree_ownership.json"
+
+    def set_marker(k: str, v: str | None):
+        data = json.loads(marker_file.read_text(encoding="utf-8"))
+        if v is None:
+            data.pop(k, None)
+        else:
+            data[k] = v
+        marker_file.write_text(json.dumps(data), encoding="utf-8")
+
+    # 1. Wrong project_id
+    set_marker("project_id", "wrong-proj")
+    with pytest.raises(RuntimeError, match="project_id .* does not match"):
+        wt_manager._verify_ownership_marker(wt_path, ownership)
+
+    # 2. Wrong job_id
+    set_marker("project_id", ownership.project_id)
+    set_marker("job_id", "wrong-job")
+    with pytest.raises(RuntimeError, match="job_id .* does not match"):
+        wt_manager._verify_ownership_marker(wt_path, ownership)
+
+    # 3. Wrong run_id
+    set_marker("job_id", ownership.job_id)
+    set_marker("run_id", "wrong-run")
+    with pytest.raises(RuntimeError, match="run_id .* does not match"):
+        wt_manager._verify_ownership_marker(wt_path, ownership)
+
+    # 4. Wrong change_name
+    set_marker("run_id", ownership.run_id)
+    set_marker("change_name", "wrong-change")
+    with pytest.raises(RuntimeError, match="change_name .* does not match"):
+        wt_manager._verify_ownership_marker(wt_path, ownership)
+
+    # 5. Wrong branch
+    set_marker("change_name", ownership.change_name)
+    set_marker("branch", "wrong-branch")
+    set_marker("branch_name", "wrong-branch")
+    with pytest.raises(RuntimeError, match="branch .* does not match"):
+        wt_manager._verify_ownership_marker(wt_path, ownership)
+
+    # 6. Wrong source repo identity
+    set_marker("branch", ownership.branch)
+    set_marker("branch_name", ownership.branch)
+    set_marker("source_repository_identity", "github.com/evil/repo")
+    with pytest.raises(RuntimeError, match="source_repository_identity .* does not match"):
+        wt_manager._verify_ownership_marker(wt_path, ownership)
+
+    # 7. Wrong source base SHA
+    set_marker("source_repository_identity", ownership.source_repository_identity)
+    set_marker("source_base_sha", "wrong-base-sha")
+    with pytest.raises(RuntimeError, match="source_base_sha .* does not match"):
+        wt_manager._verify_ownership_marker(wt_path, ownership)
+
+    # 8. Missing mandatory field
+    set_marker("source_base_sha", ownership.source_base_sha)
+    set_marker("run_id", None)
+    with pytest.raises(RuntimeError, match="missing mandatory field 'run_id'"):
+        wt_manager._verify_ownership_marker(wt_path, ownership)
+
+
 
 
 

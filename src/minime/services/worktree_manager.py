@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import logging
 import shutil
@@ -606,8 +607,13 @@ class WorktreeManager:
             "worktree_id": ownership.worktree_id,
             "project_id": ownership.project_id,
             "job_id": ownership.job_id,
+            "run_id": ownership.run_id,
+            "change_name": ownership.change_name,
             "canonical_worktree_path": ownership.canonical_worktree_path,
+            "branch": ownership.branch,
             "branch_name": ownership.branch_name,
+            "source_repository_identity": ownership.source_repository_identity,
+            "source_base_sha": ownership.source_base_sha,
             "created_at": ownership.created_at.isoformat() if hasattr(ownership.created_at, "isoformat") else str(ownership.created_at),
         }
         marker_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -639,6 +645,95 @@ class WorktreeManager:
                         pass
         except Exception:
             pass
+
+    def _verify_ownership_marker(
+        self,
+        path: Path,
+        ownership: OrchestrationWorktreeOwnership,
+        worktree_kind: str = "worktree",
+    ) -> None:
+        marker_file = path.resolve() / ".minime_worktree_ownership.json"
+        if not marker_file.exists():
+            raise RuntimeError(
+                f"Refusing to adopt existing {worktree_kind} at '{path}': Ownership marker file missing at '{marker_file}'."
+            )
+        try:
+            m_data = json.loads(marker_file.read_text(encoding="utf-8"))
+        except Exception as e:
+            raise RuntimeError(
+                f"Refusing to adopt existing {worktree_kind} at '{path}': Corrupt ownership marker: {e}"
+            )
+
+        mandatory_fields = [
+            "worktree_id",
+            "project_id",
+            "job_id",
+            "run_id",
+            "change_name",
+            "canonical_worktree_path",
+            "source_repository_identity",
+            "source_base_sha",
+        ]
+        for field in mandatory_fields:
+            val = m_data.get(field)
+            if val is None or str(val).strip() == "":
+                raise RuntimeError(
+                    f"Refusing to adopt existing {worktree_kind} at '{path}': "
+                    f"Ownership marker missing mandatory field '{field}'."
+                )
+
+        marker_branch = m_data.get("branch") or m_data.get("branch_name")
+        if not marker_branch or str(marker_branch).strip() == "":
+            raise RuntimeError(
+                f"Refusing to adopt existing {worktree_kind} at '{path}': "
+                f"Ownership marker missing mandatory field 'branch'."
+            )
+
+        if m_data.get("worktree_id") != ownership.worktree_id:
+            raise RuntimeError(
+                f"Refusing to adopt existing {worktree_kind} at '{path}': "
+                f"Ownership marker worktree_id '{m_data.get('worktree_id')}' does not match durable '{ownership.worktree_id}'."
+            )
+        if m_data.get("project_id") != ownership.project_id:
+            raise RuntimeError(
+                f"Refusing to adopt existing {worktree_kind} at '{path}': "
+                f"Ownership marker project_id '{m_data.get('project_id')}' does not match durable '{ownership.project_id}'."
+            )
+        if m_data.get("job_id") != ownership.job_id:
+            raise RuntimeError(
+                f"Refusing to adopt existing {worktree_kind} at '{path}': "
+                f"Ownership marker job_id '{m_data.get('job_id')}' does not match durable '{ownership.job_id}'."
+            )
+        if m_data.get("run_id") != ownership.run_id:
+            raise RuntimeError(
+                f"Refusing to adopt existing {worktree_kind} at '{path}': "
+                f"Ownership marker run_id '{m_data.get('run_id')}' does not match durable '{ownership.run_id}'."
+            )
+        if m_data.get("change_name") != ownership.change_name:
+            raise RuntimeError(
+                f"Refusing to adopt existing {worktree_kind} at '{path}': "
+                f"Ownership marker change_name '{m_data.get('change_name')}' does not match durable '{ownership.change_name}'."
+            )
+        if str(Path(m_data.get("canonical_worktree_path", "")).resolve()) != str(path.resolve()):
+            raise RuntimeError(
+                f"Refusing to adopt existing {worktree_kind} at '{path}': "
+                f"Ownership marker canonical_worktree_path '{m_data.get('canonical_worktree_path')}' does not match '{path.resolve()}'."
+            )
+        if marker_branch != ownership.branch:
+            raise RuntimeError(
+                f"Refusing to adopt existing {worktree_kind} at '{path}': "
+                f"Ownership marker branch '{marker_branch}' does not match durable '{ownership.branch}'."
+            )
+        if m_data.get("source_repository_identity") != ownership.source_repository_identity:
+            raise RuntimeError(
+                f"Refusing to adopt existing {worktree_kind} at '{path}': "
+                f"Ownership marker source_repository_identity '{m_data.get('source_repository_identity')}' does not match durable '{ownership.source_repository_identity}'."
+            )
+        if m_data.get("source_base_sha") != ownership.source_base_sha:
+            raise RuntimeError(
+                f"Refusing to adopt existing {worktree_kind} at '{path}': "
+                f"Ownership marker source_base_sha '{m_data.get('source_base_sha')}' does not match durable '{ownership.source_base_sha}'."
+            )
 
     def _finalize_created_ownership(self, ownership: OrchestrationWorktreeOwnership | None) -> None:
         if not ownership or not self.uow:
@@ -783,8 +878,22 @@ class WorktreeManager:
             raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': No valid ProjectManagedRepositoryBinding found for project '{eff_project_id}'.")
         if ownership.source_repository_identity != binding.canonical_repository_identity:
             raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Source repository identity '{ownership.source_repository_identity}' does not match binding '{binding.canonical_repository_identity}'.")
-        if expected_base_sha and ownership.source_base_sha != expected_base_sha:
-            raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Source base SHA '{ownership.source_base_sha}' does not match expected '{expected_base_sha}'.")
+        if not ownership.source_base_sha or not str(ownership.source_base_sha).strip():
+            raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Durable ownership record has empty source_base_sha.")
+
+        if expected_base_sha:
+            try:
+                resolved_expected = (await self._git(["rev-parse", expected_base_sha], cwd=self.project_root)).strip()
+            except Exception:
+                resolved_expected = expected_base_sha.strip()
+
+            try:
+                resolved_ownership_base = (await self._git(["rev-parse", ownership.source_base_sha], cwd=self.project_root)).strip()
+            except Exception:
+                resolved_ownership_base = ownership.source_base_sha.strip()
+
+            if ownership.source_base_sha != expected_base_sha and resolved_ownership_base != resolved_expected:
+                raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Source base SHA '{ownership.source_base_sha}' does not match expected '{expected_base_sha}'.")
 
         try:
             wt_list_out = await self._git(["worktree", "list", "--porcelain"], cwd=self.project_root)
@@ -804,30 +913,49 @@ class WorktreeManager:
             if not git_ok:
                 raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Git identity verification failed: {git_reason}")
 
-            marker_file = path.resolve() / ".minime_worktree_ownership.json"
-            if not marker_file.exists():
-                raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Ownership marker file missing at '{marker_file}'.")
-            try:
-                m_data = json.loads(marker_file.read_text(encoding="utf-8"))
-                if m_data.get("worktree_id") != ownership.worktree_id or str(Path(m_data.get("canonical_worktree_path", "")).resolve()) != str(path.resolve()):
-                    raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Ownership marker data mismatch.")
-            except Exception as e:
-                if "Ownership marker" in str(e):
-                    raise
-                raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Corrupt ownership marker: {e}")
+            self._verify_ownership_marker(path, ownership, worktree_kind=worktree_kind)
 
             actual_branch = (await self._git(["branch", "--show-current"], cwd=path)).strip()
             if actual_branch != expected_branch:
                 raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Actual branch '{actual_branch}' does not match expected '{expected_branch}'.")
 
-            if expected_base_sha:
-                actual_sha = await self.current_sha(path)
-                try:
-                    resolved_expected_sha = (await self._git(["rev-parse", expected_base_sha], cwd=self.project_root)).strip()
-                except Exception:
-                    resolved_expected_sha = expected_base_sha.strip()
-                if actual_sha != resolved_expected_sha and actual_sha != expected_base_sha.strip():
-                    raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Actual HEAD SHA '{actual_sha}' does not match expected '{expected_base_sha}'.")
+            actual_sha = await self.current_sha(path)
+            if not actual_sha or not actual_sha.strip():
+                raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Observable worktree HEAD SHA is unobservable or empty.")
+            actual_sha = actual_sha.strip()
+
+            eff_expected_base = expected_base_sha or ownership.source_base_sha
+            try:
+                resolved_expected_sha = (await self._git(["rev-parse", eff_expected_base], cwd=self.project_root)).strip()
+            except Exception:
+                resolved_expected_sha = eff_expected_base.strip()
+
+            if actual_sha != resolved_expected_sha and actual_sha != eff_expected_base.strip():
+                has_candidate_proof = False
+                if self.uow:
+                    if hasattr(self.uow, "jobs") and self.uow.jobs:
+                        j = self.uow.jobs.get_by_id(job_id)
+                        if j and getattr(j, "candidate_sha", None) == actual_sha:
+                            has_candidate_proof = True
+                    if not has_candidate_proof and hasattr(self.uow, "orchestration_runs") and self.uow.orchestration_runs:
+                        r = (
+                            self.uow.orchestration_runs.get_by_id(job_id)
+                            or (
+                                self.uow.orchestration_runs.get_by_job_id(job_id)
+                                if hasattr(self.uow.orchestration_runs, "get_by_job_id")
+                                else None
+                            )
+                        )
+                        if r:
+                            cand_sha = getattr(r, "candidate_sha", None) or getattr(r, "current_candidate_sha", None)
+                            if cand_sha == actual_sha:
+                                has_candidate_proof = True
+                if not has_candidate_proof:
+                    raise RuntimeError(
+                        f"Refusing to adopt existing {worktree_kind} at '{path}': "
+                        f"Actual HEAD SHA '{actual_sha}' does not match expected base SHA '{eff_expected_base}' "
+                        f"and is not backed by durable candidate evidence."
+                    )
 
             if require_clean:
                 state = await self.inspect_worktree_state(path)
@@ -858,12 +986,17 @@ class WorktreeManager:
         # 1. Guard preflight evaluation before any mutation side effect
         self._authorize_mutating_operation(project_id, path, WorkspaceOperation.WORKTREE_CREATE)
 
-        branch_name = branch_name or f"minime/{change_name}-{job_id}"
-        base_sha = await self._git(["rev-parse", base_branch])
+        base_sha_raw = await self._git(["rev-parse", base_branch])
+        if inspect.isawaitable(base_sha_raw):
+            base_sha_raw = await base_sha_raw
+        base_sha = str(base_sha_raw).strip() if isinstance(base_sha_raw, str) else (base_sha_raw.strip() if hasattr(base_sha_raw, "strip") else str(base_sha_raw or "").strip())
+        if not base_sha:
+            raise RuntimeError(f"Failing closed: base_sha for base_branch '{base_branch}' is unobservable or empty.")
 
         eff_project_id = self._resolve_project_id(project_id, job_id)
         eff_run_id = self._resolve_real_run_id(job_id, run_id, project_id=eff_project_id, change_name=change_name)
         eff_change_name = self._resolve_real_change_name(job_id, change_name, project_id=eff_project_id, run_id=eff_run_id)
+        branch_name = branch_name or f"minime/{eff_change_name}-{job_id}"
 
         if path.exists():
             if not reuse_existing:
@@ -877,7 +1010,7 @@ class WorktreeManager:
                     eff_run_id=eff_run_id,
                     eff_change_name=eff_change_name,
                     expected_branch=branch_name,
-                    expected_base_sha=None,
+                    expected_base_sha=base_sha,
                     require_clean=False,
                     worktree_kind="worktree",
                 )
@@ -1322,24 +1455,26 @@ class WorktreeManager:
         marker_file = path / ".minime_worktree_ownership.json"
         if marker_file.exists():
             try:
-                marker_data = json.loads(marker_file.read_text(encoding="utf-8"))
-                if (
-                    marker_data.get("worktree_id") != ownership.worktree_id
-                    or str(Path(marker_data.get("canonical_worktree_path", "")).resolve()) != canonical_path
-                    or marker_data.get("job_id") != ownership.job_id
-                ):
-                    logger.error(f"Marker corroboration failed for '{path}': CONFLICT. Refusing removal.")
-                    return WorktreeCleanupResult(
-                        outcome=ExternalOutcome.FAILURE,
-                        reason_code=ExternalReasonCode.CONFLICT,
-                        provider_detail=f"Marker corroboration failed for '{path}'.",
-                    )
+                self._verify_ownership_marker(path, ownership, worktree_kind="worktree")
             except Exception as e:
-                logger.error(f"Corrupted ownership marker at '{path}': {e}. Refusing removal.")
+                logger.error(f"Marker corroboration failed for '{path}': {e}. Refusing removal.")
+                err_str = str(e)
+                is_conflict = (
+                    "does not match" in err_str
+                    or "mismatch" in err_str
+                    or "worktree_id" in err_str
+                    or "project_id" in err_str
+                    or "job_id" in err_str
+                    or "run_id" in err_str
+                    or "change_name" in err_str
+                    or "branch" in err_str
+                    or "source_repository_identity" in err_str
+                    or "source_base_sha" in err_str
+                )
                 return WorktreeCleanupResult(
-                    outcome=ExternalOutcome.UNKNOWN,
-                    reason_code=ExternalReasonCode.EVIDENCE_INSUFFICIENT,
-                    provider_detail=f"Corrupted ownership marker at '{path}': {e}.",
+                    outcome=ExternalOutcome.FAILURE if is_conflict else ExternalOutcome.UNKNOWN,
+                    reason_code=ExternalReasonCode.CONFLICT if is_conflict else ExternalReasonCode.EVIDENCE_INSUFFICIENT,
+                    provider_detail=f"Marker corroboration failed for '{path}': {e}.",
                 )
 
         state = await self.inspect_worktree_state(path)
