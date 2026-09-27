@@ -41,7 +41,7 @@ class OpenSpecSyncService:
         operation: WorkspaceOperation,
         project_id: str | None = None,
         target_subpath: Path | str | None = None,
-    ) -> tuple[str, ManagedWorkspaceGuard] | ExternalActionResult[Any]:
+    ) -> tuple[str, Path, ManagedWorkspaceGuard] | ExternalActionResult[Any]:
         # Input path confinement check
         if Path(openspec_path).is_absolute() or ".." in Path(openspec_path).parts:
             return ExternalActionResult(
@@ -82,6 +82,19 @@ class OpenSpecSyncService:
             )
 
         managed_root = Path(binding.managed_repository_root).resolve()
+        if self.project_root.resolve() != managed_root:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="openspec_sync",
+                reason_code=ExternalReasonCode.POLICY_DENIED,
+                retry_safety=RetrySafety.SAFE,
+                data=None,
+                error_message=(
+                    f"OpenSpecSyncService project_root '{self.project_root.resolve()}' "
+                    f"does not match durable managed repository root '{managed_root}'."
+                ),
+            )
+
         openspec_root = (managed_root / openspec_path).resolve()
         try:
             openspec_root.relative_to(managed_root)
@@ -139,7 +152,7 @@ class OpenSpecSyncService:
                 error_message=f"ManagedWorkspaceGuard denied {operation.value} for path '{target_path_str}': {decision.provider_detail or decision.reason_code.value}",
             )
 
-        return (eff_project_id, guard)
+        return (eff_project_id, managed_root, guard)
 
     def sync_change_specs(
         self, openspec_path: str, change_name: str, project_id: str | None = None
@@ -168,7 +181,9 @@ class OpenSpecSyncService:
                 error_message=auth_res.error_message,
             )
 
-        change_dir = (self.project_root / openspec_path / "changes" / change_name).resolve()
+        eff_project_id, managed_root, guard = auth_res
+        openspec_root = (managed_root / openspec_path).resolve()
+        change_dir = (openspec_root / "changes" / change_name).resolve()
         change_specs_dir = (change_dir / "specs").resolve()
 
         if not change_dir.exists():
@@ -193,69 +208,123 @@ class OpenSpecSyncService:
                 error_message="No delta specs directory present for change.",
             )
 
-        synced_capabilities: list[str] = []
-        main_specs_dir = (self.project_root / openspec_path / "specs").resolve()
-        main_specs_dir.mkdir(parents=True, exist_ok=True)
+        cap_dirs = [d for d in sorted(change_specs_dir.iterdir()) if d.is_dir()]
+        if not cap_dirs:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="openspec_sync",
+                reason_code=ExternalReasonCode.REUSED_EXISTING,
+                retry_safety=RetrySafety.SAFE,
+                data=[],
+                provider_detail="NO_DELTA_SPECS_SYNC_NOT_REQUIRED",
+                error_message="No capability directories found in delta specs.",
+            )
 
+        main_specs_dir = (openspec_root / "specs").resolve()
         try:
-            cap_dirs = [d for d in sorted(change_specs_dir.iterdir()) if d.is_dir()]
-            if not cap_dirs:
+            main_specs_dir.relative_to(openspec_root)
+        except ValueError:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="openspec_sync",
+                reason_code=ExternalReasonCode.POLICY_DENIED,
+                retry_safety=RetrySafety.SAFE,
+                data=[],
+                error_message=f"Main specs directory '{main_specs_dir}' escapes OpenSpec root '{openspec_root}'.",
+            )
+
+        # Preflight validation & target authorizations BEFORE any directory creation or write
+        validated_targets: list[tuple[Path, Path, Path]] = []
+        for cap_dir in cap_dirs:
+            cap_name = cap_dir.name
+            if Path(cap_name).is_absolute() or ".." in Path(cap_name).parts or Path(cap_name).name != cap_name:
                 return ExternalActionResult(
-                    outcome=ExternalOutcome.SUCCESS,
+                    outcome=ExternalOutcome.FAILURE,
                     source_adapter="openspec_sync",
-                    reason_code=ExternalReasonCode.REUSED_EXISTING,
+                    reason_code=ExternalReasonCode.POLICY_DENIED,
                     retry_safety=RetrySafety.SAFE,
                     data=[],
-                    provider_detail="NO_DELTA_SPECS_SYNC_NOT_REQUIRED",
-                    error_message="No capability directories found in delta specs.",
+                    error_message=f"Capability directory name '{cap_name}' fails path confinement check.",
+                )
+            delta_spec_file = (cap_dir / "spec.md").resolve()
+            if not delta_spec_file.exists():
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="openspec_sync",
+                    reason_code=ExternalReasonCode.EVIDENCE_INSUFFICIENT,
+                    retry_safety=RetrySafety.SAFE,
+                    data=[],
+                    error_message=f"Capability directory '{cap_name}' is missing required 'spec.md' artifact.",
+                )
+            try:
+                _ = delta_spec_file.read_text(encoding="utf-8")
+            except Exception as read_exc:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="openspec_sync",
+                    reason_code=ExternalReasonCode.EVIDENCE_INSUFFICIENT,
+                    retry_safety=RetrySafety.SAFE,
+                    data=[],
+                    error_message=f"Capability directory '{cap_name}' spec.md cannot be read: {read_exc}",
                 )
 
-            # Preflight validation: verify all capability directories contain readable spec.md before any write
-            for cap_dir in cap_dirs:
-                if Path(cap_dir.name).is_absolute() or ".." in Path(cap_dir.name).parts:
-                    return ExternalActionResult(
-                        outcome=ExternalOutcome.FAILURE,
-                        source_adapter="openspec_sync",
-                        reason_code=ExternalReasonCode.POLICY_DENIED,
-                        retry_safety=RetrySafety.SAFE,
-                        data=[],
-                        error_message=f"Capability directory name '{cap_dir.name}' fails path confinement check.",
-                    )
-                delta_spec_file = (cap_dir / "spec.md").resolve()
-                if not delta_spec_file.exists():
-                    return ExternalActionResult(
-                        outcome=ExternalOutcome.FAILURE,
-                        source_adapter="openspec_sync",
-                        reason_code=ExternalReasonCode.EVIDENCE_INSUFFICIENT,
-                        retry_safety=RetrySafety.SAFE,
-                        data=[],
-                        error_message=f"Capability directory '{cap_dir.name}' is missing required 'spec.md' artifact.",
-                    )
-                try:
-                    _ = delta_spec_file.read_text(encoding="utf-8")
-                except Exception as read_exc:
-                    return ExternalActionResult(
-                        outcome=ExternalOutcome.FAILURE,
-                        source_adapter="openspec_sync",
-                        reason_code=ExternalReasonCode.EVIDENCE_INSUFFICIENT,
-                        retry_safety=RetrySafety.SAFE,
-                        data=[],
-                        error_message=f"Capability directory '{cap_dir.name}' spec.md cannot be read: {read_exc}",
-                    )
+            target_cap_dir = (main_specs_dir / cap_name).resolve()
+            target_spec_file = (target_cap_dir / "spec.md").resolve()
+            try:
+                target_cap_dir.relative_to(main_specs_dir)
+                target_spec_file.relative_to(main_specs_dir)
+            except ValueError:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="openspec_sync",
+                    reason_code=ExternalReasonCode.POLICY_DENIED,
+                    retry_safety=RetrySafety.SAFE,
+                    data=[],
+                    error_message=f"Capability target '{target_cap_dir}' escapes main specs directory '{main_specs_dir}'.",
+                )
 
-            # Writes begin ONLY after complete preflight succeeds
-            synced_capabilities: list[str] = []
-            main_specs_dir = (self.project_root / openspec_path / "specs").resolve()
+            auth_target = self._authorize_openspec_operation(
+                openspec_path,
+                WorkspaceOperation.OPENSPEC_SYNC,
+                eff_project_id,
+                target_subpath=f"specs/{cap_name}",
+            )
+            if isinstance(auth_target, ExternalActionResult):
+                return ExternalActionResult(
+                    outcome=auth_target.outcome,
+                    source_adapter="openspec_sync",
+                    reason_code=auth_target.reason_code,
+                    retry_safety=auth_target.retry_safety,
+                    data=[],
+                    error_message=auth_target.error_message,
+                )
+
+            auth_spec = self._authorize_openspec_operation(
+                openspec_path,
+                WorkspaceOperation.OPENSPEC_SYNC,
+                eff_project_id,
+                target_subpath=f"specs/{cap_name}/spec.md",
+            )
+            if isinstance(auth_spec, ExternalActionResult):
+                return ExternalActionResult(
+                    outcome=auth_spec.outcome,
+                    source_adapter="openspec_sync",
+                    reason_code=auth_spec.reason_code,
+                    retry_safety=auth_spec.retry_safety,
+                    data=[],
+                    error_message=auth_spec.error_message,
+                )
+
+            validated_targets.append((delta_spec_file, target_cap_dir, target_spec_file))
+
+        synced_capabilities: list[str] = []
+        try:
             main_specs_dir.mkdir(parents=True, exist_ok=True)
-
-            for cap_dir in cap_dirs:
-                delta_spec_file = (cap_dir / "spec.md").resolve()
-                capability_name = cap_dir.name
-                target_cap_dir = (main_specs_dir / capability_name).resolve()
+            for delta_spec_file, target_cap_dir, target_spec_file in validated_targets:
+                capability_name = target_cap_dir.name
                 target_cap_dir.mkdir(parents=True, exist_ok=True)
-                target_spec_file = (target_cap_dir / "spec.md").resolve()
-
                 delta_content = delta_spec_file.read_text(encoding="utf-8")
+
                 if not target_spec_file.exists():
                     target_spec_file.write_text(delta_content, encoding="utf-8")
                     synced_capabilities.append(capability_name)
@@ -364,13 +433,23 @@ class OpenSpecSyncService:
                 error_message=auth_res.error_message,
             )
 
-        eff_project_id, guard = auth_res
+        eff_project_id, managed_root, guard = auth_res
 
         if re.match(r"^\d{4}-\d{2}-\d{2}-", change_name):
             target_name = change_name
         else:
             date_str = target_date or datetime.now(UTC).strftime("%Y-%m-%d")
             target_name = f"{date_str}-{change_name}"
+
+        if Path(target_name).is_absolute() or ".." in Path(target_name).parts or Path(target_name).name != target_name:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="openspec_archive",
+                reason_code=ExternalReasonCode.POLICY_DENIED,
+                retry_safety=RetrySafety.SAFE,
+                data=Path("/dev/null"),
+                error_message=f"Archive target name '{target_name}' fails path confinement check.",
+            )
 
         archive_sub = f"changes/archive/{target_name}"
         auth_archive = self._authorize_openspec_operation(
@@ -386,10 +465,24 @@ class OpenSpecSyncService:
                 error_message=auth_archive.error_message,
             )
 
-        change_dir = (self.project_root / openspec_path / "changes" / change_name).resolve()
-        archive_root = (self.project_root / openspec_path / "changes" / "archive").resolve()
-        archive_root.mkdir(parents=True, exist_ok=True)
+        openspec_root = (managed_root / openspec_path).resolve()
+        change_dir = (openspec_root / "changes" / change_name).resolve()
+        archive_root = (openspec_root / "changes" / "archive").resolve()
         target_dir = (archive_root / target_name).resolve()
+
+        try:
+            change_dir.relative_to(openspec_root)
+            archive_root.relative_to(openspec_root)
+            target_dir.relative_to(openspec_root)
+        except ValueError:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="openspec_archive",
+                reason_code=ExternalReasonCode.POLICY_DENIED,
+                retry_safety=RetrySafety.SAFE,
+                data=Path("/dev/null"),
+                error_message="Archive paths escape OpenSpec root.",
+            )
 
         if change_dir.exists() and target_dir.exists():
             return ExternalActionResult(
@@ -413,7 +506,7 @@ class OpenSpecSyncService:
                     provider_detail="",
                     external_id=str(target_dir),
                 )
-            alt_dir = self.project_root / openspec_path / "archive" / change_name
+            alt_dir = openspec_root / "archive" / change_name
             if alt_dir.exists():
                 return ExternalActionResult(
                     outcome=ExternalOutcome.SUCCESS,
@@ -429,6 +522,7 @@ class OpenSpecSyncService:
                 source_adapter="openspec_archive",
                 reason_code=ExternalReasonCode.UNOBSERVABLE,
                 retry_safety=RetrySafety.SAFE,
+                data=Path("/dev/null"),
                 error_message=f"OpenSpec change directory not found: {change_dir}",
             )
 
@@ -445,6 +539,7 @@ class OpenSpecSyncService:
                     expected_manifest.append(rel_spec)
 
         try:
+            archive_root.mkdir(parents=True, exist_ok=True)
             shutil.move(str(change_dir), str(target_dir))
             if target_dir.exists() and not change_dir.exists():
                 logger.info("Archived change '%s' -> '%s'.", change_name, target_dir)
@@ -481,8 +576,27 @@ class OpenSpecSyncService:
         openspec_path: str,
         change_name: str,
         synced_capabilities: ExternalActionResult[list[str]] | list[str],
+        project_id: str | None = None,
     ) -> ExternalActionResult[bool]:
         """Confirm synchronized requirements are present in the canonical specs."""
+        auth_res = self._authorize_openspec_operation(
+            openspec_path, WorkspaceOperation.READ, project_id, target_subpath=f"changes/{change_name}"
+        )
+        if isinstance(auth_res, ExternalActionResult):
+            return ExternalActionResult(
+                outcome=auth_res.outcome,
+                source_adapter="openspec_sync",
+                reason_code=auth_res.reason_code,
+                retry_safety=auth_res.retry_safety,
+                data=False,
+                error_message=auth_res.error_message,
+            )
+
+        eff_project_id, managed_root, guard = auth_res
+        openspec_root = (managed_root / openspec_path).resolve()
+        change_specs_dir = (openspec_root / "changes" / change_name / "specs").resolve()
+        main_specs_dir = (openspec_root / "specs").resolve()
+
         if isinstance(synced_capabilities, ExternalActionResult):
             if synced_capabilities.outcome != ExternalOutcome.SUCCESS:
                 return ExternalActionResult(
@@ -507,7 +621,6 @@ class OpenSpecSyncService:
         else:
             caps = synced_capabilities
             if not caps:
-                change_specs_dir = self.project_root / openspec_path / "changes" / change_name / "specs"
                 if not change_specs_dir.exists():
                     return ExternalActionResult(
                         outcome=ExternalOutcome.SUCCESS,
@@ -526,11 +639,8 @@ class OpenSpecSyncService:
                     error_message="Delta specs expected but none synchronized.",
                 )
 
-        change_specs_dir = self.project_root / openspec_path / "changes" / change_name / "specs"
-        main_specs_dir = self.project_root / openspec_path / "specs"
-
         for capability in caps:
-            canonical = main_specs_dir / capability / "spec.md"
+            canonical = (main_specs_dir / capability / "spec.md").resolve()
             if not canonical.exists():
                 return ExternalActionResult(
                     outcome=ExternalOutcome.FAILURE,
@@ -542,7 +652,7 @@ class OpenSpecSyncService:
                 )
 
             canonical_text = canonical.read_text(encoding="utf-8")
-            delta_file = change_specs_dir / capability / "spec.md"
+            delta_file = (change_specs_dir / capability / "spec.md").resolve()
             if not delta_file.exists():
                 if not canonical_text.strip():
                     return ExternalActionResult(
@@ -580,8 +690,26 @@ class OpenSpecSyncService:
         change_name: str,
         archived_path: ExternalActionResult[Path] | Path | None,
         expected_manifest: list[str] | None = None,
+        project_id: str | None = None,
     ) -> ExternalActionResult[bool]:
         """Confirm active change directory is gone, archive target exists, and all expected artifacts are preserved."""
+        auth_res = self._authorize_openspec_operation(
+            openspec_path, WorkspaceOperation.READ, project_id, target_subpath=f"changes/{change_name}"
+        )
+        if isinstance(auth_res, ExternalActionResult):
+            return ExternalActionResult(
+                outcome=auth_res.outcome,
+                source_adapter="openspec_archive",
+                reason_code=auth_res.reason_code,
+                retry_safety=auth_res.retry_safety,
+                data=False,
+                error_message=auth_res.error_message,
+            )
+
+        eff_project_id, managed_root, guard = auth_res
+        openspec_root = (managed_root / openspec_path).resolve()
+        change_dir = (openspec_root / "changes" / change_name).resolve()
+
         target_dir: Path | None = None
         manifest: list[str] = expected_manifest or []
 
@@ -618,8 +746,6 @@ class OpenSpecSyncService:
                 manifest = [f.strip() for f in archived_path.provider_detail.split(",") if f.strip()]
         elif isinstance(archived_path, Path):
             target_dir = archived_path
-
-        change_dir = self.project_root / openspec_path / "changes" / change_name
 
         if change_dir.exists() and target_dir and target_dir.exists():
             return ExternalActionResult(

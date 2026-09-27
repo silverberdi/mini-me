@@ -3007,6 +3007,92 @@ def test_validated_repository_context_stage_c_push_authority(tmp_dirs):
     assert err is None
 
 
+def test_openspec_sync_managed_root_authority_closure(tmp_dirs):
+    uow = MockUOW()
+    binding = ProjectManagedRepositoryBinding(
+        project_id="test-proj-sync-auth",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["repo_root"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+    )
+    uow.project_managed_repository_bindings.save(binding)
+
+    from minime.services.openspec_sync import OpenSpecSyncService
+
+    # 1. OpenSpecSyncService project_root != durable managed_repository_root => sync blocked, zero writes
+    other_dir = os.path.join(tmp_dirs["base"], "other_unauthorized_root")
+    os.makedirs(other_dir, exist_ok=True)
+    subprocess.run(["git", "init"], cwd=other_dir, check=True, capture_output=True)
+
+    bad_sync = OpenSpecSyncService(project_root=other_dir, uow=uow)
+    res_bad_sync = bad_sync.sync_change_specs(
+        openspec_path="openspec", change_name="change-1", project_id="test-proj-sync-auth"
+    )
+    assert res_bad_sync.outcome == ExternalOutcome.FAILURE
+    assert res_bad_sync.reason_code == ExternalReasonCode.POLICY_DENIED
+    assert "does not match durable managed repository root" in res_bad_sync.error_message
+    assert not (Path(other_dir) / "openspec" / "specs").exists()
+
+    # 2. project_root mismatch => archive blocked, zero move
+    res_bad_archive = bad_sync.archive_change(
+        openspec_path="openspec", change_name="change-1", project_id="test-proj-sync-auth"
+    )
+    assert res_bad_archive.outcome == ExternalOutcome.FAILURE
+    assert res_bad_archive.reason_code == ExternalReasonCode.POLICY_DENIED
+    assert "does not match durable managed repository root" in res_bad_archive.error_message
+
+    # 3. capability target escape/traversal => blocked
+    good_sync = OpenSpecSyncService(project_root=tmp_dirs["repo_root"], uow=uow)
+
+    change_dir = Path(tmp_dirs["repo_root"]) / "openspec" / "changes" / "change-1"
+    specs_dir = change_dir / "specs"
+    os.makedirs(specs_dir, exist_ok=True)
+
+    mock_cap = MagicMock()
+    mock_cap.name = ".."
+    mock_cap.is_dir.return_value = True
+    with patch.object(Path, "iterdir", return_value=[mock_cap]):
+        res_cap_escape = good_sync.sync_change_specs(
+            openspec_path="openspec", change_name="change-1", project_id="test-proj-sync-auth"
+        )
+        assert res_cap_escape.outcome == ExternalOutcome.FAILURE
+        assert res_cap_escape.reason_code == ExternalReasonCode.POLICY_DENIED
+        assert not (Path(tmp_dirs["repo_root"]) / "openspec" / "specs").exists()
+
+    # 4. exact canonical main spec destination receives guard authorization before mkdir/write
+    valid_cap_dir = specs_dir / "valid-capability"
+    os.makedirs(valid_cap_dir, exist_ok=True)
+    (valid_cap_dir / "spec.md").write_text("## Requirement: Valid Cap\n", encoding="utf-8")
+
+    target_cap_file = Path(tmp_dirs["repo_root"]) / "openspec" / "specs" / "valid-capability" / "spec.md"
+    with patch.dict(os.environ, {"MINIME_RUNTIME_ROOT": str(target_cap_file)}):
+        res_denied_target = good_sync.sync_change_specs(
+            openspec_path="openspec", change_name="change-1", project_id="test-proj-sync-auth"
+        )
+        assert res_denied_target.outcome == ExternalOutcome.FAILURE
+        assert res_denied_target.reason_code == ExternalReasonCode.POLICY_DENIED
+        assert not target_cap_file.exists()
+
+    # 5. valid managed-root sync succeeds
+    res_valid_sync = good_sync.sync_change_specs(
+        openspec_path="openspec", change_name="change-1", project_id="test-proj-sync-auth"
+    )
+    assert res_valid_sync.outcome == ExternalOutcome.SUCCESS
+    assert target_cap_file.exists()
+    assert "Valid Cap" in target_cap_file.read_text(encoding="utf-8")
+
+    # 6. valid managed-root archive succeeds
+    (change_dir / "proposal.md").write_text("proposal", encoding="utf-8")
+    res_valid_archive = good_sync.archive_change(
+        openspec_path="openspec", change_name="change-1", target_date="2026-09-27", project_id="test-proj-sync-auth"
+    )
+    assert res_valid_archive.outcome == ExternalOutcome.SUCCESS
+    assert not change_dir.exists()
+    archived_dir = Path(tmp_dirs["repo_root"]) / "openspec" / "changes" / "archive" / "2026-09-27-change-1"
+    assert archived_dir.exists()
+    assert (archived_dir / "proposal.md").exists()
+
+
 
 
 
