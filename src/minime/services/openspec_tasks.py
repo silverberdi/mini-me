@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -58,17 +59,79 @@ class OpenSpecTaskTracker:
         return [t for t in self.parse_tasks(openspec_path, change_name) if not t.complete]
 
     def reconcile_verification_tasks(
-        self, openspec_path: str, change_name: str, check_evidence_passed: bool = True
+        self,
+        openspec_path: str,
+        change_name: str,
+        check_evidence_passed: bool = True,
+        project_id: str | None = None,
+        job_id: str | None = None,
+        uow: Any | None = None,
     ) -> tuple[bool, list[str]]:
-        """Reconcile verification tasks in tasks.md when deterministic check evidence confirms passing status."""
+        """Reconcile verification tasks in tasks.md with mandatory Stage C durable authority and workspace guard policy."""
         if not check_evidence_passed:
             return False, []
 
-        path = self.tasks_path(openspec_path, change_name)
-        if not path.exists():
+        if not uow or not project_id or not job_id:
+            raise RuntimeError(
+                "Task reconciliation write denied: uow, project_id, and job_id are mandatory for mutation."
+            )
+
+        # Path confinement check on inputs
+        if Path(openspec_path).is_absolute() or ".." in Path(openspec_path).parts:
+            raise RuntimeError(f"OpenSpec path '{openspec_path}' fails path confinement check.")
+        if (
+            Path(change_name).is_absolute()
+            or ".." in Path(change_name).parts
+            or Path(change_name).name != change_name
+        ):
+            raise RuntimeError(f"Change name '{change_name}' fails path confinement check.")
+
+        target_file = (self.project_root / openspec_path / "changes" / change_name / "tasks.md").resolve()
+
+        # Durable worktree ownership verification
+        wt_ownership_repo = getattr(uow, "orchestration_worktree_ownerships", None)
+        ownership = wt_ownership_repo.get_by_job_id(job_id) if wt_ownership_repo else None
+        if not ownership:
+            raise RuntimeError(f"Task reconciliation denied: missing OrchestrationWorktreeOwnership for job '{job_id}'.")
+
+        from minime.domain.enums import WorktreeCreationState
+        if ownership.creation_state != WorktreeCreationState.CREATED:
+            raise RuntimeError(
+                f"Task reconciliation denied: worktree creation_state is '{ownership.creation_state.value}', expected CREATED."
+            )
+
+        canonical_worktree = Path(ownership.canonical_worktree_path).resolve()
+
+        # Verify target_file is strictly contained inside canonical_worktree
+        try:
+            target_file.relative_to(canonical_worktree)
+        except ValueError:
+            raise RuntimeError(
+                f"Task reconciliation denied: target file '{target_file}' escapes authorized worktree '{canonical_worktree}'."
+            )
+
+        # ManagedWorkspaceGuard authorization
+        from minime.domain.enums import WorkspaceOperation, WorkspaceRole
+        from minime.domain.models import WorkspaceMutationRequest
+        from minime.services.workspace_guard import ManagedWorkspaceGuard
+
+        guard = ManagedWorkspaceGuard(uow)
+        req = WorkspaceMutationRequest(
+            project_id=project_id,
+            target_path=str(target_file),
+            requested_operation=WorkspaceOperation.EDIT,
+            job_id=job_id,
+        )
+        decision = guard.evaluate_mutation(req)
+        if not decision.allowed or decision.workspace_role == WorkspaceRole.RUNTIME:
+            raise RuntimeError(
+                f"ManagedWorkspaceGuard denied task reconciliation write to '{target_file}': {decision.provider_detail or decision.reason_code.value}"
+            )
+
+        if not target_file.exists():
             return False, []
 
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = target_file.read_text(encoding="utf-8").splitlines()
         reconciled_ids: list[str] = []
         new_lines: list[str] = []
 
@@ -93,7 +156,7 @@ class OpenSpecTaskTracker:
             new_lines.append(line)
 
         if reconciled_ids:
-            path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+            target_file.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
             return True, reconciled_ids
         return False, []
 

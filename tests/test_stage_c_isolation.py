@@ -410,14 +410,15 @@ def test_openspec_sync_runtime_target_denied(tmp_dirs):
     binding = ProjectManagedRepositoryBinding(
         project_id="proj-1",
         canonical_repository_identity="github.com/org/repo",
-        managed_repository_root=tmp_dirs["repo_root"],
+        managed_repository_root=tmp_dirs["runtime"],
         worktree_parent_dir=tmp_dirs["worktrees"],
     )
     uow.project_managed_repository_bindings.save(binding)
     sync_service = OpenSpecSyncService(project_root=tmp_dirs["runtime"], uow=uow)
 
     # Sync into runtime root => POLICY_DENIED
-    res = sync_service.sync_change_specs(openspec_path="openspec", change_name="test-change", project_id="proj-1")
+    with patch.dict(os.environ, {"MINIME_RUNTIME_ROOT": tmp_dirs["runtime"]}):
+        res = sync_service.sync_change_specs(openspec_path="openspec", change_name="test-change", project_id="proj-1")
     assert res.outcome == ExternalOutcome.FAILURE
     assert res.reason_code == ExternalReasonCode.POLICY_DENIED
 
@@ -427,14 +428,15 @@ def test_openspec_archive_runtime_target_denied(tmp_dirs):
     binding = ProjectManagedRepositoryBinding(
         project_id="proj-1",
         canonical_repository_identity="github.com/org/repo",
-        managed_repository_root=tmp_dirs["repo_root"],
+        managed_repository_root=tmp_dirs["runtime"],
         worktree_parent_dir=tmp_dirs["worktrees"],
     )
     uow.project_managed_repository_bindings.save(binding)
     sync_service = OpenSpecSyncService(project_root=tmp_dirs["runtime"], uow=uow)
 
     # Archive inside runtime root => POLICY_DENIED
-    res = sync_service.archive_change(openspec_path="openspec", change_name="test-change", project_id="proj-1")
+    with patch.dict(os.environ, {"MINIME_RUNTIME_ROOT": tmp_dirs["runtime"]}):
+        res = sync_service.archive_change(openspec_path="openspec", change_name="test-change", project_id="proj-1")
     assert res.outcome == ExternalOutcome.FAILURE
     assert res.reason_code == ExternalReasonCode.POLICY_DENIED
 
@@ -2750,6 +2752,260 @@ def test_worktree_ownership_marker_corroborates_all_durable_fields(tmp_dirs):
     set_marker("run_id", None)
     with pytest.raises(RuntimeError, match="missing mandatory field 'run_id'"):
         wt_manager._verify_ownership_marker(wt_path, ownership)
+
+
+def test_openspec_task_tracker_active_writer_isolation(tmp_dirs):
+    uow = MockUOW()
+    binding = ProjectManagedRepositoryBinding(
+        project_id="test-proj-tracker",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["repo_root"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+    )
+    uow.project_managed_repository_bindings.save(binding)
+
+    from minime.services.openspec_tasks import OpenSpecTaskTracker
+
+    wt_path = Path(tmp_dirs["worktrees"]) / "wt-tracker-1"
+    tracker = OpenSpecTaskTracker(project_root=wt_path)
+
+    # 1. Absolute / traversal openspec_path / change_name blocked
+    with pytest.raises(RuntimeError, match="path confinement check"):
+        tracker.reconcile_verification_tasks(
+            openspec_path="/etc/passwd",
+            change_name="change-1",
+            check_evidence_passed=True,
+            project_id="test-proj-tracker",
+            job_id="job-1",
+            uow=uow,
+        )
+
+    with pytest.raises(RuntimeError, match="path confinement check"):
+        tracker.reconcile_verification_tasks(
+            openspec_path="openspec",
+            change_name="../change-1",
+            check_evidence_passed=True,
+            project_id="test-proj-tracker",
+            job_id="job-1",
+            uow=uow,
+        )
+
+    # 2. Setup owned execution worktree
+    wt_path = Path(tmp_dirs["worktrees"]) / "wt-tracker-1"
+    os.makedirs(wt_path, exist_ok=True)
+    subprocess.run(["git", "init"], cwd=wt_path, check=True, capture_output=True)
+    subprocess.run(["git", "remote", "add", "origin", "https://github.com/org/repo"], cwd=wt_path, check=True, capture_output=True)
+
+    tasks_dir = wt_path / "openspec" / "changes" / "change-1"
+    os.makedirs(tasks_dir, exist_ok=True)
+    tasks_file = tasks_dir / "tasks.md"
+    tasks_file.write_text("- [ ] run pytest tests\n", encoding="utf-8")
+
+    ownership = OrchestrationWorktreeOwnership(
+        worktree_id="wt-tracker-1",
+        project_id="test-proj-tracker",
+        job_id="job-1",
+        run_id="run-1",
+        change_name="change-1",
+        canonical_worktree_path=str(wt_path.resolve()),
+        branch="minime/change-1-job-1",
+        source_repository_identity="github.com/org/repo",
+        source_base_sha="0000000000000000000000000000000000000000",
+        creation_state=WorktreeCreationState.CREATED,
+    )
+    uow.orchestration_worktree_ownerships.save(ownership)
+
+    # 3. Runtime root path blocked
+    with patch.dict(os.environ, {"MINIME_RUNTIME_ROOT": str(wt_path)}):
+        with pytest.raises(RuntimeError, match="denied"):
+            tracker.reconcile_verification_tasks(
+                openspec_path="openspec",
+                change_name="change-1",
+                check_evidence_passed=True,
+                project_id="test-proj-tracker",
+                job_id="job-1",
+                uow=uow,
+            )
+
+    # 4. Valid owned execution worktree reconciliation succeeds
+    success, ids = tracker.reconcile_verification_tasks(
+        openspec_path="openspec",
+        change_name="change-1",
+        check_evidence_passed=True,
+        project_id="test-proj-tracker",
+        job_id="job-1",
+        uow=uow,
+    )
+    assert success is True
+    assert "[x]" in tasks_file.read_text(encoding="utf-8")
+
+
+def test_openspec_generator_and_sync_descendant_authorization_isolation(tmp_dirs):
+    uow = MockUOW()
+    binding = ProjectManagedRepositoryBinding(
+        project_id="test-proj-gen",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["repo_root"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+    )
+    uow.project_managed_repository_bindings.save(binding)
+
+    from minime.services.openspec_generator import GeneratedOpenSpec, OpenSpecGenerator
+    from minime.services.openspec_sync import OpenSpecSyncService
+
+    gen = OpenSpecGenerator(
+        project_root=tmp_dirs["repo_root"],
+        uow=uow,
+    )
+
+    # 1. OpenSpecGenerator: change_name traversal blocked
+    with pytest.raises(RuntimeError, match="path confinement check"):
+        gen.write_change_to_disk(
+            generated=GeneratedOpenSpec(
+                change_name="../escaped",
+                proposal_content="p",
+                tasks_content="t",
+                specs={},
+            ),
+            project_id="test-proj-gen",
+            openspec_path="openspec",
+        )
+
+    # 2. OpenSpecGenerator: spec subpath traversal blocked
+    with pytest.raises(RuntimeError, match="fails path confinement check"):
+        gen.write_change_to_disk(
+            generated=GeneratedOpenSpec(
+                change_name="valid-change",
+                proposal_content="p",
+                tasks_content="t",
+                specs={"../../evil.md": "content"},
+            ),
+            project_id="test-proj-gen",
+            openspec_path="openspec",
+        )
+
+    # 3. OpenSpecSyncService: sync_change_specs traversal blocked
+    sync_svc = OpenSpecSyncService(project_root=tmp_dirs["repo_root"], uow=uow)
+    res_sync = sync_svc.sync_change_specs(openspec_path="openspec", change_name="../escaped", project_id="test-proj-gen")
+    assert res_sync.outcome == ExternalOutcome.FAILURE
+    assert res_sync.reason_code == ExternalReasonCode.POLICY_DENIED
+
+    # 4. OpenSpecSyncService: archive_change traversal blocked
+    res_arch = sync_svc.archive_change(openspec_path="openspec", change_name="../escaped", project_id="test-proj-gen")
+    assert res_arch.outcome == ExternalOutcome.FAILURE
+    assert res_arch.reason_code == ExternalReasonCode.POLICY_DENIED
+
+
+def test_validated_repository_context_stage_c_push_authority(tmp_dirs):
+    uow = MockUOW()
+
+    from minime.domain.models import Project, ProjectBinding
+    from minime.services.orchestration_service import OrchestrationService
+
+    project = Project(
+        project_id="test-proj-push",
+        display_name="Test Push",
+        repository="github.com/org/repo",
+        base_branch="main",
+    )
+    binding = ProjectBinding(
+        project_id="test-proj-push",
+        repository="github.com/org/repo",
+        openspec_change_name="change-push",
+        is_valid=True,
+    )
+
+    orch_svc = OrchestrationService(uow=uow, project_root=tmp_dirs["repo_root"])
+
+    # 1. Missing ProjectManagedRepositoryBinding -> blocked
+    head_sha = (subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True, text=True)).stdout.strip()
+    _, err = orch_svc._validated_repository_context(
+        root=Path(tmp_dirs["repo_root"]),
+        project=project,
+        binding=binding,
+        candidate_sha=head_sha,
+    )
+    assert err is not None
+    assert "Missing ProjectManagedRepositoryBinding" in err
+
+    # 2. Invalid ProjectManagedRepositoryBinding (mismatch reasons) -> blocked
+    mb_invalid = ProjectManagedRepositoryBinding(
+        project_id="test-proj-push",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["repo_root"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+        mismatch_reasons=["mismatch"],
+    )
+    uow.project_managed_repository_bindings.save(mb_invalid)
+    _, err = orch_svc._validated_repository_context(
+        root=Path(tmp_dirs["repo_root"]),
+        project=project,
+        binding=binding,
+        candidate_sha=head_sha,
+    )
+    assert err is not None
+    assert "missing, invalid, or unverified" in err
+
+    # 3. Root differs from managed_repository_root -> blocked
+    mb_valid = ProjectManagedRepositoryBinding(
+        project_id="test-proj-push",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["repo_root"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+    )
+    uow.project_managed_repository_bindings.save(mb_valid)
+
+    other_dir = os.path.join(tmp_dirs["base"], "other_dir")
+    os.makedirs(other_dir, exist_ok=True)
+    subprocess.run(["git", "init"], cwd=other_dir, check=True, capture_output=True)
+
+    _, err = orch_svc._validated_repository_context(
+        root=Path(other_dir),
+        project=project,
+        binding=binding,
+        candidate_sha=head_sha,
+    )
+    assert err is not None
+    assert "does not match managed repository root" in err
+
+    # 4. Target path inside runtime root -> blocked
+    mb_runtime = ProjectManagedRepositoryBinding(
+        project_id="test-proj-push",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["runtime"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+    )
+    uow.project_managed_repository_bindings.save(mb_runtime)
+    with patch.dict(os.environ, {"MINIME_RUNTIME_ROOT": tmp_dirs["runtime"]}):
+        _, err = orch_svc._validated_repository_context(
+            root=Path(tmp_dirs["runtime"]),
+            project=project,
+            binding=binding,
+            candidate_sha=head_sha,
+        )
+        assert err is not None
+        assert any(token in err for token in ("Workspace mutation policy denied", "marker", "unobservable", "Git repository"))
+
+    # 5. Valid managed root + binding + marker + remote + candidate SHA -> allowed
+    uow.project_managed_repository_bindings.save(mb_valid)
+    marker_path = os.path.join(tmp_dirs["repo_root"], ".minime-managed-project.json")
+    with open(marker_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "project_id": "test-proj-push",
+                "canonical_repository_identity": "github.com/org/repo",
+            },
+            f,
+        )
+
+    _, err = orch_svc._validated_repository_context(
+        root=Path(tmp_dirs["repo_root"]),
+        project=project,
+        binding=binding,
+        candidate_sha=head_sha,
+    )
+    assert err is None
+
 
 
 

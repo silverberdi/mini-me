@@ -918,6 +918,9 @@ class ExecutionPipelineService:
                                     project.openspec_path,
                                     job.change_name,
                                     check_evidence_passed=True,
+                                    project_id=job.project_id,
+                                    job_id=job.job_id,
+                                    uow=self.uow,
                                 )
                             )
                             if reconciled:

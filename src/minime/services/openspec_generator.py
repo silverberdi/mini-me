@@ -201,6 +201,18 @@ class OpenSpecGenerator:
         if not eff_uow or not project_id:
             raise RuntimeError("OpenSpec write denied: uow and project_id are mandatory for disk mutation.")
 
+        # Path confinement check on inputs
+        if Path(openspec_path).is_absolute() or ".." in Path(openspec_path).parts:
+            raise RuntimeError(f"OpenSpec write denied: openspec_path '{openspec_path}' fails path confinement check.")
+        if (
+            Path(generated.change_name).is_absolute()
+            or ".." in Path(generated.change_name).parts
+            or Path(generated.change_name).name != generated.change_name
+        ):
+            raise RuntimeError(
+                f"OpenSpec write denied: change_name '{generated.change_name}' fails path confinement check."
+            )
+
         binding_repo = getattr(eff_uow, "project_managed_repository_bindings", None)
         binding = binding_repo.get_by_project_id(project_id) if binding_repo else None
         from minime.services.workspace_guard import is_binding_fully_valid
@@ -210,13 +222,37 @@ class OpenSpecGenerator:
                 f"OpenSpec write denied: missing or invalid ProjectManagedRepositoryBinding for project '{project_id}'."
             )
         base_root = Path(binding.managed_repository_root).resolve()
+        openspec_root = (base_root / openspec_path).resolve()
+
+        # Construct final intended change directory and verify containment
+        target_dir = (base_root / openspec_path / "changes" / generated.change_name).resolve()
+        try:
+            target_dir.relative_to(openspec_root)
+        except ValueError:
+            raise RuntimeError(
+                f"OpenSpec write denied: change directory '{target_dir}' escapes OpenSpec root '{openspec_root}'."
+            )
+
+        # Validate spec relative paths
+        for rel_spec_path in generated.specs.keys():
+            if Path(rel_spec_path).is_absolute() or ".." in Path(rel_spec_path).parts:
+                raise RuntimeError(
+                    f"OpenSpec write denied: spec relative path '{rel_spec_path}' fails path confinement check."
+                )
+            spec_file = (target_dir / rel_spec_path).resolve()
+            try:
+                spec_file.relative_to(target_dir)
+            except ValueError:
+                raise RuntimeError(
+                    f"OpenSpec write denied: spec file '{spec_file}' escapes change directory '{target_dir}'."
+                )
 
         from minime.domain.enums import WorkspaceOperation, WorkspaceRole
         from minime.domain.models import WorkspaceMutationRequest
         from minime.services.workspace_guard import ManagedWorkspaceGuard
 
         guard = ManagedWorkspaceGuard(eff_uow)
-        target_path_str = str(base_root / openspec_path)
+        target_path_str = str(target_dir)
         req = WorkspaceMutationRequest(
             project_id=project_id,
             target_path=target_path_str,
@@ -228,7 +264,6 @@ class OpenSpecGenerator:
                 f"ManagedWorkspaceGuard denied OpenSpec generation write to '{target_path_str}': {decision.provider_detail or decision.reason_code.value}"
             )
 
-        target_dir = base_root / openspec_path / "changes" / generated.change_name
         target_dir.mkdir(parents=True, exist_ok=True)
 
         proposal_file = target_dir / "proposal.md"
@@ -245,7 +280,7 @@ class OpenSpecGenerator:
             design_file.write_text(generated.design_content, encoding="utf-8")
 
         for rel_spec_path, spec_text in generated.specs.items():
-            spec_file = target_dir / rel_spec_path
+            spec_file = (target_dir / rel_spec_path).resolve()
             spec_file.parent.mkdir(parents=True, exist_ok=True)
             if overwrite or not spec_file.exists():
                 spec_file.write_text(spec_text, encoding="utf-8")

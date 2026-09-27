@@ -40,7 +40,19 @@ class OpenSpecSyncService:
         openspec_path: str,
         operation: WorkspaceOperation,
         project_id: str | None = None,
+        target_subpath: Path | str | None = None,
     ) -> tuple[str, ManagedWorkspaceGuard] | ExternalActionResult[Any]:
+        # Input path confinement check
+        if Path(openspec_path).is_absolute() or ".." in Path(openspec_path).parts:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="openspec_sync",
+                reason_code=ExternalReasonCode.POLICY_DENIED,
+                retry_safety=RetrySafety.SAFE,
+                data=None,
+                error_message=f"OpenSpec path '{openspec_path}' fails path confinement check.",
+            )
+
         eff_project_id = project_id
         b_repo = getattr(self.uow, "project_managed_repository_bindings", None)
         binding = None
@@ -69,11 +81,51 @@ class OpenSpecSyncService:
                 error_message=f"Missing or unverified ProjectManagedRepositoryBinding for '{self.project_root}'.",
             )
 
+        managed_root = Path(binding.managed_repository_root).resolve()
+        openspec_root = (managed_root / openspec_path).resolve()
+        try:
+            openspec_root.relative_to(managed_root)
+        except ValueError:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="openspec_sync",
+                reason_code=ExternalReasonCode.POLICY_DENIED,
+                retry_safety=RetrySafety.SAFE,
+                data=None,
+                error_message=f"OpenSpec path '{openspec_root}' escapes managed repository root '{managed_root}'.",
+            )
+
+        eval_target = openspec_root
+        if target_subpath:
+            sub = Path(target_subpath)
+            if sub.is_absolute() or ".." in sub.parts:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="openspec_sync",
+                    reason_code=ExternalReasonCode.POLICY_DENIED,
+                    retry_safety=RetrySafety.SAFE,
+                    data=None,
+                    error_message=f"Target subpath '{sub}' fails path confinement check.",
+                )
+            resolved_sub = (openspec_root / sub).resolve()
+            try:
+                resolved_sub.relative_to(openspec_root)
+            except ValueError:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="openspec_sync",
+                    reason_code=ExternalReasonCode.POLICY_DENIED,
+                    retry_safety=RetrySafety.SAFE,
+                    data=None,
+                    error_message=f"Target subpath '{resolved_sub}' escapes OpenSpec root '{openspec_root}'.",
+                )
+            eval_target = resolved_sub
+
         guard = ManagedWorkspaceGuard(self.uow)
-        target_path = str(self.project_root / openspec_path)
+        target_path_str = str(eval_target)
         req = WorkspaceMutationRequest(
             project_id=eff_project_id,
-            target_path=target_path,
+            target_path=target_path_str,
             requested_operation=operation,
         )
         decision = guard.evaluate_mutation(req)
@@ -84,7 +136,7 @@ class OpenSpecSyncService:
                 reason_code=decision.reason_code,
                 retry_safety=RetrySafety.SAFE,
                 data=None,
-                error_message=f"ManagedWorkspaceGuard denied {operation.value} for path '{target_path}': {decision.provider_detail or decision.reason_code.value}",
+                error_message=f"ManagedWorkspaceGuard denied {operation.value} for path '{target_path_str}': {decision.provider_detail or decision.reason_code.value}",
             )
 
         return (eff_project_id, guard)
@@ -93,7 +145,19 @@ class OpenSpecSyncService:
         self, openspec_path: str, change_name: str, project_id: str | None = None
     ) -> ExternalActionResult[list[str]]:
         """Synchronize all delta specs of a change into main specs under openspec/specs/."""
-        auth_res = self._authorize_openspec_operation(openspec_path, WorkspaceOperation.OPENSPEC_SYNC, project_id)
+        if Path(change_name).is_absolute() or ".." in Path(change_name).parts or Path(change_name).name != change_name:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="openspec_sync",
+                reason_code=ExternalReasonCode.POLICY_DENIED,
+                retry_safety=RetrySafety.SAFE,
+                data=[],
+                error_message=f"Change name '{change_name}' fails path confinement check.",
+            )
+
+        auth_res = self._authorize_openspec_operation(
+            openspec_path, WorkspaceOperation.OPENSPEC_SYNC, project_id, target_subpath=f"changes/{change_name}"
+        )
         if isinstance(auth_res, ExternalActionResult):
             return ExternalActionResult(
                 outcome=auth_res.outcome,
@@ -104,8 +168,8 @@ class OpenSpecSyncService:
                 error_message=auth_res.error_message,
             )
 
-        change_dir = self.project_root / openspec_path / "changes" / change_name
-        change_specs_dir = change_dir / "specs"
+        change_dir = (self.project_root / openspec_path / "changes" / change_name).resolve()
+        change_specs_dir = (change_dir / "specs").resolve()
 
         if not change_dir.exists():
             return ExternalActionResult(
@@ -130,7 +194,7 @@ class OpenSpecSyncService:
             )
 
         synced_capabilities: list[str] = []
-        main_specs_dir = self.project_root / openspec_path / "specs"
+        main_specs_dir = (self.project_root / openspec_path / "specs").resolve()
         main_specs_dir.mkdir(parents=True, exist_ok=True)
 
         try:
@@ -148,7 +212,16 @@ class OpenSpecSyncService:
 
             # Preflight validation: verify all capability directories contain readable spec.md before any write
             for cap_dir in cap_dirs:
-                delta_spec_file = cap_dir / "spec.md"
+                if Path(cap_dir.name).is_absolute() or ".." in Path(cap_dir.name).parts:
+                    return ExternalActionResult(
+                        outcome=ExternalOutcome.FAILURE,
+                        source_adapter="openspec_sync",
+                        reason_code=ExternalReasonCode.POLICY_DENIED,
+                        retry_safety=RetrySafety.SAFE,
+                        data=[],
+                        error_message=f"Capability directory name '{cap_dir.name}' fails path confinement check.",
+                    )
+                delta_spec_file = (cap_dir / "spec.md").resolve()
                 if not delta_spec_file.exists():
                     return ExternalActionResult(
                         outcome=ExternalOutcome.FAILURE,
@@ -172,15 +245,15 @@ class OpenSpecSyncService:
 
             # Writes begin ONLY after complete preflight succeeds
             synced_capabilities: list[str] = []
-            main_specs_dir = self.project_root / openspec_path / "specs"
+            main_specs_dir = (self.project_root / openspec_path / "specs").resolve()
             main_specs_dir.mkdir(parents=True, exist_ok=True)
 
             for cap_dir in cap_dirs:
-                delta_spec_file = cap_dir / "spec.md"
+                delta_spec_file = (cap_dir / "spec.md").resolve()
                 capability_name = cap_dir.name
-                target_cap_dir = main_specs_dir / capability_name
+                target_cap_dir = (main_specs_dir / capability_name).resolve()
                 target_cap_dir.mkdir(parents=True, exist_ok=True)
-                target_spec_file = target_cap_dir / "spec.md"
+                target_spec_file = (target_cap_dir / "spec.md").resolve()
 
                 delta_content = delta_spec_file.read_text(encoding="utf-8")
                 if not target_spec_file.exists():
@@ -268,7 +341,19 @@ class OpenSpecSyncService:
         project_id: str | None = None,
     ) -> ExternalActionResult[Path]:
         """Move active change directory to openspec/changes/archive/{date}-{change_name}."""
-        auth_res = self._authorize_openspec_operation(openspec_path, WorkspaceOperation.OPENSPEC_ARCHIVE, project_id)
+        if Path(change_name).is_absolute() or ".." in Path(change_name).parts or Path(change_name).name != change_name:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="openspec_archive",
+                reason_code=ExternalReasonCode.POLICY_DENIED,
+                retry_safety=RetrySafety.SAFE,
+                data=Path("/dev/null"),
+                error_message=f"Change name '{change_name}' fails path confinement check.",
+            )
+
+        auth_res = self._authorize_openspec_operation(
+            openspec_path, WorkspaceOperation.OPENSPEC_ARCHIVE, project_id, target_subpath=f"changes/{change_name}"
+        )
         if isinstance(auth_res, ExternalActionResult):
             return ExternalActionResult(
                 outcome=auth_res.outcome,
@@ -278,10 +363,8 @@ class OpenSpecSyncService:
                 data=Path("/dev/null"),
                 error_message=auth_res.error_message,
             )
-        change_dir = self.project_root / openspec_path / "changes" / change_name
 
-        archive_root = self.project_root / openspec_path / "changes" / "archive"
-        archive_root.mkdir(parents=True, exist_ok=True)
+        eff_project_id, guard = auth_res
 
         if re.match(r"^\d{4}-\d{2}-\d{2}-", change_name):
             target_name = change_name
@@ -289,7 +372,24 @@ class OpenSpecSyncService:
             date_str = target_date or datetime.now(UTC).strftime("%Y-%m-%d")
             target_name = f"{date_str}-{change_name}"
 
-        target_dir = archive_root / target_name
+        archive_sub = f"changes/archive/{target_name}"
+        auth_archive = self._authorize_openspec_operation(
+            openspec_path, WorkspaceOperation.OPENSPEC_ARCHIVE, eff_project_id, target_subpath=archive_sub
+        )
+        if isinstance(auth_archive, ExternalActionResult):
+            return ExternalActionResult(
+                outcome=auth_archive.outcome,
+                source_adapter="openspec_archive",
+                reason_code=auth_archive.reason_code,
+                retry_safety=auth_archive.retry_safety,
+                data=Path("/dev/null"),
+                error_message=auth_archive.error_message,
+            )
+
+        change_dir = (self.project_root / openspec_path / "changes" / change_name).resolve()
+        archive_root = (self.project_root / openspec_path / "changes" / "archive").resolve()
+        archive_root.mkdir(parents=True, exist_ok=True)
+        target_dir = (archive_root / target_name).resolve()
 
         if change_dir.exists() and target_dir.exists():
             return ExternalActionResult(

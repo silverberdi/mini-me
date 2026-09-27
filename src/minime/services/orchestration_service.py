@@ -3125,8 +3125,69 @@ class OrchestrationService:
         """Validate the registered repository root and exact audited candidate for push."""
         import subprocess
 
+        from minime.domain.enums import WorkspaceOperation
+        from minime.domain.models import WorkspaceMutationRequest
+        from minime.services.workspace_guard import ManagedWorkspaceGuard, is_binding_fully_valid
+
         if not binding or not binding.is_valid or binding.repository != project.repository:
             return root, "Project repository binding is invalid for branch push."
+
+        binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
+        managed_binding = (
+            binding_repo.get_by_project_id(project.project_id) if binding_repo else None
+        )
+        if not managed_binding:
+            return (
+                root,
+                f"Missing ProjectManagedRepositoryBinding for project '{project.project_id}'.",
+            )
+
+        if not is_binding_fully_valid(managed_binding):
+            return (
+                root,
+                f"ProjectManagedRepositoryBinding for project '{project.project_id}' is missing, invalid, or unverified.",
+            )
+
+        managed_root = Path(managed_binding.managed_repository_root).resolve()
+        if root.resolve() != managed_root:
+            return (
+                root,
+                f"Registered repository root '{root.resolve()}' does not match managed repository root '{managed_root}'.",
+            )
+
+        guard = ManagedWorkspaceGuard(self.uow)
+        marker_ok, marker_msg, _, _ = guard.verify_managed_repository_ownership_marker(
+            str(managed_root),
+            project.project_id,
+            managed_binding.canonical_repository_identity,
+        )
+        if not marker_ok:
+            return root, marker_msg
+
+        remote_name = managed_binding.remote_name or "origin"
+        remote_ok, remote_msg = guard.verify_git_repository_identity(
+            str(managed_root),
+            managed_binding.canonical_repository_identity,
+            remote_name=remote_name,
+        )
+        if not remote_ok:
+            return root, remote_msg
+
+        decision = guard.evaluate_mutation(
+            WorkspaceMutationRequest(
+                project_id=project.project_id,
+                requested_operation=WorkspaceOperation.GIT_BRANCH,
+                target_path=str(managed_root),
+                actor="orchestrator",
+            )
+        )
+        if not decision.allowed:
+            return (
+                root,
+                f"Workspace mutation policy denied push branch for target '{managed_root}': "
+                f"{decision.provider_detail or decision.reason_code.value}",
+            )
+
         try:
             top = subprocess.run(
                 ["git", "rev-parse", "--show-toplevel"],
