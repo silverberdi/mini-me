@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
+from tests.conftest import setup_managed_repository_fixture, write_test_worktree_ownership_marker
 
 from minime.domain.enums import (
     HumanGate,
@@ -69,16 +70,17 @@ def git(root, *args):
     return subprocess.check_output(["git", *args], cwd=root, text=True).strip()
 
 
+
 def test_real_git_remediation_creates_preserved_next_generation(tmp_path, in_memory_uow):
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "test"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
-    (tmp_path / "README.md").write_text("source\n", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-m", "source"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "remote", "add", "origin", str(tmp_path)], cwd=tmp_path, check=True)
+    setup_managed_repository_fixture(
+        in_memory_uow,
+        "p",
+        tmp_path,
+        tmp_path / "worktrees",
+        canonical_repository_identity="github.com/org/repo",
+    )
     subprocess.run(
-        ["git", "fetch", "origin", "main"], cwd=tmp_path, check=True, capture_output=True
+        ["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=tmp_path, check=True
     )
     source_sha = git(tmp_path, "rev-parse", "HEAD")
     project = Project(
@@ -165,17 +167,17 @@ def test_real_git_remediation_creates_preserved_next_generation(tmp_path, in_mem
 def test_real_git_restart_after_workspace_ready_preserves_execution_boundary(
     tmp_path, in_memory_uow
 ):
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "test"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
-    (tmp_path / "README.md").write_text("source\n", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-m", "source"], cwd=tmp_path, check=True, capture_output=True)
-    source_sha = git(tmp_path, "rev-parse", "HEAD")
-    subprocess.run(["git", "remote", "add", "origin", str(tmp_path)], cwd=tmp_path, check=True)
-    subprocess.run(
-        ["git", "fetch", "origin", "main"], cwd=tmp_path, check=True, capture_output=True
+    setup_managed_repository_fixture(
+        in_memory_uow,
+        "p",
+        tmp_path,
+        tmp_path / "worktrees",
+        canonical_repository_identity="github.com/org/repo",
     )
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=tmp_path, check=True
+    )
+    source_sha = git(tmp_path, "rev-parse", "HEAD")
     project = Project(project_id="p", display_name="p", repository=str(tmp_path))
     in_memory_uow.candidate_remediations = InMemoryRemediationRepository()
     in_memory_uow.projects.save(project)
@@ -214,7 +216,9 @@ def test_real_git_restart_after_workspace_ready_preserves_execution_boundary(
     in_memory_uow.orchestration_runs.save(run)
     manager = WorktreeManager(tmp_path, uow=in_memory_uow)
     workspace = asyncio.run(
-        manager.create_remediation_worktree(job.job_id, "change", source_sha, 2, project_id="p")
+        manager.create_remediation_worktree(
+            job.job_id, "change", source_sha, 2, project_id="p", run_id="run"
+        )
     )
     contract = RemediationContract(
         contract_version="1",
@@ -253,23 +257,23 @@ def test_real_git_restart_after_workspace_ready_preserves_execution_boundary(
     assert result.remediation_id == remediation.remediation_id
     assert result.status == RemediationStatus.COMPLETED
     assert implementer.calls == 1
-    assert (workspace.path / "README.md").read_text(encoding="utf-8") == "source\n"
+    assert (workspace.path / "README.md").read_text(encoding="utf-8") == "# repo\n"
 
 
 def test_real_git_restart_during_implementer_running_refuses_duplicate_invocation(
     tmp_path, in_memory_uow
 ):
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "test"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
-    (tmp_path / "README.md").write_text("source\n", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-m", "source"], cwd=tmp_path, check=True, capture_output=True)
-    source_sha = git(tmp_path, "rev-parse", "HEAD")
-    subprocess.run(["git", "remote", "add", "origin", str(tmp_path)], cwd=tmp_path, check=True)
-    subprocess.run(
-        ["git", "fetch", "origin", "main"], cwd=tmp_path, check=True, capture_output=True
+    setup_managed_repository_fixture(
+        in_memory_uow,
+        "p",
+        tmp_path,
+        tmp_path / "worktrees",
+        canonical_repository_identity="github.com/org/repo",
     )
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=tmp_path, check=True
+    )
+    source_sha = git(tmp_path, "rev-parse", "HEAD")
     project = Project(project_id="p", display_name="p", repository=str(tmp_path))
     in_memory_uow.candidate_remediations = InMemoryRemediationRepository()
     in_memory_uow.projects.save(project)
@@ -308,7 +312,9 @@ def test_real_git_restart_during_implementer_running_refuses_duplicate_invocatio
     in_memory_uow.orchestration_runs.save(run)
     manager = WorktreeManager(tmp_path, uow=in_memory_uow)
     workspace = asyncio.run(
-        manager.create_remediation_worktree(job.job_id, "change", source_sha, 2, project_id="p")
+        manager.create_remediation_worktree(
+            job.job_id, "change", source_sha, 2, project_id="p", run_id="run"
+        )
     )
     contract = RemediationContract(
         contract_version="1",
@@ -355,23 +361,23 @@ def test_real_git_restart_during_implementer_running_refuses_duplicate_invocatio
     assert persisted.status == RemediationStatus.IMPLEMENTER_RUNNING
     assert implementer.calls == 0
     assert len(in_memory_uow.orchestration_candidates.list_by_run("run")) == 1
-    assert (workspace.path / "README.md").read_text(encoding="utf-8") == "source\n"
+    assert (workspace.path / "README.md").read_text(encoding="utf-8") == "# repo\n"
 
 
 def test_real_git_restart_after_implementer_completed_reuses_authorized_changes(
     tmp_path, in_memory_uow
 ):
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "test"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
-    (tmp_path / "README.md").write_text("source\n", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-m", "source"], cwd=tmp_path, check=True, capture_output=True)
-    source_sha = git(tmp_path, "rev-parse", "HEAD")
-    subprocess.run(["git", "remote", "add", "origin", str(tmp_path)], cwd=tmp_path, check=True)
-    subprocess.run(
-        ["git", "fetch", "origin", "main"], cwd=tmp_path, check=True, capture_output=True
+    setup_managed_repository_fixture(
+        in_memory_uow,
+        "p",
+        tmp_path,
+        tmp_path / "worktrees",
+        canonical_repository_identity="github.com/org/repo",
     )
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=tmp_path, check=True
+    )
+    source_sha = git(tmp_path, "rev-parse", "HEAD")
     project = Project(project_id="p", display_name="p", repository=str(tmp_path))
     in_memory_uow.candidate_remediations = InMemoryRemediationRepository()
     in_memory_uow.projects.save(project)
@@ -458,17 +464,17 @@ def test_real_git_restart_after_implementer_completed_reuses_authorized_changes(
 
 
 def test_real_git_restart_after_scope_validated_finalizes_once(tmp_path, in_memory_uow):
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "test"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
-    (tmp_path / "README.md").write_text("source\n", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-m", "source"], cwd=tmp_path, check=True, capture_output=True)
-    source_sha = git(tmp_path, "rev-parse", "HEAD")
-    subprocess.run(["git", "remote", "add", "origin", str(tmp_path)], cwd=tmp_path, check=True)
-    subprocess.run(
-        ["git", "fetch", "origin", "main"], cwd=tmp_path, check=True, capture_output=True
+    setup_managed_repository_fixture(
+        in_memory_uow,
+        "p",
+        tmp_path,
+        tmp_path / "worktrees",
+        canonical_repository_identity="github.com/org/repo",
     )
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=tmp_path, check=True
+    )
+    source_sha = git(tmp_path, "rev-parse", "HEAD")
     project = Project(project_id="p", display_name="p", repository=str(tmp_path))
     in_memory_uow.candidate_remediations = InMemoryRemediationRepository()
     in_memory_uow.projects.save(project)
@@ -556,17 +562,17 @@ def test_real_git_restart_after_scope_validated_finalizes_once(tmp_path, in_memo
 def test_real_git_finalization_crash_reconciles_identity_before_candidate_persistence(
     tmp_path, in_memory_uow
 ):
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "test"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
-    (tmp_path / "README.md").write_text("source\n", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-m", "source"], cwd=tmp_path, check=True, capture_output=True)
-    source_sha = git(tmp_path, "rev-parse", "HEAD")
-    subprocess.run(["git", "remote", "add", "origin", str(tmp_path)], cwd=tmp_path, check=True)
-    subprocess.run(
-        ["git", "fetch", "origin", "main"], cwd=tmp_path, check=True, capture_output=True
+    setup_managed_repository_fixture(
+        in_memory_uow,
+        "p",
+        tmp_path,
+        tmp_path / "worktrees",
+        canonical_repository_identity="github.com/org/repo",
     )
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=tmp_path, check=True
+    )
+    source_sha = git(tmp_path, "rev-parse", "HEAD")
     project = Project(project_id="p", display_name="p", repository=str(tmp_path))
     in_memory_uow.candidate_remediations = InMemoryRemediationRepository()
     in_memory_uow.projects.save(project)
@@ -658,24 +664,18 @@ def test_real_git_finalization_crash_reconciles_identity_before_candidate_persis
 
 
 def test_real_git_reconciliation_rejects_wrong_remediation_trailer(tmp_path, in_memory_uow):
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "test"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
-    (tmp_path / "README.md").write_text("source\n", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-m", "source"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "remote", "add", "origin", "https://github.com/org/p"], cwd=tmp_path, check=True)
+    setup_managed_repository_fixture(
+        in_memory_uow,
+        "p",
+        tmp_path,
+        tmp_path / "worktrees",
+        canonical_repository_identity="github.com/org/p",
+    )
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=tmp_path, check=True
+    )
     source_sha = git(tmp_path, "rev-parse", "HEAD")
     in_memory_uow.projects.save(Project(project_id="p", display_name="p", repository=str(tmp_path)))
-    from minime.domain.models import ProjectManagedRepositoryBinding
-    in_memory_uow.project_managed_repository_bindings.save(
-        ProjectManagedRepositoryBinding(
-            project_id="p",
-            canonical_repository_identity="github.com/org/p",
-            managed_repository_root=str(tmp_path.resolve()),
-            worktree_parent_dir=str((tmp_path / ".minime" / "worktrees").resolve()),
-        )
-    )
     manager = WorktreeManager(tmp_path, uow=in_memory_uow)
     in_memory_uow.jobs.save(Job(job_id="job", project_id="p", change_name="change", implementer_role="codex"))
     in_memory_uow.orchestration_runs.save(
@@ -731,17 +731,17 @@ def test_real_git_reconciliation_rejects_wrong_remediation_trailer(tmp_path, in_
 def test_real_git_restart_after_candidate_persisted_reuses_exact_result(
     tmp_path, in_memory_uow, persisted_status
 ):
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "test"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
-    (tmp_path / "README.md").write_text("source\n", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-m", "source"], cwd=tmp_path, check=True, capture_output=True)
-    source_sha = git(tmp_path, "rev-parse", "HEAD")
-    subprocess.run(["git", "remote", "add", "origin", str(tmp_path)], cwd=tmp_path, check=True)
-    subprocess.run(
-        ["git", "fetch", "origin", "main"], cwd=tmp_path, check=True, capture_output=True
+    setup_managed_repository_fixture(
+        in_memory_uow,
+        "p",
+        tmp_path,
+        tmp_path / "worktrees",
+        canonical_repository_identity="github.com/org/repo",
     )
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=tmp_path, check=True
+    )
+    source_sha = git(tmp_path, "rev-parse", "HEAD")
     project = Project(project_id="p", display_name="p", repository=str(tmp_path))
     in_memory_uow.candidate_remediations = InMemoryRemediationRepository()
     in_memory_uow.projects.save(project)
@@ -781,7 +781,9 @@ def test_real_git_restart_after_candidate_persisted_reuses_exact_result(
     in_memory_uow.orchestration_runs.save(run)
     manager = WorktreeManager(tmp_path, uow=in_memory_uow)
     workspace = asyncio.run(
-        manager.create_remediation_worktree(job.job_id, "change", source_sha, 2, project_id="p")
+        manager.create_remediation_worktree(
+            job.job_id, "change", source_sha, 2, project_id="p", run_id="run"
+        )
     )
     (workspace.path / "src").mkdir()
     (workspace.path / "src" / "fix.py").write_text("fixed = True\n", encoding="utf-8")
@@ -823,6 +825,11 @@ def test_real_git_restart_after_candidate_persisted_reuses_exact_result(
     job.candidate_sha = result_sha
     in_memory_uow.jobs.save(job)
     in_memory_uow.orchestration_runs.update_candidate_binding("run", 2, result_sha)
+    ownership = in_memory_uow.orchestration_worktree_ownerships.get_by_canonical_path(str(workspace.path))
+    if ownership:
+        ownership.source_base_sha = result_sha
+        in_memory_uow.orchestration_worktree_ownerships.save(ownership)
+        write_test_worktree_ownership_marker(workspace.path, ownership)
     remediation = CandidateRemediation(
         remediation_id=remediation_id,
         run_id="run",
@@ -893,17 +900,17 @@ class SequentialImplementer:
 def test_real_git_scope_violation_fails_without_candidate_or_commit(
     tmp_path, in_memory_uow, target, protected_paths
 ):
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "test"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
-    (tmp_path / "README.md").write_text("source\n", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-m", "source"], cwd=tmp_path, check=True, capture_output=True)
-    source_sha = git(tmp_path, "rev-parse", "HEAD")
-    subprocess.run(["git", "remote", "add", "origin", str(tmp_path)], cwd=tmp_path, check=True)
-    subprocess.run(
-        ["git", "fetch", "origin", "main"], cwd=tmp_path, check=True, capture_output=True
+    setup_managed_repository_fixture(
+        in_memory_uow,
+        "p",
+        tmp_path,
+        tmp_path / "worktrees",
+        canonical_repository_identity="github.com/org/repo",
     )
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=tmp_path, check=True
+    )
+    source_sha = git(tmp_path, "rev-parse", "HEAD")
     project = Project(project_id="p", display_name="p", repository=str(tmp_path), checks=[])
     in_memory_uow.candidate_remediations = InMemoryRemediationRepository()
     in_memory_uow.projects.save(project)
@@ -975,17 +982,17 @@ def test_real_git_scope_violation_fails_without_candidate_or_commit(
 def test_real_execution_pipeline_routes_remediation_to_its_implementer_runner(
     tmp_path, in_memory_uow
 ):
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "test"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
-    (tmp_path / "README.md").write_text("source\n", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-m", "source"], cwd=tmp_path, check=True, capture_output=True)
-    source_sha = git(tmp_path, "rev-parse", "HEAD")
-    subprocess.run(["git", "remote", "add", "origin", str(tmp_path)], cwd=tmp_path, check=True)
-    subprocess.run(
-        ["git", "fetch", "origin", "main"], cwd=tmp_path, check=True, capture_output=True
+    setup_managed_repository_fixture(
+        in_memory_uow,
+        "p",
+        tmp_path,
+        tmp_path / "worktrees",
+        canonical_repository_identity="github.com/org/repo",
     )
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=tmp_path, check=True
+    )
+    source_sha = git(tmp_path, "rev-parse", "HEAD")
     project = Project(project_id="p", display_name="p", repository=str(tmp_path), checks=[])
     in_memory_uow.candidate_remediations = InMemoryRemediationRepository()
     in_memory_uow.projects.save(project)
@@ -1052,17 +1059,17 @@ def test_real_execution_pipeline_routes_remediation_to_its_implementer_runner(
 def test_real_git_failed_n_plus_one_then_explicit_n_plus_two_preserves_lineage(
     tmp_path, in_memory_uow
 ):
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "test"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
-    (tmp_path / "README.md").write_text("source\n", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-m", "source"], cwd=tmp_path, check=True, capture_output=True)
-    source_sha = git(tmp_path, "rev-parse", "HEAD")
-    subprocess.run(["git", "remote", "add", "origin", str(tmp_path)], cwd=tmp_path, check=True)
-    subprocess.run(
-        ["git", "fetch", "origin", "main"], cwd=tmp_path, check=True, capture_output=True
+    setup_managed_repository_fixture(
+        in_memory_uow,
+        "p",
+        tmp_path,
+        tmp_path / "worktrees",
+        canonical_repository_identity="github.com/org/repo",
     )
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=tmp_path, check=True
+    )
+    source_sha = git(tmp_path, "rev-parse", "HEAD")
     project = Project(
         project_id="p",
         display_name="p",

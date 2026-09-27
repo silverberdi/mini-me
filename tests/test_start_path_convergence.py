@@ -8,7 +8,7 @@ import pytest
 from tests.conftest import (
     InMemoryPersistenceUnitOfWork,
     ReadinessGitHubStub,
-    init_git_repo,
+    setup_managed_repository_fixture,
 )
 
 from minime.domain.enums import (
@@ -29,8 +29,7 @@ def _setup_ready_item(
     uow: InMemoryPersistenceUnitOfWork, tmp_path: Path
 ) -> IntakeService:
     repo_dir = tmp_path / "app-repo"
-    repo_dir.mkdir()
-    init_git_repo(repo_dir)
+    setup_managed_repository_fixture(uow, "app-proj", repo_dir, tmp_path / "worktrees")
 
     project = Project(
         project_id="app-proj",

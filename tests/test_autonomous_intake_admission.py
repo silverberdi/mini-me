@@ -6,7 +6,7 @@ from datetime import timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from tests.conftest import InMemoryPersistenceUnitOfWork
+from tests.conftest import InMemoryPersistenceUnitOfWork, setup_managed_repository_fixture
 
 from minime.domain.enums import (
     AdmissionDecision,
@@ -83,9 +83,15 @@ def test_auto_prepare_on_backlog_creation_happy_path(
 ) -> None:
     """Verify automatic preparation, OpenSpec generation, and READY transition upon creation."""
     repo_dir = tmp_path / "auto-repo"
-    repo_dir.mkdir()
+    setup_managed_repository_fixture(
+        in_memory_uow,
+        "auto-project",
+        repo_dir,
+        repo_dir / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/auto-repo",
+    )
     openspec_dir = repo_dir / "openspec"
-    openspec_dir.mkdir()
+    openspec_dir.mkdir(exist_ok=True)
 
     project = Project(
         project_id="auto-project",
@@ -176,9 +182,15 @@ def test_auto_prepare_needs_human_on_ambiguity_and_resume(
 ) -> None:
     """Verify that underspecified items transition to NEEDS_HUMAN and resume on answer."""
     repo_dir = tmp_path / "ambiguous-repo"
-    repo_dir.mkdir()
+    setup_managed_repository_fixture(
+        in_memory_uow,
+        "ambiguous-project",
+        repo_dir,
+        repo_dir / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/ambiguous-repo",
+    )
     openspec_dir = repo_dir / "openspec"
-    openspec_dir.mkdir()
+    openspec_dir.mkdir(exist_ok=True)
 
     project = Project(
         project_id="ambiguous-project",

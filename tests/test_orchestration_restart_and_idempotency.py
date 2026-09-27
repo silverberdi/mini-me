@@ -25,7 +25,6 @@ from minime.domain.models import (
     ExternalActionResult,
     Project,
     ProjectBinding,
-    ProjectManagedRepositoryBinding,
     ProviderHealth,
 )
 from minime.services.checks_runner import ChecksRunResult
@@ -213,21 +212,21 @@ class SimpleChecksRunner:
 def setup_env(tmp_path: Path, in_memory_uow):
     import subprocess
 
-    from conftest import create_isolated_openspec_change
-
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "remote", "add", "origin", "https://github.com/silverberdi/mini-me.git"], cwd=tmp_path, check=True)
-    (tmp_path / "README.md").write_text("# Test\n", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=tmp_path, check=True)
-    subprocess.run(
-        ["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=tmp_path, check=True
-    )
+    from conftest import create_isolated_openspec_change, setup_managed_repository_fixture
 
     project_id = "mini-me"
     change_name = "008-autonomous-change-orchestration"
+
+    setup_managed_repository_fixture(
+        in_memory_uow,
+        project_id,
+        tmp_path,
+        tmp_path / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+    )
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=tmp_path, check=True
+    )
 
     project = Project(
         project_id=project_id,
@@ -241,14 +240,6 @@ def setup_env(tmp_path: Path, in_memory_uow):
         checks=[{"name": "pytest", "command": "pytest"}],
     )
     in_memory_uow.projects.save(project)
-
-    managed_binding = ProjectManagedRepositoryBinding(
-        project_id=project_id,
-        canonical_repository_identity="github.com/silverberdi/mini-me",
-        managed_repository_root=str(tmp_path.resolve()),
-        worktree_parent_dir=str((tmp_path / ".minime" / "worktrees").resolve()),
-    )
-    in_memory_uow.project_managed_repository_bindings.save(managed_binding)
 
     binding = ProjectBinding(
         project_id=project_id,

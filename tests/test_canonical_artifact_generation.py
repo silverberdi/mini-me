@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tests.conftest import InMemoryPersistenceUnitOfWork
+from tests.conftest import InMemoryPersistenceUnitOfWork, setup_managed_repository_fixture
 
 from minime.domain.enums import WorkItemPriority, WorkItemStatus
 from minime.domain.models import BacklogItem, Project
@@ -14,9 +14,10 @@ from minime.services.openspec_generator import OpenSpecGenerator
 
 def test_openspec_generator_creates_valid_structure(tmp_path: Path) -> None:
     repo_dir = tmp_path / "repo"
-    repo_dir.mkdir()
+    uow = InMemoryPersistenceUnitOfWork()
+    setup_managed_repository_fixture(uow, "test-proj", repo_dir, tmp_path / "worktrees")
 
-    generator = OpenSpecGenerator(project_root=repo_dir)
+    generator = OpenSpecGenerator(project_root=repo_dir, uow=uow)
 
     item = BacklogItem(
         project_id="test-proj",
@@ -32,7 +33,7 @@ def test_openspec_generator_creates_valid_structure(tmp_path: Path) -> None:
     )
 
     generated = generator.generate_from_backlog_item(item, project_name="test-proj")
-    spec_dir = generator.write_to_disk(generated, "openspec")
+    spec_dir = generator.write_to_disk(generated, "openspec", project_id="test-proj")
 
     assert generated.change_name == "022-rate-limiting"
     assert (spec_dir / "proposal.md").exists()
@@ -49,7 +50,7 @@ def test_prepare_work_item_idempotency(
     in_memory_uow: InMemoryPersistenceUnitOfWork, tmp_path: Path
 ) -> None:
     repo_dir = tmp_path / "app-repo"
-    repo_dir.mkdir()
+    setup_managed_repository_fixture(in_memory_uow, "app-proj", repo_dir, tmp_path / "worktrees")
 
     project = Project(
         project_id="app-proj",

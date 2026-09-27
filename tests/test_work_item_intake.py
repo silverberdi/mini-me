@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from tests.conftest import InMemoryPersistenceUnitOfWork
+from tests.conftest import InMemoryPersistenceUnitOfWork, setup_managed_repository_fixture
 
 from minime.domain.enums import WorkItemPriority, WorkItemStatus
 from minime.domain.models import Project, WorkItemCreateInput, WorkItemUpdateInput
@@ -16,7 +16,7 @@ def test_create_and_update_work_item(
     in_memory_uow: InMemoryPersistenceUnitOfWork, tmp_path: Path
 ) -> None:
     repo_dir = tmp_path / "work-repo"
-    repo_dir.mkdir()
+    setup_managed_repository_fixture(in_memory_uow, "work-project", repo_dir, tmp_path / "worktrees")
 
     project = Project(
         project_id="work-project",
@@ -70,7 +70,7 @@ def test_create_duplicate_work_item_fails(
     in_memory_uow: InMemoryPersistenceUnitOfWork, tmp_path: Path
 ) -> None:
     repo_dir = tmp_path / "work-repo"
-    repo_dir.mkdir()
+    setup_managed_repository_fixture(in_memory_uow, "work-project", repo_dir, tmp_path / "worktrees")
 
     project = Project(
         project_id="work-project",
@@ -115,7 +115,7 @@ def test_reconcile_backlog_projections_with_terminal_and_human_states(
     from minime.domain.models import BacklogItem, Change, OrchestrationRun, utc_now
 
     repo_dir = tmp_path / "work-repo"
-    repo_dir.mkdir()
+    setup_managed_repository_fixture(in_memory_uow, "work-project", repo_dir, tmp_path / "worktrees")
 
     project = Project(
         project_id="work-project",

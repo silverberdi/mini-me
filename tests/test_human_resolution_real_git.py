@@ -21,7 +21,6 @@ from minime.domain.models import (
     Job,
     OrchestrationCandidate,
     OrchestrationRun,
-    OrchestrationWorktreeOwnership,
     Project,
     ProjectManagedRepositoryBinding,
 )
@@ -38,12 +37,24 @@ def git(repo: Path, *args: str) -> str:
 
 
 def make_repo(tmp_path: Path, conflict: bool) -> tuple[Path, str, str, str]:
+    import json
     repo = tmp_path / "repo"
     repo.mkdir()
     git(repo, "init", "-b", "main")
     git(repo, "config", "user.name", "Test")
     git(repo, "config", "user.email", "test@example.com")
     git(repo, "remote", "add", "origin", "https://github.com/owner/repo.git")
+    marker = repo / ".minime-managed-project.json"
+    marker.write_text(
+        json.dumps(
+            {
+                "project_id": "mini-me",
+                "canonical_repository_identity": "github.com/owner/repo",
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
     (repo / "shared.txt").write_text("base\n", encoding="utf-8")
     git(repo, "add", ".")
     git(repo, "commit", "-m", "base A")
@@ -68,6 +79,8 @@ def make_repo(tmp_path: Path, conflict: bool) -> tuple[Path, str, str, str]:
 
 
 def make_service(uow, repo: Path, base_a: str, candidate_sha: str, candidate_ref: str):
+    from tests.conftest import create_test_worktree_ownership, write_test_worktree_ownership_marker
+
     project = Project(
         project_id="mini-me",
         display_name="mini me",
@@ -116,16 +129,21 @@ def make_service(uow, repo: Path, base_a: str, candidate_sha: str, candidate_ref
         candidate_ref=candidate_ref,
         manifest_hash="historical-manifest",
     )
-    ownership = OrchestrationWorktreeOwnership(
+    wt_path = repo / ".minime" / "worktrees" / job.job_id
+    ownership = create_test_worktree_ownership(
+        uow,
         worktree_id="wt-human-resolution",
         project_id="mini-me",
         job_id=job.job_id,
         run_id=run.run_id,
         change_name=change.name,
-        canonical_worktree_path=str((repo / ".minime" / "worktrees" / job.job_id).resolve()),
+        canonical_worktree_path=wt_path,
+        source_repository_identity="github.com/owner/repo",
+        source_base_sha=base_a,
+        branch="main",
         creation_state=WorktreeCreationState.CREATED,
     )
-    uow.orchestration_worktree_ownerships.save(ownership)
+    write_test_worktree_ownership_marker(wt_path, ownership)
     uow.projects.save(project)
     uow.project_managed_repository_bindings.save(binding)
     uow.changes.save(change)
@@ -156,30 +174,13 @@ def make_service(uow, repo: Path, base_a: str, candidate_sha: str, candidate_ref
 
 
 def test_advanced_base_real_git_integration_and_idempotency(tmp_path, in_memory_uow):
+
     repo, base_a, candidate_sha, base_b = make_repo(tmp_path, conflict=False)
     service, run_id = make_service(
         in_memory_uow, repo, base_a, candidate_sha, "refs/heads/historical-candidate"
     )
     service.drive_coordinator = lambda run_id, project_root=None: (
         in_memory_uow.orchestration_runs.get_by_id(run_id)
-    )
-
-    integration_wt_path = (
-        repo
-        / ".minime"
-        / "worktrees"
-        / f"job-human-resolution-integration-gen2-{base_b[:12]}"
-    ).resolve()
-    in_memory_uow.orchestration_worktree_ownerships.save(
-        OrchestrationWorktreeOwnership(
-            worktree_id="wt-integration-gen2",
-            project_id="mini-me",
-            job_id="job-human-resolution",
-            run_id=run_id,
-            change_name="010-governance-and-recovery-hardening",
-            canonical_worktree_path=str(integration_wt_path),
-            creation_state=WorktreeCreationState.CREATED,
-        )
     )
 
     resolved = service.resolve_preserved_candidate(

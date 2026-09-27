@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tests.conftest import InMemoryPersistenceUnitOfWork, init_git_repo
+from tests.conftest import (
+    InMemoryPersistenceUnitOfWork,
+    ReadinessGitHubStub,
+    setup_managed_repository_fixture,
+)
 
 from minime.domain.enums import ProviderHealthStatus, WorkItemPriority, WorkItemStatus
 from minime.domain.models import BacklogItem, Project, ProviderHealth, WorkItemAnswerInput
@@ -15,7 +19,7 @@ def test_needs_human_question_answering_flow(
     in_memory_uow: InMemoryPersistenceUnitOfWork, tmp_path: Path
 ) -> None:
     repo_dir = tmp_path / "app-repo"
-    repo_dir.mkdir()
+    setup_managed_repository_fixture(in_memory_uow, "app-proj", repo_dir, tmp_path / "worktrees")
 
     project = Project(
         project_id="app-proj",
@@ -42,8 +46,6 @@ def test_needs_human_question_answering_flow(
         acceptance_criteria=[],
     )
     in_memory_uow.backlog_items.save(item)
-
-    from tests.conftest import ReadinessGitHubStub
 
     service = IntakeService(
         in_memory_uow, project_root=repo_dir, github_adapter=ReadinessGitHubStub()
@@ -74,11 +76,8 @@ def test_needs_human_question_answering_flow(
 def test_start_work_item_and_duplicate_suppression(
     in_memory_uow: InMemoryPersistenceUnitOfWork, tmp_path: Path
 ) -> None:
-    from tests.conftest import ReadinessGitHubStub
-
     repo_dir = tmp_path / "app-repo"
-    repo_dir.mkdir()
-    init_git_repo(repo_dir)
+    setup_managed_repository_fixture(in_memory_uow, "app-proj", repo_dir, tmp_path / "worktrees")
 
     project = Project(
         project_id="app-proj",

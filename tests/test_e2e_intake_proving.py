@@ -8,7 +8,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tests.conftest import InMemoryPersistenceUnitOfWork, ReadinessGitHubStub, init_git_repo
+from tests.conftest import (
+    InMemoryPersistenceUnitOfWork,
+    ReadinessGitHubStub,
+    setup_managed_repository_fixture,
+)
 
 from minime.domain.enums import (
     ProjectOnboardingStatus,
@@ -33,9 +37,15 @@ def test_end_to_end_autonomous_intake_proving(
     # Setup Repository Context on Disk
     # -------------------------------------------------------------------------
     repo_dir = tmp_path / "mini-me"
-    repo_dir.mkdir()
-    (repo_dir / "docs").mkdir()
-    (repo_dir / "openspec").mkdir()
+    setup_managed_repository_fixture(
+        in_memory_uow,
+        "mini-me",
+        repo_dir,
+        tmp_path / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+    )
+    (repo_dir / "docs").mkdir(exist_ok=True)
+    (repo_dir / "openspec").mkdir(exist_ok=True)
 
     (repo_dir / "README.md").write_text(
         "# mini me\n\nAutonomous agentic software engineering runtime.\n"
@@ -48,7 +58,9 @@ def test_end_to_end_autonomous_intake_proving(
         "### 022 — Greenfield Proving — NEXT\n"
     )
 
-    init_git_repo(repo_dir)
+    import subprocess
+    subprocess.run(["git", "add", "."], cwd=repo_dir, check=True)
+    subprocess.run(["git", "commit", "-m", "add base docs"], cwd=repo_dir, check=True, capture_output=True)
 
     github_stub = ReadinessGitHubStub()
 

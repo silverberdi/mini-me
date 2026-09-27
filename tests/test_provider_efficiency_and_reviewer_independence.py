@@ -14,6 +14,13 @@ Covers:
 from pathlib import Path
 from unittest.mock import MagicMock
 
+from tests.conftest import (
+    InMemoryPersistenceUnitOfWork,
+    create_test_worktree_ownership,
+    setup_managed_repository_fixture,
+    write_test_worktree_ownership_marker,
+)
+
 from minime.domain.enums import (
     AttemptProductivityClass,
     ContinuationDecision,
@@ -347,13 +354,33 @@ def test_same_sha_anti_loop_suppression():
     assert res.suppressed_same_sha is True
 
 
-def test_lightweight_in_process_reconciliation(tmp_path: Path):
+
+def test_lightweight_in_process_reconciliation(tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork):
     """Mandatory Rule D: In-process reconciliation marks remaining tasks and records evidence at 0 LLM cost."""
-    uow = MockUOW()
-    rec_service = LightweightReconciliationService(uow)
+    setup_managed_repository_fixture(
+        in_memory_uow,
+        "proj-1",
+        tmp_path,
+        tmp_path / "worktrees",
+        canonical_repository_identity="github.com/owner/repo",
+    )
+    worktree_path = tmp_path / "worktrees" / "wt-1"
+    ownership = create_test_worktree_ownership(
+        in_memory_uow,
+        worktree_id="wt-1",
+        project_id="proj-1",
+        job_id="job-rec-1",
+        run_id="run-1",
+        change_name="018-test-change",
+        canonical_worktree_path=worktree_path,
+        source_repository_identity="github.com/owner/repo",
+    )
+    write_test_worktree_ownership_marker(worktree_path, ownership)
+
+    rec_service = LightweightReconciliationService(in_memory_uow)
 
     # Create synthetic change dir with tasks.md
-    change_dir = tmp_path / "openspec" / "changes" / "018-test-change"
+    change_dir = worktree_path / "openspec" / "changes" / "018-test-change"
     change_dir.mkdir(parents=True, exist_ok=True)
     tasks_file = change_dir / "tasks.md"
     tasks_file.write_text(
@@ -377,7 +404,7 @@ def test_lightweight_in_process_reconciliation(tmp_path: Path):
     )
 
     result = rec_service.reconcile_bookkeeping(
-        worktree_path=tmp_path,
+        worktree_path=worktree_path,
         openspec_path="openspec",
         change_name="018-test-change",
         project=project,
@@ -394,7 +421,7 @@ def test_lightweight_in_process_reconciliation(tmp_path: Path):
     assert "- [x] 1.2 tasks.md reconciliation and evidence sync" in updated_tasks
 
     # Verify event was emitted
-    events = uow._events
+    events = in_memory_uow.events.list_events(project_id="proj-1")
     assert any(e.event_type == EventType.LIGHTWEIGHT_RECONCILIATION_PERFORMED for e in events)
 
 

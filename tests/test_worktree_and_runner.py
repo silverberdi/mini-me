@@ -7,11 +7,10 @@ import sys
 from pathlib import Path
 
 import pytest
-from tests.conftest import InMemoryPersistenceUnitOfWork
+from tests.conftest import InMemoryPersistenceUnitOfWork, setup_managed_repository_fixture
 
 from minime.adapters.github import GitHubAdapter
 from minime.config import AppConfig, CliInvocationConfig, ProviderConfig, load_config
-from minime.domain.models import ProjectManagedRepositoryBinding
 from minime.services.implementer_runner import CliImplementerRunner, runner_for_implementer
 from minime.services.reviewer_runner import CliReviewerRunner, runner_for_reviewer
 from minime.services.worktree_manager import WorktreeManager
@@ -28,23 +27,15 @@ async def run(cmd: list[str], cwd: Path) -> None:
     assert proc.returncode == 0, (stdout.decode(), stderr.decode())
 
 
-async def setup_test_repo(repo_path: Path, uow: InMemoryPersistenceUnitOfWork, project_id: str = "test-project") -> None:
-    repo_path.mkdir(parents=True, exist_ok=True)
-    await run(["git", "init", "-b", "main"], repo_path)
-    await run(["git", "config", "user.email", "test@example.com"], repo_path)
-    await run(["git", "config", "user.name", "Test User"], repo_path)
-    await run(["git", "remote", "add", "origin", f"https://github.com/org/{project_id}"], repo_path)
-    (repo_path / "README.md").write_text("hello\n", encoding="utf-8")
-    await run(["git", "add", "README.md"], repo_path)
-    await run(["git", "commit", "-m", "initial"], repo_path)
 
-    binding = ProjectManagedRepositoryBinding(
-        project_id=project_id,
+async def setup_test_repo(repo_path: Path, uow: InMemoryPersistenceUnitOfWork, project_id: str = "test-project") -> None:
+    setup_managed_repository_fixture(
+        uow,
+        project_id,
+        repo_path,
+        repo_path / ".minime" / "worktrees",
         canonical_repository_identity=f"github.com/org/{project_id}",
-        managed_repository_root=str(repo_path.resolve()),
-        worktree_parent_dir=str((repo_path / ".minime" / "worktrees").resolve()),
     )
-    uow.project_managed_repository_bindings.save(binding)
 
 
 @pytest.mark.asyncio
@@ -94,8 +85,10 @@ async def test_cleanup_worktree_refuses_dirty_worktree_without_deleting_it(tmp_p
 
     manager._git = recording_git
 
-    with pytest.raises(RuntimeError, match="Refusing to remove dirty"):
-        await manager.cleanup_worktree("job-recovery", project_id="job-rec-proj")
+    res = await manager.cleanup_worktree("job-recovery", project_id="job-rec-proj")
+    from minime.domain.enums import ExternalOutcome, ExternalReasonCode
+    assert res.outcome == ExternalOutcome.FAILURE
+    assert res.reason_code == ExternalReasonCode.POLICY_DENIED
 
     assert info.path.exists()
     assert (info.path / "README.md").read_text(encoding="utf-8") == "recovered\n"
@@ -129,6 +122,7 @@ async def test_remove_clean_worktree_removes_clean_managed_worktree(tmp_path):
 @pytest.mark.asyncio
 async def test_production_push_uses_repository_root_after_worktree_cleanup(tmp_path):
     """A finalized candidate remains pushable after its managed worktree is removed."""
+    import json
     repo = tmp_path / "repo"
     remote = tmp_path / "remote.git"
     uow = InMemoryPersistenceUnitOfWork()
@@ -142,6 +136,10 @@ async def test_production_push_uses_repository_root_after_worktree_cleanup(tmp_p
     binding = uow.project_managed_repository_bindings.get_by_project_id("job-push-proj")
     binding.canonical_repository_identity = str(remote.resolve())
     uow.project_managed_repository_bindings.save(binding)
+    (repo / ".minime-managed-project.json").write_text(
+        json.dumps({"project_id": "job-push-proj", "canonical_repository_identity": str(remote.resolve())}),
+        encoding="utf-8",
+    )
 
     manager = WorktreeManager(repo, uow=uow)
     info = await manager.create_worktree("job-push", "008-autonomous-change-orchestration", "main", project_id="job-push-proj", run_id="run-push")

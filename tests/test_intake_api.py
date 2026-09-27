@@ -5,7 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi.testclient import TestClient
-from tests.conftest import InMemoryPersistenceUnitOfWork, ReadinessGitHubStub, init_git_repo
+from tests.conftest import (
+    InMemoryPersistenceUnitOfWork,
+    ReadinessGitHubStub,
+    setup_managed_repository_fixture,
+)
 
 from minime.api.app import (
     app,
@@ -58,8 +62,7 @@ def test_api_backlog_crud_and_lifecycle(
     in_memory_uow: InMemoryPersistenceUnitOfWork, tmp_path: Path
 ) -> None:
     repo_dir = tmp_path / "api-repo"
-    repo_dir.mkdir()
-    init_git_repo(repo_dir)
+    setup_managed_repository_fixture(in_memory_uow, "api-project", repo_dir, tmp_path / "worktrees")
 
     github_stub = ReadinessGitHubStub()
     app.dependency_overrides[get_uow] = lambda: in_memory_uow
