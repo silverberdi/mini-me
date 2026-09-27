@@ -222,7 +222,7 @@ def test_post_merge_completes_when_sync_and_archive_verified(tmp_path: Path):
 
 def test_post_merge_blocks_when_archive_fails(tmp_path: Path):
     uow = InMemoryUnitOfWork()
-    _setup_uow(uow)
+    _setup_uow(uow, tmp_path=tmp_path)
     _make_change(tmp_path)
 
     mock_sync = MagicMock(spec=OpenSpecSyncService)
@@ -271,7 +271,7 @@ def test_post_merge_blocks_when_archive_fails(tmp_path: Path):
 
 def test_post_merge_blocks_when_sync_evidence_missing(tmp_path: Path):
     uow = InMemoryUnitOfWork()
-    _setup_uow(uow)
+    _setup_uow(uow, tmp_path=tmp_path)
     _make_change(tmp_path)
 
     mock_sync = MagicMock(spec=OpenSpecSyncService)
@@ -312,7 +312,7 @@ def test_post_merge_blocks_when_sync_evidence_missing(tmp_path: Path):
 
 def test_post_merge_blocks_when_issue_close_unknown_or_ambiguous(tmp_path: Path):
     uow = InMemoryUnitOfWork()
-    _setup_uow(uow)
+    _setup_uow(uow, tmp_path=tmp_path)
     _make_change(tmp_path)
 
     adapter = _github_adapter()
@@ -340,7 +340,7 @@ def test_post_merge_blocks_when_issue_close_unknown_or_ambiguous(tmp_path: Path)
 
 def test_post_merge_blocks_when_project_item_update_fails(tmp_path: Path):
     uow = InMemoryUnitOfWork()
-    _setup_uow(uow)
+    _setup_uow(uow, tmp_path=tmp_path)
     _make_change(tmp_path)
 
     adapter = _github_adapter()
@@ -365,7 +365,7 @@ def test_post_merge_blocks_when_project_item_update_fails(tmp_path: Path):
 
 def test_post_merge_blocks_when_worktree_cleanup_fails(tmp_path: Path):
     uow = InMemoryUnitOfWork()
-    _setup_uow(uow)
+    _setup_uow(uow, tmp_path=tmp_path)
     _make_change(tmp_path)
 
     # Create a fake worktree directory that cannot be removed
@@ -397,7 +397,7 @@ def test_post_merge_blocks_when_worktree_cleanup_fails(tmp_path: Path):
 
 def test_post_merge_blocks_when_remote_branch_cleanup_fails(tmp_path: Path):
     uow = InMemoryUnitOfWork()
-    _setup_uow(uow)
+    _setup_uow(uow, tmp_path=tmp_path)
     _make_change(tmp_path)
 
     adapter = _github_adapter()
@@ -459,51 +459,65 @@ def test_sync_and_archive_retry_safety_semantics(tmp_path: Path):
 
 
 def test_local_branch_authoritative_absent_returns_success_already_absent(tmp_path: Path):
-    import subprocess
-    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=False)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, capture_output=True, check=False)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=False)
-    subprocess.run(["git", "commit", "--allow-empty", "-m", "init"], cwd=tmp_path, capture_output=True, check=False)
-    service = PostMergeReconciliationService(uow=InMemoryUnitOfWork(), project_root=tmp_path, github_adapter=_github_adapter())
-    res = service._delete_local_branch("non-existent-branch")
+    _make_change(tmp_path)
+    uow = InMemoryUnitOfWork()
+    _setup_uow(uow, tmp_path=tmp_path)
+    service = PostMergeReconciliationService(uow=uow, project_root=tmp_path, github_adapter=_github_adapter())
+    res = service._delete_local_branch("non-existent-branch", project_id="mini-me")
     assert res.outcome == ExternalOutcome.SUCCESS
     assert res.reason_code == ExternalReasonCode.ALREADY_ABSENT
 
 
 def test_local_branch_show_ref_error_returns_unknown(tmp_path: Path, monkeypatch):
-    service = PostMergeReconciliationService(uow=InMemoryUnitOfWork(), project_root=tmp_path, github_adapter=_github_adapter())
-    # Mock subprocess.run for show-ref pre-check to return exit code 128 (fatal git repo error)
-    monkeypatch.setattr(
-        "subprocess.run",
-        lambda *args, **kwargs: MagicMock(returncode=128, stderr="fatal: not a git repository"),
-    )
-    res = service._delete_local_branch("some-branch")
+    import subprocess
+    _make_change(tmp_path)
+    uow = InMemoryUnitOfWork()
+    _setup_uow(uow, tmp_path=tmp_path)
+    service = PostMergeReconciliationService(uow=uow, project_root=tmp_path, github_adapter=_github_adapter())
+
+    orig_run = subprocess.run
+    def mock_run(cmd, **kwargs):
+        if isinstance(cmd, list) and "show-ref" in cmd:
+            proc = MagicMock()
+            proc.returncode = 128
+            proc.stderr = "fatal: not a git repository"
+            return proc
+        return orig_run(cmd, **kwargs)
+
+    monkeypatch.setattr("subprocess.run", mock_run)
+    res = service._delete_local_branch("some-branch", project_id="mini-me")
     assert res.outcome == ExternalOutcome.UNKNOWN
     assert res.reason_code == ExternalReasonCode.UNOBSERVABLE
     assert res.data is False
 
 
 def test_local_branch_post_check_unobservable_returns_unknown(tmp_path: Path, monkeypatch):
-    service = PostMergeReconciliationService(uow=InMemoryUnitOfWork(), project_root=tmp_path, github_adapter=_github_adapter())
+    import subprocess
+    _make_change(tmp_path)
+    uow = InMemoryUnitOfWork()
+    _setup_uow(uow, tmp_path=tmp_path)
+    service = PostMergeReconciliationService(uow=uow, project_root=tmp_path, github_adapter=_github_adapter())
     calls = 0
 
+    orig_run = subprocess.run
     def mock_run(cmd, **kwargs):
         nonlocal calls
-        calls += 1
-        proc = MagicMock()
-        if "branch" in cmd:
-            proc.returncode = 0
+        if isinstance(cmd, list) and ("show-ref" in cmd or "branch" in cmd):
+            proc = MagicMock()
+            if "branch" in cmd:
+                proc.returncode = 0
+                return proc
+            calls += 1
+            if calls == 1:
+                proc.returncode = 0
+            else:
+                proc.returncode = 128
+                proc.stderr = "git error"
             return proc
-        # show-ref calls: pre-check (call 1) returns 0 (branch exists), post-check (call 2) returns 128 (error)
-        if calls == 1:
-            proc.returncode = 0
-        else:
-            proc.returncode = 128
-            proc.stderr = "git error"
-        return proc
+        return orig_run(cmd, **kwargs)
 
     monkeypatch.setattr("subprocess.run", mock_run)
-    res = service._delete_local_branch("test-branch")
+    res = service._delete_local_branch("test-branch", project_id="mini-me")
     assert res.outcome == ExternalOutcome.UNKNOWN
     assert res.reason_code == ExternalReasonCode.UNOBSERVABLE
     assert res.data is False
@@ -511,7 +525,7 @@ def test_local_branch_post_check_unobservable_returns_unknown(tmp_path: Path, mo
 
 def test_worktree_scan_failure_returns_unknown_and_blocks_completion(tmp_path: Path, monkeypatch):
     uow = InMemoryUnitOfWork()
-    _setup_uow(uow)
+    _setup_uow(uow, tmp_path=tmp_path)
     _make_change(tmp_path)
 
     service = PostMergeReconciliationService(uow=uow, project_root=tmp_path, github_adapter=_github_adapter())
@@ -589,29 +603,29 @@ def test_archive_verify_reused_existing_without_independent_manifest_returns_unk
 
 
 def test_cleanup_branch_and_worktree_mutations_return_retry_safety_unsafe(tmp_path: Path):
+    _make_change(tmp_path)
+    uow = InMemoryUnitOfWork()
+    _setup_uow(uow, tmp_path=tmp_path)
+
     import subprocess
-    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=False)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, capture_output=True, check=False)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=False)
-    subprocess.run(["git", "commit", "--allow-empty", "-m", "init"], cwd=tmp_path, capture_output=True, check=False)
     subprocess.run(["git", "branch", "to-delete"], cwd=tmp_path, capture_output=True, check=False)
 
-    service = PostMergeReconciliationService(uow=InMemoryUnitOfWork(), project_root=tmp_path, github_adapter=_github_adapter())
+    service = PostMergeReconciliationService(uow=uow, project_root=tmp_path, github_adapter=_github_adapter())
 
     # Actual git branch -D executed and verified -> RetrySafety.UNSAFE
-    del_res = service._delete_local_branch("to-delete")
+    del_res = service._delete_local_branch("to-delete", project_id="mini-me")
     assert del_res.outcome == ExternalOutcome.SUCCESS
     assert del_res.reason_code == ExternalReasonCode.EXECUTION_SUCCESS
     assert del_res.retry_safety == RetrySafety.UNSAFE
 
     # Pre-check proves branch already absent -> RetrySafety.SAFE
-    absent_res = service._delete_local_branch("absent-branch")
+    absent_res = service._delete_local_branch("absent-branch", project_id="mini-me")
     assert absent_res.outcome == ExternalOutcome.SUCCESS
     assert absent_res.reason_code == ExternalReasonCode.ALREADY_ABSENT
     assert absent_res.retry_safety == RetrySafety.SAFE
 
     # Worktree clean with no target paths (authoritative already absent) -> RetrySafety.SAFE
-    wt_absent = service._clean_worktrees("non-existent-job")
+    wt_absent = service._clean_worktrees("non-existent-job", project_id="mini-me")
     assert wt_absent.outcome == ExternalOutcome.SUCCESS
     assert wt_absent.reason_code == ExternalReasonCode.ALREADY_ABSENT
     assert wt_absent.retry_safety == RetrySafety.SAFE
