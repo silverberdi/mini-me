@@ -334,7 +334,7 @@ class IntakeService:
 
         # 2. Write OpenSpec files to disk
         self.openspec_generator.write_change_to_disk(
-            project.openspec_path, generated, overwrite=True, project_id=project_id
+            project.openspec_path, generated, overwrite=True, project_id=project_id, uow=self.uow
         )
 
         # Save/update Change entity in DB

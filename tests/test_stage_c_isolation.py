@@ -1978,6 +1978,7 @@ def test_remediation_worktree_reuse_requires_full_durable_adoption_proof(tmp_dir
     # 4. Valid CREATED ownership & Git identity & worktree list => Accepted
     ownership.creation_state = WorktreeCreationState.CREATED
     uow.orchestration_worktree_ownerships.save(ownership)
+    wt_manager._write_ownership_marker(rem_path, ownership)
 
     with patch.object(wt_manager, "_git") as mock_git, patch.object(wt_manager, "current_sha", new_callable=AsyncMock) as mock_sha:
         mock_sha.return_value = source_sha
@@ -2334,6 +2335,218 @@ def test_post_merge_service_source_code_has_no_direct_worktree_remove():
     src = inspect.getsource(PostMergeReconciliationService)
     assert 'git", "worktree", "remove"' not in src
     assert "worktree remove --force" not in src
+
+
+def test_openspec_generator_missing_uow_or_project_id_fails_closed_zero_writes(tmp_dirs):
+    from minime.services.openspec_generator import GeneratedOpenSpec, OpenSpecGenerator
+
+    gen = OpenSpecGenerator(project_root=tmp_dirs["repo_root"], uow=None)
+    spec = GeneratedOpenSpec(
+        change_name="test-zero-write",
+        proposal_content="# Proposal\n",
+        tasks_content="- [ ] 1.1 Task\n",
+    )
+
+    target_dir = Path(tmp_dirs["repo_root"]) / "openspec" / "changes" / "test-zero-write"
+    with pytest.raises(RuntimeError, match="mandatory for disk mutation"):
+        gen.write_change_to_disk("openspec", spec, project_id=None)
+    assert not target_dir.exists()
+
+    uow = MockUOW()
+    gen_with_uow = OpenSpecGenerator(project_root=tmp_dirs["repo_root"], uow=uow)
+    with pytest.raises(RuntimeError, match="mandatory for disk mutation"):
+        gen_with_uow.write_change_to_disk("openspec", spec, project_id=None)
+    assert not target_dir.exists()
+
+
+def test_lightweight_reconciliation_missing_uow_fails_closed(tmp_dirs):
+    from minime.domain.models import Job, Project
+    from minime.services.lightweight_reconciliation_service import LightweightReconciliationService
+
+    rec = LightweightReconciliationService(uow=None)
+    tasks_dir = Path(tmp_dirs["repo_root"]) / "openspec" / "changes" / "rec-change"
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+    tasks_file = tasks_dir / "tasks.md"
+    initial_content = "# Tasks\n- [ ] 1.1 test verification task\n"
+    tasks_file.write_text(initial_content, encoding="utf-8")
+
+    job = Job(job_id="job-rec-1", project_id="proj-rec", change_name="rec-change", implementer_role="codex")
+    project = Project(project_id="proj-rec", display_name="rec", repository="org/repo")
+
+    with pytest.raises(RuntimeError, match="self.uow is mandatory for tasks.md mutation"):
+        rec.reconcile_bookkeeping(
+            worktree_path=tmp_dirs["repo_root"],
+            openspec_path="openspec",
+            change_name="rec-change",
+            job=job,
+            project=project,
+            checks_passed=True,
+        )
+
+    assert tasks_file.read_text(encoding="utf-8") == initial_content
+
+
+def test_integration_worktree_adoption_proof_adversarial_checks(tmp_dirs):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_dirs["repo_root"], check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_dirs["repo_root"], check=True)
+    (Path(tmp_dirs["repo_root"]) / "README.md").write_text("init", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_dirs["repo_root"], check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+    base_sha = (subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True, text=True)).stdout.strip()
+
+    uow = MockUOW()
+    binding = ProjectManagedRepositoryBinding(
+        project_id="proj-int-adv",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["repo_root"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+    )
+    uow.project_managed_repository_bindings.save(binding)
+    uow.jobs.save(Job(job_id="job-int-adv", project_id="proj-int-adv", change_name="change-int", implementer_role="codex"))
+    uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id="run-int-adv",
+            active_job_id="job-int-adv",
+            project_id="proj-int-adv",
+            change_name="change-int",
+            base_sha=base_sha,
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            resumable_stage=OrchestrationStage.IMPLEMENTING,
+            is_active=True,
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        )
+    )
+
+    wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
+    int_path = Path(tmp_dirs["worktrees"]) / "job-int-adv-integration-gen1"
+    subprocess.run(["git", "worktree", "add", "-b", "minime/integration-gen1", str(int_path), "HEAD"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+
+    with pytest.raises(RuntimeError, match="No durable OrchestrationWorktreeOwnership record found"):
+        asyncio.run(
+            wt_manager.create_integration_worktree(
+                job_id="job-int-adv",
+                branch_name="minime/integration-gen1",
+                base_sha=base_sha,
+                generation=1,
+                project_id="proj-int-adv",
+                run_id="run-int-adv",
+                change_name="change-int",
+            )
+        )
+
+    ownership = OrchestrationWorktreeOwnership(
+        worktree_id="wt-job-int-adv-integration-gen1",
+        project_id="proj-int-adv",
+        job_id="job-int-adv",
+        run_id="run-int-adv",
+        change_name="change-int",
+        canonical_worktree_path=str(int_path.resolve()),
+        branch="minime/integration-gen1",
+        source_repository_identity="github.com/org/repo",
+        source_base_sha=base_sha,
+        creation_state=WorktreeCreationState.CREATED,
+    )
+    uow.orchestration_worktree_ownerships.save(ownership)
+
+    ownership.run_id = "wrong-run"
+    uow.orchestration_worktree_ownerships.save(ownership)
+    with pytest.raises(RuntimeError, match="Run ID .* does not match durable"):
+        asyncio.run(
+            wt_manager.create_integration_worktree(
+                job_id="job-int-adv",
+                branch_name="minime/integration-gen1",
+                base_sha=base_sha,
+                generation=1,
+                project_id="proj-int-adv",
+                run_id="run-int-adv",
+                change_name="change-int",
+            )
+        )
+    ownership.run_id = "run-int-adv"
+    uow.orchestration_worktree_ownerships.save(ownership)
+
+    ownership.change_name = "wrong-change"
+    uow.orchestration_worktree_ownerships.save(ownership)
+    with pytest.raises(RuntimeError, match="Change name .* does not match durable"):
+        asyncio.run(
+            wt_manager.create_integration_worktree(
+                job_id="job-int-adv",
+                branch_name="minime/integration-gen1",
+                base_sha=base_sha,
+                generation=1,
+                project_id="proj-int-adv",
+                run_id="run-int-adv",
+                change_name="change-int",
+            )
+        )
+    ownership.change_name = "change-int"
+    uow.orchestration_worktree_ownerships.save(ownership)
+
+    ownership.branch = "wrong-branch"
+    uow.orchestration_worktree_ownerships.save(ownership)
+    with pytest.raises(RuntimeError, match="Branch .* does not match expected"):
+        asyncio.run(
+            wt_manager.create_integration_worktree(
+                job_id="job-int-adv",
+                branch_name="minime/integration-gen1",
+                base_sha=base_sha,
+                generation=1,
+                project_id="proj-int-adv",
+                run_id="run-int-adv",
+                change_name="change-int",
+            )
+        )
+    ownership.branch = "minime/integration-gen1"
+    uow.orchestration_worktree_ownerships.save(ownership)
+
+    ownership.source_repository_identity = "github.com/evil/repo"
+    uow.orchestration_worktree_ownerships.save(ownership)
+    with pytest.raises(RuntimeError, match="Source repository identity .* does not match binding"):
+        asyncio.run(
+            wt_manager.create_integration_worktree(
+                job_id="job-int-adv",
+                branch_name="minime/integration-gen1",
+                base_sha=base_sha,
+                generation=1,
+                project_id="proj-int-adv",
+                run_id="run-int-adv",
+                change_name="change-int",
+            )
+        )
+    ownership.source_repository_identity = "github.com/org/repo"
+    uow.orchestration_worktree_ownerships.save(ownership)
+
+    with pytest.raises(RuntimeError, match="Ownership marker file missing"):
+        asyncio.run(
+            wt_manager.create_integration_worktree(
+                job_id="job-int-adv",
+                branch_name="minime/integration-gen1",
+                base_sha=base_sha,
+                generation=1,
+                project_id="proj-int-adv",
+                run_id="run-int-adv",
+                change_name="change-int",
+            )
+        )
+
+
+def test_managed_repository_marker_missing_repository_identity_fails_closed(tmp_dirs):
+    uow = MockUOW()
+    guard = ManagedWorkspaceGuard(uow)
+
+    marker_path = Path(tmp_dirs["repo_root"]) / ".minime-managed-project.json"
+    marker_path.write_text(json.dumps({"project_id": "proj-marker-test", "canonical_repository_identity": ""}))
+
+    ok, msg, reason, outcome = guard.verify_managed_repository_ownership_marker(
+        tmp_dirs["repo_root"], "proj-marker-test", "github.com/org/repo"
+    )
+
+    assert ok is False
+    assert reason == ExternalReasonCode.EVIDENCE_INSUFFICIENT
+    assert outcome == ExternalOutcome.UNKNOWN
+    assert "missing mandatory canonical repository identity" in msg
 
 
 

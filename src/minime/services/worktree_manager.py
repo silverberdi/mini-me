@@ -675,69 +675,18 @@ class WorktreeManager:
         self._authorize_mutating_operation(eff_project_id, path, WorkspaceOperation.WORKTREE_CREATE)
 
         if path.exists():
-            ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None) if self.uow else None
-            ownership = ownership_repo.get_by_canonical_path(str(path.resolve())) if ownership_repo else None
-            if not ownership and ownership_repo and hasattr(ownership_repo, "get_by_job_id"):
-                cand = ownership_repo.get_by_job_id(job_id)
-                if cand and str(Path(cand.canonical_worktree_path).resolve()) == str(path.resolve()):
-                    ownership = cand
-
-            binding_repo = getattr(self.uow, "project_managed_repository_bindings", None) if self.uow else None
-            binding = binding_repo.get_by_project_id(eff_project_id) if binding_repo else None
-
-            adoption_valid = False
-            adoption_error = ""
-
-            if not ownership:
-                adoption_error = "No durable OrchestrationWorktreeOwnership record found."
-            elif ownership.creation_state != WorktreeCreationState.CREATED:
-                adoption_error = f"Worktree creation state is '{ownership.creation_state.value}', not CREATED."
-            elif ownership.project_id != eff_project_id:
-                adoption_error = f"Project ID '{ownership.project_id}' does not match expected '{eff_project_id}'."
-            elif ownership.job_id != job_id:
-                adoption_error = f"Job ID '{ownership.job_id}' does not match expected '{job_id}'."
-            elif ownership.run_id != eff_run_id:
-                adoption_error = f"Run ID '{ownership.run_id}' does not match durable '{eff_run_id}'."
-            elif ownership.change_name != eff_change_name:
-                adoption_error = f"Change name '{ownership.change_name}' does not match durable '{eff_change_name}'."
-            elif str(Path(ownership.canonical_worktree_path).resolve()) != str(path.resolve()):
-                adoption_error = f"Canonical path '{ownership.canonical_worktree_path}' does not match '{path.resolve()}'."
-            elif ownership.branch != branch:
-                adoption_error = f"Branch '{ownership.branch}' does not match expected '{branch}'."
-            elif binding and ownership.source_repository_identity != binding.canonical_repository_identity:
-                adoption_error = f"Source repository identity '{ownership.source_repository_identity}' does not match binding '{binding.canonical_repository_identity}'."
-            else:
-                try:
-                    wt_list_out = await self._git(["worktree", "list", "--porcelain"], cwd=self.project_root)
-                    wt_paths = [
-                        str(Path(line[9:].strip()).resolve())
-                        for line in wt_list_out.splitlines()
-                        if line.startswith("worktree ")
-                    ]
-                    if str(path.resolve()) not in wt_paths:
-                        adoption_error = f"Path '{path}' is not present in git worktree list."
-                    else:
-                        from minime.services.workspace_guard import ManagedWorkspaceGuard
-                        guard = self.workspace_guard or ManagedWorkspaceGuard(self.uow)
-                        git_ok, git_reason = guard.verify_git_repository_identity(
-                            str(path.resolve()), binding.canonical_repository_identity, binding.remote_name
-                        )
-                        if not git_ok:
-                            adoption_error = f"Git identity verification failed for remediation adoption: {git_reason}"
-                        else:
-                            actual_branch = (await self._git(["branch", "--show-current"], cwd=path)).strip()
-                            actual_sha = await self.current_sha(path)
-                            if actual_branch != branch or actual_sha != source_sha:
-                                adoption_error = f"Actual branch/SHA ('{actual_branch}', '{actual_sha}') does not match expected ('{branch}', '{source_sha}')."
-                            else:
-                                adoption_valid = True
-                except Exception as err:
-                    adoption_error = f"Remediation adoption check failed with error: {err}"
-
-            if adoption_valid:
-                return WorktreeInfo(path, branch, source_sha)
-            else:
-                raise RuntimeError(f"Refusing to adopt existing remediation worktree at '{path}': {adoption_error}")
+            await self._verify_worktree_adoption_proof(
+                path=path,
+                job_id=job_id,
+                eff_project_id=eff_project_id,
+                eff_run_id=eff_run_id,
+                eff_change_name=eff_change_name,
+                expected_branch=branch,
+                expected_base_sha=source_sha,
+                require_clean=False,
+                worktree_kind="remediation worktree",
+            )
+            return WorktreeInfo(path, branch, source_sha)
 
         # 2. Mandatory durable PENDING ownership before git worktree add
         ownership = self._persist_pending_ownership(
@@ -789,6 +738,106 @@ class WorktreeManager:
         }
         return tuple(sorted(found))
 
+    async def _verify_worktree_adoption_proof(
+        self,
+        *,
+        path: Path,
+        job_id: str,
+        eff_project_id: str,
+        eff_run_id: str,
+        eff_change_name: str,
+        expected_branch: str,
+        expected_base_sha: str | None = None,
+        require_clean: bool = True,
+        worktree_kind: str = "worktree",
+    ) -> None:
+        ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None) if self.uow else None
+        ownership = ownership_repo.get_by_canonical_path(str(path.resolve())) if ownership_repo else None
+        if not ownership and ownership_repo and hasattr(ownership_repo, "get_by_job_id"):
+            cand = ownership_repo.get_by_job_id(job_id)
+            if cand and str(Path(cand.canonical_worktree_path).resolve()) == str(path.resolve()):
+                ownership = cand
+
+        binding_repo = getattr(self.uow, "project_managed_repository_bindings", None) if self.uow else None
+        binding = binding_repo.get_by_project_id(eff_project_id) if binding_repo else None
+
+        if not ownership:
+            raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': No durable OrchestrationWorktreeOwnership record found.")
+        if ownership.creation_state != WorktreeCreationState.CREATED:
+            raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Worktree creation state is '{ownership.creation_state.value}', not CREATED.")
+        if getattr(ownership, "has_synthetic_placeholder", False):
+            raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Durable ownership record contains synthetic placeholders.")
+        if ownership.project_id != eff_project_id:
+            raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Project ID '{ownership.project_id}' does not match expected '{eff_project_id}'.")
+        if ownership.job_id != job_id:
+            raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Job ID '{ownership.job_id}' does not match expected '{job_id}'.")
+        if ownership.run_id != eff_run_id:
+            raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Run ID '{ownership.run_id}' does not match durable '{eff_run_id}'.")
+        if ownership.change_name != eff_change_name:
+            raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Change name '{ownership.change_name}' does not match durable '{eff_change_name}'.")
+        if str(Path(ownership.canonical_worktree_path).resolve()) != str(path.resolve()):
+            raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Canonical path '{ownership.canonical_worktree_path}' does not match '{path.resolve()}'.")
+        if ownership.branch != expected_branch:
+            raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Branch '{ownership.branch}' does not match expected '{expected_branch}'.")
+        if not binding:
+            raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': No valid ProjectManagedRepositoryBinding found for project '{eff_project_id}'.")
+        if ownership.source_repository_identity != binding.canonical_repository_identity:
+            raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Source repository identity '{ownership.source_repository_identity}' does not match binding '{binding.canonical_repository_identity}'.")
+        if expected_base_sha and ownership.source_base_sha != expected_base_sha:
+            raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Source base SHA '{ownership.source_base_sha}' does not match expected '{expected_base_sha}'.")
+
+        try:
+            wt_list_out = await self._git(["worktree", "list", "--porcelain"], cwd=self.project_root)
+            wt_paths = [
+                str(Path(line[9:].strip()).resolve())
+                for line in wt_list_out.splitlines()
+                if line.startswith("worktree ")
+            ]
+            if str(path.resolve()) not in wt_paths:
+                raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Path '{path}' is not present in git worktree list.")
+
+            from minime.services.workspace_guard import ManagedWorkspaceGuard
+            guard = self.workspace_guard or ManagedWorkspaceGuard(self.uow)
+            git_ok, git_reason = guard.verify_git_repository_identity(
+                str(path.resolve()), binding.canonical_repository_identity, binding.remote_name
+            )
+            if not git_ok:
+                raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Git identity verification failed: {git_reason}")
+
+            marker_file = path.resolve() / ".minime_worktree_ownership.json"
+            if not marker_file.exists():
+                raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Ownership marker file missing at '{marker_file}'.")
+            try:
+                m_data = json.loads(marker_file.read_text(encoding="utf-8"))
+                if m_data.get("worktree_id") != ownership.worktree_id or str(Path(m_data.get("canonical_worktree_path", "")).resolve()) != str(path.resolve()):
+                    raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Ownership marker data mismatch.")
+            except Exception as e:
+                if "Ownership marker" in str(e):
+                    raise
+                raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Corrupt ownership marker: {e}")
+
+            actual_branch = (await self._git(["branch", "--show-current"], cwd=path)).strip()
+            if actual_branch != expected_branch:
+                raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Actual branch '{actual_branch}' does not match expected '{expected_branch}'.")
+
+            if expected_base_sha:
+                actual_sha = await self.current_sha(path)
+                try:
+                    resolved_expected_sha = (await self._git(["rev-parse", expected_base_sha], cwd=self.project_root)).strip()
+                except Exception:
+                    resolved_expected_sha = expected_base_sha.strip()
+                if actual_sha != resolved_expected_sha and actual_sha != expected_base_sha.strip():
+                    raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Actual HEAD SHA '{actual_sha}' does not match expected '{expected_base_sha}'.")
+
+            if require_clean:
+                state = await self.inspect_worktree_state(path)
+                if state.dirty:
+                    raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Existing integration worktree is dirty: {path}")
+        except RuntimeError:
+            raise
+        except Exception as err:
+            raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Adoption check failed: {err}")
+
     async def create_worktree(
         self,
         job_id: str,
@@ -821,68 +870,18 @@ class WorktreeManager:
                 if any(path.iterdir()):
                     raise ValueError(f"Worktree path already exists and is not empty: {path}")
             else:
-                ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None) if self.uow else None
-                ownership = ownership_repo.get_by_canonical_path(str(path.resolve())) if ownership_repo else None
-                if not ownership and ownership_repo and hasattr(ownership_repo, "get_by_job_id"):
-                    cand = ownership_repo.get_by_job_id(job_id)
-                    if cand and str(Path(cand.canonical_worktree_path).resolve()) == str(path.resolve()):
-                        ownership = cand
-
-                binding_repo = getattr(self.uow, "project_managed_repository_bindings", None) if self.uow else None
-                binding = binding_repo.get_by_project_id(eff_project_id) if binding_repo else None
-
-                adoption_valid = False
-                adoption_error = ""
-
-                if not ownership:
-                    adoption_error = "No durable OrchestrationWorktreeOwnership record found."
-                elif ownership.creation_state != WorktreeCreationState.CREATED:
-                    adoption_error = f"Worktree creation state is '{ownership.creation_state.value}', not CREATED."
-                elif ownership.project_id != eff_project_id:
-                    adoption_error = f"Project ID '{ownership.project_id}' does not match expected '{eff_project_id}'."
-                elif ownership.job_id != job_id:
-                    adoption_error = f"Job ID '{ownership.job_id}' does not match expected '{job_id}'."
-                elif ownership.run_id != eff_run_id:
-                    adoption_error = f"Run ID '{ownership.run_id}' does not match durable '{eff_run_id}'."
-                elif ownership.change_name != eff_change_name:
-                    adoption_error = f"Change name '{ownership.change_name}' does not match durable '{eff_change_name}'."
-                elif str(Path(ownership.canonical_worktree_path).resolve()) != str(path.resolve()):
-                    adoption_error = f"Canonical path '{ownership.canonical_worktree_path}' does not match '{path.resolve()}'."
-                elif ownership.branch != branch_name:
-                    adoption_error = f"Branch '{ownership.branch}' does not match expected '{branch_name}'."
-                elif binding and ownership.source_repository_identity != binding.canonical_repository_identity:
-                    adoption_error = f"Source repository identity '{ownership.source_repository_identity}' does not match binding '{binding.canonical_repository_identity}'."
-                else:
-                    try:
-                        wt_list_out = await self._git(["worktree", "list", "--porcelain"], cwd=self.project_root)
-                        wt_paths = [
-                            str(Path(line[9:].strip()).resolve())
-                            for line in wt_list_out.splitlines()
-                            if line.startswith("worktree ")
-                        ]
-                        if str(path.resolve()) not in wt_paths:
-                            adoption_error = f"Path '{path}' is not present in git worktree list."
-                        else:
-                            from minime.services.workspace_guard import ManagedWorkspaceGuard
-                            guard = self.workspace_guard or ManagedWorkspaceGuard(self.uow)
-                            git_ok, git_reason = guard.verify_git_repository_identity(
-                                str(path.resolve()), binding.canonical_repository_identity, binding.remote_name
-                            )
-                            if not git_ok:
-                                adoption_error = f"Git identity verification failed for adoption: {git_reason}"
-                            else:
-                                actual_branch = (await self._git(["branch", "--show-current"], cwd=path)).strip()
-                                if actual_branch != branch_name:
-                                    adoption_error = f"Actual branch '{actual_branch}' does not match expected '{branch_name}'."
-                                else:
-                                    adoption_valid = True
-                    except Exception as err:
-                        adoption_error = f"Adoption check failed with error: {err}"
-
-                if adoption_valid:
-                    return WorktreeInfo(path=path, branch_name=branch_name, base_sha=base_sha)
-                else:
-                    raise RuntimeError(f"Refusing to adopt existing worktree at '{path}': {adoption_error}")
+                await self._verify_worktree_adoption_proof(
+                    path=path,
+                    job_id=job_id,
+                    eff_project_id=eff_project_id,
+                    eff_run_id=eff_run_id,
+                    eff_change_name=eff_change_name,
+                    expected_branch=branch_name,
+                    expected_base_sha=None,
+                    require_clean=False,
+                    worktree_kind="worktree",
+                )
+                return WorktreeInfo(path=path, branch_name=branch_name, base_sha=base_sha)
 
         if not run_id and self.uow and hasattr(self.uow, "jobs"):
             job = self.uow.jobs.get_by_id(job_id)
@@ -963,62 +962,18 @@ class WorktreeManager:
         )
 
         if path.exists():
-            ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None) if self.uow else None
-            ownership = ownership_repo.get_by_canonical_path(str(path.resolve())) if ownership_repo else None
-            if not ownership and ownership_repo and hasattr(ownership_repo, "get_by_job_id"):
-                cand = ownership_repo.get_by_job_id(job_id)
-                if cand and str(Path(cand.canonical_worktree_path).resolve()) == str(path.resolve()):
-                    ownership = cand
-
-            binding_repo = getattr(self.uow, "project_managed_repository_bindings", None) if self.uow else None
-            binding = binding_repo.get_by_project_id(eff_project_id) if binding_repo else None
-
-            adoption_valid = False
-            adoption_error = ""
-
-            if not ownership:
-                adoption_error = "No durable OrchestrationWorktreeOwnership record found."
-            elif ownership.creation_state != WorktreeCreationState.CREATED:
-                adoption_error = f"Worktree creation state is '{ownership.creation_state.value}', not CREATED."
-            elif getattr(ownership, "has_synthetic_placeholder", False):
-                adoption_error = "Durable ownership record contains synthetic placeholders."
-            elif ownership.project_id != eff_project_id:
-                adoption_error = f"Project ID '{ownership.project_id}' does not match expected '{eff_project_id}'."
-            elif ownership.job_id != job_id:
-                adoption_error = f"Job ID '{ownership.job_id}' does not match expected '{job_id}'."
-            elif str(Path(ownership.canonical_worktree_path).resolve()) != str(path.resolve()):
-                adoption_error = f"Canonical path '{ownership.canonical_worktree_path}' does not match '{path.resolve()}'."
-            else:
-                try:
-                    wt_list_out = await self._git(["worktree", "list", "--porcelain"], cwd=self.project_root)
-                    wt_paths = [
-                        str(Path(line[9:].strip()).resolve())
-                        for line in wt_list_out.splitlines()
-                        if line.startswith("worktree ")
-                    ]
-                    if str(path.resolve()) not in wt_paths:
-                        adoption_error = f"Path '{path}' is not present in git worktree list."
-                    else:
-                        from minime.services.workspace_guard import ManagedWorkspaceGuard
-                        guard = self.workspace_guard or ManagedWorkspaceGuard(self.uow)
-                        git_ok, git_reason = guard.verify_git_repository_identity(
-                            str(path.resolve()), binding.canonical_repository_identity, binding.remote_name
-                        )
-                        if not git_ok:
-                            adoption_error = f"Git identity verification failed: {git_reason}"
-                        else:
-                            state = await self.inspect_worktree_state(path)
-                            if state.dirty:
-                                adoption_error = f"Existing integration worktree is dirty: {path}"
-                            else:
-                                adoption_valid = True
-                except Exception as err:
-                    adoption_error = f"Integration adoption check failed: {err}"
-
-            if adoption_valid:
-                return WorktreeInfo(path, branch_name, base_sha)
-            else:
-                raise RuntimeError(f"Refusing to adopt existing integration worktree at '{path}': {adoption_error}")
+            await self._verify_worktree_adoption_proof(
+                path=path,
+                job_id=job_id,
+                eff_project_id=eff_project_id,
+                eff_run_id=eff_run_id,
+                eff_change_name=eff_change_name,
+                expected_branch=branch_name,
+                expected_base_sha=base_sha,
+                require_clean=True,
+                worktree_kind="integration worktree",
+            )
+            return WorktreeInfo(path, branch_name, base_sha)
 
         # 2. Mandatory durable PENDING ownership before git worktree add
         ownership = self._persist_pending_ownership(

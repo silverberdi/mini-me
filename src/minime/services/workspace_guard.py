@@ -103,6 +103,22 @@ class ManagedWorkspaceGuard:
             proj_id = data.get("project_id")
             repo_id = data.get("canonical_repository_identity") or data.get("repository")
 
+            if not proj_id or not str(proj_id).strip():
+                return (
+                    False,
+                    f"Managed repository ownership marker missing mandatory project_id at '{marker_path}'.",
+                    ExternalReasonCode.EVIDENCE_INSUFFICIENT,
+                    ExternalOutcome.UNKNOWN,
+                )
+
+            if not repo_id or not str(repo_id).strip():
+                return (
+                    False,
+                    f"Managed repository ownership marker missing mandatory canonical repository identity at '{marker_path}'.",
+                    ExternalReasonCode.EVIDENCE_INSUFFICIENT,
+                    ExternalOutcome.UNKNOWN,
+                )
+
             if proj_id != expected_project_id:
                 return (
                     False,
@@ -111,16 +127,15 @@ class ManagedWorkspaceGuard:
                     ExternalOutcome.FAILURE,
                 )
 
-            if repo_id:
-                norm_obs = normalize_repository_identity(repo_id)
-                norm_exp = normalize_repository_identity(expected_repo_identity)
-                if norm_obs != norm_exp:
-                    return (
-                        False,
-                        f"Managed repository ownership marker repository identity mismatch: observed '{norm_obs}', expected '{norm_exp}'.",
-                        ExternalReasonCode.CONFLICT,
-                        ExternalOutcome.FAILURE,
-                    )
+            norm_obs = normalize_repository_identity(repo_id)
+            norm_exp = normalize_repository_identity(expected_repo_identity)
+            if norm_obs != norm_exp:
+                return (
+                    False,
+                    f"Managed repository ownership marker repository identity mismatch: observed '{norm_obs}', expected '{norm_exp}'.",
+                    ExternalReasonCode.CONFLICT,
+                    ExternalOutcome.FAILURE,
+                )
 
             return True, "Managed repository ownership marker verified successfully.", ExternalReasonCode.EXECUTION_SUCCESS, ExternalOutcome.SUCCESS
         except Exception as err:
