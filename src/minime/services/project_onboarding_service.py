@@ -204,9 +204,8 @@ class ProjectOnboardingService:
             project_id=project_id,
             target_path=managed_root,
             requested_operation=WorkspaceOperation.EDIT,
-            provisional_binding=provisional_binding,
         )
-        dec_managed_dir = guard.evaluate_mutation(req_managed_dir)
+        dec_managed_dir = guard.evaluate_onboarding_bootstrap(req_managed_dir, provisional_binding=provisional_binding)
         if not dec_managed_dir.allowed:
             mismatch_reasons.append(
                 f"ManagedWorkspaceGuard denied mutation authorization for repository root '{managed_root}': {dec_managed_dir.provider_detail}"
@@ -230,9 +229,8 @@ class ProjectOnboardingService:
                         project_id=project_id,
                         target_path=parent_dir,
                         requested_operation=WorkspaceOperation.EDIT,
-                        provisional_binding=provisional_binding,
                     )
-                    dec_p = guard.evaluate_mutation(req_p)
+                    dec_p = guard.evaluate_onboarding_bootstrap(req_p, provisional_binding=provisional_binding)
                     if not dec_p.allowed:
                         raise ValueError(f"Guard denied parent directory creation '{parent_dir}': {dec_p.provider_detail}")
                     os.makedirs(parent_dir, exist_ok=True)
@@ -241,9 +239,8 @@ class ProjectOnboardingService:
                     project_id=project_id,
                     target_path=managed_root,
                     requested_operation=WorkspaceOperation.GIT_BRANCH,
-                    provisional_binding=provisional_binding,
                 )
-                dec_clone = guard.evaluate_mutation(req_clone)
+                dec_clone = guard.evaluate_onboarding_bootstrap(req_clone, provisional_binding=provisional_binding)
                 if not dec_clone.allowed:
                     raise ValueError(f"Guard denied Git clone mutation for '{managed_root}': {dec_clone.provider_detail}")
 
@@ -266,9 +263,8 @@ class ProjectOnboardingService:
                     project_id=project_id,
                     target_path=managed_root,
                     requested_operation=WorkspaceOperation.GIT_BRANCH,
-                    provisional_binding=provisional_binding,
                 )
-                dec_fetch = guard.evaluate_mutation(req_fetch)
+                dec_fetch = guard.evaluate_onboarding_bootstrap(req_fetch, provisional_binding=provisional_binding)
                 if not dec_fetch.allowed:
                     raise ValueError(f"Guard denied Git fetch mutation for '{managed_root}': {dec_fetch.provider_detail}")
 
@@ -281,14 +277,22 @@ class ProjectOnboardingService:
             onboarding_status = ProjectOnboardingStatus.BLOCKED
             raise ValueError(f"Project onboarding failed closed on remote repository establishment: {exc}") from exc
 
-        # 6d. Verify Remote Truth & Local HEAD Derivation (No synthetic commits or fabricated refs!)
+        # 6d. Verify Remote Truth & Local HEAD Derivation (Require local HEAD SHA == origin/<base_branch> SHA!)
         cp_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=managed_root, capture_output=True, text=True)
         cp_origin_head = subprocess.run(["git", "rev-parse", f"origin/{base_br}"], cwd=managed_root, capture_output=True, text=True)
 
-        if cp_head.returncode != 0:
+        head_sha = cp_head.stdout.strip()
+        origin_head_sha = cp_origin_head.stdout.strip()
+
+        if cp_head.returncode != 0 or not head_sha:
             mismatch_reasons.append(f"Local HEAD commit in managed repository '{managed_root}' is unobservable: {cp_head.stderr.strip()}")
-        if cp_origin_head.returncode != 0:
+        if cp_origin_head.returncode != 0 or not origin_head_sha:
             mismatch_reasons.append(f"Remote base branch tracking ref 'origin/{base_br}' in managed repository is unobservable: {cp_origin_head.stderr.strip()}")
+
+        if head_sha and origin_head_sha and head_sha != origin_head_sha:
+            mismatch_reasons.append(
+                f"Local HEAD SHA '{head_sha}' does not match remote base branch tracking ref 'origin/{base_br}' SHA '{origin_head_sha}'."
+            )
 
         if mismatch_reasons:
             reasons.extend(mismatch_reasons)
@@ -311,9 +315,8 @@ class ProjectOnboardingService:
             project_id=project_id,
             target_path=marker_file,
             requested_operation=WorkspaceOperation.EDIT,
-            provisional_binding=provisional_binding,
         )
-        dec_marker = guard.evaluate_mutation(req_marker)
+        dec_marker = guard.evaluate_onboarding_bootstrap(req_marker, provisional_binding=provisional_binding)
         if not dec_marker.allowed:
             mismatch_reasons.append(f"ManagedWorkspaceGuard denied marker mutation: {dec_marker.provider_detail}")
             reasons.extend(mismatch_reasons)
@@ -345,9 +348,8 @@ class ProjectOnboardingService:
             project_id=project_id,
             target_path=worktree_parent_dir,
             requested_operation=WorkspaceOperation.WORKTREE_CREATE,
-            provisional_binding=provisional_binding,
         )
-        dec_wt_parent = guard.evaluate_mutation(req_wt_parent)
+        dec_wt_parent = guard.evaluate_onboarding_bootstrap(req_wt_parent, provisional_binding=provisional_binding)
         if not dec_wt_parent.allowed:
             mismatch_reasons.append(f"ManagedWorkspaceGuard denied worktree parent dir creation: {dec_wt_parent.provider_detail}")
             reasons.extend(mismatch_reasons)

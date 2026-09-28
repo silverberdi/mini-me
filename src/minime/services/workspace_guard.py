@@ -16,6 +16,7 @@ from minime.domain.enums import (
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
+    ProjectManagedRepositoryBinding,
     WorkspaceMutationDecision,
     WorkspaceMutationRequest,
 )
@@ -207,6 +208,21 @@ class ManagedWorkspaceGuard:
             self._record_denial_metric(request, decision)
         return decision
 
+    def evaluate_onboarding_bootstrap(
+        self,
+        request: WorkspaceMutationRequest,
+        provisional_binding: ProjectManagedRepositoryBinding,
+    ) -> WorkspaceMutationDecision:
+        """Evaluate workspace mutation request strictly for initial project onboarding repository establishment.
+
+        This method provides a dedicated, narrowly-scoped authority for establishing the managed repository
+        before a durable binding is saved in persistence.
+        """
+        decision = self._evaluate_onboarding_bootstrap_internal(request, provisional_binding)
+        if not decision.allowed:
+            self._record_denial_metric(request, decision)
+        return decision
+
     def _record_denial_metric(
         self, request: WorkspaceMutationRequest, decision: WorkspaceMutationDecision
     ) -> None:
@@ -281,9 +297,6 @@ class ManagedWorkspaceGuard:
         # 2. Lookup binding for project
         binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
         binding = binding_repo.get_by_project_id(request.project_id) if binding_repo else None
-
-        if not binding and getattr(request, "provisional_binding", None):
-            binding = request.provisional_binding
 
         if not is_binding_fully_valid(binding):
             return WorkspaceMutationDecision(
@@ -442,20 +455,8 @@ class ManagedWorkspaceGuard:
                 resolved_path=resolved,
             )
 
-        # 4. Check if target is inside managed repository root (or is a parent container during onboarding)
-        is_managed_target = (
-            self._is_path_inside(resolved, managed_repo_root)
-            or (
-                getattr(request, "provisional_binding", None)
-                and self._is_path_inside(managed_repo_root, resolved)
-                and (
-                    self.trusted_managed_root is None
-                    or self._is_path_inside(resolved, self.trusted_managed_root)
-                    or resolved == self.resolve_canonical_path(self.trusted_managed_root)
-                )
-            )
-        )
-        if is_managed_target:
+        # 4. Check if target is inside managed repository root
+        if self._is_path_inside(resolved, managed_repo_root):
             # Verify Git identity and ownership marker if managed repository exists
             if os.path.exists(managed_repo_root):
                 valid_git, git_reason = self.verify_git_repository_identity(
@@ -491,24 +492,6 @@ class ManagedWorkspaceGuard:
                             provider_detail=marker_reason,
                         )
             else:
-                # Allow initial establishment and creation of managed_repo_root and marker before repository creation ONLY during onboarding (provisional_binding present)
-                marker_filename = getattr(binding, "ownership_marker_filename", ".minime-managed-project.json")
-                if getattr(request, "provisional_binding", None) and request.requested_operation in (
-                    WorkspaceOperation.WORKTREE_CREATE,
-                    WorkspaceOperation.GIT_BRANCH,
-                    WorkspaceOperation.EDIT,
-                ) and (
-                    resolved == managed_repo_root
-                    or self._is_path_inside(managed_repo_root, resolved)
-                    or resolved == os.path.join(managed_repo_root, marker_filename)
-                ):
-                    return WorkspaceMutationDecision(
-                        allowed=True,
-                        outcome=ExternalOutcome.SUCCESS,
-                        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
-                        workspace_role=WorkspaceRole.MANAGED_REPOSITORY,
-                        resolved_path=resolved,
-                    )
                 return WorkspaceMutationDecision(
                     allowed=False,
                     outcome=ExternalOutcome.UNKNOWN,
@@ -560,6 +543,164 @@ class ManagedWorkspaceGuard:
             provider_detail=(
                 f"Target path '{resolved}' is outside authorized managed bounds "
                 f"for project '{request.project_id}'."
+            ),
+        )
+
+    def _evaluate_onboarding_bootstrap_internal(
+        self,
+        request: WorkspaceMutationRequest,
+        provisional_binding: ProjectManagedRepositoryBinding,
+    ) -> WorkspaceMutationDecision:
+        """Internal evaluation for onboarding bootstrap requests."""
+        resolved = self.resolve_canonical_path(request.target_path)
+
+        # 1. Protect runtime root against ANY non-READ mutation operation
+        if self._is_path_inside(resolved, self.runtime_root) or resolved == self.runtime_root:
+            if request.requested_operation != WorkspaceOperation.READ:
+                return WorkspaceMutationDecision(
+                    allowed=False,
+                    outcome=ExternalOutcome.FAILURE,
+                    reason_code=ExternalReasonCode.POLICY_DENIED,
+                    workspace_role=WorkspaceRole.RUNTIME,
+                    resolved_path=resolved,
+                    provider_detail=(
+                        f"Bootstrap mutation operation '{request.requested_operation.value}' denied: "
+                        f"Target path '{resolved}' is inside mini-me runtime root '{self.runtime_root}'."
+                    ),
+                )
+            return WorkspaceMutationDecision(
+                allowed=True,
+                outcome=ExternalOutcome.SUCCESS,
+                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                workspace_role=WorkspaceRole.RUNTIME,
+                resolved_path=resolved,
+            )
+
+        # 2. Validate provisional binding payload
+        if (
+            not provisional_binding
+            or provisional_binding.project_id != request.project_id
+            or not is_binding_fully_valid(provisional_binding)
+        ):
+            return WorkspaceMutationDecision(
+                allowed=False,
+                outcome=ExternalOutcome.UNKNOWN,
+                reason_code=ExternalReasonCode.EVIDENCE_INSUFFICIENT,
+                workspace_role=WorkspaceRole.UNKNOWN,
+                resolved_path=resolved,
+                provider_detail=(
+                    f"Onboarding bootstrap binding for project '{request.project_id}' is missing, invalid, or unverified."
+                ),
+            )
+
+        managed_repo_root = self.resolve_canonical_path(provisional_binding.managed_repository_root)
+        worktree_parent_dir = self.resolve_canonical_path(provisional_binding.worktree_parent_dir)
+
+        # 3. Enforce runtime root non-overlap / collision checks
+        if (
+            managed_repo_root == self.runtime_root
+            or self._is_path_inside(managed_repo_root, self.runtime_root)
+            or self._is_path_inside(self.runtime_root, managed_repo_root)
+            or worktree_parent_dir == self.runtime_root
+            or self._is_path_inside(worktree_parent_dir, self.runtime_root)
+            or self._is_path_inside(self.runtime_root, worktree_parent_dir)
+        ):
+            return WorkspaceMutationDecision(
+                allowed=False,
+                outcome=ExternalOutcome.FAILURE,
+                reason_code=ExternalReasonCode.POLICY_DENIED,
+                workspace_role=WorkspaceRole.RUNTIME,
+                resolved_path=resolved,
+                provider_detail="Managed repository or worktree root collides with/aliases runtime root.",
+            )
+
+        # 4. Enforce trusted_managed_root containment for BOTH managed_repo_root and worktree_parent_dir
+        if self.trusted_managed_root is not None:
+            trusted = self.resolve_canonical_path(self.trusted_managed_root)
+            managed_valid = self._is_path_inside(managed_repo_root, trusted) or managed_repo_root == trusted
+            wt_parent_valid = self._is_path_inside(worktree_parent_dir, trusted) or worktree_parent_dir == trusted
+            if not managed_valid or not wt_parent_valid:
+                return WorkspaceMutationDecision(
+                    allowed=False,
+                    outcome=ExternalOutcome.FAILURE,
+                    reason_code=ExternalReasonCode.POLICY_DENIED,
+                    workspace_role=WorkspaceRole.UNKNOWN,
+                    resolved_path=resolved,
+                    provider_detail=(
+                        f"Project '{request.project_id}' bootstrap paths lie outside trusted managed root '{trusted}'."
+                    ),
+                )
+
+        # 5. Restrict to onboarding establishment surface targets & operations
+        marker_filename = getattr(provisional_binding, "ownership_marker_filename", ".minime-managed-project.json")
+        marker_path = self.resolve_canonical_path(os.path.join(managed_repo_root, marker_filename))
+
+        is_establishment_target = (
+            resolved == managed_repo_root
+            or self._is_path_inside(managed_repo_root, resolved)
+            or resolved == marker_path
+            or resolved == worktree_parent_dir
+            or self._is_path_inside(worktree_parent_dir, resolved)
+        )
+
+        if not is_establishment_target:
+            return WorkspaceMutationDecision(
+                allowed=False,
+                outcome=ExternalOutcome.FAILURE,
+                reason_code=ExternalReasonCode.POLICY_DENIED,
+                workspace_role=WorkspaceRole.UNKNOWN,
+                resolved_path=resolved,
+                provider_detail=(
+                    f"Target path '{resolved}' is outside authorized onboarding bootstrap establishment surface for project '{request.project_id}'."
+                ),
+            )
+
+        if request.requested_operation == WorkspaceOperation.READ:
+            return WorkspaceMutationDecision(
+                allowed=True,
+                outcome=ExternalOutcome.SUCCESS,
+                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                workspace_role=WorkspaceRole.MANAGED_REPOSITORY,
+                resolved_path=resolved,
+            )
+
+        # Disallow arbitrary code edits or commits inside managed_repo_root
+        is_establishment_path = (
+            resolved == managed_repo_root
+            or resolved == marker_path
+            or resolved == worktree_parent_dir
+            or self._is_path_inside(resolved, worktree_parent_dir)
+        )
+        if self._is_path_inside(resolved, managed_repo_root) and not is_establishment_path:
+            return WorkspaceMutationDecision(
+                allowed=False,
+                outcome=ExternalOutcome.FAILURE,
+                reason_code=ExternalReasonCode.POLICY_DENIED,
+                workspace_role=WorkspaceRole.MANAGED_REPOSITORY,
+                resolved_path=resolved,
+                provider_detail=(
+                    f"Bootstrap mutation operation '{request.requested_operation.value}' denied: "
+                    f"Bootstrap authority only permits repository/marker establishment, not code edits inside '{managed_repo_root}'."
+                ),
+            )
+
+        if request.requested_operation in (WorkspaceOperation.EDIT, WorkspaceOperation.GIT_BRANCH, WorkspaceOperation.WORKTREE_CREATE):
+            return WorkspaceMutationDecision(
+                allowed=True,
+                outcome=ExternalOutcome.SUCCESS,
+                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                workspace_role=WorkspaceRole.MANAGED_REPOSITORY,
+                resolved_path=resolved,
+            )
+
+        return WorkspaceMutationDecision(
+            allowed=False,
+            outcome=ExternalOutcome.FAILURE,
+            reason_code=ExternalReasonCode.POLICY_DENIED,
+            workspace_role=WorkspaceRole.MANAGED_REPOSITORY,
+            resolved_path=resolved,
+            provider_detail=(
+                f"Bootstrap mutation operation '{request.requested_operation.value}' denied for onboarding target '{resolved}'."
             ),
         )
 

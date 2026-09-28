@@ -3972,6 +3972,194 @@ def test_dashboard_service_system_status_telemetry(tmp_dirs):
     assert p_status.denied_mutation_breakdown.get("POLICY_DENIED") == 1
 
 
+def test_onboard_project_diff_head_and_origin_ref_refused(tmp_path):
+    """Verify onboarding fails closed if local HEAD SHA does not match origin/<base_branch> SHA."""
+    from minime.domain.models import ProjectOnboardingInput
+    from minime.services.project_onboarding_service import ProjectOnboardingService
+
+    uow = MockUOW()
+    trusted_root = tmp_path / "trusted_managed"
+    trusted_root.mkdir(parents=True, exist_ok=True)
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    (runtime_root / "openspec").mkdir(parents=True, exist_ok=True)
+
+    # Create bare remote repository
+    remote_bare = tmp_path / "remote_mismatch.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(remote_bare)], check=True, capture_output=True)
+
+    work_seed = tmp_path / "seed"
+    subprocess.run(["git", "clone", str(remote_bare), str(work_seed)], check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Dev"], cwd=work_seed, check=True)
+    subprocess.run(["git", "config", "user.email", "dev@test.local"], cwd=work_seed, check=True)
+    (work_seed / "README.md").write_text("# Seed\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=work_seed, check=True)
+    subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=work_seed, check=True, capture_output=True)
+    subprocess.run(["git", "push", "origin", "main"], cwd=work_seed, check=True, capture_output=True)
+
+    # Pre-clone managed_target to simulate existing repository with a local commit on HEAD that differs from origin/main
+    managed_target = trusted_root / "proj-head-diff"
+    subprocess.run(["git", "clone", str(remote_bare), str(managed_target)], check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Local Dev"], cwd=managed_target, check=True)
+    subprocess.run(["git", "config", "user.email", "dev@local.test"], cwd=managed_target, check=True)
+    (managed_target / "local_edit.txt").write_text("Divergent local commit", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=managed_target, check=True)
+    subprocess.run(["git", "commit", "-m", "Unpushed local commit"], cwd=managed_target, check=True, capture_output=True)
+
+    service = ProjectOnboardingService(uow=uow, project_root=runtime_root, trusted_managed_root=trusted_root)
+    worktrees_target = trusted_root / "worktrees" / "proj-head-diff"
+
+    onboard_input = ProjectOnboardingInput(
+        project_id="proj-head-diff",
+        display_name="Head Diff Project",
+        repository=str(remote_bare),
+        base_branch="main",
+        managed_repository_root=str(managed_target),
+        worktree_parent_dir=str(worktrees_target),
+    )
+
+    with pytest.raises(ValueError, match="Local HEAD SHA '.*' does not match remote base branch tracking ref 'origin/main' SHA"):
+        service.onboard_project(onboard_input)
+
+    assert uow.project_managed_repository_bindings.get_by_project_id("proj-head-diff") is None
+
+
+def test_ordinary_evaluate_mutation_without_durable_binding_denied(tmp_path):
+    """Verify ordinary evaluate_mutation remains DENIED without durable binding in UOW."""
+    uow = MockUOW()
+    runtime_root = tmp_path / "runtime"
+    trusted_root = tmp_path / "trusted"
+
+    guard = ManagedWorkspaceGuard(uow=uow, runtime_root=runtime_root, trusted_managed_root=trusted_root)
+
+    request = WorkspaceMutationRequest(
+        project_id="proj-no-binding",
+        target_path=str(trusted_root / "proj-no-binding"),
+        requested_operation=WorkspaceOperation.EDIT,
+    )
+
+    decision = guard.evaluate_mutation(request)
+    assert decision.allowed is False
+    assert decision.reason_code == ExternalReasonCode.EVIDENCE_INSUFFICIENT
+
+
+def test_onboarding_bootstrap_establishes_managed_repo(tmp_path):
+    """Verify evaluate_onboarding_bootstrap permits repository establishment under trusted managed root."""
+    uow = MockUOW()
+    runtime_root = tmp_path / "runtime"
+    trusted_root = tmp_path / "trusted"
+
+    guard = ManagedWorkspaceGuard(uow=uow, runtime_root=runtime_root, trusted_managed_root=trusted_root)
+
+    provisional_binding = ProjectManagedRepositoryBinding(
+        project_id="proj-bootstrap-ok",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=str(trusted_root / "proj-bootstrap-ok"),
+        worktree_parent_dir=str(trusted_root / "worktrees" / "proj-bootstrap-ok"),
+    )
+
+    request = WorkspaceMutationRequest(
+        project_id="proj-bootstrap-ok",
+        target_path=str(trusted_root / "proj-bootstrap-ok"),
+        requested_operation=WorkspaceOperation.GIT_BRANCH,
+    )
+
+    decision = guard.evaluate_onboarding_bootstrap(request, provisional_binding)
+    assert decision.allowed is True
+    assert decision.reason_code == ExternalReasonCode.EXECUTION_SUCCESS
+
+
+def test_bootstrap_authority_cannot_authorize_arbitrary_edits(tmp_path):
+    """Verify evaluate_onboarding_bootstrap DENIES arbitrary code edits inside managed_repo_root."""
+    uow = MockUOW()
+    runtime_root = tmp_path / "runtime"
+    trusted_root = tmp_path / "trusted"
+
+    guard = ManagedWorkspaceGuard(uow=uow, runtime_root=runtime_root, trusted_managed_root=trusted_root)
+
+    managed_root = trusted_root / "proj-bootstrap-edit-denied"
+    provisional_binding = ProjectManagedRepositoryBinding(
+        project_id="proj-bootstrap-edit-denied",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=str(managed_root),
+        worktree_parent_dir=str(trusted_root / "worktrees" / "proj-bootstrap-edit-denied"),
+    )
+
+    request = WorkspaceMutationRequest(
+        project_id="proj-bootstrap-edit-denied",
+        target_path=str(managed_root / "src" / "app.py"),
+        requested_operation=WorkspaceOperation.EDIT,
+    )
+
+    decision = guard.evaluate_onboarding_bootstrap(request, provisional_binding)
+    assert decision.allowed is False
+    assert decision.reason_code == ExternalReasonCode.POLICY_DENIED
+
+
+def test_bootstrap_authority_rejects_runtime_collision(tmp_path):
+    """Verify evaluate_onboarding_bootstrap rejects target paths inside runtime root."""
+    uow = MockUOW()
+    runtime_root = tmp_path / "runtime"
+    trusted_root = tmp_path / "trusted"
+
+    guard = ManagedWorkspaceGuard(uow=uow, runtime_root=runtime_root, trusted_managed_root=trusted_root)
+
+    provisional_binding = ProjectManagedRepositoryBinding(
+        project_id="proj-collision",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=str(runtime_root / "nested_repo"),
+        worktree_parent_dir=str(trusted_root / "worktrees"),
+    )
+
+    request = WorkspaceMutationRequest(
+        project_id="proj-collision",
+        target_path=str(runtime_root / "nested_repo"),
+        requested_operation=WorkspaceOperation.EDIT,
+    )
+
+    decision = guard.evaluate_onboarding_bootstrap(request, provisional_binding)
+    assert decision.allowed is False
+    assert decision.workspace_role == WorkspaceRole.RUNTIME
+
+
+def test_normal_durable_binding_guard_behavior_after_persistence(tmp_path):
+    """Verify normal evaluate_mutation works with persisted binding in UOW."""
+    uow = MockUOW()
+    runtime_root = tmp_path / "runtime"
+    trusted_root = tmp_path / "trusted"
+
+    managed_root = trusted_root / "proj-persisted"
+    managed_root.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-b", "main"], cwd=managed_root, check=True, capture_output=True)
+    subprocess.run(["git", "remote", "add", "origin", "https://github.com/org/repo.git"], cwd=managed_root, check=True, capture_output=True)
+
+    marker_file = managed_root / ".minime-managed-project.json"
+    marker_file.write_text(json.dumps({"project_id": "proj-persisted", "canonical_repository_identity": "github.com/org/repo"}))
+
+    worktree_parent = trusted_root / "worktrees" / "proj-persisted"
+
+    binding = ProjectManagedRepositoryBinding(
+        project_id="proj-persisted",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=str(managed_root),
+        worktree_parent_dir=str(worktree_parent),
+        is_valid=True,
+    )
+    uow.project_managed_repository_bindings.save(binding)
+
+    guard = ManagedWorkspaceGuard(uow=uow, runtime_root=runtime_root, trusted_managed_root=trusted_root)
+
+    request = WorkspaceMutationRequest(
+        project_id="proj-persisted",
+        target_path=str(managed_root),
+        requested_operation=WorkspaceOperation.READ,
+    )
+
+    decision = guard.evaluate_mutation(request)
+    assert decision.allowed is True
+    assert decision.reason_code == ExternalReasonCode.EXECUTION_SUCCESS
+
+
 
 
 

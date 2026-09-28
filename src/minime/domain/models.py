@@ -1622,7 +1622,6 @@ class WorkspaceMutationRequest(BaseModel):
     requested_operation: WorkspaceOperation
     job_id: str | None = None
     run_id: str | None = None
-    provisional_binding: Any | None = None
 
 
 class WorkspaceMutationDecision(BaseModel):
