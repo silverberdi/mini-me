@@ -387,8 +387,17 @@ def test_scheduler_reconciles_and_resumes_waiting_capacity(in_memory_uow, tmp_pa
     )
     in_memory_uow.bindings.save(binding)
 
-    from conftest import ReadinessGitHubStub
+    from conftest import ReadinessGitHubStub, setup_managed_repository_fixture
     from minime.services.deepseek_auditor_runner import MockAuditorRunner
+
+    setup_managed_repository_fixture(
+        uow=in_memory_uow,
+        project_id=project_id,
+        repo_root=tmp_path,
+        worktree_parent_dir=tmp_path / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+        remote_name="origin",
+    )
 
     pipeline = ExecutionPipelineService(
         uow=in_memory_uow,

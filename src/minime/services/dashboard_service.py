@@ -701,8 +701,41 @@ class OperationsDashboardService:
         active_wts = len(ownership_repo.list_active()) if ownership_repo else 0
 
         from minime.services.agent_confinement import AgentProcessConfinement
+        from minime.services.workspace_guard import ManagedWorkspaceGuard
 
         confinement_active = AgentProcessConfinement("/tmp").is_confinement_available()
+
+        bindings_repo = getattr(self.uow, "project_managed_repository_bindings", None)
+        all_bindings = bindings_repo.list_all() if bindings_repo else []
+
+        guard = ManagedWorkspaceGuard(self.uow)
+        runtime_isolated = bool(all_bindings)
+        for b in all_bindings:
+            if not getattr(b, "is_valid", False):
+                runtime_isolated = False
+                break
+            m_root = getattr(b, "managed_repository_root", "")
+            wt_root = getattr(b, "worktree_parent_dir", "")
+            if guard._paths_overlap(m_root, guard.runtime_root) or guard._paths_overlap(wt_root, guard.runtime_root):
+                runtime_isolated = False
+                break
+            if guard.trusted_managed_root:
+                if not (guard._is_path_inside(m_root, guard.trusted_managed_root) or m_root == guard.trusted_managed_root):
+                    runtime_isolated = False
+                    break
+                if not (guard._is_path_inside(wt_root, guard.trusted_managed_root) or wt_root == guard.trusted_managed_root):
+                    runtime_isolated = False
+                    break
+
+        denied_mutations_count = 0
+        events_repo = getattr(self.uow, "events", None)
+        all_events = events_repo.list_all() if events_repo else []
+        for ev in all_events:
+            et = str(getattr(ev, "event_type", "")).upper()
+            payload = getattr(ev, "payload", {}) or {}
+            reason = str(payload.get("reason_code", "")).upper() if isinstance(payload, dict) else ""
+            if "DENIED" in et or "MUTATION" in et or reason == "POLICY_DENIED":
+                denied_mutations_count += 1
 
         system_status = SystemStatusDTO(
             healthy=is_overall_healthy,
@@ -715,10 +748,10 @@ class OperationsDashboardService:
             active_runs_count=len(active_executions),
             total_changes_count=len(change_summaries),
             attention_runs_count=len(attention_items),
-            is_runtime_isolated=True,
+            is_runtime_isolated=runtime_isolated,
             is_agent_confinement_active=confinement_active,
             active_durable_worktrees=active_wts,
-            workspace_mutation_denied_count=0,
+            workspace_mutation_denied_count=denied_mutations_count,
             providers=prov_dtos,
         )
 

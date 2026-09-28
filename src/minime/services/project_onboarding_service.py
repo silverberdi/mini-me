@@ -122,6 +122,72 @@ class ProjectOnboardingService:
                 onboarding_status = ProjectOnboardingStatus.CONTEXT_INCOMPLETE
 
         now = utc_now()
+
+        # 5b. Establish and validate Stage C ProjectManagedRepositoryBinding
+        import os
+
+        from minime.domain.models import ProjectManagedRepositoryBinding
+        from minime.services.workspace_guard import ManagedWorkspaceGuard
+
+        trusted_root = os.path.realpath(os.environ.get("MINIME_MANAGED_ROOT", "/opt/minime/repos"))
+        runtime_root = os.path.realpath(os.environ.get("MINIME_RUNTIME_ROOT", os.getcwd()))
+
+        if self.project_root != Path(runtime_root) and (self.project_root / ".git").exists():
+            managed_root = str(self.project_root.resolve())
+        else:
+            managed_root = os.path.realpath(f"{trusted_root}/{project_id}")
+
+        worktree_parent_dir = os.path.realpath(f"{managed_root}/.minime/worktrees")
+
+        mismatch_reasons: list[str] = []
+        guard = ManagedWorkspaceGuard(self.uow, runtime_root=runtime_root, trusted_managed_root=trusted_root)
+
+        if guard._paths_overlap(managed_root, runtime_root):
+            mismatch_reasons.append(f"Managed repository root '{managed_root}' aliases or overlaps runtime root '{runtime_root}'.")
+
+        if guard._paths_overlap(worktree_parent_dir, runtime_root):
+            mismatch_reasons.append(f"Worktree parent dir '{worktree_parent_dir}' aliases or overlaps runtime root '{runtime_root}'.")
+
+        if trusted_root:
+            if not (guard._is_path_inside(managed_root, trusted_root) or managed_root == trusted_root):
+                mismatch_reasons.append(f"Managed repository root '{managed_root}' is outside trusted managed root '{trusted_root}'.")
+            if not (guard._is_path_inside(worktree_parent_dir, trusted_root) or worktree_parent_dir == trusted_root):
+                mismatch_reasons.append(f"Worktree parent directory '{worktree_parent_dir}' is outside trusted managed root '{trusted_root}'.")
+
+        if not os.path.exists(managed_root) or not os.path.isdir(managed_root):
+            mismatch_reasons.append(f"Managed repository root directory '{managed_root}' does not exist on disk.")
+        else:
+            valid_git, git_reason = guard.verify_git_repository_identity(managed_root, norm_repo, remote_name="origin")
+            if not valid_git:
+                mismatch_reasons.append(f"Git repository identity verification failed for '{managed_root}': {git_reason}")
+
+        if not os.path.exists(worktree_parent_dir) or not os.path.isdir(worktree_parent_dir):
+            mismatch_reasons.append(f"Worktree parent directory '{worktree_parent_dir}' does not exist on disk.")
+
+        is_valid_binding = len(mismatch_reasons) == 0
+        if not is_valid_binding:
+            reasons.extend(mismatch_reasons)
+            onboarding_status = ProjectOnboardingStatus.BLOCKED
+
+        managed_binding = ProjectManagedRepositoryBinding(
+            project_id=project_id,
+            canonical_repository_identity=norm_repo,
+            remote_name="origin",
+            managed_repository_root=managed_root,
+            worktree_parent_dir=worktree_parent_dir,
+            default_base_branch=input_data.base_branch,
+            is_valid=is_valid_binding,
+            mismatch_reasons=mismatch_reasons,
+            created_at=now,
+            updated_at=now,
+        )
+        self.uow.project_managed_repository_bindings.save(managed_binding)
+
+        if not is_valid_binding or onboarding_status == ProjectOnboardingStatus.BLOCKED:
+            raise ValueError(
+                f"Project onboarding failed closed on repository or managed binding verification: {'; '.join(reasons)}"
+            )
+
         project = Project(
             project_id=project_id,
             display_name=display_name,

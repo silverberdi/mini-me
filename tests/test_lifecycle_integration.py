@@ -64,6 +64,16 @@ def test_lifecycle_gate_chain_end_to_end(in_memory_uow, tmp_path: Path):
     )
     in_memory_uow.changes.save(Change(project_id="mini-me", name="chain-change"))
 
+    from conftest import setup_managed_repository_fixture
+    setup_managed_repository_fixture(
+        uow=in_memory_uow,
+        project_id="mini-me",
+        repo_root=tmp_path,
+        worktree_parent_dir=tmp_path / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+        remote_name="origin",
+    )
+
     # 1. Strict-validity (Phase A)
     readiness = ReadinessService(
         in_memory_uow, github_adapter=ReadinessGitHubStub()
