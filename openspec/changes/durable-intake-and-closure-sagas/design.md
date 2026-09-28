@@ -12,7 +12,7 @@ It preserves all foundational architectural laws and existing authority boundari
 2. **Fail-closed evidence**: Missing or unobservable evidence is never interpreted as success (`UNKNOWN` blocks execution).
 3. **Non-resurrection**: Observations, projections, or restarted sagas cannot return terminal (`COMPLETED` / `CANCELLED` / `DONE`) work to executable state.
 4. **Runtime isolation**: The deployed runtime checkout is never a managed project workspace (`ManagedWorkspaceGuard` authority).
-5. **Existing Authority Preservation**: `WorktreeManager` retains worktree cleanup authority; Stage B adapters retain `ExternalActionResult`, `ExternalOutcome`, `RetrySafety`, `operation_key`, and observe-before-repeat semantics.
+5. **Existing Authority Preservation**: `WorktreeManager` retains worktree cleanup authority; `OrchestrationExternalActionRepository.reconcile_observe_before_repeat()` retains external action state machine authority; Stage B adapters retain `ExternalActionResult`, `ExternalOutcome`, `RetrySafety`, `operation_key`, and observe-before-repeat semantics.
 
 ---
 
@@ -44,25 +44,51 @@ Durable Saga attributes:
 
 1. **Evidence-Based Phase Completion**: A saga phase transitions to complete ONLY when positive durable evidence is recorded in `OrchestrationExternalActionModel` or `evidence_references`.
 2. **Safe Reconstruction on Restart**: Upon daemon restart, the saga engine reconstructs the next safe action from persisted DB state plus current external observations.
-3. **No Blind Replay**: Phases recorded as `SUCCESS` are never re-executed.
-4. **Reconcile Before Retry**: If an action outcome is `UNKNOWN` or `AMBIGUOUS`, reconciliation MUST run before repeating any external mutation.
+3. **No Blind Replay**: Phases recorded as `COMPLETED` are never re-executed.
+4. **Reconcile Before Retry**: If an action outcome is `UNKNOWN` or `AMBIGUOUS`, reconciliation MUST run via `reconcile_observe_before_repeat()` before repeating any external mutation.
 
-### C. Single Durable External-Action Authority (Generalization of `orchestration_external_actions`)
+### C. Single External-Action Authority & Exact `ExternalActionStatus` State Machine
 
-To prevent creating duplicate authoritative stores for external action identity, Stage D **does NOT create a separate `SagaActionModel`**.
+Stage D **does NOT create a separate `SagaActionModel` or a parallel action state machine**.
 
-Instead, Stage D generalizes the existing canonical `OrchestrationExternalActionModel` (`orchestration_external_actions`) to serve as the SINGLE external action entity across mini me:
-- Add `saga_id: Mapped[str | None] = mapped_column(String(64), ForeignKey("durable_sagas.id", ondelete="CASCADE"), nullable=True, index=True)`
-- Update `run_id` to be nullable (`nullable=True`) for intake/closure actions created before an orchestration run exists.
-- Update `candidate_sha` to be nullable (`nullable=True`) for pre-candidate intake actions.
-- Retain `action_key: Mapped[str] = mapped_column(String(128), unique=True, nullable=False, index=True)` for global deterministic action-key uniqueness.
-- Retain all existing Stage B fields (`action_type`, `target_identity`, `request_fingerprint`, `status`, `remote_identifier`, `result_payload`, `error_message`, `reserved_at`, `reconciled_at`).
+It reuses the canonical `OrchestrationExternalActionModel` (`orchestration_external_actions`) and its exact `ExternalActionStatus` enum values:
 
-Every external mutation reserves an `OrchestrationExternalActionModel` record in PostgreSQL BEFORE invoking external adapters.
+- `RESERVED`: Action reserved before external mutation.
+- `EXECUTING`: Mutation actively transmitted / executing (where required by adapter protocol).
+- `COMPLETED`: Positive observed postcondition or adopted existing remote effect.
+- `FAILED`: Authoritative, permanent external execution failure.
+- `UNKNOWN`: Unobservable remote read or response.
+- `AMBIGUOUS`: Mutating side effect with uncertain remote occurrence.
 
-### D. Inherit Stage B Identities Exactly & Reconcile Before Retry
+> **Explicit Confirmation**: `SUCCESS` and `RECONCILED` are NOT persisted lifecycle statuses. `reconciled_at` remains timestamp evidence metadata on the action model.
 
-Stage D reconciliation MUST preserve the exact Stage B fail-closed external evidence contract:
+#### Domain, DB, Repository, and Interface Evolution
+
+To support saga-bound external actions before an orchestration run exists, the `OrchestrationExternalAction` model is updated consistently across ALL layers:
+1. **Domain Model (`src/minime/domain/models.py`)**:
+   - `run_id: str | None = None`
+   - `saga_id: str | None = None`
+   - `candidate_sha: str | None = None`
+2. **SQLAlchemy Model (`src/minime/db/models.py`)**:
+   - `run_id`: `Mapped[str | None] = mapped_column(String(64), ForeignKey("orchestration_runs.id", ondelete="CASCADE"), nullable=True, index=True)`
+   - `saga_id`: `Mapped[str | None] = mapped_column(String(64), ForeignKey("durable_sagas.id", ondelete="CASCADE"), nullable=True, index=True)`
+   - `candidate_sha`: `Mapped[str | None] = mapped_column(String(64), nullable=True)`
+   - `action_key`: `Mapped[str] = mapped_column(String(128), unique=True, nullable=False, index=True)` (globally unique).
+3. **Domain/Repository Interfaces (`src/minime/domain/interfaces.py` & `src/minime/db/repository.py`)**:
+   - Updated `OrchestrationExternalActionRepository` interface to allow listing by `saga_id` or `run_id`.
+   - Updated in-memory test repository, Postgres repository mapping, and serialization/dict conversion functions.
+4. **Callers & Mappers**:
+   - Updated all callers that previously assumed `run_id` or `candidate_sha` was non-null.
+
+#### Operational Action Ownership Invariant
+
+An external action MUST be durably attributable to at least one valid operational owner/context:
+- **Rule**: `run_id is not None or saga_id is not None`.
+- **Constraint**: An external action record with neither `run_id` nor `saga_id` is invalid and MUST be rejected during creation/saving.
+
+### D. Inherit Stage B Identities & Delegate to `reconcile_observe_before_repeat()`
+
+The Stage D `ReconciliationAuthority` delegates directly to canonical `OrchestrationExternalActionRepository.reconcile_observe_before_repeat()` semantics and inherits exact Stage B external resource identity rules:
 
 1. **GitHub Issue Creation (`GITHUB_ISSUE_CREATE`)**:
    - Deterministic `operation_key` (`issue_create:{project_id}:{change_name}`) is authoritative.
@@ -95,8 +121,8 @@ Stage D reconciliation MUST preserve the exact Stage B fail-closed external evid
    - Resource identity: branch names (`minime/{change_name}` and `minime/{change_name}-{job_id}`).
    - Reconciled via `git show-ref` exit code 1 (local) and GitHub REST API 404 (remote).
 
-When an action is found in `RESERVED`, `IN_FLIGHT`, or `AMBIGUOUS` state:
-- If external occurrence is positively confirmed by Stage B identity matching: record `remote_identifier`, mark action `RECONCILED` / `SUCCESS`, and advance saga phase.
+When an action is found in `RESERVED`, `EXECUTING`, or `AMBIGUOUS` state:
+- If external occurrence is positively confirmed by Stage B identity matching: record `remote_identifier`, transition action status to `COMPLETED` (setting `reconciled_at = utc_now()`), and advance saga phase.
 - If non-occurrence is positively confirmed: execute the mutation safely.
 - If external state remains unobservable: mark action `AMBIGUOUS`, set saga `status = BLOCKED`, emit `DURABLE_SAGA_BLOCKED` event, and wait for operator intervention.
 
@@ -111,8 +137,8 @@ Intake tracks preparation of backlog items up to scheduler admission eligibility
 - Phase 1 `INTAKE_CREATED`: Backlog item persisted in DB.
 - Phase 2 `CONTEXT_CHECKED`: Project context sources validated.
 - Phase 3 `OPENSPEC_AUTHORED`: `OpenSpecGenerator` writes `proposal.md`, `design.md`, `tasks.md`, `specs/spec.md`. Action reserved before disk write.
-- Phase 4 `ISSUE_BOUND`: GitHub Issue created/bound via `GitHubAdapter`. Action reserved before HTTP call. Reconciles via `<!-- minime-opkey: ... -->` marker search on retry. Title-only deduplication forbidden.
-- Phase 5 `PROJECT_ITEM_BOUND`: GitHub Project v2 item added via `GitHubAdapter`. Action reserved before GraphQL call. Reconciles via issue URL lookup on retry.
+- Phase 4 `ISSUE_BOUND`: GitHub Issue created/bound via `GitHubAdapter`. Action reserved with `status = RESERVED` before HTTP call. Reconciles via `<!-- minime-opkey: ... -->` marker search on retry. Title-only deduplication forbidden.
+- Phase 5 `PROJECT_ITEM_BOUND`: GitHub Project v2 item added via `GitHubAdapter`. Action reserved with `status = RESERVED` before GraphQL call. Reconciles via issue URL lookup on retry.
 - Phase 6 `READINESS_EVALUATED`: Definition of Ready (DoR) evaluated by `ReadinessService`.
 - Phase 7 `READY`: `BacklogItem.status` updated to `READY` via `LifecycleTransitionAuthority`. Handoff boundary to `SchedulerService.admit_work_item`.
 
@@ -129,7 +155,7 @@ Closure tracks post-human-merge SDLC finalization:
   - **Normal / Ancestry-Preserving Merge**: Candidate SHA is verified as an ancestor of target base branch (`git merge-base --is-ancestor candidate_sha base_ref`).
   - **Squash Merge**: Verifies PR `is_merged == True`, repository/base identity is exact, PR head SHA equals audited candidate SHA, observed `merge_commit_sha` exists, and canonical base branch contains `merge_commit_sha`. Candidate non-ancestry after a verified squash merge is NOT a verification failure.
 - Phase 3 `RUN_JOB_RECONCILED`: `OrchestrationRun` and `Job` transitioned to `POST_MERGE_RECONCILING`.
-- Phase 4 `ISSUE_CLOSED`: Remote GitHub Issue closed. Action reserved before API PATCH.
+- Phase 4 `ISSUE_CLOSED`: Remote GitHub Issue closed. Action reserved with `status = RESERVED` before API PATCH.
 - Phase 5 `PROJECT_ITEM_DONE`: Remote GitHub Project item status updated to "Done". Action reserved before GraphQL call.
 - Phase 6 `SPEC_SYNCED`: `OpenSpecSyncService` syncs delta specs to main specs in `openspec/specs/`.
 - Phase 7 `SYNC_VERIFIED`: `OpenSpecSyncService` verifies synced capabilities exist in main specs.
@@ -153,7 +179,7 @@ Closure completion requires the complete required durable evidence set. A single
    - **DO NOT** resurrect work.
    - **DO NOT** infer closure success.
    - Enter **reconciliation-only mode**: inspect/check missing closure postconditions.
-   - Adopt already-completed external effects where positively proven.
+   - Adopt already-completed external effects where proven.
    - Complete saga ONLY after complete required evidence set exists.
    - If evidence cannot be safely reconstructed, remain `BLOCKED` / `NEEDS_HUMAN`.
 
@@ -293,7 +319,7 @@ class OrchestrationExternalActionModel(Base):
     # Generalization: candidate_sha made nullable for intake actions
     candidate_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
     generation: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
-    status: Mapped[str] = mapped_column(String(32), default="RESERVED", nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), default="RESERVED", nullable=False, index=True) # RESERVED, EXECUTING, COMPLETED, FAILED, UNKNOWN, AMBIGUOUS
     remote_identifier: Mapped[str | None] = mapped_column(String(255), nullable=True)
     result_payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -328,16 +354,16 @@ To guarantee Architectural Law 4 without holding open long database locks across
    - **COMMIT DB TRANSACTION**.
 
 2. **Step 2 — External Mutation Invocation (No DB Lock)**:
-   - Invoke remote external mutation (e.g. GitHub REST/GraphQL call, OpenSpec filesystem edit).
-   - Receive response or catch network exception.
+   - Option A: For simple calls, invoke adapter directly.
+   - Option B: For tracked adapter calls, update action status to `EXECUTING` -> invoke remote adapter.
 
 3. **Step 3 — Observation & Result Verification**:
    - If response received successfully: parse external outcome, extract `remote_identifier`.
-   - If network call timed out or threw unhandled error: enter RECONCILE BEFORE RETRY phase by querying external system using target identity and Stage B exact markers (`<!-- minime-opkey: ... -->`).
+   - If network call timed out or threw unhandled error: enter RECONCILE BEFORE RETRY phase by calling `OrchestrationExternalActionRepository.reconcile_observe_before_repeat()` using target identity and Stage B exact markers (`<!-- minime-opkey: ... -->`).
 
 4. **Step 4 — Result Persistence (DB Commit)**:
    - Begin DB transaction.
-   - Update `OrchestrationExternalActionModel` with `status = RECONCILED` / `SUCCESS` (or `AMBIGUOUS`), `remote_identifier`, `result_payload`, and `reconciled_at`.
+   - Update `OrchestrationExternalActionModel` with `status = COMPLETED` (or `FAILED` / `AMBIGUOUS`), `remote_identifier`, `result_payload`, and `reconciled_at = utc_now()`.
    - **COMMIT DB TRANSACTION**.
 
 5. **Step 5 — Saga Checkpoint Advancement (DB Commit)**:
@@ -347,30 +373,30 @@ To guarantee Architectural Law 4 without holding open long database locks across
    - **COMMIT DB TRANSACTION**.
 
 6. **Step 6 — Final Saga Closure Gate (DB Commit)**:
-   - When all required phases reach `SUCCESS` evidence:
+   - When all required phases reach `COMPLETED` action evidence:
    - Invoke `LifecycleTransitionAuthority.transition_change()` and `transition_backlog_item()` to update terminal states atomically.
    - Update `DurableSagaModel` `status = COMPLETED`.
    - **COMMIT DB TRANSACTION**.
 
 ---
 
-## Crash-Window Analysis (8 Explicit Cases)
+## Crash-Window Analysis (8 Explicit Cases Using Canonical Statuses)
 
-1. **Case 1: Crash before external call**:
+1. **Case 1: Crash after reservation but before external call**:
    - *State*: `OrchestrationExternalActionModel` is `RESERVED` in DB, but external HTTP request was not sent.
-   - *Recovery*: Saga engine reads `RESERVED` action on startup. Executes RECONCILE FIRST check against external target using Stage B comment marker / URL. Search returns non-occurrence. Saga engine proceeds to execute external mutation safely.
+   - *Recovery*: Saga engine reads `RESERVED` action on startup. Delegates to `reconcile_observe_before_repeat()` against external target using Stage B comment marker / URL. Search returns non-occurrence. Saga engine proceeds to execute external mutation safely.
 
-2. **Case 2: Crash after remote accepted mutation but before response**:
-   - *State*: GitHub API created issue #42 with `<!-- minime-opkey: issue_create:proj1:feat-a -->` in body, but daemon crashed before receiving HTTP response body.
-   - *Recovery*: `OrchestrationExternalActionModel` is `RESERVED`. On restart, saga engine executes RECONCILE FIRST check: searches GitHub repo for issues containing `<!-- minime-opkey: issue_create:proj1:feat-a -->`. Finds issue #42. Adopts issue #42 as `remote_identifier`, updates action status to `RECONCILED`, advances checkpoint without creating a duplicate issue. Title-only search is forbidden.
+2. **Case 2: Remote effect occurred but response/result persistence was lost**:
+   - *State*: GitHub API created issue #42 with `<!-- minime-opkey: issue_create:proj1:feat-a -->` in body, but daemon crashed before receiving HTTP response body or saving result.
+   - *Recovery*: `OrchestrationExternalActionModel` is `RESERVED` or `EXECUTING`. On restart, `reconcile_observe_before_repeat()` searches GitHub repo for issues containing `<!-- minime-opkey: issue_create:proj1:feat-a -->`. Finds issue #42. Adopts issue #42 as `remote_identifier`, updates action status to `COMPLETED` (setting `reconciled_at`), advances checkpoint without creating a duplicate issue. Title-only search is forbidden.
 
-3. **Case 3: Crash after response but before DB result persistence**:
-   - *State*: GitHub API returned 201 Created (issue #42), but daemon crashed before committing `OrchestrationExternalActionModel` status `RECONCILED` to PostgreSQL.
-   - *Recovery*: Same as Case 2. On restart, RECONCILE FIRST check queries remote GitHub API using Stage B comment marker, finds issue #42, records `RECONCILED` in DB, advances saga phase.
+3. **Case 3: External effect positively observed**:
+   - *State*: External call succeeded or reconciliation observed pre-existing resource.
+   - *Recovery*: Action status transitions to `COMPLETED`, `remote_identifier` is recorded, `reconciled_at` timestamp is saved, and saga advances phase. `COMPLETED` action is never re-executed.
 
-4. **Case 4: Crash after result persisted but before phase advancement**:
-   - *State*: `OrchestrationExternalActionModel` is saved as `RECONCILED` with issue #42, but `DurableSagaModel.current_phase` is still `OPENSPEC_AUTHORED`.
-   - *Recovery*: On restart, saga engine inspects `OrchestrationExternalActionModel` for phase `ISSUE_BOUND`, sees `status == RECONCILED`, skips remote call entirely, advances `DurableSagaModel.current_phase` to `ISSUE_BOUND`, and proceeds to next phase (`PROJECT_ITEM_BOUND`).
+4. **Case 4: Completed action with saga phase not advanced**:
+   - *State*: `OrchestrationExternalActionModel` is saved as `COMPLETED` with issue #42, but `DurableSagaModel.current_phase` is still `OPENSPEC_AUTHORED`.
+   - *Recovery*: On restart, saga engine inspects `OrchestrationExternalActionModel` for phase `ISSUE_BOUND`, sees `status == COMPLETED`, skips remote mutation entirely, advances `DurableSagaModel.current_phase` to `ISSUE_BOUND`, and proceeds to next phase (`PROJECT_ITEM_BOUND`).
 
 5. **Case 5: Restart after phase advancement**:
    - *State*: `DurableSagaModel.current_phase` is `SPEC_ARCHIVED`.
@@ -380,9 +406,9 @@ To guarantee Architectural Law 4 without holding open long database locks across
    - *State*: Operator triggers `/api/v1/control-plane/sagas/{saga_id}/resume` multiple times concurrently or sequentially.
    - *Recovery*: `SagaEngine` acquires row lock on `DurableSagaModel` using atomic `SELECT ... FOR UPDATE`. If saga is already `COMPLETED` or active on worker, subsequent calls execute sequentially and return current status idempotently.
 
-7. **Case 7: External system temporarily unavailable during reconciliation**:
-   - *State*: GitHub API returns 503 Service Unavailable or times out during RECONCILE FIRST check.
-   - *Recovery*: Saga engine CANNOT establish occurrence or non-occurrence. Action `status` transitions to `AMBIGUOUS`. `DurableSagaModel.status` transitions to `BLOCKED` with `blocking_reason = "GitHub API 503 during action reconciliation"`. Emits `DURABLE_SAGA_BLOCKED` event. Daemon does NOT fabricate success or retry blindly; waits for next scheduled sweep or operator resume.
+7. **Case 7: Effect cannot be determined (unobservable)**:
+   - *State*: GitHub API returns 503 Service Unavailable or times out during reconciliation.
+   - *Recovery*: Saga engine CANNOT establish occurrence or non-occurrence. Action `status` becomes/remains `AMBIGUOUS` (or `UNKNOWN` for read failures). `DurableSagaModel.status` transitions to `BLOCKED` with `blocking_reason`. Emits `DURABLE_SAGA_BLOCKED` event. Daemon does NOT fabricate success or retry blindly; waits for next scheduled sweep or operator resume.
 
 8. **Case 8: Terminal domain flag with incomplete saga evidence**:
    - *State*: `ChangeModel` is `DONE` or `JobModel` is `COMPLETED`, but `ClosureSaga` evidence is incomplete (e.g. OpenSpec spec sync or archive was interrupted).
@@ -402,14 +428,15 @@ Targeted verification scenarios to implement in `tests/test_durable_sagas.py`:
 6. **Ancestry-Preserving Merge Delivery Verification**: Test closure saga delivery verification when PR was fast-forward or normal merged; verify `git merge-base --is-ancestor candidate_sha base_ref` passes.
 7. **Terminal Domain Flag + Incomplete Saga Evidence != Closure Success**: Test change marked `DONE` in DB with incomplete `ClosureSaga` evidence; verify saga DOES NOT infer closure success, enters reconciliation-only mode, and remains `BLOCKED` until all 12 closure phase evidence records exist.
 8. **Terminal Domain Work Never Re-opened During Intake**: Test intake preparation trigger on `COMPLETED` backlog item; verify request is rejected with `POLICY_DENIED`.
-9. **Single External Action Authority Verification**: Verify all saga actions reserve records in `orchestration_external_actions` table with deterministic `action_key` uniqueness constraint, and no separate `saga_actions` table is created.
-10. **Fail-Closed on Unobservable State**: Verify HTTP 500/503 during reconciliation sets action to `AMBIGUOUS` and saga to `BLOCKED` without guessing success.
-11. **Completed Phases Not Re-executed**: Verify completed phases with `RECONCILED` / `SUCCESS` action records are skipped during saga resume.
-12. **Repeated Resume Idempotency**: Verify calling `resume_saga()` multiple times sequentially produces identical final state without side effects.
-13. **Partially Completed Closure Blocked**: Verify closure saga lacking required phase evidence (e.g. sync unverified) stops at `WAIT_EXTERNAL` or `BLOCKED` and does NOT transition Change to `DONE`.
-14. **Idempotent OpenSpec Spec Sync**: Verify retrying OpenSpec spec sync phase does not duplicate spec sections in `openspec/specs/`.
-15. **Idempotent OpenSpec Archive**: Verify retrying OpenSpec archive when active change directory is already moved reconciles archive destination safely without raising `FileNotFoundError`.
-16. **Worktree Cleanup Idempotency**: Verify worktree cleanup returns `ALREADY_ABSENT` safely when worktree directory is already deleted.
-17. **Branch Cleanup Idempotency**: Verify local and remote branch cleanup handle `ALREADY_ABSENT` gracefully on retry.
-18. **Daemon Startup Recovery Sweep**: Test `RestartRecoveryService.reconcile_on_startup()` discovering and resuming interrupted `INTAKE` and `CLOSURE` sagas.
-19. **Control-Plane Saga Resume Integration**: Test triggering manual saga resume via `ControlPlaneService` endpoint.
+9. **Single External Action Authority & Ownership Invariant Verification**: Verify all saga actions reserve records in `orchestration_external_actions` table with deterministic `action_key` uniqueness constraint, and no separate `saga_actions` table exists. Verify creating an action with neither `run_id` nor `saga_id` raises a validation error.
+10. **Canonical Status Verification**: Verify action status transitions follow `RESERVED` -> `COMPLETED` / `FAILED` / `AMBIGUOUS`, and `SUCCESS` / `RECONCILED` are NOT persisted status values.
+11. **Fail-Closed on Unobservable State**: Verify HTTP 500/503 during reconciliation sets action to `AMBIGUOUS` and saga to `BLOCKED` without guessing success.
+12. **Completed Phases Not Re-executed**: Verify completed phases with `COMPLETED` action records are skipped during saga resume.
+13. **Repeated Resume Idempotency**: Verify calling `resume_saga()` multiple times sequentially produces identical final state without side effects.
+14. **Partially Completed Closure Blocked**: Verify closure saga lacking required phase evidence (e.g. sync unverified) stops at `WAIT_EXTERNAL` or `BLOCKED` and does NOT transition Change to `DONE`.
+15. **Idempotent OpenSpec Spec Sync**: Verify retrying OpenSpec spec sync phase does not duplicate spec sections in `openspec/specs/`.
+16. **Idempotent OpenSpec Archive**: Verify retrying OpenSpec archive when active change directory is already moved reconciles archive destination safely without raising `FileNotFoundError`.
+17. **Worktree Cleanup Idempotency**: Verify worktree cleanup returns `ALREADY_ABSENT` safely when worktree directory is already deleted.
+18. **Branch Cleanup Idempotency**: Verify local and remote branch cleanup handle `ALREADY_ABSENT` gracefully on retry.
+19. **Daemon Startup Recovery Sweep**: Test `RestartRecoveryService.reconcile_on_startup()` discovering and resuming interrupted `INTAKE` and `CLOSURE` sagas.
+20. **Control-Plane Saga Resume Integration**: Test triggering manual saga resume via `ControlPlaneService` endpoint.

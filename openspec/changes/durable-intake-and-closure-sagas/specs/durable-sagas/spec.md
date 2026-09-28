@@ -56,9 +56,9 @@ AND SHALL NOT transition `Change` to `DONE` or `BacklogItem` to `COMPLETED`.
 
 ---
 
-### Requirement: Single External Action Store and Stage B Exact Identity Reconciliation
+### Requirement: Single External Action Store, Action Ownership Invariant, and Stage B Exact Identity Reconciliation
 
-All saga-bound external mutations (GitHub Issue creation, GitHub Project item addition, OpenSpec file authoring, GitHub Issue closure, GitHub Project item status update, OpenSpec spec sync, OpenSpec change archiving, worktree cleanup, branch deletion, lock release) SHALL reserve an `OrchestrationExternalActionModel` record in PostgreSQL with `status = RESERVED` and a deterministic `request_fingerprint` BEFORE invoking external adapters, and reconciliation SHALL enforce Stage B exact identity matching.
+All saga-bound external mutations (GitHub Issue creation, GitHub Project item addition, OpenSpec file authoring, GitHub Issue closure, GitHub Project item status update, OpenSpec spec sync, OpenSpec change archiving, worktree cleanup, branch deletion, lock release) SHALL reserve an `OrchestrationExternalActionModel` record in PostgreSQL with `status = RESERVED` and a deterministic `request_fingerprint` BEFORE invoking external adapters, action records SHALL satisfy the operational ownership invariant (`run_id is not None or saga_id is not None`), and reconciliation SHALL delegate to `reconcile_observe_before_repeat()` enforcing Stage B exact identity matching.
 
 #### Scenario: Action reservation committed before remote mutation
 GIVEN an intake or closure saga preparing an external action (such as creating a GitHub Issue)
@@ -66,18 +66,24 @@ WHEN the saga engine executes the action step
 THEN it SHALL persist and COMMIT an `OrchestrationExternalActionModel` record with `status = "RESERVED"`, `action_key`, `target_identity`, `saga_id`, and `request_fingerprint`
 AND SHALL invoke the external adapter ONLY AFTER durable DB commit confirmation.
 
+#### Scenario: Action without operational owner denied by ownership invariant
+GIVEN a request to create or persist an `OrchestrationExternalAction` record
+WHEN both `run_id` and `saga_id` are `None`
+THEN the domain model and repository SHALL reject the action record as invalid
+AND NO record SHALL be persisted to PostgreSQL.
+
 #### Scenario: GitHub Issue creation reconciled via exact Stage B comment marker
 GIVEN a saga action `GITHUB_ISSUE_CREATE` in state `RESERVED` following a daemon restart
-WHEN the saga engine executes reconciliation before retry
+WHEN the saga engine executes reconciliation before retry via `reconcile_observe_before_repeat()`
 THEN it SHALL search repository issues for the exact comment marker `<!-- minime-opkey: <operation_key> -->`
-AND WHEN matching issue #42 is found, it SHALL adopt issue #42, update action status to `RECONCILED`, and advance phase
+AND WHEN matching issue #42 is found, it SHALL adopt issue #42, update action status to `COMPLETED` (setting `reconciled_at`), and advance phase
 AND title-only deduplication SHALL be strictly FORBIDDEN.
 
 #### Scenario: GitHub Project item creation reconciled via exact issue URL
 GIVEN a saga action `GITHUB_PROJECT_ITEM_ADD` in state `RESERVED` following a daemon restart
-WHEN the saga engine executes reconciliation before retry
+WHEN the saga engine executes reconciliation before retry via `reconcile_observe_before_repeat()`
 THEN it SHALL query project items for the exact bound issue URL
-AND WHEN matching project item is found, it SHALL adopt the item ID, update action status to `RECONCILED`, and advance phase
+AND WHEN matching project item is found, it SHALL adopt the item ID, update action status to `COMPLETED` (setting `reconciled_at`), and advance phase
 AND fuzzy title matching SHALL be strictly FORBIDDEN.
 
 #### Scenario: Unobservable remote state transitions action to AMBIGUOUS and blocks saga

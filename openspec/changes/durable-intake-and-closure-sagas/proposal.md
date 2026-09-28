@@ -22,13 +22,15 @@ It also strictly enforces foundational cross-program invariants:
 
 ## What Changes
 
-- **Durable Saga Identity & Generalized Single External-Action Authority**:
+- **Durable Saga Identity & Generalization of Existing External Action Authority**:
   - Introduce `DurableSagaModel` (`durable_sagas`) in PostgreSQL to track saga ID, saga type (`INTAKE`, `CLOSURE`), project ID, work item key, change name, run ID, job ID, generation, current phase checkpoint, status (`IN_PROGRESS`, `BLOCKED`, `COMPLETED`, `FAILED`, `CANCELLED`), blocking reason, and evidence references.
-  - **Single External Action Authority**: Avoid creating a duplicate store. Generalize the existing canonical `OrchestrationExternalActionModel` (`orchestration_external_actions`) by adding an optional `saga_id` foreign key and making `run_id` and `candidate_sha` conditional, while retaining global deterministic `action_key` uniqueness.
-  - Require pre-execution reservation of an `OrchestrationExternalActionModel` record with status `RESERVED` / `IN_FLIGHT` and `request_fingerprint` BEFORE executing any external mutation.
+  - **Reuse Existing `ExternalActionStatus` & Model Authority**: Preserve the single canonical `OrchestrationExternalActionModel` (`orchestration_external_actions`) and its exact `ExternalActionStatus` state machine (`RESERVED`, `EXECUTING`, `COMPLETED`, `FAILED`, `UNKNOWN`, `AMBIGUOUS`). `SUCCESS` and `RECONCILED` are NOT persisted statuses (`reconciled_at` is timestamp metadata).
+  - Generalize `OrchestrationExternalAction` across domain model, DB model, repository interfaces, Postgres/in-memory mappers, and callers by making `run_id: str | None`, `candidate_sha: str | None`, and adding optional `saga_id: str | None`.
+  - **Action Ownership Invariant**: Every external action MUST have at least one valid operational owner (`run_id is not None or saga_id is not None`). An action record with neither owner is invalid and denied.
+  - Require pre-execution reservation of an `OrchestrationExternalActionModel` record with status `RESERVED` and `request_fingerprint` BEFORE executing any external mutation.
 
-- **Inherit Stage B Identities Exactly & Reconcile Before Retry**:
-  - For GitHub Issues: deterministic `operation_key` is authoritative; body carries exact `<!-- minime-opkey: <operation_key> -->` comment marker. Reconciliation matches this marker; title-only deduplication is FORBIDDEN.
+- **Inherit Stage B Identities Exactly & Delegate to Canonical `reconcile_observe_before_repeat()`**:
+  - For GitHub Issues: deterministic `operation_key` is authoritative; body carries exact `<!-- minime-opkey: <operation_key> -->` comment marker. Reconciliation matches this marker via canonical `reconcile_observe_before_repeat()`. Title-only deduplication is FORBIDDEN.
   - For GitHub Project items: reconcile using exact project identity + issue URL / operation-key semantics already established by Stage B; no fuzzy or title matching.
   - For OpenSpec authoring/sync/archive: reconcile via project ID, change name, and filesystem verification.
   - For Worktrees & Branches: reconcile via Stage C 4-way verification, `git show-ref` exit code 1, and remote 404 HTTP outcomes.
@@ -66,4 +68,4 @@ It also strictly enforces foundational cross-program invariants:
 ## Capabilities
 
 ### New Capability: Durable Intake and Closure Sagas
-Provides PostgreSQL-backed, phase-checkpointed, idempotent intake and post-merge closure sagas reusing the single canonical external-action authority, enforcing Stage B deterministic identity matching, supporting squash-merge delivery verification, protecting terminal domain states, and recovering safely from process crashes.
+Provides PostgreSQL-backed, phase-checkpointed, idempotent intake and post-merge closure sagas reusing the single canonical external-action authority and exact `ExternalActionStatus` state machine, enforcing Stage B deterministic identity matching, supporting squash-merge delivery verification, protecting terminal domain states, enforcing action ownership invariants, and recovering safely from process crashes.
