@@ -282,6 +282,9 @@ class ManagedWorkspaceGuard:
         binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
         binding = binding_repo.get_by_project_id(request.project_id) if binding_repo else None
 
+        if not binding and getattr(request, "provisional_binding", None):
+            binding = request.provisional_binding
+
         if not is_binding_fully_valid(binding):
             return WorkspaceMutationDecision(
                 allowed=False,
@@ -439,8 +442,20 @@ class ManagedWorkspaceGuard:
                 resolved_path=resolved,
             )
 
-        # 4. Check if target is inside managed repository root
-        if self._is_path_inside(resolved, managed_repo_root):
+        # 4. Check if target is inside managed repository root (or is a parent container during onboarding)
+        is_managed_target = (
+            self._is_path_inside(resolved, managed_repo_root)
+            or (
+                getattr(request, "provisional_binding", None)
+                and self._is_path_inside(managed_repo_root, resolved)
+                and (
+                    self.trusted_managed_root is None
+                    or self._is_path_inside(resolved, self.trusted_managed_root)
+                    or resolved == self.resolve_canonical_path(self.trusted_managed_root)
+                )
+            )
+        )
+        if is_managed_target:
             # Verify Git identity and ownership marker if managed repository exists
             if os.path.exists(managed_repo_root):
                 valid_git, git_reason = self.verify_git_repository_identity(
@@ -459,19 +474,41 @@ class ManagedWorkspaceGuard:
                         provider_detail=git_reason,
                     )
 
-                valid_marker, marker_reason, m_code, m_outcome = self.verify_managed_repository_ownership_marker(
-                    managed_repo_root, binding.project_id, binding.canonical_repository_identity, binding.ownership_marker_filename
-                )
-                if not valid_marker:
+                marker_filename = getattr(binding, "ownership_marker_filename", ".minime-managed-project.json")
+                is_marker_target = resolved == os.path.join(managed_repo_root, marker_filename) or resolved == managed_repo_root
+
+                if not is_marker_target:
+                    valid_marker, marker_reason, m_code, m_outcome = self.verify_managed_repository_ownership_marker(
+                        managed_repo_root, binding.project_id, binding.canonical_repository_identity, binding.ownership_marker_filename
+                    )
+                    if not valid_marker:
+                        return WorkspaceMutationDecision(
+                            allowed=False,
+                            outcome=m_outcome,
+                            reason_code=m_code,
+                            workspace_role=WorkspaceRole.MANAGED_REPOSITORY,
+                            resolved_path=resolved,
+                            provider_detail=marker_reason,
+                        )
+            else:
+                # Allow initial establishment and creation of managed_repo_root and marker before repository creation ONLY during onboarding (provisional_binding present)
+                marker_filename = getattr(binding, "ownership_marker_filename", ".minime-managed-project.json")
+                if getattr(request, "provisional_binding", None) and request.requested_operation in (
+                    WorkspaceOperation.WORKTREE_CREATE,
+                    WorkspaceOperation.GIT_BRANCH,
+                    WorkspaceOperation.EDIT,
+                ) and (
+                    resolved == managed_repo_root
+                    or self._is_path_inside(managed_repo_root, resolved)
+                    or resolved == os.path.join(managed_repo_root, marker_filename)
+                ):
                     return WorkspaceMutationDecision(
-                        allowed=False,
-                        outcome=m_outcome,
-                        reason_code=m_code,
+                        allowed=True,
+                        outcome=ExternalOutcome.SUCCESS,
+                        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
                         workspace_role=WorkspaceRole.MANAGED_REPOSITORY,
                         resolved_path=resolved,
-                        provider_detail=marker_reason,
                     )
-            else:
                 return WorkspaceMutationDecision(
                     allowed=False,
                     outcome=ExternalOutcome.UNKNOWN,
@@ -481,10 +518,16 @@ class ManagedWorkspaceGuard:
                     provider_detail=f"Managed repository root '{managed_repo_root}' does not exist on disk.",
                 )
 
-            # Managed repository root is read-only for direct agent code edits
-            if request.requested_operation in (
-                WorkspaceOperation.EDIT,
-                WorkspaceOperation.GIT_COMMIT,
+            # Managed repository root is read-only for direct agent code edits (except marker file or root establishment)
+            marker_filename = getattr(binding, "ownership_marker_filename", ".minime-managed-project.json")
+            is_marker_or_root = (
+                resolved == os.path.join(managed_repo_root, marker_filename)
+                or resolved == managed_repo_root
+            )
+
+            if (
+                request.requested_operation in (WorkspaceOperation.EDIT, WorkspaceOperation.GIT_COMMIT)
+                and not is_marker_or_root
             ):
                 return WorkspaceMutationDecision(
                     allowed=False,

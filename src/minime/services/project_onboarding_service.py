@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from minime.adapters.github import GitHubAdapter, GitHubAuthorizationError, GitHubRemoteError
@@ -44,6 +45,14 @@ class ProjectOnboardingService:
         self.trusted_managed_root = (
             str(Path(trusted_managed_root).resolve()) if trusted_managed_root else None
         )
+
+    def _resolve_remote_source(self, raw_repo: str, norm_repo: str) -> str:
+        cleaned = raw_repo.strip()
+        if cleaned.startswith("/") or cleaned.startswith("file://") or os.path.isabs(cleaned) or os.path.exists(cleaned):
+            return cleaned
+        if cleaned.startswith("http://") or cleaned.startswith("https://") or cleaned.startswith("git@"):
+            return cleaned
+        return f"https://{norm_repo}"
 
     def onboard_project(
         self,
@@ -127,12 +136,13 @@ class ProjectOnboardingService:
 
         now = utc_now()
 
-        # 5b. Establish and validate Stage C ProjectManagedRepositoryBinding
+        # 6. Establish and validate Stage C ProjectManagedRepositoryBinding via Guard
         import json
         import os
         import subprocess
 
-        from minime.domain.models import ProjectManagedRepositoryBinding
+        from minime.domain.enums import WorkspaceOperation
+        from minime.domain.models import ProjectManagedRepositoryBinding, WorkspaceMutationRequest
         from minime.services.workspace_guard import ManagedWorkspaceGuard
 
         trusted_root = (
@@ -161,14 +171,21 @@ class ProjectOnboardingService:
         guard = ManagedWorkspaceGuard(self.uow, runtime_root=runtime_root, trusted_managed_root=trusted_root)
         mismatch_reasons: list[str] = []
 
-        # 1. Reject RUNTIME overlap BEFORE mutation
+        provisional_binding = ProjectManagedRepositoryBinding(
+            project_id=project_id,
+            canonical_repository_identity=norm_repo,
+            managed_repository_root=managed_root,
+            worktree_parent_dir=worktree_parent_dir,
+            is_valid=True,
+        )
+
+        # 6a. Helper pre-checks (topology & trusted root containment)
         if guard._paths_overlap(managed_root, runtime_root):
             mismatch_reasons.append(f"Managed repository root '{managed_root}' aliases or overlaps runtime root '{runtime_root}'.")
 
         if guard._paths_overlap(worktree_parent_dir, runtime_root):
             mismatch_reasons.append(f"Worktree parent dir '{worktree_parent_dir}' aliases or overlaps runtime root '{runtime_root}'.")
 
-        # 2. Check trusted root bounds BEFORE mutation
         if trusted_root:
             if not (guard._is_path_inside(managed_root, trusted_root) or managed_root == trusted_root):
                 mismatch_reasons.append(f"Managed repository root '{managed_root}' is outside trusted managed root '{trusted_root}'.")
@@ -182,49 +199,128 @@ class ProjectOnboardingService:
                 f"Project onboarding failed closed on pre-mutation topology checks: {'; '.join(reasons)}"
             )
 
-        # 3. Establish filesystem layout
-        try:
-            os.makedirs(managed_root, exist_ok=True)
-            os.makedirs(worktree_parent_dir, exist_ok=True)
-        except Exception as exc:
-            mismatch_reasons.append(f"Failed to create managed repository layout: {exc}")
+        # 6b. MANDATORY Guard Authorization for target managed_root BEFORE filesystem or Git mutation
+        req_managed_dir = WorkspaceMutationRequest(
+            project_id=project_id,
+            target_path=managed_root,
+            requested_operation=WorkspaceOperation.EDIT,
+            provisional_binding=provisional_binding,
+        )
+        dec_managed_dir = guard.evaluate_mutation(req_managed_dir)
+        if not dec_managed_dir.allowed:
+            mismatch_reasons.append(
+                f"ManagedWorkspaceGuard denied mutation authorization for repository root '{managed_root}': {dec_managed_dir.provider_detail}"
+            )
             reasons.extend(mismatch_reasons)
             onboarding_status = ProjectOnboardingStatus.BLOCKED
-            raise ValueError(f"Project onboarding failed closed on directory creation: {exc}") from exc
+            raise ValueError(
+                f"Project onboarding failed closed on Guard authorization denial for repository root: {dec_managed_dir.provider_detail}"
+            )
 
-        # 4. Establish Git repository identity
-        remote_url = f"https://{norm_repo}"
+        # 6c. Real Canonical Remote Repository Establishment (Clone / Fetch)
+        remote_source = self._resolve_remote_source(raw_repo, norm_repo)
         base_br = input_data.base_branch or "main"
 
         try:
             if not os.path.exists(os.path.join(managed_root, ".git")):
-                subprocess.run(["git", "init", "-b", base_br], cwd=managed_root, check=True, capture_output=True)
-                subprocess.run(["git", "config", "user.name", "mini me"], cwd=managed_root, check=True)
-                subprocess.run(["git", "config", "user.email", "minime@local"], cwd=managed_root, check=True)
-                subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=managed_root, check=True)
-                subprocess.run(["git", "remote", "add", "origin", remote_url], cwd=managed_root, check=True, capture_output=True)
+                # Ensure parent dir exists under Guard authorization if needed
+                parent_dir = os.path.dirname(managed_root)
+                if parent_dir and not os.path.exists(parent_dir):
+                    req_p = WorkspaceMutationRequest(
+                        project_id=project_id,
+                        target_path=parent_dir,
+                        requested_operation=WorkspaceOperation.EDIT,
+                        provisional_binding=provisional_binding,
+                    )
+                    dec_p = guard.evaluate_mutation(req_p)
+                    if not dec_p.allowed:
+                        raise ValueError(f"Guard denied parent directory creation '{parent_dir}': {dec_p.provider_detail}")
+                    os.makedirs(parent_dir, exist_ok=True)
 
-                if not any(f for f in os.listdir(managed_root) if f != ".git"):
-                    readme_path = os.path.join(managed_root, "README.md")
-                    with open(readme_path, "w", encoding="utf-8") as f:
-                        f.write(f"# {display_name}\n\nManaged project repository for {norm_repo}\n")
-                    subprocess.run(["git", "add", "."], cwd=managed_root, check=True)
-                    subprocess.run(["git", "commit", "-m", "Initial managed repository base commit"], cwd=managed_root, check=True, capture_output=True)
+                req_clone = WorkspaceMutationRequest(
+                    project_id=project_id,
+                    target_path=managed_root,
+                    requested_operation=WorkspaceOperation.GIT_BRANCH,
+                    provisional_binding=provisional_binding,
+                )
+                dec_clone = guard.evaluate_mutation(req_clone)
+                if not dec_clone.allowed:
+                    raise ValueError(f"Guard denied Git clone mutation for '{managed_root}': {dec_clone.provider_detail}")
 
-                subprocess.run(["git", "update-ref", f"refs/remotes/origin/{base_br}", "HEAD"], cwd=managed_root, check=True)
-            else:
-                cp = subprocess.run(["git", "remote", "get-url", "origin"], cwd=managed_root, capture_output=True, text=True)
+                clone_cmd = ["git", "clone", "--branch", base_br, remote_source, managed_root]
+                cp = subprocess.run(clone_cmd, capture_output=True, text=True)
                 if cp.returncode != 0:
-                    subprocess.run(["git", "remote", "add", "origin", remote_url], cwd=managed_root, check=True, capture_output=True)
+                    # Retry without --branch if branch checkout failed during clone
+                    clone_fallback = ["git", "clone", remote_source, managed_root]
+                    cp_fb = subprocess.run(clone_fallback, capture_output=True, text=True)
+                    if cp_fb.returncode != 0:
+                        raise ValueError(
+                            f"Failed to clone remote repository from '{remote_source}' (branch '{base_br}'): "
+                            f"{cp.stderr.strip() or cp_fb.stderr.strip() or cp.stdout.strip()}"
+                        )
+                    co_cp = subprocess.run(["git", "checkout", base_br], cwd=managed_root, capture_output=True, text=True)
+                    if co_cp.returncode != 0:
+                        raise ValueError(f"Remote repository does not contain requested base branch '{base_br}': {co_cp.stderr.strip()}")
+            else:
+                req_fetch = WorkspaceMutationRequest(
+                    project_id=project_id,
+                    target_path=managed_root,
+                    requested_operation=WorkspaceOperation.GIT_BRANCH,
+                    provisional_binding=provisional_binding,
+                )
+                dec_fetch = guard.evaluate_mutation(req_fetch)
+                if not dec_fetch.allowed:
+                    raise ValueError(f"Guard denied Git fetch mutation for '{managed_root}': {dec_fetch.provider_detail}")
+
+                cp_fetch = subprocess.run(["git", "fetch", "origin", base_br], cwd=managed_root, capture_output=True, text=True)
+                if cp_fetch.returncode != 0:
+                    subprocess.run(["git", "fetch", "origin"], cwd=managed_root, capture_output=True, text=True)
         except Exception as exc:
-            mismatch_reasons.append(f"Failed to establish Git repository: {exc}")
+            mismatch_reasons.append(f"Failed to establish canonical remote checkout: {exc}")
             reasons.extend(mismatch_reasons)
             onboarding_status = ProjectOnboardingStatus.BLOCKED
-            raise ValueError(f"Project onboarding failed closed on Git repository establishment: {exc}") from exc
+            raise ValueError(f"Project onboarding failed closed on remote repository establishment: {exc}") from exc
 
-        # 5. Establish ownership marker file (.minime-managed-project.json)
+        # 6d. Verify Remote Truth & Local HEAD Derivation (No synthetic commits or fabricated refs!)
+        cp_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=managed_root, capture_output=True, text=True)
+        cp_origin_head = subprocess.run(["git", "rev-parse", f"origin/{base_br}"], cwd=managed_root, capture_output=True, text=True)
+
+        if cp_head.returncode != 0:
+            mismatch_reasons.append(f"Local HEAD commit in managed repository '{managed_root}' is unobservable: {cp_head.stderr.strip()}")
+        if cp_origin_head.returncode != 0:
+            mismatch_reasons.append(f"Remote base branch tracking ref 'origin/{base_br}' in managed repository is unobservable: {cp_origin_head.stderr.strip()}")
+
+        if mismatch_reasons:
+            reasons.extend(mismatch_reasons)
+            onboarding_status = ProjectOnboardingStatus.BLOCKED
+            raise ValueError(
+                f"Project onboarding failed closed on remote branch verification: {'; '.join(reasons)}"
+            )
+
+        # 6e. Post-checkout Remote Identity Verification
+        valid_git, git_reason = guard.verify_git_repository_identity(managed_root, norm_repo, remote_name="origin")
+        if not valid_git:
+            mismatch_reasons.append(f"Git repository identity verification failed post-checkout: {git_reason}")
+            reasons.extend(mismatch_reasons)
+            onboarding_status = ProjectOnboardingStatus.BLOCKED
+            raise ValueError(f"Project onboarding failed closed on remote identity verification: {git_reason}")
+
+        # 6f. Establish Ownership Marker ONLY AFTER successful remote checkout verification
+        marker_file = os.path.join(managed_root, ".minime-managed-project.json")
+        req_marker = WorkspaceMutationRequest(
+            project_id=project_id,
+            target_path=marker_file,
+            requested_operation=WorkspaceOperation.EDIT,
+            provisional_binding=provisional_binding,
+        )
+        dec_marker = guard.evaluate_mutation(req_marker)
+        if not dec_marker.allowed:
+            mismatch_reasons.append(f"ManagedWorkspaceGuard denied marker mutation: {dec_marker.provider_detail}")
+            reasons.extend(mismatch_reasons)
+            onboarding_status = ProjectOnboardingStatus.BLOCKED
+            raise ValueError(f"Project onboarding failed closed on ownership marker authorization denial: {dec_marker.provider_detail}")
+
         try:
-            marker_file = os.path.join(managed_root, ".minime-managed-project.json")
             marker_data = {
                 "project_id": project_id,
                 "canonical_repository_identity": norm_repo,
@@ -237,27 +333,34 @@ class ProjectOnboardingService:
             onboarding_status = ProjectOnboardingStatus.BLOCKED
             raise ValueError(f"Project onboarding failed closed on ownership marker creation: {exc}") from exc
 
-        # 6. Post-establishment verification
-        valid_git, git_reason = guard.verify_git_repository_identity(managed_root, norm_repo, remote_name="origin")
-        if not valid_git:
-            mismatch_reasons.append(f"Git repository identity verification failed post-establishment: {git_reason}")
-
         valid_marker, marker_msg, _, _ = guard.verify_managed_repository_ownership_marker(managed_root, project_id, norm_repo)
         if not valid_marker:
             mismatch_reasons.append(f"Ownership marker verification failed post-establishment: {marker_msg}")
-
-        if not os.path.exists(managed_root) or not os.path.isdir(managed_root):
-            mismatch_reasons.append(f"Managed root '{managed_root}' missing post-establishment.")
-
-        if not os.path.exists(worktree_parent_dir) or not os.path.isdir(worktree_parent_dir):
-            mismatch_reasons.append(f"Worktree parent directory '{worktree_parent_dir}' missing post-establishment.")
-
-        if mismatch_reasons:
             reasons.extend(mismatch_reasons)
             onboarding_status = ProjectOnboardingStatus.BLOCKED
-            raise ValueError(
-                f"Project onboarding failed closed on post-establishment verification: {'; '.join(reasons)}"
-            )
+            raise ValueError(f"Project onboarding failed closed on ownership marker verification: {marker_msg}")
+
+        # 6g. Establish Worktree Parent Directory under Guard Authorization
+        req_wt_parent = WorkspaceMutationRequest(
+            project_id=project_id,
+            target_path=worktree_parent_dir,
+            requested_operation=WorkspaceOperation.WORKTREE_CREATE,
+            provisional_binding=provisional_binding,
+        )
+        dec_wt_parent = guard.evaluate_mutation(req_wt_parent)
+        if not dec_wt_parent.allowed:
+            mismatch_reasons.append(f"ManagedWorkspaceGuard denied worktree parent dir creation: {dec_wt_parent.provider_detail}")
+            reasons.extend(mismatch_reasons)
+            onboarding_status = ProjectOnboardingStatus.BLOCKED
+            raise ValueError(f"Project onboarding failed closed on worktree parent directory authorization denial: {dec_wt_parent.provider_detail}")
+
+        try:
+            os.makedirs(worktree_parent_dir, exist_ok=True)
+        except Exception as exc:
+            mismatch_reasons.append(f"Failed to create worktree parent directory: {exc}")
+            reasons.extend(mismatch_reasons)
+            onboarding_status = ProjectOnboardingStatus.BLOCKED
+            raise ValueError(f"Project onboarding failed closed on worktree parent directory creation: {exc}") from exc
 
         managed_binding = ProjectManagedRepositoryBinding(
             project_id=project_id,
@@ -265,9 +368,9 @@ class ProjectOnboardingService:
             remote_name="origin",
             managed_repository_root=managed_root,
             worktree_parent_dir=worktree_parent_dir,
-            default_base_branch=input_data.base_branch,
             is_valid=True,
             mismatch_reasons=[],
+            validated_at=now,
             created_at=now,
             updated_at=now,
         )

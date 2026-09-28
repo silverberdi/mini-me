@@ -3693,62 +3693,130 @@ def test_task_c_worktree_manager_internal_writers(tmp_dirs):
     assert os.path.islink(dest_openspec_root) or os.path.islink(dest_openspec_root / "changes") or os.path.islink(dest_change_dir)
 
 
-def test_onboard_project_establishes_managed_repository(tmp_path):
-    """Verify onboarding establishes managed repository directory, git repo, marker, and valid binding."""
+def test_onboard_project_establishes_real_remote_checkout_and_uses_guard_authorization(tmp_path):
+    """Verify fresh onboarding clones actual remote history, verifies refs, uses Guard authorization, and persists marker after checkout."""
     from minime.domain.enums import ProjectOnboardingStatus
     from minime.domain.models import ProjectOnboardingInput
     from minime.services.project_onboarding_service import ProjectOnboardingService
 
     uow = MockUOW()
     trusted_root = tmp_path / "trusted_managed"
+    trusted_root.mkdir(parents=True, exist_ok=True)
     runtime_root = tmp_path / "runtime"
     runtime_root.mkdir(parents=True, exist_ok=True)
     (runtime_root / "openspec").mkdir(parents=True, exist_ok=True)
 
-    # Initialize mock metric repo in uow
-    saved_facts = []
+    # 1. Create a real local bare Git remote repository fixture
+    remote_bare = tmp_path / "remote_source.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(remote_bare)], check=True, capture_output=True)
 
-    class MockMetricsRepo:
-        def save(self, fact):
-            saved_facts.append(fact)
+    work_seed = tmp_path / "work_seed"
+    subprocess.run(["git", "clone", str(remote_bare), str(work_seed)], check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Remote Dev"], cwd=work_seed, check=True)
+    subprocess.run(["git", "config", "user.email", "dev@remote.local"], cwd=work_seed, check=True)
+    (work_seed / "README.md").write_text("# Remote Base History\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=work_seed, check=True)
+    subprocess.run(["git", "commit", "-m", "Remote canonical base commit"], cwd=work_seed, check=True, capture_output=True)
+    subprocess.run(["git", "push", "origin", "main"], cwd=work_seed, check=True, capture_output=True)
 
-        def list_by_name(self, name):
-            return [f for f in saved_facts if getattr(f, "metric_name", None) == name]
+    remote_head_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=work_seed, text=True).strip()
 
-        def list_all(self):
-            return list(saved_facts)
-
-    uow.metrics = MockMetricsRepo()
-
-    service = ProjectOnboardingService(uow=uow, project_root=runtime_root)
+    # 2. Run onboarding targeting real remote_bare
+    service = ProjectOnboardingService(uow=uow, project_root=runtime_root, trusted_managed_root=trusted_root)
+    managed_target = trusted_root / "proj-real-remote"
+    worktrees_target = trusted_root / "worktrees" / "proj-real-remote"
 
     onboard_input = ProjectOnboardingInput(
-        project_id="proj-fresh-onboard",
-        display_name="Fresh Onboard Project",
-        repository="github.com/test-org/fresh-repo",
+        project_id="proj-real-remote",
+        display_name="Real Remote Project",
+        repository=str(remote_bare),
         base_branch="main",
-        managed_repository_root=str(trusted_root / "proj-fresh-onboard"),
-        worktree_parent_dir=str(trusted_root / "worktrees" / "proj-fresh-onboard"),
+        managed_repository_root=str(managed_target),
+        worktree_parent_dir=str(worktrees_target),
     )
 
     result = service.onboard_project(onboard_input)
 
     assert result.status == ProjectOnboardingStatus.READY_FOR_WORK
 
-    managed_root = trusted_root / "proj-fresh-onboard"
-    assert managed_root.exists()
-    assert (trusted_root / "worktrees" / "proj-fresh-onboard").exists()
-    assert (managed_root / ".git").exists()
-    assert (managed_root / ".minime-managed-project.json").exists()
+    # 3. Prove real remote history & branch checkout
+    assert managed_target.exists()
+    assert worktrees_target.exists()
+    assert (managed_target / ".git").exists()
+    assert (managed_target / ".minime-managed-project.json").exists()
 
-    binding = uow.project_managed_repository_bindings.get_by_project_id("proj-fresh-onboard")
+    local_head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=managed_target, text=True).strip()
+    origin_head = subprocess.check_output(["git", "rev-parse", "origin/main"], cwd=managed_target, text=True).strip()
+
+    assert local_head == remote_head_sha
+    assert origin_head == remote_head_sha
+
+    binding = uow.project_managed_repository_bindings.get_by_project_id("proj-real-remote")
     assert binding is not None
     assert binding.is_valid is True
     assert binding.mismatch_reasons == []
 
-    proj = uow.projects.get_by_id("proj-fresh-onboard")
-    assert proj is not None
-    assert proj.onboarding_status == ProjectOnboardingStatus.READY_FOR_WORK
+
+def test_onboard_project_guard_denial_prevents_mutation(tmp_path):
+    """Verify ManagedWorkspaceGuard denial prevents disk creation, marker creation, and binding persistence."""
+    from minime.domain.models import ProjectOnboardingInput
+    from minime.services.project_onboarding_service import ProjectOnboardingService
+
+    uow = MockUOW()
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    trusted_root = tmp_path / "trusted"
+
+    service = ProjectOnboardingService(uow=uow, project_root=runtime_root, trusted_managed_root=trusted_root)
+
+    escaped_target = tmp_path / "unauthorized_escape_dir"
+
+    onboard_input = ProjectOnboardingInput(
+        project_id="proj-denied",
+        display_name="Denied Project",
+        repository="github.com/org/repo",
+        base_branch="main",
+        managed_repository_root=str(escaped_target),
+        worktree_parent_dir=str(trusted_root / "worktrees"),
+    )
+
+    with pytest.raises(ValueError, match="pre-mutation topology checks|Guard authorization denial"):
+        service.onboard_project(onboard_input)
+
+    # Prove no disk mutation occurred for escaped_target
+    assert not escaped_target.exists()
+    assert uow.project_managed_repository_bindings.get_by_project_id("proj-denied") is None
+
+
+def test_onboard_project_unobservable_remote_fails_closed(tmp_path):
+    """Verify non-existent remote repository fails closed without creating marker or binding."""
+    from minime.domain.models import ProjectOnboardingInput
+    from minime.services.project_onboarding_service import ProjectOnboardingService
+
+    uow = MockUOW()
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    trusted_root = tmp_path / "trusted"
+
+    service = ProjectOnboardingService(uow=uow, project_root=runtime_root, trusted_managed_root=trusted_root)
+
+    managed_target = trusted_root / "proj-unobservable"
+    non_existent_remote = tmp_path / "does_not_exist_remote.git"
+
+    onboard_input = ProjectOnboardingInput(
+        project_id="proj-unobservable",
+        display_name="Unobservable Project",
+        repository=str(non_existent_remote),
+        base_branch="main",
+        managed_repository_root=str(managed_target),
+        worktree_parent_dir=str(trusted_root / "worktrees"),
+    )
+
+    with pytest.raises(ValueError, match="remote repository establishment|remote checkout"):
+        service.onboard_project(onboard_input)
+
+    assert not (managed_target / ".minime-managed-project.json").exists()
+    assert uow.project_managed_repository_bindings.get_by_project_id("proj-unobservable") is None
 
 
 def test_onboard_project_rejects_runtime_collision(tmp_path):
@@ -3761,7 +3829,7 @@ def test_onboard_project_rejects_runtime_collision(tmp_path):
     runtime_root.mkdir(parents=True, exist_ok=True)
     trusted_root = tmp_path / "trusted"
 
-    service = ProjectOnboardingService(uow=uow, project_root=runtime_root)
+    service = ProjectOnboardingService(uow=uow, project_root=runtime_root, trusted_managed_root=trusted_root)
 
     onboard_input = ProjectOnboardingInput(
         project_id="proj-collision",
