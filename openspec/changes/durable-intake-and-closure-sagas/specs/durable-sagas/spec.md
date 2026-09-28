@@ -27,9 +27,9 @@ AND the backlog item SHALL be eligible for scheduler admission.
 
 ---
 
-### Requirement: Durable Closure Saga Persistence and Phase Checkpointing
+### Requirement: Durable Closure Saga Persistence and Squash-Merge Aware Delivery Verification
 
-The system SHALL execute post-human-merge closure and cleanup operations through a PostgreSQL-persisted, phase-checkpointed `DurableSagaModel` (`saga_type = CLOSURE`), and terminal `Change.DONE` and `BacklogItem.COMPLETED` transitions SHALL be DENIED until ALL required closure phases are durably proven complete.
+The system SHALL execute post-human-merge closure and cleanup operations through a PostgreSQL-persisted, phase-checkpointed `DurableSagaModel` (`saga_type = CLOSURE`), delivery verification SHALL explicitly support both normal ancestry-preserving merges and squash merges, and terminal `Change.DONE` and `BacklogItem.COMPLETED` transitions SHALL be DENIED until ALL required closure phases are durably proven complete.
 
 #### Scenario: Post-merge reconciliation creates durable closure saga
 GIVEN a merged pull request observed for a change and run
@@ -37,11 +37,16 @@ WHEN PostMergeReconciliationService begins post-merge closure
 THEN it SHALL create and commit a `DurableSagaModel` record in PostgreSQL with `saga_type = "CLOSURE"`, `status = "IN_PROGRESS"`, and `current_phase = "MERGE_OBSERVED"`
 AND SHALL record PR merge observation evidence in the saga record.
 
-#### Scenario: Process crash during closure resumes at exact persisted checkpoint
-GIVEN a closure saga that completed `SPEC_SYNCED` and `SYNC_VERIFIED` phases before daemon crash
-WHEN the daemon restarts and reconciles active sagas
-THEN the closure saga SHALL resume at phase `SPEC_ARCHIVED`
-AND SHALL NOT re-sync main specs or re-verify already completed sync phases.
+#### Scenario: Squash merge delivery verified using merge commit evidence
+GIVEN a pull request merged via GitHub squash merge
+WHEN the closure saga evaluates phase `MERGED_DELIVERY_VERIFIED`
+THEN it SHALL verify PR `is_merged == True`, repository/base identity is exact, PR head SHA equals audited candidate SHA, and observed `merge_commit_sha` exists on base branch
+AND candidate non-ancestry SHALL NOT be treated as a verification failure.
+
+#### Scenario: Normal merge delivery verified using Git ancestry
+GIVEN a pull request merged via normal merge or fast-forward
+WHEN the closure saga evaluates phase `MERGED_DELIVERY_VERIFIED`
+THEN it SHALL verify that `git merge-base --is-ancestor candidate_sha base_ref` returns exit code 0.
 
 #### Scenario: Missing phase evidence blocks terminal Change and BacklogItem closure
 GIVEN a closure saga executing post-merge closure
@@ -51,39 +56,29 @@ AND SHALL NOT transition `Change` to `DONE` or `BacklogItem` to `COMPLETED`.
 
 ---
 
-### Requirement: Pre-Execution Action Reservation and Idempotent Action Identity
+### Requirement: Single External Action Store and Stage B Exact Identity Reconciliation
 
-Every non-idempotent or externally observable side effect (GitHub Issue creation, GitHub Project item addition, OpenSpec file authoring, GitHub Issue closure, GitHub Project item status update, OpenSpec spec sync, OpenSpec change archiving, worktree cleanup, branch deletion, lock release) SHALL reserve a `SagaActionModel` record in PostgreSQL with `execution_state = REQUESTED` and a deterministic `request_fingerprint` BEFORE invoking external adapters.
+All saga-bound external mutations (GitHub Issue creation, GitHub Project item addition, OpenSpec file authoring, GitHub Issue closure, GitHub Project item status update, OpenSpec spec sync, OpenSpec change archiving, worktree cleanup, branch deletion, lock release) SHALL reserve an `OrchestrationExternalActionModel` record in PostgreSQL with `status = RESERVED` and a deterministic `request_fingerprint` BEFORE invoking external adapters, and reconciliation SHALL enforce Stage B exact identity matching.
 
 #### Scenario: Action reservation committed before remote mutation
 GIVEN an intake or closure saga preparing an external action (such as creating a GitHub Issue)
 WHEN the saga engine executes the action step
-THEN it SHALL persist and COMMIT a `SagaActionModel` record with `execution_state = "REQUESTED"`, `action_key`, `target_identity`, and `request_fingerprint`
+THEN it SHALL persist and COMMIT an `OrchestrationExternalActionModel` record with `status = "RESERVED"`, `action_key`, `target_identity`, `saga_id`, and `request_fingerprint`
 AND SHALL invoke the external adapter ONLY AFTER durable DB commit confirmation.
 
-#### Scenario: Completed action with SUCCESS state is skipped on retry
-GIVEN a saga action step whose `SagaActionModel` record exists in DB with `execution_state = "SUCCESS"` and valid `observed_result_identity`
-WHEN the saga engine retries or resumes execution of the phase
-THEN it SHALL skip the external mutation entirely
-AND SHALL reuse the persisted `observed_result_identity`.
-
----
-
-### Requirement: Reconcile Before Retry Protocol for Ambiguous Outcomes
-
-When an external action is found in `REQUESTED`, `IN_FLIGHT`, or `AMBIGUOUS` state following a restart, network timeout, or ambiguous response, the saga engine SHALL query the target external system using target and fingerprint evidence before attempting to re-execute the mutation.
-
-#### Scenario: Remote side effect discovered during reconciliation is adopted without duplication
-GIVEN a saga action `GITHUB_ISSUE_CREATE` in state `REQUESTED` due to a process crash during HTTP call
+#### Scenario: GitHub Issue creation reconciled via exact Stage B comment marker
+GIVEN a saga action `GITHUB_ISSUE_CREATE` in state `RESERVED` following a daemon restart
 WHEN the saga engine executes reconciliation before retry
-THEN it SHALL search the target GitHub repository for an issue matching the request fingerprint and title
-AND WHEN matching issue #42 is found, it SHALL record `observed_result_identity = "#42"`, update action state to `SUCCESS`, and advance phase without creating a duplicate issue.
+THEN it SHALL search repository issues for the exact comment marker `<!-- minime-opkey: <operation_key> -->`
+AND WHEN matching issue #42 is found, it SHALL adopt issue #42, update action status to `RECONCILED`, and advance phase
+AND title-only deduplication SHALL be strictly FORBIDDEN.
 
-#### Scenario: Non-occurrence confirmed by reconciliation authorizes safe execution
-GIVEN a saga action `GITHUB_ISSUE_CREATE` in state `REQUESTED`
-WHEN reconciliation queries the remote GitHub repository and positively confirms no matching issue exists
-THEN the saga engine SHALL classify the retry as `SAFE_TO_RETRY`
-AND SHALL proceed to invoke `GitHubAdapter.create_issue()` safely.
+#### Scenario: GitHub Project item creation reconciled via exact issue URL
+GIVEN a saga action `GITHUB_PROJECT_ITEM_ADD` in state `RESERVED` following a daemon restart
+WHEN the saga engine executes reconciliation before retry
+THEN it SHALL query project items for the exact bound issue URL
+AND WHEN matching project item is found, it SHALL adopt the item ID, update action status to `RECONCILED`, and advance phase
+AND fuzzy title matching SHALL be strictly FORBIDDEN.
 
 #### Scenario: Unobservable remote state transitions action to AMBIGUOUS and blocks saga
 GIVEN a saga action reconciliation attempt encountering remote HTTP 503 or network failure
@@ -94,9 +89,9 @@ AND the system SHALL emit a `DURABLE_SAGA_BLOCKED` event and wait for operator i
 
 ---
 
-### Requirement: Terminal Identity Protection and Non-Resurrection Guarantee
+### Requirement: Terminal Domain State Protection and Reconciliation Mode
 
-The saga engine and lifecycle authority SHALL enforce that terminal work items (`Change.status IN ('DONE', 'CANCELLED')` or `BacklogItem.status IN ('COMPLETED', 'CANCELLED')`) CANNOT be resurrected or re-executed by intake or closure sagas.
+The saga engine and lifecycle authority SHALL enforce that terminal domain items (`Change.status IN ('DONE', 'CANCELLED')` or `BacklogItem.status IN ('COMPLETED', 'CANCELLED')`) CANNOT be re-opened or re-admitted during intake, and an already terminal domain state during closure SHALL NOT infer saga closure success without complete required evidence.
 
 #### Scenario: Intake attempt on COMPLETED backlog item rejected
 GIVEN a backlog item with `status = COMPLETED`
@@ -105,15 +100,16 @@ THEN the system SHALL reject the request with outcome `FAILURE`
 AND reason_code SHALL be `POLICY_DENIED`
 AND no saga SHALL be initialized.
 
-#### Scenario: Closure attempt on DONE change rejected
-GIVEN an OpenSpec change with `status = DONE`
-WHEN a post-merge reconciliation trigger attempts to start a closure saga for the change name
-THEN the system SHALL reject the execution with outcome `SUCCESS` and `already_closed = True`
-AND SHALL NOT re-run spec sync, archiving, worktree cleanup, or branch deletion.
+#### Scenario: Terminal domain state with incomplete closure evidence enters reconciliation mode
+GIVEN a Change with `status = DONE` in DB BUT a `ClosureSaga` with incomplete spec sync or archive evidence
+WHEN post-merge reconciliation executes
+THEN the saga engine SHALL NOT infer saga closure success and SHALL NOT resurrect domain work
+AND it SHALL enter reconciliation-only mode to observe/check missing closure postconditions
+AND it SHALL transition saga status to `COMPLETED` ONLY when all 12 required closure phase evidence records exist.
 
 ---
 
-### Requirement: Daemon Restart Recovery and Control-Plane Saga Continuation
+### Requirement: Daemon Restart Recovery and Control-Plane Continuation
 
 The system SHALL automatically discover, reconcile, and safely resume in-flight and blocked sagas on daemon startup and SHALL provide control-plane endpoints for manual operator saga inspection and resume.
 
@@ -127,3 +123,15 @@ GIVEN an operator issuing a saga resume command via `ControlPlaneService` for sa
 WHEN the control plane processes the command
 THEN it SHALL acquire row lock on saga S, inspect phase evidence, and resume execution from the current phase checkpoint
 AND IF saga S is already `COMPLETED`, it SHALL return outcome `SUCCESS` with `already_closed = True`.
+
+---
+
+### Requirement: Concurrency Scope Boundary Separation
+
+Stage D SHALL provide durable saga identity, deterministic action identity, row-locking idempotency for sequential resume, and checkpoint recovery, and full multi-worker concurrent admission and race proving SHALL be explicitly deferred to `Stage F — transaction-and-concurrency-contract`.
+
+#### Scenario: Concurrent resume requests execute sequentially via row lock
+GIVEN two concurrent resume requests targeting the same saga ID S
+WHEN both requests reach the saga engine
+THEN the saga engine SHALL use atomic row locking (`SELECT ... FOR UPDATE`) to serialize execution
+AND the second request SHALL observe the updated saga state idempotently without executing duplicate actions.
