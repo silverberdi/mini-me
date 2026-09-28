@@ -215,10 +215,19 @@ class WorktreeManager:
         eff_project_id = self._resolve_project_id(project_id, job_id)
         return self.resolve_worktree_parent_dir(eff_project_id) / f"{job_id}-remediation-gen{generation}"
 
-    def review_worktree_path(self, job_id: str, reviewer_role: str, project_id: str | None = None) -> Path:
+    def review_worktree_path(
+        self,
+        job_id: str,
+        reviewer_role: str,
+        project_id: str | None = None,
+        candidate_sha: str | None = None,
+    ) -> Path:
         eff_project_id = self._resolve_project_id(project_id, job_id)
         sanitized_role = reviewer_role.replace("/", "_").replace("\\", "_").replace(":", "_")
-        return self.resolve_worktree_parent_dir(eff_project_id) / f"{job_id}-review-{sanitized_role}"
+        short_sha = candidate_sha[:8] if candidate_sha else ""
+        suffix = f"-{short_sha}" if short_sha else ""
+        return self.resolve_worktree_parent_dir(eff_project_id) / f"{job_id}-review-{sanitized_role}{suffix}"
+
 
     async def _git(
         self,
@@ -834,8 +843,10 @@ class WorktreeManager:
         eff_change_name = self._resolve_real_change_name(job_id, change_name, project_id=eff_project_id, run_id=eff_run_id)
 
         sanitized_role = reviewer_role.replace("/", "_").replace("\\", "_").replace(":", "_")
-        branch = f"minime/{eff_change_name}-{job_id}-review-{sanitized_role}"
-        path = self.review_worktree_path(job_id, reviewer_role, eff_project_id).resolve()
+        short_sha = candidate_sha[:8] if candidate_sha else ""
+        suffix = f"-{short_sha}" if short_sha else ""
+        branch = f"minime/{eff_change_name}-{job_id}-review-{sanitized_role}{suffix}"
+        path = self.review_worktree_path(job_id, reviewer_role, eff_project_id, candidate_sha=candidate_sha).resolve()
         parent = self.resolve_worktree_parent_dir(eff_project_id).resolve()
         if parent not in path.parents:
             raise ValueError(f"Worktree path escapes managed root: {path}")
@@ -887,6 +898,7 @@ class WorktreeManager:
         self._finalize_created_ownership(ownership)
 
         return WorktreeInfo(path, branch, candidate_sha)
+
 
 
     async def changed_paths_since(
@@ -1613,29 +1625,9 @@ class WorktreeManager:
             )
 
         path = Path(worktree_path).resolve()
-        if not path.exists():
-            return WorktreeCleanupResult(
-                outcome=ExternalOutcome.SUCCESS,
-                reason_code=ExternalReasonCode.ALREADY_ABSENT,
-                provider_detail=f"Worktree path '{path}' is already absent.",
-            )
-
-        # 1. Guard authorization before deleting
-        try:
-            self._authorize_mutating_operation(
-                eff_project_id, path, WorkspaceOperation.WORKTREE_DELETE, require_created_ownership=True, job_id=job_id
-            )
-        except (RuntimeError, ValueError) as exc:
-            logger.warning(f"Refusing deletion of review worktree at '{path}': {exc}")
-            return WorktreeCleanupResult(
-                outcome=ExternalOutcome.FAILURE,
-                reason_code=ExternalReasonCode.POLICY_DENIED,
-                provider_detail=f"Guard denied deletion: {exc}",
-            )
-
         canonical_path = str(path)
 
-        # 2. Durable DB ownership check
+        # 1. 4-Way Authority Step 1: Durable DB ownership check FIRST
         ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None) if self.uow else None
         if not ownership_repo:
             return WorktreeCleanupResult(
@@ -1650,6 +1642,7 @@ class WorktreeManager:
             if cand and str(Path(cand.canonical_worktree_path).resolve()) == canonical_path:
                 ownership = cand
 
+        # Absent review path + no durable ownership => UNKNOWN / EVIDENCE_INSUFFICIENT, not success
         if not ownership:
             return WorktreeCleanupResult(
                 outcome=ExternalOutcome.UNKNOWN,
@@ -1671,7 +1664,28 @@ class WorktreeManager:
                 provider_detail=f"DB ownership job_id/project_id mismatch for '{path}'.",
             )
 
-        # 3. git worktree list corroboration
+        if str(Path(ownership.canonical_worktree_path).resolve()) != canonical_path:
+            return WorktreeCleanupResult(
+                outcome=ExternalOutcome.FAILURE,
+                reason_code=ExternalReasonCode.CONFLICT,
+                provider_detail=f"DB ownership canonical path mismatch for '{path}'.",
+            )
+
+        # Guard preflight authorization
+        try:
+            self._authorize_mutating_operation(
+                eff_project_id, path, WorkspaceOperation.WORKTREE_DELETE, require_created_ownership=False, job_id=job_id
+            )
+        except (RuntimeError, ValueError) as exc:
+            logger.warning(f"Refusing deletion of review worktree at '{path}': {exc}")
+            return WorktreeCleanupResult(
+                outcome=ExternalOutcome.FAILURE,
+                reason_code=ExternalReasonCode.POLICY_DENIED,
+                provider_detail=f"Guard denied deletion: {exc}",
+            )
+
+        # 2. 4-Way Authority Step 3: git worktree list observation
+        wt_in_git = False
         try:
             wt_list_out = await self._git(["worktree", "list", "--porcelain"], cwd=self.project_root)
             wt_paths = [
@@ -1679,12 +1693,7 @@ class WorktreeManager:
                 for line in wt_list_out.splitlines()
                 if line.startswith("worktree ")
             ]
-            if canonical_path not in wt_paths:
-                return WorktreeCleanupResult(
-                    outcome=ExternalOutcome.UNKNOWN,
-                    reason_code=ExternalReasonCode.EVIDENCE_INSUFFICIENT,
-                    provider_detail=f"Path '{path}' not present in git worktree list.",
-                )
+            wt_in_git = canonical_path in wt_paths
         except Exception as exc:
             return WorktreeCleanupResult(
                 outcome=ExternalOutcome.UNKNOWN,
@@ -1692,7 +1701,7 @@ class WorktreeManager:
                 provider_detail=f"Git worktree list query failed: {exc}",
             )
 
-        # 4. Marker corroboration if present
+        # 3. 4-Way Authority Step 4: Marker corroboration if present on disk
         marker_file = path / ".minime_worktree_ownership.json"
         if marker_file.exists():
             try:
@@ -1704,21 +1713,61 @@ class WorktreeManager:
                     provider_detail=f"Marker corroboration failed for '{path}': {e}.",
                 )
 
-        # Transition DELEING
-        ownership.creation_state = WorktreeCreationState.DELETING
-        ownership.updated_at = utc_now()
-        ownership_repo.save(ownership)
-        self.uow.commit()
+        dir_exists = path.exists()
 
-        # Force remove review worktree (disposable workspace)
-        await self._git(
-            ["worktree", "remove", "--force", str(path)],
-            cwd=self.project_root,
-            job_id=job_id,
-            project_id=eff_project_id,
-            operation_type="review_worktree_remove",
-            managed_worktree_path=path,
-        )
+        # Reconcile DB state vs Git state vs physical presence:
+        if ownership.creation_state == WorktreeCreationState.DELETED:
+            if not dir_exists and not wt_in_git:
+                return WorktreeCleanupResult(
+                    outcome=ExternalOutcome.SUCCESS,
+                    reason_code=ExternalReasonCode.ALREADY_ABSENT,
+                    provider_detail=f"Review worktree at '{path}' is already absent and state is DELETED.",
+                )
+            if dir_exists or wt_in_git:
+                return WorktreeCleanupResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    reason_code=ExternalReasonCode.CONFLICT,
+                    provider_detail=f"Inconsistent observation: DB state is DELETED but path exists ({dir_exists}) or git lists it ({wt_in_git}).",
+                )
+
+        # Active ownership (CREATED, PENDING, DELETING)
+        if wt_in_git:
+            ownership.creation_state = WorktreeCreationState.DELETING
+            ownership.updated_at = utc_now()
+            ownership_repo.save(ownership)
+            self.uow.commit()
+
+            try:
+                await self._git(
+                    ["worktree", "remove", "--force", str(path)],
+                    cwd=self.project_root,
+                    job_id=job_id,
+                    project_id=eff_project_id,
+                    operation_type="review_worktree_remove",
+                    managed_worktree_path=path,
+                )
+            except Exception as e:
+                logger.warning(f"git worktree remove failed: {e}")
+
+            try:
+                wt_list_out = await self._git(["worktree", "list", "--porcelain"], cwd=self.project_root)
+                wt_paths = [
+                    str(Path(line[9:].strip()).resolve())
+                    for line in wt_list_out.splitlines()
+                    if line.startswith("worktree ")
+                ]
+                if canonical_path in wt_paths:
+                    return WorktreeCleanupResult(
+                        outcome=ExternalOutcome.FAILURE,
+                        reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
+                        provider_detail=f"Failed to remove worktree path '{path}' from git worktree list.",
+                    )
+            except Exception as exc:
+                return WorktreeCleanupResult(
+                    outcome=ExternalOutcome.UNKNOWN,
+                    reason_code=ExternalReasonCode.UNOBSERVABLE,
+                    provider_detail=f"Git worktree list query failed after removal: {exc}",
+                )
 
         if path.exists():
             return WorktreeCleanupResult(
@@ -1733,9 +1782,17 @@ class WorktreeManager:
         ownership_repo.save(ownership)
         self.uow.commit()
 
+        if not dir_exists and not wt_in_git:
+            return WorktreeCleanupResult(
+                outcome=ExternalOutcome.SUCCESS,
+                reason_code=ExternalReasonCode.ALREADY_ABSENT,
+                provider_detail=f"Successfully reconciled absent review worktree state to DELETED for '{path}'.",
+            )
+
         return WorktreeCleanupResult(
             outcome=ExternalOutcome.SUCCESS,
             reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
             provider_detail=f"Successfully removed review worktree at '{path}'.",
         )
+
 

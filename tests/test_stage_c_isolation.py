@@ -3093,6 +3093,118 @@ def test_openspec_sync_managed_root_authority_closure(tmp_dirs):
     assert (archived_dir / "proposal.md").exists()
 
 
+@pytest.mark.asyncio
+async def test_review_worktree_lifecycle_finalization_cases(tmp_dirs):
+    """Proves all 6 requirements for Stage C review worktree lifecycle finalization."""
+    repo_root = tmp_dirs["repo_root"]
+    worktrees_dir = tmp_dirs["worktrees"]
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo_root, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_root, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo_root, check=True)
+    (Path(repo_root) / "README.md").write_text("init candidate A", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo_root, check=True)
+    subprocess.run(["git", "commit", "-m", "candidate A commit"], cwd=repo_root, check=True, capture_output=True)
+    cand_sha_a = (subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_root, check=True, capture_output=True, text=True)).stdout.strip()
+
+    # Commit candidate B
+    (Path(repo_root) / "README.md").write_text("init candidate B", encoding="utf-8")
+    subprocess.run(["git", "commit", "-am", "candidate B commit"], cwd=repo_root, check=True, capture_output=True)
+    cand_sha_b = (subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_root, check=True, capture_output=True, text=True)).stdout.strip()
+
+    uow = MockUOW()
+    binding = ProjectManagedRepositoryBinding(
+        project_id="proj-rev-final",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=repo_root,
+        worktree_parent_dir=worktrees_dir,
+    )
+    uow.project_managed_repository_bindings.save(binding)
+    uow.jobs.save(Job(job_id="job-rev-final", project_id="proj-rev-final", change_name="change-rev-final", implementer_role="codex"))
+    uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id="run-rev-final",
+            active_job_id="job-rev-final",
+            project_id="proj-rev-final",
+            change_name="change-rev-final",
+            base_sha=cand_sha_a,
+            current_stage=OrchestrationStage.COMPLEMENTARY_REVIEW,
+            resumable_stage=OrchestrationStage.COMPLEMENTARY_REVIEW,
+
+        )
+    )
+
+    mgr = WorktreeManager(repo_root, uow)
+
+    # 1. absent review path + no durable ownership => EVIDENCE_INSUFFICIENT, not success
+    fake_absent_path = Path(worktrees_dir) / "job-rev-final-review-antigravity-fake"
+    res1 = await mgr.remove_review_worktree(fake_absent_path, "job-rev-final", "proj-rev-final")
+    assert res1.outcome == ExternalOutcome.UNKNOWN
+    assert res1.reason_code == ExternalReasonCode.EVIDENCE_INSUFFICIENT
+
+    # 4. reviewer candidate A: create -> review -> cleanup
+    wt_a = await mgr.create_review_worktree(
+        job_id="job-rev-final",
+        change_name="change-rev-final",
+        candidate_sha=cand_sha_a,
+        reviewer_role="antigravity",
+        project_id="proj-rev-final",
+        run_id="run-rev-final",
+    )
+    assert wt_a.path.exists()
+    assert cand_sha_a[:8] in wt_a.path.name
+    assert cand_sha_a[:8] in wt_a.branch_name
+
+    res_clean_a = await mgr.remove_review_worktree(wt_a.path, "job-rev-final", "proj-rev-final")
+    assert res_clean_a.outcome == ExternalOutcome.SUCCESS
+    assert not wt_a.path.exists()
+
+    # 2. absent path + durable DELETED + git absent => ALREADY_ABSENT
+    res2 = await mgr.remove_review_worktree(wt_a.path, "job-rev-final", "proj-rev-final")
+    assert res2.outcome == ExternalOutcome.SUCCESS
+    assert res2.reason_code == ExternalReasonCode.ALREADY_ABSENT
+
+    # 3. inconsistent active ownership / filesystem / git observations => fail closed
+    wt_a.path.mkdir(parents=True, exist_ok=True)
+    res3 = await mgr.remove_review_worktree(wt_a.path, "job-rev-final", "proj-rev-final")
+    assert res3.outcome == ExternalOutcome.FAILURE
+    assert res3.reason_code in (ExternalReasonCode.CONFLICT, ExternalReasonCode.POLICY_DENIED)
+    shutil.rmtree(wt_a.path, ignore_errors=True)
+
+
+    # 5. same job/reviewer then candidate B: creates a valid review worktree at candidate B and is not blocked by candidate A's historical review branch
+    wt_b = await mgr.create_review_worktree(
+        job_id="job-rev-final",
+        change_name="change-rev-final",
+        candidate_sha=cand_sha_b,
+        reviewer_role="antigravity",
+        project_id="proj-rev-final",
+        run_id="run-rev-final",
+    )
+    assert wt_b.path.exists()
+    assert cand_sha_b[:8] in wt_b.path.name
+    assert wt_b.base_sha == cand_sha_b
+
+    head_b = (subprocess.run(["git", "rev-parse", "HEAD"], cwd=wt_b.path, check=True, capture_output=True, text=True)).stdout.strip()
+    assert head_b == cand_sha_b
+
+    # 6. same exact candidate retry: deterministic/idempotent adoption/recreation behavior
+    wt_b_retry = await mgr.create_review_worktree(
+        job_id="job-rev-final",
+        change_name="change-rev-final",
+        candidate_sha=cand_sha_b,
+        reviewer_role="antigravity",
+        project_id="proj-rev-final",
+        run_id="run-rev-final",
+    )
+    assert wt_b_retry.path == wt_b.path
+    assert wt_b_retry.base_sha == cand_sha_b
+
+    # Final cleanup of B
+    res_clean_b = await mgr.remove_review_worktree(wt_b.path, "job-rev-final", "proj-rev-final")
+    assert res_clean_b.outcome == ExternalOutcome.SUCCESS
+
+
+
 
 
 

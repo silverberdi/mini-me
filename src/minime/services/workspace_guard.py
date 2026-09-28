@@ -365,7 +365,7 @@ class ManagedWorkspaceGuard:
                         resolved_path=resolved,
                         provider_detail=git_reason,
                     )
-            else:
+            elif request.requested_operation != WorkspaceOperation.WORKTREE_DELETE:
                 return WorkspaceMutationDecision(
                     allowed=False,
                     outcome=ExternalOutcome.UNKNOWN,
@@ -374,6 +374,7 @@ class ManagedWorkspaceGuard:
                     resolved_path=resolved,
                     provider_detail=f"Worktree directory '{cw_path}' does not exist on disk.",
                 )
+
 
             return WorkspaceMutationDecision(
                 allowed=True,
