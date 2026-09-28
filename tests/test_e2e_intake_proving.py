@@ -11,7 +11,6 @@ from pathlib import Path
 from tests.conftest import (
     InMemoryPersistenceUnitOfWork,
     ReadinessGitHubStub,
-    setup_managed_repository_fixture,
 )
 
 from minime.domain.enums import (
@@ -34,33 +33,50 @@ def test_end_to_end_autonomous_intake_proving(
     in_memory_uow: InMemoryPersistenceUnitOfWork, tmp_path: Path
 ) -> None:
     # -------------------------------------------------------------------------
-    # Setup Repository Context on Disk
+    # Setup Repository Context & Remote Source on Disk
     # -------------------------------------------------------------------------
-    repo_dir = tmp_path / "mini-me"
-    setup_managed_repository_fixture(
-        in_memory_uow,
-        "mini-me",
-        repo_dir,
-        tmp_path / "worktrees",
-        canonical_repository_identity="github.com/silverberdi/mini-me",
-    )
-    (repo_dir / "docs").mkdir(exist_ok=True)
-    (repo_dir / "openspec").mkdir(exist_ok=True)
-
-    (repo_dir / "README.md").write_text(
-        "# mini me\n\nAutonomous agentic software engineering runtime.\n"
-    )
-    (repo_dir / "docs" / "ROADMAP.md").write_text(
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    (runtime_root / "openspec").mkdir(parents=True, exist_ok=True)
+    (runtime_root / "docs").mkdir(parents=True, exist_ok=True)
+    (runtime_root / "docs" / "ROADMAP.md").write_text(
         "# Roadmap\n\n"
         "### 020 — Operator Experience Parity — DELIVERED\n"
         "### 021 — Work Intake and Backlog Execution — CURRENT\n"
         "- 021-work-intake: Autonomous product intake and project onboarding (READY)\n"
-        "### 022 — Greenfield Proving — NEXT\n"
+        "### 022 — Greenfield Proving — NEXT\n", encoding="utf-8"
     )
 
+    trusted_root = tmp_path / "managed"
+    trusted_root.mkdir(parents=True, exist_ok=True)
+
     import subprocess
-    subprocess.run(["git", "add", "."], cwd=repo_dir, check=True)
-    subprocess.run(["git", "commit", "-m", "add base docs"], cwd=repo_dir, check=True, capture_output=True)
+
+    remote_bare = tmp_path / "remote_mini_me.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(remote_bare)], check=True, capture_output=True)
+
+    seed_dir = tmp_path / "seed"
+    subprocess.run(["git", "clone", str(remote_bare), str(seed_dir)], check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test Dev"], cwd=seed_dir, check=True)
+    subprocess.run(["git", "config", "user.email", "dev@test.local"], cwd=seed_dir, check=True)
+
+    (seed_dir / "docs").mkdir(exist_ok=True)
+    (seed_dir / "openspec").mkdir(exist_ok=True)
+
+    (seed_dir / "README.md").write_text(
+        "# mini me\n\nAutonomous agentic software engineering runtime.\n", encoding="utf-8"
+    )
+    (seed_dir / "docs" / "ROADMAP.md").write_text(
+        "# Roadmap\n\n"
+        "### 020 — Operator Experience Parity — DELIVERED\n"
+        "### 021 — Work Intake and Backlog Execution — CURRENT\n"
+        "- 021-work-intake: Autonomous product intake and project onboarding (READY)\n"
+        "### 022 — Greenfield Proving — NEXT\n", encoding="utf-8"
+    )
+
+    subprocess.run(["git", "add", "."], cwd=seed_dir, check=True)
+    subprocess.run(["git", "commit", "-m", "add base docs"], cwd=seed_dir, check=True, capture_output=True)
+    subprocess.run(["git", "push", "origin", "main"], cwd=seed_dir, check=True, capture_output=True)
 
     github_stub = ReadinessGitHubStub()
 
@@ -69,15 +85,19 @@ def test_end_to_end_autonomous_intake_proving(
     # -------------------------------------------------------------------------
     onboarding_service = ProjectOnboardingService(
         in_memory_uow,
-        project_root=repo_dir,
+        project_root=runtime_root,
         github_adapter=github_stub,
+        trusted_managed_root=trusted_root,
     )
+
+    managed_target = trusted_root / "mini-me"
+    worktrees_target = trusted_root / "worktrees" / "mini-me"
 
     onboard_res = onboarding_service.onboard_project(
         ProjectOnboardingInput(
             project_id="mini-me",
             display_name="mini me",
-            repository="silverberdi/mini-me",
+            repository=str(remote_bare),
             base_branch="main",
             openspec_path="openspec",
             roadmap_path="docs/ROADMAP.md",
@@ -86,6 +106,8 @@ def test_end_to_end_autonomous_intake_proving(
             github_project_owner="silverberdi",
             implementer="codex",
             reviewer="antigravity",
+            managed_repository_root=str(managed_target),
+            worktree_parent_dir=str(worktrees_target),
         ),
         operator_email="operator@example.com",
     )
@@ -97,7 +119,7 @@ def test_end_to_end_autonomous_intake_proving(
     # -------------------------------------------------------------------------
     # Step 2: Context & Backlog Discovery
     # -------------------------------------------------------------------------
-    discovery_service = ContextDiscoveryService(in_memory_uow, project_root=repo_dir)
+    discovery_service = ContextDiscoveryService(in_memory_uow, project_root=managed_target)
     context_report = discovery_service.discover_context("mini-me")
     assert len(context_report.discovered_facts) >= 2
     assert len(context_report.inferred_structure) >= 1
@@ -110,7 +132,7 @@ def test_end_to_end_autonomous_intake_proving(
     # -------------------------------------------------------------------------
     intake_service = IntakeService(
         in_memory_uow,
-        project_root=repo_dir,
+        project_root=managed_target,
         github_adapter=github_stub,
     )
 
@@ -150,7 +172,7 @@ def test_end_to_end_autonomous_intake_proving(
 
     # Verify OpenSpec files were written to disk
     change_dir = (
-        repo_dir
+        managed_target
         / "openspec"
         / "changes"
         / "021-work-intake-project-onboarding-and-backlog-execution"
