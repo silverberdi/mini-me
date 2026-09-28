@@ -4160,6 +4160,132 @@ def test_normal_durable_binding_guard_behavior_after_persistence(tmp_path):
     assert decision.reason_code == ExternalReasonCode.EXECUTION_SUCCESS
 
 
+def test_bootstrap_parent_target_trusted_root_boundaries(tmp_path):
+    """Verify evaluate_onboarding_bootstrap enforces trusted managed root containment on target paths."""
+    uow = MockUOW()
+    runtime_root = tmp_path / "runtime"
+    trusted_root = tmp_path / "trusted_root"
+    trusted_root.mkdir(parents=True, exist_ok=True)
+
+    sub_container = trusted_root / "sub_container"
+    managed_root = sub_container / "proj-target-test"
+    worktree_parent = trusted_root / "worktrees" / "proj-target-test"
+
+    guard = ManagedWorkspaceGuard(uow=uow, runtime_root=runtime_root, trusted_managed_root=trusted_root)
+
+    provisional_binding = ProjectManagedRepositoryBinding(
+        project_id="proj-target-test",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=str(managed_root),
+        worktree_parent_dir=str(worktree_parent),
+    )
+
+    # 1. Parent directory under trusted root is ALLOWED
+    req_sub = WorkspaceMutationRequest(
+        project_id="proj-target-test",
+        target_path=str(sub_container),
+        requested_operation=WorkspaceOperation.EDIT,
+    )
+    assert guard.evaluate_onboarding_bootstrap(req_sub, provisional_binding).allowed is True
+
+    # 2. Trusted root itself is ALLOWED
+    req_trusted = WorkspaceMutationRequest(
+        project_id="proj-target-test",
+        target_path=str(trusted_root),
+        requested_operation=WorkspaceOperation.EDIT,
+    )
+    assert guard.evaluate_onboarding_bootstrap(req_trusted, provisional_binding).allowed is True
+
+    # 3. Ancestor above trusted root is DENIED
+    ancestor_dir = trusted_root.parent
+    req_ancestor = WorkspaceMutationRequest(
+        project_id="proj-target-test",
+        target_path=str(ancestor_dir),
+        requested_operation=WorkspaceOperation.EDIT,
+    )
+    dec_ancestor = guard.evaluate_onboarding_bootstrap(req_ancestor, provisional_binding)
+    assert dec_ancestor.allowed is False
+    assert dec_ancestor.reason_code == ExternalReasonCode.POLICY_DENIED
+
+    # 4. Root '/' is DENIED
+    req_root = WorkspaceMutationRequest(
+        project_id="proj-target-test",
+        target_path="/",
+        requested_operation=WorkspaceOperation.EDIT,
+    )
+    dec_root = guard.evaluate_onboarding_bootstrap(req_root, provisional_binding)
+    assert dec_root.allowed is False
+    assert dec_root.reason_code == ExternalReasonCode.POLICY_DENIED
+
+    # 5. Arbitrary sibling/outside path is DENIED
+    outside_dir = tmp_path / "outside_unauthorized"
+    req_outside = WorkspaceMutationRequest(
+        project_id="proj-target-test",
+        target_path=str(outside_dir),
+        requested_operation=WorkspaceOperation.EDIT,
+    )
+    dec_outside = guard.evaluate_onboarding_bootstrap(req_outside, provisional_binding)
+    assert dec_outside.allowed is False
+    assert dec_outside.reason_code == ExternalReasonCode.POLICY_DENIED
+
+
+def test_onboard_project_unobservable_fetch_rejects_stale_tracking_ref(tmp_path):
+    """Verify onboarding fails closed when remote fetch fails even if local stale origin/main ref matches HEAD."""
+    from minime.domain.models import ProjectOnboardingInput
+    from minime.services.project_onboarding_service import ProjectOnboardingService
+
+    uow = MockUOW()
+    trusted_root = tmp_path / "trusted_managed"
+    trusted_root.mkdir(parents=True, exist_ok=True)
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    (runtime_root / "openspec").mkdir(parents=True, exist_ok=True)
+
+    # 1. Create initial bare remote repository
+    remote_bare = tmp_path / "remote_unobservable.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(remote_bare)], check=True, capture_output=True)
+
+    seed_dir = tmp_path / "seed_dir"
+    subprocess.run(["git", "clone", str(remote_bare), str(seed_dir)], check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Dev"], cwd=seed_dir, check=True)
+    subprocess.run(["git", "config", "user.email", "dev@test.local"], cwd=seed_dir, check=True)
+    (seed_dir / "README.md").write_text("# Seed\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=seed_dir, check=True)
+    subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=seed_dir, check=True, capture_output=True)
+    subprocess.run(["git", "push", "origin", "main"], cwd=seed_dir, check=True, capture_output=True)
+
+    # 2. Establish an existing managed checkout with valid tracking ref origin/main == HEAD
+    managed_target = trusted_root / "proj-stale-ref"
+    subprocess.run(["git", "clone", str(remote_bare), str(managed_target)], check=True, capture_output=True)
+
+    # Verify that HEAD == origin/main currently on managed_target
+    head_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=managed_target, text=True).strip()
+    origin_sha = subprocess.check_output(["git", "rev-parse", "origin/main"], cwd=managed_target, text=True).strip()
+    assert head_sha == origin_sha
+
+    # 3. Make remote bare repository unobservable by deleting/renaming it
+    remote_bare_disabled = tmp_path / "remote_unobservable_disabled.git"
+    os.rename(remote_bare, remote_bare_disabled)
+
+    # 4. Attempt onboarding on the existing managed_target
+    service = ProjectOnboardingService(uow=uow, project_root=runtime_root, trusted_managed_root=trusted_root)
+    worktrees_target = trusted_root / "worktrees" / "proj-stale-ref"
+
+    onboard_input = ProjectOnboardingInput(
+        project_id="proj-stale-ref",
+        display_name="Stale Ref Test Project",
+        repository=str(remote_bare),
+        base_branch="main",
+        managed_repository_root=str(managed_target),
+        worktree_parent_dir=str(worktrees_target),
+    )
+
+    with pytest.raises(ValueError, match="unobservable or unreachable during fetch|Failed to establish canonical remote checkout"):
+        service.onboard_project(onboard_input)
+
+    assert uow.project_managed_repository_bindings.get_by_project_id("proj-stale-ref") is None
+
+
 
 
 

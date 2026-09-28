@@ -614,12 +614,13 @@ class ManagedWorkspaceGuard:
                 provider_detail="Managed repository or worktree root collides with/aliases runtime root.",
             )
 
-        # 4. Enforce trusted_managed_root containment for BOTH managed_repo_root and worktree_parent_dir
+        # 4. Enforce trusted_managed_root containment for managed_repo_root, worktree_parent_dir, and target resolved
         if self.trusted_managed_root is not None:
             trusted = self.resolve_canonical_path(self.trusted_managed_root)
             managed_valid = self._is_path_inside(managed_repo_root, trusted) or managed_repo_root == trusted
             wt_parent_valid = self._is_path_inside(worktree_parent_dir, trusted) or worktree_parent_dir == trusted
-            if not managed_valid or not wt_parent_valid:
+            target_valid = self._is_path_inside(resolved, trusted) or resolved == trusted
+            if not managed_valid or not wt_parent_valid or not target_valid:
                 return WorkspaceMutationDecision(
                     allowed=False,
                     outcome=ExternalOutcome.FAILURE,
@@ -627,7 +628,7 @@ class ManagedWorkspaceGuard:
                     workspace_role=WorkspaceRole.UNKNOWN,
                     resolved_path=resolved,
                     provider_detail=(
-                        f"Project '{request.project_id}' bootstrap paths lie outside trusted managed root '{trusted}'."
+                        f"Project '{request.project_id}' bootstrap target path '{resolved}' lies outside trusted managed root '{trusted}'."
                     ),
                 )
 

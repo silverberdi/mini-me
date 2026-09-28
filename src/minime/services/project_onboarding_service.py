@@ -270,7 +270,10 @@ class ProjectOnboardingService:
 
                 cp_fetch = subprocess.run(["git", "fetch", "origin", base_br], cwd=managed_root, capture_output=True, text=True)
                 if cp_fetch.returncode != 0:
-                    subprocess.run(["git", "fetch", "origin"], cwd=managed_root, capture_output=True, text=True)
+                    cp_fetch_fallback = subprocess.run(["git", "fetch", "origin"], cwd=managed_root, capture_output=True, text=True)
+                    if cp_fetch_fallback.returncode != 0:
+                        fetch_err = cp_fetch.stderr.strip() or cp_fetch_fallback.stderr.strip() or "Remote fetch failed."
+                        raise ValueError(f"Remote repository '{remote_source}' is unobservable or unreachable during fetch: {fetch_err}")
         except Exception as exc:
             mismatch_reasons.append(f"Failed to establish canonical remote checkout: {exc}")
             reasons.extend(mismatch_reasons)
