@@ -72,6 +72,9 @@ class MockBindingRepo:
                 return b
         return None
 
+    def list_all(self):
+        return list(self.bindings.values())
+
     def delete(self, project_id: str) -> None:
         self.bindings.pop(project_id, None)
 
@@ -140,6 +143,13 @@ class MockJobRepo:
     def list_all(self):
         return list(self.jobs.values())
 
+    def list_active_jobs(self):
+        from minime.domain.enums import JobStatus
+        return [
+            j for j in self.jobs.values()
+            if j.status in (JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.CHECKS_RUNNING, JobStatus.REVIEW_RUNNING, JobStatus.AUDIT_RUNNING)
+        ]
+
 
 class MockOrchestrationRunRepo:
     def __init__(self):
@@ -171,6 +181,9 @@ class MockUOW:
         self.git_operations = MagicMock()
         self.events = MagicMock()
         self.metrics = MagicMock()
+        self.provider_health = MagicMock()
+        self.reviews = MagicMock()
+        self.audits = MagicMock()
         self.changes = MagicMock()
         self.bindings = MagicMock()
         self.committed = False
@@ -3678,6 +3691,220 @@ def test_task_c_worktree_manager_internal_writers(tmp_dirs):
     dest_openspec_root = wt_path2 / "openspec"
     dest_change_dir = dest_openspec_root / "changes" / "change-task-c"
     assert os.path.islink(dest_openspec_root) or os.path.islink(dest_openspec_root / "changes") or os.path.islink(dest_change_dir)
+
+
+def test_onboard_project_establishes_managed_repository(tmp_path):
+    """Verify onboarding establishes managed repository directory, git repo, marker, and valid binding."""
+    from minime.domain.enums import ProjectOnboardingStatus
+    from minime.domain.models import ProjectOnboardingInput
+    from minime.services.project_onboarding_service import ProjectOnboardingService
+
+    uow = MockUOW()
+    trusted_root = tmp_path / "trusted_managed"
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    (runtime_root / "openspec").mkdir(parents=True, exist_ok=True)
+
+    # Initialize mock metric repo in uow
+    saved_facts = []
+
+    class MockMetricsRepo:
+        def save(self, fact):
+            saved_facts.append(fact)
+
+        def list_by_name(self, name):
+            return [f for f in saved_facts if getattr(f, "metric_name", None) == name]
+
+        def list_all(self):
+            return list(saved_facts)
+
+    uow.metrics = MockMetricsRepo()
+
+    service = ProjectOnboardingService(uow=uow, project_root=runtime_root)
+
+    onboard_input = ProjectOnboardingInput(
+        project_id="proj-fresh-onboard",
+        display_name="Fresh Onboard Project",
+        repository="github.com/test-org/fresh-repo",
+        base_branch="main",
+        managed_repository_root=str(trusted_root / "proj-fresh-onboard"),
+        worktree_parent_dir=str(trusted_root / "worktrees" / "proj-fresh-onboard"),
+    )
+
+    result = service.onboard_project(onboard_input)
+
+    assert result.status == ProjectOnboardingStatus.READY_FOR_WORK
+
+    managed_root = trusted_root / "proj-fresh-onboard"
+    assert managed_root.exists()
+    assert (trusted_root / "worktrees" / "proj-fresh-onboard").exists()
+    assert (managed_root / ".git").exists()
+    assert (managed_root / ".minime-managed-project.json").exists()
+
+    binding = uow.project_managed_repository_bindings.get_by_project_id("proj-fresh-onboard")
+    assert binding is not None
+    assert binding.is_valid is True
+    assert binding.mismatch_reasons == []
+
+    proj = uow.projects.get_by_id("proj-fresh-onboard")
+    assert proj is not None
+    assert proj.onboarding_status == ProjectOnboardingStatus.READY_FOR_WORK
+
+
+def test_onboard_project_rejects_runtime_collision(tmp_path):
+    """Verify onboarding fails closed when target repository overlaps runtime root."""
+    from minime.domain.models import ProjectOnboardingInput
+    from minime.services.project_onboarding_service import ProjectOnboardingService
+
+    uow = MockUOW()
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    trusted_root = tmp_path / "trusted"
+
+    service = ProjectOnboardingService(uow=uow, project_root=runtime_root)
+
+    onboard_input = ProjectOnboardingInput(
+        project_id="proj-collision",
+        display_name="Collision Project",
+        repository="github.com/test-org/collision-repo",
+        base_branch="main",
+        managed_repository_root=str(runtime_root / "nested"),
+        worktree_parent_dir=str(trusted_root / "worktrees"),
+    )
+
+    with pytest.raises(ValueError, match="overlaps runtime root"):
+        service.onboard_project(onboard_input)
+
+
+def test_workspace_guard_records_denial_metric_fact(tmp_dirs):
+    """Verify ManagedWorkspaceGuard emits MetricFact when mutation is denied."""
+    from minime.domain.models import WorkspaceMutationRequest
+
+    uow = MockUOW()
+    saved_facts = []
+
+    class MockMetricsRepo:
+        def save(self, fact):
+            saved_facts.append(fact)
+
+        def list_by_name(self, name):
+            return [f for f in saved_facts if getattr(f, "metric_name", None) == name]
+
+        def list_facts(self, metric_name=None):
+            if metric_name:
+                return [f for f in saved_facts if getattr(f, "metric_name", None) == metric_name]
+            return list(saved_facts)
+
+        def list_all(self):
+            return list(saved_facts)
+
+    uow.metrics = MockMetricsRepo()
+
+    guard = ManagedWorkspaceGuard(
+        uow=uow,
+        runtime_root=tmp_dirs["runtime"],
+        trusted_managed_root=os.path.dirname(tmp_dirs["repo_root"]),
+    )
+
+    binding = ProjectManagedRepositoryBinding(
+        project_id="proj-metric-test",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["repo_root"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+        is_valid=True,
+    )
+    uow.project_managed_repository_bindings.save(binding)
+
+    # Mutation outside managed bounds
+    request = WorkspaceMutationRequest(
+        project_id="proj-metric-test",
+        target_path="/tmp/unauthorized_path_escape",
+        requested_operation=WorkspaceOperation.EDIT,
+    )
+
+    decision = guard.evaluate_mutation(request)
+    assert decision.allowed is False
+
+    denial_facts = [f for f in saved_facts if getattr(f, "metric_name", None) == "workspace_mutation_denied_total"]
+    assert len(denial_facts) == 1
+    fact = denial_facts[0]
+    assert fact.project_id == "proj-metric-test"
+    assert fact.details["reason_code"] == decision.reason_code.value
+
+
+def test_dashboard_service_system_status_telemetry(tmp_dirs):
+    """Verify OperationsDashboardService returns telemetry breakdown and project status."""
+    from minime.domain.models import MetricFact
+    from minime.services.dashboard_service import OperationsDashboardService
+
+    uow = MockUOW()
+    saved_facts = [
+        MetricFact(
+            metric_name="workspace_mutation_denied_total",
+            project_id="proj-dash-test",
+            fact_value=1.0,
+            details={
+                "reason_code": "POLICY_DENIED",
+                "attempted_operation": "EDIT",
+            },
+        )
+    ]
+
+    class MockMetricsRepo:
+        def save(self, fact):
+            saved_facts.append(fact)
+
+        def list_by_name(self, name):
+            return [f for f in saved_facts if getattr(f, "metric_name", None) == name]
+
+        def list_facts(self, metric_name=None):
+            if metric_name:
+                return [f for f in saved_facts if getattr(f, "metric_name", None) == metric_name]
+            return list(saved_facts)
+
+        def list_all(self):
+            return list(saved_facts)
+
+    uow.metrics = MockMetricsRepo()
+
+    class MockHealthRepo:
+        def list_all(self):
+            return []
+
+        def get_by_provider(self, provider):
+            from minime.domain.enums import ProviderHealthStatus
+            from minime.domain.models import ProviderHealth
+            return ProviderHealth(provider=provider, status=ProviderHealthStatus.AVAILABLE)
+
+    uow.provider_health = MockHealthRepo()
+
+    binding = ProjectManagedRepositoryBinding(
+        project_id="proj-dash-test",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["repo_root"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+        is_valid=True,
+    )
+    uow.project_managed_repository_bindings.save(binding)
+    uow.projects.save(Project(project_id="proj-dash-test", display_name="Dash Test", repository="github.com/org/repo"))
+
+    dashboard = OperationsDashboardService(uow=uow)
+    dashboard.runtime_root = tmp_dirs["runtime"]
+    dashboard.trusted_managed_root = os.path.dirname(tmp_dirs["repo_root"])
+
+    overview = dashboard.get_overview()
+
+    sys_status = overview.system_status
+    assert sys_status.workspace_mutation_denied_count == 1
+    assert len(sys_status.managed_projects) == 1
+
+    p_status = sys_status.managed_projects[0]
+    assert p_status.project_id == "proj-dash-test"
+    assert p_status.workspace_mutation_denied_total == 1
+    assert p_status.denied_mutation_breakdown.get("POLICY_DENIED") == 1
+
+
+
 
 
 

@@ -1415,6 +1415,8 @@ class ProjectOnboardingInput(BaseModel):
     implementer: str = "codex"
     reviewer: str = "antigravity"
     checks: list[dict[str, Any]] = Field(default_factory=list)
+    managed_repository_root: str | None = None
+    worktree_parent_dir: str | None = None
 
 
 class ProjectOnboardingResult(BaseModel):

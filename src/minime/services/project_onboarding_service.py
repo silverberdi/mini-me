@@ -33,12 +33,16 @@ class ProjectOnboardingService:
         project_root: str | Path = ".",
         github_adapter: GitHubAdapter | None = None,
         context_discovery_service: ContextDiscoveryService | None = None,
+        trusted_managed_root: str | Path | None = None,
     ):
         self.uow = uow
         self.project_root = Path(project_root).resolve()
         self.github_adapter = github_adapter or GitHubAdapter()
         self.context_discovery_service = context_discovery_service or ContextDiscoveryService(
             uow, project_root=self.project_root
+        )
+        self.trusted_managed_root = (
+            str(Path(trusted_managed_root).resolve()) if trusted_managed_root else None
         )
 
     def onboard_project(
@@ -124,50 +128,136 @@ class ProjectOnboardingService:
         now = utc_now()
 
         # 5b. Establish and validate Stage C ProjectManagedRepositoryBinding
+        import json
         import os
+        import subprocess
 
         from minime.domain.models import ProjectManagedRepositoryBinding
         from minime.services.workspace_guard import ManagedWorkspaceGuard
 
-        trusted_root = os.path.realpath(os.environ.get("MINIME_MANAGED_ROOT", "/opt/minime/repos"))
-        runtime_root = os.path.realpath(os.environ.get("MINIME_RUNTIME_ROOT", os.getcwd()))
+        trusted_root = (
+            os.path.realpath(self.trusted_managed_root)
+            if self.trusted_managed_root
+            else os.path.realpath(os.environ.get("MINIME_MANAGED_ROOT", "/opt/minime/repos"))
+        )
+        runtime_root = os.path.realpath(os.environ.get("MINIME_RUNTIME_ROOT", str(self.project_root)))
 
-        if self.project_root != Path(runtime_root) and (self.project_root / ".git").exists():
+        if getattr(input_data, "managed_repository_root", None):
+            managed_root = os.path.realpath(input_data.managed_repository_root)
+            if not self.trusted_managed_root and not os.environ.get("MINIME_MANAGED_ROOT"):
+                trusted_root = os.path.dirname(managed_root)
+        elif self.project_root != Path(runtime_root) and (self.project_root / ".git").exists():
             managed_root = str(self.project_root.resolve())
+            if not self.trusted_managed_root and not os.environ.get("MINIME_MANAGED_ROOT"):
+                trusted_root = os.path.dirname(managed_root)
         else:
             managed_root = os.path.realpath(f"{trusted_root}/{project_id}")
 
-        worktree_parent_dir = os.path.realpath(f"{managed_root}/.minime/worktrees")
+        if getattr(input_data, "worktree_parent_dir", None):
+            worktree_parent_dir = os.path.realpath(input_data.worktree_parent_dir)
+        else:
+            worktree_parent_dir = os.path.realpath(f"{managed_root}/.minime/worktrees")
 
-        mismatch_reasons: list[str] = []
         guard = ManagedWorkspaceGuard(self.uow, runtime_root=runtime_root, trusted_managed_root=trusted_root)
+        mismatch_reasons: list[str] = []
 
+        # 1. Reject RUNTIME overlap BEFORE mutation
         if guard._paths_overlap(managed_root, runtime_root):
             mismatch_reasons.append(f"Managed repository root '{managed_root}' aliases or overlaps runtime root '{runtime_root}'.")
 
         if guard._paths_overlap(worktree_parent_dir, runtime_root):
             mismatch_reasons.append(f"Worktree parent dir '{worktree_parent_dir}' aliases or overlaps runtime root '{runtime_root}'.")
 
+        # 2. Check trusted root bounds BEFORE mutation
         if trusted_root:
             if not (guard._is_path_inside(managed_root, trusted_root) or managed_root == trusted_root):
                 mismatch_reasons.append(f"Managed repository root '{managed_root}' is outside trusted managed root '{trusted_root}'.")
             if not (guard._is_path_inside(worktree_parent_dir, trusted_root) or worktree_parent_dir == trusted_root):
                 mismatch_reasons.append(f"Worktree parent directory '{worktree_parent_dir}' is outside trusted managed root '{trusted_root}'.")
 
-        if not os.path.exists(managed_root) or not os.path.isdir(managed_root):
-            mismatch_reasons.append(f"Managed repository root directory '{managed_root}' does not exist on disk.")
-        else:
-            valid_git, git_reason = guard.verify_git_repository_identity(managed_root, norm_repo, remote_name="origin")
-            if not valid_git:
-                mismatch_reasons.append(f"Git repository identity verification failed for '{managed_root}': {git_reason}")
-
-        if not os.path.exists(worktree_parent_dir) or not os.path.isdir(worktree_parent_dir):
-            mismatch_reasons.append(f"Worktree parent directory '{worktree_parent_dir}' does not exist on disk.")
-
-        is_valid_binding = len(mismatch_reasons) == 0
-        if not is_valid_binding:
+        if mismatch_reasons:
             reasons.extend(mismatch_reasons)
             onboarding_status = ProjectOnboardingStatus.BLOCKED
+            raise ValueError(
+                f"Project onboarding failed closed on pre-mutation topology checks: {'; '.join(reasons)}"
+            )
+
+        # 3. Establish filesystem layout
+        try:
+            os.makedirs(managed_root, exist_ok=True)
+            os.makedirs(worktree_parent_dir, exist_ok=True)
+        except Exception as exc:
+            mismatch_reasons.append(f"Failed to create managed repository layout: {exc}")
+            reasons.extend(mismatch_reasons)
+            onboarding_status = ProjectOnboardingStatus.BLOCKED
+            raise ValueError(f"Project onboarding failed closed on directory creation: {exc}") from exc
+
+        # 4. Establish Git repository identity
+        remote_url = f"https://{norm_repo}"
+        base_br = input_data.base_branch or "main"
+
+        try:
+            if not os.path.exists(os.path.join(managed_root, ".git")):
+                subprocess.run(["git", "init", "-b", base_br], cwd=managed_root, check=True, capture_output=True)
+                subprocess.run(["git", "config", "user.name", "mini me"], cwd=managed_root, check=True)
+                subprocess.run(["git", "config", "user.email", "minime@local"], cwd=managed_root, check=True)
+                subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=managed_root, check=True)
+                subprocess.run(["git", "remote", "add", "origin", remote_url], cwd=managed_root, check=True, capture_output=True)
+
+                if not any(f for f in os.listdir(managed_root) if f != ".git"):
+                    readme_path = os.path.join(managed_root, "README.md")
+                    with open(readme_path, "w", encoding="utf-8") as f:
+                        f.write(f"# {display_name}\n\nManaged project repository for {norm_repo}\n")
+                    subprocess.run(["git", "add", "."], cwd=managed_root, check=True)
+                    subprocess.run(["git", "commit", "-m", "Initial managed repository base commit"], cwd=managed_root, check=True, capture_output=True)
+
+                subprocess.run(["git", "update-ref", f"refs/remotes/origin/{base_br}", "HEAD"], cwd=managed_root, check=True)
+            else:
+                cp = subprocess.run(["git", "remote", "get-url", "origin"], cwd=managed_root, capture_output=True, text=True)
+                if cp.returncode != 0:
+                    subprocess.run(["git", "remote", "add", "origin", remote_url], cwd=managed_root, check=True, capture_output=True)
+        except Exception as exc:
+            mismatch_reasons.append(f"Failed to establish Git repository: {exc}")
+            reasons.extend(mismatch_reasons)
+            onboarding_status = ProjectOnboardingStatus.BLOCKED
+            raise ValueError(f"Project onboarding failed closed on Git repository establishment: {exc}") from exc
+
+        # 5. Establish ownership marker file (.minime-managed-project.json)
+        try:
+            marker_file = os.path.join(managed_root, ".minime-managed-project.json")
+            marker_data = {
+                "project_id": project_id,
+                "canonical_repository_identity": norm_repo,
+            }
+            with open(marker_file, "w", encoding="utf-8") as f:
+                json.dump(marker_data, f, indent=2)
+        except Exception as exc:
+            mismatch_reasons.append(f"Failed to write ownership marker: {exc}")
+            reasons.extend(mismatch_reasons)
+            onboarding_status = ProjectOnboardingStatus.BLOCKED
+            raise ValueError(f"Project onboarding failed closed on ownership marker creation: {exc}") from exc
+
+        # 6. Post-establishment verification
+        valid_git, git_reason = guard.verify_git_repository_identity(managed_root, norm_repo, remote_name="origin")
+        if not valid_git:
+            mismatch_reasons.append(f"Git repository identity verification failed post-establishment: {git_reason}")
+
+        valid_marker, marker_msg, _, _ = guard.verify_managed_repository_ownership_marker(managed_root, project_id, norm_repo)
+        if not valid_marker:
+            mismatch_reasons.append(f"Ownership marker verification failed post-establishment: {marker_msg}")
+
+        if not os.path.exists(managed_root) or not os.path.isdir(managed_root):
+            mismatch_reasons.append(f"Managed root '{managed_root}' missing post-establishment.")
+
+        if not os.path.exists(worktree_parent_dir) or not os.path.isdir(worktree_parent_dir):
+            mismatch_reasons.append(f"Worktree parent directory '{worktree_parent_dir}' missing post-establishment.")
+
+        if mismatch_reasons:
+            reasons.extend(mismatch_reasons)
+            onboarding_status = ProjectOnboardingStatus.BLOCKED
+            raise ValueError(
+                f"Project onboarding failed closed on post-establishment verification: {'; '.join(reasons)}"
+            )
 
         managed_binding = ProjectManagedRepositoryBinding(
             project_id=project_id,
@@ -176,17 +266,12 @@ class ProjectOnboardingService:
             managed_repository_root=managed_root,
             worktree_parent_dir=worktree_parent_dir,
             default_base_branch=input_data.base_branch,
-            is_valid=is_valid_binding,
-            mismatch_reasons=mismatch_reasons,
+            is_valid=True,
+            mismatch_reasons=[],
             created_at=now,
             updated_at=now,
         )
         self.uow.project_managed_repository_bindings.save(managed_binding)
-
-        if not is_valid_binding or onboarding_status == ProjectOnboardingStatus.BLOCKED:
-            raise ValueError(
-                f"Project onboarding failed closed on repository or managed binding verification: {'; '.join(reasons)}"
-            )
 
         project = Project(
             project_id=project_id,

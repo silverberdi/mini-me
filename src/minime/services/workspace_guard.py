@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import subprocess
@@ -18,6 +19,8 @@ from minime.domain.models import (
     WorkspaceMutationDecision,
     WorkspaceMutationRequest,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def is_binding_fully_valid(binding: Any) -> bool:
@@ -199,6 +202,58 @@ class ManagedWorkspaceGuard:
         self, request: WorkspaceMutationRequest
     ) -> WorkspaceMutationDecision:
         """Evaluate workspace mutation request against physical/logical isolation policies."""
+        decision = self._evaluate_mutation_internal(request)
+        if not decision.allowed:
+            self._record_denial_metric(request, decision)
+        return decision
+
+    def _record_denial_metric(
+        self, request: WorkspaceMutationRequest, decision: WorkspaceMutationDecision
+    ) -> None:
+        """Instrument workspace mutation denials with durable MetricFact."""
+        if decision.allowed:
+            return
+        if not hasattr(self, "uow") or self.uow is None:
+            return
+        if not hasattr(self.uow, "metrics") or self.uow.metrics is None:
+            return
+
+        try:
+            from minime.domain.models import MetricFact
+            reason_code_val = (
+                decision.reason_code.value
+                if hasattr(decision.reason_code, "value")
+                else str(decision.reason_code)
+            )
+            op_val = (
+                request.requested_operation.value
+                if hasattr(request.requested_operation, "value")
+                else str(request.requested_operation)
+            )
+            fact = MetricFact(
+                metric_name="workspace_mutation_denied_total",
+                project_id=request.project_id or "unknown",
+                details={
+                    "reason_code": reason_code_val,
+                    "attempted_operation": op_val,
+                    "resolved_path": decision.resolved_path,
+                    "provider_detail": decision.provider_detail,
+                    "workspace_role": (
+                        decision.workspace_role.value
+                        if hasattr(decision.workspace_role, "value")
+                        else str(decision.workspace_role)
+                    ),
+                },
+                fact_value=1.0,
+            )
+            self.uow.metrics.save(fact)
+        except Exception as exc:
+            logger.debug(f"Failed to record workspace_mutation_denied_total metric fact: {exc}")
+
+    def _evaluate_mutation_internal(
+        self, request: WorkspaceMutationRequest
+    ) -> WorkspaceMutationDecision:
+        """Internal evaluation of workspace mutation request."""
         resolved = self.resolve_canonical_path(request.target_path)
 
         # 1. Protect runtime root against ANY non-READ mutation operation
