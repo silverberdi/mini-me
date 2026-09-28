@@ -3204,6 +3204,214 @@ async def test_review_worktree_lifecycle_finalization_cases(tmp_dirs):
     assert res_clean_b.outcome == ExternalOutcome.SUCCESS
 
 
+def test_blocker_1_openspec_generator_symlink_preflight_atomicity(tmp_dirs):
+    """Proves OpenSpecGenerator destination preflight atomicity and symlink escape rejection."""
+    uow = MockUOW()
+    binding = ProjectManagedRepositoryBinding(
+        project_id="test-gen-blocker1",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["repo_root"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+    )
+    uow.project_managed_repository_bindings.save(binding)
+
+    from minime.services.openspec_generator import GeneratedOpenSpec, OpenSpecGenerator
+
+    gen = OpenSpecGenerator(project_root=tmp_dirs["repo_root"], uow=uow)
+
+    target_dir = Path(tmp_dirs["repo_root"]) / "openspec" / "changes" / "change-symlink-test"
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    runtime_secret = Path(tmp_dirs["runtime"]) / "runtime_secret.txt"
+    runtime_secret.parent.mkdir(parents=True, exist_ok=True)
+    runtime_secret.write_text("INITIAL_RUNTIME_CONTENT", encoding="utf-8")
+
+    # A) proposal.md is a symlink into RUNTIME + overwrite=True => operation denied => runtime target unchanged
+    proposal_symlink = target_dir / "proposal.md"
+    os.symlink(str(runtime_secret), str(proposal_symlink))
+
+    spec_a = GeneratedOpenSpec(
+        change_name="change-symlink-test",
+        proposal_content="# Malicious Proposal\n",
+        tasks_content="- [ ] task\n",
+        design_content="# Malicious Design\n",
+    )
+
+    with patch.dict(os.environ, {"MINIME_RUNTIME_ROOT": tmp_dirs["runtime"]}):
+        with pytest.raises(RuntimeError, match="OpenSpec write denied: symlink target|ManagedWorkspaceGuard denied"):
+            gen.write_change_to_disk("openspec", spec_a, overwrite=True, project_id="test-gen-blocker1")
+
+    assert runtime_secret.read_text(encoding="utf-8") == "INITIAL_RUNTIME_CONTENT"
+    # E) Preflight atomicity: tasks.md and design.md were NOT written
+    assert not (target_dir / "tasks.md").exists()
+    assert not (target_dir / "design.md").exists()
+
+    # B) Clean up proposal symlink, make tasks.md a symlink into RUNTIME
+    proposal_symlink.unlink()
+    tasks_symlink = target_dir / "tasks.md"
+    os.symlink(str(runtime_secret), str(tasks_symlink))
+
+    with patch.dict(os.environ, {"MINIME_RUNTIME_ROOT": tmp_dirs["runtime"]}):
+        with pytest.raises(RuntimeError, match="OpenSpec write denied: symlink target|ManagedWorkspaceGuard denied"):
+            gen.write_change_to_disk("openspec", spec_a, overwrite=True, project_id="test-gen-blocker1")
+
+    assert runtime_secret.read_text(encoding="utf-8") == "INITIAL_RUNTIME_CONTENT"
+    assert not (target_dir / "proposal.md").exists()
+
+    # C) spec final file symlink escapes change subtree
+    tasks_symlink.unlink()
+    spec_dir = target_dir / "specs" / "feat"
+    spec_dir.mkdir(parents=True, exist_ok=True)
+    spec_symlink = spec_dir / "spec.md"
+    os.symlink(str(runtime_secret), str(spec_symlink))
+
+    spec_b = GeneratedOpenSpec(
+        change_name="change-symlink-test",
+        proposal_content="# Proposal\n",
+        tasks_content="- [ ] task\n",
+        specs={"specs/feat/spec.md": "# Evil Spec\n"},
+    )
+
+    with patch.dict(os.environ, {"MINIME_RUNTIME_ROOT": tmp_dirs["runtime"]}):
+        with pytest.raises(RuntimeError, match="OpenSpec write denied|ManagedWorkspaceGuard denied"):
+            gen.write_change_to_disk("openspec", spec_b, overwrite=True, project_id="test-gen-blocker1")
+
+    assert runtime_secret.read_text(encoding="utf-8") == "INITIAL_RUNTIME_CONTENT"
+    assert not (target_dir / "proposal.md").exists()
+    assert not (target_dir / "tasks.md").exists()
+
+    # D) All destinations valid => generation succeeds
+    spec_symlink.unlink()
+    res_dir = gen.write_change_to_disk("openspec", spec_b, overwrite=True, project_id="test-gen-blocker1")
+    assert res_dir.exists()
+    assert (res_dir / "proposal.md").exists()
+    assert (res_dir / "tasks.md").exists()
+    assert (res_dir / "specs" / "feat" / "spec.md").exists()
+
+
+def test_blocker_2_readiness_current_truth_verification(tmp_dirs):
+    """Proves ReadinessService Stage C admission fence revalidates CURRENT Stage C truth."""
+    uow = MockUOW()
+
+    repo_root = tmp_dirs["repo_root"]
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo_root, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_root, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo_root, check=True)
+    (Path(repo_root) / "README.md").write_text("init", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo_root, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo_root, check=True, capture_output=True)
+    try:
+        subprocess.run(["git", "remote", "add", "origin", "https://github.com/org/repo"], cwd=repo_root, check=True, capture_output=True)
+    except Exception:
+        subprocess.run(["git", "remote", "set-url", "origin", "https://github.com/org/repo"], cwd=repo_root, check=True, capture_output=True)
+
+    marker_path = Path(repo_root) / ".minime-managed-project.json"
+    marker_path.write_text(json.dumps({
+        "project_id": "proj-readiness-current",
+        "canonical_repository_identity": "github.com/org/repo",
+    }), encoding="utf-8")
+
+    from minime.domain.models import Project, ProjectBinding
+    project = Project(
+        project_id="proj-readiness-current",
+        display_name="Readiness Current",
+        repository="github.com/org/repo",
+        base_branch="main",
+        implementer="codex",
+        reviewer="antigravity",
+    )
+    uow.projects.save(project)
+
+    binding = ProjectManagedRepositoryBinding(
+        project_id="proj-readiness-current",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=repo_root,
+        worktree_parent_dir=tmp_dirs["worktrees"],
+        remote_name="origin",
+    )
+    uow.project_managed_repository_bindings.save(binding)
+
+    durable_binding = ProjectBinding(
+        project_id="proj-readiness-current",
+        repository="github.com/org/repo",
+        openspec_change_name="change-readiness",
+        github_issue_number=123,
+        is_valid=True,
+    )
+    uow.bindings.save(durable_binding)
+
+    # Seed OpenSpec change dir
+    ch_dir = Path(repo_root) / "openspec" / "changes" / "change-readiness"
+    (ch_dir / "specs" / "feat").mkdir(parents=True, exist_ok=True)
+    (ch_dir / "proposal.md").write_text("# Proposal\n", encoding="utf-8")
+    (ch_dir / "tasks.md").write_text("# Tasks\n- [ ] task\n", encoding="utf-8")
+    (ch_dir / "design.md").write_text("# Design\n", encoding="utf-8")
+    (ch_dir / "specs" / "feat" / "spec.md").write_text("# Spec\n", encoding="utf-8")
+
+    from minime.services.readiness_service import ReadinessService
+    svc = ReadinessService(uow=uow)
+
+    # F) All current evidence valid => stage_c_workspace_isolation PASS
+    eval_ok = svc.evaluate_change_readiness("proj-readiness-current", "change-readiness", repo_root)
+    sc_check = next(c for c in eval_ok.checks if c.name == "stage_c_workspace_isolation")
+    assert sc_check.passed is True
+    assert sc_check.details.get("is_runtime_isolated") is True
+
+    # A) binding.is_valid=True but remote changed => readiness NOT_READY
+    subprocess.run(["git", "remote", "set-url", "origin", "https://github.com/evil/repo"], cwd=repo_root, check=True, capture_output=True)
+    eval_a = svc.evaluate_change_readiness("proj-readiness-current", "change-readiness", repo_root)
+    assert eval_a.is_ready is False
+    sc_a = next(c for c in eval_a.checks if c.name == "stage_c_workspace_isolation")
+    assert sc_a.passed is False
+    assert "Git repository identity verification failed" in sc_a.reason
+    subprocess.run(["git", "remote", "set-url", "origin", "https://github.com/org/repo"], cwd=repo_root, check=True, capture_output=True)
+
+    # B) binding.is_valid=True but managed marker missing/corrupt => NOT_READY
+    marker_path.unlink()
+    eval_b = svc.evaluate_change_readiness("proj-readiness-current", "change-readiness", repo_root)
+    assert eval_b.is_ready is False
+    sc_b = next(c for c in eval_b.checks if c.name == "stage_c_workspace_isolation")
+    assert sc_b.passed is False
+    assert "ownership marker verification failed" in sc_b.reason
+
+    # Restore marker
+    marker_path.write_text(json.dumps({
+        "project_id": "proj-readiness-current",
+        "canonical_repository_identity": "github.com/org/repo",
+    }), encoding="utf-8")
+
+    # C) binding.is_valid=True but managed root missing => NOT_READY
+    binding.managed_repository_root = os.path.join(tmp_dirs["base"], "nonexistent_root_path")
+    uow.project_managed_repository_bindings.save(binding)
+    eval_c = svc.evaluate_change_readiness("proj-readiness-current", "change-readiness", repo_root)
+    assert eval_c.is_ready is False
+    sc_c = next(c for c in eval_c.checks if c.name == "stage_c_workspace_isolation")
+    assert sc_c.passed is False
+    assert "does not exist or is not a directory" in sc_c.reason
+
+    # D) runtime/managed overlap => NOT_READY
+    binding.managed_repository_root = tmp_dirs["runtime"]
+    uow.project_managed_repository_bindings.save(binding)
+    with patch.dict(os.environ, {"MINIME_RUNTIME_ROOT": tmp_dirs["runtime"]}):
+        eval_d = svc.evaluate_change_readiness("proj-readiness-current", "change-readiness", repo_root)
+        assert eval_d.is_ready is False
+        sc_d = next(c for c in eval_d.checks if c.name == "stage_c_workspace_isolation")
+        assert sc_d.passed is False
+        assert "collides or overlaps" in sc_d.reason
+
+    # Restore valid binding
+    binding.managed_repository_root = repo_root
+    uow.project_managed_repository_bindings.save(binding)
+
+    # E) confinement unavailable => NOT_READY
+    with patch("minime.services.agent_confinement.AgentProcessConfinement.is_confinement_available", return_value=False):
+        eval_e = svc.evaluate_change_readiness("proj-readiness-current", "change-readiness", repo_root)
+        assert eval_e.is_ready is False
+        sc_e = next(c for c in eval_e.checks if c.name == "stage_c_workspace_isolation")
+        assert sc_e.passed is False
+        assert "confinement capability is unavailable" in sc_e.reason
+
+
 
 
 

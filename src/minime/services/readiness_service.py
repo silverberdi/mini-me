@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from minime.adapters.github import GitHubAdapter, GitHubAuthorizationError, GitHubRemoteError
 from minime.adapters.openspec import OpenSpecAdapter
 from minime.db.session import SchemaInvariantResult, verify_physical_schema_invariants
@@ -177,30 +179,81 @@ class ReadinessService:
             except Exception as e:
                 logger.warning(f"Capacity check error: {e}")
 
-        # Stage C Admission Fence: Managed Repository Binding & Process Confinement Gating
+        # Stage C Admission Fence: Re-validate CURRENT Stage C truth using canonical authorities
         managed_binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
         managed_binding = managed_binding_repo.get_by_project_id(project_id) if managed_binding_repo else None
 
         from minime.services.agent_confinement import AgentProcessConfinement
+        from minime.services.workspace_guard import ManagedWorkspaceGuard, is_binding_fully_valid
 
-        confinement = AgentProcessConfinement(
-            allowed_worktree_path=f"/opt/minime/worktrees/{project_id}/wt-readiness-probe"
-        )
-        confinement_ok = confinement.is_confinement_available()
+        guard = ManagedWorkspaceGuard(self.uow)
+
+        stage_c_reason: str | None = None
+        confinement_mech = "unknown"
 
         if managed_binding is None:
-            reason = f"Stage C Admission Fence: Missing managed repository binding for project '{project_id}'."
-            checks.append(ReadinessCheck(name="stage_c_workspace_isolation", passed=False, reason=reason))
-            unmet_reasons.append(reason)
-        elif not managed_binding.is_valid:
-            m_reasons = managed_binding.mismatch_reasons or ["Invalid ProjectManagedRepositoryBinding"]
-            reason = f"Stage C Admission Fence: Managed repository binding is invalid: {'; '.join(m_reasons)}."
-            checks.append(ReadinessCheck(name="stage_c_workspace_isolation", passed=False, reason=reason))
-            unmet_reasons.append(reason)
-        elif not confinement_ok:
-            reason = "Stage C Admission Fence: Agent process confinement capability is unavailable."
-            checks.append(ReadinessCheck(name="stage_c_workspace_isolation", passed=False, reason=reason))
-            unmet_reasons.append(reason)
+            stage_c_reason = f"Stage C Admission Fence: Missing managed repository binding for project '{project_id}'."
+        elif not is_binding_fully_valid(managed_binding):
+            m_reasons = getattr(managed_binding, "mismatch_reasons", None) or ["Invalid ProjectManagedRepositoryBinding"]
+            stage_c_reason = f"Stage C Admission Fence: Managed repository binding is invalid: {'; '.join(m_reasons)}."
+        else:
+            managed_root = managed_binding.managed_repository_root
+            wt_parent = managed_binding.worktree_parent_dir
+
+            # 1. Re-observe managed repository root existence
+            if not os.path.exists(managed_root) or not os.path.isdir(managed_root):
+                stage_c_reason = f"Stage C Admission Fence: Managed repository root '{managed_root}' does not exist or is not a directory."
+            else:
+                managed_root_real = os.path.realpath(managed_root)
+                wt_parent_real = os.path.realpath(wt_parent)
+                runtime_root_real = guard.runtime_root
+
+                # 2. Re-observe runtime collision / overlap
+                if (
+                    managed_root_real == runtime_root_real
+                    or wt_parent_real == runtime_root_real
+                    or runtime_root_real.startswith(managed_root_real.rstrip(os.sep) + os.sep)
+                    or managed_root_real.startswith(runtime_root_real.rstrip(os.sep) + os.sep)
+                ):
+                    stage_c_reason = f"Stage C Admission Fence: Runtime root '{runtime_root_real}' collides or overlaps with managed workspace."
+                elif guard.trusted_managed_root and (
+                    not managed_root_real.startswith(guard.trusted_managed_root.rstrip(os.sep))
+                    or not wt_parent_real.startswith(guard.trusted_managed_root.rstrip(os.sep))
+                ):
+                    stage_c_reason = f"Stage C Admission Fence: Managed root '{managed_root_real}' escapes trusted managed root '{guard.trusted_managed_root}'."
+
+                # 3. Re-observe Git repository identity
+                if not stage_c_reason:
+                    git_ok, git_msg = guard.verify_git_repository_identity(
+                        managed_root,
+                        managed_binding.canonical_repository_identity,
+                        remote_name=managed_binding.remote_name,
+                    )
+                    if not git_ok:
+                        stage_c_reason = f"Stage C Admission Fence: Current Git repository identity verification failed: {git_msg}"
+
+                # 4. Re-observe Ownership Marker
+                if not stage_c_reason:
+                    marker_ok, marker_msg, _, _ = guard.verify_managed_repository_ownership_marker(
+                        managed_root,
+                        expected_project_id=project_id,
+                        expected_repo_identity=managed_binding.canonical_repository_identity,
+                    )
+                    if not marker_ok:
+                        stage_c_reason = f"Stage C Admission Fence: Managed repository ownership marker verification failed: {marker_msg}"
+
+                # 5. Re-observe Agent Process Confinement availability
+                if not stage_c_reason:
+                    confinement = AgentProcessConfinement(
+                        allowed_worktree_path=f"{wt_parent}/wt-readiness-probe"
+                    )
+                    confinement_mech = confinement.confinement_mechanism
+                    if not confinement.is_confinement_available():
+                        stage_c_reason = "Stage C Admission Fence: Agent process confinement capability is unavailable."
+
+        if stage_c_reason:
+            checks.append(ReadinessCheck(name="stage_c_workspace_isolation", passed=False, reason=stage_c_reason))
+            unmet_reasons.append(stage_c_reason)
         else:
             checks.append(
                 ReadinessCheck(
@@ -208,7 +261,7 @@ class ReadinessService:
                     passed=True,
                     details={
                         "is_runtime_isolated": True,
-                        "confinement_mechanism": confinement.confinement_mechanism,
+                        "confinement_mechanism": confinement_mech,
                     },
                 )
             )

@@ -19,7 +19,13 @@ def test_needs_human_question_answering_flow(
     in_memory_uow: InMemoryPersistenceUnitOfWork, tmp_path: Path
 ) -> None:
     repo_dir = tmp_path / "app-repo"
-    setup_managed_repository_fixture(in_memory_uow, "app-proj", repo_dir, tmp_path / "worktrees")
+    setup_managed_repository_fixture(
+        in_memory_uow,
+        "app-proj",
+        repo_dir,
+        tmp_path / "worktrees",
+        canonical_repository_identity="github.com/test-owner/app-repo",
+    )
 
     project = Project(
         project_id="app-proj",
@@ -77,7 +83,13 @@ def test_start_work_item_and_duplicate_suppression(
     in_memory_uow: InMemoryPersistenceUnitOfWork, tmp_path: Path
 ) -> None:
     repo_dir = tmp_path / "app-repo"
-    setup_managed_repository_fixture(in_memory_uow, "app-proj", repo_dir, tmp_path / "worktrees")
+    setup_managed_repository_fixture(
+        in_memory_uow,
+        "app-proj",
+        repo_dir,
+        tmp_path / "worktrees",
+        canonical_repository_identity="github.com/test-owner/app-repo",
+    )
 
     project = Project(
         project_id="app-proj",

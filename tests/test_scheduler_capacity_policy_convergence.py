@@ -85,6 +85,16 @@ def setup_test_environment(
     )
     uow.projects.save(project)
 
+    from tests.conftest import setup_managed_repository_fixture
+
+    setup_managed_repository_fixture(
+        uow,
+        "mini-me",
+        root,
+        root / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+    )
+
     change = Change(
         project_id="mini-me",
         name=change_name,

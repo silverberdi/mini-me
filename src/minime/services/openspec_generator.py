@@ -225,9 +225,10 @@ class OpenSpecGenerator:
         openspec_root = (base_root / openspec_path).resolve()
 
         # Construct final intended change directory and verify containment
-        target_dir = (base_root / openspec_path / "changes" / generated.change_name).resolve()
+        target_dir = base_root / openspec_path / "changes" / generated.change_name
+        target_dir_resolved = target_dir.resolve()
         try:
-            target_dir.relative_to(openspec_root)
+            target_dir_resolved.relative_to(openspec_root)
         except ValueError:
             raise RuntimeError(
                 f"OpenSpec write denied: change directory '{target_dir}' escapes OpenSpec root '{openspec_root}'."
@@ -239,12 +240,12 @@ class OpenSpecGenerator:
                 raise RuntimeError(
                     f"OpenSpec write denied: spec relative path '{rel_spec_path}' fails path confinement check."
                 )
-            spec_file = (target_dir / rel_spec_path).resolve()
+            spec_file = target_dir / rel_spec_path
             try:
-                spec_file.relative_to(target_dir)
+                spec_file.resolve().relative_to(target_dir_resolved)
             except ValueError:
                 raise RuntimeError(
-                    f"OpenSpec write denied: spec file '{spec_file}' escapes change directory '{target_dir}'."
+                    f"OpenSpec write denied: spec file '{spec_file}' escapes change directory '{target_dir_resolved}'."
                 )
 
         from minime.domain.enums import WorkspaceOperation, WorkspaceRole
@@ -252,23 +253,80 @@ class OpenSpecGenerator:
         from minime.services.workspace_guard import ManagedWorkspaceGuard
 
         guard = ManagedWorkspaceGuard(eff_uow)
-        target_path_str = str(target_dir)
-        req = WorkspaceMutationRequest(
-            project_id=project_id,
-            target_path=target_path_str,
-            requested_operation=WorkspaceOperation.OPENSPEC_SYNC,
-        )
-        decision = guard.evaluate_mutation(req)
-        if not decision.allowed or decision.workspace_role == WorkspaceRole.RUNTIME:
-            raise RuntimeError(
-                f"ManagedWorkspaceGuard denied OpenSpec generation write to '{target_path_str}': {decision.provider_detail or decision.reason_code.value}"
-            )
 
-        target_dir.mkdir(parents=True, exist_ok=True)
-
+        # 1. Precompute ALL intended mutation target destinations BEFORE any filesystem mutation
         proposal_file = target_dir / "proposal.md"
         tasks_file = target_dir / "tasks.md"
         design_file = target_dir / "design.md"
+
+        intended_targets: list[Path] = [target_dir]
+
+        if overwrite or not proposal_file.exists():
+            intended_targets.append(proposal_file)
+
+        if overwrite or not tasks_file.exists():
+            intended_targets.append(tasks_file)
+
+        if generated.design_content and (overwrite or not design_file.exists()):
+            intended_targets.append(design_file)
+
+        for rel_spec_path in generated.specs.keys():
+            spec_file = target_dir / rel_spec_path
+            if overwrite or not spec_file.exists():
+                intended_targets.append(spec_file.parent)
+                intended_targets.append(spec_file)
+
+        # 2. Canonicalize every target, verify symlinks/containment, and guard authorize ALL destinations
+        for target_path in intended_targets:
+            # Check if target_path exists or is a symlink
+            if target_path.is_symlink() or target_path.exists():
+                real_target = target_path.resolve()
+                if target_path.is_symlink():
+                    try:
+                        real_target.relative_to(target_dir_resolved)
+                    except ValueError:
+                        raise RuntimeError(
+                            f"OpenSpec write denied: symlink target '{target_path}' points outside change directory to '{real_target}'."
+                        )
+            else:
+                # Walk existing parent ancestors to check for symlink escape
+                curr = target_path.parent
+                while curr != target_dir and curr in curr.parents:
+                    if curr.is_symlink() or curr.exists():
+                        real_curr = curr.resolve()
+                        if curr.is_symlink():
+                            try:
+                                real_curr.relative_to(target_dir_resolved)
+                            except ValueError:
+                                raise RuntimeError(
+                                    f"OpenSpec write denied: parent symlink '{curr}' escapes change directory to '{real_curr}'."
+                                )
+                        break
+                    curr = curr.parent
+
+            # Verify resolved target remains inside openspec_root
+            resolved_dest = target_path.resolve()
+            try:
+                resolved_dest.relative_to(openspec_root)
+            except ValueError:
+                raise RuntimeError(
+                    f"OpenSpec write denied: destination '{target_path}' escapes OpenSpec root '{openspec_root}'."
+                )
+
+            # Evaluate ManagedWorkspaceGuard for exact destination
+            req = WorkspaceMutationRequest(
+                project_id=project_id,
+                target_path=str(resolved_dest),
+                requested_operation=WorkspaceOperation.OPENSPEC_SYNC,
+            )
+            decision = guard.evaluate_mutation(req)
+            if not decision.allowed or decision.workspace_role == WorkspaceRole.RUNTIME:
+                raise RuntimeError(
+                    f"ManagedWorkspaceGuard denied OpenSpec generation write to '{target_path}': {decision.provider_detail or decision.reason_code.value}"
+                )
+
+        # 3. ONLY THEN perform actual filesystem writes
+        target_dir.mkdir(parents=True, exist_ok=True)
 
         if overwrite or not proposal_file.exists():
             proposal_file.write_text(generated.proposal_content, encoding="utf-8")
@@ -280,7 +338,7 @@ class OpenSpecGenerator:
             design_file.write_text(generated.design_content, encoding="utf-8")
 
         for rel_spec_path, spec_text in generated.specs.items():
-            spec_file = (target_dir / rel_spec_path).resolve()
+            spec_file = target_dir / rel_spec_path
             spec_file.parent.mkdir(parents=True, exist_ok=True)
             if overwrite or not spec_file.exists():
                 spec_file.write_text(spec_text, encoding="utf-8")
