@@ -95,6 +95,77 @@ class FakeWorktreeManager:
         if path.exists():
             shutil.rmtree(path)
 
+    async def create_review_worktree(
+        self,
+        job_id: str,
+        change_name: str,
+        candidate_sha: str,
+        reviewer_role: str,
+        project_id: str | None = None,
+        run_id: str | None = None,
+    ) -> WorktreeInfo:
+        del project_id, run_id
+        sanitized_role = reviewer_role.replace("/", "_").replace("\\", "_").replace(":", "_")
+        short_sha = candidate_sha[:8] if candidate_sha else ""
+        suffix = f"-{short_sha}" if short_sha else ""
+        path = self.root / ".minime" / "worktrees" / f"{job_id}-review-{sanitized_role}{suffix}"
+        if path.exists():
+            shutil.rmtree(path)
+        path.mkdir(parents=True, exist_ok=True)
+        source_wt = self.created_paths.get(job_id)
+        if source_wt and source_wt.exists():
+            for item in source_wt.iterdir():
+                if item.name == ".git":
+                    continue
+                if item.is_dir():
+                    shutil.copytree(item, path / item.name, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(item, path / item.name)
+        elif (self.root / "openspec").exists():
+            shutil.copytree(self.root / "openspec", path / "openspec", dirs_exist_ok=True)
+        else:
+            (path / "openspec").mkdir(parents=True, exist_ok=True)
+
+        subprocess.run(["git", "init"], cwd=str(path), check=True, capture_output=True)
+        subprocess.run(
+            ["git", "config", "user.name", "Test"], cwd=str(path), check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"],
+            cwd=str(path),
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(["git", "add", "."], cwd=str(path), check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "--allow-empty", "-m", "init review wt"],
+            cwd=str(path),
+            check=True,
+            capture_output=True,
+        )
+        head_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(path),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        self.created_paths[f"{job_id}-review-{sanitized_role}"] = path
+        branch = f"minime/{change_name}-{job_id}-review-{sanitized_role}{suffix}"
+        return WorktreeInfo(path=path, branch_name=branch, base_sha=candidate_sha or head_sha)
+
+    async def remove_review_worktree(
+        self,
+        worktree_path: str | Path,
+        job_id: str,
+        project_id: str | None = None,
+    ) -> None:
+        del project_id
+        self.cleaned.append(f"{job_id}-review")
+        path = Path(worktree_path)
+        if path.exists():
+            shutil.rmtree(path)
+
 
 def seed_ready_change(
     in_memory_uow,
