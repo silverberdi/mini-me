@@ -200,29 +200,37 @@ class ReadinessService:
             managed_root = managed_binding.managed_repository_root
             wt_parent = managed_binding.worktree_parent_dir
 
-            # 1. Re-observe managed repository root existence
+            # 1. Prove BOTH managed_repository_root and worktree_parent_dir are currently observable directories
             if not os.path.exists(managed_root) or not os.path.isdir(managed_root):
                 stage_c_reason = f"Stage C Admission Fence: Managed repository root '{managed_root}' does not exist or is not a directory."
+            elif not os.path.exists(wt_parent) or not os.path.isdir(wt_parent):
+                stage_c_reason = f"Stage C Admission Fence: Worktree parent directory '{wt_parent}' does not exist or is not a directory."
             else:
-                managed_root_real = os.path.realpath(managed_root)
-                wt_parent_real = os.path.realpath(wt_parent)
-                runtime_root_real = guard.runtime_root
+                runtime_root = guard.runtime_root
 
-                # 2. Re-observe runtime collision / overlap
-                if (
-                    managed_root_real == runtime_root_real
-                    or wt_parent_real == runtime_root_real
-                    or runtime_root_real.startswith(managed_root_real.rstrip(os.sep) + os.sep)
-                    or managed_root_real.startswith(runtime_root_real.rstrip(os.sep) + os.sep)
-                ):
-                    stage_c_reason = f"Stage C Admission Fence: Runtime root '{runtime_root_real}' collides or overlaps with managed workspace."
+                # 2. Prove BOTH have no equality/parent/child overlap with RUNTIME using guard path helpers
+                if guard._paths_overlap(managed_root, runtime_root) or guard._paths_overlap(wt_parent, runtime_root):
+                    stage_c_reason = f"Stage C Admission Fence: Runtime root '{runtime_root}' collides or overlaps with managed workspace or worktree parent directory."
                 elif guard.trusted_managed_root and (
-                    not managed_root_real.startswith(guard.trusted_managed_root.rstrip(os.sep))
-                    or not wt_parent_real.startswith(guard.trusted_managed_root.rstrip(os.sep))
+                    not guard._is_path_inside(managed_root, guard.trusted_managed_root)
+                    or not guard._is_path_inside(wt_parent, guard.trusted_managed_root)
                 ):
-                    stage_c_reason = f"Stage C Admission Fence: Managed root '{managed_root_real}' escapes trusted managed root '{guard.trusted_managed_root}'."
+                    stage_c_reason = f"Stage C Admission Fence: Managed root '{managed_root}' or worktree parent directory '{wt_parent}' escapes trusted managed root '{guard.trusted_managed_root}'."
 
-                # 3. Re-observe Git repository identity
+                # 3. Require authoritative workspace classification to remain MANAGED_REPOSITORY
+                if not stage_c_reason:
+                    from minime.domain.enums import WorkspaceOperation, WorkspaceRole
+                    from minime.domain.models import WorkspaceMutationRequest
+                    class_req = WorkspaceMutationRequest(
+                        project_id=project_id,
+                        target_path=managed_root,
+                        requested_operation=WorkspaceOperation.READ,
+                    )
+                    class_decision = guard.evaluate_mutation(class_req)
+                    if not class_decision.allowed or class_decision.workspace_role != WorkspaceRole.MANAGED_REPOSITORY:
+                        stage_c_reason = f"Stage C Admission Fence: Managed root '{managed_root}' failed workspace classification: {class_decision.provider_detail}"
+
+                # 4. Re-observe Git repository identity
                 if not stage_c_reason:
                     git_ok, git_msg = guard.verify_git_repository_identity(
                         managed_root,
@@ -232,7 +240,7 @@ class ReadinessService:
                     if not git_ok:
                         stage_c_reason = f"Stage C Admission Fence: Current Git repository identity verification failed: {git_msg}"
 
-                # 4. Re-observe Ownership Marker
+                # 5. Re-observe Ownership Marker
                 if not stage_c_reason:
                     marker_ok, marker_msg, _, _ = guard.verify_managed_repository_ownership_marker(
                         managed_root,
@@ -242,7 +250,7 @@ class ReadinessService:
                     if not marker_ok:
                         stage_c_reason = f"Stage C Admission Fence: Managed repository ownership marker verification failed: {marker_msg}"
 
-                # 5. Re-observe Agent Process Confinement availability
+                # 6. Re-observe Agent Process Confinement availability
                 if not stage_c_reason:
                     confinement = AgentProcessConfinement(
                         allowed_worktree_path=f"{wt_parent}/wt-readiness-probe"

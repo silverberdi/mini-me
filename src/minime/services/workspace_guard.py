@@ -466,9 +466,22 @@ class ManagedWorkspaceGuard:
         )
 
     def _is_path_inside(self, path: str, parent: str) -> bool:
-        """Check if resolved path is equal to or contained within parent directory."""
+        """Check if resolved path is equal to or contained within parent directory using path hierarchy."""
         try:
-            rel = os.path.relpath(path, parent)
-            return not rel.startswith("..") and rel != ".."
-        except ValueError:
+            from pathlib import Path
+            p = Path(self.resolve_canonical_path(path))
+            par = Path(self.resolve_canonical_path(parent))
+            return p == par or par in p.parents
+        except Exception:
             return False
+
+    def _paths_overlap(self, path_a: str, path_b: str) -> bool:
+        """Check if two resolved paths collide or overlap (equal, parent of, or child of)."""
+        try:
+            from pathlib import Path
+            a = Path(self.resolve_canonical_path(path_a))
+            b = Path(self.resolve_canonical_path(path_b))
+            return a == b or b in a.parents or a in b.parents
+        except Exception:
+            return True
+

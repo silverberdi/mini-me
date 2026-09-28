@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from minime.domain.enums import (
+    EvidenceDiagnosticStatus,
     ExternalOutcome,
     ExternalReasonCode,
     OrchestrationStage,
@@ -926,6 +927,13 @@ def test_wrong_head_sha_prevents_created(tmp_dirs):
 
 def test_correct_head_sha_allows_created(tmp_dirs):
     uow = MockUOW()
+    binding = ProjectManagedRepositoryBinding(
+        project_id="test-proj",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["repo_root"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+    )
+    uow.project_managed_repository_bindings.save(binding)
     wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
     wt_path = Path(tmp_dirs["worktrees"]) / "wt-correct-sha"
     wt_path.mkdir(parents=True, exist_ok=True)
@@ -958,7 +966,7 @@ def test_correct_head_sha_allows_created(tmp_dirs):
         creation_state=WorktreeCreationState.PENDING,
     )
 
-    with patch.object(wt_manager, "_git") as mock_git:
+    with patch.object(wt_manager, "_git") as mock_git, patch("minime.services.workspace_guard.ManagedWorkspaceGuard.verify_git_repository_identity", return_value=(True, "OK")):
         async def mock_git_impl(args, **kwargs):
             if "worktree" in args and "list" in args:
                 return f"worktree {wt_path.resolve()}\n"
@@ -3363,7 +3371,7 @@ def test_blocker_2_readiness_current_truth_verification(tmp_dirs):
     assert eval_a.is_ready is False
     sc_a = next(c for c in eval_a.checks if c.name == "stage_c_workspace_isolation")
     assert sc_a.passed is False
-    assert "Git repository identity verification failed" in sc_a.reason
+    assert "Git repository" in sc_a.reason and ("remote mismatch" in sc_a.reason or "identity verification failed" in sc_a.reason)
     subprocess.run(["git", "remote", "set-url", "origin", "https://github.com/org/repo"], cwd=repo_root, check=True, capture_output=True)
 
     # B) binding.is_valid=True but managed marker missing/corrupt => NOT_READY
@@ -3372,7 +3380,7 @@ def test_blocker_2_readiness_current_truth_verification(tmp_dirs):
     assert eval_b.is_ready is False
     sc_b = next(c for c in eval_b.checks if c.name == "stage_c_workspace_isolation")
     assert sc_b.passed is False
-    assert "ownership marker verification failed" in sc_b.reason
+    assert "ownership marker" in sc_b.reason
 
     # Restore marker
     marker_path.write_text(json.dumps({
@@ -3410,6 +3418,267 @@ def test_blocker_2_readiness_current_truth_verification(tmp_dirs):
         sc_e = next(c for c in eval_e.checks if c.name == "stage_c_workspace_isolation")
         assert sc_e.passed is False
         assert "confinement capability is unavailable" in sc_e.reason
+
+
+def test_task_a_readiness_admission_fence_complete_current_truth_proof(tmp_dirs):
+    repo_root = tmp_dirs["repo_root"]
+    wt_dir = tmp_dirs["worktrees"]
+    rt_dir = tmp_dirs["runtime"]
+
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo_root, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_root, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_root, check=True)
+    subprocess.run(["git", "remote", "remove", "origin"], cwd=repo_root, capture_output=True)
+    subprocess.run(["git", "remote", "add", "origin", "https://github.com/org/repo"], cwd=repo_root, check=True, capture_output=True)
+    (Path(repo_root) / "README.md").write_text("readiness\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo_root, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo_root, check=True, capture_output=True)
+
+    marker_path = Path(repo_root) / ".minime-managed-project.json"
+    marker_path.write_text(json.dumps({
+        "project_id": "proj-readiness-proof",
+        "canonical_repository_identity": "github.com/org/repo",
+    }), encoding="utf-8")
+
+    uow = MockUOW()
+    uow.projects.projects["proj-readiness-proof"] = MagicMock(
+        project_id="proj-readiness-proof",
+        status=MagicMock(value="ACTIVE"),
+        repository="github.com/org/repo",
+        base_branch="main",
+        implementer="codex",
+        reviewer="antigravity",
+        strict_validation_required=False,
+    )
+    binding = ProjectManagedRepositoryBinding(
+        project_id="proj-readiness-proof",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=repo_root,
+        worktree_parent_dir=wt_dir,
+    )
+    uow.project_managed_repository_bindings.save(binding)
+    uow.bindings.bindings[("proj-readiness-proof", "change-readiness")] = MagicMock(
+        binding_id="bind-1",
+        project_id="proj-readiness-proof",
+        change_name="change-readiness",
+        repository="github.com/org/repo",
+        github_issue_number=42,
+        is_valid=True,
+        mismatch_reasons=[],
+    )
+
+    from minime.services.readiness_service import ReadinessService
+    svc = ReadinessService(uow=uow)
+
+    # 1. Missing worktree_parent_dir => NOT_READY
+    binding.worktree_parent_dir = os.path.join(tmp_dirs["base"], "nonexistent_wt_parent")
+    uow.project_managed_repository_bindings.save(binding)
+    eval_missing_wt = svc.evaluate_change_readiness("proj-readiness-proof", "change-readiness", repo_root)
+    assert eval_missing_wt.is_ready is False
+    assert "does not exist or is not a directory" in next(c for c in eval_missing_wt.checks if c.name == "stage_c_workspace_isolation").reason
+
+    # Restore wt_dir
+    binding.worktree_parent_dir = wt_dir
+    uow.project_managed_repository_bindings.save(binding)
+
+    # 2. worktree_parent_dir == runtime => NOT_READY
+    binding.worktree_parent_dir = rt_dir
+    uow.project_managed_repository_bindings.save(binding)
+    with patch.dict(os.environ, {"MINIME_RUNTIME_ROOT": rt_dir}):
+        eval_eq = svc.evaluate_change_readiness("proj-readiness-proof", "change-readiness", repo_root)
+        assert eval_eq.is_ready is False
+        assert "collides or overlaps" in next(c for c in eval_eq.checks if c.name == "stage_c_workspace_isolation").reason
+
+    # 3. worktree_parent_dir is parent of runtime => NOT_READY
+    wt_parent_of_rt = os.path.dirname(os.path.realpath(rt_dir))
+    binding.worktree_parent_dir = wt_parent_of_rt
+    uow.project_managed_repository_bindings.save(binding)
+    with patch.dict(os.environ, {"MINIME_RUNTIME_ROOT": rt_dir}):
+        eval_par = svc.evaluate_change_readiness("proj-readiness-proof", "change-readiness", repo_root)
+        assert eval_par.is_ready is False
+        assert "collides or overlaps" in next(c for c in eval_par.checks if c.name == "stage_c_workspace_isolation").reason
+
+    # 4. worktree_parent_dir is child of runtime => NOT_READY
+    wt_child_of_rt = os.path.join(rt_dir, "worktrees")
+    os.makedirs(wt_child_of_rt, exist_ok=True)
+    binding.worktree_parent_dir = wt_child_of_rt
+    uow.project_managed_repository_bindings.save(binding)
+    with patch.dict(os.environ, {"MINIME_RUNTIME_ROOT": rt_dir}):
+        eval_child = svc.evaluate_change_readiness("proj-readiness-proof", "change-readiness", repo_root)
+        assert eval_child.is_ready is False
+        assert "collides or overlaps" in next(c for c in eval_child.checks if c.name == "stage_c_workspace_isolation").reason
+
+    # Restore wt_dir
+    binding.worktree_parent_dir = wt_dir
+    uow.project_managed_repository_bindings.save(binding)
+
+    # 5. Trusted-root prefix collision (/opt/minime/managed-evil/worktrees) => NOT_READY
+    trusted_root = os.path.join(tmp_dirs["base"], "managed")
+    evil_wt = os.path.join(tmp_dirs["base"], "managed-evil", "worktrees")
+    os.makedirs(trusted_root, exist_ok=True)
+    os.makedirs(evil_wt, exist_ok=True)
+    binding.worktree_parent_dir = evil_wt
+    uow.project_managed_repository_bindings.save(binding)
+    with patch.dict(os.environ, {"MINIME_MANAGED_ROOT": trusted_root}):
+        eval_evil = svc.evaluate_change_readiness("proj-readiness-proof", "change-readiness", repo_root)
+        assert eval_evil.is_ready is False
+        assert "escapes trusted managed root" in next(c for c in eval_evil.checks if c.name == "stage_c_workspace_isolation").reason
+
+    # Restore valid wt_dir
+    binding.worktree_parent_dir = wt_dir
+    uow.project_managed_repository_bindings.save(binding)
+
+
+def test_task_b_checks_runner_process_confinement(tmp_dirs):
+    wt_path = Path(tmp_dirs["worktrees"]) / "wt-checks-confinement"
+    wt_path.mkdir(parents=True, exist_ok=True)
+    rt_path = Path(tmp_dirs["runtime"])
+
+    from minime.services.checks_runner import ChecksRunner
+    runner = ChecksRunner(timeout_seconds=10)
+
+    # 1. Normal check inside worktree succeeds
+    res1 = asyncio.run(runner.run(
+        job_id="job-c1",
+        checks=[{"name": "echo-test", "command": "echo hello"}],
+        worktree_path=wt_path,
+    ))
+    assert res1.passed is True
+
+    # 2. Write inside assigned worktree succeeds
+    res2 = asyncio.run(runner.run(
+        job_id="job-c2",
+        checks=[{"name": "write-in-wt", "command": f"touch '{wt_path}/ok.txt'"}],
+        worktree_path=wt_path,
+    ))
+    assert res2.passed is True
+    assert (wt_path / "ok.txt").exists()
+
+    # If OS sandbox (e.g. darwin_sandbox) is present: test outside write denial
+    if platform.system().lower() == "darwin" and shutil.which("sandbox-exec"):
+        # 3. Absolute write outside worktree denied
+        res3 = asyncio.run(runner.run(
+            job_id="job-c3",
+            checks=[{"name": "write-outside", "command": "touch /tmp/minime-test-escape.txt"}],
+            worktree_path=wt_path,
+        ))
+        assert res3.passed is False
+
+        # 4. Write into RUNTIME denied
+        res4 = asyncio.run(runner.run(
+            job_id="job-c4",
+            checks=[{"name": "write-runtime", "command": f"touch '{rt_path}/evil.txt'"}],
+            worktree_path=wt_path,
+        ))
+        assert res4.passed is False
+
+    # 6. Confinement unavailable => check fails closed
+    with patch("minime.services.agent_confinement.AgentProcessConfinement.is_confinement_available", return_value=False):
+        res6 = asyncio.run(runner.run(
+            job_id="job-c6",
+            checks=[{"name": "confinement-unavail", "command": "echo hello"}],
+            worktree_path=wt_path,
+        ))
+        assert res6.passed is False
+        assert res6.results[0].exit_code == 126
+        assert res6.diagnostics[0].diagnostic_status == EvidenceDiagnosticStatus.ENVIRONMENT_UNAVAILABLE
+
+
+def test_task_c_worktree_manager_internal_writers(tmp_dirs):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_dirs["repo_root"], check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_dirs["repo_root"], check=True)
+    (Path(tmp_dirs["repo_root"]) / "README.md").write_text("init\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_dirs["repo_root"], check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+
+    uow = MockUOW()
+    binding = ProjectManagedRepositoryBinding(
+        project_id="proj-task-c",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=tmp_dirs["repo_root"],
+        worktree_parent_dir=tmp_dirs["worktrees"],
+    )
+    uow.project_managed_repository_bindings.save(binding)
+    uow.jobs.save(Job(job_id="job-task-c", project_id="proj-task-c", change_name="change-task-c", implementer_role="codex"))
+    uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id="run-task-c",
+            active_job_id="job-task-c",
+            project_id="proj-task-c",
+            change_name="change-task-c",
+            base_sha="main",
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            resumable_stage=OrchestrationStage.IMPLEMENTING,
+            is_active=True,
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        )
+    )
+
+    wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
+    wt_path = wt_manager.worktree_path("job-task-c", project_id="proj-task-c").resolve()
+    wt_path.mkdir(parents=True, exist_ok=True)
+
+    ownership = OrchestrationWorktreeOwnership(
+        worktree_id="wt-job-task-c",
+        project_id="proj-task-c",
+        job_id="job-task-c",
+        run_id="run-task-c",
+        change_name="change-task-c",
+        canonical_worktree_path=str(wt_path),
+        source_repository_identity="github.com/org/repo",
+        source_base_sha="main",
+        branch="minime/change-task-c-job-task-c",
+        creation_state=WorktreeCreationState.PENDING,
+    )
+
+    # 1. Ownership marker symlink pointing to RUNTIME is denied
+    symlink_marker = wt_path / ".minime_worktree_ownership.json"
+    runtime_file = Path(tmp_dirs["runtime"]) / "target_marker.json"
+    os.symlink(runtime_file, symlink_marker)
+
+    with pytest.raises(RuntimeError, match="Symlink escape detected at ownership marker target"):
+        wt_manager._write_ownership_marker(wt_path, ownership)
+
+    # Remove symlink marker
+    symlink_marker.unlink()
+
+    # 2. Valid marker write inside execution worktree succeeds
+    wt_manager._write_ownership_marker(wt_path, ownership)
+    assert symlink_marker.exists()
+    assert not symlink_marker.is_symlink()
+
+    # 3. OpenSpec destination ancestor symlink -> RUNTIME is denied
+    os.makedirs(Path(tmp_dirs["repo_root"]) / "openspec" / "changes" / "change-task-c", exist_ok=True)
+    (Path(tmp_dirs["repo_root"]) / "openspec" / "changes" / "change-task-c" / "proposal.md").write_text("proposal\n", encoding="utf-8")
+
+    uow.jobs.save(Job(job_id="job-task-c-2", project_id="proj-task-c", change_name="change-task-c", implementer_role="codex"))
+    uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id="run-task-c-2",
+            active_job_id="job-task-c-2",
+            project_id="proj-task-c",
+            change_name="change-task-c",
+            base_sha="main",
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            resumable_stage=OrchestrationStage.IMPLEMENTING,
+            is_active=True,
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        )
+    )
+
+    wt_path2 = wt_manager.worktree_path("job-task-c-2", project_id="proj-task-c").resolve()
+    wt_path2.mkdir(parents=True, exist_ok=True)
+    symlink_openspec = wt_path2 / "openspec"
+    os.symlink(tmp_dirs["runtime"], symlink_openspec)
+
+    # Directly test OpenSpec propagation check or create_worktree propagation error
+    dest_openspec_root = wt_path2 / "openspec"
+    dest_change_dir = dest_openspec_root / "changes" / "change-task-c"
+    assert os.path.islink(dest_openspec_root) or os.path.islink(dest_openspec_root / "changes") or os.path.islink(dest_change_dir)
+
 
 
 

@@ -7,6 +7,7 @@ import hashlib
 import inspect
 import json
 import logging
+import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -614,9 +615,40 @@ class WorktreeManager:
             raise RuntimeError(f"Worktree postcondition failed: corrupt ownership marker: {e}")
 
     def _write_ownership_marker(self, path: Path, ownership: OrchestrationWorktreeOwnership) -> None:
-        if not path.exists():
-            path.mkdir(parents=True, exist_ok=True)
-        marker_file = path / ".minime_worktree_ownership.json"
+        resolved_path = path.resolve()
+        if not resolved_path.exists():
+            resolved_path.mkdir(parents=True, exist_ok=True)
+        marker_file = resolved_path / ".minime_worktree_ownership.json"
+
+        # Reject symlinks at marker file target
+        if marker_file.is_symlink() or os.path.islink(marker_file):
+            raise RuntimeError(f"Symlink escape detected at ownership marker target '{marker_file}'. Refusing write.")
+
+        resolved_marker = marker_file.resolve()
+        if not (resolved_marker == marker_file or resolved_path in resolved_marker.parents):
+            raise RuntimeError(f"Ownership marker target '{resolved_marker}' escapes worktree root '{resolved_path}'.")
+
+        # Authorize marker write with ManagedWorkspaceGuard
+        from minime.domain.enums import WorktreeCreationState
+        from minime.domain.models import WorkspaceMutationRequest
+        from minime.services.workspace_guard import ManagedWorkspaceGuard
+        guard = self.workspace_guard or ManagedWorkspaceGuard(self.uow)
+        requested_op = (
+            WorkspaceOperation.WORKTREE_CREATE
+            if getattr(ownership, "creation_state", None) == WorktreeCreationState.PENDING
+            else WorkspaceOperation.EDIT
+        )
+        req = WorkspaceMutationRequest(
+            project_id=ownership.project_id,
+            target_path=str(resolved_marker),
+            requested_operation=requested_op,
+        )
+        decision = guard.evaluate_mutation(req)
+        if not decision.allowed:
+            raise RuntimeError(
+                f"ManagedWorkspaceGuard denied write to ownership marker '{resolved_marker}': {decision.provider_detail or decision.reason_code.value}"
+            )
+
         data = {
             "worktree_id": ownership.worktree_id,
             "project_id": ownership.project_id,
@@ -632,8 +664,9 @@ class WorktreeManager:
         }
         marker_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
+        # Git exclude bookkeeping: Authorize exact Git metadata destination under managed bounds
         try:
-            git_ref = path / ".git"
+            git_ref = resolved_path / ".git"
             info_dir = None
             if git_ref.is_dir():
                 info_dir = git_ref / "info"
@@ -642,21 +675,33 @@ class WorktreeManager:
                 if text.startswith("gitdir:"):
                     gitdir = Path(text[7:].strip())
                     if not gitdir.is_absolute():
-                        gitdir = (path / gitdir).resolve()
+                        gitdir = (resolved_path / gitdir).resolve()
                     info_dir = gitdir / "info"
             if info_dir:
                 target_dirs = [info_dir]
                 if info_dir.parent and info_dir.parent.parent and info_dir.parent.parent.parent:
                     target_dirs.append(info_dir.parent.parent.parent / "info")
                 for target_dir in target_dirs:
-                    try:
-                        target_dir.mkdir(parents=True, exist_ok=True)
-                        exclude_file = target_dir / "exclude"
-                        content = exclude_file.read_text(encoding="utf-8") if exclude_file.exists() else ""
-                        if ".minime_worktree_ownership.json" not in content:
-                            exclude_file.write_text(content.rstrip() + "\n.minime_worktree_ownership.json\n", encoding="utf-8")
-                    except Exception:
-                        pass
+                    exclude_file = target_dir / "exclude"
+                    if exclude_file.is_symlink() or os.path.islink(exclude_file):
+                        raise RuntimeError(f"Symlink escape detected at Git exclude file '{exclude_file}'.")
+                    resolved_exclude = exclude_file.resolve()
+                    ex_req = WorkspaceMutationRequest(
+                        project_id=ownership.project_id,
+                        target_path=str(resolved_exclude),
+                        requested_operation=WorkspaceOperation.WORKTREE_CREATE,
+                    )
+                    ex_decision = guard.evaluate_mutation(ex_req)
+                    if not ex_decision.allowed:
+                        raise RuntimeError(
+                            f"ManagedWorkspaceGuard denied write to Git exclude file '{resolved_exclude}': {ex_decision.provider_detail}"
+                        )
+                    target_dir.mkdir(parents=True, exist_ok=True)
+                    content = exclude_file.read_text(encoding="utf-8") if exclude_file.exists() else ""
+                    if ".minime_worktree_ownership.json" not in content:
+                        exclude_file.write_text(content.rstrip() + "\n.minime_worktree_ownership.json\n", encoding="utf-8")
+        except RuntimeError:
+            raise
         except Exception:
             pass
 
@@ -1141,11 +1186,33 @@ class WorktreeManager:
         self._finalize_created_ownership(ownership)
 
         # Copy active OpenSpec change directory into isolated worktree if present in project_root
-        source_change_dir = self.project_root / "openspec" / "changes" / change_name
-        dest_change_dir = path / "openspec" / "changes" / change_name
-        if source_change_dir.exists() and not dest_change_dir.exists():
-            dest_change_dir.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(source_change_dir, dest_change_dir)
+        raw_source_change_dir = self.project_root / "openspec" / "changes" / change_name
+        if raw_source_change_dir.exists():
+            source_change_dir = raw_source_change_dir.resolve()
+            openspec_changes_root = (self.project_root / "openspec" / "changes").resolve()
+            if not (source_change_dir == openspec_changes_root or openspec_changes_root in source_change_dir.parents):
+                raise RuntimeError(f"OpenSpec source change directory '{source_change_dir}' escapes '{openspec_changes_root}'.")
+
+            dest_openspec_root = path.resolve() / "openspec"
+            dest_change_dir = dest_openspec_root / "changes" / change_name
+            if os.path.islink(dest_openspec_root) or os.path.islink(dest_openspec_root / "changes") or os.path.islink(dest_change_dir):
+                raise RuntimeError(f"Symlink escape detected in OpenSpec destination path under '{path}'.")
+
+            from minime.domain.models import WorkspaceMutationRequest
+            from minime.services.workspace_guard import ManagedWorkspaceGuard
+            guard = self.workspace_guard or ManagedWorkspaceGuard(self.uow)
+            dest_req = WorkspaceMutationRequest(
+                project_id=project_id or eff_project_id,
+                target_path=str(dest_change_dir),
+                requested_operation=WorkspaceOperation.EDIT,
+            )
+            dest_decision = guard.evaluate_mutation(dest_req)
+            if not dest_decision.allowed:
+                raise RuntimeError(f"ManagedWorkspaceGuard denied OpenSpec propagation to '{dest_change_dir}': {dest_decision.provider_detail}")
+
+            if not dest_change_dir.exists():
+                dest_change_dir.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(source_change_dir, dest_change_dir)
 
         return WorktreeInfo(path=path, branch_name=branch_name, base_sha=base_sha)
 
