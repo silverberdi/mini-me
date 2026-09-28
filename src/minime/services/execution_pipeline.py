@@ -1637,10 +1637,28 @@ class ExecutionPipelineService:
                 )
                 raise RuntimeError(pre_err or "Pre-review candidate integrity failure.")
 
-            # Create isolated read-only reviewer workspace snapshot
-            readonly_view = self.reviewer_view_manager.create_readonly_view(
-                worktree.path, job.job_id
+            # Observation-only symlink safety scan
+            self.reviewer_view_manager.verify_candidate_tree(worktree.path)
+
+            effective_reviewer_role = (
+                f"openrouter:{selected_reviewer_model}"
+                if reviewer_fallback_used
+                else (
+                    project.implementer
+                    if current_executor == project.reviewer
+                    else project.reviewer
+                )
             )
+
+            # Create dedicated reviewer EXECUTION_WORKTREE
+            review_wt_info = await self.worktree_manager.create_review_worktree(
+                job_id=job.job_id,
+                change_name=job.change_name,
+                candidate_sha=job.candidate_sha or "",
+                reviewer_role=effective_reviewer_role,
+                project_id=job.project_id,
+            )
+            readonly_view = review_wt_info.path
             readonly_view_created = True
 
             # Reviewer visibility verification against Candidate Manifest
@@ -1664,15 +1682,7 @@ class ExecutionPipelineService:
 
             # Transition to REVIEW_RUNNING and persist Review record
             job = self._transition(job, JobStatus.REVIEW_RUNNING)
-            effective_reviewer_role = (
-                f"openrouter:{selected_reviewer_model}"
-                if reviewer_fallback_used
-                else (
-                    project.implementer
-                    if current_executor == project.reviewer
-                    else project.reviewer
-                )
-            )
+
             diff = subprocess.run(
                 ["git", "diff", "--name-only", f"{job.base_sha}..{job.candidate_sha}"],
                 cwd=worktree.path,
@@ -2175,8 +2185,14 @@ class ExecutionPipelineService:
             }:
                 self._transition(latest, JobStatus.FAILED, str(exc))
         finally:
-            if readonly_view_created:
-                self.reviewer_view_manager.cleanup_readonly_view(job.job_id)
+            if readonly_view_created and 'readonly_view' in locals() and readonly_view:
+                try:
+                    await self.worktree_manager.remove_review_worktree(
+                        readonly_view, job.job_id, job.project_id
+                    )
+                except Exception as clean_err:
+                    logger.warning(f"Failed to clean up review worktree at '{readonly_view}': {clean_err}")
+
             if worktree_created:
                 try:
                     await self._preserve_and_cleanup_worktree(job, worktree)
@@ -2271,10 +2287,19 @@ class ExecutionPipelineService:
 
         audit_view_created = False
         try:
-            audit_view = self.reviewer_view_manager.create_readonly_view(
-                worktree_path, f"audit-{job.job_id}"
+            # Observation-only symlink safety scan
+            self.reviewer_view_manager.verify_candidate_tree(worktree_path)
+
+            audit_wt_info = await self.worktree_manager.create_review_worktree(
+                job_id=job.job_id,
+                change_name=job.change_name,
+                candidate_sha=job.candidate_sha or "",
+                reviewer_role="deepseek-auditor",
+                project_id=job.project_id,
             )
+            audit_view = audit_wt_info.path
             audit_view_created = True
+
             prompt = build_audit_prompt(
                 project=project,
                 change_name=job.change_name,
@@ -2455,8 +2480,14 @@ class ExecutionPipelineService:
                 self.uow.commit()
             raise
         finally:
-            if audit_view_created:
-                self.reviewer_view_manager.cleanup_readonly_view(f"audit-{job.job_id}")
+            if audit_view_created and 'audit_view' in locals() and audit_view:
+                try:
+                    await self.worktree_manager.remove_review_worktree(
+                        audit_view, job.job_id, job.project_id
+                    )
+                except Exception as clean_err:
+                    logger.warning(f"Failed to clean up audit worktree at '{audit_view}': {clean_err}")
+
 
     def _is_dual_primary_exhausted(self, project: Project) -> bool:
         """Check if both primary providers (Codex and Antigravity) are exhausted / unavailable."""

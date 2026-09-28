@@ -100,6 +100,40 @@ class GitFakeWorktreeManager:
         self.created_paths[job_id] = path
         return WorktreeInfo(path=path, branch_name=f"minime/test-{job_id}", base_sha=head_sha)
 
+    async def create_review_worktree(
+        self, job_id: str, change_name: str, candidate_sha: str, reviewer_role: str, *args, **kwargs
+    ) -> WorktreeInfo:
+        sanitized_role = reviewer_role.replace("/", "_").replace("\\", "_").replace(":", "_")
+        path = self.root / ".minime" / "worktrees" / f"{job_id}-review-{sanitized_role}"
+        if path.exists():
+            shutil.rmtree(path)
+        path.mkdir(parents=True, exist_ok=True)
+        source_wt = self.created_paths.get(job_id)
+        if source_wt and source_wt.exists():
+            for item in source_wt.iterdir():
+                if item.name == ".git":
+                    continue
+                if item.is_dir():
+                    shutil.copytree(item, path / item.name, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(item, path / item.name)
+        elif (self.root / "openspec").exists():
+            shutil.copytree(self.root / "openspec", path / "openspec", dirs_exist_ok=True)
+        else:
+            (path / "openspec").mkdir(parents=True, exist_ok=True)
+
+        subprocess.run(["git", "init"], cwd=str(path), check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=str(path), check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(path), check=True, capture_output=True)
+        subprocess.run(["git", "add", "."], cwd=str(path), check=True, capture_output=True)
+        subprocess.run(["git", "commit", "--allow-empty", "-m", "init review wt"], cwd=str(path), check=True, capture_output=True)
+        self.created_paths[f"{job_id}-review"] = path
+        return WorktreeInfo(path=path, branch_name=f"minime/{change_name}-{job_id}-review-{sanitized_role}", base_sha=candidate_sha)
+
+
+    async def remove_review_worktree(self, worktree_path: str | Path, job_id: str, *args, **kwargs) -> None:
+        self.cleaned.append(f"{job_id}-review")
+
     async def current_sha(self, worktree_path: str | Path) -> str:
         proc = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -154,7 +188,7 @@ def setup_project_and_change(
 # ==============================================================================
 
 
-def test_readonly_reviewer_view_denies_writes_and_cleans_up(tmp_path):
+def test_readonly_reviewer_view_verifies_clean_tree(tmp_path):
     source_dir = tmp_path / "candidate_worktree"
     source_dir.mkdir()
     (source_dir / "src").mkdir()
@@ -162,32 +196,8 @@ def test_readonly_reviewer_view_denies_writes_and_cleans_up(tmp_path):
     (source_dir / "README.md").write_text("# Title", encoding="utf-8")
 
     view_mgr = ReviewerViewManager(tmp_path)
-    view_path = view_mgr.create_readonly_view(source_dir, "view-job-1")
-
-    assert view_path.exists()
-    # 1. Verify read access works
-    assert (view_path / "src" / "main.py").read_text(encoding="utf-8") == "print('hello')"
-    assert (view_path / "README.md").read_text(encoding="utf-8") == "# Title"
-
-    # 2. Verify write attempts to existing file fail
-    with pytest.raises((PermissionError, OSError)):
-        (view_path / "src" / "main.py").write_text("malicious mutation", encoding="utf-8")
-
-    # 3. Verify write attempts to create new file fail
-    with pytest.raises((PermissionError, OSError)):
-        (view_path / "new_file.txt").write_text("new file", encoding="utf-8")
-
-    # 4. Verify directory creation fails
-    with pytest.raises((PermissionError, OSError)):
-        (view_path / "new_dir").mkdir()
-
-    # 5. Verify source worktree remains untouched
-    assert (source_dir / "src" / "main.py").read_text(encoding="utf-8") == "print('hello')"
-    assert not (source_dir / "new_file.txt").exists()
-
-    # 6. Verify deterministic cleanup
-    view_mgr.cleanup_readonly_view("view-job-1")
-    assert not view_path.exists()
+    view_mgr.verify_candidate_tree(source_dir)
+    assert view_mgr.scan_candidate_for_symlinks(source_dir) == []
 
 
 def test_symlink_in_candidate_file_rejected(tmp_path):
@@ -198,7 +208,7 @@ def test_symlink_in_candidate_file_rejected(tmp_path):
 
     view_mgr = ReviewerViewManager(tmp_path)
     with pytest.raises(SymlinkInCandidateError, match="prohibited symlink"):
-        view_mgr.create_readonly_view(source, "v-file-symlink")
+        view_mgr.verify_candidate_tree(source)
 
 
 def test_symlink_in_candidate_directory_rejected(tmp_path):
@@ -209,7 +219,7 @@ def test_symlink_in_candidate_directory_rejected(tmp_path):
 
     view_mgr = ReviewerViewManager(tmp_path)
     with pytest.raises(SymlinkInCandidateError, match="prohibited symlink"):
-        view_mgr.create_readonly_view(source, "v-dir-symlink")
+        view_mgr.verify_candidate_tree(source)
 
 
 def test_symlink_to_tmp_rejected(tmp_path):
@@ -219,7 +229,7 @@ def test_symlink_to_tmp_rejected(tmp_path):
 
     view_mgr = ReviewerViewManager(tmp_path)
     with pytest.raises(SymlinkInCandidateError, match="prohibited symlink"):
-        view_mgr.create_readonly_view(source, "v-tmp-symlink")
+        view_mgr.verify_candidate_tree(source)
 
 
 def test_broken_symlink_rejected(tmp_path):
@@ -229,7 +239,8 @@ def test_broken_symlink_rejected(tmp_path):
 
     view_mgr = ReviewerViewManager(tmp_path)
     with pytest.raises(SymlinkInCandidateError, match="prohibited symlink"):
-        view_mgr.create_readonly_view(source, "v-broken-symlink")
+        view_mgr.verify_candidate_tree(source)
+
 
 
 @pytest.mark.asyncio
