@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from minime.domain.models import BacklogItem
 
@@ -34,8 +35,13 @@ class GeneratedOpenSpec:
 class OpenSpecGenerator:
     """Generates standard canonical OpenSpec artifacts from normalized backlog items."""
 
-    def __init__(self, project_root: str | Path = "."):
+    def __init__(
+        self,
+        project_root: str | Path = ".",
+        uow: Any | None = None,
+    ):
         self.project_root = Path(project_root).resolve()
+        self.uow = uow
 
     def generate_from_backlog_item(
         self,
@@ -187,14 +193,140 @@ class OpenSpecGenerator:
         openspec_path: str,
         generated: GeneratedOpenSpec,
         overwrite: bool = True,
+        project_id: str | None = None,
+        uow: Any | None = None,
     ) -> Path:
-        """Write the generated OpenSpec change directory and markdown files to disk."""
-        target_dir = self.project_root / openspec_path / "changes" / generated.change_name
-        target_dir.mkdir(parents=True, exist_ok=True)
+        """Write the generated OpenSpec change directory and markdown files to disk under authorized MANAGED_REPOSITORY workspace."""
+        eff_uow = uow or self.uow
+        if not eff_uow or not project_id:
+            raise RuntimeError("OpenSpec write denied: uow and project_id are mandatory for disk mutation.")
 
+        # Path confinement check on inputs
+        if Path(openspec_path).is_absolute() or ".." in Path(openspec_path).parts:
+            raise RuntimeError(f"OpenSpec write denied: openspec_path '{openspec_path}' fails path confinement check.")
+        if (
+            Path(generated.change_name).is_absolute()
+            or ".." in Path(generated.change_name).parts
+            or Path(generated.change_name).name != generated.change_name
+        ):
+            raise RuntimeError(
+                f"OpenSpec write denied: change_name '{generated.change_name}' fails path confinement check."
+            )
+
+        binding_repo = getattr(eff_uow, "project_managed_repository_bindings", None)
+        binding = binding_repo.get_by_project_id(project_id) if binding_repo else None
+        from minime.services.workspace_guard import is_binding_fully_valid
+
+        if not is_binding_fully_valid(binding):
+            raise RuntimeError(
+                f"OpenSpec write denied: missing or invalid ProjectManagedRepositoryBinding for project '{project_id}'."
+            )
+        base_root = Path(binding.managed_repository_root).resolve()
+        openspec_root = (base_root / openspec_path).resolve()
+
+        # Construct final intended change directory and verify containment
+        target_dir = base_root / openspec_path / "changes" / generated.change_name
+        target_dir_resolved = target_dir.resolve()
+        try:
+            target_dir_resolved.relative_to(openspec_root)
+        except ValueError:
+            raise RuntimeError(
+                f"OpenSpec write denied: change directory '{target_dir}' escapes OpenSpec root '{openspec_root}'."
+            )
+
+        # Validate spec relative paths
+        for rel_spec_path in generated.specs.keys():
+            if Path(rel_spec_path).is_absolute() or ".." in Path(rel_spec_path).parts:
+                raise RuntimeError(
+                    f"OpenSpec write denied: spec relative path '{rel_spec_path}' fails path confinement check."
+                )
+            spec_file = target_dir / rel_spec_path
+            try:
+                spec_file.resolve().relative_to(target_dir_resolved)
+            except ValueError:
+                raise RuntimeError(
+                    f"OpenSpec write denied: spec file '{spec_file}' escapes change directory '{target_dir_resolved}'."
+                )
+
+        from minime.domain.enums import WorkspaceOperation, WorkspaceRole
+        from minime.domain.models import WorkspaceMutationRequest
+        from minime.services.workspace_guard import ManagedWorkspaceGuard
+
+        guard = ManagedWorkspaceGuard(eff_uow)
+
+        # 1. Precompute ALL intended mutation target destinations BEFORE any filesystem mutation
         proposal_file = target_dir / "proposal.md"
         tasks_file = target_dir / "tasks.md"
         design_file = target_dir / "design.md"
+
+        intended_targets: list[Path] = [target_dir]
+
+        if overwrite or not proposal_file.exists():
+            intended_targets.append(proposal_file)
+
+        if overwrite or not tasks_file.exists():
+            intended_targets.append(tasks_file)
+
+        if generated.design_content and (overwrite or not design_file.exists()):
+            intended_targets.append(design_file)
+
+        for rel_spec_path in generated.specs.keys():
+            spec_file = target_dir / rel_spec_path
+            if overwrite or not spec_file.exists():
+                intended_targets.append(spec_file.parent)
+                intended_targets.append(spec_file)
+
+        # 2. Canonicalize every target, verify symlinks/containment, and guard authorize ALL destinations
+        for target_path in intended_targets:
+            # Check if target_path exists or is a symlink
+            if target_path.is_symlink() or target_path.exists():
+                real_target = target_path.resolve()
+                if target_path.is_symlink():
+                    try:
+                        real_target.relative_to(target_dir_resolved)
+                    except ValueError:
+                        raise RuntimeError(
+                            f"OpenSpec write denied: symlink target '{target_path}' points outside change directory to '{real_target}'."
+                        )
+            else:
+                # Walk existing parent ancestors to check for symlink escape
+                curr = target_path.parent
+                while curr != target_dir and curr in curr.parents:
+                    if curr.is_symlink() or curr.exists():
+                        real_curr = curr.resolve()
+                        if curr.is_symlink():
+                            try:
+                                real_curr.relative_to(target_dir_resolved)
+                            except ValueError:
+                                raise RuntimeError(
+                                    f"OpenSpec write denied: parent symlink '{curr}' escapes change directory to '{real_curr}'."
+                                )
+                        break
+                    curr = curr.parent
+
+            # Verify resolved target remains inside openspec_root
+            resolved_dest = target_path.resolve()
+            try:
+                resolved_dest.relative_to(openspec_root)
+            except ValueError:
+                raise RuntimeError(
+                    f"OpenSpec write denied: destination '{target_path}' escapes OpenSpec root '{openspec_root}'."
+                )
+
+            # Evaluate ManagedWorkspaceGuard for exact destination
+            req = WorkspaceMutationRequest(
+                project_id=project_id,
+                target_path=str(resolved_dest),
+                requested_operation=WorkspaceOperation.OPENSPEC_SYNC,
+            )
+            decision = guard.evaluate_mutation(req)
+            if not decision.allowed or decision.workspace_role == WorkspaceRole.RUNTIME:
+                raise RuntimeError(
+                    f"ManagedWorkspaceGuard denied OpenSpec generation write to '{target_path}': {decision.provider_detail or decision.reason_code.value}"
+                )
+
+        # 3. ONLY THEN perform actual filesystem writes
+        target_dir.mkdir(parents=True, exist_ok=True)
 
         if overwrite or not proposal_file.exists():
             proposal_file.write_text(generated.proposal_content, encoding="utf-8")
@@ -218,6 +350,8 @@ class OpenSpecGenerator:
         generated: GeneratedOpenSpec,
         openspec_path: str = "openspec",
         overwrite: bool = True,
+        project_id: str | None = None,
+        uow: Any | None = None,
     ) -> Path:
         """Write generated OpenSpec artifacts to disk."""
-        return self.write_change_to_disk(openspec_path, generated, overwrite=overwrite)
+        return self.write_change_to_disk(openspec_path, generated, overwrite=overwrite, project_id=project_id, uow=uow)

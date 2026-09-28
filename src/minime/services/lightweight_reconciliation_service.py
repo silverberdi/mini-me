@@ -113,6 +113,24 @@ class LightweightReconciliationService:
                 new_lines.append(line)
 
             if reconciled_task_ids:
+                if not self.uow:
+                    raise RuntimeError("Lightweight reconciliation denied: self.uow is mandatory for tasks.md mutation.")
+                from minime.domain.enums import WorkspaceOperation
+                from minime.domain.models import WorkspaceMutationRequest
+                from minime.services.workspace_guard import ManagedWorkspaceGuard
+                guard = ManagedWorkspaceGuard(self.uow)
+                target_path_str = str(tasks_file.resolve())
+                req = WorkspaceMutationRequest(
+                    project_id=project.project_id,
+                    target_path=target_path_str,
+                    requested_operation=WorkspaceOperation.EDIT,
+                    job_id=job.job_id,
+                )
+                decision = guard.evaluate_mutation(req)
+                if not decision.allowed:
+                    raise RuntimeError(
+                        f"Lightweight reconciliation denied for path '{target_path_str}': {decision.provider_detail or decision.reason_code.value}"
+                    )
                 tasks_file.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
                 logger.info(
                     f"Lightweight reconciliation updated {len(reconciled_task_ids)} tasks in {tasks_file}"

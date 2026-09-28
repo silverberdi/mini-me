@@ -29,6 +29,18 @@ from minime.services.worktree_manager import WorktreeManager
 logger = logging.getLogger(__name__)
 
 
+def _run_coro_sync(coro: Any) -> Any:
+    """Safely execute an async coroutine synchronously."""
+    import asyncio
+    import concurrent.futures
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()
+
+
 @dataclass
 class PostMergeReconciliationResult:
     """Detailed outcome of post-merge reconciliation."""
@@ -74,11 +86,54 @@ class PostMergeReconciliationService:
         self.project_root = Path(project_root).resolve()
         self.github_adapter = github_adapter
         self.worktree_manager = worktree_manager or WorktreeManager(self.project_root, uow=uow)
-        self.openspec_sync = openspec_sync or OpenSpecSyncService(self.project_root)
+        self.openspec_sync = openspec_sync or OpenSpecSyncService(self.project_root, uow=uow)
 
-    def verify_candidate_ancestry(self, candidate_sha: str, base_ref: str = "HEAD") -> bool:
+    def _authorize_managed_repo_mutation(self, project_id: str) -> None:
+        """Verify project binding, canonical path match, and ManagedWorkspaceGuard authorization before Git mutations."""
+        if not project_id:
+            raise ValueError("project_id is mandatory for post-merge repository mutations.")
+        if not self.uow:
+            raise RuntimeError("PersistenceUnitOfWork (uow) is required for post-merge repository authorization.")
+
+        from minime.domain.enums import ExternalOutcome, WorkspaceOperation, WorkspaceRole
+        from minime.domain.models import WorkspaceMutationRequest
+        from minime.services.workspace_guard import ManagedWorkspaceGuard, is_binding_fully_valid
+
+        binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
+        binding = binding_repo.get_by_project_id(project_id) if binding_repo else None
+
+        if not is_binding_fully_valid(binding):
+            raise RuntimeError(f"Failing closed: no valid durable binding found for project_id '{project_id}'.")
+
+        guard = ManagedWorkspaceGuard(self.uow)
+        req = WorkspaceMutationRequest(
+            project_id=project_id,
+            target_path=str(self.project_root),
+            requested_operation=WorkspaceOperation.GIT_BRANCH,
+        )
+        decision = guard.evaluate_mutation(req)
+
+        if not decision.allowed or decision.outcome != ExternalOutcome.SUCCESS:
+            raise RuntimeError(f"Failing closed: post-merge Git mutation denied for project_id '{project_id}': {decision.provider_detail}")
+
+        if decision.workspace_role != WorkspaceRole.MANAGED_REPOSITORY:
+            raise RuntimeError(f"Failing closed: project_root workspace role is '{decision.workspace_role.value}', not MANAGED_REPOSITORY.")
+
+        canonical_project_root = str(self.project_root.resolve())
+        canonical_managed_root = str(Path(binding.managed_repository_root).resolve())
+
+        if canonical_project_root != canonical_managed_root:
+            raise RuntimeError(
+                f"Failing closed: self.project_root '{canonical_project_root}' does not match binding.managed_repository_root '{canonical_managed_root}'."
+            )
+
+    def verify_candidate_ancestry(self, candidate_sha: str, base_ref: str = "HEAD", project_id: str | None = None) -> bool:
         """Verify that the candidate SHA is an ancestor of the base/main branch."""
+        if not project_id:
+            logger.warning("Failing closed: project_id is mandatory for verify_candidate_ancestry.")
+            return False
         try:
+            self._authorize_managed_repo_mutation(project_id)
             # Fetch remote origin if base_ref references origin
             if "origin" in base_ref or base_ref in {"HEAD", "main", "origin/main"}:
                 subprocess.run(
@@ -249,6 +304,7 @@ class PostMergeReconciliationService:
 
         # 3. Ancestry verification
         # Fetch latest main in local repository
+        self._authorize_managed_repo_mutation(project_id)
         subprocess.run(
             ["git", "fetch", "origin", f"{base_branch}:{base_branch}"],
             cwd=self.project_root,
@@ -256,9 +312,9 @@ class PostMergeReconciliationService:
             text=True,
             check=False,
         )
-        ancestry_ok = self.verify_candidate_ancestry(cand_sha, base_branch)
+        ancestry_ok = self.verify_candidate_ancestry(cand_sha, base_branch, project_id=project_id)
         if not ancestry_ok and merge_commit_sha:
-            ancestry_ok = self.verify_candidate_ancestry(cand_sha, merge_commit_sha)
+            ancestry_ok = self.verify_candidate_ancestry(cand_sha, merge_commit_sha, project_id=project_id)
 
         native_phases += 1  # Phase 3: Ancestry verified
 
@@ -344,7 +400,7 @@ class PostMergeReconciliationService:
         synced_specs: list[str] = []
         sync_verified = False
         try:
-            sync_res = self.openspec_sync.sync_change_specs(openspec_path, change_name)
+            sync_res = self.openspec_sync.sync_change_specs(openspec_path, change_name, project_id=project_id)
             verify_sync_res = self.openspec_sync.verify_sync(openspec_path, change_name, sync_res)
             sync_verified = (
                 verify_sync_res.outcome == ExternalOutcome.SUCCESS
@@ -378,7 +434,8 @@ class PostMergeReconciliationService:
         archive_verified = False
         if sync_verified:
             try:
-                archive_res = self.openspec_sync.archive_change(openspec_path, change_name)
+                archive_res = self.openspec_sync.archive_change(openspec_path, change_name, project_id=project_id)
+
                 verify_arc_res = self.openspec_sync.verify_archive(
                     openspec_path, change_name, archive_res
                 )
@@ -410,7 +467,7 @@ class PostMergeReconciliationService:
                 logger.warning("OpenSpec archive failed for '%s': %s", change_name, exc)
 
         # 9. Worktree Cleanup
-        wt_clean_res = self._clean_worktrees(job_id)
+        wt_clean_res = self._clean_worktrees(job_id, project_id=project_id)
         worktree_cleaned = wt_clean_res.outcome == ExternalOutcome.SUCCESS
         if worktree_cleaned:
             self.uow.events.save(
@@ -431,7 +488,7 @@ class PostMergeReconciliationService:
         local_clean_ok = True
         for b in local_branches:
             if b:
-                loc_res = self._delete_local_branch(b)
+                loc_res = self._delete_local_branch(b, project_id=project_id)
                 if loc_res.outcome != ExternalOutcome.SUCCESS:
                     local_clean_ok = False
 
@@ -637,8 +694,8 @@ class PostMergeReconciliationService:
                     actor="post_merge",
                 )
 
-    def _clean_worktrees(self, job_id: str | None) -> ExternalActionResult[bool]:
-        """Clean worktrees associated with a job fail-closed with postcondition verification."""
+    def _clean_worktrees(self, job_id: str | None, project_id: str | None = None) -> ExternalActionResult[bool]:
+        """Clean worktrees associated with a job fail-closed using central WorktreeManager authority."""
         if not job_id:
             return ExternalActionResult(
                 outcome=ExternalOutcome.SUCCESS,
@@ -648,18 +705,46 @@ class PostMergeReconciliationService:
                 data=True,
             )
 
+        if not project_id and self.uow:
+            job = self.uow.jobs.get_by_id(job_id) if hasattr(self.uow.jobs, "get_by_id") else None
+            if job and getattr(job, "project_id", None):
+                project_id = job.project_id
+
+        if not project_id:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="worktree_manager",
+                reason_code=ExternalReasonCode.POLICY_DENIED,
+                retry_safety=RetrySafety.SAFE,
+                data=False,
+                error_message="project_id is mandatory for post-merge worktree cleanup.",
+            )
+
+        try:
+            self._authorize_managed_repo_mutation(project_id)
+        except Exception as exc:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="worktree_manager",
+                reason_code=ExternalReasonCode.POLICY_DENIED,
+                retry_safety=RetrySafety.SAFE,
+                data=False,
+                error_message=f"Post-merge worktree cleanup denied by workspace guard: {exc}",
+            )
+
         target_paths: list[Path] = []
         scan_failed = False
         scan_err: str = ""
         try:
-            wt_path = self.worktree_manager.worktree_path(job_id)
+            wt_path = self.worktree_manager.worktree_path(job_id, project_id=project_id)
             if wt_path.exists():
-                target_paths.append(wt_path)
-            worktrees_dir = self.project_root / ".minime" / "worktrees"
-            if worktrees_dir.exists():
-                for child in worktrees_dir.glob(f"{job_id}*"):
-                    if child.exists() and child not in target_paths:
-                        target_paths.append(child)
+                target_paths.append(wt_path.resolve())
+            worktrees_parent = self.worktree_manager.resolve_worktree_parent_dir(project_id)
+            if worktrees_parent.exists():
+                for child in worktrees_parent.glob(f"{job_id}*"):
+                    resolved_child = child.resolve()
+                    if resolved_child.exists() and resolved_child not in target_paths:
+                        target_paths.append(resolved_child)
         except Exception as exc:
             logger.warning("Error scanning worktrees for job '%s': %s", job_id, exc)
             scan_failed = True
@@ -684,44 +769,73 @@ class PostMergeReconciliationService:
                 data=True,
             )
 
-        all_removed = True
-        errors: list[str] = []
         for path in target_paths:
             try:
-                res = subprocess.run(
-                    ["git", "worktree", "remove", "--force", str(path)],
-                    cwd=self.project_root,
-                    capture_output=True,
-                    text=True,
-                    check=False,
+                cleanup_res = _run_coro_sync(
+                    self.worktree_manager.remove_clean_worktree_path(
+                        path, job_id, project_id=project_id
+                    )
                 )
-                if path.exists() or res.returncode != 0:
-                    all_removed = False
-                    errors.append(f"Failed removing worktree at '{path}': rc={res.returncode}, stderr={res.stderr.strip()}")
+                if cleanup_res and cleanup_res.outcome in (ExternalOutcome.UNKNOWN, ExternalOutcome.FAILURE):
+                    return ExternalActionResult(
+                        outcome=cleanup_res.outcome,
+                        source_adapter="worktree_manager",
+                        reason_code=cleanup_res.reason_code,
+                        retry_safety=RetrySafety.SAFE,
+                        data=False,
+                        error_message=cleanup_res.provider_detail or f"Worktree cleanup failed for '{path}'.",
+                    )
+                if path.exists():
+                    return ExternalActionResult(
+                        outcome=ExternalOutcome.FAILURE,
+                        source_adapter="worktree_manager",
+                        reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
+                        retry_safety=RetrySafety.SAFE,
+                        data=False,
+                        error_message=f"Worktree path '{path}' still exists after cleanup.",
+                    )
             except Exception as exc:
-                all_removed = False
-                errors.append(f"Exception removing worktree at '{path}': {exc}")
-
-        if all_removed:
-            return ExternalActionResult(
-                outcome=ExternalOutcome.SUCCESS,
-                source_adapter="worktree_manager",
-                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
-                retry_safety=RetrySafety.UNSAFE,
-                data=True,
-            )
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="worktree_manager",
+                    reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
+                    retry_safety=RetrySafety.SAFE,
+                    data=False,
+                    error_message=f"Exception removing worktree at '{path}': {exc}",
+                )
 
         return ExternalActionResult(
-            outcome=ExternalOutcome.FAILURE,
+            outcome=ExternalOutcome.SUCCESS,
             source_adapter="worktree_manager",
-            reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
-            retry_safety=RetrySafety.SAFE,
-            data=False,
-            error_message="; ".join(errors),
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+            retry_safety=RetrySafety.UNSAFE,
+            data=True,
         )
 
-    def _delete_local_branch(self, branch_name: str) -> ExternalActionResult[bool]:
+    def _delete_local_branch(self, branch_name: str, project_id: str | None = None) -> ExternalActionResult[bool]:
         """Delete a local git branch fail-closed with postcondition verification."""
+        if not project_id:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="git_cli",
+                reason_code=ExternalReasonCode.POLICY_DENIED,
+                retry_safety=RetrySafety.SAFE,
+                data=False,
+                error_message="project_id is mandatory for post-merge branch deletion.",
+            )
+
+        try:
+            self._authorize_managed_repo_mutation(project_id)
+        except Exception as exc:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="git_cli",
+                reason_code=ExternalReasonCode.POLICY_DENIED,
+                retry_safety=RetrySafety.SAFE,
+                data=False,
+                error_message=f"Post-merge branch deletion denied by workspace guard: {exc}",
+            )
+
         try:
             check_res = subprocess.run(
                 ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch_name}"],
@@ -825,12 +939,12 @@ class PostMergeReconciliationService:
         self, project_id: str, change_name: str, job_id: str | None = None
     ) -> None:
         """Clean up worktrees and git branches associated with a job/change."""
-        self._clean_worktrees(job_id)
+        self._clean_worktrees(job_id, project_id=project_id)
         local_branches = [
             f"minime/{change_name}-{job_id}" if job_id else None,
             f"minime/{change_name}",
         ]
         for b in local_branches:
             if b:
-                self._delete_local_branch(b)
+                self._delete_local_branch(b, project_id=project_id)
 

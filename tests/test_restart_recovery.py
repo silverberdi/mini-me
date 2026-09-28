@@ -1,12 +1,30 @@
 """Unit tests for RestartRecoveryService, concrete Git lock ownership evidence, and daemon restart/interruption tracking."""
 
 import os
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from tests.conftest import (
+    create_test_worktree_ownership,
+    setup_managed_repository_fixture,
+    write_test_worktree_ownership_marker,
+)
 
-from minime.domain.enums import EventType, GitOperationStatus, JobStatus
-from minime.domain.models import CheckResult, GitOperation, Job, Project
+from minime.domain.enums import (
+    EventType,
+    GitOperationStatus,
+    JobStatus,
+    OrchestrationStage,
+    WorktreeCreationState,
+)
+from minime.domain.models import (
+    CheckResult,
+    GitOperation,
+    Job,
+    OrchestrationRun,
+    Project,
+)
 from minime.services.restart_recovery_service import RestartRecoveryService
 from minime.services.worktree_manager import WorktreeManager
 
@@ -220,22 +238,78 @@ def test_interrupted_running_never_inferred_successful(in_memory_uow, tmp_path):
 @pytest.mark.asyncio
 async def test_worktree_add_records_managed_worktree_path_not_cwd(in_memory_uow, tmp_path):
     """A1. worktree_add runs with cwd=project_root but records GitOperation.worktree_path=<worktree_path>."""
+    setup_managed_repository_fixture(
+        in_memory_uow,
+        "mini-me",
+        tmp_path,
+        tmp_path / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+    )
+    from minime.services.worktree_manager import WorktreeManager
     manager = WorktreeManager(project_root=tmp_path, uow=in_memory_uow)
     job_id = "job-wt-identity-1"
+    in_memory_uow.jobs.save(Job(job_id=job_id, project_id="mini-me", change_name="test-change", implementer_role="codex"))
+    in_memory_uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id="run-wt-identity-1",
+            active_job_id=job_id,
+            project_id="mini-me",
+            change_name="test-change",
+            base_sha="sha123",
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            resumable_stage=OrchestrationStage.IMPLEMENTING,
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+    )
     target_worktree = (tmp_path / ".minime" / "worktrees" / job_id).resolve()
 
-    # Mock git execution to succeed without creating full git repo
-    with patch("asyncio.create_subprocess_exec") as mock_exec:
-        mock_proc = mock_exec.return_value
-        mock_proc.pid = 4321
-        mock_proc.returncode = 0
-        mock_proc.communicate = AsyncMock(return_value=(b"sha123\n", b""))
+    async def mock_subprocess(*args, **kwargs):
+        proc = AsyncMock()
+        proc.pid = 4321
+        proc.returncode = 0
+        cmd_args = list(args[1:])
+        if "worktree" in cmd_args and "add" in cmd_args:
+            target_worktree.mkdir(parents=True, exist_ok=True)
+            proc.communicate = AsyncMock(return_value=(b"", b""))
+        elif "worktree" in cmd_args and "list" in cmd_args:
+            proc.communicate = AsyncMock(return_value=(f"worktree {target_worktree}\n".encode(), b""))
+        elif "branch" in cmd_args and "--show-current" in cmd_args:
+            proc.communicate = AsyncMock(return_value=(b"minime/test-change-job-wt-identity-1\n", b""))
+        elif "remote" in cmd_args and "get-url" in cmd_args:
+            proc.communicate = AsyncMock(return_value=(b"https://github.com/silverberdi/mini-me.git\n", b""))
+        elif "rev-parse" in cmd_args and "--is-inside-work-tree" in cmd_args:
+            proc.communicate = AsyncMock(return_value=(b"true\n", b""))
+        else:
+            proc.communicate = AsyncMock(return_value=(b"sha123\n", b""))
+        return proc
 
+    import subprocess
+    from unittest.mock import MagicMock
+
+    orig_run = subprocess.run
+
+    def mock_run(cmd, *args, **kwargs):
+        if isinstance(cmd, (list, tuple)) and cmd and cmd[0] == "git":
+            res = MagicMock()
+            res.returncode = 0
+            if "get-url" in cmd:
+                res.stdout = "https://github.com/silverberdi/mini-me.git\n"
+            elif "--is-inside-work-tree" in cmd:
+                res.stdout = "true\n"
+            else:
+                res.stdout = "sha123\n"
+            return res
+        return orig_run(cmd, *args, **kwargs)
+
+    with patch("asyncio.create_subprocess_exec", side_effect=mock_subprocess), patch("subprocess.run", side_effect=mock_run):
         await manager.create_worktree(
             job_id=job_id,
             change_name="test-change",
             base_branch="main",
             project_id="mini-me",
+            run_id="run-wt-identity-1",
         )
 
     ops = in_memory_uow.git_operations.list_by_job(job_id)
@@ -252,17 +326,58 @@ async def test_worktree_add_records_managed_worktree_path_not_cwd(in_memory_uow,
 @pytest.mark.asyncio
 async def test_worktree_remove_records_managed_worktree_path(in_memory_uow, tmp_path):
     """A2. worktree_remove records the exact managed worktree path being removed."""
+    import shutil
+
+    setup_managed_repository_fixture(
+        in_memory_uow,
+        "mini-me",
+        tmp_path,
+        tmp_path / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+    )
+
+    from minime.services.worktree_manager import WorktreeManager
     manager = WorktreeManager(project_root=tmp_path, uow=in_memory_uow)
+
     job_id = "job-wt-remove-1"
     target_worktree = (tmp_path / ".minime" / "worktrees" / job_id).resolve()
     target_worktree.mkdir(parents=True, exist_ok=True)
+    import subprocess
+    subprocess.run(["git", "init"], cwd=target_worktree, capture_output=True, check=False)
+    subprocess.run(["git", "remote", "add", "origin", "https://github.com/silverberdi/mini-me.git"], cwd=target_worktree, capture_output=True, check=False)
 
-    with patch("asyncio.create_subprocess_exec") as mock_exec:
-        mock_proc = mock_exec.return_value
-        mock_proc.pid = 4322
-        mock_proc.returncode = 0
-        mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+    ownership = create_test_worktree_ownership(
+        in_memory_uow,
+        worktree_id="wt-job-wt-remove-1",
+        project_id="mini-me",
+        job_id=job_id,
+        run_id="run-job-wt-remove-1",
+        change_name="test-change",
+        canonical_worktree_path=target_worktree,
+        source_repository_identity="github.com/silverberdi/mini-me",
+        source_base_sha="main",
+        branch="main",
+        creation_state=WorktreeCreationState.CREATED,
+    )
+    write_test_worktree_ownership_marker(target_worktree, ownership)
 
+    async def mock_subprocess_remove(*args, **kwargs):
+        proc = AsyncMock()
+        proc.pid = 4322
+        proc.returncode = 0
+        cmd_args = list(args[1:])
+        if "worktree" in cmd_args and "remove" in cmd_args:
+            shutil.rmtree(target_worktree, ignore_errors=True)
+            proc.communicate = AsyncMock(return_value=(b"", b""))
+        elif "worktree" in cmd_args and "list" in cmd_args:
+            proc.communicate = AsyncMock(return_value=(f"worktree {target_worktree}\n".encode(), b""))
+        elif "rev-parse" in cmd_args or "remote" in cmd_args:
+            proc.communicate = AsyncMock(return_value=(b"github.com/silverberdi/mini-me\n", b""))
+        else:
+            proc.communicate = AsyncMock(return_value=(b"", b""))
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=mock_subprocess_remove):
         await manager.cleanup_worktree(job_id=job_id, project_id="mini-me")
 
     ops = in_memory_uow.git_operations.list_by_job(job_id)
@@ -274,10 +389,28 @@ async def test_worktree_remove_records_managed_worktree_path(in_memory_uow, tmp_
 
 def test_restart_recovery_matches_real_worktree_path(in_memory_uow, tmp_path):
     """A3. Ownership record created with exact worktree path matches recovery lookup for that worktree."""
+    setup_managed_repository_fixture(
+        in_memory_uow,
+        "mini-me",
+        tmp_path,
+        tmp_path / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+    )
     job_id = "job-real-match"
     target_worktree = (tmp_path / ".minime" / "worktrees" / job_id).resolve()
     worktree_git_dir = target_worktree / ".git"
     worktree_git_dir.mkdir(parents=True, exist_ok=True)
+    ownership = create_test_worktree_ownership(
+        in_memory_uow,
+        worktree_id=f"wt-{job_id}",
+        project_id="mini-me",
+        job_id=job_id,
+        run_id=f"run-{job_id}",
+        change_name="005-match",
+        canonical_worktree_path=target_worktree,
+        source_repository_identity="github.com/silverberdi/mini-me",
+    )
+    write_test_worktree_ownership_marker(target_worktree, ownership)
     lock_file = worktree_git_dir / "index.lock"
     dead_pid = 99999999
     lock_file.write_text(f"{dead_pid}\n", encoding="utf-8")
@@ -312,12 +445,30 @@ def test_restart_recovery_matches_real_worktree_path(in_memory_uow, tmp_path):
 
 def test_ownership_record_for_different_target_worktree_fails_closed(in_memory_uow, tmp_path):
     """A4. Ownership record exists for a different target worktree -> retained."""
+    setup_managed_repository_fixture(
+        in_memory_uow,
+        "mini-me",
+        tmp_path,
+        tmp_path / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+    )
     job_id = "job-diff-wt"
     target_worktree = (tmp_path / ".minime" / "worktrees" / job_id).resolve()
     other_worktree = (tmp_path / ".minime" / "worktrees" / "other-job").resolve()
 
     worktree_git_dir = target_worktree / ".git"
     worktree_git_dir.mkdir(parents=True, exist_ok=True)
+    ownership = create_test_worktree_ownership(
+        in_memory_uow,
+        worktree_id=f"wt-{job_id}",
+        project_id="mini-me",
+        job_id=job_id,
+        run_id=f"run-{job_id}",
+        change_name="005-diff-wt",
+        canonical_worktree_path=target_worktree,
+        source_repository_identity="github.com/silverberdi/mini-me",
+    )
+    write_test_worktree_ownership_marker(target_worktree, ownership)
     lock_file = worktree_git_dir / "index.lock"
     dead_pid = 99999999
     lock_file.write_text(f"{dead_pid}\n", encoding="utf-8")
@@ -357,10 +508,28 @@ def test_ownership_record_for_different_target_worktree_fails_closed(in_memory_u
 
 def test_matching_operation_with_null_pid_fails_closed(in_memory_uow, tmp_path):
     """B5. Matching GitOperation with pid=None + dead lock PID -> retain lock -> RECOVERY_BLOCKED."""
+    setup_managed_repository_fixture(
+        in_memory_uow,
+        "mini-me",
+        tmp_path,
+        tmp_path / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+    )
     job_id = "job-null-pid"
     worktree_dir = (tmp_path / ".minime" / "worktrees" / job_id).resolve()
     worktree_git_dir = worktree_dir / ".git"
     worktree_git_dir.mkdir(parents=True, exist_ok=True)
+    ownership = create_test_worktree_ownership(
+        in_memory_uow,
+        worktree_id=f"wt-{job_id}",
+        project_id="mini-me",
+        job_id=job_id,
+        run_id=f"run-{job_id}",
+        change_name="005-null-pid",
+        canonical_worktree_path=worktree_dir,
+        source_repository_identity="github.com/silverberdi/mini-me",
+    )
+    write_test_worktree_ownership_marker(worktree_dir, ownership)
     lock_file = worktree_git_dir / "index.lock"
     lock_file.write_text("99999999\n", encoding="utf-8")
 
@@ -400,10 +569,28 @@ def test_matching_operation_with_null_pid_fails_closed(in_memory_uow, tmp_path):
 
 def test_matching_operation_pid_mismatch_fails_closed(in_memory_uow, tmp_path):
     """B6. Matching operation pid=123 + lock PID=456 -> retain -> RECOVERY_BLOCKED."""
+    setup_managed_repository_fixture(
+        in_memory_uow,
+        "mini-me",
+        tmp_path,
+        tmp_path / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+    )
     job_id = "job-pid-mismatch"
     worktree_dir = (tmp_path / ".minime" / "worktrees" / job_id).resolve()
     worktree_git_dir = worktree_dir / ".git"
     worktree_git_dir.mkdir(parents=True, exist_ok=True)
+    ownership = create_test_worktree_ownership(
+        in_memory_uow,
+        worktree_id=f"wt-{job_id}",
+        project_id="mini-me",
+        job_id=job_id,
+        run_id=f"run-{job_id}",
+        change_name="005-pid-mismatch",
+        canonical_worktree_path=worktree_dir,
+        source_repository_identity="github.com/silverberdi/mini-me",
+    )
+    write_test_worktree_ownership_marker(worktree_dir, ownership)
     lock_file = worktree_git_dir / "index.lock"
     lock_file.write_text("999999\n", encoding="utf-8")
 
@@ -441,10 +628,28 @@ def test_matching_operation_pid_mismatch_fails_closed(in_memory_uow, tmp_path):
 
 def test_matching_operation_with_living_pid_fails_closed(in_memory_uow, tmp_path):
     """B7. Matching operation pid=123 + lock PID=123 + PID alive -> retain -> RECOVERY_BLOCKED / ACTIVE_OWNER."""
+    setup_managed_repository_fixture(
+        in_memory_uow,
+        "mini-me",
+        tmp_path,
+        tmp_path / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+    )
     job_id = "job-living-pid"
     worktree_dir = (tmp_path / ".minime" / "worktrees" / job_id).resolve()
     worktree_git_dir = worktree_dir / ".git"
     worktree_git_dir.mkdir(parents=True, exist_ok=True)
+    ownership = create_test_worktree_ownership(
+        in_memory_uow,
+        worktree_id=f"wt-{job_id}",
+        project_id="mini-me",
+        job_id=job_id,
+        run_id=f"run-{job_id}",
+        change_name="005-living-pid",
+        canonical_worktree_path=worktree_dir,
+        source_repository_identity="github.com/silverberdi/mini-me",
+    )
+    write_test_worktree_ownership_marker(worktree_dir, ownership)
     lock_file = worktree_git_dir / "index.lock"
     live_pid = os.getpid()
     lock_file.write_text(f"{live_pid}\n", encoding="utf-8")
@@ -480,10 +685,28 @@ def test_matching_operation_with_living_pid_fails_closed(in_memory_uow, tmp_path
 
 def test_matching_operation_with_dead_pid_eligible_for_safe_orphaned(in_memory_uow, tmp_path):
     """B8. Matching operation pid=123 + lock PID=123 + PID dead -> SAFE_ORPHANED."""
+    setup_managed_repository_fixture(
+        in_memory_uow,
+        "mini-me",
+        tmp_path,
+        tmp_path / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+    )
     job_id = "job-dead-pid-match"
     worktree_dir = (tmp_path / ".minime" / "worktrees" / job_id).resolve()
     worktree_git_dir = worktree_dir / ".git"
     worktree_git_dir.mkdir(parents=True, exist_ok=True)
+    ownership = create_test_worktree_ownership(
+        in_memory_uow,
+        worktree_id=f"wt-{job_id}",
+        project_id="mini-me",
+        job_id=job_id,
+        run_id=f"run-{job_id}",
+        change_name="005-dead-match",
+        canonical_worktree_path=worktree_dir,
+        source_repository_identity="github.com/silverberdi/mini-me",
+    )
+    write_test_worktree_ownership_marker(worktree_dir, ownership)
     lock_file = worktree_git_dir / "index.lock"
     dead_pid = 99999999
     lock_file.write_text(f"{dead_pid}\n", encoding="utf-8")
@@ -523,10 +746,28 @@ def test_matching_operation_with_dead_pid_eligible_for_safe_orphaned(in_memory_u
 
 def test_random_dead_pid_without_ownership_record_retained(in_memory_uow, tmp_path):
     """B9. Random dead PID without ownership record -> retained."""
+    setup_managed_repository_fixture(
+        in_memory_uow,
+        "mini-me",
+        tmp_path,
+        tmp_path / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+    )
     job_id = "job-random-dead"
     worktree_dir = (tmp_path / ".minime" / "worktrees" / job_id).resolve()
     worktree_git_dir = worktree_dir / ".git"
     worktree_git_dir.mkdir(parents=True, exist_ok=True)
+    ownership = create_test_worktree_ownership(
+        in_memory_uow,
+        worktree_id=f"wt-{job_id}",
+        project_id="mini-me",
+        job_id=job_id,
+        run_id=f"run-{job_id}",
+        change_name="005-random-dead",
+        canonical_worktree_path=worktree_dir,
+        source_repository_identity="github.com/silverberdi/mini-me",
+    )
+    write_test_worktree_ownership_marker(worktree_dir, ownership)
     lock_file = worktree_git_dir / "index.lock"
     lock_file.write_text("99999999\n", encoding="utf-8")
 
@@ -549,10 +790,28 @@ def test_random_dead_pid_without_ownership_record_retained(in_memory_uow, tmp_pa
 
 def test_malformed_or_empty_lock_retained(in_memory_uow, tmp_path):
     """B10. Malformed or empty lock -> retained."""
+    setup_managed_repository_fixture(
+        in_memory_uow,
+        "mini-me",
+        tmp_path,
+        tmp_path / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+    )
     job_id = "job-empty-lock"
     worktree_dir = (tmp_path / ".minime" / "worktrees" / job_id).resolve()
     worktree_git_dir = worktree_dir / ".git"
     worktree_git_dir.mkdir(parents=True, exist_ok=True)
+    ownership = create_test_worktree_ownership(
+        in_memory_uow,
+        worktree_id=f"wt-{job_id}",
+        project_id="mini-me",
+        job_id=job_id,
+        run_id=f"run-{job_id}",
+        change_name="005-empty-lock",
+        canonical_worktree_path=worktree_dir,
+        source_repository_identity="github.com/silverberdi/mini-me",
+    )
+    write_test_worktree_ownership_marker(worktree_dir, ownership)
     lock_file = worktree_git_dir / "index.lock"
     lock_file.write_text("", encoding="utf-8")
 
@@ -657,10 +916,28 @@ async def test_operation_created_with_exact_managed_worktree_path_before_launch(
 
 def test_pid_none_crash_window_remains_fail_closed_on_restart(in_memory_uow, tmp_path):
     """C13. pid=None crash-window state remains strictly fail-closed during restart."""
+    setup_managed_repository_fixture(
+        in_memory_uow,
+        "mini-me",
+        tmp_path,
+        tmp_path / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+    )
     job_id = "job-crash-window"
     worktree_dir = (tmp_path / ".minime" / "worktrees" / job_id).resolve()
     worktree_git_dir = worktree_dir / ".git"
     worktree_git_dir.mkdir(parents=True, exist_ok=True)
+    ownership = create_test_worktree_ownership(
+        in_memory_uow,
+        worktree_id=f"wt-{job_id}",
+        project_id="mini-me",
+        job_id=job_id,
+        run_id=f"run-{job_id}",
+        change_name="005-crash-window",
+        canonical_worktree_path=worktree_dir,
+        source_repository_identity="github.com/silverberdi/mini-me",
+    )
+    write_test_worktree_ownership_marker(worktree_dir, ownership)
     lock_file = worktree_git_dir / "index.lock"
     lock_file.write_text("7777\n", encoding="utf-8")
 

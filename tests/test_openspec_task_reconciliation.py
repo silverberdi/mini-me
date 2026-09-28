@@ -28,8 +28,77 @@ def test_is_verification_task_detection():
     )
 
 
+def _setup_test_env(tmp_path):
+    import json
+    import subprocess
+
+    from minime.domain.enums import WorktreeCreationState
+    from minime.domain.models import (
+        OrchestrationWorktreeOwnership,
+        ProjectManagedRepositoryBinding,
+    )
+
+    wt_parent = tmp_path / ".minime" / "worktrees"
+    wt_dir = wt_parent / "job-123"
+    wt_dir.mkdir(parents=True, exist_ok=True)
+
+    managed_repo = tmp_path / "repo"
+    managed_repo.mkdir(parents=True, exist_ok=True)
+
+    for d in (wt_dir, managed_repo):
+        subprocess.run(["git", "init"], cwd=d, capture_output=True, check=False)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=d, capture_output=True, check=False)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=d, capture_output=True, check=False)
+        subprocess.run(["git", "remote", "add", "origin", "https://github.com/silverberdi/mini-me.git"], cwd=d, capture_output=True, check=False)
+        marker = {
+            "project_id": "mini-me",
+            "canonical_repository_identity": "github.com/silverberdi/mini-me",
+        }
+        (d / ".minime-managed-project.json").write_text(json.dumps(marker))
+
+    binding = ProjectManagedRepositoryBinding(
+        project_id="mini-me",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+        managed_repository_root=str(managed_repo),
+        worktree_parent_dir=str(wt_parent),
+        is_valid=True,
+    )
+    ownership = OrchestrationWorktreeOwnership(
+        worktree_id="wt-123",
+        job_id="job-123",
+        run_id="run-123",
+        change_name="sample-change",
+        project_id="mini-me",
+        canonical_worktree_path=str(wt_dir),
+        source_repository_identity="github.com/silverberdi/mini-me",
+        source_base_sha="base123",
+        branch="branch-123",
+        creation_state=WorktreeCreationState.CREATED,
+    )
+
+    class MockBindingRepo:
+        def get_by_project_id(self, project_id):
+            return binding
+
+    class MockOwnershipRepo:
+        def get_by_job_id(self, job_id):
+            return ownership
+        def get_by_canonical_path(self, path):
+            return ownership
+        def list_by_project(self, project_id):
+            return [ownership]
+
+    class MockUOW:
+        def __init__(self):
+            self.project_managed_repository_bindings = MockBindingRepo()
+            self.orchestration_worktree_ownerships = MockOwnershipRepo()
+
+    return wt_dir, MockUOW()
+
+
 def test_reconcile_verification_tasks_updates_tasks_file(tmp_path):
-    tasks_dir = tmp_path / "openspec" / "changes" / "sample-change"
+    wt_dir, uow = _setup_test_env(tmp_path)
+    tasks_dir = wt_dir / "openspec" / "changes" / "sample-change"
     tasks_dir.mkdir(parents=True)
     tasks_file = tasks_dir / "tasks.md"
 
@@ -41,9 +110,14 @@ def test_reconcile_verification_tasks_updates_tasks_file(tmp_path):
         encoding="utf-8",
     )
 
-    tracker = OpenSpecTaskTracker(tmp_path)
+    tracker = OpenSpecTaskTracker(wt_dir)
     reconciled, ids = tracker.reconcile_verification_tasks(
-        "openspec", "sample-change", check_evidence_passed=True
+        "openspec",
+        "sample-change",
+        check_evidence_passed=True,
+        project_id="mini-me",
+        job_id="job-123",
+        uow=uow,
     )
 
     assert reconciled is True
@@ -54,14 +128,20 @@ def test_reconcile_verification_tasks_updates_tasks_file(tmp_path):
 
     # Calling again when all complete should return False
     reconciled_again, ids_again = tracker.reconcile_verification_tasks(
-        "openspec", "sample-change", check_evidence_passed=True
+        "openspec",
+        "sample-change",
+        check_evidence_passed=True,
+        project_id="mini-me",
+        job_id="job-123",
+        uow=uow,
     )
     assert reconciled_again is False
     assert ids_again == []
 
 
 def test_reconcile_verification_tasks_does_not_reconcile_substantive_tasks(tmp_path):
-    tasks_dir = tmp_path / "openspec" / "changes" / "sample-change"
+    wt_dir, uow = _setup_test_env(tmp_path)
+    tasks_dir = wt_dir / "openspec" / "changes" / "sample-change"
     tasks_dir.mkdir(parents=True)
     tasks_file = tasks_dir / "tasks.md"
 
@@ -73,9 +153,14 @@ def test_reconcile_verification_tasks_does_not_reconcile_substantive_tasks(tmp_p
         encoding="utf-8",
     )
 
-    tracker = OpenSpecTaskTracker(tmp_path)
+    tracker = OpenSpecTaskTracker(wt_dir)
     reconciled, ids = tracker.reconcile_verification_tasks(
-        "openspec", "sample-change", check_evidence_passed=True
+        "openspec",
+        "sample-change",
+        check_evidence_passed=True,
+        project_id="mini-me",
+        job_id="job-123",
+        uow=uow,
     )
 
     assert reconciled is True

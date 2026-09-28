@@ -1,5 +1,6 @@
 """Tests for autonomous candidate worktree creation and execution startup upon admission."""
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -24,6 +25,7 @@ from minime.domain.models import (
     ExternalActionResult,
     Project,
     ProjectBinding,
+    ProjectManagedRepositoryBinding,
     ProviderHealth,
 )
 from minime.services.readiness_service import ReadinessService
@@ -75,6 +77,20 @@ def test_autonomous_admission_and_run_creation(
     )
 
     init_git_repo(tmp_path)
+    import subprocess
+    subprocess.run(["git", "remote", "set-url", "origin", "https://github.com/silverberdi/mini-me.git"], cwd=tmp_path, check=True)
+    (tmp_path / ".minime-managed-project.json").write_text(json.dumps({
+        "project_id": "mini-me",
+        "canonical_repository_identity": "github.com/silverberdi/mini-me",
+    }), encoding="utf-8")
+    mb = ProjectManagedRepositoryBinding(
+        project_id="mini-me",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+        managed_repository_root=str(tmp_path),
+        worktree_parent_dir=str(tmp_path / ".minime" / "worktrees"),
+    )
+    (tmp_path / ".minime" / "worktrees").mkdir(parents=True, exist_ok=True)
+    in_memory_uow.project_managed_repository_bindings.save(mb)
     create_isolated_openspec_change(tmp_path, change_name="016-autonomous-queue-work-selection")
 
     mock_gh = MagicMock(spec=GitHubAdapter)

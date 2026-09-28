@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
-from minime.domain.enums import EvidenceDiagnosticStatus
+from minime.domain.enums import EvidenceDiagnosticStatus, ExternalOutcome
 from minime.domain.models import CheckResult, EvidenceDiagnostic
 from minime.logging import redact_secrets
 
@@ -158,8 +158,40 @@ class ChecksRunner:
             start = asyncio.get_running_loop().time()
             proc = None
             try:
-                proc = await asyncio.create_subprocess_shell(
-                    cmd_to_run,
+                from minime.services.agent_confinement import AgentProcessConfinement
+                confinement = AgentProcessConfinement(allowed_worktree_path=str(worktree_path))
+                preflight = confinement.validate_command_preflight(cwd=str(worktree_path))
+                if not confinement.is_confinement_available() or preflight.outcome != ExternalOutcome.SUCCESS:
+                    reason = f"Check environment unavailable: Process confinement failed: {preflight.error_message if preflight.outcome != ExternalOutcome.SUCCESS else 'Agent process confinement capability unavailable.'}"
+                    result = CheckResult(
+                        job_id=job_id,
+                        check_name=name,
+                        command=command,
+                        exit_code=126,
+                        duration_ms=0,
+                        output_snippet=reason,
+                        candidate_sha=candidate_sha,
+                        candidate_generation=candidate_generation,
+                    )
+                    results.append(result)
+                    diagnostics.append(
+                        EvidenceDiagnostic(
+                            job_id=job_id,
+                            attempt_id=attempt_id,
+                            stage_type="CHECKS",
+                            check_name=name,
+                            diagnostic_status=EvidenceDiagnosticStatus.ENVIRONMENT_UNAVAILABLE,
+                            environment_identity=env_identity,
+                            candidate_sha=candidate_sha,
+                            reason=reason,
+                            evidence_reference={"exit_code": 126, "command": command},
+                        )
+                    )
+                    continue
+
+                wrapped_cmd = confinement.wrap_command(cmd_to_run)
+                proc = await asyncio.create_subprocess_exec(
+                    *wrapped_cmd,
                     cwd=str(worktree_path),
                     env=env,
                     stdout=asyncio.subprocess.PIPE,

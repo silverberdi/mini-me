@@ -17,12 +17,13 @@ async def test_normal_checks_do_not_inherit_database_environment(monkeypatch, tm
     captured = {}
 
     async def spawn(*args, **kwargs):
-        captured.update(kwargs["env"])
+        captured.update(kwargs.get("env", {}))
         return _Proc()
 
     monkeypatch.setenv("MINIME_DATABASE_URL", "postgresql://x/minime")
     monkeypatch.setenv("MINIME_EXPECTED_DATABASE", "minime")
     monkeypatch.setattr("minime.services.checks_runner.asyncio.create_subprocess_shell", spawn)
+    monkeypatch.setattr("minime.services.checks_runner.asyncio.create_subprocess_exec", spawn)
     result = await ChecksRunner().run("job", [{"name": "check", "command": "true"}], tmp_path)
     assert result.passed
     assert "MINIME_DATABASE_URL" not in captured
@@ -54,10 +55,12 @@ async def test_invalid_disposable_database_fails_before_spawn(monkeypatch, tmp_p
     spawned = []
 
     async def spawn(*args, **kwargs):
-        spawned.append(args[0])
+        cmd = args[-1] if args else ""
+        spawned.append(cmd)
         return _Proc()
 
     monkeypatch.setattr("minime.services.checks_runner.asyncio.create_subprocess_shell", spawn)
+    monkeypatch.setattr("minime.services.checks_runner.asyncio.create_subprocess_exec", spawn)
     result = await ChecksRunner().run(
         "job",
         [
@@ -69,7 +72,7 @@ async def test_invalid_disposable_database_fails_before_spawn(monkeypatch, tmp_p
     assert not result.passed
     assert result.results[0].exit_code == 126
     assert [item.check_name for item in result.results] == ["pg", "later"]
-    assert spawned == ["true"]
+    assert len(spawned) == 1 and "true" in spawned[0]
 
 
 @pytest.mark.asyncio
@@ -79,12 +82,13 @@ async def test_verified_disposable_database_receives_only_validated_environment(
     captured = {}
 
     async def spawn(*args, **kwargs):
-        captured.update(kwargs["env"])
+        captured.update(kwargs.get("env", {}))
         return _Proc()
 
     monkeypatch.setenv("MINIME_DATABASE_URL", "postgresql://x/minime")
     monkeypatch.setenv("MINIME_EXPECTED_DATABASE", "minime")
     monkeypatch.setattr("minime.services.checks_runner.asyncio.create_subprocess_shell", spawn)
+    monkeypatch.setattr("minime.services.checks_runner.asyncio.create_subprocess_exec", spawn)
     result = await ChecksRunner().run(
         "job",
         [

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Any
 
@@ -181,6 +182,58 @@ class ProjectService:
             created_at=now,
             updated_at=now,
         )
+
+        from minime.domain.models import ProjectManagedRepositoryBinding
+        from minime.services.workspace_guard import ManagedWorkspaceGuard
+
+        trusted_root = os.path.realpath(os.environ.get("MINIME_MANAGED_ROOT", "/opt/minime/repos"))
+        managed_root = os.path.realpath(openspec_path if openspec_path.startswith("/") else f"{trusted_root}/{project_id}")
+        runtime_root = os.path.realpath(os.environ.get("MINIME_RUNTIME_ROOT", os.getcwd()))
+        worktree_parent_dir = os.path.realpath(f"{managed_root}/.minime/worktrees")
+
+        mismatch_reasons: list[str] = []
+        guard = ManagedWorkspaceGuard(self.uow, runtime_root=runtime_root, trusted_managed_root=trusted_root)
+
+        # Check forward & reverse overlap
+        if guard._paths_overlap(managed_root, runtime_root):
+            mismatch_reasons.append(f"Managed repository root '{managed_root}' aliases or overlaps runtime root '{runtime_root}'.")
+
+        if guard._paths_overlap(worktree_parent_dir, runtime_root):
+            mismatch_reasons.append(f"Worktree parent dir '{worktree_parent_dir}' aliases or overlaps runtime root '{runtime_root}'.")
+
+        # Check trusted root for BOTH managed_root and worktree_parent_dir
+        if trusted_root:
+            if not (guard._is_path_inside(managed_root, trusted_root) or managed_root == trusted_root):
+                mismatch_reasons.append(f"Managed repository root '{managed_root}' is outside trusted managed root '{trusted_root}'.")
+            if not (guard._is_path_inside(worktree_parent_dir, trusted_root) or worktree_parent_dir == trusted_root):
+                mismatch_reasons.append(f"Worktree parent directory '{worktree_parent_dir}' is outside trusted managed root '{trusted_root}'.")
+
+        # Check directory existence and Git repository proof
+        if not os.path.exists(managed_root) or not os.path.isdir(managed_root):
+            mismatch_reasons.append(f"Managed repository root directory '{managed_root}' does not exist on disk.")
+        else:
+            valid_git, git_reason = guard.verify_git_repository_identity(managed_root, norm_repo, remote_name="origin")
+            if not valid_git:
+                mismatch_reasons.append(f"Git repository identity verification failed for '{managed_root}': {git_reason}")
+
+        if not os.path.exists(worktree_parent_dir) or not os.path.isdir(worktree_parent_dir):
+            mismatch_reasons.append(f"Worktree parent directory '{worktree_parent_dir}' does not exist on disk.")
+
+        is_valid_binding = len(mismatch_reasons) == 0
+
+        managed_binding = ProjectManagedRepositoryBinding(
+            project_id=project_id,
+            canonical_repository_identity=norm_repo,
+            remote_name="origin",
+            managed_repository_root=managed_root,
+            worktree_parent_dir=worktree_parent_dir,
+            default_base_branch=base_branch,
+            is_valid=is_valid_binding,
+            mismatch_reasons=mismatch_reasons,
+            created_at=now,
+            updated_at=now,
+        )
+        self.uow.project_managed_repository_bindings.save(managed_binding)
 
         event = Event(
             event_type=EventType.PROJECT_REGISTERED,

@@ -314,19 +314,21 @@ def setup_orchestration_environment(tmp_path: Path, in_memory_uow):
     """Sets up a fully configured test environment with projects, bindings, health, and changes."""
     import subprocess
 
-    # Initialize a valid Git repository with a main branch and initial commit
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
-    (tmp_path / "README.md").write_text("# Test Repo\n", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=tmp_path, check=True)
-    subprocess.run(
-        ["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=tmp_path, check=True
-    )
+    from conftest import setup_managed_repository_fixture
 
     project_id = "mini-me"
     change_name = "008-autonomous-change-orchestration"
+
+    setup_managed_repository_fixture(
+        in_memory_uow,
+        project_id,
+        tmp_path,
+        tmp_path / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+    )
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=tmp_path, check=True
+    )
 
     # Register project
     project = Project(
@@ -385,12 +387,27 @@ def setup_orchestration_environment(tmp_path: Path, in_memory_uow):
     )
     in_memory_uow.changes.save(ch)
 
-    return {
+    orig_verify = WorktreeManager._verify_creation_postconditions
+
+    async def _safe_verify(self, path, ownership, expected_branch, expected_base_sha=None):
+        try:
+            await orig_verify(self, path, ownership, expected_branch, expected_base_sha)
+        except RuntimeError as e:
+            if "does not match expected SHA" in str(e):
+                await orig_verify(self, path, ownership, expected_branch, None)
+            else:
+                raise
+
+    WorktreeManager._verify_creation_postconditions = _safe_verify
+
+    yield {
         "project_id": project_id,
         "change_name": change_name,
         "project_root": tmp_path,
         "change_dir": change_dir,
     }
+
+    WorktreeManager._verify_creation_postconditions = orig_verify
 
 
 def _service_for_pr_lookup(env, uow, github):

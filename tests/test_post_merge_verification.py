@@ -75,11 +75,19 @@ def _make_change(
     name: str = "test-change",
     delta: str = "# Spec: Cap1\n\n## Requirement: R1\n",
 ) -> Path:
+    import json
     import subprocess
     if not (tmp_path / ".git").exists():
         subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=False)
         subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, capture_output=True, check=False)
         subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=False)
+        subprocess.run(["git", "remote", "add", "origin", "https://github.com/silverberdi/mini-me.git"], cwd=tmp_path, capture_output=True, check=False)
+        marker_file = tmp_path / ".minime-managed-project.json"
+        marker_file.write_text(json.dumps({
+            "project_id": "mini-me",
+            "canonical_repository_identity": "github.com/silverberdi/mini-me",
+        }))
+        subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=False)
         subprocess.run(["git", "commit", "--allow-empty", "-m", "init"], cwd=tmp_path, capture_output=True, check=False)
     change_dir = tmp_path / "openspec" / "changes" / name
     specs_dir = change_dir / "specs" / "cap1"
@@ -90,7 +98,17 @@ def _make_change(
     return change_dir
 
 
-def _setup_uow(uow: InMemoryUnitOfWork, change_name: str = "test-change", run_id: str = "run-123"):
+def _setup_uow(uow: InMemoryUnitOfWork, change_name: str = "test-change", run_id: str = "run-123", tmp_path: Path | None = None):
+    import json
+
+    from minime.domain.models import ProjectManagedRepositoryBinding
+    if tmp_path and (tmp_path / ".git").exists():
+        marker_file = tmp_path / ".minime-managed-project.json"
+        if not marker_file.exists():
+            marker_file.write_text(json.dumps({
+                "project_id": "mini-me",
+                "canonical_repository_identity": "github.com/silverberdi/mini-me",
+            }))
     uow.projects.save(
         Project(
             project_id="mini-me",
@@ -109,6 +127,14 @@ def _setup_uow(uow: InMemoryUnitOfWork, change_name: str = "test-change", run_id
             github_pr_number=54,
             openspec_change_name=change_name,
             is_valid=True,
+        )
+    )
+    uow.project_managed_repository_bindings.save(
+        ProjectManagedRepositoryBinding(
+            project_id="mini-me",
+            canonical_repository_identity="github.com/silverberdi/mini-me",
+            managed_repository_root=str(tmp_path) if tmp_path else "/tmp",
+            worktree_parent_dir=str(tmp_path / ".minime" / "worktrees") if tmp_path else "/tmp/.minime/worktrees",
         )
     )
     uow.orchestration_runs.save(
@@ -135,13 +161,19 @@ def _setup_uow(uow: InMemoryUnitOfWork, change_name: str = "test-change", run_id
     )
 
 
+def _make_sync_service(tmp_path: Path):
+    uow = InMemoryUnitOfWork()
+    _setup_uow(uow, tmp_path=tmp_path)
+    return OpenSpecSyncService(tmp_path, uow=uow)
+
+
 # --- OpenSpecSyncService verification ---------------------------------------
 
 
 def test_verify_sync_confirms_requirements(tmp_path: Path):
     _make_change(tmp_path)
-    service = OpenSpecSyncService(tmp_path)
-    synced = service.sync_change_specs("openspec", "test-change")
+    service = _make_sync_service(tmp_path)
+    synced = service.sync_change_specs("openspec", "test-change", project_id="mini-me")
     assert synced.outcome == ExternalOutcome.SUCCESS
     assert "cap1" in synced.data
     verify_res = service.verify_sync("openspec", "test-change", synced)
@@ -151,8 +183,8 @@ def test_verify_sync_confirms_requirements(tmp_path: Path):
 
 def test_verify_sync_detects_missing_requirement(tmp_path: Path):
     _make_change(tmp_path)
-    service = OpenSpecSyncService(tmp_path)
-    synced = service.sync_change_specs("openspec", "test-change")
+    service = _make_sync_service(tmp_path)
+    synced = service.sync_change_specs("openspec", "test-change", project_id="mini-me")
     # Corrupt the canonical spec so the requirement is no longer present.
     canonical = tmp_path / "openspec" / "specs" / "cap1" / "spec.md"
     canonical.write_text("# Spec: Cap1\n\n## Requirement: DIFFERENT\n")
@@ -167,8 +199,8 @@ def test_archive_change_raises_on_collision(tmp_path: Path):
     archive_root.mkdir(parents=True)
     (archive_root / "spec.md").write_text("existing archive\n")
 
-    service = OpenSpecSyncService(tmp_path)
-    res = service.archive_change("openspec", "test-change", target_date="2026-09-03")
+    service = _make_sync_service(tmp_path)
+    res = service.archive_change("openspec", "test-change", target_date="2026-09-03", project_id="mini-me")
     assert res.outcome == ExternalOutcome.AMBIGUOUS
     assert res.reason_code == ExternalReasonCode.POSTCONDITION_NOT_PROVEN
 
@@ -181,7 +213,7 @@ def test_archive_change_raises_on_collision(tmp_path: Path):
 
 def test_post_merge_completes_when_sync_and_archive_verified(tmp_path: Path):
     uow = InMemoryUnitOfWork()
-    _setup_uow(uow)
+    _setup_uow(uow, tmp_path=tmp_path)
     _make_change(tmp_path)
 
     service = PostMergeReconciliationService(
@@ -206,7 +238,7 @@ def test_post_merge_completes_when_sync_and_archive_verified(tmp_path: Path):
 
 def test_post_merge_blocks_when_archive_fails(tmp_path: Path):
     uow = InMemoryUnitOfWork()
-    _setup_uow(uow)
+    _setup_uow(uow, tmp_path=tmp_path)
     _make_change(tmp_path)
 
     mock_sync = MagicMock(spec=OpenSpecSyncService)
@@ -255,7 +287,7 @@ def test_post_merge_blocks_when_archive_fails(tmp_path: Path):
 
 def test_post_merge_blocks_when_sync_evidence_missing(tmp_path: Path):
     uow = InMemoryUnitOfWork()
-    _setup_uow(uow)
+    _setup_uow(uow, tmp_path=tmp_path)
     _make_change(tmp_path)
 
     mock_sync = MagicMock(spec=OpenSpecSyncService)
@@ -296,7 +328,7 @@ def test_post_merge_blocks_when_sync_evidence_missing(tmp_path: Path):
 
 def test_post_merge_blocks_when_issue_close_unknown_or_ambiguous(tmp_path: Path):
     uow = InMemoryUnitOfWork()
-    _setup_uow(uow)
+    _setup_uow(uow, tmp_path=tmp_path)
     _make_change(tmp_path)
 
     adapter = _github_adapter()
@@ -324,7 +356,7 @@ def test_post_merge_blocks_when_issue_close_unknown_or_ambiguous(tmp_path: Path)
 
 def test_post_merge_blocks_when_project_item_update_fails(tmp_path: Path):
     uow = InMemoryUnitOfWork()
-    _setup_uow(uow)
+    _setup_uow(uow, tmp_path=tmp_path)
     _make_change(tmp_path)
 
     adapter = _github_adapter()
@@ -349,7 +381,7 @@ def test_post_merge_blocks_when_project_item_update_fails(tmp_path: Path):
 
 def test_post_merge_blocks_when_worktree_cleanup_fails(tmp_path: Path):
     uow = InMemoryUnitOfWork()
-    _setup_uow(uow)
+    _setup_uow(uow, tmp_path=tmp_path)
     _make_change(tmp_path)
 
     # Create a fake worktree directory that cannot be removed
@@ -381,7 +413,7 @@ def test_post_merge_blocks_when_worktree_cleanup_fails(tmp_path: Path):
 
 def test_post_merge_blocks_when_remote_branch_cleanup_fails(tmp_path: Path):
     uow = InMemoryUnitOfWork()
-    _setup_uow(uow)
+    _setup_uow(uow, tmp_path=tmp_path)
     _make_change(tmp_path)
 
     adapter = _github_adapter()
@@ -406,10 +438,10 @@ def test_post_merge_blocks_when_remote_branch_cleanup_fails(tmp_path: Path):
 
 def test_archive_preservation_manifest_verification(tmp_path: Path):
     _make_change(tmp_path)
-    service = OpenSpecSyncService(tmp_path)
+    service = _make_sync_service(tmp_path)
 
     # Archive happy path
-    arc_res = service.archive_change("openspec", "test-change", target_date="2026-09-03")
+    arc_res = service.archive_change("openspec", "test-change", target_date="2026-09-03", project_id="mini-me")
     assert arc_res.outcome == ExternalOutcome.SUCCESS
     assert arc_res.retry_safety == RetrySafety.UNSAFE
     archived_dir = arc_res.data
@@ -429,65 +461,79 @@ def test_archive_preservation_manifest_verification(tmp_path: Path):
 
 def test_sync_and_archive_retry_safety_semantics(tmp_path: Path):
     _make_change(tmp_path)
-    service = OpenSpecSyncService(tmp_path)
+    service = _make_sync_service(tmp_path)
 
     # Mutating sync -> RetrySafety.UNSAFE
-    sync_res = service.sync_change_specs("openspec", "test-change")
+    sync_res = service.sync_change_specs("openspec", "test-change", project_id="mini-me")
     assert sync_res.outcome == ExternalOutcome.SUCCESS
     assert sync_res.retry_safety == RetrySafety.UNSAFE
 
     # Mutating archive -> RetrySafety.UNSAFE
-    archive_res = service.archive_change("openspec", "test-change", target_date="2026-09-03")
+    archive_res = service.archive_change("openspec", "test-change", target_date="2026-09-03", project_id="mini-me")
     assert archive_res.outcome == ExternalOutcome.SUCCESS
     assert archive_res.retry_safety == RetrySafety.UNSAFE
 
 
 def test_local_branch_authoritative_absent_returns_success_already_absent(tmp_path: Path):
-    import subprocess
-    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=False)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, capture_output=True, check=False)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=False)
-    subprocess.run(["git", "commit", "--allow-empty", "-m", "init"], cwd=tmp_path, capture_output=True, check=False)
-    service = PostMergeReconciliationService(uow=InMemoryUnitOfWork(), project_root=tmp_path, github_adapter=_github_adapter())
-    res = service._delete_local_branch("non-existent-branch")
+    _make_change(tmp_path)
+    uow = InMemoryUnitOfWork()
+    _setup_uow(uow, tmp_path=tmp_path)
+    service = PostMergeReconciliationService(uow=uow, project_root=tmp_path, github_adapter=_github_adapter())
+    res = service._delete_local_branch("non-existent-branch", project_id="mini-me")
     assert res.outcome == ExternalOutcome.SUCCESS
     assert res.reason_code == ExternalReasonCode.ALREADY_ABSENT
 
 
 def test_local_branch_show_ref_error_returns_unknown(tmp_path: Path, monkeypatch):
-    service = PostMergeReconciliationService(uow=InMemoryUnitOfWork(), project_root=tmp_path, github_adapter=_github_adapter())
-    # Mock subprocess.run for show-ref pre-check to return exit code 128 (fatal git repo error)
-    monkeypatch.setattr(
-        "subprocess.run",
-        lambda *args, **kwargs: MagicMock(returncode=128, stderr="fatal: not a git repository"),
-    )
-    res = service._delete_local_branch("some-branch")
+    import subprocess
+    _make_change(tmp_path)
+    uow = InMemoryUnitOfWork()
+    _setup_uow(uow, tmp_path=tmp_path)
+    service = PostMergeReconciliationService(uow=uow, project_root=tmp_path, github_adapter=_github_adapter())
+
+    orig_run = subprocess.run
+    def mock_run(cmd, **kwargs):
+        if isinstance(cmd, list) and "show-ref" in cmd:
+            proc = MagicMock()
+            proc.returncode = 128
+            proc.stderr = "fatal: not a git repository"
+            return proc
+        return orig_run(cmd, **kwargs)
+
+    monkeypatch.setattr("subprocess.run", mock_run)
+    res = service._delete_local_branch("some-branch", project_id="mini-me")
     assert res.outcome == ExternalOutcome.UNKNOWN
     assert res.reason_code == ExternalReasonCode.UNOBSERVABLE
     assert res.data is False
 
 
 def test_local_branch_post_check_unobservable_returns_unknown(tmp_path: Path, monkeypatch):
-    service = PostMergeReconciliationService(uow=InMemoryUnitOfWork(), project_root=tmp_path, github_adapter=_github_adapter())
+    import subprocess
+    _make_change(tmp_path)
+    uow = InMemoryUnitOfWork()
+    _setup_uow(uow, tmp_path=tmp_path)
+    service = PostMergeReconciliationService(uow=uow, project_root=tmp_path, github_adapter=_github_adapter())
     calls = 0
 
+    orig_run = subprocess.run
     def mock_run(cmd, **kwargs):
         nonlocal calls
-        calls += 1
-        proc = MagicMock()
-        if "branch" in cmd:
-            proc.returncode = 0
+        if isinstance(cmd, list) and ("show-ref" in cmd or "branch" in cmd):
+            proc = MagicMock()
+            if "branch" in cmd:
+                proc.returncode = 0
+                return proc
+            calls += 1
+            if calls == 1:
+                proc.returncode = 0
+            else:
+                proc.returncode = 128
+                proc.stderr = "git error"
             return proc
-        # show-ref calls: pre-check (call 1) returns 0 (branch exists), post-check (call 2) returns 128 (error)
-        if calls == 1:
-            proc.returncode = 0
-        else:
-            proc.returncode = 128
-            proc.stderr = "git error"
-        return proc
+        return orig_run(cmd, **kwargs)
 
     monkeypatch.setattr("subprocess.run", mock_run)
-    res = service._delete_local_branch("test-branch")
+    res = service._delete_local_branch("test-branch", project_id="mini-me")
     assert res.outcome == ExternalOutcome.UNKNOWN
     assert res.reason_code == ExternalReasonCode.UNOBSERVABLE
     assert res.data is False
@@ -495,7 +541,7 @@ def test_local_branch_post_check_unobservable_returns_unknown(tmp_path: Path, mo
 
 def test_worktree_scan_failure_returns_unknown_and_blocks_completion(tmp_path: Path, monkeypatch):
     uow = InMemoryUnitOfWork()
-    _setup_uow(uow)
+    _setup_uow(uow, tmp_path=tmp_path)
     _make_change(tmp_path)
 
     service = PostMergeReconciliationService(uow=uow, project_root=tmp_path, github_adapter=_github_adapter())
@@ -519,7 +565,10 @@ def test_worktree_scan_failure_returns_unknown_and_blocks_completion(tmp_path: P
 
 
 def test_archive_verify_fails_when_historical_manifest_missing_and_canonical_artifact_absent(tmp_path: Path):
-    service = OpenSpecSyncService(tmp_path)
+    import shutil
+    _make_change(tmp_path)
+    shutil.rmtree(tmp_path / "openspec" / "changes" / "test-change")
+    service = _make_sync_service(tmp_path)
     archive_dir = tmp_path / "openspec" / "changes" / "archive" / "2026-09-03-test-change"
     archive_dir.mkdir(parents=True)
     # Only proposal.md exists in target archive; tasks.md is missing!
@@ -532,19 +581,20 @@ def test_archive_verify_fails_when_historical_manifest_missing_and_canonical_art
 
 
 def test_sync_change_specs_capability_dir_missing_spec_md_returns_failure(tmp_path: Path):
-    service = OpenSpecSyncService(tmp_path)
+    _make_change(tmp_path)
+    service = _make_sync_service(tmp_path)
 
     # Setup change specs with cap1 having spec.md and cap2 missing spec.md
     change_dir = tmp_path / "openspec" / "changes" / "test-change"
     cap1_dir = change_dir / "specs" / "cap1"
     cap2_dir = change_dir / "specs" / "cap2"
-    cap1_dir.mkdir(parents=True)
-    cap2_dir.mkdir(parents=True)
+    cap1_dir.mkdir(parents=True, exist_ok=True)
+    cap2_dir.mkdir(parents=True, exist_ok=True)
 
     (cap1_dir / "spec.md").write_text("# Spec Cap1\n## Requirement: R1\n")
     # cap2_dir intentionally missing spec.md!
 
-    res = service.sync_change_specs("openspec", "test-change")
+    res = service.sync_change_specs("openspec", "test-change", project_id="mini-me")
     assert res.outcome == ExternalOutcome.FAILURE
     assert res.reason_code == ExternalReasonCode.EVIDENCE_INSUFFICIENT
     assert res.data == []
@@ -556,7 +606,10 @@ def test_sync_change_specs_capability_dir_missing_spec_md_returns_failure(tmp_pa
 
 
 def test_archive_verify_reused_existing_without_independent_manifest_returns_unknown(tmp_path: Path):
-    service = OpenSpecSyncService(tmp_path)
+    import shutil
+    _make_change(tmp_path)
+    shutil.rmtree(tmp_path / "openspec" / "changes" / "test-change")
+    service = _make_sync_service(tmp_path)
     archive_dir = tmp_path / "openspec" / "changes" / "archive" / "2026-09-03-test-change"
     archive_dir.mkdir(parents=True)
     (archive_dir / "proposal.md").write_text("# Proposal\n")
@@ -572,29 +625,29 @@ def test_archive_verify_reused_existing_without_independent_manifest_returns_unk
 
 
 def test_cleanup_branch_and_worktree_mutations_return_retry_safety_unsafe(tmp_path: Path):
+    _make_change(tmp_path)
+    uow = InMemoryUnitOfWork()
+    _setup_uow(uow, tmp_path=tmp_path)
+
     import subprocess
-    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=False)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, capture_output=True, check=False)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=False)
-    subprocess.run(["git", "commit", "--allow-empty", "-m", "init"], cwd=tmp_path, capture_output=True, check=False)
     subprocess.run(["git", "branch", "to-delete"], cwd=tmp_path, capture_output=True, check=False)
 
-    service = PostMergeReconciliationService(uow=InMemoryUnitOfWork(), project_root=tmp_path, github_adapter=_github_adapter())
+    service = PostMergeReconciliationService(uow=uow, project_root=tmp_path, github_adapter=_github_adapter())
 
     # Actual git branch -D executed and verified -> RetrySafety.UNSAFE
-    del_res = service._delete_local_branch("to-delete")
+    del_res = service._delete_local_branch("to-delete", project_id="mini-me")
     assert del_res.outcome == ExternalOutcome.SUCCESS
     assert del_res.reason_code == ExternalReasonCode.EXECUTION_SUCCESS
     assert del_res.retry_safety == RetrySafety.UNSAFE
 
     # Pre-check proves branch already absent -> RetrySafety.SAFE
-    absent_res = service._delete_local_branch("absent-branch")
+    absent_res = service._delete_local_branch("absent-branch", project_id="mini-me")
     assert absent_res.outcome == ExternalOutcome.SUCCESS
     assert absent_res.reason_code == ExternalReasonCode.ALREADY_ABSENT
     assert absent_res.retry_safety == RetrySafety.SAFE
 
     # Worktree clean with no target paths (authoritative already absent) -> RetrySafety.SAFE
-    wt_absent = service._clean_worktrees("non-existent-job")
+    wt_absent = service._clean_worktrees("non-existent-job", project_id="mini-me")
     assert wt_absent.outcome == ExternalOutcome.SUCCESS
     assert wt_absent.reason_code == ExternalReasonCode.ALREADY_ABSENT
     assert wt_absent.retry_safety == RetrySafety.SAFE

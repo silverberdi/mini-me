@@ -73,6 +73,16 @@ def setup_api_env(tmp_path: Path, in_memory_uow):
         ProviderHealth(provider="antigravity", status=ProviderHealthStatus.AVAILABLE)
     )
 
+    from conftest import setup_managed_repository_fixture
+    setup_managed_repository_fixture(
+        uow=in_memory_uow,
+        project_id=project_id,
+        repo_root=tmp_path,
+        worktree_parent_dir=tmp_path / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+        remote_name="origin",
+    )
+
     create_isolated_openspec_change(
         tmp_path,
         change_name=change_name,

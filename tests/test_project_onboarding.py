@@ -23,7 +23,18 @@ def test_onboard_new_project_success(
         "# Test Roadmap\n- 001-initial-work (BACKLOG): First task\n"
     )
     (repo_dir / "openspec").mkdir()
+    import subprocess
+
     (repo_dir / "README.md").write_text("# Test Repo\nA test repository for onboarding.\n")
+    subprocess.run(["git", "init"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "checkout", "-b", "main"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "add", "."], cwd=repo_dir, check=True)
+    subprocess.run(["git", "commit", "-m", "initial commit"], cwd=repo_dir, check=True)
+
+    trusted_root = tmp_path / "trusted_managed_root"
+    trusted_root.mkdir()
 
     from tests.conftest import ReadinessGitHubStub
 
@@ -31,12 +42,13 @@ def test_onboard_new_project_success(
         in_memory_uow,
         project_root=repo_dir,
         github_adapter=ReadinessGitHubStub(),
+        trusted_managed_root=trusted_root,
     )
 
     input_data = ProjectOnboardingInput(
         project_id="test-project",
         display_name="Test Project",
-        repository="test-owner/test-repo",
+        repository=str(repo_dir),
         base_branch="main",
         openspec_path="openspec",
         roadmap_path="docs/ROADMAP.md",
@@ -47,7 +59,7 @@ def test_onboard_new_project_success(
 
     assert result.project.project_id == "test-project"
     assert result.project.display_name == "Test Project"
-    assert result.project.repository == "test-owner/test-repo"
+    assert result.project.repository == str(repo_dir)
     assert result.project.onboarding_status == ProjectOnboardingStatus.READY_FOR_WORK
     assert result.discovered_items_count >= 1
 

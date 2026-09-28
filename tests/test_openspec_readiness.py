@@ -121,6 +121,16 @@ def test_dor_evaluation_success(in_memory_uow, tmp_path):
         reviewer="antigravity",
     )
 
+    from conftest import setup_managed_repository_fixture
+    setup_managed_repository_fixture(
+        uow=in_memory_uow,
+        project_id="mini-me",
+        repo_root=tmp_path,
+        worktree_parent_dir=tmp_path / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+        remote_name="origin",
+    )
+
     binding = ProjectBinding(
         project_id="mini-me",
         repository="silverberdi/mini-me",
@@ -312,6 +322,16 @@ def test_runtime_isolation_does_not_modify_openspec(in_memory_uow, tmp_path):
     )
     in_memory_uow.bindings.save(binding)
 
+    from conftest import setup_managed_repository_fixture
+    setup_managed_repository_fixture(
+        uow=in_memory_uow,
+        project_id="mini-me",
+        repo_root=tmp_path,
+        worktree_parent_dir=tmp_path / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+        remote_name="origin",
+    )
+
     _seed_primary_health(in_memory_uow)
 
     readiness_service = ReadinessService(in_memory_uow, github_adapter=ReadinessGitHubStub())
@@ -348,6 +368,16 @@ def test_readiness_evaluation_event_deduplication(in_memory_uow, tmp_path):
         openspec_change_name="dedup-change",
     )
     in_memory_uow.bindings.save(binding)
+
+    from conftest import setup_managed_repository_fixture
+    setup_managed_repository_fixture(
+        uow=in_memory_uow,
+        project_id="mini-me",
+        repo_root=tmp_path,
+        worktree_parent_dir=tmp_path / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+        remote_name="origin",
+    )
 
     _seed_primary_health(in_memory_uow)
 

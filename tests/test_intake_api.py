@@ -5,7 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi.testclient import TestClient
-from tests.conftest import InMemoryPersistenceUnitOfWork, ReadinessGitHubStub, init_git_repo
+from tests.conftest import (
+    InMemoryPersistenceUnitOfWork,
+    ReadinessGitHubStub,
+    setup_managed_repository_fixture,
+)
 
 from minime.api.app import (
     app,
@@ -20,30 +24,54 @@ from minime.services.project_onboarding_service import ProjectOnboardingService
 
 
 def test_api_onboard_project(in_memory_uow: InMemoryPersistenceUnitOfWork, tmp_path: Path) -> None:
-    repo_dir = tmp_path / "api-repo"
-    repo_dir.mkdir()
-    (repo_dir / "README.md").write_text("# API Repo\nA test repository for onboarding.\n")
-    (repo_dir / "openspec").mkdir()
-    (repo_dir / "docs").mkdir()
-    (repo_dir / "docs" / "ROADMAP.md").write_text("# Roadmap\n- 030-feature: Feature A\n")
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    (runtime_root / "openspec").mkdir(parents=True, exist_ok=True)
+    (runtime_root / "docs").mkdir(parents=True, exist_ok=True)
+    (runtime_root / "docs" / "ROADMAP.md").write_text("# Roadmap\n- 030-feature: Feature A\n", encoding="utf-8")
+
+    trusted_root = tmp_path / "managed"
+    trusted_root.mkdir(parents=True, exist_ok=True)
+
+    import subprocess
+
+    remote_bare = tmp_path / "remote_api_repo.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(remote_bare)], check=True, capture_output=True)
+
+    seed_dir = tmp_path / "seed"
+    subprocess.run(["git", "clone", str(remote_bare), str(seed_dir)], check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test Dev"], cwd=seed_dir, check=True)
+    subprocess.run(["git", "config", "user.email", "dev@test.local"], cwd=seed_dir, check=True)
+    (seed_dir / "README.md").write_text("# API Repo\nA test repository for onboarding.\n", encoding="utf-8")
+    (seed_dir / "openspec").mkdir(exist_ok=True)
+    (seed_dir / "docs").mkdir(exist_ok=True)
+    (seed_dir / "docs" / "ROADMAP.md").write_text("# Roadmap\n- 030-feature: Feature A\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=seed_dir, check=True)
+    subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=seed_dir, check=True, capture_output=True)
+    subprocess.run(["git", "push", "origin", "main"], cwd=seed_dir, check=True, capture_output=True)
 
     github_stub = ReadinessGitHubStub()
     app.dependency_overrides[get_uow] = lambda: in_memory_uow
     app.dependency_overrides[get_github_adapter] = lambda: github_stub
     app.dependency_overrides[get_onboarding_service] = lambda: ProjectOnboardingService(
-        in_memory_uow, project_root=repo_dir, github_adapter=github_stub
+        in_memory_uow, project_root=runtime_root, github_adapter=github_stub, trusted_managed_root=trusted_root
     )
     client = TestClient(app)
+
+    managed_target = trusted_root / "api-project"
+    worktrees_target = trusted_root / "worktrees" / "api-project"
 
     resp = client.post(
         "/api/v1/projects/onboard",
         json={
             "project_id": "api-project",
             "display_name": "API Project",
-            "repository": "test-owner/api-repo",
+            "repository": str(remote_bare),
             "base_branch": "main",
             "roadmap_path": "docs/ROADMAP.md",
             "backlog_path": "docs/ROADMAP.md",
+            "managed_repository_root": str(managed_target),
+            "worktree_parent_dir": str(worktrees_target),
         },
     )
 
@@ -58,8 +86,7 @@ def test_api_backlog_crud_and_lifecycle(
     in_memory_uow: InMemoryPersistenceUnitOfWork, tmp_path: Path
 ) -> None:
     repo_dir = tmp_path / "api-repo"
-    repo_dir.mkdir()
-    init_git_repo(repo_dir)
+    setup_managed_repository_fixture(in_memory_uow, "api-project", repo_dir, tmp_path / "worktrees")
 
     github_stub = ReadinessGitHubStub()
     app.dependency_overrides[get_uow] = lambda: in_memory_uow

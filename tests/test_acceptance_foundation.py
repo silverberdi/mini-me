@@ -269,6 +269,16 @@ def test_acceptance_runtime_state_outside_openspec(in_memory_uow, tmp_path):
     )
     in_memory_uow.bindings.save(binding)
 
+    from conftest import setup_managed_repository_fixture
+    setup_managed_repository_fixture(
+        uow=in_memory_uow,
+        project_id="mini-me",
+        repo_root=tmp_path,
+        worktree_parent_dir=tmp_path / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+        remote_name="origin",
+    )
+
     readiness_service = ReadinessService(in_memory_uow, github_adapter=ReadinessGitHubStub())
     eval_result = readiness_service.evaluate_change_readiness(
         project_id="mini-me",

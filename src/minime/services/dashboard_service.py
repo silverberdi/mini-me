@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import subprocess
 from datetime import UTC, datetime
 from typing import Any
 
@@ -70,6 +72,20 @@ class ProviderHealthDTO(BaseModel):
     last_probe_at: str | None = None
 
 
+class ManagedProjectStatusDTO(BaseModel):
+    project_id: str
+    managed_repository_root: str | None = None
+    managed_repository_head_sha: str | None = None
+    canonical_repository_identity: str | None = None
+    verified_canonical_repository_identity: str | None = None
+    runtime_path: str | None = None
+    runtime_head_sha: str | None = None
+    is_runtime_isolated: bool = False
+    is_agent_confinement_active: bool = False
+    workspace_mutation_denied_total: int = 0
+    denied_mutation_breakdown: dict[str, int] = Field(default_factory=dict)
+
+
 class SystemStatusDTO(BaseModel):
     healthy: bool = True
     database_engine: str = "PostgreSQL"
@@ -81,6 +97,12 @@ class SystemStatusDTO(BaseModel):
     active_runs_count: int = 0
     total_changes_count: int = 0
     attention_runs_count: int = 0
+    is_runtime_isolated: bool = True
+    is_agent_confinement_active: bool = True
+    active_durable_worktrees: int = 0
+    workspace_mutation_denied_count: int = 0
+    active_worktrees_list: list[dict[str, Any]] = Field(default_factory=list)
+    managed_projects: list[ManagedProjectStatusDTO] = Field(default_factory=list)
     providers: list[ProviderHealthDTO] = Field(default_factory=list)
 
 
@@ -693,6 +715,104 @@ class OperationsDashboardService:
             for h in prov_health
         )
 
+        ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None)
+        active_ownerships = ownership_repo.list_active() if ownership_repo else []
+        active_wts = len(active_ownerships)
+        active_wts_list = [
+            {
+                "worktree_id": o.worktree_id,
+                "project_id": o.project_id,
+                "job_id": o.job_id,
+                "worktree_path": o.canonical_worktree_path,
+                "state": o.state.value if hasattr(o.state, "value") else str(o.state),
+                "created_at": o.created_at.isoformat() if hasattr(o.created_at, "isoformat") else str(o.created_at),
+            }
+            for o in active_ownerships
+        ]
+
+        from minime.services.agent_confinement import AgentProcessConfinement
+        from minime.services.workspace_guard import ManagedWorkspaceGuard
+
+        confinement_active = AgentProcessConfinement("/tmp").is_confinement_available()
+        guard = ManagedWorkspaceGuard(self.uow)
+        runtime_path = guard.runtime_root
+
+        runtime_head_sha = None
+        if os.path.exists(os.path.join(runtime_path, ".git")):
+            try:
+                cp = subprocess.run(["git", "rev-parse", "HEAD"], cwd=runtime_path, capture_output=True, text=True)
+                if cp.returncode == 0:
+                    runtime_head_sha = cp.stdout.strip()
+            except Exception:
+                runtime_head_sha = None
+
+        metrics_repo = getattr(self.uow, "metrics", None)
+        denied_facts = metrics_repo.list_facts(metric_name="workspace_mutation_denied_total") if metrics_repo else []
+        total_denied_mutations = len(denied_facts)
+
+        bindings_repo = getattr(self.uow, "project_managed_repository_bindings", None)
+        all_bindings = bindings_repo.list_all() if bindings_repo else []
+
+        managed_project_dtos: list[ManagedProjectStatusDTO] = []
+        overall_isolated = bool(all_bindings)
+
+        for b in all_bindings:
+            p_id = b.project_id
+            m_root = getattr(b, "managed_repository_root", "")
+            wt_root = getattr(b, "worktree_parent_dir", "")
+            b_valid = getattr(b, "is_valid", False)
+
+            m_head_sha = None
+            if m_root and os.path.exists(os.path.join(m_root, ".git")):
+                try:
+                    cp = subprocess.run(["git", "rev-parse", "HEAD"], cwd=m_root, capture_output=True, text=True)
+                    if cp.returncode == 0:
+                        m_head_sha = cp.stdout.strip()
+                except Exception:
+                    m_head_sha = None
+
+            canon_id = getattr(b, "canonical_repository_identity", "")
+            v_git_ok, _ = guard.verify_git_repository_identity(m_root, canon_id, remote_name=getattr(b, "remote_name", "origin"))
+            verified_canon_id = canon_id if v_git_ok else None
+
+            p_isolated = (
+                b_valid
+                and v_git_ok
+                and bool(m_root)
+                and bool(wt_root)
+                and not guard._paths_overlap(m_root, runtime_path)
+                and not guard._paths_overlap(wt_root, runtime_path)
+            )
+            if guard.trusted_managed_root:
+                p_isolated = p_isolated and (guard._is_path_inside(m_root, guard.trusted_managed_root) or m_root == guard.trusted_managed_root)
+                p_isolated = p_isolated and (guard._is_path_inside(wt_root, guard.trusted_managed_root) or wt_root == guard.trusted_managed_root)
+
+            if not p_isolated:
+                overall_isolated = False
+
+            p_facts = [f for f in denied_facts if f.project_id == p_id]
+            p_denied_total = len(p_facts)
+            breakdown: dict[str, int] = {}
+            for f in p_facts:
+                reason_code = f.details.get("reason_code", "UNKNOWN")
+                breakdown[reason_code] = breakdown.get(reason_code, 0) + 1
+
+            managed_project_dtos.append(
+                ManagedProjectStatusDTO(
+                    project_id=p_id,
+                    managed_repository_root=m_root,
+                    managed_repository_head_sha=m_head_sha,
+                    canonical_repository_identity=canon_id,
+                    verified_canonical_repository_identity=verified_canon_id,
+                    runtime_path=runtime_path,
+                    runtime_head_sha=runtime_head_sha,
+                    is_runtime_isolated=p_isolated,
+                    is_agent_confinement_active=confinement_active,
+                    workspace_mutation_denied_total=p_denied_total,
+                    denied_mutation_breakdown=breakdown,
+                )
+            )
+
         system_status = SystemStatusDTO(
             healthy=is_overall_healthy,
             database_engine="PostgreSQL",
@@ -704,6 +824,12 @@ class OperationsDashboardService:
             active_runs_count=len(active_executions),
             total_changes_count=len(change_summaries),
             attention_runs_count=len(attention_items),
+            is_runtime_isolated=overall_isolated,
+            is_agent_confinement_active=confinement_active,
+            active_durable_worktrees=active_wts,
+            workspace_mutation_denied_count=total_denied_mutations,
+            active_worktrees_list=active_wts_list,
+            managed_projects=managed_project_dtos,
             providers=prov_dtos,
         )
 

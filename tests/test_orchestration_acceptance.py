@@ -203,18 +203,21 @@ class AcceptanceChecksRunner:
 def setup_acceptance_env(tmp_path: Path, in_memory_uow):
     import subprocess
 
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
-    (tmp_path / "README.md").write_text("# Mini Me\n", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=tmp_path, check=True)
-    subprocess.run(
-        ["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=tmp_path, check=True
-    )
+    from conftest import setup_managed_repository_fixture
 
     project_id = "mini-me"
     change_name = "008-autonomous-change-orchestration"
+
+    setup_managed_repository_fixture(
+        in_memory_uow,
+        project_id,
+        tmp_path,
+        tmp_path / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+    )
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=tmp_path, check=True
+    )
 
     project = Project(
         project_id=project_id,

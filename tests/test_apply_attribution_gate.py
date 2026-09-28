@@ -40,7 +40,7 @@ def _project(change_name: str, **overrides) -> Project:
     return Project(**kwargs)
 
 
-def _register(uow, project: Project, change_name: str) -> None:
+def _register(uow, project: Project, change_name: str, root: Path | None = None) -> None:
     uow.projects.save(project)
     uow.bindings.save(
         ProjectBinding(
@@ -51,6 +51,16 @@ def _register(uow, project: Project, change_name: str) -> None:
         )
     )
     uow.changes.save(Change(project_id=project.project_id, name=change_name))
+    if root:
+        from conftest import setup_managed_repository_fixture
+        setup_managed_repository_fixture(
+            uow=uow,
+            project_id=project.project_id,
+            repo_root=root,
+            worktree_parent_dir=root / ".minime" / "worktrees",
+            canonical_repository_identity="github.com/silverberdi/mini-me",
+            remote_name="origin",
+        )
 
 
 def _service(uow, root: Path) -> OrchestrationService:
@@ -186,7 +196,7 @@ def test_valid_admission_with_clean_worktree_allowed(in_memory_uow, tmp_path: Pa
     _init_git_repo(tmp_path)
     create_isolated_openspec_change(tmp_path, "clean-admit")
     project = _project("clean-admit")
-    _register(in_memory_uow, project, "clean-admit")
+    _register(in_memory_uow, project, "clean-admit", root=tmp_path)
 
     admission = _service(in_memory_uow, tmp_path).admit_change(
         "mini-me", "clean-admit", tmp_path
@@ -210,7 +220,7 @@ def test_admission_blocks_predating_implementation_commit(in_memory_uow, tmp_pat
         capture_output=True,
     )
     project = _project("drift-admit")
-    _register(in_memory_uow, project, "drift-admit")
+    _register(in_memory_uow, project, "drift-admit", root=tmp_path)
 
     admission = _service(in_memory_uow, tmp_path).admit_change(
         "mini-me", "drift-admit", tmp_path
@@ -225,7 +235,7 @@ def test_duplicate_admission_refused_with_existing_run(in_memory_uow, tmp_path: 
     _init_git_repo(tmp_path)
     create_isolated_openspec_change(tmp_path, "dup-admit")
     project = _project("dup-admit")
-    _register(in_memory_uow, project, "dup-admit")
+    _register(in_memory_uow, project, "dup-admit", root=tmp_path)
     service = _service(in_memory_uow, tmp_path)
 
     first = service.admit_change("mini-me", "dup-admit", tmp_path)
@@ -241,7 +251,7 @@ def test_no_openspec_change_blocks_admission(in_memory_uow, tmp_path: Path):
     """Requested admission with no on-disk OpenSpec change refuses without a run."""
     _init_git_repo(tmp_path)
     project = _project("missing-admit")
-    _register(in_memory_uow, project, "missing-admit")
+    _register(in_memory_uow, project, "missing-admit", root=tmp_path)
 
     admission = _service(in_memory_uow, tmp_path).admit_change(
         "mini-me", "missing-admit", tmp_path
@@ -257,7 +267,7 @@ def test_apply_gate_composes_with_readiness_strict_validation(in_memory_uow, tmp
     # Phase A, proving Phase A is not weakened by the Phase B attribution gate.
     create_isolated_openspec_change(tmp_path, "strict-invalid-clean", spec_content="# Spec\n")
     project = _project("strict-invalid-clean", strict_validation_required=True)
-    _register(in_memory_uow, project, "strict-invalid-clean")
+    _register(in_memory_uow, project, "strict-invalid-clean", root=tmp_path)
 
     admission = _service(in_memory_uow, tmp_path).admit_change(
         "mini-me", "strict-invalid-clean", tmp_path

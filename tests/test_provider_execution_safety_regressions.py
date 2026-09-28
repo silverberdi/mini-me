@@ -120,9 +120,9 @@ class GitFakeWorktreeManager:
         self.cleaned: list[str] = []
 
     async def create_worktree(
-        self, job_id: str, change_name: str, base_branch: str, project_id: str | None = None
+        self, job_id: str, change_name: str, base_branch: str, *args, **kwargs
     ) -> WorktreeInfo:
-        del change_name, base_branch, project_id
+        del change_name, base_branch
         path = self.root / ".minime" / "worktrees" / job_id
         path.mkdir(parents=True, exist_ok=True)
         if (self.root / "openspec").exists():

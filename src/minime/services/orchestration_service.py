@@ -820,13 +820,11 @@ class OrchestrationService:
                 f"minime/{run.change_name}-{job.job_id}-integration-gen{next_generation}-"
                 f"{target_short_sha}"
             )
-            integration_path = (
-                root
-                / ".minime"
-                / "worktrees"
-                / f"{job.job_id}-integration-gen{next_generation}-{target_short_sha}"
-            )
             manager = self.pipeline.worktree_manager
+            integration_path = (
+                manager.resolve_worktree_parent_dir(run.project_id)
+                / f"{job.job_id}-integration-gen{next_generation}-{target_short_sha}"
+            ).resolve()
             try:
                 ancestry = subprocess.run(
                     [
@@ -1004,6 +1002,7 @@ class OrchestrationService:
                 project.base_branch,
                 project_id=run.project_id,
                 branch_name=candidate.candidate_ref.removeprefix("refs/heads/"),
+                run_id=run_id,
             )
         )
         try:
@@ -1149,9 +1148,7 @@ class OrchestrationService:
         if details["integration_branch"] != branch_name:
             raise ValueError("Human integration branch is not the deterministic expected branch.")
         integration_path = (
-            root
-            / ".minime"
-            / "worktrees"
+            self.pipeline.worktree_manager.resolve_worktree_parent_dir(run.project_id)
             / f"{job.job_id}-integration-gen{next_generation}-{target_short_sha}"
         ).resolve()
         recorded_path = details.get("worktree_path")
@@ -1337,22 +1334,28 @@ class OrchestrationService:
         job: Job,
         run: OrchestrationRun,
     ) -> WorktreeInfo:
-        """Create a managed integration worktree whose identity includes its target base."""
-        if path.exists():
-            state = await manager.inspect_worktree_state(path)
-            if state.dirty:
-                raise RuntimeError(f"Existing integration worktree is dirty: {path}")
-            return WorktreeInfo(path, branch_name, base_sha)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        await manager._git(
-            ["worktree", "add", "-b", branch_name, str(path), base_sha],
-            cwd=manager.project_root,
+        """Create a managed integration worktree using central WorktreeManager authority."""
+        gen = 1
+        sha_suffix = None
+        if "-integration-gen" in path.name:
+            try:
+                parts = path.name.split("-integration-gen", 1)[1].split("-")
+                gen = int(parts[0])
+                if len(parts) > 1:
+                    sha_suffix = parts[1]
+            except Exception:
+                pass
+
+        return await manager.create_integration_worktree(
             job_id=job.job_id,
+            branch_name=branch_name,
+            base_sha=base_sha,
+            generation=gen,
             project_id=run.project_id,
-            operation_type="candidate_base_integration_worktree_add",
-            managed_worktree_path=path,
+            run_id=run.run_id,
+            change_name=run.change_name,
+            target_short_sha=sha_suffix,
         )
-        return WorktreeInfo(path, branch_name, base_sha)
 
     def _find_transition_event(
         self,
@@ -3122,8 +3125,69 @@ class OrchestrationService:
         """Validate the registered repository root and exact audited candidate for push."""
         import subprocess
 
+        from minime.domain.enums import WorkspaceOperation
+        from minime.domain.models import WorkspaceMutationRequest
+        from minime.services.workspace_guard import ManagedWorkspaceGuard, is_binding_fully_valid
+
         if not binding or not binding.is_valid or binding.repository != project.repository:
             return root, "Project repository binding is invalid for branch push."
+
+        binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
+        managed_binding = (
+            binding_repo.get_by_project_id(project.project_id) if binding_repo else None
+        )
+        if not managed_binding:
+            return (
+                root,
+                f"Missing ProjectManagedRepositoryBinding for project '{project.project_id}'.",
+            )
+
+        if not is_binding_fully_valid(managed_binding):
+            return (
+                root,
+                f"ProjectManagedRepositoryBinding for project '{project.project_id}' is missing, invalid, or unverified.",
+            )
+
+        managed_root = Path(managed_binding.managed_repository_root).resolve()
+        if root.resolve() != managed_root:
+            return (
+                root,
+                f"Registered repository root '{root.resolve()}' does not match managed repository root '{managed_root}'.",
+            )
+
+        guard = ManagedWorkspaceGuard(self.uow)
+        marker_ok, marker_msg, _, _ = guard.verify_managed_repository_ownership_marker(
+            str(managed_root),
+            project.project_id,
+            managed_binding.canonical_repository_identity,
+        )
+        if not marker_ok:
+            return root, marker_msg
+
+        remote_name = managed_binding.remote_name or "origin"
+        remote_ok, remote_msg = guard.verify_git_repository_identity(
+            str(managed_root),
+            managed_binding.canonical_repository_identity,
+            remote_name=remote_name,
+        )
+        if not remote_ok:
+            return root, remote_msg
+
+        decision = guard.evaluate_mutation(
+            WorkspaceMutationRequest(
+                project_id=project.project_id,
+                requested_operation=WorkspaceOperation.GIT_BRANCH,
+                target_path=str(managed_root),
+                actor="orchestrator",
+            )
+        )
+        if not decision.allowed:
+            return (
+                root,
+                f"Workspace mutation policy denied push branch for target '{managed_root}': "
+                f"{decision.provider_detail or decision.reason_code.value}",
+            )
+
         try:
             top = subprocess.run(
                 ["git", "rev-parse", "--show-toplevel"],

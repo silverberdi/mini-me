@@ -47,9 +47,11 @@ from minime.domain.models import (
     OrchestrationExternalAction,
     OrchestrationRun,
     OrchestrationStageEvent,
+    OrchestrationWorktreeOwnership,
     PreviewSession,
     Project,
     ProjectBinding,
+    ProjectManagedRepositoryBinding,
     ProviderEfficiencyMetrics,
     ProviderHealth,
     Review,
@@ -125,6 +127,44 @@ class ProjectBindingRepositoryInterface(ABC):
     def get_by_project_and_change(
         self, project_id: str, change_name: str
     ) -> ProjectBinding | None: ...
+
+
+class ProjectManagedRepositoryBindingRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, binding: ProjectManagedRepositoryBinding) -> None: ...
+
+    @abstractmethod
+    def get_by_project_id(self, project_id: str) -> ProjectManagedRepositoryBinding | None: ...
+
+    @abstractmethod
+    def get_by_repository_identity(
+        self, canonical_repository_identity: str
+    ) -> ProjectManagedRepositoryBinding | None: ...
+
+
+class OrchestrationWorktreeOwnershipRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, ownership: OrchestrationWorktreeOwnership) -> None: ...
+
+    @abstractmethod
+    def get_by_id(self, worktree_id: str) -> OrchestrationWorktreeOwnership | None: ...
+
+    @abstractmethod
+    def get_by_canonical_path(
+        self, canonical_worktree_path: str
+    ) -> OrchestrationWorktreeOwnership | None: ...
+
+    @abstractmethod
+    def get_by_job_id(self, job_id: str) -> OrchestrationWorktreeOwnership | None: ...
+
+    @abstractmethod
+    def list_by_project(self, project_id: str) -> list[OrchestrationWorktreeOwnership]: ...
+
+    @abstractmethod
+    def list_active(self) -> list[OrchestrationWorktreeOwnership]: ...
+
+    @abstractmethod
+    def delete(self, worktree_id: str) -> None: ...
 
 
 class EventRepositoryInterface(ABC):
@@ -676,6 +716,8 @@ class PersistenceUnitOfWork(ABC):
     backlog_items: BacklogItemRepositoryInterface
     integrity_findings: IntegrityFindingRepositoryInterface
     classification_snapshots: TaskClassificationSnapshotRepositoryInterface
+    project_managed_repository_bindings: ProjectManagedRepositoryBindingRepositoryInterface
+    orchestration_worktree_ownerships: OrchestrationWorktreeOwnershipRepositoryInterface
 
     @abstractmethod
     def commit(self) -> None: ...

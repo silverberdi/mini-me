@@ -60,6 +60,16 @@ def test_github_issue_number_mandatory_for_ready(in_memory_uow, tmp_path):
         reviewer="antigravity",
     )
 
+    from conftest import setup_managed_repository_fixture
+    setup_managed_repository_fixture(
+        uow=in_memory_uow,
+        project_id="proj-a",
+        repo_root=tmp_path,
+        worktree_parent_dir=tmp_path / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+        remote_name="origin",
+    )
+
     # Binding without an issue number
     binding = ProjectBinding(
         project_id="proj-a",

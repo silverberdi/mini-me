@@ -48,6 +48,16 @@ def test_real_scheduler_multi_item_acceptance(
 
     init_git_repo(tmp_path)
 
+    from tests.conftest import setup_managed_repository_fixture
+
+    setup_managed_repository_fixture(
+        in_memory_uow,
+        "mini-me",
+        tmp_path,
+        tmp_path / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+    )
+
     in_memory_uow.provider_health.save(
         ProviderHealth(health_id="ph-c", provider="codex", status=ProviderHealthStatus.AVAILABLE)
     )

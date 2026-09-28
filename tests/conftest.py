@@ -30,6 +30,7 @@ from minime.domain.enums import (
     RetrySafety,
     ReviewStatus,
     ReviewVerdict,
+    WorktreeCreationState,
 )
 from minime.domain.exceptions import LifecycleBypassError
 from minime.domain.interfaces import (
@@ -105,9 +106,11 @@ from minime.domain.models import (
     OrchestrationExternalAction,
     OrchestrationRun,
     OrchestrationStageEvent,
+    OrchestrationWorktreeOwnership,
     PreviewSession,
     Project,
     ProjectBinding,
+    ProjectManagedRepositoryBinding,
     ProviderEfficiencyMetrics,
     ProviderHealth,
     Review,
@@ -1908,6 +1911,72 @@ class InMemoryTaskClassificationSnapshotRepository(TaskClassificationSnapshotRep
         return items[0] if items else None
 
 
+class InMemoryProjectManagedRepositoryBindingRepository:
+    def __init__(self, uow=None):
+        self._store: dict[str, ProjectManagedRepositoryBinding] = {}
+        self._uow = uow
+
+    def save(self, binding: ProjectManagedRepositoryBinding) -> None:
+        self._store[binding.project_id] = binding.model_copy(deep=True)
+
+    def get_by_project_id(self, project_id: str) -> ProjectManagedRepositoryBinding | None:
+        b = self._store.get(project_id)
+        if b:
+            return b.model_copy(deep=True)
+        return None
+
+    def list_all(self) -> list[ProjectManagedRepositoryBinding]:
+        return [b.model_copy(deep=True) for b in self._store.values()]
+
+    def get_by_repository_identity(self, canonical_repository_identity: str) -> ProjectManagedRepositoryBinding | None:
+        for b in self._store.values():
+            if b.canonical_repository_identity == canonical_repository_identity:
+                return b.model_copy(deep=True)
+        return None
+
+    def delete(self, project_id: str) -> None:
+        self._store.pop(project_id, None)
+
+
+class InMemoryOrchestrationWorktreeOwnershipRepository:
+    def __init__(self):
+        self._store: dict[str, OrchestrationWorktreeOwnership] = {}
+
+    def save(self, ownership: OrchestrationWorktreeOwnership) -> None:
+        self._store[ownership.worktree_id] = ownership.model_copy(deep=True)
+
+    def get_by_id(self, worktree_id: str) -> OrchestrationWorktreeOwnership | None:
+        w = self._store.get(worktree_id)
+        return w.model_copy(deep=True) if w else None
+
+    def get_by_canonical_path(self, canonical_worktree_path: str) -> OrchestrationWorktreeOwnership | None:
+        norm_target = os.path.realpath(canonical_worktree_path) if os.path.exists(canonical_worktree_path) else canonical_worktree_path
+        for w in self._store.values():
+            norm_w = os.path.realpath(w.canonical_worktree_path) if os.path.exists(w.canonical_worktree_path) else w.canonical_worktree_path
+            if norm_w == norm_target or w.canonical_worktree_path == canonical_worktree_path:
+                return w.model_copy(deep=True)
+        return None
+
+    def get_by_job_id(self, job_id: str) -> OrchestrationWorktreeOwnership | None:
+        for w in self._store.values():
+            if w.job_id == job_id:
+                return w.model_copy(deep=True)
+        return None
+
+    def list_by_project(self, project_id: str) -> list[OrchestrationWorktreeOwnership]:
+        return [w.model_copy(deep=True) for w in self._store.values() if w.project_id == project_id]
+
+    def list_active(self) -> list[OrchestrationWorktreeOwnership]:
+        return [
+            w.model_copy(deep=True)
+            for w in self._store.values()
+            if w.creation_state in (WorktreeCreationState.PENDING, WorktreeCreationState.CREATED)
+        ]
+
+    def delete(self, worktree_id: str) -> None:
+        self._store.pop(worktree_id, None)
+
+
 class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
     def __init__(self):
         self.projects = InMemoryProjectRepository()
@@ -1951,6 +2020,8 @@ class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.backlog_items = InMemoryBacklogItemRepository()
         self.integrity_findings = InMemoryIntegrityFindingRepository()
         self.classification_snapshots = InMemoryTaskClassificationSnapshotRepository()
+        self.project_managed_repository_bindings = InMemoryProjectManagedRepositoryBindingRepository(self)
+        self.orchestration_worktree_ownerships = InMemoryOrchestrationWorktreeOwnershipRepository()
         self.committed = False
         self.rolled_back = False
 
@@ -1992,6 +2063,7 @@ def init_git_repo(root: Path) -> None:
     subprocess.run(["git", "config", "user.name", "Test User"], cwd=root, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=root, check=True)
     subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=root, check=True)
+    subprocess.run(["git", "remote", "add", "origin", f"https://github.com/org/{root.name}"], cwd=root, check=False)
     if not any(root.iterdir()):
         (root / "README.md").write_text("# repo\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=root, check=True)
@@ -2021,3 +2093,119 @@ def create_isolated_openspec_change(
     specs_dir.mkdir(parents=True, exist_ok=True)
     (specs_dir / "spec.md").write_text(spec_content, encoding="utf-8")
     return change_dir
+
+
+def setup_managed_repository_fixture(
+    uow: Any,
+    project_id: str,
+    repo_root: Path,
+    worktree_parent_dir: Path,
+    canonical_repository_identity: str = "github.com/org/repo",
+    remote_name: str = "origin",
+    remote_url: str | None = None,
+) -> ProjectManagedRepositoryBinding:
+    """Canonical test helper to initialize git repo, managed project marker, and durable ProjectManagedRepositoryBinding."""
+    import json
+    import subprocess
+
+    if remote_url is None:
+        remote_url = f"https://{canonical_repository_identity}"
+
+    repo_root.mkdir(parents=True, exist_ok=True)
+    worktree_parent_dir.mkdir(parents=True, exist_ok=True)
+
+    if not (repo_root / ".git").exists():
+        subprocess.run(["git", "init", "-b", "main"], cwd=repo_root, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_root, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_root, check=True)
+
+    try:
+        subprocess.run(["git", "remote", "add", remote_name, remote_url], cwd=repo_root, check=True, capture_output=True)
+    except Exception:
+        subprocess.run(["git", "remote", "set-url", remote_name, remote_url], cwd=repo_root, check=False, capture_output=True)
+
+    marker_file = repo_root / ".minime-managed-project.json"
+    marker_data = {
+        "project_id": project_id,
+        "canonical_repository_identity": canonical_repository_identity,
+    }
+    marker_file.write_text(json.dumps(marker_data, indent=2), encoding="utf-8")
+
+    has_commits = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_root, capture_output=True).returncode == 0
+    if not has_commits:
+        if not (repo_root / "README.md").exists():
+            (repo_root / "README.md").write_text("# repo\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=repo_root, check=True)
+        subprocess.run(["git", "commit", "-m", "initial"], cwd=repo_root, check=True, capture_output=True)
+
+    binding = ProjectManagedRepositoryBinding(
+        project_id=project_id,
+        canonical_repository_identity=canonical_repository_identity,
+        managed_repository_root=str(repo_root.resolve()),
+        worktree_parent_dir=str(worktree_parent_dir.resolve()),
+        remote_name=remote_name,
+    )
+    if uow and hasattr(uow, "project_managed_repository_bindings") and uow.project_managed_repository_bindings:
+        uow.project_managed_repository_bindings.save(binding)
+
+    return binding
+
+
+def create_test_worktree_ownership(
+    uow: Any,
+    worktree_id: str,
+    project_id: str,
+    job_id: str,
+    run_id: str,
+    change_name: str,
+    canonical_worktree_path: Path | str,
+    source_repository_identity: str = "github.com/org/repo",
+    source_base_sha: str = "main",
+    branch: str = "main",
+    creation_state: WorktreeCreationState = WorktreeCreationState.CREATED,
+) -> OrchestrationWorktreeOwnership:
+    """Canonical test helper for OrchestrationWorktreeOwnership with complete identity fields."""
+    ownership = OrchestrationWorktreeOwnership(
+        worktree_id=worktree_id,
+        project_id=project_id,
+        job_id=job_id,
+        run_id=run_id,
+        change_name=change_name,
+        canonical_worktree_path=str(Path(canonical_worktree_path).resolve()),
+        source_repository_identity=source_repository_identity,
+        source_base_sha=source_base_sha,
+        branch=branch,
+        creation_state=creation_state,
+        created_at=utc_now(),
+        updated_at=utc_now(),
+    )
+    if uow and hasattr(uow, "orchestration_worktree_ownerships") and uow.orchestration_worktree_ownerships:
+        uow.orchestration_worktree_ownerships.save(ownership)
+    return ownership
+
+
+def write_test_worktree_ownership_marker(
+    worktree_path: Path | str,
+    ownership: OrchestrationWorktreeOwnership,
+) -> Path:
+    """Canonical test helper to write complete .minime_worktree_ownership.json matching durable ownership."""
+    import json
+
+    path = Path(worktree_path).resolve()
+    path.mkdir(parents=True, exist_ok=True)
+    marker_file = path / ".minime_worktree_ownership.json"
+    data = {
+        "worktree_id": ownership.worktree_id,
+        "project_id": ownership.project_id,
+        "job_id": ownership.job_id,
+        "run_id": ownership.run_id,
+        "change_name": ownership.change_name,
+        "canonical_worktree_path": ownership.canonical_worktree_path,
+        "branch": ownership.branch,
+        "branch_name": ownership.branch_name,
+        "source_repository_identity": ownership.source_repository_identity,
+        "source_base_sha": ownership.source_base_sha,
+        "created_at": ownership.created_at.isoformat() if hasattr(ownership.created_at, "isoformat") else str(ownership.created_at),
+    }
+    marker_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    return marker_file

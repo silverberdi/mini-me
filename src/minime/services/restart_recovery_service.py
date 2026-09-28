@@ -269,7 +269,14 @@ class RestartRecoveryService:
         )
 
         # 3. Inspect and recover Git locks fail-closed with concrete ownership proof
-        worktree_path = self.managed_worktrees_root / job.job_id
+        from minime.services.worktree_manager import WorktreeManager
+        wt_manager = WorktreeManager(self.project_root, uow=self.uow)
+        try:
+            wt_parent = wt_manager.resolve_worktree_parent_dir(job.project_id)
+            worktree_path = (wt_parent / job.job_id).resolve()
+        except Exception:
+            worktree_path = (self.managed_worktrees_root / job.job_id).resolve()
+
         lock_results = self.inspect_git_locks(worktree_path, job)
 
         unsafe_results = [r for r in lock_results if r.verdict != LockSafetyStatus.SAFE_ORPHANED]
@@ -300,9 +307,25 @@ class RestartRecoveryService:
             return blocked_job
 
         # Safely remove conclusively proven SAFE_ORPHANED locks and update ownership records
+        from minime.domain.enums import WorkspaceOperation
+        from minime.domain.models import WorkspaceMutationRequest
+        from minime.services.workspace_guard import ManagedWorkspaceGuard
+        guard = ManagedWorkspaceGuard(self.uow)
+
         for safe_res in lock_results:
             if safe_res.verdict == LockSafetyStatus.SAFE_ORPHANED:
-                lock_file_path = Path(safe_res.lock_path)
+                lock_file_path = Path(safe_res.lock_path).resolve()
+                req = WorkspaceMutationRequest(
+                    project_id=job.project_id,
+                    target_path=str(lock_file_path),
+                    requested_operation=WorkspaceOperation.WORKTREE_DELETE,
+                    job_id=job.job_id,
+                )
+                decision = guard.evaluate_mutation(req)
+                if not decision.allowed:
+                    logger.warning(f"Refusing lock removal at '{lock_file_path}': guard denied mutation: {decision.provider_detail}")
+                    continue
+
                 lock_file_path.unlink(missing_ok=True)
                 logger.info(f"Safely removed orphaned mini me Git lock: {safe_res.lock_path}")
 

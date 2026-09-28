@@ -68,6 +68,9 @@ from minime.domain.enums import (
     ValidationVerdict,
     WorkItemSource,
     WorkItemStatus,
+    WorkspaceOperation,
+    WorkspaceRole,
+    WorktreeCreationState,
 )
 
 
@@ -1412,6 +1415,8 @@ class ProjectOnboardingInput(BaseModel):
     implementer: str = "codex"
     reviewer: str = "antigravity"
     checks: list[dict[str, Any]] = Field(default_factory=list)
+    managed_repository_root: str | None = None
+    worktree_parent_dir: str | None = None
 
 
 class ProjectOnboardingResult(BaseModel):
@@ -1539,3 +1544,93 @@ class TaskClassificationProfile(BaseModel):
     complexity: TaskComplexity
     risk_profile: TaskRiskProfile = Field(default_factory=TaskRiskProfile)
     surface_kind: TaskSurfaceKind
+
+
+SYNTHETIC_AUTHORITY_PLACEHOLDERS: frozenset[str] = frozenset(
+    {
+        "run-default",
+        "change-default",
+        "base-default",
+        "unknown-repo",
+    }
+)
+
+
+class WorktreeCleanupResult(BaseModel):
+    """Typed outcome of a canonical worktree cleanup operation."""
+
+    outcome: ExternalOutcome
+    reason_code: ExternalReasonCode
+    provider_detail: str | None = None
+
+
+class ProjectManagedRepositoryBinding(BaseModel):
+    """Durable project managed-repository binding model for physical/logical workspace isolation."""
+
+    binding_id: str = Field(default_factory=generate_uuid)
+    project_id: str
+    canonical_repository_identity: str
+    remote_name: str = "origin"
+    managed_repository_root: str
+    worktree_parent_dir: str
+    default_base_branch: str = "main"
+    ownership_marker_filename: str = ".minime-managed-project.json"
+    is_valid: bool = True
+    mismatch_reasons: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class OrchestrationWorktreeOwnership(BaseModel):
+    """Durable database ownership record for an execution worktree outside the mutable filesystem."""
+
+    worktree_id: str = Field(default_factory=generate_uuid)
+    project_id: str
+    job_id: str
+    run_id: str
+    change_name: str
+    canonical_worktree_path: str
+    source_repository_identity: str
+    source_base_sha: str
+    branch: str
+    creation_state: WorktreeCreationState = WorktreeCreationState.PENDING
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+    @property
+    def branch_name(self) -> str:
+        return self.branch
+
+    @property
+    def has_synthetic_placeholder(self) -> bool:
+        """Return True if any authorization-capable identity field contains synthetic placeholders."""
+        fields_to_check = [
+            self.run_id,
+            self.change_name,
+            self.source_repository_identity,
+            self.source_base_sha,
+            self.branch,
+        ]
+        return any(f in SYNTHETIC_AUTHORITY_PLACEHOLDERS for f in fields_to_check if f)
+
+
+class WorkspaceMutationRequest(BaseModel):
+    """Request payload submitted to ManagedWorkspaceGuard for policy evaluation."""
+
+    project_id: str
+    target_path: str
+    requested_operation: WorkspaceOperation
+    job_id: str | None = None
+    run_id: str | None = None
+
+
+class WorkspaceMutationDecision(BaseModel):
+    """Policy authorization decision returned by ManagedWorkspaceGuard."""
+
+    allowed: bool
+    outcome: ExternalOutcome
+    reason_code: ExternalReasonCode
+    workspace_role: WorkspaceRole
+    resolved_path: str
+    provider_detail: str | None = None
+
