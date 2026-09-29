@@ -156,3 +156,57 @@ def test_disabled_operator_rejected_without_mutation(test_client_and_session, mo
     response = client.get("/projects", headers=headers)
     assert response.status_code == 403
     assert response.json()["code"] == "IDENTITY_DISABLED"
+
+
+def test_auth_me_unlinked_google_sub_remains_pure(in_memory_uow):
+    """Verify GET /api/v1/auth/me authenticates without mutating google_sub when AuthSession has sub but operator does not."""
+    uow = in_memory_uow
+    now = utc_now()
+    raw_token = "auth_me_test_token_sub_unlinked"
+    token_hash = hash_token(raw_token)
+
+    operator = AuthorizedOperator(
+        email="unlinkedop@example.com",
+        display_name="Unlinked Operator",
+        google_sub=None,
+        is_active=True,
+    )
+    uow.authorized_operators.save(operator)
+
+    session = AuthSession(
+        session_token_hash=token_hash,
+        operator_email="unlinkedop@example.com",
+        google_sub="google-sub-unlinked-12345",
+        created_at=now,
+        expires_at=now + timedelta(days=1),
+        last_seen_at=now,
+    )
+    uow.auth_sessions.save(session)
+    uow.commit()
+
+    uow.committed = False
+
+    def _get_uow_override():
+        return uow
+
+    app.dependency_overrides[get_uow] = _get_uow_override
+    client = TestClient(app)
+
+    try:
+        headers = {"Authorization": f"Bearer {raw_token}"}
+        response = client.get("/api/v1/auth/me", headers=headers)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["authenticated"] is True
+        assert data["operator"]["email"] == "unlinkedop@example.com"
+
+        reloaded_op = uow.authorized_operators.get_by_email("unlinkedop@example.com")
+        assert reloaded_op.google_sub is None
+
+        reloaded_session = uow.auth_sessions.get_by_id(session.session_id)
+        assert reloaded_session.google_sub == "google-sub-unlinked-12345"
+        assert reloaded_session.last_seen_at == session.last_seen_at
+
+        assert uow.committed is False
+    finally:
+        app.dependency_overrides.clear()

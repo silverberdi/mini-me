@@ -565,6 +565,7 @@ def cqs_test_setup(in_memory_uow):
     session = AuthSession(
         session_token_hash=hash_token(raw_token),
         operator_email="cqsop@example.com",
+        google_sub="google-sub-cqs-test-999",
         created_at=now,
         expires_at=now + timedelta(days=1),
         last_seen_at=now,

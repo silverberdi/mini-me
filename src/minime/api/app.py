@@ -1978,7 +1978,7 @@ def get_auth_me_endpoint(request: Request, uow: UowDep) -> AuthStatusDTO:
     if not auth_session:
         return AuthStatusDTO(authenticated=False)
 
-    decision, operator = operator_svc.evaluate_operator(
+    decision, operator = operator_svc.evaluate_operator_pure(
         auth_session.operator_email, auth_session.google_sub
     )
     if decision != OperatorAuthDecision.AUTHORIZED or not operator:
