@@ -4,7 +4,7 @@
 
 ### Requirement: Pure HTTP GET/HEAD Endpoint Purity and Non-Locking Reads
 
-The system SHALL enforce that all HTTP GET and HEAD endpoints operate strictly as side-effect-free Queries, SHALL execute zero database inserts, updates, deletes, or event emissions, and SHALL NOT request write-intent database locks (`SELECT ... FOR UPDATE` or `get_for_update()`).
+The system SHALL enforce that all HTTP GET and HEAD endpoints classified as Queries operate strictly as side-effect-free operations, SHALL execute zero database inserts, updates, deletes, or event emissions, and SHALL NOT request write-intent database locks (`SELECT ... FOR UPDATE` or `get_for_update()`).
 
 #### Scenario: HTTP GET budget usage returns metrics without acquiring write lock
 GIVEN a client requesting HTTP GET `/budget/usage` or GET `/projects/{project_id}/budget`
@@ -27,19 +27,45 @@ AND SHALL NOT attempt schema migration, state repair, or record insertion.
 
 ---
 
+### Requirement: Side-Effect-Free Authentication Middleware and Security Preservation
+
+Request authentication and authorization middleware executing during query processing SHALL evaluate identity, session validity, allowlist status, and permissions using pure read queries, SHALL NOT update session activity timestamps or operator identities in PostgreSQL, and SHALL preserve exact security enforcement semantics.
+
+#### Scenario: Authenticated HTTP GET produces zero session or operator mutations
+GIVEN a valid authenticated session token provided on an HTTP GET request
+WHEN `auth_middleware` and `get_current_operator` evaluate the request identity
+THEN the system SHALL authenticate the operator successfully
+AND `AuthSession.last_seen_at`, `ip_address`, and `user_agent` SHALL remain 100% unchanged in PostgreSQL
+AND `AuthorizedOperator.google_sub` SHALL remain 100% unchanged
+AND no database commit or update SHALL occur as a consequence of authentication.
+
+#### Scenario: Expired or revoked session is rejected without state mutation
+GIVEN an expired or revoked session token provided on an HTTP GET request
+WHEN request authentication middleware executes
+THEN the system SHALL reject the request with HTTP 401 Unauthorized
+AND SHALL NOT mutate PostgreSQL state or update session activity timestamps.
+
+#### Scenario: Disabled or non-allowlisted operator is rejected without state mutation
+GIVEN a session token belonging to a disabled or non-allowlisted operator identity
+WHEN request authorization middleware evaluates the operator
+THEN the system SHALL reject the request with HTTP 403 Forbidden
+AND SHALL NOT persist changes to `AuthorizedOperator` records.
+
+---
+
 ### Requirement: Side-Effect-Free Query Services and Zero Transitive Mutation
 
 All query service methods and read-model projections SHALL be transitively pure, and calling a top-level query method SHALL NOT trigger nested database writes, event emissions, or transaction commits.
 
 #### Scenario: Reading scheduler status emits no mode change events
-GIVEN `CapacityLifecycleService.get_scheduler_status()` called from a query path or GET endpoint
+GIVEN `CapacityLifecycleService.get_scheduler_status_pure()` called from a query path or GET endpoint
 WHEN the scheduler mode is evaluated
 THEN it SHALL return the computed `SchedulerStatus` DTO
 AND SHALL NOT persist a `SCHEDULER_MODE_CHANGED` event to PostgreSQL
 AND SHALL NOT invoke `uow.commit()`.
 
 #### Scenario: Listing provider health does not insert missing records on read
-GIVEN `ProviderHealthService.list_all_health()` called for tracked providers
+GIVEN `ProviderHealthService.list_existing_health()` called for tracked providers
 WHEN a provider has no existing persisted `ProviderHealth` row in PostgreSQL
 THEN the query service SHALL return an unpersisted health DTO representing its default state or `UNKNOWN`
 AND SHALL NOT insert a new row into PostgreSQL or commit a transaction.
@@ -67,6 +93,32 @@ AND SHALL NOT call `uow.commit()`.
 GIVEN an intentional command to evaluate and persist change readiness
 WHEN `ReadinessService.evaluate_and_persist_change_readiness()` is invoked
 THEN it SHALL compute DoR checks, save updated readiness fields to `Change`, emit a `READINESS_EVALUATED` event, persist a `MetricFact`, and commit the unit of work.
+
+---
+
+### Requirement: Stage D Command Row-Locking Preservation
+
+Delivered Stage D saga-resume row locking (`get_for_update()`) on command execution paths SHALL be explicitly preserved, and prohibiting write-intent locks on query paths SHALL NOT weaken or remove row locking from command execution.
+
+#### Scenario: Saga resume command retains Stage D row-locking semantics
+GIVEN an intentional operator or scheduler command to resume a saga via `SagaEngine.resume_saga()`
+WHEN the saga engine acquires the durable saga record for update
+THEN it SHALL call `DurableSagaRepository.get_for_update()` and execute `SELECT ... FOR UPDATE`
+AND this row locking SHALL be explicitly permitted as a COMMAND operation
+AND SHALL NOT be treated as a CQS violation.
+
+---
+
+### Requirement: Protocol GET Endpoint Classification and Command Exclusion
+
+Endpoints using the HTTP GET method that perform protocol-mandated state mutations (such as OAuth login, code exchange callback, and logout) SHALL be explicitly classified as Commands in the system design and excluded from generic query purity test suites through an authoritative Exclusion Register.
+
+#### Scenario: OAuth callback endpoint executes protocol command mutations
+GIVEN an incoming HTTP GET request to `/api/v1/auth/google/callback`
+WHEN the endpoint processes the OAuth authorization code exchange
+THEN it SHALL exchange the code, create an `AuthSession`, link `google_sub`, and commit the transaction
+AND this endpoint SHALL be classified as a COMMAND / PROTOCOL_MUTATION
+AND SHALL be excluded from the generic HTTP query purity test suite.
 
 ---
 
