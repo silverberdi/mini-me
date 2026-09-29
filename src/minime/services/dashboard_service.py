@@ -415,6 +415,10 @@ class OperationsDashboardService:
         for r in all_runs:
             change_for_run = changes_map.get((r.project_id, r.change_name))
             is_change_done = change_for_run and change_for_run.status == ChangeStatus.DONE
+            is_change_terminal = change_for_run and change_for_run.status in {
+                ChangeStatus.DONE,
+                ChangeStatus.CANCELLED,
+            }
             is_run_completed = (
                 r.current_stage == OrchestrationStage.COMPLETED
                 or r.stop_outcome == OrchestrationStopOutcome.COMPLETED
@@ -432,7 +436,7 @@ class OperationsDashboardService:
             is_checks_failed = job_for_run and job_for_run.status == JobStatus.CHECKS_FAILED
 
             if (
-                not is_change_done
+                not is_change_terminal
                 and not is_run_completed
                 and not is_superseded
                 and not r.is_active
@@ -494,7 +498,7 @@ class OperationsDashboardService:
                         updated_at=_format_dt(r.updated_at),
                     )
                 )
-            elif r.is_active:
+            elif r.is_active and not is_change_terminal:
                 job_for_run = (
                     jobs_map.get(r.active_job_id)
                     if r.active_job_id
@@ -1026,8 +1030,11 @@ class OperationsDashboardService:
     ) -> str:
         """Derive the canonical high-level status for a change."""
         # 1. Change-level terminal authority has highest precedence
-        if change and change.status == ChangeStatus.DONE:
-            return "COMPLETED"
+        if change:
+            if change.status == ChangeStatus.DONE:
+                return "COMPLETED"
+            if change.status == ChangeStatus.CANCELLED:
+                return "CANCELLED"
 
         if not run:
             if not change:

@@ -177,6 +177,12 @@ class ReadinessService:
                         )
                     )
             except Exception as e:
+                from minime.logging import redact_secrets
+
+                safe_diag = redact_secrets(str(e)).strip() or "Capacity observation failed"
+                reason = f"Primary pair capacity unavailable/unobservable: {safe_diag}."
+                checks.append(ReadinessCheck(name="primary_capacity", passed=False, reason=reason))
+                unmet_reasons.append(reason)
                 logger.warning(f"Capacity check error: {e}")
 
         # Stage C Admission Fence: Re-validate CURRENT Stage C truth using canonical authorities
@@ -233,7 +239,7 @@ class ReadinessService:
                         target_path=managed_root,
                         requested_operation=WorkspaceOperation.READ,
                     )
-                    class_decision = guard.evaluate_mutation(class_req)
+                    class_decision = guard.evaluate_mutation_pure(class_req)
                     if (
                         not class_decision.allowed
                         or class_decision.workspace_role != WorkspaceRole.MANAGED_REPOSITORY

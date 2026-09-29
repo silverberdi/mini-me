@@ -1030,12 +1030,15 @@ class IntakeService:
                 or is_run_completed
                 or bool(change_rec and change_rec.status == ChangeStatus.DONE)
             )
+            is_cancelled = bool(change_rec and change_rec.status == ChangeStatus.CANCELLED)
 
             new_status = item.status
             new_run_id = item.run_id
 
             if is_done:
                 new_status = WorkItemStatus.COMPLETED
+            elif is_cancelled:
+                new_status = WorkItemStatus.CANCELLED
             elif latest_run:
                 new_run_id = latest_run.run_id
                 if latest_run.is_active:

@@ -223,6 +223,12 @@ class ManagedWorkspaceGuard:
             self._record_denial_metric(request, decision)
         return decision
 
+    def evaluate_mutation_pure(
+        self, request: WorkspaceMutationRequest
+    ) -> WorkspaceMutationDecision:
+        """Pure evaluation of workspace mutation request against physical/logical isolation policies without recording denial metrics."""
+        return self._evaluate_mutation_internal(request)
+
     def evaluate_onboarding_bootstrap(
         self,
         request: WorkspaceMutationRequest,
