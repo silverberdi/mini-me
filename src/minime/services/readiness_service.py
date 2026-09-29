@@ -40,7 +40,7 @@ class ReadinessService:
         self.openspec_adapter = openspec_adapter or OpenSpecAdapter()
         self.github_adapter = github_adapter or GitHubAdapter()
 
-    def evaluate_change_readiness(
+    def evaluate_change_readiness_pure(
         self,
         project_id: str,
         change_name: str,
@@ -49,7 +49,7 @@ class ReadinessService:
         github_repo: str | None = None,
         github_issue: int | None = None,
     ) -> ReadinessEvaluation:
-        """Evaluate Definition of Ready against canonical criteria."""
+        """Evaluate Definition of Ready purely against canonical criteria."""
         set_correlation_context(
             project_id=project_id,
             change_id=change_name,
@@ -469,7 +469,7 @@ class ReadinessService:
             evaluated_at=now,
         )
 
-    def evaluate_change_readiness_pure(
+    def evaluate_change_readiness(
         self,
         project_id: str,
         change_name: str,
@@ -478,8 +478,8 @@ class ReadinessService:
         github_repo: str | None = None,
         github_issue: int | None = None,
     ) -> ReadinessEvaluation:
-        """Pure query: Evaluate Definition of Ready without mutating DB or committing transactions."""
-        return self.evaluate_change_readiness(
+        """Command alias: Evaluate Definition of Ready and persist updated Change, Event, and MetricFact."""
+        return self.evaluate_and_persist_change_readiness(
             project_id=project_id,
             change_name=change_name,
             project_root=project_root,
