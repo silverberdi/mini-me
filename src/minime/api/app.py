@@ -1973,10 +1973,8 @@ def get_auth_me_endpoint(request: Request, uow: UowDep) -> AuthStatusDTO:
 
     session_mgr = SessionManager(uow)
     operator_svc = AuthorizedOperatorService(uow)
-    client_ip = request.client.host if request.client else None
-    user_agent = request.headers.get("user-agent")
 
-    auth_session = session_mgr.validate_session(token, ip_address=client_ip, user_agent=user_agent)
+    auth_session = session_mgr.validate_session_pure(token)
     if not auth_session:
         return AuthStatusDTO(authenticated=False)
 

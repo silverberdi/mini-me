@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -10,6 +11,10 @@ from fastapi.testclient import TestClient
 
 from minime.api.app import app, get_uow
 from minime.domain.enums import (
+    CapacitySignalSource,
+    EventType,
+    ExternalActionStatus,
+    ExternalActionType,
     JobStatus,
     ProjectStatus,
     ProviderHealthStatus,
@@ -19,10 +24,16 @@ from minime.domain.models import (
     AuthorizedOperator,
     AuthSession,
     BacklogItem,
+    BudgetLedgerEntry,
+    BudgetReservation,
+    CapacityWindow,
     Change,
     DurableSaga,
+    Event,
     Job,
+    MetricFact,
     OpenRouterBudgetPolicy,
+    OrchestrationExternalAction,
     OrchestrationRun,
     Project,
     ProviderHealth,
@@ -108,12 +119,32 @@ def get_all_get_head_routes() -> list[str]:
     return sorted(list(routes))
 
 
+def _get_items(repo, *list_methods):
+    if repo is None:
+        return []
+    for m_name in list_methods:
+        if hasattr(repo, m_name):
+            try:
+                res = getattr(repo, m_name)()
+                if res is not None:
+                    return res
+            except TypeError:
+                pass
+    if hasattr(repo, "_store"):
+        store = getattr(repo, "_store")
+        if isinstance(store, dict):
+            return list(store.values())
+        elif isinstance(store, list):
+            return list(store)
+    return []
+
+
 def capture_db_field_snapshot(uow) -> dict[str, list[tuple[Any, ...]]]:
     """Capture full field-level snapshots across canonical domain models."""
     snapshot: dict[str, list[tuple[Any, ...]]] = {}
 
-    # Projects
-    projects = uow.projects.list_all()
+    # 1. Projects
+    projects = _get_items(uow.projects, "list_all")
     snapshot["projects"] = sorted(
         [
             (
@@ -129,8 +160,8 @@ def capture_db_field_snapshot(uow) -> dict[str, list[tuple[Any, ...]]]:
         ]
     )
 
-    # Changes
-    changes = uow.changes.list_all() if hasattr(uow.changes, "list_all") else []
+    # 2. Changes
+    changes = _get_items(uow.changes, "list_all")
     snapshot["changes"] = sorted(
         [
             (
@@ -144,8 +175,8 @@ def capture_db_field_snapshot(uow) -> dict[str, list[tuple[Any, ...]]]:
         ]
     )
 
-    # Backlog Items
-    backlog = uow.backlog_items.list_all() if hasattr(uow.backlog_items, "list_all") else []
+    # 3. Backlog Items
+    backlog = _get_items(uow.backlog_items, "list_all")
     snapshot["backlog_items"] = sorted(
         [
             (
@@ -158,10 +189,8 @@ def capture_db_field_snapshot(uow) -> dict[str, list[tuple[Any, ...]]]:
         ]
     )
 
-    # Orchestration Runs
-    runs = (
-        uow.orchestration_runs.list_runs() if hasattr(uow.orchestration_runs, "list_runs") else []
-    )
+    # 4. Orchestration Runs
+    runs = _get_items(uow.orchestration_runs, "list_runs", "list_all")
     snapshot["runs"] = sorted(
         [
             (
@@ -175,14 +204,14 @@ def capture_db_field_snapshot(uow) -> dict[str, list[tuple[Any, ...]]]:
         ]
     )
 
-    # Jobs
-    jobs = uow.jobs.list_active_jobs() if hasattr(uow.jobs, "list_active_jobs") else []
+    # 5. Jobs
+    jobs = _get_items(uow.jobs, "list_active_jobs", "list_all")
     snapshot["jobs"] = sorted(
         [(j.job_id, j.project_id, j.change_name, j.status.value) for j in jobs]
     )
 
-    # Sagas
-    sagas = uow.durable_sagas.list_all() if hasattr(uow.durable_sagas, "list_all") else []
+    # 6. Sagas
+    sagas = _get_items(uow.durable_sagas, "list_all")
     snapshot["sagas"] = sorted(
         [
             (
@@ -196,8 +225,8 @@ def capture_db_field_snapshot(uow) -> dict[str, list[tuple[Any, ...]]]:
         ]
     )
 
-    # Events
-    events = uow.events.list_events(limit=1000) if hasattr(uow.events, "list_events") else []
+    # 7. Events
+    events = _get_items(uow.events, "list_events", "list_all")
     snapshot["events"] = sorted(
         [
             (
@@ -210,8 +239,8 @@ def capture_db_field_snapshot(uow) -> dict[str, list[tuple[Any, ...]]]:
         ]
     )
 
-    # Provider Health
-    healths = uow.provider_health.list_all() if hasattr(uow.provider_health, "list_all") else []
+    # 8. Provider Health
+    healths = _get_items(uow.provider_health, "list_all")
     snapshot["provider_health"] = sorted(
         [
             (
@@ -223,8 +252,8 @@ def capture_db_field_snapshot(uow) -> dict[str, list[tuple[Any, ...]]]:
         ]
     )
 
-    # Auth Sessions
-    sessions = uow.auth_sessions.list_all() if hasattr(uow.auth_sessions, "list_all") else []
+    # 9. Auth Sessions
+    sessions = _get_items(uow.auth_sessions, "list_all")
     snapshot["auth_sessions"] = sorted(
         [
             (
@@ -237,18 +266,116 @@ def capture_db_field_snapshot(uow) -> dict[str, list[tuple[Any, ...]]]:
         ]
     )
 
-    # Authorized Operators
-    operators = (
-        uow.authorized_operators.list_all() if hasattr(uow.authorized_operators, "list_all") else []
-    )
+    # 10. Authorized Operators
+    operators = _get_items(uow.authorized_operators, "list_all")
     snapshot["operators"] = sorted([(op.email, op.google_sub, op.is_active) for op in operators])
 
-    # Budget Policies
-    if hasattr(uow, "budget_policies") and hasattr(uow.budget_policies, "list_all"):
-        b_policies = uow.budget_policies.list_all()
-        snapshot["budget_policies"] = sorted(
-            [(bp.project_id, bp.max_daily_budget_usd) for bp in b_policies]
-        )
+    # 11. Budget Policies
+    b_policies = _get_items(getattr(uow, "budget_policies", None), "list_all")
+    snapshot["budget_policies"] = sorted(
+        [
+            (
+                bp.project_id,
+                bp.enabled,
+                str(bp.daily_cap_usd),
+                str(bp.monthly_cap_usd),
+                bp.is_breached,
+            )
+            for bp in b_policies
+        ]
+    )
+
+    # 12. OrchestrationExternalAction
+    ext_actions = _get_items(getattr(uow, "orchestration_external_actions", None), "list_all")
+    snapshot["orchestration_external_actions"] = sorted(
+        [
+            (
+                a.action_key,
+                a.run_id,
+                a.saga_id,
+                getattr(a.action_type, "value", str(a.action_type)),
+                getattr(a.status, "value", str(a.status)),
+                a.candidate_sha,
+                a.reconciled_at.isoformat() if a.reconciled_at else None,
+                a.remote_identifier,
+                a.target_identity,
+            )
+            for a in ext_actions
+        ]
+    )
+
+    # 13. MetricFact
+    facts = _get_items(getattr(uow, "metrics", None), "list_facts", "list_all")
+    snapshot["metric_facts"] = sorted(
+        [
+            (
+                f.metric_name,
+                f.project_id,
+                f.change_id,
+                f.stage,
+                f.fact_value,
+                f.duration_ms,
+                str(sorted(f.details.items())) if f.details else None,
+                f.recorded_at.isoformat() if f.recorded_at else None,
+            )
+            for f in facts
+        ]
+    )
+
+    # 14. CapacityWindow
+    windows = _get_items(getattr(uow, "capacity_windows", None), "list_all")
+    snapshot["capacity_windows"] = sorted(
+        [
+            (
+                w.provider,
+                w.model,
+                w.quota_exhausted_at.isoformat() if w.quota_exhausted_at else None,
+                w.capacity_reset_at.isoformat() if w.capacity_reset_at else None,
+                w.retry_after_seconds,
+                getattr(w.source_signal, "value", str(w.source_signal)),
+            )
+            for w in windows
+        ]
+    )
+
+    # 15. BudgetReservation
+    reservations = _get_items(getattr(uow, "budget_reservations", None), "list_all")
+    snapshot["budget_reservations"] = sorted(
+        [
+            (
+                getattr(r, "reservation_id", getattr(r, "id", None)),
+                r.project_id,
+                r.job_id,
+                r.change_id,
+                r.role,
+                r.canonical_model_identity,
+                str(r.reserved_amount_usd),
+                r.status,
+                r.pricing_snapshot_id,
+            )
+            for r in reservations
+        ]
+    )
+
+    # 16. BudgetLedgerEntry
+    ledger_entries = _get_items(getattr(uow, "budget_ledger", None), "list_all")
+    snapshot["budget_ledger"] = sorted(
+        [
+            (
+                getattr(e, "entry_id", getattr(e, "id", None)),
+                e.reservation_id,
+                e.project_id,
+                e.job_id,
+                e.change_id,
+                e.provider,
+                e.role,
+                e.canonical_model_identity,
+                str(e.amount_usd),
+                e.entry_type,
+            )
+            for e in ledger_entries
+        ]
+    )
 
     return snapshot
 
@@ -330,14 +457,103 @@ def cqs_test_setup(in_memory_uow):
             )
         )
 
+    if hasattr(uow, "events"):
+        uow.events.save(
+            Event(
+                event_id="evt-cqs-123",
+                event_type=EventType.STATUS_CHECKED,
+                project_id="p-cqs-census",
+                change_id="sample-change",
+                timestamp=now,
+            )
+        )
+
     if hasattr(uow, "budget_policies"):
         uow.budget_policies.save(
             OpenRouterBudgetPolicy(
                 project_id="p-cqs-census",
-                max_daily_budget_usd=10.0,
+                daily_cap_usd=Decimal("10.0"),
                 updated_at=now,
             )
         )
+
+    # Seed representative records for the 5 additional durable stores
+    # 1. OrchestrationExternalAction
+    action = OrchestrationExternalAction(
+        action_id="act-cqs-123",
+        run_id="run-cqs-123",
+        saga_id="saga-cqs-123",
+        action_key="git_push:p-cqs-census:sample-change:sha123",
+        action_type=ExternalActionType.BRANCH_PUSH,
+        target_identity="github.com/owner/repo",
+        request_fingerprint="fp123",
+        candidate_sha="1234567890abcdef1234567890abcdef12345678",
+        status=ExternalActionStatus.RESERVED,
+        created_at=now,
+        updated_at=now,
+    )
+    if hasattr(uow, "orchestration_external_actions"):
+        uow.orchestration_external_actions.reserve(action)
+
+    # 2. MetricFact
+    fact = MetricFact(
+        fact_id="mf-cqs-123",
+        metric_name="cycle_time",
+        project_id="p-cqs-census",
+        change_id="sample-change",
+        stage="IMPLEMENTING",
+        fact_value=42.0,
+        recorded_at=now,
+    )
+    if hasattr(uow, "metrics"):
+        uow.metrics.save(fact)
+
+    # 3. CapacityWindow
+    window = CapacityWindow(
+        window_id="cw-cqs-123",
+        provider="codex",
+        model="codex-5",
+        quota_exhausted_at=now,
+        retry_after_seconds=60,
+        source_signal=CapacitySignalSource.HEADER_RETRY_AFTER,
+        created_at=now,
+    )
+    if hasattr(uow, "capacity_windows"):
+        uow.capacity_windows.save(window)
+
+    # 4. BudgetReservation
+    reservation = BudgetReservation(
+        reservation_id="res-cqs-123",
+        project_id="p-cqs-census",
+        job_id="j-cqs-123",
+        change_id="sample-change",
+        role="implementer",
+        canonical_model_identity="openai/gpt-4o",
+        reserved_amount_usd=Decimal("0.50"),
+        status="RESERVED",
+        pricing_snapshot_id="ps-123",
+        created_at=now,
+        updated_at=now,
+    )
+    if hasattr(uow, "budget_reservations"):
+        uow.budget_reservations.save(reservation)
+
+    # 5. BudgetLedgerEntry
+    ledger_entry = BudgetLedgerEntry(
+        entry_id="ble-cqs-123",
+        reservation_id="res-cqs-123",
+        project_id="p-cqs-census",
+        job_id="j-cqs-123",
+        change_id="sample-change",
+        provider="openrouter",
+        role="implementer",
+        canonical_model_identity="openai/gpt-4o",
+        amount_usd=Decimal("0.25"),
+        entry_type="RESERVATION_SETTLED",
+        created_at=now,
+    )
+    if hasattr(uow, "budget_ledger"):
+        uow.budget_ledger.save(ledger_entry)
 
     operator = AuthorizedOperator(
         email="cqsop@example.com",
@@ -449,3 +665,29 @@ def test_dynamic_get_route_census_purity(cqs_test_setup):
     assert executed_count == len(query_routes), (
         f"Executed {executed_count} query handlers, expected {len(query_routes)}"
     )
+
+
+def test_db_field_snapshot_detects_mutation(cqs_test_setup):
+    """Negative-control unit test verifying snapshot detects DB model field mutations."""
+    _, uow, _, _ = cqs_test_setup
+    before = capture_db_field_snapshot(uow)
+
+    # Prove snapshot captures non-empty data across all 14 stores
+    for key, records in before.items():
+        assert len(records) > 0, (
+            f"Snapshot store '{key}' is empty! Test fixture must seed representative records."
+        )
+
+    # Mutate a record in one of the new stores
+    uow.metrics.save(
+        MetricFact(
+            fact_id="mf-cqs-mutation-test",
+            metric_name="mutation_test_metric",
+            project_id="p-cqs-census",
+            change_id="sample-change",
+            fact_value=999.0,
+            recorded_at=utc_now(),
+        )
+    )
+    after = capture_db_field_snapshot(uow)
+    assert before != after, "capture_db_field_snapshot failed to detect DB mutation!"
