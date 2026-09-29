@@ -116,6 +116,15 @@ def test_end_to_end_autonomous_intake_proving(
     assert onboard_res.project.onboarding_status == ProjectOnboardingStatus.READY_FOR_WORK
     assert onboard_res.discovered_items_count >= 1
 
+    from minime.domain.enums import ProviderHealthStatus
+    from minime.domain.models import ProviderHealth
+    in_memory_uow.provider_health.save(
+        ProviderHealth(health_id="ph-codex", provider="codex", status=ProviderHealthStatus.AVAILABLE)
+    )
+    in_memory_uow.provider_health.save(
+        ProviderHealth(health_id="ph-antigravity", provider="antigravity", status=ProviderHealthStatus.AVAILABLE)
+    )
+
     # -------------------------------------------------------------------------
     # Step 2: Context & Backlog Discovery
     # -------------------------------------------------------------------------

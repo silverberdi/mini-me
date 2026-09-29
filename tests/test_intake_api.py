@@ -104,6 +104,15 @@ def test_api_backlog_crud_and_lifecycle(
     )
     in_memory_uow.projects.save(project)
 
+    from minime.domain.enums import ProviderHealthStatus
+    from minime.domain.models import ProviderHealth
+    in_memory_uow.provider_health.save(
+        ProviderHealth(health_id="ph-codex", provider="codex", status=ProviderHealthStatus.AVAILABLE)
+    )
+    in_memory_uow.provider_health.save(
+        ProviderHealth(health_id="ph-antigravity", provider="antigravity", status=ProviderHealthStatus.AVAILABLE)
+    )
+
     # 1. Create work item
     create_resp = client.post(
         "/api/v1/projects/api-project/backlog",
