@@ -194,7 +194,7 @@ class WorkDiscoveryService:
                             break
 
                 # 4. Evaluate readiness
-                readiness_eval = self.readiness_service.evaluate_change_readiness(
+                readiness_eval = self.readiness_service.evaluate_and_persist_change_readiness(
                     project_id=project.project_id,
                     change_name=change_name,
                     project_root=str(self.project_root),

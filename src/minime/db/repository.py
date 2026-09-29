@@ -2090,6 +2090,10 @@ class PostgresOpenRouterBudgetPolicyRepository(OpenRouterBudgetPolicyRepositoryI
     def __init__(self, session: Session):
         self.session = session
 
+    def get_by_project_id(self, project_id: str) -> OpenRouterBudgetPolicy | None:
+        model = self.session.get(OpenRouterBudgetPolicyModel, project_id)
+        return budget_policy_model_to_domain(model) if model else None
+
     def get_for_update(self, project_id: str) -> OpenRouterBudgetPolicy | None:
         model = self.session.scalars(
             select(OpenRouterBudgetPolicyModel)

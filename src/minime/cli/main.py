@@ -236,7 +236,7 @@ def readiness_cmd(
         with db_manager.session() as session:
             uow = PostgresPersistenceUnitOfWork(session)
             service = ReadinessService(uow)
-            result = service.evaluate_change_readiness(
+            result = service.evaluate_and_persist_change_readiness(
                 project_id=project_id,
                 change_name=change_name,
                 project_root=project_root,
@@ -937,7 +937,7 @@ def budget_status_cmd(
             if not project_id:
                 projects = uow.projects.list_all()
                 project_id = projects[0].project_id if projects else ""
-            policy = uow.budget_policies.get_for_update(project_id) if project_id else None
+            policy = uow.budget_policies.get_by_project_id(project_id) if project_id else None
             if not policy:
                 typer.echo("No OpenRouter budget policy found.")
                 return
@@ -1001,7 +1001,7 @@ def providers_openrouter_cmd(
             if not project_id:
                 projects = uow.projects.list_all()
                 project_id = projects[0].project_id if projects else ""
-            policy = uow.budget_policies.get_for_update(project_id) if project_id else None
+            policy = uow.budget_policies.get_by_project_id(project_id) if project_id else None
             headroom = service._compute_headroom(project_id, policy) if policy else None
             payload = {
                 "project_id": project_id,

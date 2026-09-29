@@ -373,6 +373,9 @@ class GitOperationRepositoryInterface(ABC):
 
 class OpenRouterBudgetPolicyRepositoryInterface(ABC):
     @abstractmethod
+    def get_by_project_id(self, project_id: str) -> OpenRouterBudgetPolicy | None: ...
+
+    @abstractmethod
     def get_for_update(self, project_id: str) -> OpenRouterBudgetPolicy | None: ...
 
     @abstractmethod

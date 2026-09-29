@@ -1017,9 +1017,12 @@ class InMemoryOpenRouterBudgetPolicyRepository:
     def __init__(self):
         self._store: dict[str, OpenRouterBudgetPolicy] = {}
 
-    def get_for_update(self, project_id: str) -> OpenRouterBudgetPolicy | None:
+    def get_by_project_id(self, project_id: str) -> OpenRouterBudgetPolicy | None:
         policy = self._store.get(project_id)
         return policy.model_copy(deep=True) if policy else None
+
+    def get_for_update(self, project_id: str) -> OpenRouterBudgetPolicy | None:
+        return self.get_by_project_id(project_id)
 
     def save(self, policy: OpenRouterBudgetPolicy) -> None:
         self._store[policy.project_id] = policy.model_copy(deep=True)

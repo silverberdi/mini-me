@@ -459,7 +459,7 @@ class ReadinessService:
         status = ReadinessState.READY if is_ready else ReadinessState.NOT_READY
 
         now = utc_now()
-        evaluation = ReadinessEvaluation(
+        return ReadinessEvaluation(
             change_id=change_name,
             project_id=project_id,
             status=status,
@@ -468,6 +468,49 @@ class ReadinessService:
             checks=checks,
             evaluated_at=now,
         )
+
+    def evaluate_change_readiness_pure(
+        self,
+        project_id: str,
+        change_name: str,
+        project_root: str,
+        current_active_change: str | None = None,
+        github_repo: str | None = None,
+        github_issue: int | None = None,
+    ) -> ReadinessEvaluation:
+        """Pure query: Evaluate Definition of Ready without mutating DB or committing transactions."""
+        return self.evaluate_change_readiness(
+            project_id=project_id,
+            change_name=change_name,
+            project_root=project_root,
+            current_active_change=current_active_change,
+            github_repo=github_repo,
+            github_issue=github_issue,
+        )
+
+    def evaluate_and_persist_change_readiness(
+        self,
+        project_id: str,
+        change_name: str,
+        project_root: str,
+        current_active_change: str | None = None,
+        github_repo: str | None = None,
+        github_issue: int | None = None,
+    ) -> ReadinessEvaluation:
+        """Command: Evaluate Definition of Ready and persist updated Change, Event, and MetricFact."""
+        evaluation = self.evaluate_change_readiness_pure(
+            project_id=project_id,
+            change_name=change_name,
+            project_root=project_root,
+            current_active_change=current_active_change,
+            github_repo=github_repo,
+            github_issue=github_issue,
+        )
+
+        status = evaluation.status
+        is_ready = evaluation.is_ready
+        unmet_reasons = evaluation.unmet_reasons
+        now = evaluation.evaluated_at
 
         # Update change record in persistence if exists, or create if absent
         change_record = self.uow.changes.get_by_name(project_id, change_name)

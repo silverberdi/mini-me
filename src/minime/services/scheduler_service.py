@@ -449,7 +449,7 @@ class SchedulerService:
                         )
 
         # 4. Definition of Ready (DoR) check
-        readiness = self.readiness_service.evaluate_change_readiness(
+        readiness = self.readiness_service.evaluate_and_persist_change_readiness(
             project_id=project_id,
             change_name=change_name,
             project_root=str(self.project_root),

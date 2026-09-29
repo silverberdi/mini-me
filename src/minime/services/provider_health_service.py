@@ -99,18 +99,32 @@ class ProviderHealthService:
         self._validate_primary(provider)
         return self.uow.provider_health.get_by_provider(provider)
 
-    def list_all_health(self) -> list[ProviderHealth]:
-        """List health for all tracked providers, ensuring records exist."""
+    def list_existing_health(self) -> list[ProviderHealth]:
+        """Pure query: List health for all tracked providers without inserting missing DB rows."""
         results = []
         for prov in sorted(PRIMARY_PROVIDERS):
-            results.append(self.get_health(prov))
+            self._validate_primary(prov)
+            existing = self.uow.provider_health.get_by_provider(prov)
+            if not existing:
+                existing = ProviderHealth(
+                    health_id=f"ph-{prov}",
+                    provider=prov,
+                    status=ProviderHealthStatus.AVAILABLE,
+                    consecutive_failures=0,
+                    updated_at=utc_now(),
+                )
+            results.append(existing)
         return results
+
+    def list_all_health(self) -> list[ProviderHealth]:
+        """List health for all tracked providers without side effects."""
+        return self.list_existing_health()
 
     def list_all_health_with_capacity(self) -> list[tuple[ProviderHealth, CapacityWindow | None]]:
         """Return health with its authoritative latest capacity window."""
         return [
             (health, self.uow.capacity_windows.get_latest_for_provider(health.provider))
-            for health in self.list_all_health()
+            for health in self.list_existing_health()
         ]
 
     def set_operator_expected_reset(
@@ -706,12 +720,15 @@ class ProviderHealthService:
         self._validate_primary(implementer)
         self._validate_primary(reviewer)
 
-        imp_health = self.get_health(implementer)
-        rev_health = self.get_health(reviewer)
+        imp_health = self.get_existing_health(implementer)
+        rev_health = self.get_existing_health(reviewer)
 
-        if imp_health.status != ProviderHealthStatus.AVAILABLE:
-            return False, f"Primary implementer '{implementer}' is {imp_health.status.value}"
-        if rev_health.status != ProviderHealthStatus.AVAILABLE:
-            return False, f"Primary reviewer '{reviewer}' is {rev_health.status.value}"
+        imp_status = imp_health.status if imp_health else ProviderHealthStatus.AVAILABLE
+        rev_status = rev_health.status if rev_health else ProviderHealthStatus.AVAILABLE
+
+        if imp_status != ProviderHealthStatus.AVAILABLE:
+            return False, f"Primary implementer '{implementer}' is {imp_status.value}"
+        if rev_status != ProviderHealthStatus.AVAILABLE:
+            return False, f"Primary reviewer '{reviewer}' is {rev_status.value}"
 
         return True, None

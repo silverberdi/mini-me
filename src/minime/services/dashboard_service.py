@@ -355,11 +355,11 @@ class OperationsDashboardService:
         """Construct high-level operational overview."""
         # 1. Capacity & Scheduler Status
         cap_service = CapacityLifecycleService(self.uow)
-        sched_status = cap_service.get_scheduler_status()
+        sched_status = cap_service.get_scheduler_status_pure()
 
         # 2. Provider Health
         health_service = ProviderHealthService(self.uow)
-        prov_health = health_service.list_all_health()
+        prov_health = health_service.list_existing_health()
         prov_dtos = [
             ProviderHealthDTO(
                 provider_id=h.provider,

@@ -254,13 +254,11 @@ class SessionManager:
         self.uow.commit()
         return raw_token, session
 
-    def validate_session(
+    def validate_session_pure(
         self,
         raw_token: str,
-        ip_address: str | None = None,
-        user_agent: str | None = None,
     ) -> AuthSession | None:
-        """Validate raw token against stored session hash; updates last_seen_at if valid."""
+        """Validate raw token against stored session hash without side effects."""
         if not raw_token or len(raw_token.strip()) < 16:
             return None
 
@@ -272,7 +270,18 @@ class SessionManager:
         if not session.is_valid:
             return None
 
-        # Update last seen
+        return session
+
+    def record_session_activity(
+        self,
+        session_id: str,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
+    ) -> None:
+        """Explicit command to record activity metadata on a valid session."""
+        session = self.uow.auth_sessions.get_by_id(session_id)
+        if not session:
+            return
         session.last_seen_at = utc_now()
         if ip_address:
             session.ip_address = ip_address
@@ -280,6 +289,19 @@ class SessionManager:
             session.user_agent = user_agent
         self.uow.auth_sessions.save(session)
         self.uow.commit()
+
+    def validate_session(
+        self,
+        raw_token: str,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
+    ) -> AuthSession | None:
+        """Validate raw token against stored session hash; updates last_seen_at if valid."""
+        session = self.validate_session_pure(raw_token)
+        if not session:
+            return None
+
+        self.record_session_activity(session.session_id, ip_address=ip_address, user_agent=user_agent)
         return session
 
     def revoke_session_by_token(self, raw_token: str) -> bool:
@@ -315,12 +337,12 @@ class AuthorizedOperatorService:
     def __init__(self, uow: PersistenceUnitOfWork):
         self.uow = uow
 
-    def evaluate_operator(
+    def evaluate_operator_pure(
         self,
         email: str,
         google_sub: str | None = None,
     ) -> tuple[OperatorAuthDecision, AuthorizedOperator | None]:
-        """Evaluate if an authenticated identity is an authorized, active operator."""
+        """Evaluate operator authorization without persisting google_sub side effects."""
         normalized_email = email.lower().strip()
         operator = self.uow.authorized_operators.get_by_email(normalized_email)
         if not operator and google_sub:
@@ -332,14 +354,29 @@ class AuthorizedOperatorService:
         if not operator.is_active:
             return OperatorAuthDecision.IDENTITY_DISABLED, operator
 
-        # Update google_sub if not yet linked
-        if google_sub and not operator.google_sub:
+        return OperatorAuthDecision.AUTHORIZED, operator
+
+    def link_google_sub(self, email: str, google_sub: str) -> None:
+        """Explicit command to link Google sub to an authorized operator."""
+        normalized_email = email.lower().strip()
+        operator = self.uow.authorized_operators.get_by_email(normalized_email)
+        if operator and not operator.google_sub:
             operator.google_sub = google_sub
             operator.updated_at = utc_now()
             self.uow.authorized_operators.save(operator)
             self.uow.commit()
 
-        return OperatorAuthDecision.AUTHORIZED, operator
+    def evaluate_operator(
+        self,
+        email: str,
+        google_sub: str | None = None,
+    ) -> tuple[OperatorAuthDecision, AuthorizedOperator | None]:
+        """Evaluate if an authenticated identity is an authorized, active operator."""
+        decision, operator = self.evaluate_operator_pure(email, google_sub=google_sub)
+        if decision == OperatorAuthDecision.AUTHORIZED and operator and google_sub and not operator.google_sub:
+            self.link_google_sub(email, google_sub)
+            operator = self.uow.authorized_operators.get_by_email(email.lower().strip()) or operator
+        return decision, operator
 
     def seed_operator(
         self,
