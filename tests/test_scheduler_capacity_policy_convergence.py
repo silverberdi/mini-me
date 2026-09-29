@@ -126,6 +126,8 @@ def setup_test_environment(
                 status=reviewer_status,
             )
         )
+    else:
+        uow.provider_health._store.clear()
 
     create_isolated_openspec_change(root, change_name=change_name)
 

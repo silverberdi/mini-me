@@ -729,12 +729,17 @@ class SchedulerService:
             ProviderHealthStatus.DEGRADED,
         ):
             cooldown_until, has_deterministic_eta = _capacity_eta(configured_implementer)
+            block_cond = (
+                AdmissionBlockCondition.UNKNOWN_CAPACITY
+                if impl_health.status == ProviderHealthStatus.UNKNOWN
+                else AdmissionBlockCondition.CAPACITY_EXHAUSTED
+            )
             return AdmissionEvaluationResult(
                 decision=AdmissionDecisionKind.WAIT,
                 project_id=project_id,
                 change_name=change_name,
                 safe_executable_pair_exists=False,
-                block_condition=AdmissionBlockCondition.CAPACITY_EXHAUSTED,
+                block_condition=block_cond,
                 rationale=f"Configured implementer '{configured_implementer}' is {impl_health.status.value}.",
                 cooldown_until=cooldown_until,
                 has_deterministic_eta=has_deterministic_eta,
@@ -747,12 +752,17 @@ class SchedulerService:
             ProviderHealthStatus.DEGRADED,
         ):
             cooldown_until, has_deterministic_eta = _capacity_eta(configured_reviewer)
+            block_cond = (
+                AdmissionBlockCondition.UNKNOWN_CAPACITY
+                if rev_health.status == ProviderHealthStatus.UNKNOWN
+                else AdmissionBlockCondition.CAPACITY_EXHAUSTED
+            )
             return AdmissionEvaluationResult(
                 decision=AdmissionDecisionKind.WAIT,
                 project_id=project_id,
                 change_name=change_name,
                 safe_executable_pair_exists=False,
-                block_condition=AdmissionBlockCondition.CAPACITY_EXHAUSTED,
+                block_condition=block_cond,
                 rationale=f"Configured reviewer '{configured_reviewer}' is {rev_health.status.value}.",
                 cooldown_until=cooldown_until,
                 has_deterministic_eta=has_deterministic_eta,

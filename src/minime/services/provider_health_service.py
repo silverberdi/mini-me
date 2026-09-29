@@ -81,7 +81,7 @@ class ProviderHealthService:
             health = ProviderHealth(
                 health_id=f"ph-{provider}",
                 provider=provider,
-                status=ProviderHealthStatus.AVAILABLE,
+                status=ProviderHealthStatus.UNKNOWN,
                 consecutive_failures=0,
                 updated_at=utc_now(),
             )
