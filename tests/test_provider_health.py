@@ -211,7 +211,9 @@ async def test_provider_health_transient_failure_threshold(in_memory_uow):
 
 
 def test_zero_provider_health_records_does_not_persist(in_memory_uow):
-    service = ProviderHealthService(in_memory_uow)
+    uow = in_memory_uow
+    uow.provider_health._store.clear()
+    service = ProviderHealthService(uow)
     results = service.list_existing_health()
 
     assert len(results) >= 2
@@ -219,11 +221,13 @@ def test_zero_provider_health_records_does_not_persist(in_memory_uow):
         assert r.status == ProviderHealthStatus.UNKNOWN
 
     # Zero DB rows persisted
-    assert len(in_memory_uow.provider_health.list_all()) == 0
+    assert len(uow.provider_health.list_all()) == 0
 
 
 def test_missing_provider_health_is_unknown_not_available(in_memory_uow):
-    service = ProviderHealthService(in_memory_uow)
+    uow = in_memory_uow
+    uow.provider_health._store.clear()
+    service = ProviderHealthService(uow)
     assert service.get_existing_health("codex") is None
 
     avail, reason = service.is_pair_available("codex", "antigravity")
@@ -237,7 +241,9 @@ def test_scheduler_status_pure_with_missing_primary_health_does_not_authorize_ad
     from minime.domain.enums import SchedulerMode
     from minime.services.capacity_lifecycle_service import CapacityLifecycleService
 
-    capacity_service = CapacityLifecycleService(in_memory_uow)
+    uow = in_memory_uow
+    uow.provider_health._store.clear()
+    capacity_service = CapacityLifecycleService(uow)
     status = capacity_service.get_scheduler_status_pure()
 
     assert status.admission_allowed is False

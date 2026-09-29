@@ -2181,7 +2181,18 @@ class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
 
 @pytest.fixture
 def in_memory_uow() -> InMemoryPersistenceUnitOfWork:
-    return InMemoryPersistenceUnitOfWork()
+    uow = InMemoryPersistenceUnitOfWork()
+    for prov in ["codex", "antigravity"]:
+        uow.provider_health.save(
+            ProviderHealth(
+                health_id=f"ph-{prov}",
+                provider=prov,
+                status=ProviderHealthStatus.AVAILABLE,
+                updated_at=utc_now(),
+            )
+        )
+    uow.committed = False
+    return uow
 
 
 _SYNTHETIC_SPEC_CONTENT = (
