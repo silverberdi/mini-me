@@ -78,11 +78,21 @@ def test_autonomous_admission_and_run_creation(
 
     init_git_repo(tmp_path)
     import subprocess
-    subprocess.run(["git", "remote", "set-url", "origin", "https://github.com/silverberdi/mini-me.git"], cwd=tmp_path, check=True)
-    (tmp_path / ".minime-managed-project.json").write_text(json.dumps({
-        "project_id": "mini-me",
-        "canonical_repository_identity": "github.com/silverberdi/mini-me",
-    }), encoding="utf-8")
+
+    subprocess.run(
+        ["git", "remote", "set-url", "origin", "https://github.com/silverberdi/mini-me.git"],
+        cwd=tmp_path,
+        check=True,
+    )
+    (tmp_path / ".minime-managed-project.json").write_text(
+        json.dumps(
+            {
+                "project_id": "mini-me",
+                "canonical_repository_identity": "github.com/silverberdi/mini-me",
+            }
+        ),
+        encoding="utf-8",
+    )
     mb = ProjectManagedRepositoryBinding(
         project_id="mini-me",
         canonical_repository_identity="github.com/silverberdi/mini-me",

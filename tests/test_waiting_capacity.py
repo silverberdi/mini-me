@@ -361,13 +361,19 @@ def test_scheduler_reconciles_and_resumes_waiting_capacity(in_memory_uow, tmp_pa
     from minime.services.scheduler_service import SchedulerService
 
     # Set up git repo
-    subprocess.run(["git", "init", "-b", "main"], cwd=str(tmp_path), check=True, capture_output=True)
+    subprocess.run(
+        ["git", "init", "-b", "main"], cwd=str(tmp_path), check=True, capture_output=True
+    )
     subprocess.run(["git", "config", "user.name", "Test"], cwd=str(tmp_path), check=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(tmp_path), check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"], cwd=str(tmp_path), check=True
+    )
     (tmp_path / "README.md").write_text("# Test\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=str(tmp_path), check=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=str(tmp_path), check=True)
-    subprocess.run(["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=str(tmp_path), check=True)
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=str(tmp_path), check=True
+    )
 
     project_id = "mini-me"
     change_name = "021-test-waiting-resume"
@@ -408,7 +414,9 @@ def test_scheduler_reconciles_and_resumes_waiting_capacity(in_memory_uow, tmp_pa
                 '```json\n{"verdict": "READY_TO_MERGE", "summary": "Looks good", "findings": []}\n```'
             ]
         ),
-        auditor_runner=MockAuditorRunner(output=['{"risk": "low", "summary": "Audit passed", "findings": []}']),
+        auditor_runner=MockAuditorRunner(
+            output=['{"risk": "low", "summary": "Audit passed", "findings": []}']
+        ),
     )
     orch_svc = OrchestrationService(
         uow=in_memory_uow,
@@ -441,7 +449,9 @@ def test_scheduler_reconciles_and_resumes_waiting_capacity(in_memory_uow, tmp_pa
     )
 
     # Reconcile waiting runs in scheduler
-    scheduler = SchedulerService(uow=in_memory_uow, project_root=tmp_path, orchestration_service=orch_svc)
+    scheduler = SchedulerService(
+        uow=in_memory_uow, project_root=tmp_path, orchestration_service=orch_svc
+    )
     resumed_ids = scheduler.reconcile_waiting_runs(project_id=project_id, drive_resumed=False)
 
     assert run.run_id in resumed_ids
@@ -489,13 +499,18 @@ def test_scheduler_waiting_capacity_timeout_escalates_to_needs_human(in_memory_u
         stop_outcome=OrchestrationStopOutcome.WAITING_CAPACITY,
         human_gate=None,
         stop_reason="External execution environment is temporarily unavailable",
-        stop_details={"provider": "codex", "waiting_since": (utc_now() - timedelta(hours=3)).isoformat()},
+        stop_details={
+            "provider": "codex",
+            "waiting_since": (utc_now() - timedelta(hours=3)).isoformat(),
+        },
         is_active=True,
     )
     in_memory_uow.orchestration_runs.save(run)
 
     scheduler = SchedulerService(uow=in_memory_uow, project_root=tmp_path)
-    resumed_ids = scheduler.reconcile_waiting_runs(project_id="mini-me", drive_resumed=False, timeout_hours=2.0)
+    resumed_ids = scheduler.reconcile_waiting_runs(
+        project_id="mini-me", drive_resumed=False, timeout_hours=2.0
+    )
 
     assert len(resumed_ids) == 0
     updated_run = in_memory_uow.orchestration_runs.get_by_id(run.run_id)
@@ -555,5 +570,3 @@ async def test_checks_runner_timeout_cleanup(tmp_path):
     assert len(res.results) == 1
     assert res.results[0].exit_code == 124
     assert "timed out" in res.results[0].output_snippet.lower()
-
-

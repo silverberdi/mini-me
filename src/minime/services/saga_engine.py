@@ -90,7 +90,9 @@ class SagaEngine:
         self.uow.events.save(event)
         self.uow.commit()
 
-        logger.info("Started DurableSaga '%s' (%s) at phase '%s'", saga.id, st_enum.value, initial_phase)
+        logger.info(
+            "Started DurableSaga '%s' (%s) at phase '%s'", saga.id, st_enum.value, initial_phase
+        )
         return saga
 
     def advance_phase(
@@ -160,7 +162,9 @@ class SagaEngine:
         self.uow.events.save(event)
         self.uow.commit()
 
-        logger.warning("Saga '%s' blocked at phase '%s': %s", saga.id, saga.current_phase, blocking_reason)
+        logger.warning(
+            "Saga '%s' blocked at phase '%s': %s", saga.id, saga.current_phase, blocking_reason
+        )
         return updated
 
     def complete_saga(
@@ -225,7 +229,13 @@ class SagaEngine:
         self.uow.events.save(event)
         self.uow.commit()
 
-        logger.error("Saga '%s' (%s) FAILED at phase '%s': %s", saga.id, saga.saga_type.value, saga.current_phase, failure_reason)
+        logger.error(
+            "Saga '%s' (%s) FAILED at phase '%s': %s",
+            saga.id,
+            saga.saga_type.value,
+            saga.current_phase,
+            failure_reason,
+        )
         return updated
 
     def reserve_action(
@@ -244,7 +254,11 @@ class SagaEngine:
 
         existing = self.uow.orchestration_external_actions.get_by_action_key(action_key)
         if existing:
-            logger.info("Action reservation for '%s' already exists (status=%s).", action_key, existing.status.value)
+            logger.info(
+                "Action reservation for '%s' already exists (status=%s).",
+                action_key,
+                existing.status.value,
+            )
             return existing
 
         action = OrchestrationExternalAction(
@@ -276,7 +290,9 @@ class SagaEngine:
         self.uow.events.save(event)
         self.uow.commit()
 
-        logger.info("Reserved action '%s' (%s) in PostgreSQL BEFORE execution.", action_key, at_enum.value)
+        logger.info(
+            "Reserved action '%s' (%s) in PostgreSQL BEFORE execution.", action_key, at_enum.value
+        )
         return action
 
     def record_action_result(
@@ -297,7 +313,9 @@ class SagaEngine:
             ExternalActionStatus.EXECUTING,
             ExternalActionStatus.RESERVED,
         }:
-            raise ValueError(f"Invalid external action status '{st_enum}'. Cannot persist arbitrary status.")
+            raise ValueError(
+                f"Invalid external action status '{st_enum}'. Cannot persist arbitrary status."
+            )
 
         updated = self.uow.orchestration_external_actions.update_status(
             action_key=action_key,
@@ -351,7 +369,9 @@ class SagaEngine:
         self.uow.events.save(event)
         self.uow.commit()
 
-        logger.info("Saga '%s' (%s) CANCELLED: %s", saga.id, saga.saga_type.value, cancellation_reason)
+        logger.info(
+            "Saga '%s' (%s) CANCELLED: %s", saga.id, saga.saga_type.value, cancellation_reason
+        )
         return updated
 
     def resume_saga(
@@ -366,7 +386,9 @@ class SagaEngine:
             raise ValueError(f"Saga '{saga_id}' not found.")
 
         if saga.status in {SagaStatus.COMPLETED, SagaStatus.FAILED}:
-            logger.info("Saga '%s' is in terminal state '%s'; resume skipped.", saga.id, saga.status.value)
+            logger.info(
+                "Saga '%s' is in terminal state '%s'; resume skipped.", saga.id, saga.status.value
+            )
             return saga
 
         logger.info(
@@ -378,7 +400,9 @@ class SagaEngine:
         )
 
         if saga.status == SagaStatus.BLOCKED:
-            saga = self.uow.durable_sagas.update_status(saga.id, status=SagaStatus.IN_PROGRESS, blocking_reason=None)
+            saga = self.uow.durable_sagas.update_status(
+                saga.id, status=SagaStatus.IN_PROGRESS, blocking_reason=None
+            )
 
         if saga.saga_type == SagaType.INTAKE:
             if intake_service is not None:
@@ -393,4 +417,3 @@ class SagaEngine:
 
         updated = self.get_saga(saga_id) or saga
         return updated
-

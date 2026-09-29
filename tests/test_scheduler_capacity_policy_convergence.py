@@ -521,9 +521,7 @@ def test_provider_health_lookup_failure_never_run(
 def test_missing_provider_health_record_never_run(
     tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork
 ):
-    _, scheduler = setup_test_environment(
-        tmp_path, in_memory_uow, save_health=False
-    )
+    _, scheduler = setup_test_environment(tmp_path, in_memory_uow, save_health=False)
 
     res = scheduler.evaluate_admission("mini-me", "016-autonomous-queue-work-selection")
 
@@ -642,9 +640,7 @@ def test_drain_never_invokes_fresh_admission(
     scheduler.orchestration_service = MagicMock()
     scheduler.orchestration_service.resume.return_value = mock_run
 
-    dec, record, run = scheduler.admit_work_item(
-        "mini-me", "016-autonomous-queue-work-selection"
-    )
+    dec, record, run = scheduler.admit_work_item("mini-me", "016-autonomous-queue-work-selection")
 
     assert scheduler.orchestration_service.admit_change.call_count == 0
     assert scheduler.orchestration_service.resume.call_count == 1

@@ -109,7 +109,7 @@ class ProviderHealthService:
                 existing = ProviderHealth(
                     health_id=f"ph-{prov}",
                     provider=prov,
-                    status=ProviderHealthStatus.AVAILABLE,
+                    status=ProviderHealthStatus.UNKNOWN,
                     consecutive_failures=0,
                     updated_at=utc_now(),
                 )
@@ -127,9 +127,7 @@ class ProviderHealthService:
             for health in self.list_existing_health()
         ]
 
-    def set_operator_expected_reset(
-        self, provider: str, reset_at: datetime
-    ) -> CapacityWindow:
+    def set_operator_expected_reset(self, provider: str, reset_at: datetime) -> CapacityWindow:
         """Record an operator-reported expected provider recovery time."""
         self._validate_primary(provider)
         now = utc_now()
@@ -562,18 +560,14 @@ class ProviderHealthService:
                     if not self._try_reserve_expensive_probe(
                         provider,
                         cfg,
-                        baseline_at=(
-                            latest_window.quota_exhausted_at if latest_window else None
-                        ),
+                        baseline_at=(latest_window.quota_exhausted_at if latest_window else None),
                     ):
                         return False
             else:
                 if not self._probe_eligible(
                     provider,
                     health,
-                    baseline_at=(
-                        latest_window.quota_exhausted_at if latest_window else None
-                    ),
+                    baseline_at=(latest_window.quota_exhausted_at if latest_window else None),
                 ):
                     return False
 
@@ -609,9 +603,7 @@ class ProviderHealthService:
                 self.uow.commit()
 
         if probe_success and verifies_capacity:
-            logger.info(
-                f"Availability probe for {provider} SUCCEEDED. Transitioning to AVAILABLE."
-            )
+            logger.info(f"Availability probe for {provider} SUCCEEDED. Transitioning to AVAILABLE.")
             self.uow.provider_health.update_health(
                 provider=provider,
                 status=ProviderHealthStatus.AVAILABLE.value,
@@ -723,8 +715,8 @@ class ProviderHealthService:
         imp_health = self.get_existing_health(implementer)
         rev_health = self.get_existing_health(reviewer)
 
-        imp_status = imp_health.status if imp_health else ProviderHealthStatus.AVAILABLE
-        rev_status = rev_health.status if rev_health else ProviderHealthStatus.AVAILABLE
+        imp_status = imp_health.status if imp_health else ProviderHealthStatus.UNKNOWN
+        rev_status = rev_health.status if rev_health else ProviderHealthStatus.UNKNOWN
 
         if imp_status != ProviderHealthStatus.AVAILABLE:
             return False, f"Primary implementer '{implementer}' is {imp_status.value}"

@@ -246,9 +246,14 @@ async def test_worktree_add_records_managed_worktree_path_not_cwd(in_memory_uow,
         canonical_repository_identity="github.com/silverberdi/mini-me",
     )
     from minime.services.worktree_manager import WorktreeManager
+
     manager = WorktreeManager(project_root=tmp_path, uow=in_memory_uow)
     job_id = "job-wt-identity-1"
-    in_memory_uow.jobs.save(Job(job_id=job_id, project_id="mini-me", change_name="test-change", implementer_role="codex"))
+    in_memory_uow.jobs.save(
+        Job(
+            job_id=job_id, project_id="mini-me", change_name="test-change", implementer_role="codex"
+        )
+    )
     in_memory_uow.orchestration_runs.save(
         OrchestrationRun(
             run_id="run-wt-identity-1",
@@ -274,11 +279,17 @@ async def test_worktree_add_records_managed_worktree_path_not_cwd(in_memory_uow,
             target_worktree.mkdir(parents=True, exist_ok=True)
             proc.communicate = AsyncMock(return_value=(b"", b""))
         elif "worktree" in cmd_args and "list" in cmd_args:
-            proc.communicate = AsyncMock(return_value=(f"worktree {target_worktree}\n".encode(), b""))
+            proc.communicate = AsyncMock(
+                return_value=(f"worktree {target_worktree}\n".encode(), b"")
+            )
         elif "branch" in cmd_args and "--show-current" in cmd_args:
-            proc.communicate = AsyncMock(return_value=(b"minime/test-change-job-wt-identity-1\n", b""))
+            proc.communicate = AsyncMock(
+                return_value=(b"minime/test-change-job-wt-identity-1\n", b"")
+            )
         elif "remote" in cmd_args and "get-url" in cmd_args:
-            proc.communicate = AsyncMock(return_value=(b"https://github.com/silverberdi/mini-me.git\n", b""))
+            proc.communicate = AsyncMock(
+                return_value=(b"https://github.com/silverberdi/mini-me.git\n", b"")
+            )
         elif "rev-parse" in cmd_args and "--is-inside-work-tree" in cmd_args:
             proc.communicate = AsyncMock(return_value=(b"true\n", b""))
         else:
@@ -303,7 +314,10 @@ async def test_worktree_add_records_managed_worktree_path_not_cwd(in_memory_uow,
             return res
         return orig_run(cmd, *args, **kwargs)
 
-    with patch("asyncio.create_subprocess_exec", side_effect=mock_subprocess), patch("subprocess.run", side_effect=mock_run):
+    with (
+        patch("asyncio.create_subprocess_exec", side_effect=mock_subprocess),
+        patch("subprocess.run", side_effect=mock_run),
+    ):
         await manager.create_worktree(
             job_id=job_id,
             change_name="test-change",
@@ -337,14 +351,21 @@ async def test_worktree_remove_records_managed_worktree_path(in_memory_uow, tmp_
     )
 
     from minime.services.worktree_manager import WorktreeManager
+
     manager = WorktreeManager(project_root=tmp_path, uow=in_memory_uow)
 
     job_id = "job-wt-remove-1"
     target_worktree = (tmp_path / ".minime" / "worktrees" / job_id).resolve()
     target_worktree.mkdir(parents=True, exist_ok=True)
     import subprocess
+
     subprocess.run(["git", "init"], cwd=target_worktree, capture_output=True, check=False)
-    subprocess.run(["git", "remote", "add", "origin", "https://github.com/silverberdi/mini-me.git"], cwd=target_worktree, capture_output=True, check=False)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/silverberdi/mini-me.git"],
+        cwd=target_worktree,
+        capture_output=True,
+        check=False,
+    )
 
     ownership = create_test_worktree_ownership(
         in_memory_uow,
@@ -370,7 +391,9 @@ async def test_worktree_remove_records_managed_worktree_path(in_memory_uow, tmp_
             shutil.rmtree(target_worktree, ignore_errors=True)
             proc.communicate = AsyncMock(return_value=(b"", b""))
         elif "worktree" in cmd_args and "list" in cmd_args:
-            proc.communicate = AsyncMock(return_value=(f"worktree {target_worktree}\n".encode(), b""))
+            proc.communicate = AsyncMock(
+                return_value=(f"worktree {target_worktree}\n".encode(), b"")
+            )
         elif "rev-parse" in cmd_args or "remote" in cmd_args:
             proc.communicate = AsyncMock(return_value=(b"github.com/silverberdi/mini-me\n", b""))
         else:

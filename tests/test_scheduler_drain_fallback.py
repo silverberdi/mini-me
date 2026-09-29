@@ -765,9 +765,7 @@ async def test_unverified_pinned_default_snapshot_in_db_denies_fallback_with_zer
     assert "PRICING_SNAPSHOT_MISSING" in result_job.capacity_block_reason
 
 
-def test_drain_resume_continues_inflight_job_through_real_runtime(
-    in_memory_uow, tmp_path
-):
+def test_drain_resume_continues_inflight_job_through_real_runtime(in_memory_uow, tmp_path):
     """A valid DRAIN decision must route to a real continuation that advances.
 
     Uses the real OrchestrationService.resume -> drive_coordinator -> pipeline
@@ -852,9 +850,7 @@ def test_drain_resume_continues_inflight_job_through_real_runtime(
             output=[json.dumps({"risk": "low", "summary": "ok", "findings": []})]
         ),
     )
-    orch = OrchestrationService(
-        in_memory_uow, project_root=tmp_path, pipeline=pipeline
-    )
+    orch = OrchestrationService(in_memory_uow, project_root=tmp_path, pipeline=pipeline)
 
     orch.resume(run.run_id, project_root=tmp_path, drain_mode=True)
 

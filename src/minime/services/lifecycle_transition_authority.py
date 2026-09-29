@@ -31,14 +31,52 @@ ALLOWED_CHANGE_TRANSITIONS: dict[ChangeStatus, set[ChangeStatus]] = {
 
 # Canonical WorkItemStatus transition matrix
 ALLOWED_WORK_ITEM_TRANSITIONS: dict[WorkItemStatus, set[WorkItemStatus]] = {
-    WorkItemStatus.BACKLOG: {WorkItemStatus.CONTEXT_CHECK, WorkItemStatus.PREPARING, WorkItemStatus.CANCELLED},
-    WorkItemStatus.CONTEXT_CHECK: {WorkItemStatus.PREPARING, WorkItemStatus.NEEDS_HUMAN, WorkItemStatus.BLOCKED, WorkItemStatus.CANCELLED},
-    WorkItemStatus.PREPARING: {WorkItemStatus.NEEDS_HUMAN, WorkItemStatus.READY, WorkItemStatus.BLOCKED, WorkItemStatus.CANCELLED},
-    WorkItemStatus.NEEDS_HUMAN: {WorkItemStatus.PREPARING, WorkItemStatus.BLOCKED, WorkItemStatus.CANCELLED},
-    WorkItemStatus.READY: {WorkItemStatus.ADMITTED, WorkItemStatus.NEEDS_HUMAN, WorkItemStatus.BLOCKED, WorkItemStatus.CANCELLED},
-    WorkItemStatus.ADMITTED: {WorkItemStatus.RUNNING, WorkItemStatus.NEEDS_HUMAN, WorkItemStatus.BLOCKED, WorkItemStatus.CANCELLED},
-    WorkItemStatus.RUNNING: {WorkItemStatus.NEEDS_HUMAN, WorkItemStatus.BLOCKED, WorkItemStatus.COMPLETED, WorkItemStatus.CANCELLED},
-    WorkItemStatus.BLOCKED: {WorkItemStatus.PREPARING, WorkItemStatus.READY, WorkItemStatus.NEEDS_HUMAN, WorkItemStatus.CANCELLED},
+    WorkItemStatus.BACKLOG: {
+        WorkItemStatus.CONTEXT_CHECK,
+        WorkItemStatus.PREPARING,
+        WorkItemStatus.CANCELLED,
+    },
+    WorkItemStatus.CONTEXT_CHECK: {
+        WorkItemStatus.PREPARING,
+        WorkItemStatus.NEEDS_HUMAN,
+        WorkItemStatus.BLOCKED,
+        WorkItemStatus.CANCELLED,
+    },
+    WorkItemStatus.PREPARING: {
+        WorkItemStatus.NEEDS_HUMAN,
+        WorkItemStatus.READY,
+        WorkItemStatus.BLOCKED,
+        WorkItemStatus.CANCELLED,
+    },
+    WorkItemStatus.NEEDS_HUMAN: {
+        WorkItemStatus.PREPARING,
+        WorkItemStatus.BLOCKED,
+        WorkItemStatus.CANCELLED,
+    },
+    WorkItemStatus.READY: {
+        WorkItemStatus.ADMITTED,
+        WorkItemStatus.NEEDS_HUMAN,
+        WorkItemStatus.BLOCKED,
+        WorkItemStatus.CANCELLED,
+    },
+    WorkItemStatus.ADMITTED: {
+        WorkItemStatus.RUNNING,
+        WorkItemStatus.NEEDS_HUMAN,
+        WorkItemStatus.BLOCKED,
+        WorkItemStatus.CANCELLED,
+    },
+    WorkItemStatus.RUNNING: {
+        WorkItemStatus.NEEDS_HUMAN,
+        WorkItemStatus.BLOCKED,
+        WorkItemStatus.COMPLETED,
+        WorkItemStatus.CANCELLED,
+    },
+    WorkItemStatus.BLOCKED: {
+        WorkItemStatus.PREPARING,
+        WorkItemStatus.READY,
+        WorkItemStatus.NEEDS_HUMAN,
+        WorkItemStatus.CANCELLED,
+    },
     WorkItemStatus.COMPLETED: set(),
     WorkItemStatus.CANCELLED: set(),
 }
@@ -79,7 +117,9 @@ class LifecycleTransitionAuthority:
 
         change = self.uow.changes.get_by_name(project_id, name)
         if not change:
-            raise LifecycleTransitionConflictError(f"Change '{name}' for project '{project_id}' not found.")
+            raise LifecycleTransitionConflictError(
+                f"Change '{name}' for project '{project_id}' not found."
+            )
 
         if change.status != expected_from_state:
             raise LifecycleTransitionConflictError(
@@ -122,7 +162,9 @@ class LifecycleTransitionAuthority:
                 updated.updated_at = now
                 self.uow.changes._store[change.change_id] = updated
             else:
-                raise NotImplementedError("Unsupported UoW/Repository implementation for LifecycleTransitionAuthority")
+                raise NotImplementedError(
+                    "Unsupported UoW/Repository implementation for LifecycleTransitionAuthority"
+                )
 
             # Atomic Event emission in same DB transaction
             event = Event(
@@ -173,7 +215,9 @@ class LifecycleTransitionAuthority:
 
         item = self.uow.backlog_items.get_by_project_and_key(project_id, item_key)
         if not item:
-            raise LifecycleTransitionConflictError(f"BacklogItem '{item_key}' for project '{project_id}' not found.")
+            raise LifecycleTransitionConflictError(
+                f"BacklogItem '{item_key}' for project '{project_id}' not found."
+            )
 
         if item.status != expected_from_state:
             raise LifecycleTransitionConflictError(
@@ -216,7 +260,9 @@ class LifecycleTransitionAuthority:
                 updated.updated_at = now
                 self.uow.backlog_items._store[item.item_id] = updated
             else:
-                raise NotImplementedError("Unsupported UoW/Repository implementation for LifecycleTransitionAuthority")
+                raise NotImplementedError(
+                    "Unsupported UoW/Repository implementation for LifecycleTransitionAuthority"
+                )
 
             # Atomic Event emission in same DB transaction
             event = Event(

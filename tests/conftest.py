@@ -130,7 +130,9 @@ from minime.domain.models import (
 class ReadinessGitHubStub:
     """Explicit offline double for legacy readiness tests; live validation is tested separately."""
 
-    def validate_issue_binding(self, expected_repository, issue_number, github_repository=None) -> ExternalActionResult[bool]:
+    def validate_issue_binding(
+        self, expected_repository, issue_number, github_repository=None
+    ) -> ExternalActionResult[bool]:
         return ExternalActionResult(
             outcome=ExternalOutcome.SUCCESS,
             source_adapter="github_stub",
@@ -148,7 +150,9 @@ class ReadinessGitHubStub:
             data=True,
         )
 
-    def list_issues(self, repository: str, state: str = "open", limit: int = 50) -> ExternalActionResult[list[dict]]:
+    def list_issues(
+        self, repository: str, state: str = "open", limit: int = 50
+    ) -> ExternalActionResult[list[dict]]:
         return ExternalActionResult(
             outcome=ExternalOutcome.SUCCESS,
             source_adapter="github_stub",
@@ -157,7 +161,14 @@ class ReadinessGitHubStub:
             data=[],
         )
 
-    def create_issue(self, repository: str, title: str, body: str, labels: list[str] | None = None, operation_key: str | None = None) -> ExternalActionResult[dict]:
+    def create_issue(
+        self,
+        repository: str,
+        title: str,
+        body: str,
+        labels: list[str] | None = None,
+        operation_key: str | None = None,
+    ) -> ExternalActionResult[dict]:
         issue_data = {
             "number": 42,
             "title": title,
@@ -175,7 +186,9 @@ class ReadinessGitHubStub:
             operation_key=operation_key,
         )
 
-    def add_issue_to_project(self, project_number: int, owner: str, issue_url: str, operation_key: str | None = None) -> ExternalActionResult[str]:
+    def add_issue_to_project(
+        self, project_number: int, owner: str, issue_url: str, operation_key: str | None = None
+    ) -> ExternalActionResult[str]:
         return ExternalActionResult(
             outcome=ExternalOutcome.SUCCESS,
             source_adapter="github_stub",
@@ -186,7 +199,9 @@ class ReadinessGitHubStub:
             operation_key=operation_key,
         )
 
-    def list_project_items(self, project_number: int = 2, owner: str = "silverberdi", limit: int = 50) -> ExternalActionResult[list[dict]]:
+    def list_project_items(
+        self, project_number: int = 2, owner: str = "silverberdi", limit: int = 50
+    ) -> ExternalActionResult[list[dict]]:
         return ExternalActionResult(
             outcome=ExternalOutcome.SUCCESS,
             source_adapter="github_stub",
@@ -195,7 +210,9 @@ class ReadinessGitHubStub:
             data=[],
         )
 
-    def get_pull_request(self, repository: str, branch: str, base: str = "main") -> ExternalActionResult[dict]:
+    def get_pull_request(
+        self, repository: str, branch: str, base: str = "main"
+    ) -> ExternalActionResult[dict]:
         return ExternalActionResult(
             outcome=ExternalOutcome.FAILURE,
             source_adapter="github_stub",
@@ -204,7 +221,9 @@ class ReadinessGitHubStub:
             error_message="Pull request not found.",
         )
 
-    def get_pull_request_details(self, repository: str, pr_number: int) -> ExternalActionResult[dict]:
+    def get_pull_request_details(
+        self, repository: str, pr_number: int
+    ) -> ExternalActionResult[dict]:
         return ExternalActionResult(
             outcome=ExternalOutcome.SUCCESS,
             source_adapter="github_stub",
@@ -214,7 +233,9 @@ class ReadinessGitHubStub:
             external_id=str(pr_number),
         )
 
-    def close_issue(self, repository: str, issue_number: int, comment: str | None = None) -> ExternalActionResult[bool]:
+    def close_issue(
+        self, repository: str, issue_number: int, comment: str | None = None
+    ) -> ExternalActionResult[bool]:
         return ExternalActionResult(
             outcome=ExternalOutcome.SUCCESS,
             source_adapter="github_stub",
@@ -224,7 +245,9 @@ class ReadinessGitHubStub:
             external_id=str(issue_number),
         )
 
-    def update_project_item_status(self, project_number: int, owner: str, item_id: str, status: str = "Done") -> ExternalActionResult[bool]:
+    def update_project_item_status(
+        self, project_number: int, owner: str, item_id: str, status: str = "Done"
+    ) -> ExternalActionResult[bool]:
         return ExternalActionResult(
             outcome=ExternalOutcome.SUCCESS,
             source_adapter="github_stub",
@@ -234,7 +257,9 @@ class ReadinessGitHubStub:
             external_id=item_id,
         )
 
-    def delete_remote_branch(self, repository: str, branch: str, remote: str = "origin") -> ExternalActionResult[bool]:
+    def delete_remote_branch(
+        self, repository: str, branch: str, remote: str = "origin"
+    ) -> ExternalActionResult[bool]:
         return ExternalActionResult(
             outcome=ExternalOutcome.SUCCESS,
             source_adapter="github_stub",
@@ -243,7 +268,9 @@ class ReadinessGitHubStub:
             data=True,
         )
 
-    def push_branch(self, worktree_path: str, remote: str, branch: str, candidate_sha: str) -> ExternalActionResult[str]:
+    def push_branch(
+        self, worktree_path: str, remote: str, branch: str, candidate_sha: str
+    ) -> ExternalActionResult[str]:
         return ExternalActionResult(
             outcome=ExternalOutcome.SUCCESS,
             source_adapter="github_stub",
@@ -252,7 +279,9 @@ class ReadinessGitHubStub:
             data=candidate_sha,
         )
 
-    def get_remote_branch_head(self, repository: str, branch: str, remote: str = "origin") -> ExternalActionResult[str]:
+    def get_remote_branch_head(
+        self, repository: str, branch: str, remote: str = "origin"
+    ) -> ExternalActionResult[str]:
         return ExternalActionResult(
             outcome=ExternalOutcome.FAILURE,
             source_adapter="github_stub",
@@ -1396,7 +1425,9 @@ class InMemoryOrchestrationExternalActionRepository(OrchestrationExternalActionR
 
     def reserve(self, action: OrchestrationExternalAction) -> None:
         if action.run_id is None and action.saga_id is None:
-            raise ValueError("OrchestrationExternalAction must have at least run_id or saga_id set.")
+            raise ValueError(
+                "OrchestrationExternalAction must have at least run_id or saga_id set."
+            )
         for existing in self._store.values():
             if existing.action_key == action.action_key:
                 raise ValueError(f"Action key '{action.action_key}' already exists")
@@ -1479,7 +1510,10 @@ class InMemoryOrchestrationExternalActionRepository(OrchestrationExternalActionR
             target.error_message = getattr(observed_result, "error_message", None)
         else:
             target.status = ExternalActionStatus.AMBIGUOUS
-            target.error_message = getattr(observed_result, "error_message", None) or "Observe-before-repeat protocol inconclusive."
+            target.error_message = (
+                getattr(observed_result, "error_message", None)
+                or "Observe-before-repeat protocol inconclusive."
+            )
 
         target.updated_at = utc_now()
         return target.model_copy(deep=True)
@@ -1839,9 +1873,7 @@ class InMemoryBacklogItemRepository(BacklogItemRepositoryInterface):
                 return item.model_copy(deep=True)
         return None
 
-    def get_by_openspec_change_name(
-        self, project_id: str, change_name: str
-    ) -> BacklogItem | None:
+    def get_by_openspec_change_name(self, project_id: str, change_name: str) -> BacklogItem | None:
         for item in self._store.values():
             if item.project_id == project_id and (
                 item.openspec_change_name == change_name or item.item_key == change_name
@@ -1912,15 +1944,11 @@ class InMemoryTaskClassificationSnapshotRepository(TaskClassificationSnapshotRep
         items.sort(key=lambda s: s.created_at, reverse=True)
         return [s.model_copy(deep=True) for s in items]
 
-    def find_latest_by_change(
-        self, change_id: str
-    ) -> TaskClassificationSnapshot | None:
+    def find_latest_by_change(self, change_id: str) -> TaskClassificationSnapshot | None:
         items = self.find_by_change(change_id)
         return items[0] if items else None
 
-    def find_latest_by_job(
-        self, job_id: str
-    ) -> TaskClassificationSnapshot | None:
+    def find_latest_by_job(self, job_id: str) -> TaskClassificationSnapshot | None:
         items = self.find_by_job(job_id)
         return items[0] if items else None
 
@@ -1942,7 +1970,9 @@ class InMemoryProjectManagedRepositoryBindingRepository:
     def list_all(self) -> list[ProjectManagedRepositoryBinding]:
         return [b.model_copy(deep=True) for b in self._store.values()]
 
-    def get_by_repository_identity(self, canonical_repository_identity: str) -> ProjectManagedRepositoryBinding | None:
+    def get_by_repository_identity(
+        self, canonical_repository_identity: str
+    ) -> ProjectManagedRepositoryBinding | None:
         for b in self._store.values():
             if b.canonical_repository_identity == canonical_repository_identity:
                 return b.model_copy(deep=True)
@@ -1963,10 +1993,20 @@ class InMemoryOrchestrationWorktreeOwnershipRepository:
         w = self._store.get(worktree_id)
         return w.model_copy(deep=True) if w else None
 
-    def get_by_canonical_path(self, canonical_worktree_path: str) -> OrchestrationWorktreeOwnership | None:
-        norm_target = os.path.realpath(canonical_worktree_path) if os.path.exists(canonical_worktree_path) else canonical_worktree_path
+    def get_by_canonical_path(
+        self, canonical_worktree_path: str
+    ) -> OrchestrationWorktreeOwnership | None:
+        norm_target = (
+            os.path.realpath(canonical_worktree_path)
+            if os.path.exists(canonical_worktree_path)
+            else canonical_worktree_path
+        )
         for w in self._store.values():
-            norm_w = os.path.realpath(w.canonical_worktree_path) if os.path.exists(w.canonical_worktree_path) else w.canonical_worktree_path
+            norm_w = (
+                os.path.realpath(w.canonical_worktree_path)
+                if os.path.exists(w.canonical_worktree_path)
+                else w.canonical_worktree_path
+            )
             if norm_w == norm_target or w.canonical_worktree_path == canonical_worktree_path:
                 return w.model_copy(deep=True)
         return None
@@ -2005,15 +2045,29 @@ class InMemoryDurableSagaRepository(DurableSagaRepositoryInterface):
     def get_for_update(self, saga_id: str) -> DurableSaga | None:
         return self.get_by_id(saga_id)
 
-    def get_active_saga(self, project_id: str, work_item_key: str, saga_type: SagaType | str) -> DurableSaga | None:
+    def get_active_saga(
+        self, project_id: str, work_item_key: str, saga_type: SagaType | str
+    ) -> DurableSaga | None:
         st_val = saga_type.value if isinstance(saga_type, SagaType) else saga_type
         for s in self._store.values():
-            if s.project_id == project_id and s.work_item_key == work_item_key and s.saga_type.value == st_val:
-                if s.status.value in {"IN_PROGRESS", "BLOCKED"} or s.status in {SagaStatus.IN_PROGRESS, SagaStatus.BLOCKED}:
+            if (
+                s.project_id == project_id
+                and s.work_item_key == work_item_key
+                and s.saga_type.value == st_val
+            ):
+                if s.status.value in {"IN_PROGRESS", "BLOCKED"} or s.status in {
+                    SagaStatus.IN_PROGRESS,
+                    SagaStatus.BLOCKED,
+                }:
                     return s.model_copy(deep=True)
         return None
 
-    def list_by_project(self, project_id: str, saga_type: SagaType | str | None = None, status: SagaStatus | str | None = None) -> list[DurableSaga]:
+    def list_by_project(
+        self,
+        project_id: str,
+        saga_type: SagaType | str | None = None,
+        status: SagaStatus | str | None = None,
+    ) -> list[DurableSaga]:
         res = [s for s in self._store.values() if s.project_id == project_id]
         if saga_type:
             st_val = saga_type.value if isinstance(saga_type, SagaType) else saga_type
@@ -2031,7 +2085,13 @@ class InMemoryDurableSagaRepository(DurableSagaRepositoryInterface):
             res = [s for s in res if s.saga_type.value == st_val]
         return [s.model_copy(deep=True) for s in res]
 
-    def update_phase(self, saga_id: str, current_phase: str, evidence_references: dict | None = None, last_observed_outcome: Any | None = None) -> DurableSaga:
+    def update_phase(
+        self,
+        saga_id: str,
+        current_phase: str,
+        evidence_references: dict | None = None,
+        last_observed_outcome: Any | None = None,
+    ) -> DurableSaga:
         saga = self._store[saga_id]
         refs = dict(saga.evidence_references)
         if evidence_references:
@@ -2043,7 +2103,13 @@ class InMemoryDurableSagaRepository(DurableSagaRepositoryInterface):
         saga.updated_at = utc_now()
         return saga.model_copy(deep=True)
 
-    def update_status(self, saga_id: str, status: SagaStatus | str, blocking_reason: str | None = None, last_observed_outcome: Any | None = None) -> DurableSaga:
+    def update_status(
+        self,
+        saga_id: str,
+        status: SagaStatus | str,
+        blocking_reason: str | None = None,
+        last_observed_outcome: Any | None = None,
+    ) -> DurableSaga:
         saga = self._store[saga_id]
         st_enum = SagaStatus(status) if isinstance(status, str) else status
         saga.status = st_enum
@@ -2099,7 +2165,9 @@ class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.backlog_items = InMemoryBacklogItemRepository()
         self.integrity_findings = InMemoryIntegrityFindingRepository()
         self.classification_snapshots = InMemoryTaskClassificationSnapshotRepository()
-        self.project_managed_repository_bindings = InMemoryProjectManagedRepositoryBindingRepository(self)
+        self.project_managed_repository_bindings = (
+            InMemoryProjectManagedRepositoryBindingRepository(self)
+        )
         self.orchestration_worktree_ownerships = InMemoryOrchestrationWorktreeOwnershipRepository()
         self.committed = False
         self.rolled_back = False
@@ -2142,16 +2210,18 @@ def init_git_repo(root: Path) -> None:
     subprocess.run(["git", "config", "user.name", "Test User"], cwd=root, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=root, check=True)
     subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=root, check=True)
-    subprocess.run(["git", "remote", "add", "origin", f"https://github.com/org/{root.name}"], cwd=root, check=False)
+    subprocess.run(
+        ["git", "remote", "add", "origin", f"https://github.com/org/{root.name}"],
+        cwd=root,
+        check=False,
+    )
     if not any(root.iterdir()):
         (root / "README.md").write_text("# repo\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=root, check=True)
     subprocess.run(
         ["git", "commit", "--allow-empty", "-m", "base"], cwd=root, check=True, capture_output=True
     )
-    subprocess.run(
-        ["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=root, check=True
-    )
+    subprocess.run(["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=root, check=True)
 
 
 def create_isolated_openspec_change(
@@ -2194,14 +2264,28 @@ def setup_managed_repository_fixture(
     worktree_parent_dir.mkdir(parents=True, exist_ok=True)
 
     if not (repo_root / ".git").exists():
-        subprocess.run(["git", "init", "-b", "main"], cwd=repo_root, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "init", "-b", "main"], cwd=repo_root, check=True, capture_output=True
+        )
         subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_root, check=True)
-        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_root, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"], cwd=repo_root, check=True
+        )
 
     try:
-        subprocess.run(["git", "remote", "add", remote_name, remote_url], cwd=repo_root, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "remote", "add", remote_name, remote_url],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+        )
     except Exception:
-        subprocess.run(["git", "remote", "set-url", remote_name, remote_url], cwd=repo_root, check=False, capture_output=True)
+        subprocess.run(
+            ["git", "remote", "set-url", remote_name, remote_url],
+            cwd=repo_root,
+            check=False,
+            capture_output=True,
+        )
 
     marker_file = repo_root / ".minime-managed-project.json"
     marker_data = {
@@ -2210,12 +2294,17 @@ def setup_managed_repository_fixture(
     }
     marker_file.write_text(json.dumps(marker_data, indent=2), encoding="utf-8")
 
-    has_commits = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_root, capture_output=True).returncode == 0
+    has_commits = (
+        subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_root, capture_output=True).returncode
+        == 0
+    )
     if not has_commits:
         if not (repo_root / "README.md").exists():
             (repo_root / "README.md").write_text("# repo\n", encoding="utf-8")
         subprocess.run(["git", "add", "."], cwd=repo_root, check=True)
-        subprocess.run(["git", "commit", "-m", "initial"], cwd=repo_root, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "initial"], cwd=repo_root, check=True, capture_output=True
+        )
 
     binding = ProjectManagedRepositoryBinding(
         project_id=project_id,
@@ -2224,7 +2313,11 @@ def setup_managed_repository_fixture(
         worktree_parent_dir=str(worktree_parent_dir.resolve()),
         remote_name=remote_name,
     )
-    if uow and hasattr(uow, "project_managed_repository_bindings") and uow.project_managed_repository_bindings:
+    if (
+        uow
+        and hasattr(uow, "project_managed_repository_bindings")
+        and uow.project_managed_repository_bindings
+    ):
         uow.project_managed_repository_bindings.save(binding)
 
     return binding
@@ -2258,7 +2351,11 @@ def create_test_worktree_ownership(
         created_at=utc_now(),
         updated_at=utc_now(),
     )
-    if uow and hasattr(uow, "orchestration_worktree_ownerships") and uow.orchestration_worktree_ownerships:
+    if (
+        uow
+        and hasattr(uow, "orchestration_worktree_ownerships")
+        and uow.orchestration_worktree_ownerships
+    ):
         uow.orchestration_worktree_ownerships.save(ownership)
     return ownership
 
@@ -2284,7 +2381,9 @@ def write_test_worktree_ownership_marker(
         "branch_name": ownership.branch_name,
         "source_repository_identity": ownership.source_repository_identity,
         "source_base_sha": ownership.source_base_sha,
-        "created_at": ownership.created_at.isoformat() if hasattr(ownership.created_at, "isoformat") else str(ownership.created_at),
+        "created_at": ownership.created_at.isoformat()
+        if hasattr(ownership.created_at, "isoformat")
+        else str(ownership.created_at),
     }
     marker_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
     return marker_file

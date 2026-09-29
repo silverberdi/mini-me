@@ -80,9 +80,7 @@ async def test_implementer_preflight_failure_no_retry_and_no_health_degradation(
     events = in_memory_uow.events.list_events(
         project_id="mini-me", change_id="synthetic-pipeline-change"
     )
-    assert not any(
-        e.event_type == EventType.CORRECTIVE_RETRY_ISSUED for e in events
-    )
+    assert not any(e.event_type == EventType.CORRECTIVE_RETRY_ISSUED for e in events)
 
 
 @pytest.mark.asyncio
@@ -106,6 +104,4 @@ async def test_reviewer_preflight_failure_no_retry_and_no_health_degradation(
     events = in_memory_uow.events.list_events(
         project_id="mini-me", change_id="synthetic-pipeline-change"
     )
-    assert not any(
-        e.event_type == EventType.CORRECTIVE_RETRY_ISSUED for e in events
-    )
+    assert not any(e.event_type == EventType.CORRECTIVE_RETRY_ISSUED for e in events)

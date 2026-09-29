@@ -674,11 +674,11 @@ def scheduler_status_cmd(
             if sched_status.recent_decisions:
                 typer.echo("\nRecent Decisions:")
                 for d in sched_status.recent_decisions[:5]:
-                    op = d.operational_decision.value if d.operational_decision else d.decision.value
-                    d_color = typer.colors.GREEN if op in {"RUN", "DRAIN"} else typer.colors.YELLOW
-                    typer.secho(
-                        f"  • [{op}] {d.change_name} — {d.reason_summary}", fg=d_color
+                    op = (
+                        d.operational_decision.value if d.operational_decision else d.decision.value
                     )
+                    d_color = typer.colors.GREEN if op in {"RUN", "DRAIN"} else typer.colors.YELLOW
+                    typer.secho(f"  • [{op}] {d.change_name} — {d.reason_summary}", fg=d_color)
 
     except Exception as e:
         typer.secho(f"Error fetching scheduler status: {e}", fg=typer.colors.RED)
@@ -760,7 +760,9 @@ def scheduler_run_cmd(
                 admitted = [
                     d
                     for d in decisions
-                    if (d.operational_decision.value if d.operational_decision else d.decision.value)
+                    if (
+                        d.operational_decision.value if d.operational_decision else d.decision.value
+                    )
                     in {"RUN", "DRAIN"}
                 ]
                 if admitted:
@@ -1113,7 +1115,9 @@ def orchestrate_start_cmd(
 def orchestrate_resume_cmd(
     run_id: str = typer.Argument(..., help="Orchestration run identifier"),
     project_root: str = typer.Option(".", "--path", "-p", help="Filesystem path to project root"),
-    force: bool = typer.Option(False, "--force", "-f", help="Force resumption even if waiting or gated"),
+    force: bool = typer.Option(
+        False, "--force", "-f", help="Force resumption even if waiting or gated"
+    ),
     json_output: bool = typer.Option(False, "--json", help="Output result as JSON"),
 ) -> None:
     """Resume an existing orchestration run from its persisted checkpoint."""

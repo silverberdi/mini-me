@@ -50,7 +50,9 @@ class MockBindingRepo:
     def save(self, binding: ProjectManagedRepositoryBinding) -> None:
         self.bindings[binding.project_id] = binding
         if binding.managed_repository_root and os.path.exists(binding.managed_repository_root):
-            marker_path = os.path.join(binding.managed_repository_root, ".minime-managed-project.json")
+            marker_path = os.path.join(
+                binding.managed_repository_root, ".minime-managed-project.json"
+            )
             try:
                 with open(marker_path, "w", encoding="utf-8") as f:
                     json.dump(
@@ -66,7 +68,9 @@ class MockBindingRepo:
     def get_by_project_id(self, project_id: str) -> ProjectManagedRepositoryBinding | None:
         return self.bindings.get(project_id)
 
-    def get_by_repository_identity(self, canonical_repository_identity: str) -> ProjectManagedRepositoryBinding | None:
+    def get_by_repository_identity(
+        self, canonical_repository_identity: str
+    ) -> ProjectManagedRepositoryBinding | None:
         for b in self.bindings.values():
             if b.canonical_repository_identity == canonical_repository_identity:
                 return b
@@ -89,10 +93,20 @@ class MockWorktreeOwnershipRepo:
     def get_by_id(self, worktree_id: str) -> OrchestrationWorktreeOwnership | None:
         return self.ownerships.get(worktree_id)
 
-    def get_by_canonical_path(self, canonical_worktree_path: str) -> OrchestrationWorktreeOwnership | None:
-        norm_target = os.path.realpath(canonical_worktree_path) if os.path.exists(canonical_worktree_path) else canonical_worktree_path
+    def get_by_canonical_path(
+        self, canonical_worktree_path: str
+    ) -> OrchestrationWorktreeOwnership | None:
+        norm_target = (
+            os.path.realpath(canonical_worktree_path)
+            if os.path.exists(canonical_worktree_path)
+            else canonical_worktree_path
+        )
         for w in self.ownerships.values():
-            norm_w = os.path.realpath(w.canonical_worktree_path) if os.path.exists(w.canonical_worktree_path) else w.canonical_worktree_path
+            norm_w = (
+                os.path.realpath(w.canonical_worktree_path)
+                if os.path.exists(w.canonical_worktree_path)
+                else w.canonical_worktree_path
+            )
             if norm_w == norm_target or w.canonical_worktree_path == canonical_worktree_path:
                 return w
         return None
@@ -108,7 +122,8 @@ class MockWorktreeOwnershipRepo:
 
     def list_active(self) -> list[OrchestrationWorktreeOwnership]:
         return [
-            w for w in self.ownerships.values()
+            w
+            for w in self.ownerships.values()
             if w.creation_state in (WorktreeCreationState.PENDING, WorktreeCreationState.CREATED)
         ]
 
@@ -145,9 +160,18 @@ class MockJobRepo:
 
     def list_active_jobs(self):
         from minime.domain.enums import JobStatus
+
         return [
-            j for j in self.jobs.values()
-            if j.status in (JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.CHECKS_RUNNING, JobStatus.REVIEW_RUNNING, JobStatus.AUDIT_RUNNING)
+            j
+            for j in self.jobs.values()
+            if j.status
+            in (
+                JobStatus.QUEUED,
+                JobStatus.RUNNING,
+                JobStatus.CHECKS_RUNNING,
+                JobStatus.REVIEW_RUNNING,
+                JobStatus.AUDIT_RUNNING,
+            )
         ]
 
 
@@ -177,6 +201,7 @@ class MockUOW:
             InMemoryDurableSagaRepository,
             InMemoryOrchestrationExternalActionRepository,
         )
+
         self.durable_sagas = InMemoryDurableSagaRepository()
         self.orchestration_external_actions = InMemoryOrchestrationExternalActionRepository()
         self.project_managed_repository_bindings = MockBindingRepo()
@@ -214,7 +239,9 @@ def tmp_dirs():
     subprocess.run(["git", "init", "-b", "main"], cwd=repo_root, check=True, capture_output=True)
     subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_root, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_root, check=True)
-    subprocess.run(["git", "remote", "add", "origin", "https://github.com/org/repo"], cwd=repo_root, check=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/org/repo"], cwd=repo_root, check=True
+    )
     with open(os.path.join(repo_root, "README.md"), "w") as f:
         f.write("base\n")
     with open(os.path.join(repo_root, ".minime-managed-project.json"), "w") as f:
@@ -226,7 +253,9 @@ def tmp_dirs():
             f,
         )
     subprocess.run(["git", "add", "."], cwd=repo_root, check=True)
-    subprocess.run(["git", "commit", "-m", "initial"], cwd=repo_root, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "initial"], cwd=repo_root, check=True, capture_output=True
+    )
 
     yield {
         "base": base,
@@ -238,8 +267,14 @@ def tmp_dirs():
 
 
 def test_repository_identity_normalization():
-    assert normalize_repository_identity("https://github.com/org/repo.git") in ("org/repo", "github.com/org/repo")
-    assert normalize_repository_identity("git@github.com:org/repo.git") in ("org/repo", "github.com/org/repo")
+    assert normalize_repository_identity("https://github.com/org/repo.git") in (
+        "org/repo",
+        "github.com/org/repo",
+    )
+    assert normalize_repository_identity("git@github.com:org/repo.git") in (
+        "org/repo",
+        "github.com/org/repo",
+    )
     assert normalize_repository_identity("org/repo") == "org/repo"
 
 
@@ -315,7 +350,12 @@ def test_guard_execution_worktree_owned_path_allowed(tmp_dirs):
     wt_dir = os.path.join(tmp_dirs["worktrees"], "wt-job-100")
     os.makedirs(wt_dir, exist_ok=True)
     subprocess.run(["git", "init"], cwd=wt_dir, check=True, capture_output=True)
-    subprocess.run(["git", "remote", "add", "origin", "https://github.com/org/repo"], cwd=wt_dir, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/org/repo"],
+        cwd=wt_dir,
+        check=True,
+        capture_output=True,
+    )
     binding = ProjectManagedRepositoryBinding(
         project_id="test-proj",
         canonical_repository_identity="github.com/org/repo",
@@ -385,12 +425,16 @@ def test_agent_confinement_darwin_sandbox_execution(tmp_dirs):
     confinement.confinement_mechanism = "darwin_sandbox"
 
     # Write inside allowed worktree succeeds
-    res_ok = confinement.run_confined_subprocess(["touch", os.path.join(wt_path, "allowed.txt")], cwd=wt_path)
+    res_ok = confinement.run_confined_subprocess(
+        ["touch", os.path.join(wt_path, "allowed.txt")], cwd=wt_path
+    )
     assert res_ok.returncode == 0
     assert os.path.exists(os.path.join(wt_path, "allowed.txt"))
 
     # Write inside runtime root fails
-    res_fail = confinement.run_confined_subprocess(["touch", os.path.join(tmp_dirs["runtime"], "forbidden.txt")], cwd=wt_path)
+    res_fail = confinement.run_confined_subprocess(
+        ["touch", os.path.join(tmp_dirs["runtime"], "forbidden.txt")], cwd=wt_path
+    )
     assert res_fail.returncode != 0
     assert not os.path.exists(os.path.join(tmp_dirs["runtime"], "forbidden.txt"))
 
@@ -438,7 +482,9 @@ def test_openspec_sync_runtime_target_denied(tmp_dirs):
 
     # Sync into runtime root => POLICY_DENIED
     with patch.dict(os.environ, {"MINIME_RUNTIME_ROOT": tmp_dirs["runtime"]}):
-        res = sync_service.sync_change_specs(openspec_path="openspec", change_name="test-change", project_id="proj-1")
+        res = sync_service.sync_change_specs(
+            openspec_path="openspec", change_name="test-change", project_id="proj-1"
+        )
     assert res.outcome == ExternalOutcome.FAILURE
     assert res.reason_code == ExternalReasonCode.POLICY_DENIED
 
@@ -456,18 +502,31 @@ def test_openspec_archive_runtime_target_denied(tmp_dirs):
 
     # Archive inside runtime root => POLICY_DENIED
     with patch.dict(os.environ, {"MINIME_RUNTIME_ROOT": tmp_dirs["runtime"]}):
-        res = sync_service.archive_change(openspec_path="openspec", change_name="test-change", project_id="proj-1")
+        res = sync_service.archive_change(
+            openspec_path="openspec", change_name="test-change", project_id="proj-1"
+        )
     assert res.outcome == ExternalOutcome.FAILURE
     assert res.reason_code == ExternalReasonCode.POLICY_DENIED
 
 
 def test_worktree_manager_pending_ordering(tmp_dirs):
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_dirs["repo_root"], check=True)
-    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_dirs["repo_root"], check=True)
+    subprocess.run(
+        ["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"], cwd=tmp_dirs["repo_root"], check=True
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test User"], cwd=tmp_dirs["repo_root"], check=True
+    )
     (Path(tmp_dirs["repo_root"]) / "README.md").write_text("initial\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=tmp_dirs["repo_root"], check=True)
-    subprocess.run(["git", "commit", "-m", "initial"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "initial"],
+        cwd=tmp_dirs["repo_root"],
+        check=True,
+        capture_output=True,
+    )
 
     uow = MockUOW()
     binding = ProjectManagedRepositoryBinding(
@@ -477,7 +536,14 @@ def test_worktree_manager_pending_ordering(tmp_dirs):
         worktree_parent_dir=tmp_dirs["worktrees"],
     )
     uow.project_managed_repository_bindings.save(binding)
-    uow.jobs.save(Job(job_id="job-test-10", project_id="proj-1", change_name="change-1", implementer_role="codex"))
+    uow.jobs.save(
+        Job(
+            job_id="job-test-10",
+            project_id="proj-1",
+            change_name="change-1",
+            implementer_role="codex",
+        )
+    )
     uow.orchestration_runs.save(
         OrchestrationRun(
             run_id="run-test-10",
@@ -496,7 +562,11 @@ def test_worktree_manager_pending_ordering(tmp_dirs):
 
     wt_path = wt_manager.worktree_path("job-test-10", project_id="proj-1").resolve()
 
-    asyncio.run(wt_manager.create_worktree("job-test-10", "change-1", "main", project_id="proj-1", run_id="run-test-10"))
+    asyncio.run(
+        wt_manager.create_worktree(
+            "job-test-10", "change-1", "main", project_id="proj-1", run_id="run-test-10"
+        )
+    )
 
     ownership = uow.orchestration_worktree_ownerships.get_by_id("wt-job-test-10")
     assert ownership is not None
@@ -516,7 +586,9 @@ def test_worktree_manager_cleanup_unowned_directory_denied(tmp_dirs):
 
 
 def test_worktree_manager_cleanup_marker_conflict_denied(tmp_dirs):
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True
+    )
     uow = MockUOW()
     binding = ProjectManagedRepositoryBinding(
         project_id="proj-1",
@@ -545,14 +617,18 @@ def test_worktree_manager_cleanup_marker_conflict_denied(tmp_dirs):
     uow.orchestration_worktree_ownerships.save(ownership)
 
     marker_file = wt_path / ".minime_worktree_ownership.json"
-    marker_file.write_text(json.dumps({"worktree_id": "wt-SPOOFED", "canonical_worktree_path": str(wt_path.resolve())}))
+    marker_file.write_text(
+        json.dumps({"worktree_id": "wt-SPOOFED", "canonical_worktree_path": str(wt_path.resolve())})
+    )
 
     asyncio.run(wt_manager.remove_clean_worktree_path(wt_path, "job-marker-test", "proj-1"))
     assert wt_path.exists()
 
 
 def test_guard_denial_happens_before_pending(tmp_dirs):
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True
+    )
     uow = MockUOW()
     binding = ProjectManagedRepositoryBinding(
         project_id="proj-1",
@@ -561,7 +637,14 @@ def test_guard_denial_happens_before_pending(tmp_dirs):
         worktree_parent_dir=tmp_dirs["worktrees"],
     )
     uow.project_managed_repository_bindings.save(binding)
-    uow.jobs.save(Job(job_id="job-denied-1", project_id="proj-1", change_name="change-1", implementer_role="codex"))
+    uow.jobs.save(
+        Job(
+            job_id="job-denied-1",
+            project_id="proj-1",
+            change_name="change-1",
+            implementer_role="codex",
+        )
+    )
     uow.orchestration_runs.save(
         OrchestrationRun(
             run_id="run-denied-1",
@@ -577,21 +660,33 @@ def test_guard_denial_happens_before_pending(tmp_dirs):
         )
     )
     guard = MagicMock(spec=ManagedWorkspaceGuard)
-    guard.evaluate_mutation.return_value = MagicMock(allowed=False, provider_detail="Guard Denied", reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN)
+    guard.evaluate_mutation.return_value = MagicMock(
+        allowed=False,
+        provider_detail="Guard Denied",
+        reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
+    )
 
     wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow, workspace_guard=guard)
 
     with pytest.raises(RuntimeError, match="fails workspace guard authorization: Guard Denied"):
-        asyncio.run(wt_manager.create_worktree("job-denied-1", "change-1", "main", project_id="proj-1", run_id="run-denied-1"))
+        asyncio.run(
+            wt_manager.create_worktree(
+                "job-denied-1", "change-1", "main", project_id="proj-1", run_id="run-denied-1"
+            )
+        )
 
     ownership = uow.orchestration_worktree_ownerships.get_by_id("wt-job-denied-1")
     assert ownership is None
 
 
 def test_pending_persistence_failure_prevents_git_add(tmp_dirs):
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True
+    )
     marker_file = Path(tmp_dirs["repo_root"]) / ".minime-managed-project.json"
-    marker_file.write_text(json.dumps({"project_id": "proj-1", "canonical_repository_identity": "github.com/org/repo"}))
+    marker_file.write_text(
+        json.dumps({"project_id": "proj-1", "canonical_repository_identity": "github.com/org/repo"})
+    )
     bad_uow = MagicMock()
     binding = ProjectManagedRepositoryBinding(
         project_id="proj-1",
@@ -602,7 +697,9 @@ def test_pending_persistence_failure_prevents_git_add(tmp_dirs):
     mock_b_repo = MagicMock()
     mock_b_repo.get_by_project_id.return_value = binding
     mock_j_repo = MagicMock()
-    mock_j_repo.get_by_id.return_value = Job(job_id="job-no-uow", project_id="proj-1", change_name="change-1", implementer_role="codex")
+    mock_j_repo.get_by_id.return_value = Job(
+        job_id="job-no-uow", project_id="proj-1", change_name="change-1", implementer_role="codex"
+    )
     mock_r_repo = MagicMock()
     mock_r_repo.get_by_active_job_id.return_value = OrchestrationRun(
         run_id="run-no-uow",
@@ -623,8 +720,14 @@ def test_pending_persistence_failure_prevents_git_add(tmp_dirs):
     wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=bad_uow)
 
     with patch.object(wt_manager, "_git", new_callable=AsyncMock) as mock_git:
-        with pytest.raises(RuntimeError, match="orchestration_worktree_ownerships repository missing"):
-            asyncio.run(wt_manager.create_worktree("job-no-uow", "change-1", "main", project_id="proj-1", run_id="run-no-uow"))
+        with pytest.raises(
+            RuntimeError, match="orchestration_worktree_ownerships repository missing"
+        ):
+            asyncio.run(
+                wt_manager.create_worktree(
+                    "job-no-uow", "change-1", "main", project_id="proj-1", run_id="run-no-uow"
+                )
+            )
 
         for call_item in mock_git.call_args_list:
             args = call_item.args[0] if call_item.args else []
@@ -638,10 +741,14 @@ def test_marker_only_cleanup_denied(tmp_dirs):
     marker_only_path = wt_manager.worktrees_root / "marker-only"
     os.makedirs(marker_only_path, exist_ok=True)
     marker_file = marker_only_path / ".minime_worktree_ownership.json"
-    marker_file.write_text(json.dumps({"worktree_id": "wt-marker-only", "job_id": "job-marker-only"}))
+    marker_file.write_text(
+        json.dumps({"worktree_id": "wt-marker-only", "job_id": "job-marker-only"})
+    )
 
     # Without durable DB ownership, cleanup must be denied and directory preserved
-    asyncio.run(wt_manager.remove_clean_worktree_path(marker_only_path, "job-marker-only", "proj-1"))
+    asyncio.run(
+        wt_manager.remove_clean_worktree_path(marker_only_path, "job-marker-only", "proj-1")
+    )
     assert marker_only_path.exists()
 
 
@@ -767,7 +874,9 @@ def test_dot_minime_path_does_not_synthesize_authorization(tmp_dirs):
 def test_missing_git_remote_fails_identity_proof():
     no_remote_dir = tempfile.mkdtemp()
     try:
-        subprocess.run(["git", "init", "-b", "main"], cwd=no_remote_dir, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "init", "-b", "main"], cwd=no_remote_dir, check=True, capture_output=True
+        )
         uow = MockUOW()
         guard = ManagedWorkspaceGuard(uow)
 
@@ -785,7 +894,11 @@ def test_wrong_remote_fails(tmp_dirs):
     guard = ManagedWorkspaceGuard(uow)
 
     # Set origin remote to different repository
-    subprocess.run(["git", "remote", "set-url", "origin", "https://github.com/org/wrong-repo.git"], cwd=tmp_dirs["repo_root"], check=True)
+    subprocess.run(
+        ["git", "remote", "set-url", "origin", "https://github.com/org/wrong-repo.git"],
+        cwd=tmp_dirs["repo_root"],
+        check=True,
+    )
 
     valid, reason = guard.verify_git_repository_identity(
         tmp_dirs["repo_root"], "github.com/org/correct-repo", remote_name="origin"
@@ -807,7 +920,9 @@ def test_temp_path_outside_configured_trusted_root_denied(tmp_dirs):
     # Configure trusted_managed_root to a completely different path
     other_trusted_root = tempfile.mkdtemp()
     try:
-        guard = ManagedWorkspaceGuard(uow, runtime_root=tmp_dirs["runtime"], trusted_managed_root=other_trusted_root)
+        guard = ManagedWorkspaceGuard(
+            uow, runtime_root=tmp_dirs["runtime"], trusted_managed_root=other_trusted_root
+        )
         req = WorkspaceMutationRequest(
             project_id="test-proj",
             target_path=os.path.join(tmp_dirs["repo_root"], "README.md"),
@@ -816,7 +931,10 @@ def test_temp_path_outside_configured_trusted_root_denied(tmp_dirs):
         decision = guard.evaluate_mutation(req)
 
         assert decision.allowed is False
-        assert "lies outside trusted managed root" in decision.provider_detail or "outside trusted managed root" in decision.provider_detail
+        assert (
+            "lies outside trusted managed root" in decision.provider_detail
+            or "outside trusted managed root" in decision.provider_detail
+        )
     finally:
         shutil.rmtree(other_trusted_root, ignore_errors=True)
 
@@ -833,7 +951,9 @@ def test_explicit_trusted_root_allows_valid_temp_fixture(tmp_dirs):
 
     # Configure trusted_managed_root to include parent of repo_root
     parent_trusted = str(Path(tmp_dirs["repo_root"]).parent.resolve())
-    guard = ManagedWorkspaceGuard(uow, runtime_root=tmp_dirs["runtime"], trusted_managed_root=parent_trusted)
+    guard = ManagedWorkspaceGuard(
+        uow, runtime_root=tmp_dirs["runtime"], trusted_managed_root=parent_trusted
+    )
     req = WorkspaceMutationRequest(
         project_id="test-proj",
         target_path=os.path.join(tmp_dirs["worktrees"], "wt-job", "app.py"),
@@ -844,7 +964,12 @@ def test_explicit_trusted_root_allows_valid_temp_fixture(tmp_dirs):
     wt_path = os.path.join(tmp_dirs["worktrees"], "wt-job")
     os.makedirs(wt_path, exist_ok=True)
     subprocess.run(["git", "init"], cwd=wt_path, check=True, capture_output=True)
-    subprocess.run(["git", "remote", "add", "origin", "https://github.com/org/repo"], cwd=wt_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/org/repo"],
+        cwd=wt_path,
+        check=True,
+        capture_output=True,
+    )
     ownership = OrchestrationWorktreeOwnership(
         worktree_id="wt-job",
         project_id="test-proj",
@@ -923,6 +1048,7 @@ def test_wrong_head_sha_prevents_created(tmp_dirs):
     )
 
     with patch.object(wt_manager, "_git") as mock_git:
+
         async def mock_git_impl(args, **kwargs):
             if "worktree" in args and "list" in args:
                 return f"worktree {wt_path.resolve()}\n"
@@ -936,7 +1062,10 @@ def test_wrong_head_sha_prevents_created(tmp_dirs):
 
         mock_git.side_effect = mock_git_impl
 
-        with pytest.raises(RuntimeError, match="actual HEAD SHA 'actual_sha_123' does not match expected SHA 'expected_sha_456'"):
+        with pytest.raises(
+            RuntimeError,
+            match="actual HEAD SHA 'actual_sha_123' does not match expected SHA 'expected_sha_456'",
+        ):
             asyncio.run(
                 wt_manager._verify_creation_postconditions(
                     wt_path, ownership, expected_branch="main", expected_base_sha="expected_sha_456"
@@ -985,7 +1114,14 @@ def test_correct_head_sha_allows_created(tmp_dirs):
         creation_state=WorktreeCreationState.PENDING,
     )
 
-    with patch.object(wt_manager, "_git") as mock_git, patch("minime.services.workspace_guard.ManagedWorkspaceGuard.verify_git_repository_identity", return_value=(True, "OK")):
+    with (
+        patch.object(wt_manager, "_git") as mock_git,
+        patch(
+            "minime.services.workspace_guard.ManagedWorkspaceGuard.verify_git_repository_identity",
+            return_value=(True, "OK"),
+        ),
+    ):
+
         async def mock_git_impl(args, **kwargs):
             if "worktree" in args and "list" in args:
                 return f"worktree {wt_path.resolve()}\n"
@@ -1074,6 +1210,7 @@ def test_mutating_git_operations_require_guard_authorization(tmp_dirs):
     class MockOwnershipRepo:
         def get_by_canonical_path(self, path):
             return None
+
         def get_by_job_id(self, jid):
             return None
 
@@ -1082,7 +1219,9 @@ def test_mutating_git_operations_require_guard_authorization(tmp_dirs):
             self.project_managed_repository_bindings = MockBindingRepo()
             self.orchestration_worktree_ownerships = MockOwnershipRepo()
             self.git_operations = MagicMock()
-        def commit(self): pass
+
+        def commit(self):
+            pass
 
     uow = DeniedUOW()
     wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
@@ -1092,14 +1231,22 @@ def test_mutating_git_operations_require_guard_authorization(tmp_dirs):
         asyncio.run(wt_manager.create_recovery_snapshot("job-123", project_id=None))
 
     with pytest.raises(ValueError, match="project_id is mandatory"):
-        asyncio.run(wt_manager.finalize_candidate_commit(tmp_dirs["worktrees"], "job-123", project_id=None))
+        asyncio.run(
+            wt_manager.finalize_candidate_commit(tmp_dirs["worktrees"], "job-123", project_id=None)
+        )
 
     with pytest.raises(ValueError, match="project_id is mandatory"):
-        asyncio.run(wt_manager.cherry_pick(tmp_dirs["worktrees"], ["sha1"], "job-123", project_id=None))
+        asyncio.run(
+            wt_manager.cherry_pick(tmp_dirs["worktrees"], ["sha1"], "job-123", project_id=None)
+        )
 
     # 2. Denied ownership / missing CREATED record fails closed with RuntimeError
     with pytest.raises(RuntimeError, match="no valid worktree ownership found"):
-        asyncio.run(wt_manager.finalize_candidate_commit(tmp_dirs["worktrees"], "job-123", project_id="test-proj"))
+        asyncio.run(
+            wt_manager.finalize_candidate_commit(
+                tmp_dirs["worktrees"], "job-123", project_id="test-proj"
+            )
+        )
 
 
 def test_openspec_sync_service_without_uow_fails_closed(tmp_dirs):
@@ -1134,7 +1281,9 @@ def test_worktree_manager_uses_binding_worktree_parent_dir(tmp_dirs):
     assert str(resolved_path.resolve()) == os.path.realpath(os.path.join(custom_wt_dir, "job-999"))
 
     remediation_path = wt_manager.remediation_worktree_path("job-999", 1, project_id="custom-proj")
-    assert str(remediation_path.resolve()) == os.path.realpath(os.path.join(custom_wt_dir, "job-999-remediation-gen1"))
+    assert str(remediation_path.resolve()) == os.path.realpath(
+        os.path.join(custom_wt_dir, "job-999-remediation-gen1")
+    )
 
 
 def test_persisted_ownership_exact_identity_fields(tmp_dirs):
@@ -1151,10 +1300,13 @@ def test_persisted_ownership_exact_identity_fields(tmp_dirs):
     class MockOwnershipRepo:
         def __init__(self):
             self.store = {}
+
         def save(self, obj):
             self.store[obj.worktree_id] = obj
+
         def get_by_id(self, wid):
             return self.store.get(wid)
+
         def get_by_canonical_path(self, path):
             for v in self.store.values():
                 if v.canonical_worktree_path == path:
@@ -1167,10 +1319,19 @@ def test_persisted_ownership_exact_identity_fields(tmp_dirs):
             self.orchestration_worktree_ownerships = MockOwnershipRepo()
             self.jobs = MockJobRepo()
             self.orchestration_runs = MockOrchestrationRunRepo()
-        def commit(self): pass
+
+        def commit(self):
+            pass
 
     uow = MockUOWExact()
-    uow.jobs.save(Job(job_id="job-exact-1", project_id="exact-proj", change_name="my-change-spec", implementer_role="codex"))
+    uow.jobs.save(
+        Job(
+            job_id="job-exact-1",
+            project_id="exact-proj",
+            change_name="my-change-spec",
+            implementer_role="codex",
+        )
+    )
     uow.orchestration_runs.save(
         OrchestrationRun(
             run_id="run-exact-100",
@@ -1221,6 +1382,7 @@ def test_created_worktree_wrong_remote_identity_denied_conflict(tmp_dirs):
     class MockOwnershipRepo:
         def __init__(self, ow):
             self.ow = ow
+
         def get_by_canonical_path(self, path):
             return self.ow
 
@@ -1249,7 +1411,10 @@ def test_created_worktree_wrong_remote_identity_denied_conflict(tmp_dirs):
     guard = ManagedWorkspaceGuard(uow)
 
     # Monkeypatch verify_git_repository_identity to return False due to remote mismatch
-    guard.verify_git_repository_identity = lambda path, identity, remote: (False, "Remote identity mismatch: expected remote url mismatch")
+    guard.verify_git_repository_identity = lambda path, identity, remote: (
+        False,
+        "Remote identity mismatch: expected remote url mismatch",
+    )
 
     req = WorkspaceMutationRequest(
         project_id="proj-conflict",
@@ -1269,6 +1434,7 @@ def test_full_runtime_managed_root_overlap_containment_denied(tmp_dirs):
         def __init__(self, repo_root, wt_dir):
             self.repo_root = str(Path(repo_root).resolve())
             self.wt_dir = str(Path(wt_dir).resolve())
+
         def get_by_project_id(self, pid):
             return ProjectManagedRepositoryBinding(
                 project_id=pid,
@@ -1299,6 +1465,7 @@ def test_full_runtime_managed_root_overlap_containment_denied(tmp_dirs):
     ]
 
     for managed_root, wt_dir in scenarios:
+
         class MockUOWOverlap:
             def __init__(self):
                 self.project_managed_repository_bindings = CustomBindingRepo(managed_root, wt_dir)
@@ -1313,7 +1480,9 @@ def test_full_runtime_managed_root_overlap_containment_denied(tmp_dirs):
             requested_operation=WorkspaceOperation.WORKTREE_CREATE,
         )
         decision = guard.evaluate_mutation(req)
-        assert not decision.allowed, f"Scenario failed: managed_root={managed_root}, wt_dir={wt_dir}"
+        assert not decision.allowed, (
+            f"Scenario failed: managed_root={managed_root}, wt_dir={wt_dir}"
+        )
         assert decision.reason_code == ExternalReasonCode.POLICY_DENIED
 
 
@@ -1337,14 +1506,20 @@ def test_missing_binding_prevents_path_resolution_and_worktree_creation(tmp_dirs
         wt_manager.worktree_path("job-1", "missing-proj")
 
     with pytest.raises((RuntimeError, ValueError)):
-        asyncio.run(wt_manager.create_worktree("job-1", "change-1", "main", project_id="missing-proj"))
+        asyncio.run(
+            wt_manager.create_worktree("job-1", "change-1", "main", project_id="missing-proj")
+        )
 
 
 def test_missing_run_id_or_change_name_prevents_creation_and_matches_supplied(tmp_dirs):
     class MockBindingRepo:
         def get_by_project_id(self, pid):
             marker_file = Path(tmp_dirs["repo_root"]) / ".minime-managed-project.json"
-            marker_file.write_text(json.dumps({"project_id": pid, "canonical_repository_identity": "github.com/org/repo"}))
+            marker_file.write_text(
+                json.dumps(
+                    {"project_id": pid, "canonical_repository_identity": "github.com/org/repo"}
+                )
+            )
             return ProjectManagedRepositoryBinding(
                 project_id=pid,
                 canonical_repository_identity="github.com/org/repo",
@@ -1375,7 +1550,9 @@ def test_missing_run_id_or_change_name_prevents_creation_and_matches_supplied(tm
             self.orchestration_worktree_ownerships = MockOwnershipRepo()
             self.jobs = MockJobRepo()
             self.orchestration_runs = MockOrchestrationRunRepo()
-        def commit(self): pass
+
+        def commit(self):
+            pass
 
     uow = MockUOWStrict()
     wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
@@ -1395,7 +1572,9 @@ def test_missing_run_id_or_change_name_prevents_creation_and_matches_supplied(tm
     assert "run_id" in str(exc1.value)
 
     # 2. Missing change_name raises ValueError
-    uow.jobs.save(Job(job_id="job-strict-1", project_id="proj-1", change_name="", implementer_role="codex"))
+    uow.jobs.save(
+        Job(job_id="job-strict-1", project_id="proj-1", change_name="", implementer_role="codex")
+    )
     uow.orchestration_runs.save(
         OrchestrationRun(
             run_id="run-1",
@@ -1424,7 +1603,14 @@ def test_missing_run_id_or_change_name_prevents_creation_and_matches_supplied(tm
 
     # 3. Valid run_id and change_name match exactly
     target3 = Path(tmp_dirs["worktrees"]) / "job-strict-3"
-    uow.jobs.save(Job(job_id="job-strict-3", project_id="proj-1", change_name="change-supplied-88", implementer_role="codex"))
+    uow.jobs.save(
+        Job(
+            job_id="job-strict-3",
+            project_id="proj-1",
+            change_name="change-supplied-88",
+            implementer_role="codex",
+        )
+    )
     uow.orchestration_runs.save(
         OrchestrationRun(
             run_id="run-supplied-99",
@@ -1453,11 +1639,18 @@ def test_missing_run_id_or_change_name_prevents_creation_and_matches_supplied(tm
 
 
 def test_durable_job_without_run_id_fails_before_git_add(tmp_dirs):
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True
+    )
+
     class MockBindingRepo:
         def get_by_project_id(self, pid):
             marker_file = Path(tmp_dirs["repo_root"]) / ".minime-managed-project.json"
-            marker_file.write_text(json.dumps({"project_id": pid, "canonical_repository_identity": "github.com/org/repo"}))
+            marker_file.write_text(
+                json.dumps(
+                    {"project_id": pid, "canonical_repository_identity": "github.com/org/repo"}
+                )
+            )
             return ProjectManagedRepositoryBinding(
                 project_id=pid,
                 canonical_repository_identity="github.com/org/repo",
@@ -1467,10 +1660,17 @@ def test_durable_job_without_run_id_fails_before_git_add(tmp_dirs):
             )
 
     class MockOwnershipRepo:
-        def __init__(self): self.store = {}
-        def save(self, obj): self.store[obj.worktree_id] = obj
-        def get_by_id(self, wid): return self.store.get(wid)
-        def get_by_canonical_path(self, path): return None
+        def __init__(self):
+            self.store = {}
+
+        def save(self, obj):
+            self.store[obj.worktree_id] = obj
+
+        def get_by_id(self, wid):
+            return self.store.get(wid)
+
+        def get_by_canonical_path(self, path):
+            return None
 
     class MockUOWJobNoRunID:
         def __init__(self):
@@ -1479,7 +1679,9 @@ def test_durable_job_without_run_id_fails_before_git_add(tmp_dirs):
             self.jobs = None
             self.orchestration_runs = None
             self.candidate_remediations = None
-        def commit(self): pass
+
+        def commit(self):
+            pass
 
     uow = MockUOWJobNoRunID()
     wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
@@ -1501,11 +1703,18 @@ def test_durable_job_without_run_id_fails_before_git_add(tmp_dirs):
 
 
 def test_missing_canonical_change_name_blocks_integration_worktree_creation(tmp_dirs):
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True
+    )
+
     class MockBindingRepo:
         def get_by_project_id(self, pid):
             marker_file = Path(tmp_dirs["repo_root"]) / ".minime-managed-project.json"
-            marker_file.write_text(json.dumps({"project_id": pid, "canonical_repository_identity": "github.com/org/repo"}))
+            marker_file.write_text(
+                json.dumps(
+                    {"project_id": pid, "canonical_repository_identity": "github.com/org/repo"}
+                )
+            )
             return ProjectManagedRepositoryBinding(
                 project_id=pid,
                 canonical_repository_identity="github.com/org/repo",
@@ -1515,21 +1724,45 @@ def test_missing_canonical_change_name_blocks_integration_worktree_creation(tmp_
             )
 
     class MockOwnershipRepo:
-        def __init__(self): self.store = {}
-        def save(self, obj): self.store[obj.worktree_id] = obj
-        def get_by_id(self, wid): return self.store.get(wid)
-        def get_by_canonical_path(self, path): return None
+        def __init__(self):
+            self.store = {}
+
+        def save(self, obj):
+            self.store[obj.worktree_id] = obj
+
+        def get_by_id(self, wid):
+            return self.store.get(wid)
+
+        def get_by_canonical_path(self, path):
+            return None
 
     class MockUOWNoChangeName:
         def __init__(self):
             self.project_managed_repository_bindings = MockBindingRepo()
             self.orchestration_worktree_ownerships = MockOwnershipRepo()
             self.jobs = MockJobRepo()
-            self.jobs.save(Job(job_id="job-int-no-change-name", project_id="proj-1", change_name="", implementer_role="codex"))
+            self.jobs.save(
+                Job(
+                    job_id="job-int-no-change-name",
+                    project_id="proj-1",
+                    change_name="",
+                    implementer_role="codex",
+                )
+            )
             self.orchestration_runs = MockOrchestrationRunRepo()
-            self.orchestration_runs.save(OrchestrationRun(run_id="run-1", active_job_id="job-int-no-change-name", project_id="proj-1", change_name="", base_sha="sha123"))
+            self.orchestration_runs.save(
+                OrchestrationRun(
+                    run_id="run-1",
+                    active_job_id="job-int-no-change-name",
+                    project_id="proj-1",
+                    change_name="",
+                    base_sha="sha123",
+                )
+            )
             self.candidate_remediations = None
-        def commit(self): pass
+
+        def commit(self):
+            pass
 
     uow = MockUOWNoChangeName()
     wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
@@ -1615,12 +1848,23 @@ def test_worktree_manager_refuses_path_resolution_from_invalid_binding(tmp_dirs)
 
 
 def test_source_repo_project_root_mismatch_blocks_git_mutation(tmp_dirs):
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_dirs["repo_root"], check=True)
-    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_dirs["repo_root"], check=True)
+    subprocess.run(
+        ["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"], cwd=tmp_dirs["repo_root"], check=True
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test User"], cwd=tmp_dirs["repo_root"], check=True
+    )
     (Path(tmp_dirs["repo_root"]) / "README.md").write_text("initial\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=tmp_dirs["repo_root"], check=True)
-    subprocess.run(["git", "commit", "-m", "initial"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "initial"],
+        cwd=tmp_dirs["repo_root"],
+        check=True,
+        capture_output=True,
+    )
 
     other_repo = os.path.join(tmp_dirs["base"], "other_managed_repo")
     os.makedirs(other_repo, exist_ok=True)
@@ -1634,7 +1878,14 @@ def test_source_repo_project_root_mismatch_blocks_git_mutation(tmp_dirs):
         worktree_parent_dir=tmp_dirs["worktrees"],
     )
     uow.project_managed_repository_bindings.save(binding)
-    uow.jobs.save(Job(job_id="job-source-mismatch", project_id="proj-source-mismatch", change_name="change-1", implementer_role="codex"))
+    uow.jobs.save(
+        Job(
+            job_id="job-source-mismatch",
+            project_id="proj-source-mismatch",
+            change_name="change-1",
+            implementer_role="codex",
+        )
+    )
     uow.orchestration_runs.save(
         OrchestrationRun(
             run_id="run-1",
@@ -1670,7 +1921,9 @@ def test_source_repo_project_root_mismatch_blocks_git_mutation(tmp_dirs):
 
 
 def test_reuse_existing_rejects_unproven_worktree(tmp_dirs):
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True
+    )
     uow = MockUOW()
     binding = ProjectManagedRepositoryBinding(
         project_id="proj-reuse",
@@ -1679,7 +1932,14 @@ def test_reuse_existing_rejects_unproven_worktree(tmp_dirs):
         worktree_parent_dir=tmp_dirs["worktrees"],
     )
     uow.project_managed_repository_bindings.save(binding)
-    uow.jobs.save(Job(job_id="job-reuse", project_id="proj-reuse", change_name="change-reuse", implementer_role="codex"))
+    uow.jobs.save(
+        Job(
+            job_id="job-reuse",
+            project_id="proj-reuse",
+            change_name="change-reuse",
+            implementer_role="codex",
+        )
+    )
     uow.orchestration_runs.save(
         OrchestrationRun(
             run_id="run-reuse",
@@ -1741,7 +2001,14 @@ def test_reuse_existing_rejects_unproven_worktree(tmp_dirs):
 
 def test_supplied_false_run_id_and_change_name_rejected(tmp_dirs):
     uow = MockUOW()
-    uow.jobs.save(Job(job_id="job-durable-1", project_id="proj-1", change_name="real-change", implementer_role="codex"))
+    uow.jobs.save(
+        Job(
+            job_id="job-durable-1",
+            project_id="proj-1",
+            change_name="real-change",
+            implementer_role="codex",
+        )
+    )
     uow.orchestration_runs.save(
         OrchestrationRun(
             run_id="real-run",
@@ -1760,31 +2027,62 @@ def test_supplied_false_run_id_and_change_name_rejected(tmp_dirs):
     wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
 
     with pytest.raises(ValueError, match="CONFLICT: Caller-supplied run_id 'false-run' conflicts"):
-        wt_manager._resolve_real_run_id("job-durable-1", run_id="false-run", project_id="proj-1", change_name="real-change")
+        wt_manager._resolve_real_run_id(
+            "job-durable-1", run_id="false-run", project_id="proj-1", change_name="real-change"
+        )
 
-    with pytest.raises(ValueError, match="CONFLICT: Caller-supplied change_name 'false-change' conflicts"):
-        wt_manager._resolve_real_change_name("job-durable-1", change_name="false-change", project_id="proj-1", run_id="real-run")
+    with pytest.raises(
+        ValueError, match="CONFLICT: Caller-supplied change_name 'false-change' conflicts"
+    ):
+        wt_manager._resolve_real_change_name(
+            "job-durable-1", change_name="false-change", project_id="proj-1", run_id="real-run"
+        )
 
-    assert wt_manager._resolve_real_run_id("job-durable-1", run_id="real-run", project_id="proj-1", change_name="real-change") == "real-run"
-    assert wt_manager._resolve_real_change_name("job-durable-1", change_name="real-change", project_id="proj-1", run_id="real-run") == "real-change"
+    assert (
+        wt_manager._resolve_real_run_id(
+            "job-durable-1", run_id="real-run", project_id="proj-1", change_name="real-change"
+        )
+        == "real-run"
+    )
+    assert (
+        wt_manager._resolve_real_change_name(
+            "job-durable-1", change_name="real-change", project_id="proj-1", run_id="real-run"
+        )
+        == "real-change"
+    )
 
 
 def test_remote_identity_host_sensitive():
     assert normalize_repository_identity("git@github.com:org/repo.git") == "github.com/org/repo"
     assert normalize_repository_identity("https://github.com/org/repo.git") == "github.com/org/repo"
-    assert normalize_repository_identity("ssh://git@github.com/org/repo.git") == "github.com/org/repo"
+    assert (
+        normalize_repository_identity("ssh://git@github.com/org/repo.git") == "github.com/org/repo"
+    )
     assert normalize_repository_identity("git@evil.example:org/repo.git") == "evil.example/org/repo"
 
-    assert normalize_repository_identity("git@github.com:org/repo.git") != normalize_repository_identity("git@evil.example:org/repo.git")
+    assert normalize_repository_identity(
+        "git@github.com:org/repo.git"
+    ) != normalize_repository_identity("git@evil.example:org/repo.git")
 
 
 def test_synthetic_run_id_fallback_rejected_when_job_run_id_empty(tmp_dirs):
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_dirs["repo_root"], check=True)
-    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_dirs["repo_root"], check=True)
+    subprocess.run(
+        ["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"], cwd=tmp_dirs["repo_root"], check=True
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test User"], cwd=tmp_dirs["repo_root"], check=True
+    )
     (Path(tmp_dirs["repo_root"]) / "README.md").write_text("initial\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=tmp_dirs["repo_root"], check=True)
-    subprocess.run(["git", "commit", "-m", "initial"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "initial"],
+        cwd=tmp_dirs["repo_root"],
+        check=True,
+        capture_output=True,
+    )
 
     uow = MockUOW()
     binding = ProjectManagedRepositoryBinding(
@@ -1796,14 +2094,25 @@ def test_synthetic_run_id_fallback_rejected_when_job_run_id_empty(tmp_dirs):
     uow.project_managed_repository_bindings.save(binding)
 
     # Durable Job exists, but Job.run_id is None/empty
-    job = Job(job_id="job-synth-1", project_id="proj-synth", change_name="change-synth", run_id=None, implementer_role="codex")
+    job = Job(
+        job_id="job-synth-1",
+        project_id="proj-synth",
+        change_name="change-synth",
+        run_id=None,
+        implementer_role="codex",
+    )
     uow.jobs.save(job)
 
     wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
 
     # 1. Direct call to _resolve_real_run_id with caller-supplied fake run_id => EVIDENCE_INSUFFICIENT
-    with pytest.raises(ValueError, match="EVIDENCE_INSUFFICIENT: Durable run_id for job_id 'job-synth-1' is unobservable"):
-        wt_manager._resolve_real_run_id("job-synth-1", run_id="fake-run", project_id="proj-synth", change_name="change-synth")
+    with pytest.raises(
+        ValueError,
+        match="EVIDENCE_INSUFFICIENT: Durable run_id for job_id 'job-synth-1' is unobservable",
+    ):
+        wt_manager._resolve_real_run_id(
+            "job-synth-1", run_id="fake-run", project_id="proj-synth", change_name="change-synth"
+        )
 
     # 2. Attempting create_worktree with caller-supplied fake run_id => fails before PENDING persistence and before git worktree add
     with patch.object(wt_manager, "_git", new_callable=AsyncMock) as mock_git:
@@ -1885,7 +2194,11 @@ def test_unobservable_remote_identity_returns_unknown_outcome(tmp_dirs):
     assert decision_wt.reason_code == ExternalReasonCode.UNOBSERVABLE
 
     # 3. Mismatch remote URL => FAILURE + CONFLICT
-    subprocess.run(["git", "remote", "set-url", "origin", "git@evil.example:org/repo.git"], cwd=tmp_dirs["repo_root"], check=True)
+    subprocess.run(
+        ["git", "remote", "set-url", "origin", "git@evil.example:org/repo.git"],
+        cwd=tmp_dirs["repo_root"],
+        check=True,
+    )
     req_mismatch = WorkspaceMutationRequest(
         project_id="proj-unobs",
         target_path=tmp_dirs["repo_root"],
@@ -1912,6 +2225,7 @@ def test_post_merge_git_mutations_blocked_on_unauthorized_project_root(tmp_dirs)
     uow.project_managed_repository_bindings.save(binding)
 
     from minime.services.post_merge_service import PostMergeReconciliationService
+
     pm_service = PostMergeReconciliationService(
         uow=uow,
         project_root=other_root,
@@ -1920,7 +2234,9 @@ def test_post_merge_git_mutations_blocked_on_unauthorized_project_root(tmp_dirs)
 
     with patch("subprocess.run") as mock_sub:
         # 1. verify_candidate_ancestry fails closed before git fetch
-        ancestry_res = pm_service.verify_candidate_ancestry("sha123", "main", project_id="proj-pm-guard")
+        ancestry_res = pm_service.verify_candidate_ancestry(
+            "sha123", "main", project_id="proj-pm-guard"
+        )
         assert ancestry_res is False
 
         # 2. _clean_worktrees fails closed before git worktree remove
@@ -1939,7 +2255,15 @@ def test_post_merge_git_mutations_blocked_on_unauthorized_project_root(tmp_dirs)
 
 
 def test_remediation_worktree_reuse_requires_full_durable_adoption_proof(tmp_dirs):
-    source_sha = (subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True, text=True)).stdout.strip()
+    source_sha = (
+        subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=tmp_dirs["repo_root"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    ).stdout.strip()
 
     uow = MockUOW()
     binding = ProjectManagedRepositoryBinding(
@@ -1950,7 +2274,14 @@ def test_remediation_worktree_reuse_requires_full_durable_adoption_proof(tmp_dir
     )
     uow.project_managed_repository_bindings.save(binding)
 
-    uow.jobs.save(Job(job_id="job-rem-1", project_id="proj-rem-reuse", change_name="change-rem", implementer_role="codex"))
+    uow.jobs.save(
+        Job(
+            job_id="job-rem-1",
+            project_id="proj-rem-reuse",
+            change_name="change-rem",
+            implementer_role="codex",
+        )
+    )
     uow.orchestration_runs.save(
         OrchestrationRun(
             run_id="run-rem-1",
@@ -1970,12 +2301,21 @@ def test_remediation_worktree_reuse_requires_full_durable_adoption_proof(tmp_dir
     rem_path = Path(tmp_dirs["worktrees"]) / "job-rem-1-remediation-gen1"
     rem_path.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "init", "-b", "main"], cwd=rem_path, check=True, capture_output=True)
-    subprocess.run(["git", "remote", "add", "origin", "https://github.com/org/repo"], cwd=rem_path, check=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/org/repo"], cwd=rem_path, check=True
+    )
 
     # 1. No ownership record => refused
     with pytest.raises(RuntimeError, match="Refusing to adopt existing remediation worktree"):
         asyncio.run(
-            wt_manager.create_remediation_worktree("job-rem-1", "change-rem", source_sha, 1, project_id="proj-rem-reuse", run_id="run-rem-1")
+            wt_manager.create_remediation_worktree(
+                "job-rem-1",
+                "change-rem",
+                source_sha,
+                1,
+                project_id="proj-rem-reuse",
+                run_id="run-rem-1",
+            )
         )
 
     # 2. PENDING ownership => refused
@@ -1995,13 +2335,27 @@ def test_remediation_worktree_reuse_requires_full_durable_adoption_proof(tmp_dir
 
     with pytest.raises(RuntimeError, match="Refusing to adopt existing remediation worktree"):
         asyncio.run(
-            wt_manager.create_remediation_worktree("job-rem-1", "change-rem", source_sha, 1, project_id="proj-rem-reuse", run_id="run-rem-1")
+            wt_manager.create_remediation_worktree(
+                "job-rem-1",
+                "change-rem",
+                source_sha,
+                1,
+                project_id="proj-rem-reuse",
+                run_id="run-rem-1",
+            )
         )
 
     # 3. Caller conflict in run_id => CONFLICT
     with pytest.raises(ValueError, match="CONFLICT"):
         asyncio.run(
-            wt_manager.create_remediation_worktree("job-rem-1", "change-rem", source_sha, 1, project_id="proj-rem-reuse", run_id="wrong-run")
+            wt_manager.create_remediation_worktree(
+                "job-rem-1",
+                "change-rem",
+                source_sha,
+                1,
+                project_id="proj-rem-reuse",
+                run_id="wrong-run",
+            )
         )
 
     # 4. Valid CREATED ownership & Git identity & worktree list => Accepted
@@ -2009,8 +2363,12 @@ def test_remediation_worktree_reuse_requires_full_durable_adoption_proof(tmp_dir
     uow.orchestration_worktree_ownerships.save(ownership)
     wt_manager._write_ownership_marker(rem_path, ownership)
 
-    with patch.object(wt_manager, "_git") as mock_git, patch.object(wt_manager, "current_sha", new_callable=AsyncMock) as mock_sha:
+    with (
+        patch.object(wt_manager, "_git") as mock_git,
+        patch.object(wt_manager, "current_sha", new_callable=AsyncMock) as mock_sha,
+    ):
         mock_sha.return_value = source_sha
+
         async def mock_git_side_effect(args, cwd=None, **kwargs):
             if "branch" in args and "--show-current" in args:
                 return "minime/change-rem-job-rem-1-remediation-gen1"
@@ -2025,7 +2383,14 @@ def test_remediation_worktree_reuse_requires_full_durable_adoption_proof(tmp_dir
         mock_git.side_effect = mock_git_side_effect
 
         info = asyncio.run(
-            wt_manager.create_remediation_worktree("job-rem-1", "change-rem", source_sha, 1, project_id="proj-rem-reuse", run_id="run-rem-1")
+            wt_manager.create_remediation_worktree(
+                "job-rem-1",
+                "change-rem",
+                source_sha,
+                1,
+                project_id="proj-rem-reuse",
+                run_id="run-rem-1",
+            )
         )
         assert info.path.resolve() == rem_path.resolve()
         assert info.branch_name == "minime/change-rem-job-rem-1-remediation-gen1"
@@ -2042,6 +2407,7 @@ def test_verify_candidate_ancestry_missing_project_id_fails_closed_before_fetch(
     uow.project_managed_repository_bindings.save(binding)
 
     from minime.services.post_merge_service import PostMergeReconciliationService
+
     pm_service = PostMergeReconciliationService(
         uow=uow,
         project_root=tmp_dirs["repo_root"],
@@ -2059,7 +2425,12 @@ def test_verify_candidate_ancestry_missing_project_id_fails_closed_before_fetch(
 
 
 def test_delete_local_branch_missing_project_id_fails_closed_before_deletion(tmp_dirs):
-    subprocess.run(["git", "branch", "minime/test-branch-to-del"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "branch", "minime/test-branch-to-del"],
+        cwd=tmp_dirs["repo_root"],
+        check=True,
+        capture_output=True,
+    )
 
     uow = MockUOW()
     binding = ProjectManagedRepositoryBinding(
@@ -2071,6 +2442,7 @@ def test_delete_local_branch_missing_project_id_fails_closed_before_deletion(tmp
     uow.project_managed_repository_bindings.save(binding)
 
     from minime.services.post_merge_service import PostMergeReconciliationService
+
     pm_service = PostMergeReconciliationService(
         uow=uow,
         project_root=tmp_dirs["repo_root"],
@@ -2093,6 +2465,7 @@ def test_delete_local_branch_missing_project_id_fails_closed_before_deletion(tmp
 def test_systemic_post_merge_entry_points_blocked_without_project_id(tmp_dirs):
     uow = MockUOW()
     from minime.services.post_merge_service import PostMergeReconciliationService
+
     pm_service = PostMergeReconciliationService(
         uow=uow,
         project_root=tmp_dirs["repo_root"],
@@ -2101,7 +2474,9 @@ def test_systemic_post_merge_entry_points_blocked_without_project_id(tmp_dirs):
 
     with patch("subprocess.run") as mock_sub:
         # 1. fetch / verify_candidate_ancestry
-        ancestry_ok = pm_service.verify_candidate_ancestry("sha123", base_ref="main", project_id=None)
+        ancestry_ok = pm_service.verify_candidate_ancestry(
+            "sha123", base_ref="main", project_id=None
+        )
         assert ancestry_ok is False
 
         # 2. worktree remove / _clean_worktrees
@@ -2132,7 +2507,10 @@ def test_post_merge_cleanup_unowned_prefix_directory_not_removed(tmp_dirs):
     uow.project_managed_repository_bindings.save(binding)
 
     from minime.services.post_merge_service import PostMergeReconciliationService
-    pm_service = PostMergeReconciliationService(uow=uow, project_root=tmp_dirs["repo_root"], github_adapter=MagicMock())
+
+    pm_service = PostMergeReconciliationService(
+        uow=uow, project_root=tmp_dirs["repo_root"], github_adapter=MagicMock()
+    )
 
     unowned_dir = Path(tmp_dirs["worktrees"]) / "job-unowned-123"
     unowned_dir.mkdir(parents=True, exist_ok=True)
@@ -2141,7 +2519,10 @@ def test_post_merge_cleanup_unowned_prefix_directory_not_removed(tmp_dirs):
     res = pm_service._clean_worktrees("job-unowned-123", project_id="proj-clean-1")
 
     assert res.outcome == ExternalOutcome.FAILURE
-    assert res.reason_code in (ExternalReasonCode.POSTCONDITION_NOT_PROVEN, ExternalReasonCode.POLICY_DENIED)
+    assert res.reason_code in (
+        ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
+        ExternalReasonCode.POLICY_DENIED,
+    )
     assert unowned_dir.exists()
 
 
@@ -2173,7 +2554,10 @@ def test_post_merge_cleanup_mismatched_ownership_not_removed(tmp_dirs):
     uow.orchestration_worktree_ownerships.save(ownership)
 
     from minime.services.post_merge_service import PostMergeReconciliationService
-    pm_service = PostMergeReconciliationService(uow=uow, project_root=tmp_dirs["repo_root"], github_adapter=MagicMock())
+
+    pm_service = PostMergeReconciliationService(
+        uow=uow, project_root=tmp_dirs["repo_root"], github_adapter=MagicMock()
+    )
 
     res = pm_service._clean_worktrees("job-mismatch-456", project_id="proj-clean-2")
 
@@ -2209,7 +2593,10 @@ def test_post_merge_cleanup_absent_from_git_worktree_list_not_removed(tmp_dirs):
     uow.orchestration_worktree_ownerships.save(ownership)
 
     from minime.services.post_merge_service import PostMergeReconciliationService
-    pm_service = PostMergeReconciliationService(uow=uow, project_root=tmp_dirs["repo_root"], github_adapter=MagicMock())
+
+    pm_service = PostMergeReconciliationService(
+        uow=uow, project_root=tmp_dirs["repo_root"], github_adapter=MagicMock()
+    )
 
     res = pm_service._clean_worktrees("job-no-gitlist-789", project_id="proj-clean-3")
 
@@ -2218,12 +2605,20 @@ def test_post_merge_cleanup_absent_from_git_worktree_list_not_removed(tmp_dirs):
 
 
 def test_post_merge_cleanup_dirty_managed_worktree_not_removed(tmp_dirs):
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_dirs["repo_root"], check=True)
-    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_dirs["repo_root"], check=True)
+    subprocess.run(
+        ["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"], cwd=tmp_dirs["repo_root"], check=True
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test User"], cwd=tmp_dirs["repo_root"], check=True
+    )
     (Path(tmp_dirs["repo_root"]) / "README.md").write_text("init", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=tmp_dirs["repo_root"], check=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True
+    )
 
     uow = MockUOW()
     binding = ProjectManagedRepositoryBinding(
@@ -2233,7 +2628,14 @@ def test_post_merge_cleanup_dirty_managed_worktree_not_removed(tmp_dirs):
         worktree_parent_dir=tmp_dirs["worktrees"],
     )
     uow.project_managed_repository_bindings.save(binding)
-    uow.jobs.save(Job(job_id="job-dirty-4", project_id="proj-dirty-4", change_name="change-dirty", implementer_role="codex"))
+    uow.jobs.save(
+        Job(
+            job_id="job-dirty-4",
+            project_id="proj-dirty-4",
+            change_name="change-dirty",
+            implementer_role="codex",
+        )
+    )
     uow.orchestration_runs.save(
         OrchestrationRun(
             run_id="run-dirty-4",
@@ -2250,13 +2652,23 @@ def test_post_merge_cleanup_dirty_managed_worktree_not_removed(tmp_dirs):
     )
 
     wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
-    info = asyncio.run(wt_manager.create_worktree("job-dirty-4", "change-dirty", "main", project_id="proj-dirty-4", run_id="run-dirty-4"))
+    info = asyncio.run(
+        wt_manager.create_worktree(
+            "job-dirty-4", "change-dirty", "main", project_id="proj-dirty-4", run_id="run-dirty-4"
+        )
+    )
     assert info.path.exists()
 
     (info.path / "dirty.txt").write_text("untracked modifications", encoding="utf-8")
 
     from minime.services.post_merge_service import PostMergeReconciliationService
-    pm_service = PostMergeReconciliationService(uow=uow, project_root=tmp_dirs["repo_root"], github_adapter=MagicMock(), worktree_manager=wt_manager)
+
+    pm_service = PostMergeReconciliationService(
+        uow=uow,
+        project_root=tmp_dirs["repo_root"],
+        github_adapter=MagicMock(),
+        worktree_manager=wt_manager,
+    )
 
     res = pm_service._clean_worktrees("job-dirty-4", project_id="proj-dirty-4")
 
@@ -2265,12 +2677,20 @@ def test_post_merge_cleanup_dirty_managed_worktree_not_removed(tmp_dirs):
 
 
 def test_post_merge_cleanup_clean_owned_worktree_successfully_removed(tmp_dirs):
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_dirs["repo_root"], check=True)
-    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_dirs["repo_root"], check=True)
+    subprocess.run(
+        ["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"], cwd=tmp_dirs["repo_root"], check=True
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test User"], cwd=tmp_dirs["repo_root"], check=True
+    )
     (Path(tmp_dirs["repo_root"]) / "README.md").write_text("init", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=tmp_dirs["repo_root"], check=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True
+    )
 
     uow = MockUOW()
     binding = ProjectManagedRepositoryBinding(
@@ -2280,7 +2700,14 @@ def test_post_merge_cleanup_clean_owned_worktree_successfully_removed(tmp_dirs):
         worktree_parent_dir=tmp_dirs["worktrees"],
     )
     uow.project_managed_repository_bindings.save(binding)
-    uow.jobs.save(Job(job_id="job-clean-5", project_id="proj-clean-5", change_name="change-clean", implementer_role="codex"))
+    uow.jobs.save(
+        Job(
+            job_id="job-clean-5",
+            project_id="proj-clean-5",
+            change_name="change-clean",
+            implementer_role="codex",
+        )
+    )
     uow.orchestration_runs.save(
         OrchestrationRun(
             run_id="run-clean-5",
@@ -2297,11 +2724,21 @@ def test_post_merge_cleanup_clean_owned_worktree_successfully_removed(tmp_dirs):
     )
 
     wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
-    info = asyncio.run(wt_manager.create_worktree("job-clean-5", "change-clean", "main", project_id="proj-clean-5", run_id="run-clean-5"))
+    info = asyncio.run(
+        wt_manager.create_worktree(
+            "job-clean-5", "change-clean", "main", project_id="proj-clean-5", run_id="run-clean-5"
+        )
+    )
     assert info.path.exists()
 
     from minime.services.post_merge_service import PostMergeReconciliationService
-    pm_service = PostMergeReconciliationService(uow=uow, project_root=tmp_dirs["repo_root"], github_adapter=MagicMock(), worktree_manager=wt_manager)
+
+    pm_service = PostMergeReconciliationService(
+        uow=uow,
+        project_root=tmp_dirs["repo_root"],
+        github_adapter=MagicMock(),
+        worktree_manager=wt_manager,
+    )
 
     res = pm_service._clean_worktrees("job-clean-5", project_id="proj-clean-5")
 
@@ -2314,6 +2751,7 @@ def test_post_merge_cleanup_clean_owned_worktree_successfully_removed(tmp_dirs):
 
 def test_post_merge_reconciliation_refuses_claim_when_cleanup_fails(tmp_dirs):
     from minime.domain.enums import JobStatus, OrchestrationStopOutcome
+
     uow = MockUOW()
     binding = ProjectManagedRepositoryBinding(
         project_id="proj-refuse-6",
@@ -2322,7 +2760,15 @@ def test_post_merge_reconciliation_refuses_claim_when_cleanup_fails(tmp_dirs):
         worktree_parent_dir=tmp_dirs["worktrees"],
     )
     uow.project_managed_repository_bindings.save(binding)
-    uow.jobs.save(Job(job_id="job-refuse-6", project_id="proj-refuse-6", change_name="change-refuse", status=JobStatus.READY_TO_MERGE, implementer_role="codex"))
+    uow.jobs.save(
+        Job(
+            job_id="job-refuse-6",
+            project_id="proj-refuse-6",
+            change_name="change-refuse",
+            status=JobStatus.READY_TO_MERGE,
+            implementer_role="codex",
+        )
+    )
     uow.orchestration_runs.save(
         OrchestrationRun(
             run_id="run-refuse-6",
@@ -2342,13 +2788,21 @@ def test_post_merge_reconciliation_refuses_claim_when_cleanup_fails(tmp_dirs):
     unowned_dir.mkdir(parents=True, exist_ok=True)
 
     from minime.services.post_merge_service import PostMergeReconciliationService
-    mock_gh = MagicMock()
-    mock_gh.get_pull_request_details.return_value = MagicMock(outcome=ExternalOutcome.SUCCESS, data={"is_merged": True, "merged_by_login": "user", "head_sha": "sha"})
 
-    pm_service = PostMergeReconciliationService(uow=uow, project_root=tmp_dirs["repo_root"], github_adapter=mock_gh)
+    mock_gh = MagicMock()
+    mock_gh.get_pull_request_details.return_value = MagicMock(
+        outcome=ExternalOutcome.SUCCESS,
+        data={"is_merged": True, "merged_by_login": "user", "head_sha": "sha"},
+    )
+
+    pm_service = PostMergeReconciliationService(
+        uow=uow, project_root=tmp_dirs["repo_root"], github_adapter=mock_gh
+    )
     pm_service.verify_candidate_ancestry = MagicMock(return_value=True)
 
-    result = pm_service.reconcile_post_merge("proj-refuse-6", "change-refuse", run_id="run-refuse-6")
+    result = pm_service.reconcile_post_merge(
+        "proj-refuse-6", "change-refuse", run_id="run-refuse-6"
+    )
 
     assert result.success is False
     assert result.worktree_cleaned is False
@@ -2399,7 +2853,12 @@ def test_lightweight_reconciliation_missing_uow_fails_closed(tmp_dirs):
     initial_content = "# Tasks\n- [ ] 1.1 test verification task\n"
     tasks_file.write_text(initial_content, encoding="utf-8")
 
-    job = Job(job_id="job-rec-1", project_id="proj-rec", change_name="rec-change", implementer_role="codex")
+    job = Job(
+        job_id="job-rec-1",
+        project_id="proj-rec",
+        change_name="rec-change",
+        implementer_role="codex",
+    )
     project = Project(project_id="proj-rec", display_name="rec", repository="org/repo")
 
     with pytest.raises(RuntimeError, match="self.uow is mandatory for tasks.md mutation"):
@@ -2416,13 +2875,27 @@ def test_lightweight_reconciliation_missing_uow_fails_closed(tmp_dirs):
 
 
 def test_integration_worktree_adoption_proof_adversarial_checks(tmp_dirs):
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_dirs["repo_root"], check=True)
+    subprocess.run(
+        ["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"], cwd=tmp_dirs["repo_root"], check=True
+    )
     subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_dirs["repo_root"], check=True)
     (Path(tmp_dirs["repo_root"]) / "README.md").write_text("init", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=tmp_dirs["repo_root"], check=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
-    base_sha = (subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True, text=True)).stdout.strip()
+    subprocess.run(
+        ["git", "commit", "-m", "init"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True
+    )
+    base_sha = (
+        subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=tmp_dirs["repo_root"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    ).stdout.strip()
 
     uow = MockUOW()
     binding = ProjectManagedRepositoryBinding(
@@ -2432,7 +2905,14 @@ def test_integration_worktree_adoption_proof_adversarial_checks(tmp_dirs):
         worktree_parent_dir=tmp_dirs["worktrees"],
     )
     uow.project_managed_repository_bindings.save(binding)
-    uow.jobs.save(Job(job_id="job-int-adv", project_id="proj-int-adv", change_name="change-int", implementer_role="codex"))
+    uow.jobs.save(
+        Job(
+            job_id="job-int-adv",
+            project_id="proj-int-adv",
+            change_name="change-int",
+            implementer_role="codex",
+        )
+    )
     uow.orchestration_runs.save(
         OrchestrationRun(
             run_id="run-int-adv",
@@ -2450,9 +2930,16 @@ def test_integration_worktree_adoption_proof_adversarial_checks(tmp_dirs):
 
     wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
     int_path = Path(tmp_dirs["worktrees"]) / "job-int-adv-integration-gen1"
-    subprocess.run(["git", "worktree", "add", "-b", "minime/integration-gen1", str(int_path), "HEAD"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "worktree", "add", "-b", "minime/integration-gen1", str(int_path), "HEAD"],
+        cwd=tmp_dirs["repo_root"],
+        check=True,
+        capture_output=True,
+    )
 
-    with pytest.raises(RuntimeError, match="No durable OrchestrationWorktreeOwnership record found"):
+    with pytest.raises(
+        RuntimeError, match="No durable OrchestrationWorktreeOwnership record found"
+    ):
         asyncio.run(
             wt_manager.create_integration_worktree(
                 job_id="job-int-adv",
@@ -2566,7 +3053,9 @@ def test_managed_repository_marker_missing_repository_identity_fails_closed(tmp_
     guard = ManagedWorkspaceGuard(uow)
 
     marker_path = Path(tmp_dirs["repo_root"]) / ".minime-managed-project.json"
-    marker_path.write_text(json.dumps({"project_id": "proj-marker-test", "canonical_repository_identity": ""}))
+    marker_path.write_text(
+        json.dumps({"project_id": "proj-marker-test", "canonical_repository_identity": ""})
+    )
 
     ok, msg, reason, outcome = guard.verify_managed_repository_ownership_marker(
         tmp_dirs["repo_root"], "proj-marker-test", "github.com/org/repo"
@@ -2579,13 +3068,27 @@ def test_managed_repository_marker_missing_repository_identity_fails_closed(tmp_
 
 
 def test_create_worktree_reuse_requires_source_base_sha_and_proven_head(tmp_dirs):
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_dirs["repo_root"], check=True)
+    subprocess.run(
+        ["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"], cwd=tmp_dirs["repo_root"], check=True
+    )
     subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_dirs["repo_root"], check=True)
     (Path(tmp_dirs["repo_root"]) / "README.md").write_text("init", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=tmp_dirs["repo_root"], check=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
-    base_sha = (subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True, text=True)).stdout.strip()
+    subprocess.run(
+        ["git", "commit", "-m", "init"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True
+    )
+    base_sha = (
+        subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=tmp_dirs["repo_root"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    ).stdout.strip()
 
     uow = MockUOW()
     binding = ProjectManagedRepositoryBinding(
@@ -2595,7 +3098,14 @@ def test_create_worktree_reuse_requires_source_base_sha_and_proven_head(tmp_dirs
         worktree_parent_dir=tmp_dirs["worktrees"],
     )
     uow.project_managed_repository_bindings.save(binding)
-    uow.jobs.save(Job(job_id="job-reuse-sha", project_id="proj-reuse-sha", change_name="change-reuse", implementer_role="codex"))
+    uow.jobs.save(
+        Job(
+            job_id="job-reuse-sha",
+            project_id="proj-reuse-sha",
+            change_name="change-reuse",
+            implementer_role="codex",
+        )
+    )
     uow.orchestration_runs.save(
         OrchestrationRun(
             run_id="run-reuse-sha",
@@ -2613,7 +3123,12 @@ def test_create_worktree_reuse_requires_source_base_sha_and_proven_head(tmp_dirs
 
     wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
     wt_path = Path(tmp_dirs["worktrees"]) / "job-reuse-sha"
-    subprocess.run(["git", "worktree", "add", "-b", "minime/change-reuse-job-reuse-sha", str(wt_path), "HEAD"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "worktree", "add", "-b", "minime/change-reuse-job-reuse-sha", str(wt_path), "HEAD"],
+        cwd=tmp_dirs["repo_root"],
+        check=True,
+        capture_output=True,
+    )
 
     ownership = OrchestrationWorktreeOwnership(
         worktree_id="wt-job-reuse-sha",
@@ -2651,8 +3166,14 @@ def test_create_worktree_reuse_requires_source_base_sha_and_proven_head(tmp_dirs
     # Add an unproven commit to wt_path HEAD
     (wt_path / "extra.txt").write_text("extra", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=wt_path, check=True)
-    subprocess.run(["git", "commit", "-m", "extra unproven"], cwd=wt_path, check=True, capture_output=True)
-    unproven_head = (subprocess.run(["git", "rev-parse", "HEAD"], cwd=wt_path, check=True, capture_output=True, text=True)).stdout.strip()
+    subprocess.run(
+        ["git", "commit", "-m", "extra unproven"], cwd=wt_path, check=True, capture_output=True
+    )
+    unproven_head = (
+        subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=wt_path, check=True, capture_output=True, text=True
+        )
+    ).stdout.strip()
 
     # 2. Unproven HEAD (not equal to base SHA and not in DB candidate evidence) => Refused
     with pytest.raises(RuntimeError, match="and is not backed by durable candidate evidence"):
@@ -2686,8 +3207,18 @@ def test_create_worktree_reuse_requires_source_base_sha_and_proven_head(tmp_dirs
 
 
 def test_worktree_ownership_marker_corroborates_all_durable_fields(tmp_dirs):
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
-    base_sha = (subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True, text=True)).stdout.strip()
+    subprocess.run(
+        ["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True
+    )
+    base_sha = (
+        subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=tmp_dirs["repo_root"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    ).stdout.strip()
 
     uow = MockUOW()
     binding = ProjectManagedRepositoryBinding(
@@ -2713,7 +3244,12 @@ def test_worktree_ownership_marker_corroborates_all_durable_fields(tmp_dirs):
     uow.orchestration_worktree_ownerships.save(ownership)
 
     wt_path = Path(tmp_dirs["worktrees"]) / "wt-marker-adv"
-    subprocess.run(["git", "worktree", "add", "-b", ownership.branch, str(wt_path), "HEAD"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "worktree", "add", "-b", ownership.branch, str(wt_path), "HEAD"],
+        cwd=tmp_dirs["repo_root"],
+        check=True,
+        capture_output=True,
+    )
 
     wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=uow)
 
@@ -2821,7 +3357,12 @@ def test_openspec_task_tracker_active_writer_isolation(tmp_dirs):
     wt_path = Path(tmp_dirs["worktrees"]) / "wt-tracker-1"
     os.makedirs(wt_path, exist_ok=True)
     subprocess.run(["git", "init"], cwd=wt_path, check=True, capture_output=True)
-    subprocess.run(["git", "remote", "add", "origin", "https://github.com/org/repo"], cwd=wt_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/org/repo"],
+        cwd=wt_path,
+        check=True,
+        capture_output=True,
+    )
 
     tasks_dir = wt_path / "openspec" / "changes" / "change-1"
     os.makedirs(tasks_dir, exist_ok=True)
@@ -2913,12 +3454,16 @@ def test_openspec_generator_and_sync_descendant_authorization_isolation(tmp_dirs
 
     # 3. OpenSpecSyncService: sync_change_specs traversal blocked
     sync_svc = OpenSpecSyncService(project_root=tmp_dirs["repo_root"], uow=uow)
-    res_sync = sync_svc.sync_change_specs(openspec_path="openspec", change_name="../escaped", project_id="test-proj-gen")
+    res_sync = sync_svc.sync_change_specs(
+        openspec_path="openspec", change_name="../escaped", project_id="test-proj-gen"
+    )
     assert res_sync.outcome == ExternalOutcome.FAILURE
     assert res_sync.reason_code == ExternalReasonCode.POLICY_DENIED
 
     # 4. OpenSpecSyncService: archive_change traversal blocked
-    res_arch = sync_svc.archive_change(openspec_path="openspec", change_name="../escaped", project_id="test-proj-gen")
+    res_arch = sync_svc.archive_change(
+        openspec_path="openspec", change_name="../escaped", project_id="test-proj-gen"
+    )
     assert res_arch.outcome == ExternalOutcome.FAILURE
     assert res_arch.reason_code == ExternalReasonCode.POLICY_DENIED
 
@@ -2945,7 +3490,15 @@ def test_validated_repository_context_stage_c_push_authority(tmp_dirs):
     orch_svc = OrchestrationService(uow=uow, project_root=tmp_dirs["repo_root"])
 
     # 1. Missing ProjectManagedRepositoryBinding -> blocked
-    head_sha = (subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True, text=True)).stdout.strip()
+    head_sha = (
+        subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=tmp_dirs["repo_root"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    ).stdout.strip()
     _, err = orch_svc._validated_repository_context(
         root=Path(tmp_dirs["repo_root"]),
         project=project,
@@ -3011,7 +3564,15 @@ def test_validated_repository_context_stage_c_push_authority(tmp_dirs):
             candidate_sha=head_sha,
         )
         assert err is not None
-        assert any(token in err for token in ("Workspace mutation policy denied", "marker", "unobservable", "Git repository"))
+        assert any(
+            token in err
+            for token in (
+                "Workspace mutation policy denied",
+                "marker",
+                "unobservable",
+                "Git repository",
+            )
+        )
 
     # 5. Valid managed root + binding + marker + remote + candidate SHA -> allowed
     uow.project_managed_repository_bindings.save(mb_valid)
@@ -3091,7 +3652,9 @@ def test_openspec_sync_managed_root_authority_closure(tmp_dirs):
     os.makedirs(valid_cap_dir, exist_ok=True)
     (valid_cap_dir / "spec.md").write_text("## Requirement: Valid Cap\n", encoding="utf-8")
 
-    target_cap_file = Path(tmp_dirs["repo_root"]) / "openspec" / "specs" / "valid-capability" / "spec.md"
+    target_cap_file = (
+        Path(tmp_dirs["repo_root"]) / "openspec" / "specs" / "valid-capability" / "spec.md"
+    )
     with patch.dict(os.environ, {"MINIME_RUNTIME_ROOT": str(target_cap_file)}):
         res_denied_target = good_sync.sync_change_specs(
             openspec_path="openspec", change_name="change-1", project_id="test-proj-sync-auth"
@@ -3111,11 +3674,16 @@ def test_openspec_sync_managed_root_authority_closure(tmp_dirs):
     # 6. valid managed-root archive succeeds
     (change_dir / "proposal.md").write_text("proposal", encoding="utf-8")
     res_valid_archive = good_sync.archive_change(
-        openspec_path="openspec", change_name="change-1", target_date="2026-09-27", project_id="test-proj-sync-auth"
+        openspec_path="openspec",
+        change_name="change-1",
+        target_date="2026-09-27",
+        project_id="test-proj-sync-auth",
     )
     assert res_valid_archive.outcome == ExternalOutcome.SUCCESS
     assert not change_dir.exists()
-    archived_dir = Path(tmp_dirs["repo_root"]) / "openspec" / "changes" / "archive" / "2026-09-27-change-1"
+    archived_dir = (
+        Path(tmp_dirs["repo_root"]) / "openspec" / "changes" / "archive" / "2026-09-27-change-1"
+    )
     assert archived_dir.exists()
     assert (archived_dir / "proposal.md").exists()
 
@@ -3130,13 +3698,31 @@ async def test_review_worktree_lifecycle_finalization_cases(tmp_dirs):
     subprocess.run(["git", "config", "user.name", "Test"], cwd=repo_root, check=True)
     (Path(repo_root) / "README.md").write_text("init candidate A", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=repo_root, check=True)
-    subprocess.run(["git", "commit", "-m", "candidate A commit"], cwd=repo_root, check=True, capture_output=True)
-    cand_sha_a = (subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_root, check=True, capture_output=True, text=True)).stdout.strip()
+    subprocess.run(
+        ["git", "commit", "-m", "candidate A commit"],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+    )
+    cand_sha_a = (
+        subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=repo_root, check=True, capture_output=True, text=True
+        )
+    ).stdout.strip()
 
     # Commit candidate B
     (Path(repo_root) / "README.md").write_text("init candidate B", encoding="utf-8")
-    subprocess.run(["git", "commit", "-am", "candidate B commit"], cwd=repo_root, check=True, capture_output=True)
-    cand_sha_b = (subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_root, check=True, capture_output=True, text=True)).stdout.strip()
+    subprocess.run(
+        ["git", "commit", "-am", "candidate B commit"],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+    )
+    cand_sha_b = (
+        subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=repo_root, check=True, capture_output=True, text=True
+        )
+    ).stdout.strip()
 
     uow = MockUOW()
     binding = ProjectManagedRepositoryBinding(
@@ -3146,7 +3732,14 @@ async def test_review_worktree_lifecycle_finalization_cases(tmp_dirs):
         worktree_parent_dir=worktrees_dir,
     )
     uow.project_managed_repository_bindings.save(binding)
-    uow.jobs.save(Job(job_id="job-rev-final", project_id="proj-rev-final", change_name="change-rev-final", implementer_role="codex"))
+    uow.jobs.save(
+        Job(
+            job_id="job-rev-final",
+            project_id="proj-rev-final",
+            change_name="change-rev-final",
+            implementer_role="codex",
+        )
+    )
     uow.orchestration_runs.save(
         OrchestrationRun(
             run_id="run-rev-final",
@@ -3156,7 +3749,6 @@ async def test_review_worktree_lifecycle_finalization_cases(tmp_dirs):
             base_sha=cand_sha_a,
             current_stage=OrchestrationStage.COMPLEMENTARY_REVIEW,
             resumable_stage=OrchestrationStage.COMPLEMENTARY_REVIEW,
-
         )
     )
 
@@ -3197,7 +3789,6 @@ async def test_review_worktree_lifecycle_finalization_cases(tmp_dirs):
     assert res3.reason_code in (ExternalReasonCode.CONFLICT, ExternalReasonCode.POLICY_DENIED)
     shutil.rmtree(wt_a.path, ignore_errors=True)
 
-
     # 5. same job/reviewer then candidate B: creates a valid review worktree at candidate B and is not blocked by candidate A's historical review branch
     wt_b = await mgr.create_review_worktree(
         job_id="job-rev-final",
@@ -3211,7 +3802,11 @@ async def test_review_worktree_lifecycle_finalization_cases(tmp_dirs):
     assert cand_sha_b[:8] in wt_b.path.name
     assert wt_b.base_sha == cand_sha_b
 
-    head_b = (subprocess.run(["git", "rev-parse", "HEAD"], cwd=wt_b.path, check=True, capture_output=True, text=True)).stdout.strip()
+    head_b = (
+        subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=wt_b.path, check=True, capture_output=True, text=True
+        )
+    ).stdout.strip()
     assert head_b == cand_sha_b
 
     # 6. same exact candidate retry: deterministic/idempotent adoption/recreation behavior
@@ -3265,8 +3860,12 @@ def test_blocker_1_openspec_generator_symlink_preflight_atomicity(tmp_dirs):
     )
 
     with patch.dict(os.environ, {"MINIME_RUNTIME_ROOT": tmp_dirs["runtime"]}):
-        with pytest.raises(RuntimeError, match="OpenSpec write denied: symlink target|ManagedWorkspaceGuard denied"):
-            gen.write_change_to_disk("openspec", spec_a, overwrite=True, project_id="test-gen-blocker1")
+        with pytest.raises(
+            RuntimeError, match="OpenSpec write denied: symlink target|ManagedWorkspaceGuard denied"
+        ):
+            gen.write_change_to_disk(
+                "openspec", spec_a, overwrite=True, project_id="test-gen-blocker1"
+            )
 
     assert runtime_secret.read_text(encoding="utf-8") == "INITIAL_RUNTIME_CONTENT"
     # E) Preflight atomicity: tasks.md and design.md were NOT written
@@ -3279,8 +3878,12 @@ def test_blocker_1_openspec_generator_symlink_preflight_atomicity(tmp_dirs):
     os.symlink(str(runtime_secret), str(tasks_symlink))
 
     with patch.dict(os.environ, {"MINIME_RUNTIME_ROOT": tmp_dirs["runtime"]}):
-        with pytest.raises(RuntimeError, match="OpenSpec write denied: symlink target|ManagedWorkspaceGuard denied"):
-            gen.write_change_to_disk("openspec", spec_a, overwrite=True, project_id="test-gen-blocker1")
+        with pytest.raises(
+            RuntimeError, match="OpenSpec write denied: symlink target|ManagedWorkspaceGuard denied"
+        ):
+            gen.write_change_to_disk(
+                "openspec", spec_a, overwrite=True, project_id="test-gen-blocker1"
+            )
 
     assert runtime_secret.read_text(encoding="utf-8") == "INITIAL_RUNTIME_CONTENT"
     assert not (target_dir / "proposal.md").exists()
@@ -3300,8 +3903,12 @@ def test_blocker_1_openspec_generator_symlink_preflight_atomicity(tmp_dirs):
     )
 
     with patch.dict(os.environ, {"MINIME_RUNTIME_ROOT": tmp_dirs["runtime"]}):
-        with pytest.raises(RuntimeError, match="OpenSpec write denied|ManagedWorkspaceGuard denied"):
-            gen.write_change_to_disk("openspec", spec_b, overwrite=True, project_id="test-gen-blocker1")
+        with pytest.raises(
+            RuntimeError, match="OpenSpec write denied|ManagedWorkspaceGuard denied"
+        ):
+            gen.write_change_to_disk(
+                "openspec", spec_b, overwrite=True, project_id="test-gen-blocker1"
+            )
 
     assert runtime_secret.read_text(encoding="utf-8") == "INITIAL_RUNTIME_CONTENT"
     assert not (target_dir / "proposal.md").exists()
@@ -3309,7 +3916,9 @@ def test_blocker_1_openspec_generator_symlink_preflight_atomicity(tmp_dirs):
 
     # D) All destinations valid => generation succeeds
     spec_symlink.unlink()
-    res_dir = gen.write_change_to_disk("openspec", spec_b, overwrite=True, project_id="test-gen-blocker1")
+    res_dir = gen.write_change_to_disk(
+        "openspec", spec_b, overwrite=True, project_id="test-gen-blocker1"
+    )
     assert res_dir.exists()
     assert (res_dir / "proposal.md").exists()
     assert (res_dir / "tasks.md").exists()
@@ -3328,17 +3937,33 @@ def test_blocker_2_readiness_current_truth_verification(tmp_dirs):
     subprocess.run(["git", "add", "."], cwd=repo_root, check=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=repo_root, check=True, capture_output=True)
     try:
-        subprocess.run(["git", "remote", "add", "origin", "https://github.com/org/repo"], cwd=repo_root, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "remote", "add", "origin", "https://github.com/org/repo"],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+        )
     except Exception:
-        subprocess.run(["git", "remote", "set-url", "origin", "https://github.com/org/repo"], cwd=repo_root, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "remote", "set-url", "origin", "https://github.com/org/repo"],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+        )
 
     marker_path = Path(repo_root) / ".minime-managed-project.json"
-    marker_path.write_text(json.dumps({
-        "project_id": "proj-readiness-current",
-        "canonical_repository_identity": "github.com/org/repo",
-    }), encoding="utf-8")
+    marker_path.write_text(
+        json.dumps(
+            {
+                "project_id": "proj-readiness-current",
+                "canonical_repository_identity": "github.com/org/repo",
+            }
+        ),
+        encoding="utf-8",
+    )
 
     from minime.domain.models import Project, ProjectBinding
+
     project = Project(
         project_id="proj-readiness-current",
         display_name="Readiness Current",
@@ -3376,6 +4001,7 @@ def test_blocker_2_readiness_current_truth_verification(tmp_dirs):
     (ch_dir / "specs" / "feat" / "spec.md").write_text("# Spec\n", encoding="utf-8")
 
     from minime.services.readiness_service import ReadinessService
+
     svc = ReadinessService(uow=uow)
 
     # F) All current evidence valid => stage_c_workspace_isolation PASS
@@ -3385,13 +4011,25 @@ def test_blocker_2_readiness_current_truth_verification(tmp_dirs):
     assert sc_check.details.get("is_runtime_isolated") is True
 
     # A) binding.is_valid=True but remote changed => readiness NOT_READY
-    subprocess.run(["git", "remote", "set-url", "origin", "https://github.com/evil/repo"], cwd=repo_root, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "set-url", "origin", "https://github.com/evil/repo"],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+    )
     eval_a = svc.evaluate_change_readiness("proj-readiness-current", "change-readiness", repo_root)
     assert eval_a.is_ready is False
     sc_a = next(c for c in eval_a.checks if c.name == "stage_c_workspace_isolation")
     assert sc_a.passed is False
-    assert "Git repository" in sc_a.reason and ("remote mismatch" in sc_a.reason or "identity verification failed" in sc_a.reason)
-    subprocess.run(["git", "remote", "set-url", "origin", "https://github.com/org/repo"], cwd=repo_root, check=True, capture_output=True)
+    assert "Git repository" in sc_a.reason and (
+        "remote mismatch" in sc_a.reason or "identity verification failed" in sc_a.reason
+    )
+    subprocess.run(
+        ["git", "remote", "set-url", "origin", "https://github.com/org/repo"],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+    )
 
     # B) binding.is_valid=True but managed marker missing/corrupt => NOT_READY
     marker_path.unlink()
@@ -3402,10 +4040,15 @@ def test_blocker_2_readiness_current_truth_verification(tmp_dirs):
     assert "ownership marker" in sc_b.reason
 
     # Restore marker
-    marker_path.write_text(json.dumps({
-        "project_id": "proj-readiness-current",
-        "canonical_repository_identity": "github.com/org/repo",
-    }), encoding="utf-8")
+    marker_path.write_text(
+        json.dumps(
+            {
+                "project_id": "proj-readiness-current",
+                "canonical_repository_identity": "github.com/org/repo",
+            }
+        ),
+        encoding="utf-8",
+    )
 
     # C) binding.is_valid=True but managed root missing => NOT_READY
     binding.managed_repository_root = os.path.join(tmp_dirs["base"], "nonexistent_root_path")
@@ -3420,7 +4063,9 @@ def test_blocker_2_readiness_current_truth_verification(tmp_dirs):
     binding.managed_repository_root = tmp_dirs["runtime"]
     uow.project_managed_repository_bindings.save(binding)
     with patch.dict(os.environ, {"MINIME_RUNTIME_ROOT": tmp_dirs["runtime"]}):
-        eval_d = svc.evaluate_change_readiness("proj-readiness-current", "change-readiness", repo_root)
+        eval_d = svc.evaluate_change_readiness(
+            "proj-readiness-current", "change-readiness", repo_root
+        )
         assert eval_d.is_ready is False
         sc_d = next(c for c in eval_d.checks if c.name == "stage_c_workspace_isolation")
         assert sc_d.passed is False
@@ -3431,8 +4076,13 @@ def test_blocker_2_readiness_current_truth_verification(tmp_dirs):
     uow.project_managed_repository_bindings.save(binding)
 
     # E) confinement unavailable => NOT_READY
-    with patch("minime.services.agent_confinement.AgentProcessConfinement.is_confinement_available", return_value=False):
-        eval_e = svc.evaluate_change_readiness("proj-readiness-current", "change-readiness", repo_root)
+    with patch(
+        "minime.services.agent_confinement.AgentProcessConfinement.is_confinement_available",
+        return_value=False,
+    ):
+        eval_e = svc.evaluate_change_readiness(
+            "proj-readiness-current", "change-readiness", repo_root
+        )
         assert eval_e.is_ready is False
         sc_e = next(c for c in eval_e.checks if c.name == "stage_c_workspace_isolation")
         assert sc_e.passed is False
@@ -3448,16 +4098,26 @@ def test_task_a_readiness_admission_fence_complete_current_truth_proof(tmp_dirs)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_root, check=True)
     subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_root, check=True)
     subprocess.run(["git", "remote", "remove", "origin"], cwd=repo_root, capture_output=True)
-    subprocess.run(["git", "remote", "add", "origin", "https://github.com/org/repo"], cwd=repo_root, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/org/repo"],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+    )
     (Path(repo_root) / "README.md").write_text("readiness\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=repo_root, check=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=repo_root, check=True, capture_output=True)
 
     marker_path = Path(repo_root) / ".minime-managed-project.json"
-    marker_path.write_text(json.dumps({
-        "project_id": "proj-readiness-proof",
-        "canonical_repository_identity": "github.com/org/repo",
-    }), encoding="utf-8")
+    marker_path.write_text(
+        json.dumps(
+            {
+                "project_id": "proj-readiness-proof",
+                "canonical_repository_identity": "github.com/org/repo",
+            }
+        ),
+        encoding="utf-8",
+    )
 
     uow = MockUOW()
     uow.projects.projects["proj-readiness-proof"] = MagicMock(
@@ -3487,14 +4147,20 @@ def test_task_a_readiness_admission_fence_complete_current_truth_proof(tmp_dirs)
     )
 
     from minime.services.readiness_service import ReadinessService
+
     svc = ReadinessService(uow=uow)
 
     # 1. Missing worktree_parent_dir => NOT_READY
     binding.worktree_parent_dir = os.path.join(tmp_dirs["base"], "nonexistent_wt_parent")
     uow.project_managed_repository_bindings.save(binding)
-    eval_missing_wt = svc.evaluate_change_readiness("proj-readiness-proof", "change-readiness", repo_root)
+    eval_missing_wt = svc.evaluate_change_readiness(
+        "proj-readiness-proof", "change-readiness", repo_root
+    )
     assert eval_missing_wt.is_ready is False
-    assert "does not exist or is not a directory" in next(c for c in eval_missing_wt.checks if c.name == "stage_c_workspace_isolation").reason
+    assert (
+        "does not exist or is not a directory"
+        in next(c for c in eval_missing_wt.checks if c.name == "stage_c_workspace_isolation").reason
+    )
 
     # Restore wt_dir
     binding.worktree_parent_dir = wt_dir
@@ -3504,18 +4170,28 @@ def test_task_a_readiness_admission_fence_complete_current_truth_proof(tmp_dirs)
     binding.worktree_parent_dir = rt_dir
     uow.project_managed_repository_bindings.save(binding)
     with patch.dict(os.environ, {"MINIME_RUNTIME_ROOT": rt_dir}):
-        eval_eq = svc.evaluate_change_readiness("proj-readiness-proof", "change-readiness", repo_root)
+        eval_eq = svc.evaluate_change_readiness(
+            "proj-readiness-proof", "change-readiness", repo_root
+        )
         assert eval_eq.is_ready is False
-        assert "collides or overlaps" in next(c for c in eval_eq.checks if c.name == "stage_c_workspace_isolation").reason
+        assert (
+            "collides or overlaps"
+            in next(c for c in eval_eq.checks if c.name == "stage_c_workspace_isolation").reason
+        )
 
     # 3. worktree_parent_dir is parent of runtime => NOT_READY
     wt_parent_of_rt = os.path.dirname(os.path.realpath(rt_dir))
     binding.worktree_parent_dir = wt_parent_of_rt
     uow.project_managed_repository_bindings.save(binding)
     with patch.dict(os.environ, {"MINIME_RUNTIME_ROOT": rt_dir}):
-        eval_par = svc.evaluate_change_readiness("proj-readiness-proof", "change-readiness", repo_root)
+        eval_par = svc.evaluate_change_readiness(
+            "proj-readiness-proof", "change-readiness", repo_root
+        )
         assert eval_par.is_ready is False
-        assert "collides or overlaps" in next(c for c in eval_par.checks if c.name == "stage_c_workspace_isolation").reason
+        assert (
+            "collides or overlaps"
+            in next(c for c in eval_par.checks if c.name == "stage_c_workspace_isolation").reason
+        )
 
     # 4. worktree_parent_dir is child of runtime => NOT_READY
     wt_child_of_rt = os.path.join(rt_dir, "worktrees")
@@ -3523,9 +4199,14 @@ def test_task_a_readiness_admission_fence_complete_current_truth_proof(tmp_dirs)
     binding.worktree_parent_dir = wt_child_of_rt
     uow.project_managed_repository_bindings.save(binding)
     with patch.dict(os.environ, {"MINIME_RUNTIME_ROOT": rt_dir}):
-        eval_child = svc.evaluate_change_readiness("proj-readiness-proof", "change-readiness", repo_root)
+        eval_child = svc.evaluate_change_readiness(
+            "proj-readiness-proof", "change-readiness", repo_root
+        )
         assert eval_child.is_ready is False
-        assert "collides or overlaps" in next(c for c in eval_child.checks if c.name == "stage_c_workspace_isolation").reason
+        assert (
+            "collides or overlaps"
+            in next(c for c in eval_child.checks if c.name == "stage_c_workspace_isolation").reason
+        )
 
     # Restore wt_dir
     binding.worktree_parent_dir = wt_dir
@@ -3539,9 +4220,14 @@ def test_task_a_readiness_admission_fence_complete_current_truth_proof(tmp_dirs)
     binding.worktree_parent_dir = evil_wt
     uow.project_managed_repository_bindings.save(binding)
     with patch.dict(os.environ, {"MINIME_MANAGED_ROOT": trusted_root}):
-        eval_evil = svc.evaluate_change_readiness("proj-readiness-proof", "change-readiness", repo_root)
+        eval_evil = svc.evaluate_change_readiness(
+            "proj-readiness-proof", "change-readiness", repo_root
+        )
         assert eval_evil.is_ready is False
-        assert "escapes trusted managed root" in next(c for c in eval_evil.checks if c.name == "stage_c_workspace_isolation").reason
+        assert (
+            "escapes trusted managed root"
+            in next(c for c in eval_evil.checks if c.name == "stage_c_workspace_isolation").reason
+        )
 
     # Restore valid wt_dir
     binding.worktree_parent_dir = wt_dir
@@ -3554,62 +4240,87 @@ def test_task_b_checks_runner_process_confinement(tmp_dirs):
     rt_path = Path(tmp_dirs["runtime"])
 
     from minime.services.checks_runner import ChecksRunner
+
     runner = ChecksRunner(timeout_seconds=10)
 
     # 1. Normal check inside worktree succeeds
-    res1 = asyncio.run(runner.run(
-        job_id="job-c1",
-        checks=[{"name": "echo-test", "command": "echo hello"}],
-        worktree_path=wt_path,
-    ))
+    res1 = asyncio.run(
+        runner.run(
+            job_id="job-c1",
+            checks=[{"name": "echo-test", "command": "echo hello"}],
+            worktree_path=wt_path,
+        )
+    )
     assert res1.passed is True
 
     # 2. Write inside assigned worktree succeeds
-    res2 = asyncio.run(runner.run(
-        job_id="job-c2",
-        checks=[{"name": "write-in-wt", "command": f"touch '{wt_path}/ok.txt'"}],
-        worktree_path=wt_path,
-    ))
+    res2 = asyncio.run(
+        runner.run(
+            job_id="job-c2",
+            checks=[{"name": "write-in-wt", "command": f"touch '{wt_path}/ok.txt'"}],
+            worktree_path=wt_path,
+        )
+    )
     assert res2.passed is True
     assert (wt_path / "ok.txt").exists()
 
     # If OS sandbox (e.g. darwin_sandbox) is present: test outside write denial
     if platform.system().lower() == "darwin" and shutil.which("sandbox-exec"):
         # 3. Absolute write outside worktree denied
-        res3 = asyncio.run(runner.run(
-            job_id="job-c3",
-            checks=[{"name": "write-outside", "command": "touch /tmp/minime-test-escape.txt"}],
-            worktree_path=wt_path,
-        ))
+        res3 = asyncio.run(
+            runner.run(
+                job_id="job-c3",
+                checks=[{"name": "write-outside", "command": "touch /tmp/minime-test-escape.txt"}],
+                worktree_path=wt_path,
+            )
+        )
         assert res3.passed is False
 
         # 4. Write into RUNTIME denied
-        res4 = asyncio.run(runner.run(
-            job_id="job-c4",
-            checks=[{"name": "write-runtime", "command": f"touch '{rt_path}/evil.txt'"}],
-            worktree_path=wt_path,
-        ))
+        res4 = asyncio.run(
+            runner.run(
+                job_id="job-c4",
+                checks=[{"name": "write-runtime", "command": f"touch '{rt_path}/evil.txt'"}],
+                worktree_path=wt_path,
+            )
+        )
         assert res4.passed is False
 
     # 6. Confinement unavailable => check fails closed
-    with patch("minime.services.agent_confinement.AgentProcessConfinement.is_confinement_available", return_value=False):
-        res6 = asyncio.run(runner.run(
-            job_id="job-c6",
-            checks=[{"name": "confinement-unavail", "command": "echo hello"}],
-            worktree_path=wt_path,
-        ))
+    with patch(
+        "minime.services.agent_confinement.AgentProcessConfinement.is_confinement_available",
+        return_value=False,
+    ):
+        res6 = asyncio.run(
+            runner.run(
+                job_id="job-c6",
+                checks=[{"name": "confinement-unavail", "command": "echo hello"}],
+                worktree_path=wt_path,
+            )
+        )
         assert res6.passed is False
         assert res6.results[0].exit_code == 126
-        assert res6.diagnostics[0].diagnostic_status == EvidenceDiagnosticStatus.ENVIRONMENT_UNAVAILABLE
+        assert (
+            res6.diagnostics[0].diagnostic_status
+            == EvidenceDiagnosticStatus.ENVIRONMENT_UNAVAILABLE
+        )
 
 
 def test_task_c_worktree_manager_internal_writers(tmp_dirs):
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_dirs["repo_root"], check=True)
-    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_dirs["repo_root"], check=True)
+    subprocess.run(
+        ["git", "init", "-b", "main"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"], cwd=tmp_dirs["repo_root"], check=True
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test User"], cwd=tmp_dirs["repo_root"], check=True
+    )
     (Path(tmp_dirs["repo_root"]) / "README.md").write_text("init\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=tmp_dirs["repo_root"], check=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"], cwd=tmp_dirs["repo_root"], check=True, capture_output=True
+    )
 
     uow = MockUOW()
     binding = ProjectManagedRepositoryBinding(
@@ -3619,7 +4330,14 @@ def test_task_c_worktree_manager_internal_writers(tmp_dirs):
         worktree_parent_dir=tmp_dirs["worktrees"],
     )
     uow.project_managed_repository_bindings.save(binding)
-    uow.jobs.save(Job(job_id="job-task-c", project_id="proj-task-c", change_name="change-task-c", implementer_role="codex"))
+    uow.jobs.save(
+        Job(
+            job_id="job-task-c",
+            project_id="proj-task-c",
+            change_name="change-task-c",
+            implementer_role="codex",
+        )
+    )
     uow.orchestration_runs.save(
         OrchestrationRun(
             run_id="run-task-c",
@@ -3669,10 +4387,21 @@ def test_task_c_worktree_manager_internal_writers(tmp_dirs):
     assert not symlink_marker.is_symlink()
 
     # 3. OpenSpec destination ancestor symlink -> RUNTIME is denied
-    os.makedirs(Path(tmp_dirs["repo_root"]) / "openspec" / "changes" / "change-task-c", exist_ok=True)
-    (Path(tmp_dirs["repo_root"]) / "openspec" / "changes" / "change-task-c" / "proposal.md").write_text("proposal\n", encoding="utf-8")
+    os.makedirs(
+        Path(tmp_dirs["repo_root"]) / "openspec" / "changes" / "change-task-c", exist_ok=True
+    )
+    (
+        Path(tmp_dirs["repo_root"]) / "openspec" / "changes" / "change-task-c" / "proposal.md"
+    ).write_text("proposal\n", encoding="utf-8")
 
-    uow.jobs.save(Job(job_id="job-task-c-2", project_id="proj-task-c", change_name="change-task-c", implementer_role="codex"))
+    uow.jobs.save(
+        Job(
+            job_id="job-task-c-2",
+            project_id="proj-task-c",
+            change_name="change-task-c",
+            implementer_role="codex",
+        )
+    )
     uow.orchestration_runs.save(
         OrchestrationRun(
             run_id="run-task-c-2",
@@ -3696,7 +4425,11 @@ def test_task_c_worktree_manager_internal_writers(tmp_dirs):
     # Directly test OpenSpec propagation check or create_worktree propagation error
     dest_openspec_root = wt_path2 / "openspec"
     dest_change_dir = dest_openspec_root / "changes" / "change-task-c"
-    assert os.path.islink(dest_openspec_root) or os.path.islink(dest_openspec_root / "changes") or os.path.islink(dest_change_dir)
+    assert (
+        os.path.islink(dest_openspec_root)
+        or os.path.islink(dest_openspec_root / "changes")
+        or os.path.islink(dest_change_dir)
+    )
 
 
 def test_onboard_project_establishes_real_remote_checkout_and_uses_guard_authorization(tmp_path):
@@ -3714,21 +4447,36 @@ def test_onboard_project_establishes_real_remote_checkout_and_uses_guard_authori
 
     # 1. Create a real local bare Git remote repository fixture
     remote_bare = tmp_path / "remote_source.git"
-    subprocess.run(["git", "init", "--bare", "-b", "main", str(remote_bare)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "init", "--bare", "-b", "main", str(remote_bare)], check=True, capture_output=True
+    )
 
     work_seed = tmp_path / "work_seed"
-    subprocess.run(["git", "clone", str(remote_bare), str(work_seed)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "clone", str(remote_bare), str(work_seed)], check=True, capture_output=True
+    )
     subprocess.run(["git", "config", "user.name", "Remote Dev"], cwd=work_seed, check=True)
     subprocess.run(["git", "config", "user.email", "dev@remote.local"], cwd=work_seed, check=True)
     (work_seed / "README.md").write_text("# Remote Base History\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=work_seed, check=True)
-    subprocess.run(["git", "commit", "-m", "Remote canonical base commit"], cwd=work_seed, check=True, capture_output=True)
-    subprocess.run(["git", "push", "origin", "main"], cwd=work_seed, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "Remote canonical base commit"],
+        cwd=work_seed,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "push", "origin", "main"], cwd=work_seed, check=True, capture_output=True
+    )
 
-    remote_head_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=work_seed, text=True).strip()
+    remote_head_sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=work_seed, text=True
+    ).strip()
 
     # 2. Run onboarding targeting real remote_bare
-    service = ProjectOnboardingService(uow=uow, project_root=runtime_root, trusted_managed_root=trusted_root)
+    service = ProjectOnboardingService(
+        uow=uow, project_root=runtime_root, trusted_managed_root=trusted_root
+    )
     managed_target = trusted_root / "proj-real-remote"
     worktrees_target = trusted_root / "worktrees" / "proj-real-remote"
 
@@ -3751,8 +4499,12 @@ def test_onboard_project_establishes_real_remote_checkout_and_uses_guard_authori
     assert (managed_target / ".git").exists()
     assert (managed_target / ".minime-managed-project.json").exists()
 
-    local_head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=managed_target, text=True).strip()
-    origin_head = subprocess.check_output(["git", "rev-parse", "origin/main"], cwd=managed_target, text=True).strip()
+    local_head = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=managed_target, text=True
+    ).strip()
+    origin_head = subprocess.check_output(
+        ["git", "rev-parse", "origin/main"], cwd=managed_target, text=True
+    ).strip()
 
     assert local_head == remote_head_sha
     assert origin_head == remote_head_sha
@@ -3773,7 +4525,9 @@ def test_onboard_project_guard_denial_prevents_mutation(tmp_path):
     runtime_root.mkdir(parents=True, exist_ok=True)
     trusted_root = tmp_path / "trusted"
 
-    service = ProjectOnboardingService(uow=uow, project_root=runtime_root, trusted_managed_root=trusted_root)
+    service = ProjectOnboardingService(
+        uow=uow, project_root=runtime_root, trusted_managed_root=trusted_root
+    )
 
     escaped_target = tmp_path / "unauthorized_escape_dir"
 
@@ -3804,7 +4558,9 @@ def test_onboard_project_unobservable_remote_fails_closed(tmp_path):
     runtime_root.mkdir(parents=True, exist_ok=True)
     trusted_root = tmp_path / "trusted"
 
-    service = ProjectOnboardingService(uow=uow, project_root=runtime_root, trusted_managed_root=trusted_root)
+    service = ProjectOnboardingService(
+        uow=uow, project_root=runtime_root, trusted_managed_root=trusted_root
+    )
 
     managed_target = trusted_root / "proj-unobservable"
     non_existent_remote = tmp_path / "does_not_exist_remote.git"
@@ -3835,7 +4591,9 @@ def test_onboard_project_rejects_runtime_collision(tmp_path):
     runtime_root.mkdir(parents=True, exist_ok=True)
     trusted_root = tmp_path / "trusted"
 
-    service = ProjectOnboardingService(uow=uow, project_root=runtime_root, trusted_managed_root=trusted_root)
+    service = ProjectOnboardingService(
+        uow=uow, project_root=runtime_root, trusted_managed_root=trusted_root
+    )
 
     onboard_input = ProjectOnboardingInput(
         project_id="proj-collision",
@@ -3899,7 +4657,11 @@ def test_workspace_guard_records_denial_metric_fact(tmp_dirs):
     decision = guard.evaluate_mutation(request)
     assert decision.allowed is False
 
-    denial_facts = [f for f in saved_facts if getattr(f, "metric_name", None) == "workspace_mutation_denied_total"]
+    denial_facts = [
+        f
+        for f in saved_facts
+        if getattr(f, "metric_name", None) == "workspace_mutation_denied_total"
+    ]
     assert len(denial_facts) == 1
     fact = denial_facts[0]
     assert fact.project_id == "proj-metric-test"
@@ -3948,6 +4710,7 @@ def test_dashboard_service_system_status_telemetry(tmp_dirs):
         def get_by_provider(self, provider):
             from minime.domain.enums import ProviderHealthStatus
             from minime.domain.models import ProviderHealth
+
             return ProviderHealth(provider=provider, status=ProviderHealthStatus.AVAILABLE)
 
     uow.provider_health = MockHealthRepo()
@@ -3960,7 +4723,11 @@ def test_dashboard_service_system_status_telemetry(tmp_dirs):
         is_valid=True,
     )
     uow.project_managed_repository_bindings.save(binding)
-    uow.projects.save(Project(project_id="proj-dash-test", display_name="Dash Test", repository="github.com/org/repo"))
+    uow.projects.save(
+        Project(
+            project_id="proj-dash-test", display_name="Dash Test", repository="github.com/org/repo"
+        )
+    )
 
     dashboard = OperationsDashboardService(uow=uow)
     dashboard.runtime_root = tmp_dirs["runtime"]
@@ -3992,27 +4759,46 @@ def test_onboard_project_diff_head_and_origin_ref_refused(tmp_path):
 
     # Create bare remote repository
     remote_bare = tmp_path / "remote_mismatch.git"
-    subprocess.run(["git", "init", "--bare", "-b", "main", str(remote_bare)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "init", "--bare", "-b", "main", str(remote_bare)], check=True, capture_output=True
+    )
 
     work_seed = tmp_path / "seed"
-    subprocess.run(["git", "clone", str(remote_bare), str(work_seed)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "clone", str(remote_bare), str(work_seed)], check=True, capture_output=True
+    )
     subprocess.run(["git", "config", "user.name", "Dev"], cwd=work_seed, check=True)
     subprocess.run(["git", "config", "user.email", "dev@test.local"], cwd=work_seed, check=True)
     (work_seed / "README.md").write_text("# Seed\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=work_seed, check=True)
-    subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=work_seed, check=True, capture_output=True)
-    subprocess.run(["git", "push", "origin", "main"], cwd=work_seed, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "Initial commit"], cwd=work_seed, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "push", "origin", "main"], cwd=work_seed, check=True, capture_output=True
+    )
 
     # Pre-clone managed_target to simulate existing repository with a local commit on HEAD that differs from origin/main
     managed_target = trusted_root / "proj-head-diff"
-    subprocess.run(["git", "clone", str(remote_bare), str(managed_target)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "clone", str(remote_bare), str(managed_target)], check=True, capture_output=True
+    )
     subprocess.run(["git", "config", "user.name", "Local Dev"], cwd=managed_target, check=True)
-    subprocess.run(["git", "config", "user.email", "dev@local.test"], cwd=managed_target, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "dev@local.test"], cwd=managed_target, check=True
+    )
     (managed_target / "local_edit.txt").write_text("Divergent local commit", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=managed_target, check=True)
-    subprocess.run(["git", "commit", "-m", "Unpushed local commit"], cwd=managed_target, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "Unpushed local commit"],
+        cwd=managed_target,
+        check=True,
+        capture_output=True,
+    )
 
-    service = ProjectOnboardingService(uow=uow, project_root=runtime_root, trusted_managed_root=trusted_root)
+    service = ProjectOnboardingService(
+        uow=uow, project_root=runtime_root, trusted_managed_root=trusted_root
+    )
     worktrees_target = trusted_root / "worktrees" / "proj-head-diff"
 
     onboard_input = ProjectOnboardingInput(
@@ -4024,7 +4810,10 @@ def test_onboard_project_diff_head_and_origin_ref_refused(tmp_path):
         worktree_parent_dir=str(worktrees_target),
     )
 
-    with pytest.raises(ValueError, match="Local HEAD SHA '.*' does not match remote base branch tracking ref 'origin/main' SHA"):
+    with pytest.raises(
+        ValueError,
+        match="Local HEAD SHA '.*' does not match remote base branch tracking ref 'origin/main' SHA",
+    ):
         service.onboard_project(onboard_input)
 
     assert uow.project_managed_repository_bindings.get_by_project_id("proj-head-diff") is None
@@ -4036,7 +4825,9 @@ def test_ordinary_evaluate_mutation_without_durable_binding_denied(tmp_path):
     runtime_root = tmp_path / "runtime"
     trusted_root = tmp_path / "trusted"
 
-    guard = ManagedWorkspaceGuard(uow=uow, runtime_root=runtime_root, trusted_managed_root=trusted_root)
+    guard = ManagedWorkspaceGuard(
+        uow=uow, runtime_root=runtime_root, trusted_managed_root=trusted_root
+    )
 
     request = WorkspaceMutationRequest(
         project_id="proj-no-binding",
@@ -4055,7 +4846,9 @@ def test_onboarding_bootstrap_establishes_managed_repo(tmp_path):
     runtime_root = tmp_path / "runtime"
     trusted_root = tmp_path / "trusted"
 
-    guard = ManagedWorkspaceGuard(uow=uow, runtime_root=runtime_root, trusted_managed_root=trusted_root)
+    guard = ManagedWorkspaceGuard(
+        uow=uow, runtime_root=runtime_root, trusted_managed_root=trusted_root
+    )
 
     provisional_binding = ProjectManagedRepositoryBinding(
         project_id="proj-bootstrap-ok",
@@ -4081,7 +4874,9 @@ def test_bootstrap_authority_cannot_authorize_arbitrary_edits(tmp_path):
     runtime_root = tmp_path / "runtime"
     trusted_root = tmp_path / "trusted"
 
-    guard = ManagedWorkspaceGuard(uow=uow, runtime_root=runtime_root, trusted_managed_root=trusted_root)
+    guard = ManagedWorkspaceGuard(
+        uow=uow, runtime_root=runtime_root, trusted_managed_root=trusted_root
+    )
 
     managed_root = trusted_root / "proj-bootstrap-edit-denied"
     provisional_binding = ProjectManagedRepositoryBinding(
@@ -4108,7 +4903,9 @@ def test_bootstrap_authority_rejects_runtime_collision(tmp_path):
     runtime_root = tmp_path / "runtime"
     trusted_root = tmp_path / "trusted"
 
-    guard = ManagedWorkspaceGuard(uow=uow, runtime_root=runtime_root, trusted_managed_root=trusted_root)
+    guard = ManagedWorkspaceGuard(
+        uow=uow, runtime_root=runtime_root, trusted_managed_root=trusted_root
+    )
 
     provisional_binding = ProjectManagedRepositoryBinding(
         project_id="proj-collision",
@@ -4137,10 +4934,19 @@ def test_normal_durable_binding_guard_behavior_after_persistence(tmp_path):
     managed_root = trusted_root / "proj-persisted"
     managed_root.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "init", "-b", "main"], cwd=managed_root, check=True, capture_output=True)
-    subprocess.run(["git", "remote", "add", "origin", "https://github.com/org/repo.git"], cwd=managed_root, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/org/repo.git"],
+        cwd=managed_root,
+        check=True,
+        capture_output=True,
+    )
 
     marker_file = managed_root / ".minime-managed-project.json"
-    marker_file.write_text(json.dumps({"project_id": "proj-persisted", "canonical_repository_identity": "github.com/org/repo"}))
+    marker_file.write_text(
+        json.dumps(
+            {"project_id": "proj-persisted", "canonical_repository_identity": "github.com/org/repo"}
+        )
+    )
 
     worktree_parent = trusted_root / "worktrees" / "proj-persisted"
 
@@ -4153,7 +4959,9 @@ def test_normal_durable_binding_guard_behavior_after_persistence(tmp_path):
     )
     uow.project_managed_repository_bindings.save(binding)
 
-    guard = ManagedWorkspaceGuard(uow=uow, runtime_root=runtime_root, trusted_managed_root=trusted_root)
+    guard = ManagedWorkspaceGuard(
+        uow=uow, runtime_root=runtime_root, trusted_managed_root=trusted_root
+    )
 
     request = WorkspaceMutationRequest(
         project_id="proj-persisted",
@@ -4177,7 +4985,9 @@ def test_bootstrap_parent_target_trusted_root_boundaries(tmp_path):
     managed_root = sub_container / "proj-target-test"
     worktree_parent = trusted_root / "worktrees" / "proj-target-test"
 
-    guard = ManagedWorkspaceGuard(uow=uow, runtime_root=runtime_root, trusted_managed_root=trusted_root)
+    guard = ManagedWorkspaceGuard(
+        uow=uow, runtime_root=runtime_root, trusted_managed_root=trusted_root
+    )
 
     provisional_binding = ProjectManagedRepositoryBinding(
         project_id="proj-target-test",
@@ -4249,24 +5059,36 @@ def test_onboard_project_unobservable_fetch_rejects_stale_tracking_ref(tmp_path)
 
     # 1. Create initial bare remote repository
     remote_bare = tmp_path / "remote_unobservable.git"
-    subprocess.run(["git", "init", "--bare", "-b", "main", str(remote_bare)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "init", "--bare", "-b", "main", str(remote_bare)], check=True, capture_output=True
+    )
 
     seed_dir = tmp_path / "seed_dir"
-    subprocess.run(["git", "clone", str(remote_bare), str(seed_dir)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "clone", str(remote_bare), str(seed_dir)], check=True, capture_output=True
+    )
     subprocess.run(["git", "config", "user.name", "Dev"], cwd=seed_dir, check=True)
     subprocess.run(["git", "config", "user.email", "dev@test.local"], cwd=seed_dir, check=True)
     (seed_dir / "README.md").write_text("# Seed\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=seed_dir, check=True)
-    subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=seed_dir, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "Initial commit"], cwd=seed_dir, check=True, capture_output=True
+    )
     subprocess.run(["git", "push", "origin", "main"], cwd=seed_dir, check=True, capture_output=True)
 
     # 2. Establish an existing managed checkout with valid tracking ref origin/main == HEAD
     managed_target = trusted_root / "proj-stale-ref"
-    subprocess.run(["git", "clone", str(remote_bare), str(managed_target)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "clone", str(remote_bare), str(managed_target)], check=True, capture_output=True
+    )
 
     # Verify that HEAD == origin/main currently on managed_target
-    head_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=managed_target, text=True).strip()
-    origin_sha = subprocess.check_output(["git", "rev-parse", "origin/main"], cwd=managed_target, text=True).strip()
+    head_sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=managed_target, text=True
+    ).strip()
+    origin_sha = subprocess.check_output(
+        ["git", "rev-parse", "origin/main"], cwd=managed_target, text=True
+    ).strip()
     assert head_sha == origin_sha
 
     # 3. Make remote bare repository unobservable by deleting/renaming it
@@ -4274,7 +5096,9 @@ def test_onboard_project_unobservable_fetch_rejects_stale_tracking_ref(tmp_path)
     os.rename(remote_bare, remote_bare_disabled)
 
     # 4. Attempt onboarding on the existing managed_target
-    service = ProjectOnboardingService(uow=uow, project_root=runtime_root, trusted_managed_root=trusted_root)
+    service = ProjectOnboardingService(
+        uow=uow, project_root=runtime_root, trusted_managed_root=trusted_root
+    )
     worktrees_target = trusted_root / "worktrees" / "proj-stale-ref"
 
     onboard_input = ProjectOnboardingInput(
@@ -4286,20 +5110,10 @@ def test_onboard_project_unobservable_fetch_rejects_stale_tracking_ref(tmp_path)
         worktree_parent_dir=str(worktrees_target),
     )
 
-    with pytest.raises(ValueError, match="unobservable or unreachable during fetch|Failed to establish canonical remote checkout"):
+    with pytest.raises(
+        ValueError,
+        match="unobservable or unreachable during fetch|Failed to establish canonical remote checkout",
+    ):
         service.onboard_project(onboard_input)
 
     assert uow.project_managed_repository_bindings.get_by_project_id("proj-stale-ref") is None
-
-
-
-
-
-
-
-
-
-
-
-
-

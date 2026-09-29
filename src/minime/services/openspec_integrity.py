@@ -162,7 +162,10 @@ class OpenSpecIntegrityService:
                         "category": "INVALID_ACTIVE_CHANGE",
                         "change_name": name,
                         "description": f"Active change '{name}' fails strict OpenSpec validation.",
-                        "evidence": {"stderr": result.get("stderr", ""), "returncode": result.get("returncode")},
+                        "evidence": {
+                            "stderr": result.get("stderr", ""),
+                            "returncode": result.get("returncode"),
+                        },
                     }
                 )
             elif result["status"] == "UNKNOWN":
@@ -176,16 +179,23 @@ class OpenSpecIntegrityService:
         gaps: list[str] = []
         runs = self.uow.orchestration_runs.list_runs(project_id=project.project_id)
         for run in runs:
-            if run.current_stage not in (OrchestrationStage.COMPLETED, OrchestrationStage.PR_PREPARED):
+            if run.current_stage not in (
+                OrchestrationStage.COMPLETED,
+                OrchestrationStage.PR_PREPARED,
+            ):
                 continue
-            binding = self.uow.bindings.get_by_project_and_change(project.project_id, run.change_name)
+            binding = self.uow.bindings.get_by_project_and_change(
+                project.project_id, run.change_name
+            )
             if not binding or not binding.github_pr_number:
                 continue
             capabilities = self._change_capabilities(project, run.change_name)
             missing = [
                 c
                 for c in capabilities
-                if not (self.project_root / project.openspec_path / "specs" / c / "spec.md").exists()
+                if not (
+                    self.project_root / project.openspec_path / "specs" / c / "spec.md"
+                ).exists()
             ]
             if missing:
                 findings.append(
@@ -221,9 +231,7 @@ class OpenSpecIntegrityService:
                 )
         return findings, gaps
 
-    def _check_orphan_directories(
-        self, project: Project
-    ) -> tuple[list[dict[str, Any]], list[str]]:
+    def _check_orphan_directories(self, project: Project) -> tuple[list[dict[str, Any]], list[str]]:
         findings: list[dict[str, Any]] = []
         gaps: list[str] = []
         db_names = {c.name for c in self.uow.changes.list_by_project(project.project_id)}
@@ -325,7 +333,10 @@ class OpenSpecIntegrityService:
                     "category": "LEGACY_CLASSIFICATION",
                     "change_name": None,
                     "description": "A non-canonical archive location was detected.",
-                    "evidence": {"classification": "ARCHIVE_LAYOUT_AMBIGUITY", "path": str(alt_archive)},
+                    "evidence": {
+                        "classification": "ARCHIVE_LAYOUT_AMBIGUITY",
+                        "path": str(alt_archive),
+                    },
                 }
             )
         return findings, gaps
@@ -363,4 +374,3 @@ class OpenSpecIntegrityService:
         if has_proposal or has_tasks or has_design or has_specs:
             return "LEGACY_STRUCTURAL"
         return "LEGACY_ARCHIVE_DEBT"
-

@@ -74,6 +74,7 @@ def setup_api_env(tmp_path: Path, in_memory_uow):
     )
 
     from conftest import setup_managed_repository_fixture
+
     setup_managed_repository_fixture(
         uow=in_memory_uow,
         project_id=project_id,

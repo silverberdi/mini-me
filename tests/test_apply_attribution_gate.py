@@ -20,9 +20,7 @@ def _init_git_repo(root: Path) -> None:
     (root / "README.md").write_text("# repo\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=root, check=True)
     subprocess.run(["git", "commit", "-m", "base"], cwd=root, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=root, check=True
-    )
+    subprocess.run(["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=root, check=True)
 
 
 def _project(change_name: str, **overrides) -> Project:
@@ -53,6 +51,7 @@ def _register(uow, project: Project, change_name: str, root: Path | None = None)
     uow.changes.save(Change(project_id=project.project_id, name=change_name))
     if root:
         from conftest import setup_managed_repository_fixture
+
         setup_managed_repository_fixture(
             uow=uow,
             project_id=project.project_id,
@@ -198,9 +197,7 @@ def test_valid_admission_with_clean_worktree_allowed(in_memory_uow, tmp_path: Pa
     project = _project("clean-admit")
     _register(in_memory_uow, project, "clean-admit", root=tmp_path)
 
-    admission = _service(in_memory_uow, tmp_path).admit_change(
-        "mini-me", "clean-admit", tmp_path
-    )
+    admission = _service(in_memory_uow, tmp_path).admit_change("mini-me", "clean-admit", tmp_path)
     assert admission.admitted is True
     assert admission.run is not None
     assert in_memory_uow.orchestration_runs.get_by_id(admission.run.run_id) is not None
@@ -222,9 +219,7 @@ def test_admission_blocks_predating_implementation_commit(in_memory_uow, tmp_pat
     project = _project("drift-admit")
     _register(in_memory_uow, project, "drift-admit", root=tmp_path)
 
-    admission = _service(in_memory_uow, tmp_path).admit_change(
-        "mini-me", "drift-admit", tmp_path
-    )
+    admission = _service(in_memory_uow, tmp_path).admit_change("mini-me", "drift-admit", tmp_path)
     assert admission.admitted is False
     assert admission.refusal_details["code"] == "LIFECYCLE_DRIFT"
     assert in_memory_uow.orchestration_runs.list_runs() == []
@@ -253,9 +248,7 @@ def test_no_openspec_change_blocks_admission(in_memory_uow, tmp_path: Path):
     project = _project("missing-admit")
     _register(in_memory_uow, project, "missing-admit", root=tmp_path)
 
-    admission = _service(in_memory_uow, tmp_path).admit_change(
-        "mini-me", "missing-admit", tmp_path
-    )
+    admission = _service(in_memory_uow, tmp_path).admit_change("mini-me", "missing-admit", tmp_path)
     assert admission.admitted is False
     assert in_memory_uow.orchestration_runs.list_runs() == []
 

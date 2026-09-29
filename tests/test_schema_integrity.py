@@ -112,6 +112,4 @@ def test_wrong_head_emits_schema_invariant_violation():
     ):
         service = ReadinessService(uow, openspec_adapter=MagicMock(), github_adapter=MagicMock())
         evaluation = service.evaluate_change_readiness("proj", "change", "/tmp")
-    assert any(
-        "SCHEMA_INVARIANT_VIOLATION" in reason for reason in evaluation.unmet_reasons
-    )
+    assert any("SCHEMA_INVARIANT_VIOLATION" in reason for reason in evaluation.unmet_reasons)

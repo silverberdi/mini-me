@@ -181,6 +181,7 @@ class ProviderHealthStatus(str, Enum):
     AUTH_REQUIRED = "auth_required"
     MISCONFIGURED = "misconfigured"
     UNREACHABLE = "unreachable"
+    UNKNOWN = "unknown"
 
 
 class ProviderResultClass(str, Enum):
@@ -798,4 +799,3 @@ class WorktreeCreationState(str, Enum):
     CREATED = "CREATED"
     DELETING = "DELETING"
     DELETED = "DELETED"
-

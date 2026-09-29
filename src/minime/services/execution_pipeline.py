@@ -792,7 +792,7 @@ class ExecutionPipelineService:
                     )
                     runner_stdout = result.stdout
                     runner_stderr = result.stderr
-                    if getattr(result, 'preflight_error', None):
+                    if getattr(result, "preflight_error", None):
                         has_preflight_failure = True
 
                     for line in result.stdout:
@@ -2185,13 +2185,15 @@ class ExecutionPipelineService:
             }:
                 self._transition(latest, JobStatus.FAILED, str(exc))
         finally:
-            if readonly_view_created and 'readonly_view' in locals() and readonly_view:
+            if readonly_view_created and "readonly_view" in locals() and readonly_view:
                 try:
                     await self.worktree_manager.remove_review_worktree(
                         readonly_view, job.job_id, job.project_id
                     )
                 except Exception as clean_err:
-                    logger.warning(f"Failed to clean up review worktree at '{readonly_view}': {clean_err}")
+                    logger.warning(
+                        f"Failed to clean up review worktree at '{readonly_view}': {clean_err}"
+                    )
 
             if worktree_created:
                 try:
@@ -2480,14 +2482,15 @@ class ExecutionPipelineService:
                 self.uow.commit()
             raise
         finally:
-            if audit_view_created and 'audit_view' in locals() and audit_view:
+            if audit_view_created and "audit_view" in locals() and audit_view:
                 try:
                     await self.worktree_manager.remove_review_worktree(
                         audit_view, job.job_id, job.project_id
                     )
                 except Exception as clean_err:
-                    logger.warning(f"Failed to clean up audit worktree at '{audit_view}': {clean_err}")
-
+                    logger.warning(
+                        f"Failed to clean up audit worktree at '{audit_view}': {clean_err}"
+                    )
 
     def _is_dual_primary_exhausted(self, project: Project) -> bool:
         """Check if both primary providers (Codex and Antigravity) are exhausted / unavailable."""
@@ -2553,11 +2556,7 @@ class ExecutionPipelineService:
                     check=False,
                 )
                 if diff.returncode == 0 and diff.stdout:
-                    diff_paths = [
-                        line.strip()
-                        for line in diff.stdout.splitlines()
-                        if line.strip()
-                    ]
+                    diff_paths = [line.strip() for line in diff.stdout.splitlines() if line.strip()]
 
             change = self.uow.changes.get_by_name(job.project_id, job.change_name)
             change_id = change.change_id if change else None

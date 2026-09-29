@@ -44,7 +44,8 @@ def test_end_to_end_autonomous_intake_proving(
         "### 020 — Operator Experience Parity — DELIVERED\n"
         "### 021 — Work Intake and Backlog Execution — CURRENT\n"
         "- 021-work-intake: Autonomous product intake and project onboarding (READY)\n"
-        "### 022 — Greenfield Proving — NEXT\n", encoding="utf-8"
+        "### 022 — Greenfield Proving — NEXT\n",
+        encoding="utf-8",
     )
 
     trusted_root = tmp_path / "managed"
@@ -53,10 +54,14 @@ def test_end_to_end_autonomous_intake_proving(
     import subprocess
 
     remote_bare = tmp_path / "remote_mini_me.git"
-    subprocess.run(["git", "init", "--bare", "-b", "main", str(remote_bare)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "init", "--bare", "-b", "main", str(remote_bare)], check=True, capture_output=True
+    )
 
     seed_dir = tmp_path / "seed"
-    subprocess.run(["git", "clone", str(remote_bare), str(seed_dir)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "clone", str(remote_bare), str(seed_dir)], check=True, capture_output=True
+    )
     subprocess.run(["git", "config", "user.name", "Test Dev"], cwd=seed_dir, check=True)
     subprocess.run(["git", "config", "user.email", "dev@test.local"], cwd=seed_dir, check=True)
 
@@ -71,11 +76,14 @@ def test_end_to_end_autonomous_intake_proving(
         "### 020 — Operator Experience Parity — DELIVERED\n"
         "### 021 — Work Intake and Backlog Execution — CURRENT\n"
         "- 021-work-intake: Autonomous product intake and project onboarding (READY)\n"
-        "### 022 — Greenfield Proving — NEXT\n", encoding="utf-8"
+        "### 022 — Greenfield Proving — NEXT\n",
+        encoding="utf-8",
     )
 
     subprocess.run(["git", "add", "."], cwd=seed_dir, check=True)
-    subprocess.run(["git", "commit", "-m", "add base docs"], cwd=seed_dir, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "add base docs"], cwd=seed_dir, check=True, capture_output=True
+    )
     subprocess.run(["git", "push", "origin", "main"], cwd=seed_dir, check=True, capture_output=True)
 
     github_stub = ReadinessGitHubStub()
@@ -118,11 +126,18 @@ def test_end_to_end_autonomous_intake_proving(
 
     from minime.domain.enums import ProviderHealthStatus
     from minime.domain.models import ProviderHealth
+
     in_memory_uow.provider_health.save(
-        ProviderHealth(health_id="ph-codex", provider="codex", status=ProviderHealthStatus.AVAILABLE)
+        ProviderHealth(
+            health_id="ph-codex", provider="codex", status=ProviderHealthStatus.AVAILABLE
+        )
     )
     in_memory_uow.provider_health.save(
-        ProviderHealth(health_id="ph-antigravity", provider="antigravity", status=ProviderHealthStatus.AVAILABLE)
+        ProviderHealth(
+            health_id="ph-antigravity",
+            provider="antigravity",
+            status=ProviderHealthStatus.AVAILABLE,
+        )
     )
 
     # -------------------------------------------------------------------------

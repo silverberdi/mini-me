@@ -147,7 +147,8 @@ def validate_post_review_integrity(
                 f"Post-review integrity error running git status: {proc_status.stderr.strip()}",
             )
         status_lines = [
-            line for line in proc_status.stdout.splitlines()
+            line
+            for line in proc_status.stdout.splitlines()
             if line.strip() and "minime_worktree_ownership.json" not in line
         ]
         if status_lines:
@@ -230,7 +231,8 @@ def verify_pre_audit(
                 f"Pre-audit integrity error running git status: {status_proc.stderr.strip()}",
             )
         status_lines = [
-            line for line in status_proc.stdout.splitlines()
+            line
+            for line in status_proc.stdout.splitlines()
             if line.strip() and "minime_worktree_ownership.json" not in line
         ]
         if status_lines:

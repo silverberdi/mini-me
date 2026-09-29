@@ -89,7 +89,9 @@ def test_evaluate_operator_pure_causes_zero_db_mutations(in_memory_uow):
     uow.committed = False
 
     op_svc = AuthorizedOperatorService(uow)
-    decision, evaluated = op_svc.evaluate_operator_pure("pureop2@example.com", google_sub="sub-12345")
+    decision, evaluated = op_svc.evaluate_operator_pure(
+        "pureop2@example.com", google_sub="sub-12345"
+    )
 
     assert decision == OperatorAuthDecision.AUTHORIZED
     assert evaluated is not None
@@ -99,7 +101,9 @@ def test_evaluate_operator_pure_causes_zero_db_mutations(in_memory_uow):
     assert uow.committed is False
 
 
-def test_authenticated_get_request_leaves_auth_session_and_operator_unchanged(test_client_and_session):
+def test_authenticated_get_request_leaves_auth_session_and_operator_unchanged(
+    test_client_and_session,
+):
     client, uow, raw_token, initial_session, initial_op = test_client_and_session
 
     initial_last_seen = initial_session.last_seen_at

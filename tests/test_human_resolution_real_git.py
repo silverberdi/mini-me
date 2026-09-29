@@ -38,6 +38,7 @@ def git(repo: Path, *args: str) -> str:
 
 def make_repo(tmp_path: Path, conflict: bool) -> tuple[Path, str, str, str]:
     import json
+
     repo = tmp_path / "repo"
     repo.mkdir()
     git(repo, "init", "-b", "main")

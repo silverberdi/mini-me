@@ -301,7 +301,9 @@ class SessionManager:
         if not session:
             return None
 
-        self.record_session_activity(session.session_id, ip_address=ip_address, user_agent=user_agent)
+        self.record_session_activity(
+            session.session_id, ip_address=ip_address, user_agent=user_agent
+        )
         return session
 
     def revoke_session_by_token(self, raw_token: str) -> bool:
@@ -373,7 +375,12 @@ class AuthorizedOperatorService:
     ) -> tuple[OperatorAuthDecision, AuthorizedOperator | None]:
         """Evaluate if an authenticated identity is an authorized, active operator."""
         decision, operator = self.evaluate_operator_pure(email, google_sub=google_sub)
-        if decision == OperatorAuthDecision.AUTHORIZED and operator and google_sub and not operator.google_sub:
+        if (
+            decision == OperatorAuthDecision.AUTHORIZED
+            and operator
+            and google_sub
+            and not operator.google_sub
+        ):
             self.link_google_sub(email, google_sub)
             operator = self.uow.authorized_operators.get_by_email(email.lower().strip()) or operator
         return decision, operator

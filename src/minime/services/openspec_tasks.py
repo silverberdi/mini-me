@@ -86,15 +86,20 @@ class OpenSpecTaskTracker:
         ):
             raise RuntimeError(f"Change name '{change_name}' fails path confinement check.")
 
-        target_file = (self.project_root / openspec_path / "changes" / change_name / "tasks.md").resolve()
+        target_file = (
+            self.project_root / openspec_path / "changes" / change_name / "tasks.md"
+        ).resolve()
 
         # Durable worktree ownership verification
         wt_ownership_repo = getattr(uow, "orchestration_worktree_ownerships", None)
         ownership = wt_ownership_repo.get_by_job_id(job_id) if wt_ownership_repo else None
         if not ownership:
-            raise RuntimeError(f"Task reconciliation denied: missing OrchestrationWorktreeOwnership for job '{job_id}'.")
+            raise RuntimeError(
+                f"Task reconciliation denied: missing OrchestrationWorktreeOwnership for job '{job_id}'."
+            )
 
         from minime.domain.enums import WorktreeCreationState
+
         if ownership.creation_state != WorktreeCreationState.CREATED:
             raise RuntimeError(
                 f"Task reconciliation denied: worktree creation_state is '{ownership.creation_state.value}', expected CREATED."

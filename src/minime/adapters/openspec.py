@@ -43,11 +43,18 @@ class OpenSpecAdapter(OpenSpecAdapterInterface):
         try:
             result = subprocess.run(
                 [self.cli_command, "validate", change_name, "--strict", "--type", "change"],
-                cwd=str(project_root), capture_output=True, text=True, check=False
+                cwd=str(project_root),
+                capture_output=True,
+                text=True,
+                check=False,
             )
         except OSError as exc:
             return {"status": "UNKNOWN", "error": str(exc), "stdout": "", "stderr": ""}
-        evidence = {"returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
+        evidence = {
+            "returncode": result.returncode,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        }
         return {"status": "PASS" if result.returncode == 0 else "FAIL", **evidence}
 
     def discover_changes(self, project: Project, project_root: str) -> list[Change]:

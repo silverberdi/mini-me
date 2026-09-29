@@ -11,7 +11,7 @@ from pathlib import Path
 from minime.config import CliInvocationProfile
 
 _SEARCH_PATH = (
-    f"{Path.home()}/.local/bin:/opt/homebrew/bin:/usr/local/bin:{os.environ.get("PATH", "")}"
+    f"{Path.home()}/.local/bin:/opt/homebrew/bin:/usr/local/bin:{os.environ.get('PATH', '')}"
 )
 
 

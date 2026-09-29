@@ -185,4 +185,3 @@ def test_integrity_task_state_contradiction(in_memory_uow, tmp_path: Path):
     audit = OpenSpecIntegrityService(in_memory_uow, project_root=tmp_path).run_audit("mini-me")
 
     assert "TASK_STATE_CONTRADICTION" in _categories(audit)
-

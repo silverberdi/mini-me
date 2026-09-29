@@ -241,7 +241,6 @@ async def test_continuation_pipeline_multi_attempt_success(tmp_path: Path):
     mock_worktree_mgr.create_review_worktree = AsyncMock(return_value=mock_worktree)
     mock_worktree_mgr.remove_review_worktree = AsyncMock()
 
-
     # Mock task tracker
     mock_task_tracker = MagicMock()
     mock_task_tracker.format_prompt_context = MagicMock(return_value="Prompt context")
@@ -389,7 +388,6 @@ async def test_reviewer_visibility_blindness_escalation(tmp_path: Path):
     mock_worktree_mgr.create_review_worktree = AsyncMock(return_value=mock_worktree)
     mock_worktree_mgr.remove_review_worktree = AsyncMock()
 
-
     mock_task_tracker = MagicMock()
     mock_task_tracker.format_prompt_context = MagicMock(return_value="Prompt context")
     mock_task_tracker.parse_tasks = MagicMock(return_value=[])
@@ -533,7 +531,6 @@ async def test_reassignment_creates_handoff_and_tracks_mixed_authorship(tmp_path
     mock_worktree_mgr.cleanup_worktree = AsyncMock()
     mock_worktree_mgr.create_review_worktree = AsyncMock(return_value=mock_worktree)
     mock_worktree_mgr.remove_review_worktree = AsyncMock()
-
 
     mock_task_tracker = MagicMock()
     mock_task_tracker.format_prompt_context = MagicMock(return_value="Prompt context")
@@ -724,9 +721,10 @@ async def test_continuation_counters_reconstructed_after_restart_prevent_fresh_b
     )
     mock_worktree_mgr.current_sha = AsyncMock(return_value="sha-att3")
     mock_worktree_mgr.cleanup_worktree = AsyncMock()
-    mock_worktree_mgr.create_review_worktree = AsyncMock(return_value=MagicMock(path=tmp_path / "wt", base_sha="base-sha"))
+    mock_worktree_mgr.create_review_worktree = AsyncMock(
+        return_value=MagicMock(path=tmp_path / "wt", base_sha="base-sha")
+    )
     mock_worktree_mgr.remove_review_worktree = AsyncMock()
-
 
     mock_task_tracker = MagicMock()
     mock_task_tracker.format_prompt_context = MagicMock(return_value="Task context")
@@ -847,9 +845,10 @@ async def test_post_reassignment_capacity_check_uses_effective_executor(tmp_path
     )
     mock_worktree_mgr.current_sha = AsyncMock(return_value="sha1")
     mock_worktree_mgr.cleanup_worktree = AsyncMock()
-    mock_worktree_mgr.create_review_worktree = AsyncMock(return_value=MagicMock(path=tmp_path / "wt", base_sha="base-sha"))
+    mock_worktree_mgr.create_review_worktree = AsyncMock(
+        return_value=MagicMock(path=tmp_path / "wt", base_sha="base-sha")
+    )
     mock_worktree_mgr.remove_review_worktree = AsyncMock()
-
 
     mock_task_tracker = MagicMock()
     mock_outcome_gov = MagicMock()
@@ -1005,9 +1004,10 @@ async def test_pipeline_rule_k_exhaustive_provider_health_status_on_reassignment
     )
     mock_worktree_mgr.current_sha = AsyncMock(return_value="sha-att3")
     mock_worktree_mgr.cleanup_worktree = AsyncMock()
-    mock_worktree_mgr.create_review_worktree = AsyncMock(return_value=MagicMock(path=tmp_path / f"wt-{target_status.value}", base_sha="base-sha"))
+    mock_worktree_mgr.create_review_worktree = AsyncMock(
+        return_value=MagicMock(path=tmp_path / f"wt-{target_status.value}", base_sha="base-sha")
+    )
     mock_worktree_mgr.remove_review_worktree = AsyncMock()
-
 
     mock_task_tracker = MagicMock()
     mock_task_tracker.format_prompt_context = MagicMock(return_value="Task context")
@@ -1183,9 +1183,10 @@ async def test_pipeline_reassignment_resumes_when_capacity_returns(tmp_path):
     )
     mock_worktree_mgr.current_sha = AsyncMock(return_value="sha-att3")
     mock_worktree_mgr.cleanup_worktree = AsyncMock()
-    mock_worktree_mgr.create_review_worktree = AsyncMock(return_value=MagicMock(path=tmp_path / "wt-resume", base_sha="base-sha"))
+    mock_worktree_mgr.create_review_worktree = AsyncMock(
+        return_value=MagicMock(path=tmp_path / "wt-resume", base_sha="base-sha")
+    )
     mock_worktree_mgr.remove_review_worktree = AsyncMock()
-
 
     mock_task_tracker = MagicMock()
     mock_task_tracker.format_prompt_context = MagicMock(return_value="Task context")
@@ -1377,9 +1378,10 @@ async def test_pipeline_rule_k_structurally_ineligible_escalates_to_needs_human(
     )
     mock_worktree_mgr.current_sha = AsyncMock(return_value="sha-att3")
     mock_worktree_mgr.cleanup_worktree = AsyncMock()
-    mock_worktree_mgr.create_review_worktree = AsyncMock(return_value=MagicMock(path=tmp_path / "wt-self", base_sha="base-sha"))
+    mock_worktree_mgr.create_review_worktree = AsyncMock(
+        return_value=MagicMock(path=tmp_path / "wt-self", base_sha="base-sha")
+    )
     mock_worktree_mgr.remove_review_worktree = AsyncMock()
-
 
     mock_task_tracker = MagicMock()
     mock_task_tracker.format_prompt_context = MagicMock(return_value="Task context")
@@ -1524,9 +1526,10 @@ async def test_pipeline_reassigns_to_antigravity_on_codex_non_convergence(tmp_pa
     )
     mock_worktree_mgr.current_sha = AsyncMock(return_value="sha-att3")
     mock_worktree_mgr.cleanup_worktree = AsyncMock()
-    mock_worktree_mgr.create_review_worktree = AsyncMock(return_value=MagicMock(path=wt_path, base_sha="base-sha"))
+    mock_worktree_mgr.create_review_worktree = AsyncMock(
+        return_value=MagicMock(path=wt_path, base_sha="base-sha")
+    )
     mock_worktree_mgr.remove_review_worktree = AsyncMock()
-
 
     mock_task_tracker = MagicMock()
     mock_task_tracker.format_prompt_context = MagicMock(return_value="Task context")
@@ -1534,7 +1537,12 @@ async def test_pipeline_reassigns_to_antigravity_on_codex_non_convergence(tmp_pa
         return_value=[OpenSpecTask("1.1", "T1", "Phase 1", False)]
     )
     mock_task_tracker.read_openspec = MagicMock(
-        return_value={"proposal": "Proposal text", "design": "Design text", "specs": {}, "tasks": []}
+        return_value={
+            "proposal": "Proposal text",
+            "design": "Design text",
+            "specs": {},
+            "tasks": [],
+        }
     )
 
     mock_outcome_gov = MagicMock()
@@ -1564,9 +1572,11 @@ async def test_pipeline_reassigns_to_antigravity_on_codex_non_convergence(tmp_pa
     mock_outcome_gov.verify_completion = MagicMock(side_effect=verify_side_effect)
     mock_outcome_gov.classify_outcome = MagicMock(side_effect=classify_side_effect)
     mock_outcome_gov.evaluate_progress = MagicMock(
-        side_effect=lambda *args, **kwargs: "NO_PROGRESS"
-        if uow._jobs_dict[job_id].current_executor == "codex"
-        else "FULL_COMPLETION"
+        side_effect=lambda *args, **kwargs: (
+            "NO_PROGRESS"
+            if uow._jobs_dict[job_id].current_executor == "codex"
+            else "FULL_COMPLETION"
+        )
     )
 
     mock_imp_runner = MagicMock()
@@ -1621,4 +1631,3 @@ async def test_pipeline_reassigns_to_antigravity_on_codex_non_convergence(tmp_pa
     assert EventType.AGENT_REASSIGNED in saved_events
     assert EventType.PREMIUM_PROVIDER_ASSIGNED in saved_events
     assert EventType.PREMIUM_RECOVERY_ASSIGNED in saved_events
-

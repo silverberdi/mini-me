@@ -114,10 +114,13 @@ class LightweightReconciliationService:
 
             if reconciled_task_ids:
                 if not self.uow:
-                    raise RuntimeError("Lightweight reconciliation denied: self.uow is mandatory for tasks.md mutation.")
+                    raise RuntimeError(
+                        "Lightweight reconciliation denied: self.uow is mandatory for tasks.md mutation."
+                    )
                 from minime.domain.enums import WorkspaceOperation
                 from minime.domain.models import WorkspaceMutationRequest
                 from minime.services.workspace_guard import ManagedWorkspaceGuard
+
                 guard = ManagedWorkspaceGuard(self.uow)
                 target_path_str = str(tasks_file.resolve())
                 req = WorkspaceMutationRequest(

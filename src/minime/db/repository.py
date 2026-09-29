@@ -1141,8 +1141,8 @@ class PostgresEventRepository(EventRepositoryInterface):
         provider: str | None = None,
         since: datetime | None = None,
     ) -> int:
-        stmt = select(func.count()).select_from(EventModel).where(
-            EventModel.event_type == event_type
+        stmt = (
+            select(func.count()).select_from(EventModel).where(EventModel.event_type == event_type)
         )
         if provider is not None:
             stmt = stmt.where(
@@ -2920,7 +2920,11 @@ class PostgresDurableSagaRepository(DurableSagaRepositoryInterface):
     def save(self, saga: DurableSaga) -> None:
         existing = self.session.get(DurableSagaModel, saga.id)
         if existing:
-            existing.saga_type = saga.saga_type.value if isinstance(saga.saga_type, SagaType) else str(saga.saga_type)
+            existing.saga_type = (
+                saga.saga_type.value
+                if isinstance(saga.saga_type, SagaType)
+                else str(saga.saga_type)
+            )
             existing.project_id = saga.project_id
             existing.work_item_key = saga.work_item_key
             existing.change_name = saga.change_name
@@ -2928,7 +2932,9 @@ class PostgresDurableSagaRepository(DurableSagaRepositoryInterface):
             existing.job_id = saga.job_id
             existing.generation = saga.generation
             existing.current_phase = saga.current_phase
-            existing.status = saga.status.value if isinstance(saga.status, SagaStatus) else str(saga.status)
+            existing.status = (
+                saga.status.value if isinstance(saga.status, SagaStatus) else str(saga.status)
+            )
             existing.last_observed_outcome = (
                 saga.last_observed_outcome.value
                 if isinstance(saga.last_observed_outcome, ExternalOutcome)
@@ -2941,7 +2947,9 @@ class PostgresDurableSagaRepository(DurableSagaRepositoryInterface):
             self.session.add(
                 DurableSagaModel(
                     id=saga.id,
-                    saga_type=saga.saga_type.value if isinstance(saga.saga_type, SagaType) else str(saga.saga_type),
+                    saga_type=saga.saga_type.value
+                    if isinstance(saga.saga_type, SagaType)
+                    else str(saga.saga_type),
                     project_id=saga.project_id,
                     work_item_key=saga.work_item_key,
                     change_name=saga.change_name,
@@ -2949,7 +2957,9 @@ class PostgresDurableSagaRepository(DurableSagaRepositoryInterface):
                     job_id=saga.job_id,
                     generation=saga.generation,
                     current_phase=saga.current_phase,
-                    status=saga.status.value if isinstance(saga.status, SagaStatus) else str(saga.status),
+                    status=saga.status.value
+                    if isinstance(saga.status, SagaStatus)
+                    else str(saga.status),
                     last_observed_outcome=(
                         saga.last_observed_outcome.value
                         if isinstance(saga.last_observed_outcome, ExternalOutcome)
@@ -2967,11 +2977,7 @@ class PostgresDurableSagaRepository(DurableSagaRepositoryInterface):
         return durable_saga_model_to_domain(model) if model else None
 
     def get_for_update(self, saga_id: str) -> DurableSaga | None:
-        stmt = (
-            select(DurableSagaModel)
-            .where(DurableSagaModel.id == saga_id)
-            .with_for_update()
-        )
+        stmt = select(DurableSagaModel).where(DurableSagaModel.id == saga_id).with_for_update()
         model = self.session.scalars(stmt).first()
         return durable_saga_model_to_domain(model) if model else None
 
@@ -3071,7 +3077,9 @@ class PostgresOrchestrationExternalActionRepository(OrchestrationExternalActionR
 
     def reserve(self, action: OrchestrationExternalAction) -> None:
         if action.run_id is None and action.saga_id is None:
-            raise ValueError("OrchestrationExternalAction must have at least run_id or saga_id set.")
+            raise ValueError(
+                "OrchestrationExternalAction must have at least run_id or saga_id set."
+            )
         existing = self.session.get(OrchestrationExternalActionModel, action.action_id)
         if not existing:
             self.session.add(
@@ -3631,9 +3639,7 @@ def scheduler_decision_domain_to_model(
         "eligible_reviewer": decision.eligible_reviewer,
         "safe_executable_pair_exists": decision.safe_executable_pair_exists,
         "has_deterministic_eta": decision.has_deterministic_eta,
-        "cooldown_until": decision.cooldown_until.isoformat()
-        if decision.cooldown_until
-        else None,
+        "cooldown_until": decision.cooldown_until.isoformat() if decision.cooldown_until else None,
     }
     capacity_snapshot = {**(decision.capacity_snapshot or {}), "_operational": operational}
 
@@ -4274,9 +4280,7 @@ class PostgresBacklogItemRepository(BacklogItemRepositoryInterface):
         model = self.session.scalars(stmt).first()
         return backlog_item_model_to_domain(model) if model else None
 
-    def get_by_openspec_change_name(
-        self, project_id: str, change_name: str
-    ) -> BacklogItem | None:
+    def get_by_openspec_change_name(self, project_id: str, change_name: str) -> BacklogItem | None:
         stmt = (
             select(BacklogItemModel)
             .where(BacklogItemModel.project_id == project_id)
@@ -4524,7 +4528,8 @@ class PostgresProjectManagedRepositoryBindingRepository(
         self, canonical_repository_identity: str
     ) -> ProjectManagedRepositoryBinding | None:
         stmt = select(ProjectManagedRepositoryBindingModel).where(
-            ProjectManagedRepositoryBindingModel.canonical_repository_identity == canonical_repository_identity
+            ProjectManagedRepositoryBindingModel.canonical_repository_identity
+            == canonical_repository_identity
         )
         model = self.session.scalars(stmt).first()
         return project_managed_repository_binding_model_to_domain(model) if model else None
@@ -4654,8 +4659,8 @@ class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.backlog_items = PostgresBacklogItemRepository(session)
         self.integrity_findings = PostgresIntegrityFindingRepository(session)
         self.classification_snapshots = PostgresTaskClassificationSnapshotRepository(session)
-        self.project_managed_repository_bindings = PostgresProjectManagedRepositoryBindingRepository(
-            session
+        self.project_managed_repository_bindings = (
+            PostgresProjectManagedRepositoryBindingRepository(session)
         )
         self.orchestration_worktree_ownerships = PostgresOrchestrationWorktreeOwnershipRepository(
             session

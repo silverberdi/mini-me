@@ -76,7 +76,8 @@ class ManagedWorkspaceGuard:
     ):
         self.uow = uow
         self.runtime_root = os.path.realpath(
-            runtime_root or os.environ.get("MINIME_RUNTIME_ROOT", os.path.join(os.getcwd(), ".minime"))
+            runtime_root
+            or os.environ.get("MINIME_RUNTIME_ROOT", os.path.join(os.getcwd(), ".minime"))
         )
         tm_root = trusted_managed_root or os.environ.get("MINIME_MANAGED_ROOT")
         self.trusted_managed_root = os.path.realpath(tm_root) if tm_root else None
@@ -87,7 +88,11 @@ class ManagedWorkspaceGuard:
         return os.path.realpath(abs_path)
 
     def verify_managed_repository_ownership_marker(
-        self, managed_root: str, expected_project_id: str, expected_repo_identity: str, marker_filename: str = ".minime-managed-project.json"
+        self,
+        managed_root: str,
+        expected_project_id: str,
+        expected_repo_identity: str,
+        marker_filename: str = ".minime-managed-project.json",
     ) -> tuple[bool, str, ExternalReasonCode, ExternalOutcome]:
         """Verify the managed repository ownership marker file fail-closed."""
         marker_path = os.path.join(managed_root, marker_filename)
@@ -101,6 +106,7 @@ class ManagedWorkspaceGuard:
 
         try:
             import json
+
             with open(marker_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
 
@@ -141,7 +147,12 @@ class ManagedWorkspaceGuard:
                     ExternalOutcome.FAILURE,
                 )
 
-            return True, "Managed repository ownership marker verified successfully.", ExternalReasonCode.EXECUTION_SUCCESS, ExternalOutcome.SUCCESS
+            return (
+                True,
+                "Managed repository ownership marker verified successfully.",
+                ExternalReasonCode.EXECUTION_SUCCESS,
+                ExternalOutcome.SUCCESS,
+            )
         except Exception as err:
             return (
                 False,
@@ -172,7 +183,10 @@ class ManagedWorkspaceGuard:
                 timeout=5,
             )
             if res_top.returncode != 0:
-                return False, f"Git repository unobservable at '{workdir}': {res_top.stderr.strip()}"
+                return (
+                    False,
+                    f"Git repository unobservable at '{workdir}': {res_top.stderr.strip()}",
+                )
 
             res_remote = subprocess.run(
                 ["git", "remote", "get-url", remote_name],
@@ -182,7 +196,10 @@ class ManagedWorkspaceGuard:
                 timeout=5,
             )
             if res_remote.returncode != 0:
-                return False, f"Configured remote '{remote_name}' missing: {res_remote.stderr.strip()}"
+                return (
+                    False,
+                    f"Configured remote '{remote_name}' missing: {res_remote.stderr.strip()}",
+                )
 
             observed_url = res_remote.stdout.strip()
             norm_observed = normalize_repository_identity(observed_url)
@@ -199,9 +216,7 @@ class ManagedWorkspaceGuard:
         except Exception as err:
             return False, f"Git identity verification failed with unobservable error: {err}"
 
-    def evaluate_mutation(
-        self, request: WorkspaceMutationRequest
-    ) -> WorkspaceMutationDecision:
+    def evaluate_mutation(self, request: WorkspaceMutationRequest) -> WorkspaceMutationDecision:
         """Evaluate workspace mutation request against physical/logical isolation policies."""
         decision = self._evaluate_mutation_internal(request)
         if not decision.allowed:
@@ -236,6 +251,7 @@ class ManagedWorkspaceGuard:
 
         try:
             from minime.domain.models import MetricFact
+
             reason_code_val = (
                 decision.reason_code.value
                 if hasattr(decision.reason_code, "value")
@@ -317,8 +333,12 @@ class ManagedWorkspaceGuard:
         # Enforce trusted_managed_root for BOTH managed_repo_root and worktree_parent_dir
         if self.trusted_managed_root is not None:
             trusted = self.resolve_canonical_path(self.trusted_managed_root)
-            managed_valid = self._is_path_inside(managed_repo_root, trusted) or managed_repo_root == trusted
-            wt_parent_valid = self._is_path_inside(worktree_parent_dir, trusted) or worktree_parent_dir == trusted
+            managed_valid = (
+                self._is_path_inside(managed_repo_root, trusted) or managed_repo_root == trusted
+            )
+            wt_parent_valid = (
+                self._is_path_inside(worktree_parent_dir, trusted) or worktree_parent_dir == trusted
+            )
             if not managed_valid or not wt_parent_valid:
                 return WorkspaceMutationDecision(
                     allowed=False,
@@ -364,7 +384,11 @@ class ManagedWorkspaceGuard:
             if ownership_repo:
                 ownership = ownership_repo.get_by_canonical_path(resolved)
                 if not ownership:
-                    active_list = ownership_repo.list_by_project(request.project_id) if hasattr(ownership_repo, "list_by_project") else []
+                    active_list = (
+                        ownership_repo.list_by_project(request.project_id)
+                        if hasattr(ownership_repo, "list_by_project")
+                        else []
+                    )
                     for ow in active_list:
                         cw_path = self.resolve_canonical_path(ow.canonical_worktree_path)
                         if self._is_path_inside(resolved, cw_path) or resolved == cw_path:
@@ -397,7 +421,11 @@ class ManagedWorkspaceGuard:
                 )
 
             from minime.domain.enums import WorktreeCreationState
-            if ownership.creation_state != WorktreeCreationState.CREATED and request.requested_operation != WorkspaceOperation.WORKTREE_DELETE:
+
+            if (
+                ownership.creation_state != WorktreeCreationState.CREATED
+                and request.requested_operation != WorkspaceOperation.WORKTREE_DELETE
+            ):
                 return WorkspaceMutationDecision(
                     allowed=False,
                     outcome=ExternalOutcome.FAILURE,
@@ -427,7 +455,11 @@ class ManagedWorkspaceGuard:
                 if not valid_git:
                     is_mismatch = "mismatch" in git_reason
                     outcome = ExternalOutcome.FAILURE if is_mismatch else ExternalOutcome.UNKNOWN
-                    reason_code = ExternalReasonCode.CONFLICT if is_mismatch else ExternalReasonCode.UNOBSERVABLE
+                    reason_code = (
+                        ExternalReasonCode.CONFLICT
+                        if is_mismatch
+                        else ExternalReasonCode.UNOBSERVABLE
+                    )
                     return WorkspaceMutationDecision(
                         allowed=False,
                         outcome=outcome,
@@ -445,7 +477,6 @@ class ManagedWorkspaceGuard:
                     resolved_path=resolved,
                     provider_detail=f"Worktree directory '{cw_path}' does not exist on disk.",
                 )
-
 
             return WorkspaceMutationDecision(
                 allowed=True,
@@ -465,7 +496,11 @@ class ManagedWorkspaceGuard:
                 if not valid_git:
                     is_mismatch = "mismatch" in git_reason
                     outcome = ExternalOutcome.FAILURE if is_mismatch else ExternalOutcome.UNKNOWN
-                    reason_code = ExternalReasonCode.CONFLICT if is_mismatch else ExternalReasonCode.UNOBSERVABLE
+                    reason_code = (
+                        ExternalReasonCode.CONFLICT
+                        if is_mismatch
+                        else ExternalReasonCode.UNOBSERVABLE
+                    )
                     return WorkspaceMutationDecision(
                         allowed=False,
                         outcome=outcome,
@@ -475,12 +510,22 @@ class ManagedWorkspaceGuard:
                         provider_detail=git_reason,
                     )
 
-                marker_filename = getattr(binding, "ownership_marker_filename", ".minime-managed-project.json")
-                is_marker_target = resolved == os.path.join(managed_repo_root, marker_filename) or resolved == managed_repo_root
+                marker_filename = getattr(
+                    binding, "ownership_marker_filename", ".minime-managed-project.json"
+                )
+                is_marker_target = (
+                    resolved == os.path.join(managed_repo_root, marker_filename)
+                    or resolved == managed_repo_root
+                )
 
                 if not is_marker_target:
-                    valid_marker, marker_reason, m_code, m_outcome = self.verify_managed_repository_ownership_marker(
-                        managed_repo_root, binding.project_id, binding.canonical_repository_identity, binding.ownership_marker_filename
+                    valid_marker, marker_reason, m_code, m_outcome = (
+                        self.verify_managed_repository_ownership_marker(
+                            managed_repo_root,
+                            binding.project_id,
+                            binding.canonical_repository_identity,
+                            binding.ownership_marker_filename,
+                        )
                     )
                     if not valid_marker:
                         return WorkspaceMutationDecision(
@@ -502,14 +547,17 @@ class ManagedWorkspaceGuard:
                 )
 
             # Managed repository root is read-only for direct agent code edits (except marker file or root establishment)
-            marker_filename = getattr(binding, "ownership_marker_filename", ".minime-managed-project.json")
+            marker_filename = getattr(
+                binding, "ownership_marker_filename", ".minime-managed-project.json"
+            )
             is_marker_or_root = (
                 resolved == os.path.join(managed_repo_root, marker_filename)
                 or resolved == managed_repo_root
             )
 
             if (
-                request.requested_operation in (WorkspaceOperation.EDIT, WorkspaceOperation.GIT_COMMIT)
+                request.requested_operation
+                in (WorkspaceOperation.EDIT, WorkspaceOperation.GIT_COMMIT)
                 and not is_marker_or_root
             ):
                 return WorkspaceMutationDecision(
@@ -617,8 +665,12 @@ class ManagedWorkspaceGuard:
         # 4. Enforce trusted_managed_root containment for managed_repo_root, worktree_parent_dir, and target resolved
         if self.trusted_managed_root is not None:
             trusted = self.resolve_canonical_path(self.trusted_managed_root)
-            managed_valid = self._is_path_inside(managed_repo_root, trusted) or managed_repo_root == trusted
-            wt_parent_valid = self._is_path_inside(worktree_parent_dir, trusted) or worktree_parent_dir == trusted
+            managed_valid = (
+                self._is_path_inside(managed_repo_root, trusted) or managed_repo_root == trusted
+            )
+            wt_parent_valid = (
+                self._is_path_inside(worktree_parent_dir, trusted) or worktree_parent_dir == trusted
+            )
             target_valid = self._is_path_inside(resolved, trusted) or resolved == trusted
             if not managed_valid or not wt_parent_valid or not target_valid:
                 return WorkspaceMutationDecision(
@@ -633,7 +685,9 @@ class ManagedWorkspaceGuard:
                 )
 
         # 5. Restrict to onboarding establishment surface targets & operations
-        marker_filename = getattr(provisional_binding, "ownership_marker_filename", ".minime-managed-project.json")
+        marker_filename = getattr(
+            provisional_binding, "ownership_marker_filename", ".minime-managed-project.json"
+        )
         marker_path = self.resolve_canonical_path(os.path.join(managed_repo_root, marker_filename))
 
         is_establishment_target = (
@@ -685,7 +739,11 @@ class ManagedWorkspaceGuard:
                 ),
             )
 
-        if request.requested_operation in (WorkspaceOperation.EDIT, WorkspaceOperation.GIT_BRANCH, WorkspaceOperation.WORKTREE_CREATE):
+        if request.requested_operation in (
+            WorkspaceOperation.EDIT,
+            WorkspaceOperation.GIT_BRANCH,
+            WorkspaceOperation.WORKTREE_CREATE,
+        ):
             return WorkspaceMutationDecision(
                 allowed=True,
                 outcome=ExternalOutcome.SUCCESS,
@@ -709,6 +767,7 @@ class ManagedWorkspaceGuard:
         """Check if resolved path is equal to or contained within parent directory using path hierarchy."""
         try:
             from pathlib import Path
+
             p = Path(self.resolve_canonical_path(path))
             par = Path(self.resolve_canonical_path(parent))
             return p == par or par in p.parents
@@ -719,9 +778,9 @@ class ManagedWorkspaceGuard:
         """Check if two resolved paths collide or overlap (equal, parent of, or child of)."""
         try:
             from pathlib import Path
+
             a = Path(self.resolve_canonical_path(path_a))
             b = Path(self.resolve_canonical_path(path_b))
             return a == b or b in a.parents or a in b.parents
         except Exception:
             return True
-

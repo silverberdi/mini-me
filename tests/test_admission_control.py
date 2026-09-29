@@ -83,6 +83,7 @@ def setup_test_project_and_change(
     create_isolated_openspec_change(root, change_name=change_name)
 
     from tests.conftest import setup_managed_repository_fixture
+
     setup_managed_repository_fixture(
         uow=uow,
         project_id="mini-me",

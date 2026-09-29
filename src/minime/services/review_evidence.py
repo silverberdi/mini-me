@@ -128,9 +128,7 @@ def build_review_evidence_report(
         and existing_review.candidate_sha != expected_sha
     )
 
-    valid, verdict, reason = validate_review_authority(
-        uow, run, job, candidate, authorship_service
-    )
+    valid, verdict, reason = validate_review_authority(uow, run, job, candidate, authorship_service)
     if valid:
         return ReviewEvidenceReport(
             satisfied=True,

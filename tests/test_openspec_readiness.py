@@ -122,6 +122,7 @@ def test_dor_evaluation_success(in_memory_uow, tmp_path):
     )
 
     from conftest import setup_managed_repository_fixture
+
     setup_managed_repository_fixture(
         uow=in_memory_uow,
         project_id="mini-me",
@@ -323,6 +324,7 @@ def test_runtime_isolation_does_not_modify_openspec(in_memory_uow, tmp_path):
     in_memory_uow.bindings.save(binding)
 
     from conftest import setup_managed_repository_fixture
+
     setup_managed_repository_fixture(
         uow=in_memory_uow,
         project_id="mini-me",
@@ -370,6 +372,7 @@ def test_readiness_evaluation_event_deduplication(in_memory_uow, tmp_path):
     in_memory_uow.bindings.save(binding)
 
     from conftest import setup_managed_repository_fixture
+
     setup_managed_repository_fixture(
         uow=in_memory_uow,
         project_id="mini-me",

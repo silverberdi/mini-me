@@ -228,9 +228,7 @@ def get_context_service(uow: UowDep) -> ContextDiscoveryService:
 ContextServiceDep = Annotated[ContextDiscoveryService, Depends(get_context_service)]
 
 
-def get_intake_service(
-    uow: UowDep, github_adapter: GitHubAdapterDep
-) -> IntakeService:
+def get_intake_service(uow: UowDep, github_adapter: GitHubAdapterDep) -> IntakeService:
     return IntakeService(uow, github_adapter=github_adapter)
 
 
@@ -842,7 +840,7 @@ def evaluate_readiness(
     current_active_change: str | None = None,
 ) -> dict[str, Any]:
     service = ReadinessService(uow)
-    eval_result = service.evaluate_change_readiness(
+    eval_result = service.evaluate_change_readiness_pure(
         project_id=project_id,
         change_name=change_name,
         project_root=project_root,
@@ -869,9 +867,7 @@ async def run_project_job(
             project_id, req.change_name, drive_admitted=True
         )
         if run is None:
-            reason = (
-                record.reason_summary if record else "Admission blocked by scheduler policy."
-            )
+            reason = record.reason_summary if record else "Admission blocked by scheduler policy."
             raise ValueError(reason)
         job = uow.jobs.get_by_id(run.active_job_id) if run.active_job_id else None
         if not job:
@@ -1212,9 +1208,7 @@ def start_orchestration(
             req.project_id, req.change_name, drive_admitted=True
         )
         if run is None:
-            reason = (
-                record.reason_summary if record else "Admission blocked by scheduler policy."
-            )
+            reason = record.reason_summary if record else "Admission blocked by scheduler policy."
             raise ValueError(reason)
         status_view = scheduler.orchestration_service.get_status(run.run_id)
         return status_view.model_dump()

@@ -40,7 +40,9 @@ def _service(uow, clock, monkeypatch, max_per_hour):
 
 def _setup_exhausted(service, provider: str = "codex"):
     # Seed actionable READY work item so expensive probes are eligible under current governance contract
-    p = Project(project_id="test-p", display_name="Test", repository="owner/repo", implementer=provider)
+    p = Project(
+        project_id="test-p", display_name="Test", repository="owner/repo", implementer=provider
+    )
     service.uow.projects.save(p)
     w = WorkQueueItem(
         project_id="test-p",
@@ -71,7 +73,9 @@ async def test_expensive_probe_below_limit_is_allowed(in_memory_uow, monkeypatch
     )
     await service.check_and_probe_provider("codex")
     assert adapter.probe_call_count == 1
-    executed = [e for e in _events(in_memory_uow) if e.event_type.value == "PROVIDER_PROBE_EXECUTED"]
+    executed = [
+        e for e in _events(in_memory_uow) if e.event_type.value == "PROVIDER_PROBE_EXECUTED"
+    ]
     assert len(executed) == 1
     assert executed[0].payload.get("kind") == "expensive"
     assert executed[0].payload.get("result") == "failure"
@@ -108,9 +112,7 @@ async def test_cheap_probe_is_not_counted_toward_expensive_quota(in_memory_uow, 
     assert not any(
         e.event_type.value == "PROVIDER_PROBE_SUPPRESSED" for e in _events(in_memory_uow)
     )
-    assert not any(
-        e.event_type.value == "PROVIDER_PROBE_EXECUTED" for e in _events(in_memory_uow)
-    )
+    assert not any(e.event_type.value == "PROVIDER_PROBE_EXECUTED" for e in _events(in_memory_uow))
 
 
 async def test_successful_recovery_leaves_success_evidence(in_memory_uow, monkeypatch):
@@ -122,11 +124,11 @@ async def test_successful_recovery_leaves_success_evidence(in_memory_uow, monkey
         "minime.services.provider_health_service.get_provider_adapter", lambda p: adapter
     )
     assert await service.check_and_probe_provider("codex") is True
-    executed = [e for e in _events(in_memory_uow) if e.event_type.value == "PROVIDER_PROBE_EXECUTED"]
+    executed = [
+        e for e in _events(in_memory_uow) if e.event_type.value == "PROVIDER_PROBE_EXECUTED"
+    ]
     assert executed[0].payload.get("result") == "success"
-    assert any(
-        e.event_type.value == "PRIMARY_CAPACITY_RECOVERED" for e in _events(in_memory_uow)
-    )
+    assert any(e.event_type.value == "PRIMARY_CAPACITY_RECOVERED" for e in _events(in_memory_uow))
 
 
 async def test_repeated_scheduler_cycles_do_not_exceed_max_per_hour(in_memory_uow, monkeypatch):
@@ -140,7 +142,9 @@ async def test_repeated_scheduler_cycles_do_not_exceed_max_per_hour(in_memory_uo
     for _ in range(10):
         await service.probe_unavailable_providers()
     assert adapter.probe_call_count == 2
-    executed = [e for e in _events(in_memory_uow) if e.event_type.value == "PROVIDER_PROBE_EXECUTED"]
+    executed = [
+        e for e in _events(in_memory_uow) if e.event_type.value == "PROVIDER_PROBE_EXECUTED"
+    ]
     suppressed = [
         e for e in _events(in_memory_uow) if e.event_type.value == "PROVIDER_PROBE_SUPPRESSED"
     ]
@@ -166,9 +170,7 @@ async def test_probe_does_not_increment_implementation_retry_budget(in_memory_uo
         "CORRECTIVE_RETRY_ISSUED",
         "AGENT_REASSIGNED",
     }
-    assert not any(
-        e.event_type.value in retry_events for e in _events(in_memory_uow)
-    )
+    assert not any(e.event_type.value in retry_events for e in _events(in_memory_uow))
 
 
 async def test_suppressed_probe_does_not_increment_retry_budget(in_memory_uow, monkeypatch):
@@ -227,15 +229,11 @@ async def test_concurrent_eligible_checks_do_not_exceed_bound(in_memory_uow, mon
     monkeypatch.setattr(
         "minime.services.provider_health_service.get_provider_adapter", lambda p: adapter
     )
-    await asyncio.gather(
-        *[service.check_and_probe_provider("codex") for _ in range(20)]
-    )
+    await asyncio.gather(*[service.check_and_probe_provider("codex") for _ in range(20)])
     assert adapter.probe_call_count == 2
 
 
-async def test_repeated_suppressed_ticks_bounded_suppression_evidence(
-    in_memory_uow, monkeypatch
-):
+async def test_repeated_suppressed_ticks_bounded_suppression_evidence(in_memory_uow, monkeypatch):
     """Leaf B: repeated suppressed scheduler ticks must not emit unbounded
     suppression evidence (bounded to one event per provider per hour)."""
     clock = _Clock()

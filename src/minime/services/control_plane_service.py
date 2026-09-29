@@ -1486,4 +1486,3 @@ class ControlPlaneService:
             intake_service=intake_svc,
             post_merge_service=post_merge_svc,
         )
-

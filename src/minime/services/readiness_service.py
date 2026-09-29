@@ -181,7 +181,9 @@ class ReadinessService:
 
         # Stage C Admission Fence: Re-validate CURRENT Stage C truth using canonical authorities
         managed_binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
-        managed_binding = managed_binding_repo.get_by_project_id(project_id) if managed_binding_repo else None
+        managed_binding = (
+            managed_binding_repo.get_by_project_id(project_id) if managed_binding_repo else None
+        )
 
         from minime.services.agent_confinement import AgentProcessConfinement
         from minime.services.workspace_guard import ManagedWorkspaceGuard, is_binding_fully_valid
@@ -194,7 +196,9 @@ class ReadinessService:
         if managed_binding is None:
             stage_c_reason = f"Stage C Admission Fence: Missing managed repository binding for project '{project_id}'."
         elif not is_binding_fully_valid(managed_binding):
-            m_reasons = getattr(managed_binding, "mismatch_reasons", None) or ["Invalid ProjectManagedRepositoryBinding"]
+            m_reasons = getattr(managed_binding, "mismatch_reasons", None) or [
+                "Invalid ProjectManagedRepositoryBinding"
+            ]
             stage_c_reason = f"Stage C Admission Fence: Managed repository binding is invalid: {'; '.join(m_reasons)}."
         else:
             managed_root = managed_binding.managed_repository_root
@@ -209,7 +213,9 @@ class ReadinessService:
                 runtime_root = guard.runtime_root
 
                 # 2. Prove BOTH have no equality/parent/child overlap with RUNTIME using guard path helpers
-                if guard._paths_overlap(managed_root, runtime_root) or guard._paths_overlap(wt_parent, runtime_root):
+                if guard._paths_overlap(managed_root, runtime_root) or guard._paths_overlap(
+                    wt_parent, runtime_root
+                ):
                     stage_c_reason = f"Stage C Admission Fence: Runtime root '{runtime_root}' collides or overlaps with managed workspace or worktree parent directory."
                 elif guard.trusted_managed_root and (
                     not guard._is_path_inside(managed_root, guard.trusted_managed_root)
@@ -221,13 +227,17 @@ class ReadinessService:
                 if not stage_c_reason:
                     from minime.domain.enums import WorkspaceOperation, WorkspaceRole
                     from minime.domain.models import WorkspaceMutationRequest
+
                     class_req = WorkspaceMutationRequest(
                         project_id=project_id,
                         target_path=managed_root,
                         requested_operation=WorkspaceOperation.READ,
                     )
                     class_decision = guard.evaluate_mutation(class_req)
-                    if not class_decision.allowed or class_decision.workspace_role != WorkspaceRole.MANAGED_REPOSITORY:
+                    if (
+                        not class_decision.allowed
+                        or class_decision.workspace_role != WorkspaceRole.MANAGED_REPOSITORY
+                    ):
                         stage_c_reason = f"Stage C Admission Fence: Managed root '{managed_root}' failed workspace classification: {class_decision.provider_detail}"
 
                 # 4. Re-observe Git repository identity
@@ -260,7 +270,11 @@ class ReadinessService:
                         stage_c_reason = "Stage C Admission Fence: Agent process confinement capability is unavailable."
 
         if stage_c_reason:
-            checks.append(ReadinessCheck(name="stage_c_workspace_isolation", passed=False, reason=stage_c_reason))
+            checks.append(
+                ReadinessCheck(
+                    name="stage_c_workspace_isolation", passed=False, reason=stage_c_reason
+                )
+            )
             unmet_reasons.append(stage_c_reason)
         else:
             checks.append(
@@ -343,7 +357,9 @@ class ReadinessService:
                     binding_res = self.github_adapter.validate_issue_binding(
                         project.repository, effective_issue, github_repository=github_repo
                     )
-                    issue_valid = binding_res.outcome == ExternalOutcome.SUCCESS and binding_res.data is True
+                    issue_valid = (
+                        binding_res.outcome == ExternalOutcome.SUCCESS and binding_res.data is True
+                    )
                     issue_reason = binding_res.error_message
                 except GitHubRemoteError as exc:
                     issue_valid = False

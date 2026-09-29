@@ -145,10 +145,22 @@ class GitFakeWorktreeManager:
             os.symlink("/tmp", path / "tmp_escape", target_is_directory=True)
 
         subprocess.run(["git", "init"], cwd=str(path), check=True, capture_output=True)
-        subprocess.run(["git", "config", "user.name", "Test"], cwd=str(path), check=True, capture_output=True)
-        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(path), check=True, capture_output=True)
+        subprocess.run(
+            ["git", "config", "user.name", "Test"], cwd=str(path), check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"],
+            cwd=str(path),
+            check=True,
+            capture_output=True,
+        )
         subprocess.run(["git", "add", "."], cwd=str(path), check=True, capture_output=True)
-        subprocess.run(["git", "commit", "--allow-empty", "-m", "init review wt"], cwd=str(path), check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "--allow-empty", "-m", "init review wt"],
+            cwd=str(path),
+            check=True,
+            capture_output=True,
+        )
         head_sha = subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=str(path), check=True, capture_output=True, text=True
         ).stdout.strip()

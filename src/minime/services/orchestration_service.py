@@ -379,8 +379,7 @@ class OrchestrationService:
                 )
                 health = self.pipeline.health_service.get_health(provider)
                 if (
-                    health.status
-                    in (ProviderHealthStatus.AVAILABLE, ProviderHealthStatus.DEGRADED)
+                    health.status in (ProviderHealthStatus.AVAILABLE, ProviderHealthStatus.DEGRADED)
                     or force
                     or drain_mode
                 ):
@@ -1432,10 +1431,15 @@ class OrchestrationService:
 
             if stage == OrchestrationStage.ADMITTED:
                 authority = LifecycleTransitionAuthority(self.uow)
-                bk_item = self.uow.backlog_items.get_by_project_and_key(run.project_id, run.change_name)
+                bk_item = self.uow.backlog_items.get_by_project_and_key(
+                    run.project_id, run.change_name
+                )
                 if not bk_item:
                     for item in self.uow.backlog_items.list_by_project(run.project_id):
-                        if item.openspec_change_name == run.change_name or item.item_key == run.change_name:
+                        if (
+                            item.openspec_change_name == run.change_name
+                            or item.item_key == run.change_name
+                        ):
                             bk_item = item
                             break
                 if bk_item and bk_item.status == WorkItemStatus.ADMITTED:
@@ -2016,10 +2020,15 @@ class OrchestrationService:
                     )
                     if head_res.outcome == ExternalOutcome.SUCCESS:
                         remote_sha = head_res.data
-                    elif head_res.outcome == ExternalOutcome.FAILURE and head_res.reason_code == ExternalReasonCode.NOT_FOUND:
+                    elif (
+                        head_res.outcome == ExternalOutcome.FAILURE
+                        and head_res.reason_code == ExternalReasonCode.NOT_FOUND
+                    ):
                         remote_sha = None
                     else:
-                        raise RuntimeError(head_res.error_message or "Could not observe remote branch head.")
+                        raise RuntimeError(
+                            head_res.error_message or "Could not observe remote branch head."
+                        )
                 except Exception as exc:
                     logger.warning(f"Could not observe remote branch '{branch_name}': {exc}")
                     self._stop_run(
@@ -2096,8 +2105,14 @@ class OrchestrationService:
                                 self.uow.commit()
                             else:
                                 push_outcome = getattr(push_res, "outcome", ExternalOutcome.FAILURE)
-                                push_err = getattr(push_res, "error_message", None) or "Push failed."
-                                final_status = ExternalActionStatus.AMBIGUOUS if push_outcome == ExternalOutcome.AMBIGUOUS else ExternalActionStatus.FAILED
+                                push_err = (
+                                    getattr(push_res, "error_message", None) or "Push failed."
+                                )
+                                final_status = (
+                                    ExternalActionStatus.AMBIGUOUS
+                                    if push_outcome == ExternalOutcome.AMBIGUOUS
+                                    else ExternalActionStatus.FAILED
+                                )
                                 self.uow.orchestration_external_actions.update_status(
                                     push_key,
                                     final_status,
@@ -2162,7 +2177,10 @@ class OrchestrationService:
                         if lookup_res.outcome == ExternalOutcome.SUCCESS and lookup_res.data:
                             lookup_state = "SUCCESS"
                             existing_pr = lookup_res.data
-                        elif lookup_res.outcome == ExternalOutcome.FAILURE and lookup_res.reason_code == ExternalReasonCode.NOT_FOUND:
+                        elif (
+                            lookup_res.outcome == ExternalOutcome.FAILURE
+                            and lookup_res.reason_code == ExternalReasonCode.NOT_FOUND
+                        ):
                             lookup_state = "NOT_FOUND"
                         elif lookup_res.outcome == ExternalOutcome.AMBIGUOUS:
                             lookup_state = "AMBIGUOUS"
@@ -2239,13 +2257,19 @@ class OrchestrationService:
                                 ),
                                 head_sha=cand_sha,
                             )
-                            is_create_ok = create_res.outcome == ExternalOutcome.SUCCESS and bool(create_res.data)
+                            is_create_ok = create_res.outcome == ExternalOutcome.SUCCESS and bool(
+                                create_res.data
+                            )
                             create_data = create_res.data
                             create_outcome = create_res.outcome
                             create_err = create_res.error_message or "PR creation failed"
 
                             if not is_create_ok or not create_data:
-                                final_status = ExternalActionStatus.AMBIGUOUS if create_outcome == ExternalOutcome.AMBIGUOUS else ExternalActionStatus.FAILED
+                                final_status = (
+                                    ExternalActionStatus.AMBIGUOUS
+                                    if create_outcome == ExternalOutcome.AMBIGUOUS
+                                    else ExternalActionStatus.FAILED
+                                )
                                 self.uow.orchestration_external_actions.update_status(
                                     pr_key,
                                     final_status,
@@ -2253,8 +2277,12 @@ class OrchestrationService:
                                 )
                                 self._stop_run(
                                     run,
-                                    stop_outcome=OrchestrationStopOutcome.WAITING_EXTERNAL if create_outcome == ExternalOutcome.AMBIGUOUS else OrchestrationStopOutcome.NEEDS_HUMAN,
-                                    human_gate=None if create_outcome == ExternalOutcome.AMBIGUOUS else HumanGate.NEEDS_HUMAN,
+                                    stop_outcome=OrchestrationStopOutcome.WAITING_EXTERNAL
+                                    if create_outcome == ExternalOutcome.AMBIGUOUS
+                                    else OrchestrationStopOutcome.NEEDS_HUMAN,
+                                    human_gate=None
+                                    if create_outcome == ExternalOutcome.AMBIGUOUS
+                                    else HumanGate.NEEDS_HUMAN,
                                     stop_reason=create_err,
                                     stop_details={"action_key": pr_key},
                                 )
@@ -3004,7 +3032,10 @@ class OrchestrationService:
             bk_item = self.uow.backlog_items.get_by_project_and_key(run.project_id, run.change_name)
             if not bk_item:
                 for item in self.uow.backlog_items.list_by_project(run.project_id):
-                    if item.openspec_change_name == run.change_name or item.item_key == run.change_name:
+                    if (
+                        item.openspec_change_name == run.change_name
+                        or item.item_key == run.change_name
+                    ):
                         bk_item = item
                         break
             if bk_item:
@@ -3018,6 +3049,7 @@ class OrchestrationService:
                     from minime.services.lifecycle_transition_authority import (
                         ALLOWED_WORK_ITEM_TRANSITIONS,
                     )
+
                     allowed = ALLOWED_WORK_ITEM_TRANSITIONS.get(bk_item.status, set())
                     if target_status in allowed:
                         authority = LifecycleTransitionAuthority(self.uow)

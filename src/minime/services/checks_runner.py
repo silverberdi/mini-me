@@ -159,9 +159,13 @@ class ChecksRunner:
             proc = None
             try:
                 from minime.services.agent_confinement import AgentProcessConfinement
+
                 confinement = AgentProcessConfinement(allowed_worktree_path=str(worktree_path))
                 preflight = confinement.validate_command_preflight(cwd=str(worktree_path))
-                if not confinement.is_confinement_available() or preflight.outcome != ExternalOutcome.SUCCESS:
+                if (
+                    not confinement.is_confinement_available()
+                    or preflight.outcome != ExternalOutcome.SUCCESS
+                ):
                     reason = f"Check environment unavailable: Process confinement failed: {preflight.error_message if preflight.outcome != ExternalOutcome.SUCCESS else 'Agent process confinement capability unavailable.'}"
                     result = CheckResult(
                         job_id=job_id,
@@ -211,7 +215,9 @@ class ChecksRunner:
                         os.killpg(proc.pid, signal.SIGKILL)
                     except OSError:
                         pass
-                output = f"Environment execution failure: Check timed out after {self.timeout_seconds}s"
+                output = (
+                    f"Environment execution failure: Check timed out after {self.timeout_seconds}s"
+                )
                 exit_code = 124
             except Exception as err:
                 duration_ms = int((asyncio.get_running_loop().time() - start) * 1000)

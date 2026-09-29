@@ -71,6 +71,7 @@ class OpenSpecSyncService:
                 eff_project_id = binding.project_id
 
         from minime.services.workspace_guard import is_binding_fully_valid
+
         if not eff_project_id or not is_binding_fully_valid(binding):
             return ExternalActionResult(
                 outcome=ExternalOutcome.UNKNOWN,
@@ -158,7 +159,11 @@ class OpenSpecSyncService:
         self, openspec_path: str, change_name: str, project_id: str | None = None
     ) -> ExternalActionResult[list[str]]:
         """Synchronize all delta specs of a change into main specs under openspec/specs/."""
-        if Path(change_name).is_absolute() or ".." in Path(change_name).parts or Path(change_name).name != change_name:
+        if (
+            Path(change_name).is_absolute()
+            or ".." in Path(change_name).parts
+            or Path(change_name).name != change_name
+        ):
             return ExternalActionResult(
                 outcome=ExternalOutcome.FAILURE,
                 source_adapter="openspec_sync",
@@ -169,7 +174,10 @@ class OpenSpecSyncService:
             )
 
         auth_res = self._authorize_openspec_operation(
-            openspec_path, WorkspaceOperation.OPENSPEC_SYNC, project_id, target_subpath=f"changes/{change_name}"
+            openspec_path,
+            WorkspaceOperation.OPENSPEC_SYNC,
+            project_id,
+            target_subpath=f"changes/{change_name}",
         )
         if isinstance(auth_res, ExternalActionResult):
             return ExternalActionResult(
@@ -237,7 +245,11 @@ class OpenSpecSyncService:
         validated_targets: list[tuple[Path, Path, Path]] = []
         for cap_dir in cap_dirs:
             cap_name = cap_dir.name
-            if Path(cap_name).is_absolute() or ".." in Path(cap_name).parts or Path(cap_name).name != cap_name:
+            if (
+                Path(cap_name).is_absolute()
+                or ".." in Path(cap_name).parts
+                or Path(cap_name).name != cap_name
+            ):
                 return ExternalActionResult(
                     outcome=ExternalOutcome.FAILURE,
                     source_adapter="openspec_sync",
@@ -410,7 +422,11 @@ class OpenSpecSyncService:
         project_id: str | None = None,
     ) -> ExternalActionResult[Path]:
         """Move active change directory to openspec/changes/archive/{date}-{change_name}."""
-        if Path(change_name).is_absolute() or ".." in Path(change_name).parts or Path(change_name).name != change_name:
+        if (
+            Path(change_name).is_absolute()
+            or ".." in Path(change_name).parts
+            or Path(change_name).name != change_name
+        ):
             return ExternalActionResult(
                 outcome=ExternalOutcome.FAILURE,
                 source_adapter="openspec_archive",
@@ -421,7 +437,10 @@ class OpenSpecSyncService:
             )
 
         auth_res = self._authorize_openspec_operation(
-            openspec_path, WorkspaceOperation.OPENSPEC_ARCHIVE, project_id, target_subpath=f"changes/{change_name}"
+            openspec_path,
+            WorkspaceOperation.OPENSPEC_ARCHIVE,
+            project_id,
+            target_subpath=f"changes/{change_name}",
         )
         if isinstance(auth_res, ExternalActionResult):
             return ExternalActionResult(
@@ -441,7 +460,11 @@ class OpenSpecSyncService:
             date_str = target_date or datetime.now(UTC).strftime("%Y-%m-%d")
             target_name = f"{date_str}-{change_name}"
 
-        if Path(target_name).is_absolute() or ".." in Path(target_name).parts or Path(target_name).name != target_name:
+        if (
+            Path(target_name).is_absolute()
+            or ".." in Path(target_name).parts
+            or Path(target_name).name != target_name
+        ):
             return ExternalActionResult(
                 outcome=ExternalOutcome.FAILURE,
                 source_adapter="openspec_archive",
@@ -453,7 +476,10 @@ class OpenSpecSyncService:
 
         archive_sub = f"changes/archive/{target_name}"
         auth_archive = self._authorize_openspec_operation(
-            openspec_path, WorkspaceOperation.OPENSPEC_ARCHIVE, eff_project_id, target_subpath=archive_sub
+            openspec_path,
+            WorkspaceOperation.OPENSPEC_ARCHIVE,
+            eff_project_id,
+            target_subpath=archive_sub,
         )
         if isinstance(auth_archive, ExternalActionResult):
             return ExternalActionResult(
@@ -580,7 +606,10 @@ class OpenSpecSyncService:
     ) -> ExternalActionResult[bool]:
         """Confirm synchronized requirements are present in the canonical specs."""
         auth_res = self._authorize_openspec_operation(
-            openspec_path, WorkspaceOperation.READ, project_id, target_subpath=f"changes/{change_name}"
+            openspec_path,
+            WorkspaceOperation.READ,
+            project_id,
+            target_subpath=f"changes/{change_name}",
         )
         if isinstance(auth_res, ExternalActionResult):
             return ExternalActionResult(
@@ -694,7 +723,10 @@ class OpenSpecSyncService:
     ) -> ExternalActionResult[bool]:
         """Confirm active change directory is gone, archive target exists, and all expected artifacts are preserved."""
         auth_res = self._authorize_openspec_operation(
-            openspec_path, WorkspaceOperation.READ, project_id, target_subpath=f"changes/{change_name}"
+            openspec_path,
+            WorkspaceOperation.READ,
+            project_id,
+            target_subpath=f"changes/{change_name}",
         )
         if isinstance(auth_res, ExternalActionResult):
             return ExternalActionResult(
@@ -743,7 +775,9 @@ class OpenSpecSyncService:
                 )
             target_dir = archived_path.data
             if not manifest and archived_path.provider_detail:
-                manifest = [f.strip() for f in archived_path.provider_detail.split(",") if f.strip()]
+                manifest = [
+                    f.strip() for f in archived_path.provider_detail.split(",") if f.strip()
+                ]
         elif isinstance(archived_path, Path):
             target_dir = archived_path
 
