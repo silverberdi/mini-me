@@ -67,7 +67,7 @@ class ReconciliationAuthority:
         marker = f"<!-- minime-opkey: {operation_key} -->"
         try:
             res = github_adapter.list_issues(repository, state="all")
-            if res.outcome == ExternalOutcome.SUCCESS and res.data:
+            if res.outcome == ExternalOutcome.SUCCESS and res.data is not None:
                 for issue in res.data:
                     body = issue.get("body") or ""
                     if marker in body:
@@ -80,14 +80,33 @@ class ReconciliationAuthority:
                             data={"number": num, "html_url": url},
                             external_id=str(num),
                         )
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github",
+                    reason_code=ExternalReasonCode.NOT_FOUND,
+                    error_message=f"No issue found with marker '{operation_key}'",
+                )
+            elif res.outcome != ExternalOutcome.SUCCESS:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.UNKNOWN,
+                    source_adapter="github",
+                    reason_code=ExternalReasonCode.UNOBSERVABLE,
+                    error_message=getattr(res, "error_message", "Listing issues returned non-success outcome."),
+                )
         except Exception as exc:
             logger.warning("Failed to list issues during reconciliation for '%s': %s", operation_key, exc)
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="github",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                error_message=f"Exception during issue list reconciliation: {exc}",
+            )
 
         return ExternalActionResult(
-            outcome=ExternalOutcome.FAILURE,
+            outcome=ExternalOutcome.UNKNOWN,
             source_adapter="github",
-            reason_code=ExternalReasonCode.NOT_FOUND,
-            error_message=f"No issue found with marker '{operation_key}'",
+            reason_code=ExternalReasonCode.UNOBSERVABLE,
+            error_message=f"Unobservable issue listing for '{operation_key}'",
         )
 
     def reconcile_project_item_add(
@@ -104,7 +123,7 @@ class ReconciliationAuthority:
 
         try:
             res = github_adapter.list_project_items(project_number=project_number, owner=owner)
-            if res.outcome == ExternalOutcome.SUCCESS and res.data:
+            if res.outcome == ExternalOutcome.SUCCESS and res.data is not None:
                 for item in res.data:
                     content_url = item.get("issue_url") or item.get("content_url") or (item.get("content", {}).get("url") if isinstance(item.get("content"), dict) else None)
                     if content_url == issue_url:
@@ -116,14 +135,33 @@ class ReconciliationAuthority:
                             data=item_id,
                             external_id=str(item_id),
                         )
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github",
+                    reason_code=ExternalReasonCode.NOT_FOUND,
+                    error_message=f"No project item found for issue URL '{issue_url}'",
+                )
+            elif res.outcome != ExternalOutcome.SUCCESS:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.UNKNOWN,
+                    source_adapter="github",
+                    reason_code=ExternalReasonCode.UNOBSERVABLE,
+                    error_message=getattr(res, "error_message", "Listing project items returned non-success outcome."),
+                )
         except Exception as exc:
             logger.warning("Failed to list project items during reconciliation for '%s': %s", issue_url, exc)
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="github",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                error_message=f"Exception during project item list reconciliation: {exc}",
+            )
 
         return ExternalActionResult(
-            outcome=ExternalOutcome.FAILURE,
+            outcome=ExternalOutcome.UNKNOWN,
             source_adapter="github",
-            reason_code=ExternalReasonCode.NOT_FOUND,
-            error_message=f"No project item found for issue URL '{issue_url}'",
+            reason_code=ExternalReasonCode.UNOBSERVABLE,
+            error_message=f"Unobservable project item listing for '{issue_url}'",
         )
 
 

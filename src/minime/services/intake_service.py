@@ -312,18 +312,22 @@ class IntakeService:
             raise ValueError(f"Work item '{item_key}' not found in project '{project_id}'.")
 
         now = utc_now()
-        # Terminal Intake Protection (Root Cause 3.1)
-        if item.status in (WorkItemStatus.COMPLETED, WorkItemStatus.CANCELLED):
-            logger.info("Work item '%s' is in terminal state '%s'. Intake preparation denied.", item_key, item.status.value)
+        change_name = item.openspec_change_name or slugify(item.item_key)
+        change_record = self.uow.changes.get_by_name(project_id, change_name)
+
+        # Terminal Intake Protection (Root Cause 1 / Defect 1)
+        is_terminal = (
+            item.status in (WorkItemStatus.COMPLETED, WorkItemStatus.CANCELLED)
+            or (change_record is not None and change_record.status in (ChangeStatus.DONE, ChangeStatus.CANCELLED))
+        )
+        if is_terminal:
+            logger.info("Work item '%s' / change '%s' is in terminal state. Intake preparation denied.", item_key, change_name)
             return WorkItemPrepareResult(
                 item=item,
-                openspec_change_name=item.openspec_change_name or slugify(item_key),
+                openspec_change_name=change_name,
                 readiness_state=item.readiness_state,
                 unmet_readiness_reasons=item.unmet_readiness_reasons,
             )
-
-        change_name = item.openspec_change_name or slugify(item.item_key)
-        change_record = self.uow.changes.get_by_name(project_id, change_name)
 
         # Start or retrieve active INTAKE saga
         saga = self.saga_engine.start_saga(
@@ -333,24 +337,6 @@ class IntakeService:
             change_name=change_name,
             initial_phase="INTAKE_CREATED",
         )
-
-        is_terminal = (
-            item.status in (WorkItemStatus.COMPLETED, WorkItemStatus.CANCELLED)
-            or (change_record and change_record.status in (ChangeStatus.DONE, ChangeStatus.CANCELLED))
-        )
-        if is_terminal:
-            logger.info("Work item '%s' / change '%s' is in terminal state. Intake preparation denied.", item_key, change_name)
-            if saga.status not in (SagaStatus.COMPLETED, SagaStatus.CANCELLED) and saga.current_phase != "READY":
-                self.saga_engine.cancel_saga(
-                    saga,
-                    cancellation_reason="Parent backlog item or change is terminal; intake cancelled.",
-                )
-            return WorkItemPrepareResult(
-                item=item,
-                openspec_change_name=change_name,
-                readiness_state=item.readiness_state,
-                unmet_readiness_reasons=item.unmet_readiness_reasons,
-            )
 
         if saga.status == SagaStatus.COMPLETED or saga.current_phase == "READY":
             logger.info("Saga '%s' is already COMPLETED at phase '%s'. Returning existing item.", saga.id, saga.current_phase)

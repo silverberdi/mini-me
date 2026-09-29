@@ -363,6 +363,7 @@ def test_squash_merge_delivery_verification(tmp_path, monkeypatch):
 
     gh_mock = MagicMock()
     gh_mock.get_pull_request_merge_details.return_value = {
+        "repository": "owner/repo",
         "is_merged": True,
         "merged_by": "octocat",
         "head_sha": "cand_sha_123",
@@ -912,3 +913,91 @@ def test_valid_squash_passes():
             pr_details=pr_details,
         )
         assert verified is True
+
+
+# 25. Terminal Change Check Prevents Saga Creation
+def test_terminal_change_check_prevents_saga_creation():
+    """Verify prepare_work_item does not start or cancel a saga when Change is terminal."""
+    uow = DummyUOW()
+    engine = MagicMock(wraps=SagaEngine(uow))
+    item = BacklogItem(
+        project_id="p1",
+        item_key="term1",
+        title="Title",
+        description="Desc",
+        priority=QueuePriority.NORMAL,
+        status=WorkItemStatus.PREPARING,
+        readiness_state=ReadinessState.NOT_READY,
+        openspec_change_name="term1",
+    )
+    uow.backlog_items.save(item)
+    change = Change(
+        project_id="p1",
+        name="term1",
+        status=ChangeStatus.DONE,
+        proposal_path="p",
+        tasks_path="t",
+        design_path="d",
+    )
+    uow.changes.save(change)
+    service = IntakeService(uow=uow, project_root=".", saga_engine=engine)
+    res = service.prepare_work_item("p1", "term1")
+    assert res.item.item_key == "term1"
+    engine.start_saga.assert_not_called()
+    engine.cancel_saga.assert_not_called()
+
+
+# 26. Observation Failure Returns UNKNOWN
+def test_reconcile_issue_creation_unobservable_returns_unknown():
+    """Verify reconcile_issue_creation returns ExternalOutcome.UNKNOWN when list_issues query fails or throws."""
+    from minime.domain.enums import ExternalReasonCode
+    from minime.domain.models import ExternalActionResult
+    uow = DummyUOW()
+    rec_auth = ReconciliationAuthority(uow)
+    gh_mock = MagicMock()
+
+    # Case 1: Exception during list_issues
+    gh_mock.list_issues.side_effect = RuntimeError("503 Service Unavailable")
+    res1 = rec_auth.reconcile_issue_creation(gh_mock, "owner/repo", "op1", "Title")
+    assert res1.outcome == ExternalOutcome.UNKNOWN
+    assert res1.reason_code == ExternalReasonCode.UNOBSERVABLE
+
+    # Case 2: Non-success outcome from list_issues
+    gh_mock.list_issues.side_effect = None
+    gh_mock.list_issues.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.FAILURE,
+        source_adapter="github",
+        reason_code=ExternalReasonCode.UNOBSERVABLE,
+        error_message="Timeout",
+    )
+    res2 = rec_auth.reconcile_issue_creation(gh_mock, "owner/repo", "op1", "Title")
+    assert res2.outcome == ExternalOutcome.UNKNOWN
+    assert res2.reason_code == ExternalReasonCode.UNOBSERVABLE
+
+
+# 27. Project Item Observation Failure Returns UNKNOWN
+def test_reconcile_project_item_add_unobservable_returns_unknown():
+    """Verify reconcile_project_item_add returns ExternalOutcome.UNKNOWN when list_project_items query fails or throws."""
+    from minime.domain.enums import ExternalReasonCode
+    from minime.domain.models import ExternalActionResult
+    uow = DummyUOW()
+    rec_auth = ReconciliationAuthority(uow)
+    gh_mock = MagicMock()
+
+    # Exception
+    gh_mock.list_project_items.side_effect = TimeoutError("Request timed out")
+    res1 = rec_auth.reconcile_project_item_add(gh_mock, 1, "owner", "http://issue/1", "op1")
+    assert res1.outcome == ExternalOutcome.UNKNOWN
+    assert res1.reason_code == ExternalReasonCode.UNOBSERVABLE
+
+    # Non-success outcome
+    gh_mock.list_project_items.side_effect = None
+    gh_mock.list_project_items.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.FAILURE,
+        source_adapter="github",
+        reason_code=ExternalReasonCode.UNOBSERVABLE,
+        error_message="GraphQL Error",
+    )
+    res2 = rec_auth.reconcile_project_item_add(gh_mock, 1, "owner", "http://issue/1", "op1")
+    assert res2.outcome == ExternalOutcome.UNKNOWN
+    assert res2.reason_code == ExternalReasonCode.UNOBSERVABLE
