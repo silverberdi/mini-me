@@ -14,6 +14,8 @@ from minime.domain.enums import (
     HumanGate,
     OrchestrationStage,
     OrchestrationStopOutcome,
+    SagaStatus,
+    SagaType,
 )
 from minime.domain.models import (
     AuditFinding,
@@ -30,6 +32,7 @@ from minime.domain.models import (
     CapacityWindow,
     Change,
     CheckResult,
+    DurableSaga,
     Event,
     EvidenceDiagnostic,
     ExternalActionResult,
@@ -569,6 +572,51 @@ class OrchestrationCandidateRepositoryInterface(ABC):
     def supersede(self, candidate_id: str, superseded_by_id: str) -> None: ...
 
 
+class DurableSagaRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, saga: DurableSaga) -> None: ...
+
+    @abstractmethod
+    def get_by_id(self, saga_id: str) -> DurableSaga | None: ...
+
+    @abstractmethod
+    def get_active_saga(
+        self,
+        project_id: str,
+        work_item_key: str,
+        saga_type: SagaType | str,
+    ) -> DurableSaga | None: ...
+
+    @abstractmethod
+    def list_by_project(
+        self,
+        project_id: str,
+        saga_type: SagaType | str | None = None,
+        status: SagaStatus | str | None = None,
+    ) -> list[DurableSaga]: ...
+
+    @abstractmethod
+    def list_active(self, saga_type: SagaType | str | None = None) -> list[DurableSaga]: ...
+
+    @abstractmethod
+    def update_phase(
+        self,
+        saga_id: str,
+        current_phase: str,
+        evidence_references: dict[str, Any] | None = None,
+        last_observed_outcome: ExternalOutcome | str | None = None,
+    ) -> DurableSaga: ...
+
+    @abstractmethod
+    def update_status(
+        self,
+        saga_id: str,
+        status: SagaStatus | str,
+        blocking_reason: str | None = None,
+        last_observed_outcome: ExternalOutcome | str | None = None,
+    ) -> DurableSaga: ...
+
+
 class OrchestrationExternalActionRepositoryInterface(ABC):
     @abstractmethod
     def reserve(self, action: OrchestrationExternalAction) -> None: ...
@@ -578,6 +626,9 @@ class OrchestrationExternalActionRepositoryInterface(ABC):
 
     @abstractmethod
     def list_by_run(self, run_id: str) -> list[OrchestrationExternalAction]: ...
+
+    @abstractmethod
+    def list_by_saga(self, saga_id: str) -> list[OrchestrationExternalAction]: ...
 
     @abstractmethod
     def update_status(
@@ -718,6 +769,7 @@ class PersistenceUnitOfWork(ABC):
     classification_snapshots: TaskClassificationSnapshotRepositoryInterface
     project_managed_repository_bindings: ProjectManagedRepositoryBindingRepositoryInterface
     orchestration_worktree_ownerships: OrchestrationWorktreeOwnershipRepositoryInterface
+    durable_sagas: DurableSagaRepositoryInterface
 
     @abstractmethod
     def commit(self) -> None: ...

@@ -19,6 +19,7 @@ from minime.domain.enums import (
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
+    DurableSaga,
     Event,
     Job,
     LockInspectionResult,
@@ -104,8 +105,78 @@ class RestartRecoveryService:
             recovery_cycle_id=recovery_cycle_id,
         )
 
+        self.reconcile_durable_sagas(recovery_cycle_id=recovery_cycle_id)
+
         self.uow.commit()
         return reconciled
+
+    def reconcile_durable_sagas(self, recovery_cycle_id: str | None = None) -> list[DurableSaga]:
+        """Reconcile active durable intake and closure sagas on daemon startup with terminal identity protection."""
+        from minime.domain.enums import ChangeStatus, SagaStatus, SagaType, WorkItemStatus
+        from minime.services.saga_engine import SagaEngine
+
+        saga_engine = SagaEngine(self.uow)
+        active_sagas = self.uow.durable_sagas.list_active()
+        reconciled = []
+
+        for saga in active_sagas:
+            if saga.status in {SagaStatus.COMPLETED, SagaStatus.FAILED}:
+                continue
+
+            item = self.uow.backlog_items.get_by_project_and_key(saga.project_id, saga.work_item_key)
+            change = self.uow.changes.get_by_name(saga.project_id, saga.change_name or saga.work_item_key)
+
+            is_terminal = (
+                (item and item.status in {WorkItemStatus.COMPLETED, WorkItemStatus.CANCELLED})
+                or (change and change.status in {ChangeStatus.DONE, ChangeStatus.CANCELLED})
+            )
+
+            if is_terminal and saga.saga_type == SagaType.INTAKE:
+                logger.info(
+                    "Intake saga '%s' belongs to terminal item/change; completing saga to preserve terminal identity.",
+                    saga.id,
+                )
+                updated = saga_engine.complete_saga(saga)
+                reconciled.append(updated)
+                continue
+
+            if is_terminal and saga.saga_type == SagaType.CLOSURE:
+                from minime.services.post_merge_service import PostMergeReconciliationService
+
+                post_merge_service = PostMergeReconciliationService(self.uow, project_root=self.project_root)
+                post_merge_service.reconcile_post_merge(
+                    project_id=saga.project_id,
+                    change_name=saga.change_name or saga.work_item_key,
+                    run_id=saga.run_id,
+                )
+                updated = self.uow.durable_sagas.get_by_id(saga.id) or saga
+                reconciled.append(updated)
+                continue
+
+            try:
+                if saga.saga_type == SagaType.INTAKE:
+                    from minime.services.intake_service import IntakeService
+
+                    intake_svc = IntakeService(self.uow, project_root=self.project_root)
+                    intake_svc.prepare_work_item(saga.project_id, saga.work_item_key)
+                elif saga.saga_type == SagaType.CLOSURE:
+                    from minime.services.post_merge_service import PostMergeReconciliationService
+
+                    post_merge_svc = PostMergeReconciliationService(self.uow, project_root=self.project_root)
+                    post_merge_svc.reconcile_post_merge(
+                        project_id=saga.project_id,
+                        change_name=saga.change_name or saga.work_item_key,
+                        run_id=saga.run_id,
+                    )
+            except Exception as exc:
+                logger.warning("Failed to resume saga '%s' on startup: %s", saga.id, exc)
+
+            updated = self.uow.durable_sagas.get_by_id(saga.id) or saga
+            reconciled.append(updated)
+
+        self.uow.commit()
+        return reconciled
+
 
     def reconcile_orchestration_runs(
         self,

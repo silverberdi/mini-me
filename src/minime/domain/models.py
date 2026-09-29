@@ -61,6 +61,8 @@ from minime.domain.enums import (
     RetrySafety,
     ReviewStatus,
     ReviewVerdict,
+    SagaStatus,
+    SagaType,
     SchedulerMode,
     TaskClass,
     TaskComplexity,
@@ -862,17 +864,38 @@ class OrchestrationCandidate(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
+class DurableSaga(BaseModel):
+    """Durable intake or closure saga lifecycle record in PostgreSQL."""
+
+    id: str = Field(default_factory=generate_uuid)
+    saga_type: SagaType
+    project_id: str
+    work_item_key: str
+    change_name: str | None = None
+    run_id: str | None = None
+    job_id: str | None = None
+    generation: int = 1
+    current_phase: str
+    status: SagaStatus = SagaStatus.IN_PROGRESS
+    last_observed_outcome: ExternalOutcome | None = None
+    blocking_reason: str | None = None
+    evidence_references: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
 class OrchestrationExternalAction(BaseModel):
     """Durable idempotency reservation record for mutating Git/GitHub actions."""
 
     action_id: str = Field(default_factory=generate_uuid)
-    run_id: str
+    run_id: str | None = None
+    saga_id: str | None = None
     action_key: str
     action_type: ExternalActionType
     target_identity: str
     request_fingerprint: str
-    candidate_sha: str
-    generation: int
+    candidate_sha: str | None = None
+    generation: int = 1
     status: ExternalActionStatus = ExternalActionStatus.RESERVED
     remote_identifier: str | None = None
     result_payload: dict[str, Any] = Field(default_factory=dict)
@@ -881,6 +904,12 @@ class OrchestrationExternalAction(BaseModel):
     reconciled_at: datetime | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+
+    @model_validator(mode="after")
+    def validate_ownership(self) -> OrchestrationExternalAction:
+        if self.run_id is None and self.saga_id is None:
+            raise ValueError("OrchestrationExternalAction must have at least run_id or saga_id set.")
+        return self
 
 
 class AdmissionResult(BaseModel):

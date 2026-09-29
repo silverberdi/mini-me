@@ -99,6 +99,9 @@ class ProjectModel(Base):
     backlog_items: Mapped[list[BacklogItemModel]] = relationship(
         "BacklogItemModel", back_populates="project", cascade="all, delete-orphan"
     )
+    sagas: Mapped[list[DurableSagaModel]] = relationship(
+        "DurableSagaModel", back_populates="project", cascade="all, delete-orphan"
+    )
 
 
 class BacklogItemModel(Base):
@@ -977,22 +980,82 @@ class CandidateRemediationModel(Base):
     )
 
 
+class DurableSagaModel(Base):
+    __tablename__ = "durable_sagas"
+
+    __table_args__ = (
+        Index(
+            "uq_active_intake_saga",
+            "project_id",
+            "work_item_key",
+            unique=True,
+            postgresql_where=text("saga_type = 'INTAKE' AND status IN ('IN_PROGRESS', 'BLOCKED')"),
+            sqlite_where=text("saga_type = 'INTAKE' AND status IN ('IN_PROGRESS', 'BLOCKED')"),
+        ),
+        Index(
+            "uq_active_closure_saga",
+            "project_id",
+            "work_item_key",
+            unique=True,
+            postgresql_where=text("saga_type = 'CLOSURE' AND status IN ('IN_PROGRESS', 'BLOCKED')"),
+            sqlite_where=text("saga_type = 'CLOSURE' AND status IN ('IN_PROGRESS', 'BLOCKED')"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    saga_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    project_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    work_item_key: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    change_name: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    run_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("orchestration_runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    job_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    generation: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    current_phase: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="IN_PROGRESS", nullable=False, index=True)
+    last_observed_outcome: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    blocking_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    evidence_references: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+    project: Mapped[ProjectModel] = relationship("ProjectModel", back_populates="sagas")
+    external_actions: Mapped[list[OrchestrationExternalActionModel]] = relationship(
+        "OrchestrationExternalActionModel", back_populates="saga", cascade="all, delete-orphan"
+    )
+
+
 class OrchestrationExternalActionModel(Base):
     __tablename__ = "orchestration_external_actions"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    run_id: Mapped[str] = mapped_column(
+    run_id: Mapped[str | None] = mapped_column(
         String(64),
         ForeignKey("orchestration_runs.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
+        index=True,
+    )
+    saga_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("durable_sagas.id", ondelete="CASCADE"),
+        nullable=True,
         index=True,
     )
     action_key: Mapped[str] = mapped_column(String(128), unique=True, nullable=False, index=True)
     action_type: Mapped[str] = mapped_column(String(32), nullable=False)
     target_identity: Mapped[str] = mapped_column(String(255), nullable=False)
     request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
-    candidate_sha: Mapped[str] = mapped_column(String(64), nullable=False)
-    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    candidate_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    generation: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="RESERVED", nullable=False, index=True)
     remote_identifier: Mapped[str | None] = mapped_column(String(255), nullable=True)
     result_payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
@@ -1008,8 +1071,11 @@ class OrchestrationExternalActionModel(Base):
         DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
     )
 
-    run: Mapped[OrchestrationRunModel] = relationship(
+    run: Mapped[OrchestrationRunModel | None] = relationship(
         "OrchestrationRunModel", back_populates="external_actions"
+    )
+    saga: Mapped[DurableSagaModel | None] = relationship(
+        "DurableSagaModel", back_populates="external_actions"
     )
 
 

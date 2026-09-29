@@ -107,6 +107,13 @@ class InMemoryUnitOfWork(PersistenceUnitOfWork):
         self.operator_actions = MagicMock()
         self.operator_actions.get_by_request_id.return_value = None
 
+        from tests.conftest import (
+            InMemoryDurableSagaRepository,
+            InMemoryOrchestrationExternalActionRepository,
+        )
+        self.durable_sagas = InMemoryDurableSagaRepository()
+        self.orchestration_external_actions = InMemoryOrchestrationExternalActionRepository()
+
     def _save_run(self, run: OrchestrationRun):
         self._runs[run.run_id] = run
 

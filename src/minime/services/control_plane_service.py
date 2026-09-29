@@ -1466,3 +1466,24 @@ class ControlPlaneService:
     def list_action_history(self, run_id: str, limit: int = 50) -> list[OperatorActionRecord]:
         """Fetch audit trail of operator actions executed for a run."""
         return self.uow.operator_actions.list_by_run(run_id, limit=limit)
+
+    def resume_saga(self, saga_id: str, actor_identity: str = "operator") -> Any:
+        """Manually trigger saga resumption with row-locking idempotency."""
+        saga = self.uow.durable_sagas.get_by_id(saga_id)
+        if not saga:
+            raise ValueError(f"DurableSaga '{saga_id}' not found.")
+
+        from minime.services.intake_service import IntakeService
+        from minime.services.post_merge_service import PostMergeReconciliationService
+        from minime.services.saga_engine import SagaEngine
+
+        saga_engine = SagaEngine(self.uow)
+        intake_svc = IntakeService(self.uow, project_root=self.project_root)
+        post_merge_svc = PostMergeReconciliationService(self.uow, project_root=self.project_root)
+
+        return saga_engine.resume_saga(
+            saga_id=saga_id,
+            intake_service=intake_svc,
+            post_merge_service=post_merge_svc,
+        )
+
