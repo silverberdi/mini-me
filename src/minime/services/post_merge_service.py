@@ -176,6 +176,41 @@ class PostMergeReconciliationService:
         if not candidate_sha:
             return False
 
+        if pr_details:
+            from minime.services.project_service import normalize_repository_identity
+
+            project = self.uow.projects.get_by_id(project_id) if self.uow else None
+            expected_repo = (
+                normalize_repository_identity(project.repository)
+                if project and project.repository
+                else None
+            )
+            pr_repo = pr_details.get("repository")
+            if expected_repo and pr_repo:
+                if normalize_repository_identity(pr_repo) != expected_repo:
+                    logger.warning(
+                        "PR repository mismatch in verify_candidate_delivery: expected '%s', got '%s'",
+                        expected_repo,
+                        pr_repo,
+                    )
+                    return False
+
+            pr_base = pr_details.get("base_branch")
+            if pr_base and base_branch:
+                norm_pr_base = pr_base.replace("refs/heads/", "").strip()
+                norm_base_branch = (
+                    base_branch.replace("refs/heads/", "")
+                    .replace("origin/", "")
+                    .strip()
+                )
+                if norm_pr_base != norm_base_branch:
+                    logger.warning(
+                        "PR base branch mismatch in verify_candidate_delivery: expected '%s', got '%s'",
+                        norm_base_branch,
+                        norm_pr_base,
+                    )
+                    return False
+
         # 1. Direct ancestry check
         if self.verify_candidate_ancestry(candidate_sha, base_branch, project_id=project_id):
             return True
@@ -242,6 +277,13 @@ class PostMergeReconciliationService:
 
         # Check if already closed and saga completed
         existing_saga = self.saga_engine.get_active_saga(project_id, change_name, SagaType.CLOSURE)
+        completed_sagas = self.uow.durable_sagas.list_by_project(
+            project_id, saga_type=SagaType.CLOSURE, status=SagaStatus.COMPLETED
+        )
+        has_completed_saga = any(
+            s.work_item_key == change_name or s.change_name == change_name for s in completed_sagas
+        )
+
         is_run_terminal = (
             run.current_stage == OrchestrationStage.COMPLETED
             or run.stop_outcome in {OrchestrationStopOutcome.COMPLETED, OrchestrationStopOutcome.CANCELLED}
@@ -250,7 +292,7 @@ class PostMergeReconciliationService:
         is_job_terminal = job is None or job.status in {JobStatus.COMPLETED, JobStatus.CANCELLED}
 
         if is_run_terminal and is_job_terminal:
-            if existing_saga is not None and existing_saga.status == SagaStatus.COMPLETED:
+            if has_completed_saga or (existing_saga is not None and existing_saga.status == SagaStatus.COMPLETED):
                 logger.info("Change '%s' (Run: %s) is already closed with completed saga.", change_name, run.run_id)
                 self._reconcile_change_and_backlog_item(project_id, change_name)
                 return PostMergeReconciliationResult(
@@ -294,12 +336,47 @@ class PostMergeReconciliationService:
                 if act.status == ExternalActionStatus.COMPLETED
             }
 
-            issue_closed_ev = ExternalActionType.ISSUE_CLOSE in completed_action_types
-            project_done_ev = ExternalActionType.PROJECT_ITEM_EDIT in completed_action_types
+            binding = self.uow.bindings.get_by_project_and_change(project_id, change_name)
+            issue_required = bool(binding and binding.github_issue_number)
+            project_item_required = bool(binding and (binding.github_project_item_id or binding.github_issue_number))
+
+            issue_closed_ev = (not issue_required) or (ExternalActionType.ISSUE_CLOSE in completed_action_types)
+            project_done_ev = (not project_item_required) or (ExternalActionType.PROJECT_ITEM_EDIT in completed_action_types)
             spec_synced_ev = ExternalActionType.OPENSPEC_SYNC in completed_action_types
             spec_archived_ev = ExternalActionType.OPENSPEC_ARCHIVE in completed_action_types
-            worktree_clean_ev = ExternalActionType.WORKTREE_DELETE in completed_action_types or ExternalActionType.BRANCH_DELETE in completed_action_types
+            worktree_clean_ev = ExternalActionType.WORKTREE_DELETE in completed_action_types
             branch_clean_ev = ExternalActionType.BRANCH_DELETE in completed_action_types
+
+            # Evaluate missing evidence for required phases
+            missing_phases: list[str] = []
+            if not issue_closed_ev:
+                missing_phases.append("ISSUE_CLOSED")
+            if not project_done_ev:
+                missing_phases.append("PROJECT_ITEM_DONE")
+            if not spec_synced_ev:
+                missing_phases.append("SPEC_SYNCED")
+            if not spec_archived_ev:
+                missing_phases.append("SPEC_ARCHIVED")
+            if not worktree_clean_ev:
+                missing_phases.append("WORKTREE_CLEANED")
+            if not branch_clean_ev:
+                missing_phases.append("BRANCH_CLEANED")
+
+            if missing_phases:
+                reason = f"Terminal closure reconciliation missing positive evidence for phase(s): {', '.join(missing_phases)}"
+                logger.warning(reason)
+                self.saga_engine.block_saga(saga, blocking_reason=reason)
+                self.uow.commit()
+                return PostMergeReconciliationResult(
+                    success=False,
+                    already_closed=False,
+                    change_name=change_name,
+                    run_id=run.run_id,
+                    job_id=job_id,
+                    is_merged=True,
+                    ancestry_verified=True,
+                    error_message=reason,
+                )
 
             self.saga_engine.advance_phase(saga, "MERGE_OBSERVED")
             self.saga_engine.advance_phase(saga, "MERGED_DELIVERY_VERIFIED")

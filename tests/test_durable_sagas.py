@@ -12,6 +12,9 @@ from minime.domain.enums import (
     ExternalActionStatus,
     ExternalActionType,
     ExternalOutcome,
+    JobStatus,
+    OrchestrationStage,
+    OrchestrationStopOutcome,
     QueuePriority,
     ReadinessState,
     SagaStatus,
@@ -24,6 +27,7 @@ from minime.domain.models import (
     DurableSaga,
     OrchestrationExternalAction,
 )
+from minime.services.intake_service import IntakeService
 from minime.services.post_merge_service import PostMergeReconciliationService
 from minime.services.reconciliation_authority import ReconciliationAuthority
 from minime.services.restart_recovery_service import RestartRecoveryService
@@ -123,13 +127,54 @@ class DummyUOW:
         self.durable_sagas = InMemoryDurableSagaRepository()
         self.orchestration_external_actions = InMemoryExternalActionRepository()
         self.events = MagicMock()
-        self.backlog_items = MagicMock()
-        self.changes = MagicMock()
         self.projects = MagicMock()
+        self.projects.get_by_id.return_value = MagicMock(
+            project_id="p1",
+            display_name="Proj",
+            repository="owner/repo",
+            base_branch="main",
+            openspec_path="openspec",
+        )
         self.bindings = MagicMock()
+        self.bindings.get_by_project_and_change.return_value = None
         self.work_queue = MagicMock()
+        self.work_queue.get_by_project_and_change.return_value = None
+
+        def _save_change(c):
+            if hasattr(c, "name") and c.name:
+                self.changes._store[c.name] = c
+            if hasattr(c, "change_id") and c.change_id:
+                self.changes._store[c.change_id] = c
+
+        self.changes = MagicMock()
+        self.changes.return_value = None
+        self.changes._store = {}
+        self.changes.get_by_name.side_effect = (
+            lambda pid, name: self.changes._store.get(name)
+            if self.changes._store.get(name) is not None
+            else self.changes.return_value
+        )
+        self.changes.save.side_effect = _save_change
+
+        def _save_item(item):
+            if hasattr(item, "item_key") and item.item_key:
+                self.backlog_items._store[item.item_key] = item
+            if hasattr(item, "item_id") and item.item_id:
+                self.backlog_items._store[item.item_id] = item
+
+        self.backlog_items = MagicMock()
+        self.backlog_items.return_value = None
+        self.backlog_items._store = {}
+        self.backlog_items.get_by_project_and_key.side_effect = (
+            lambda pid, key: self.backlog_items._store.get(key)
+            if self.backlog_items._store.get(key) is not None
+            else self.backlog_items.return_value
+        )
+        self.backlog_items.save.side_effect = _save_item
+
         self.orchestration_runs = MagicMock()
         self.jobs = MagicMock()
+        self.metrics = MagicMock()
         self.git_operations = MagicMock()
         self.git_operations.list_by_job.return_value = []
         self.git_operations.list_by_worktree.return_value = []
@@ -452,7 +497,7 @@ def test_terminal_identity_protection_intake():
     uow = DummyUOW()
     engine = SagaEngine(uow)
 
-    uow.backlog_items.get_by_project_and_key.return_value = BacklogItem(
+    item = BacklogItem(
         project_id="p1",
         item_key="k1",
         title="Title",
@@ -462,6 +507,7 @@ def test_terminal_identity_protection_intake():
         readiness_state=ReadinessState.READY,
         openspec_change_name="k1",
     )
+    uow.backlog_items.save(item)
 
     _saga = engine.start_saga(
         saga_type=SagaType.INTAKE,
@@ -474,7 +520,7 @@ def test_terminal_identity_protection_intake():
     recovery = RestartRecoveryService(uow, project_root=".")
     reconciled = recovery.reconcile_durable_sagas()
     assert len(reconciled) == 1
-    assert reconciled[0].status == SagaStatus.COMPLETED
+    assert reconciled[0].status == SagaStatus.CANCELLED
 
 
 # 11. Repeated Resume Idempotency
@@ -494,3 +540,375 @@ def test_repeated_resume_idempotency():
     res3 = engine.resume_saga(saga.id)
 
     assert res1.id == res2.id == res3.id == saga.id
+
+
+# 12. Intake Resume From Persisted Phase Without Replay
+def test_intake_resume_from_persisted_phase_no_replay():
+    """Verify intake resumes from persisted phase without replaying prior completed phases."""
+    uow = DummyUOW()
+    engine = SagaEngine(uow)
+
+    item = BacklogItem(
+        project_id="p1",
+        item_key="k1",
+        title="Title",
+        description="Desc",
+        priority=QueuePriority.NORMAL,
+        status=WorkItemStatus.PREPARING,
+        readiness_state=ReadinessState.NOT_READY,
+        openspec_change_name="k1",
+    )
+    uow.backlog_items.save(item)
+    uow.projects.get_by_id.return_value = MagicMock(display_name="Proj", openspec_path="openspec", repository="owner/repo", base_branch="main", project_id="p1")
+    uow.changes.get_by_name.return_value = None
+
+    _saga = engine.start_saga(
+        saga_type=SagaType.INTAKE,
+        project_id="p1",
+        work_item_key="k1",
+        change_name="k1",
+        initial_phase="OPENSPEC_AUTHORED",
+    )
+
+    gen_mock = MagicMock()
+    service = IntakeService(uow=uow, project_root=".", openspec_generator=gen_mock, saga_engine=engine)
+    service.prepare_work_item("p1", "k1")
+    gen_mock.generate_from_backlog_item.assert_not_called()
+
+
+# 13. OpenSpec Generation Not Replayed After OPENSPEC_AUTHORED
+def test_openspec_generation_not_replayed_after_authored():
+    """Verify generate_from_backlog_item and write_change_to_disk are not called when phase >= OPENSPEC_AUTHORED."""
+    uow = DummyUOW()
+    engine = SagaEngine(uow)
+    item = BacklogItem(
+        project_id="p1",
+        item_key="k1",
+        title="Title",
+        description="Desc",
+        priority=QueuePriority.NORMAL,
+        status=WorkItemStatus.PREPARING,
+        readiness_state=ReadinessState.NOT_READY,
+        openspec_change_name="k1",
+    )
+    uow.backlog_items.save(item)
+    uow.projects.get_by_id.return_value = MagicMock(display_name="Proj", openspec_path="openspec", repository="owner/repo", base_branch="main", project_id="p1")
+    uow.changes.get_by_name.return_value = None
+
+    _saga = engine.start_saga(
+        saga_type=SagaType.INTAKE,
+        project_id="p1",
+        work_item_key="k1",
+        change_name="k1",
+        initial_phase="ISSUE_BOUND",
+    )
+    gen_mock = MagicMock()
+    service = IntakeService(uow=uow, project_root=".", openspec_generator=gen_mock, saga_engine=engine)
+    service.prepare_work_item("p1", "k1")
+    gen_mock.generate_from_backlog_item.assert_not_called()
+    gen_mock.write_change_to_disk.assert_not_called()
+
+
+# 14. Canonical reconcile_observe_before_repeat Invoked For Issue Action
+def test_canonical_reconcile_observe_before_repeat_invoked_for_issue():
+    """Verify reconcile_observe_before_repeat is invoked for Issue creation action."""
+    uow = DummyUOW()
+    rec_auth = ReconciliationAuthority(uow)
+
+    op_key = "issue_create:p1:k1"
+    action = OrchestrationExternalAction(
+        saga_id="s1",
+        action_key=op_key,
+        action_type=ExternalActionType.ISSUE_CREATE,
+        target_identity="k1",
+        request_fingerprint="k1",
+        status=ExternalActionStatus.RESERVED,
+    )
+    uow.orchestration_external_actions.reserve(action)
+
+    mock_obs = MagicMock()
+    mock_obs.outcome = ExternalOutcome.SUCCESS
+    mock_obs.remote_identifier = "42"
+
+    res = rec_auth.reconcile_observe_before_repeat(op_key, mock_obs)
+    assert res.status == ExternalActionStatus.COMPLETED
+    assert res.remote_identifier == "42"
+
+
+# 15. Canonical reconcile_observe_before_repeat Invoked For Project Item Action
+def test_canonical_reconcile_observe_before_repeat_invoked_for_project_item():
+    """Verify reconcile_observe_before_repeat is invoked for Project item action."""
+    uow = DummyUOW()
+    rec_auth = ReconciliationAuthority(uow)
+    op_key = "project_item_add:p1:k1"
+    action = OrchestrationExternalAction(
+        saga_id="s1",
+        action_key=op_key,
+        action_type=ExternalActionType.PROJECT_ITEM_ADD,
+        target_identity="k1",
+        request_fingerprint="k1",
+        status=ExternalActionStatus.RESERVED,
+    )
+    uow.orchestration_external_actions.reserve(action)
+    mock_obs = MagicMock()
+    mock_obs.outcome = ExternalOutcome.SUCCESS
+    mock_obs.remote_identifier = "item_99"
+    res = rec_auth.reconcile_observe_before_repeat(op_key, mock_obs)
+    assert res.status == ExternalActionStatus.COMPLETED
+    assert res.remote_identifier == "item_99"
+
+
+# 16. Ambiguous Action Without Safe Retry Blocks
+def test_ambiguous_action_without_safe_retry_blocks():
+    """Verify action in AMBIGUOUS status without safe retry authorization blocks saga."""
+    uow = DummyUOW()
+    engine = SagaEngine(uow)
+    item = BacklogItem(
+        project_id="p1",
+        item_key="k1",
+        title="Title",
+        description="Desc",
+        priority=QueuePriority.NORMAL,
+        status=WorkItemStatus.PREPARING,
+        readiness_state=ReadinessState.NOT_READY,
+        openspec_change_name="k1",
+    )
+    uow.backlog_items.save(item)
+    uow.projects.get_by_id.return_value = MagicMock(display_name="Proj", openspec_path="openspec", repository="owner/repo", base_branch="main", project_id="p1")
+    uow.changes.get_by_name.return_value = None
+
+    saga = engine.start_saga(
+        saga_type=SagaType.INTAKE,
+        project_id="p1",
+        work_item_key="k1",
+        change_name="k1",
+        initial_phase="OPENSPEC_AUTHORED",
+    )
+    op_key = "issue_create:p1:k1"
+    action = OrchestrationExternalAction(
+        saga_id=saga.id,
+        action_key=op_key,
+        action_type=ExternalActionType.ISSUE_CREATE,
+        target_identity="k1",
+        request_fingerprint="k1",
+        status=ExternalActionStatus.AMBIGUOUS,
+    )
+    uow.orchestration_external_actions.reserve(action)
+
+    mock_github = MagicMock()
+    mock_github.list_issues.return_value = MagicMock(outcome=ExternalOutcome.FAILURE, data=[])
+
+    service = IntakeService(uow=uow, project_root=".", github_adapter=mock_github, saga_engine=engine)
+    service.prepare_work_item("p1", "k1")
+
+    updated_saga = engine.get_saga(saga.id)
+    assert updated_saga.status == SagaStatus.BLOCKED
+
+
+# 17. Terminal Intake Recovery Does Not Become Successful COMPLETED
+def test_terminal_intake_recovery_cancels_saga():
+    """Verify terminal intake saga transitions to CANCELLED instead of COMPLETED."""
+    uow = DummyUOW()
+    engine = SagaEngine(uow)
+
+    item = BacklogItem(
+        project_id="p1",
+        item_key="k1",
+        title="Title",
+        description="Desc",
+        priority=QueuePriority.NORMAL,
+        status=WorkItemStatus.CANCELLED,
+        readiness_state=ReadinessState.NOT_READY,
+        openspec_change_name="k1",
+    )
+    uow.backlog_items.save(item)
+
+    _saga = engine.start_saga(
+        saga_type=SagaType.INTAKE,
+        project_id="p1",
+        work_item_key="k1",
+        change_name="k1",
+        initial_phase="INTAKE_CREATED",
+    )
+
+    recovery = RestartRecoveryService(uow, project_root=".")
+    reconciled = recovery.reconcile_durable_sagas()
+    assert len(reconciled) == 1
+    assert reconciled[0].status == SagaStatus.CANCELLED
+
+
+# 18. Terminal Closure Reconciliation Missing Evidence Blocks
+def test_terminal_closure_reconciliation_missing_evidence_blocks():
+    """Verify terminal closure reconciliation with missing evidence blocks saga."""
+    uow = DummyUOW()
+    engine = SagaEngine(uow)
+
+    run = MagicMock(run_id="run_1", project_id="p1", change_name="c1", current_stage=OrchestrationStage.COMPLETED, stop_outcome=OrchestrationStopOutcome.COMPLETED, is_active=False, active_job_id="job_1", candidate_sha="sha123")
+    job = MagicMock(job_id="job_1", status=JobStatus.COMPLETED)
+    uow.orchestration_runs.get_by_id.return_value = run
+    uow.jobs.get_by_id.return_value = job
+    uow.bindings.get_by_project_and_change.return_value = MagicMock(github_issue_number=123, github_project_item_id="item_1")
+
+    service = PostMergeReconciliationService(uow=uow, project_root=".", saga_engine=engine)
+    res = service.reconcile_post_merge("p1", "c1", run_id="run_1")
+    assert res.success is False
+
+
+# 19. Terminal Closure Missing One Phase Does Not Reach FINAL_CLOSED
+def test_terminal_closure_missing_one_phase_does_not_reach_final_closed():
+    """Verify terminal closure missing even 1 phase evidence does not reach FINAL_CLOSED."""
+    uow = DummyUOW()
+    engine = SagaEngine(uow)
+
+    run = MagicMock(run_id="run_1", project_id="p1", change_name="c1", current_stage=OrchestrationStage.COMPLETED, stop_outcome=OrchestrationStopOutcome.COMPLETED, is_active=False, active_job_id="job_1", candidate_sha="sha123")
+    job = MagicMock(job_id="job_1", status=JobStatus.COMPLETED)
+    uow.orchestration_runs.get_by_id.return_value = run
+    uow.jobs.get_by_id.return_value = job
+    c = Change(project_id="p1", name="c1", status=ChangeStatus.IN_PROGRESS, proposal_path="p", tasks_path="t", design_path="d")
+    uow.changes.save(c)
+    item = BacklogItem(project_id="p1", item_key="c1", title="T", description="D", priority=QueuePriority.HIGH, status=WorkItemStatus.RUNNING, readiness_state=ReadinessState.READY, openspec_change_name="c1")
+    uow.backlog_items.save(item)
+
+    saga = engine.start_saga(saga_type=SagaType.CLOSURE, project_id="p1", work_item_key="c1", change_name="c1", run_id="run_1", job_id="job_1")
+    for act_type in [ExternalActionType.ISSUE_CLOSE, ExternalActionType.PROJECT_ITEM_EDIT, ExternalActionType.OPENSPEC_SYNC, ExternalActionType.OPENSPEC_ARCHIVE, ExternalActionType.BRANCH_DELETE]:
+        uow.orchestration_external_actions.reserve(OrchestrationExternalAction(
+            saga_id=saga.id,
+            action_key=f"act:{act_type.value}",
+            action_type=act_type,
+            target_identity="c1",
+            request_fingerprint="fp",
+            status=ExternalActionStatus.COMPLETED,
+        ))
+    uow.bindings.get_by_project_and_change.return_value = MagicMock(github_issue_number=123, github_project_item_id="item_1")
+
+    service = PostMergeReconciliationService(uow=uow, project_root=".", saga_engine=engine)
+    res = service.reconcile_post_merge("p1", "c1", run_id="run_1")
+    assert res.success is False
+    assert saga.current_phase != "FINAL_CLOSED"
+
+
+# 20. Terminal Closure All 13 Proven Reaches FINAL_CLOSED
+def test_terminal_closure_all_13_proven_reaches_final_closed():
+    """Verify terminal closure with all 13 phases proven reaches FINAL_CLOSED and completes."""
+    uow = DummyUOW()
+    engine = SagaEngine(uow)
+
+    run = MagicMock(run_id="run_1", project_id="p1", change_name="c1", current_stage=OrchestrationStage.COMPLETED, stop_outcome=OrchestrationStopOutcome.COMPLETED, is_active=False, active_job_id="job_1", candidate_sha="sha123")
+    job = MagicMock(job_id="job_1", status=JobStatus.COMPLETED)
+    uow.orchestration_runs.get_by_id.return_value = run
+    uow.jobs.get_by_id.return_value = job
+    c = Change(project_id="p1", name="c1", status=ChangeStatus.IN_PROGRESS, proposal_path="p", tasks_path="t", design_path="d")
+    uow.changes.save(c)
+    item = BacklogItem(project_id="p1", item_key="c1", title="T", description="D", priority=QueuePriority.HIGH, status=WorkItemStatus.RUNNING, readiness_state=ReadinessState.READY, openspec_change_name="c1")
+    uow.backlog_items.save(item)
+
+    saga = engine.start_saga(saga_type=SagaType.CLOSURE, project_id="p1", work_item_key="c1", change_name="c1", run_id="run_1", job_id="job_1")
+    for act_type in [ExternalActionType.ISSUE_CLOSE, ExternalActionType.PROJECT_ITEM_EDIT, ExternalActionType.OPENSPEC_SYNC, ExternalActionType.OPENSPEC_ARCHIVE, ExternalActionType.WORKTREE_DELETE, ExternalActionType.BRANCH_DELETE]:
+        uow.orchestration_external_actions.reserve(OrchestrationExternalAction(
+            saga_id=saga.id,
+            action_key=f"act:{act_type.value}",
+            action_type=act_type,
+            target_identity="c1",
+            request_fingerprint="fp",
+            status=ExternalActionStatus.COMPLETED,
+        ))
+    uow.bindings.get_by_project_and_change.return_value = MagicMock(github_issue_number=123, github_project_item_id="item_1")
+
+    service = PostMergeReconciliationService(uow=uow, project_root=".", saga_engine=engine)
+    res = service.reconcile_post_merge("p1", "c1", run_id="run_1")
+    assert res.success is True
+    assert res.already_closed is True
+
+
+# 21. Squash Repository Mismatch Fails
+def test_squash_repository_mismatch_fails():
+    """Verify verify_candidate_delivery fails when PR repository mismatch occurs."""
+    uow = DummyUOW()
+    uow.projects.get_by_id.return_value = MagicMock(repository="owner/expected-repo")
+    service = PostMergeReconciliationService(uow=uow, project_root=".")
+
+    pr_details = {
+        "repository": "owner/wrong-repo",
+        "base_branch": "main",
+        "head_sha": "cand123",
+        "merge_commit_sha": "merge123",
+        "is_merged": True,
+    }
+    verified = service.verify_candidate_delivery(
+        candidate_sha="cand123",
+        base_branch="main",
+        project_id="p1",
+        pr_details=pr_details,
+    )
+    assert verified is False
+
+
+# 22. Squash Base Mismatch Fails
+def test_squash_base_mismatch_fails():
+    """Verify verify_candidate_delivery fails when PR base branch mismatch occurs."""
+    uow = DummyUOW()
+    uow.projects.get_by_id.return_value = MagicMock(repository="owner/repo")
+    service = PostMergeReconciliationService(uow=uow, project_root=".")
+
+    pr_details = {
+        "repository": "owner/repo",
+        "base_branch": "feature-branch",
+        "head_sha": "cand123",
+        "merge_commit_sha": "merge123",
+        "is_merged": True,
+    }
+    verified = service.verify_candidate_delivery(
+        candidate_sha="cand123",
+        base_branch="main",
+        project_id="p1",
+        pr_details=pr_details,
+    )
+    assert verified is False
+
+
+# 23. Missing Audited Candidate Fails
+def test_missing_audited_candidate_fails():
+    """Verify verify_candidate_delivery fails when candidate SHA is empty."""
+    uow = DummyUOW()
+    service = PostMergeReconciliationService(uow=uow, project_root=".")
+    verified = service.verify_candidate_delivery(
+        candidate_sha="",
+        base_branch="main",
+        project_id="p1",
+    )
+    assert verified is False
+
+
+# 24. Valid Squash Passes
+def test_valid_squash_passes():
+    """Verify verify_candidate_delivery passes when valid squash merge evidence is present."""
+    uow = DummyUOW()
+    uow.projects.get_by_id.return_value = MagicMock(repository="owner/repo")
+    service = PostMergeReconciliationService(uow=uow, project_root=".")
+    service.verify_candidate_ancestry = MagicMock(side_effect=lambda cand, base, **kw: base == "merge123")
+    service._authorize_managed_repo_mutation = MagicMock()
+
+    pr_details = {
+        "repository": "owner/repo",
+        "base_branch": "main",
+        "head_sha": "cand123",
+        "merge_commit_sha": "merge123",
+        "is_merged": True,
+    }
+
+    import subprocess
+    orig_run = subprocess.run
+    def mock_run(cmd, **kwargs):
+        if "merge-base" in cmd:
+            return MagicMock(returncode=0)
+        return orig_run(cmd, **kwargs)
+
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(subprocess, "run", mock_run)
+        verified = service.verify_candidate_delivery(
+            candidate_sha="cand123",
+            base_branch="main",
+            project_id="p1",
+            pr_details=pr_details,
+        )
+        assert verified is True

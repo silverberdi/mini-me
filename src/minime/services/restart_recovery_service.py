@@ -133,10 +133,10 @@ class RestartRecoveryService:
 
             if is_terminal and saga.saga_type == SagaType.INTAKE:
                 logger.info(
-                    "Intake saga '%s' belongs to terminal item/change; completing saga to preserve terminal identity.",
+                    "Intake saga '%s' belongs to terminal item/change; cancelling saga to preserve terminal identity.",
                     saga.id,
                 )
-                updated = saga_engine.complete_saga(saga)
+                updated = saga_engine.cancel_saga(saga, cancellation_reason="Parent backlog item or change is terminal.")
                 reconciled.append(updated)
                 continue
 
