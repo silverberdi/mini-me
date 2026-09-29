@@ -19,6 +19,8 @@ from minime.domain.models import (
     EvidenceDiagnostic,
     Job,
     Project,
+    ProviderHealth,
+    utc_now,
 )
 from minime.services.candidate_manifest import CandidateManifestService
 from minime.services.checks_runner import ChecksRunResult
@@ -175,7 +177,14 @@ class MockUnitOfWork:
 
         self.provider_health = MagicMock()
         self.provider_health.update_health = MagicMock()
-        self.provider_health.get_by_provider = MagicMock(return_value=None)
+        self.provider_health.get_by_provider = MagicMock(
+            side_effect=lambda p: ProviderHealth(
+                health_id=f"ph-{p}",
+                provider=p,
+                status=ProviderHealthStatus.AVAILABLE,
+                updated_at=utc_now(),
+            )
+        )
         self.provider_health.list_all = MagicMock(return_value=[])
 
     def _set_waiting(self, jid, p, r=None):
