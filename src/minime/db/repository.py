@@ -2962,6 +2962,15 @@ class PostgresDurableSagaRepository(DurableSagaRepositoryInterface):
         model = self.session.get(DurableSagaModel, saga_id)
         return durable_saga_model_to_domain(model) if model else None
 
+    def get_for_update(self, saga_id: str) -> DurableSaga | None:
+        stmt = (
+            select(DurableSagaModel)
+            .where(DurableSagaModel.id == saga_id)
+            .with_for_update()
+        )
+        model = self.session.scalars(stmt).first()
+        return durable_saga_model_to_domain(model) if model else None
+
     def get_active_saga(
         self,
         project_id: str,
@@ -3057,6 +3066,8 @@ class PostgresOrchestrationExternalActionRepository(OrchestrationExternalActionR
         self.session = session
 
     def reserve(self, action: OrchestrationExternalAction) -> None:
+        if action.run_id is None and action.saga_id is None:
+            raise ValueError("OrchestrationExternalAction must have at least run_id or saga_id set.")
         existing = self.session.get(OrchestrationExternalActionModel, action.action_id)
         if not existing:
             self.session.add(

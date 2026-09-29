@@ -28,6 +28,9 @@ class SagaEngine:
     def get_saga(self, saga_id: str) -> DurableSaga | None:
         return self.uow.durable_sagas.get_by_id(saga_id)
 
+    def get_for_update(self, saga_id: str) -> DurableSaga | None:
+        return self.uow.durable_sagas.get_for_update(saga_id)
+
     def get_active_saga(
         self,
         project_id: str,
@@ -321,14 +324,44 @@ class SagaEngine:
         logger.info("Recorded action result for '%s': status=%s", action_key, st_enum.value)
         return updated
 
+    def cancel_saga(
+        self,
+        saga: DurableSaga,
+        cancellation_reason: str,
+    ) -> DurableSaga:
+        """Mark saga as CANCELLED."""
+        updated = self.uow.durable_sagas.update_status(
+            saga_id=saga.id,
+            status=SagaStatus.CANCELLED,
+            blocking_reason=cancellation_reason,
+            last_observed_outcome=ExternalOutcome.FAILURE,
+        )
+
+        event = Event(
+            project_id=saga.project_id,
+            change_id=saga.change_name or saga.work_item_key,
+            event_type=EventType.DURABLE_SAGA_FAILED.value,
+            payload={
+                "saga_id": saga.id,
+                "saga_type": saga.saga_type.value,
+                "phase": saga.current_phase,
+                "cancellation_reason": cancellation_reason,
+            },
+        )
+        self.uow.events.save(event)
+        self.uow.commit()
+
+        logger.info("Saga '%s' (%s) CANCELLED: %s", saga.id, saga.saga_type.value, cancellation_reason)
+        return updated
+
     def resume_saga(
         self,
         saga_id: str,
         intake_service: Any = None,
         post_merge_service: Any = None,
     ) -> DurableSaga:
-        """Resume an active or blocked saga from its persisted checkpoint."""
-        saga = self.get_saga(saga_id)
+        """Resume an active or blocked saga from its persisted checkpoint with row-locking idempotency."""
+        saga = self.get_for_update(saga_id) or self.get_saga(saga_id)
         if not saga:
             raise ValueError(f"Saga '{saga_id}' not found.")
 

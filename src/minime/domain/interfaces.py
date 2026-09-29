@@ -580,6 +580,9 @@ class DurableSagaRepositoryInterface(ABC):
     def get_by_id(self, saga_id: str) -> DurableSaga | None: ...
 
     @abstractmethod
+    def get_for_update(self, saga_id: str) -> DurableSaga | None: ...
+
+    @abstractmethod
     def get_active_saga(
         self,
         project_id: str,

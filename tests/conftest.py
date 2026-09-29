@@ -1392,6 +1392,8 @@ class InMemoryOrchestrationExternalActionRepository(OrchestrationExternalActionR
         self._store: dict[str, OrchestrationExternalAction] = {}
 
     def reserve(self, action: OrchestrationExternalAction) -> None:
+        if action.run_id is None and action.saga_id is None:
+            raise ValueError("OrchestrationExternalAction must have at least run_id or saga_id set.")
         for existing in self._store.values():
             if existing.action_key == action.action_key:
                 raise ValueError(f"Action key '{action.action_key}' already exists")
@@ -1996,6 +1998,9 @@ class InMemoryDurableSagaRepository(DurableSagaRepositoryInterface):
     def get_by_id(self, saga_id: str) -> DurableSaga | None:
         s = self._store.get(saga_id)
         return s.model_copy(deep=True) if s else None
+
+    def get_for_update(self, saga_id: str) -> DurableSaga | None:
+        return self.get_by_id(saga_id)
 
     def get_active_saga(self, project_id: str, work_item_key: str, saga_type: SagaType | str) -> DurableSaga | None:
         st_val = saga_type.value if isinstance(saga_type, SagaType) else saga_type

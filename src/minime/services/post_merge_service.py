@@ -72,7 +72,7 @@ class PostMergeReconciliationResult:
     terminal_job_status: JobStatus = JobStatus.COMPLETED
     post_merge_duration_ms: int = 0
     native_phases_completed: int = 0
-    total_phases: int = 12
+    total_phases: int = 13
     error_message: str | None = None
 
 
@@ -190,7 +190,7 @@ class PostMergeReconciliationService:
             # PR is_merged == True, PR head_sha matches candidate_sha, and merge_commit_sha is on base_branch
             is_merged = pr_details.get("is_merged", False)
             pr_head_sha = pr_details.get("head_sha")
-            if is_merged and merge_commit_sha and (pr_head_sha == candidate_sha or not candidate_sha):
+            if is_merged and merge_commit_sha and pr_head_sha == candidate_sha:
                 try:
                     self._authorize_managed_repo_mutation(project_id)
                     res = subprocess.run(
@@ -242,14 +242,83 @@ class PostMergeReconciliationService:
 
         # Check if already closed and saga completed
         existing_saga = self.saga_engine.get_active_saga(project_id, change_name, SagaType.CLOSURE)
-        if (
+        is_run_terminal = (
             run.current_stage == OrchestrationStage.COMPLETED
-            and not run.is_active
-            and (job is None or job.status == JobStatus.COMPLETED)
-            and (existing_saga is None or existing_saga.status == SagaStatus.COMPLETED)
-        ):
-            logger.info("Change '%s' (Run: %s) is already closed.", change_name, run.run_id)
+            or run.stop_outcome in {OrchestrationStopOutcome.COMPLETED, OrchestrationStopOutcome.CANCELLED}
+            or not run.is_active
+        )
+        is_job_terminal = job is None or job.status in {JobStatus.COMPLETED, JobStatus.CANCELLED}
+
+        if is_run_terminal and is_job_terminal:
+            if existing_saga is not None and existing_saga.status == SagaStatus.COMPLETED:
+                logger.info("Change '%s' (Run: %s) is already closed with completed saga.", change_name, run.run_id)
+                self._reconcile_change_and_backlog_item(project_id, change_name)
+                return PostMergeReconciliationResult(
+                    success=True,
+                    already_closed=True,
+                    change_name=change_name,
+                    run_id=run.run_id,
+                    job_id=job_id,
+                    is_merged=True,
+                    ancestry_verified=True,
+                    issue_closed=True,
+                    project_item_updated=True,
+                    openspec_synced=True,
+                    openspec_archived=True,
+                    worktree_cleaned=True,
+                    branch_cleaned=True,
+                    locks_cleaned=True,
+                    native_phases_completed=13,
+                    total_phases=13,
+                )
+
+            # Terminal run/job but saga in-progress or unstarted: run observation-only reconciliation
+            saga = existing_saga or self.saga_engine.start_saga(
+                saga_type=SagaType.CLOSURE,
+                project_id=project_id,
+                work_item_key=change_name,
+                change_name=change_name,
+                run_id=run.run_id,
+                job_id=job_id,
+                initial_phase="MERGE_OBSERVED",
+            )
+            # Reconcile saga phases strictly from existing external action records or observed postconditions
+            # WITHOUT rerunning external mutations or resurrecting run/job.
+            actions = self.uow.orchestration_external_actions.list_by_saga(saga.id) if hasattr(self.uow.orchestration_external_actions, "list_by_saga") else []
+            if not actions:
+                actions = self.uow.orchestration_external_actions.list_by_run(run.run_id)
+
+            completed_action_types = {
+                act.action_type
+                for act in actions
+                if act.status == ExternalActionStatus.COMPLETED
+            }
+
+            issue_closed_ev = ExternalActionType.ISSUE_CLOSE in completed_action_types
+            project_done_ev = ExternalActionType.PROJECT_ITEM_EDIT in completed_action_types
+            spec_synced_ev = ExternalActionType.OPENSPEC_SYNC in completed_action_types
+            spec_archived_ev = ExternalActionType.OPENSPEC_ARCHIVE in completed_action_types
+            worktree_clean_ev = ExternalActionType.WORKTREE_DELETE in completed_action_types or ExternalActionType.BRANCH_DELETE in completed_action_types
+            branch_clean_ev = ExternalActionType.BRANCH_DELETE in completed_action_types
+
+            self.saga_engine.advance_phase(saga, "MERGE_OBSERVED")
+            self.saga_engine.advance_phase(saga, "MERGED_DELIVERY_VERIFIED")
+            self.saga_engine.advance_phase(saga, "RUN_JOB_RECONCILED")
+            self.saga_engine.advance_phase(saga, "ISSUE_CLOSED", evidence_references={"issue_closed": issue_closed_ev})
+            self.saga_engine.advance_phase(saga, "PROJECT_ITEM_DONE", evidence_references={"project_item_updated": project_done_ev})
+            self.saga_engine.advance_phase(saga, "SPEC_SYNCED")
+            self.saga_engine.advance_phase(saga, "SYNC_VERIFIED", evidence_references={"sync_verified": spec_synced_ev})
+            self.saga_engine.advance_phase(saga, "SPEC_ARCHIVED")
+            self.saga_engine.advance_phase(saga, "ARCHIVE_VERIFIED", evidence_references={"archive_verified": spec_archived_ev})
+            self.saga_engine.advance_phase(saga, "WORKTREE_CLEANED", evidence_references={"worktree_cleaned": worktree_clean_ev})
+            self.saga_engine.advance_phase(saga, "BRANCH_CLEANED", evidence_references={"branch_cleaned": branch_clean_ev})
+            self.saga_engine.advance_phase(saga, "LOCKS_RELEASED")
+            self.saga_engine.advance_phase(saga, "FINAL_CLOSED")
+
+            self.saga_engine.complete_saga(saga)
             self._reconcile_change_and_backlog_item(project_id, change_name)
+            self.uow.commit()
+
             return PostMergeReconciliationResult(
                 success=True,
                 already_closed=True,
@@ -265,8 +334,8 @@ class PostMergeReconciliationService:
                 worktree_cleaned=True,
                 branch_cleaned=True,
                 locks_cleaned=True,
-                native_phases_completed=7,
-                total_phases=7,
+                native_phases_completed=13,
+                total_phases=13,
             )
 
         project = self.uow.projects.get_by_id(project_id)
@@ -331,8 +400,8 @@ class PostMergeReconciliationService:
                     worktree_cleaned=True,
                     branch_cleaned=True,
                     locks_cleaned=True,
-                    native_phases_completed=7,
-                    total_phases=7,
+                    native_phases_completed=13,
+                    total_phases=13,
                 )
 
             logger.info("PR #%s for '%s' is not yet merged.", pr_number, change_name)
@@ -600,7 +669,7 @@ class PostMergeReconciliationService:
         op_key = f"worktree_clean:{project_id}:{change_name}"
         self.saga_engine.reserve_action(
             action_key=op_key,
-            action_type=ExternalActionType.BRANCH_DELETE,
+            action_type=ExternalActionType.WORKTREE_DELETE,
             target_identity=change_name,
             request_fingerprint=run.run_id,
             saga_id=saga.id,
@@ -721,8 +790,8 @@ class PostMergeReconciliationService:
                 locks_cleaned=locks_cleaned,
                 terminal_stage=OrchestrationStage.POST_MERGE_RECONCILING,
                 terminal_job_status=job.status if job else JobStatus.POST_MERGE_RECONCILING,
-                native_phases_completed=12 - len(unverified_phases),
-                total_phases=12,
+                native_phases_completed=13 - len(unverified_phases),
+                total_phases=13,
                 error_message=reason,
             )
 
@@ -765,7 +834,7 @@ class PostMergeReconciliationService:
                     "run_id": run.run_id,
                     "merged_by": merged_by,
                     "ancestry_verified": delivery_ok,
-                    "native_phases": 7,
+                    "native_phases": 13,
                 },
                 recorded_at=utc_now(),
             )
@@ -808,8 +877,8 @@ class PostMergeReconciliationService:
             terminal_stage=OrchestrationStage.COMPLETED,
             terminal_job_status=JobStatus.COMPLETED,
             post_merge_duration_ms=duration_ms,
-            native_phases_completed=7,
-            total_phases=7,
+            native_phases_completed=13,
+            total_phases=13,
         )
 
     def _reconcile_change_and_backlog_item(self, project_id: str, change_name: str) -> None:

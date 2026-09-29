@@ -40,6 +40,9 @@ class InMemoryDurableSagaRepository:
     def get_by_id(self, saga_id: str) -> DurableSaga | None:
         return self._sagas.get(saga_id)
 
+    def get_for_update(self, saga_id: str) -> DurableSaga | None:
+        return self._sagas.get(saga_id)
+
     def get_active_saga(self, project_id: str, work_item_key: str, saga_type: SagaType | str) -> DurableSaga | None:
         st_val = saga_type.value if isinstance(saga_type, SagaType) else saga_type
         for s in self._sagas.values():
@@ -235,6 +238,8 @@ def test_forbidden_persisted_statuses():
 # 4. Stage B Comment Marker Issue Matching
 def test_stage_b_issue_comment_marker_matching():
     """Verify Issue reconciliation matches exact comment marker and forbids title-only matching."""
+    from minime.domain.enums import ExternalReasonCode
+    from minime.domain.models import ExternalActionResult
     uow = DummyUOW()
     uow.orchestration_external_actions.reserve(
         OrchestrationExternalAction(
@@ -250,9 +255,12 @@ def test_stage_b_issue_comment_marker_matching():
     gh_mock = MagicMock()
 
     # Issue with matching marker comment
-    gh_mock.search_issues_by_marker.return_value = [
-        {"number": 42, "html_url": "http://gh/issue/42", "body": "<!-- minime-opkey: issue_create:p:c -->\nIssue body"}
-    ]
+    gh_mock.list_issues.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="github",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        data=[{"number": 42, "html_url": "http://gh/issue/42", "body": "<!-- minime-opkey: issue_create:p:c -->\nIssue body"}],
+    )
 
     res = rec_auth.reconcile_issue_creation(
         github_adapter=gh_mock,
@@ -262,13 +270,14 @@ def test_stage_b_issue_comment_marker_matching():
     )
     assert res.outcome == ExternalOutcome.SUCCESS
     assert res.data["number"] == 42
-    # Verify exact marker search was called, NOT title search
-    gh_mock.search_issues_by_marker.assert_called_once_with("owner/repo", "issue_create:p:c")
+    gh_mock.list_issues.assert_called_once_with("owner/repo", state="all")
 
 
 # 5. Stage B Project Item URL Lookup Matching
 def test_stage_b_project_item_url_lookup():
     """Verify Project Item reconciliation uses exact issue URL lookup and forbids title search."""
+    from minime.domain.enums import ExternalReasonCode
+    from minime.domain.models import ExternalActionResult
     uow = DummyUOW()
     uow.orchestration_external_actions.reserve(
         OrchestrationExternalAction(
@@ -282,7 +291,12 @@ def test_stage_b_project_item_url_lookup():
     )
     rec_auth = ReconciliationAuthority(uow)
     gh_mock = MagicMock()
-    gh_mock.lookup_project_item_id_by_issue_url.return_value = "pvti_123"
+    gh_mock.list_project_items.return_value = ExternalActionResult(
+        outcome=ExternalOutcome.SUCCESS,
+        source_adapter="github",
+        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+        data=[{"id": "pvti_123", "content": {"url": "http://gh/issue/42"}}],
+    )
 
     res = rec_auth.reconcile_project_item_add(
         github_adapter=gh_mock,
@@ -293,7 +307,7 @@ def test_stage_b_project_item_url_lookup():
     )
     assert res.outcome == ExternalOutcome.SUCCESS
     assert res.data == "pvti_123"
-    gh_mock.lookup_project_item_id_by_issue_url.assert_called_once_with(1, "owner", "http://gh/issue/42")
+    gh_mock.list_project_items.assert_called_once_with(project_number=1, owner="owner")
 
 
 # 6. Squash Merge Delivery Verification

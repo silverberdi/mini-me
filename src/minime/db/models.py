@@ -10,6 +10,7 @@ import sqlalchemy as sa
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -1036,6 +1037,9 @@ class DurableSagaModel(Base):
 
 class OrchestrationExternalActionModel(Base):
     __tablename__ = "orchestration_external_actions"
+    __table_args__ = (
+        CheckConstraint("run_id IS NOT NULL OR saga_id IS NOT NULL", name="ck_external_action_ownership"),
+    )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     run_id: Mapped[str | None] = mapped_column(

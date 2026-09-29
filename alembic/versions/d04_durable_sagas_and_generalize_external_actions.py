@@ -80,9 +80,11 @@ def upgrade() -> None:
     op.create_index('ix_orchestration_external_actions_saga_id', 'orchestration_external_actions', ['saga_id'], unique=False)
     op.alter_column('orchestration_external_actions', 'run_id', existing_type=sa.String(length=64), nullable=True)
     op.alter_column('orchestration_external_actions', 'candidate_sha', existing_type=sa.String(length=64), nullable=True)
+    op.create_check_constraint('ck_external_action_ownership', 'orchestration_external_actions', 'run_id IS NOT NULL OR saga_id IS NOT NULL')
 
 
 def downgrade() -> None:
+    op.drop_constraint('ck_external_action_ownership', 'orchestration_external_actions', type_='check')
     op.alter_column('orchestration_external_actions', 'candidate_sha', existing_type=sa.String(length=64), nullable=False)
     op.alter_column('orchestration_external_actions', 'run_id', existing_type=sa.String(length=64), nullable=False)
     op.drop_index('ix_orchestration_external_actions_saga_id', table_name='orchestration_external_actions')
