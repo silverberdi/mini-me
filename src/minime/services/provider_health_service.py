@@ -74,7 +74,7 @@ class ProviderHealthService:
             raise ValueError(f"Invalid provider '{provider}'. Must be a non-empty string.")
 
     def get_health(self, provider: str) -> ProviderHealth:
-        """Get existing health record or return an in-memory default AVAILABLE record without mutating DB."""
+        """Get or initialize health record for a provider."""
         self._validate_primary(provider)
         health = self.uow.provider_health.get_by_provider(provider)
         if not health:
@@ -85,21 +85,19 @@ class ProviderHealthService:
                 consecutive_failures=0,
                 updated_at=utc_now(),
             )
+            self.uow.provider_health.save(health)
+            self.uow.commit()
         return health
 
     def get_existing_health(self, provider: str) -> ProviderHealth | None:
-        """Return existing authoritative health or default in-memory AVAILABLE health when no record exists, without mutating DB."""
+        """Return existing authoritative health, or None when no record exists.
+
+        Unlike ``get_health``, this never synthesizes a record: a provider with no
+        persisted health row yields ``None`` (UNKNOWN truth), so callers can fail
+        closed instead of treating absence as AVAILABLE.
+        """
         self._validate_primary(provider)
-        health = self.uow.provider_health.get_by_provider(provider)
-        if not health:
-            health = ProviderHealth(
-                health_id=f"ph-{provider}",
-                provider=provider,
-                status=ProviderHealthStatus.AVAILABLE,
-                consecutive_failures=0,
-                updated_at=utc_now(),
-            )
-        return health
+        return self.uow.provider_health.get_by_provider(provider)
 
     def list_existing_health(self) -> list[ProviderHealth]:
         """Pure query: List health for all tracked providers without inserting missing DB rows."""
