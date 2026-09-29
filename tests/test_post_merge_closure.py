@@ -107,6 +107,13 @@ class InMemoryUnitOfWork(PersistenceUnitOfWork):
         self.operator_actions = MagicMock()
         self.operator_actions.get_by_request_id.return_value = None
 
+        from tests.conftest import (
+            InMemoryDurableSagaRepository,
+            InMemoryOrchestrationExternalActionRepository,
+        )
+        self.durable_sagas = InMemoryDurableSagaRepository()
+        self.orchestration_external_actions = InMemoryOrchestrationExternalActionRepository()
+
     def _save_run(self, run: OrchestrationRun):
         self._runs[run.run_id] = run
 
@@ -335,7 +342,7 @@ def test_post_merge_reconciliation_full_cycle(tmp_path: Path, mock_github_adapte
     assert result.openspec_archived is True
     assert result.terminal_stage == OrchestrationStage.COMPLETED
     assert result.terminal_job_status == JobStatus.COMPLETED
-    assert result.native_phases_completed == 7
+    assert result.native_phases_completed == 13
 
     # Verify run and job persisted state
     updated_run = uow.orchestration_runs.get_by_id("run-123")
@@ -359,7 +366,7 @@ def test_post_merge_reconciliation_full_cycle(tmp_path: Path, mock_github_adapte
     rerun_result = service.reconcile_post_merge("mini-me", "test-change", run_id="run-123")
     assert rerun_result.success is True
     assert rerun_result.already_closed is True
-    assert rerun_result.native_phases_completed == 7
+    assert rerun_result.native_phases_completed == 13
 
 
 def test_control_plane_reconcile_post_merge(tmp_path: Path, mock_github_adapter):

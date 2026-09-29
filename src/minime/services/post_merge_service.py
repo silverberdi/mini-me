@@ -12,18 +12,23 @@ from typing import Any
 from minime.domain.enums import (
     ChangeStatus,
     EventType,
+    ExternalActionStatus,
+    ExternalActionType,
     ExternalOutcome,
     ExternalReasonCode,
     JobStatus,
     OrchestrationStage,
     OrchestrationStopOutcome,
     RetrySafety,
+    SagaStatus,
+    SagaType,
     WorkItemStatus,
 )
 from minime.domain.interfaces import GitHubAdapterInterface, PersistenceUnitOfWork
 from minime.domain.models import Event, ExternalActionResult, MetricFact, utc_now
 from minime.services.lifecycle_transition_authority import LifecycleTransitionAuthority
 from minime.services.openspec_sync import OpenSpecSyncService
+from minime.services.saga_engine import SagaEngine
 from minime.services.worktree_manager import WorktreeManager
 
 logger = logging.getLogger(__name__)
@@ -67,7 +72,7 @@ class PostMergeReconciliationResult:
     terminal_job_status: JobStatus = JobStatus.COMPLETED
     post_merge_duration_ms: int = 0
     native_phases_completed: int = 0
-    total_phases: int = 12
+    total_phases: int = 13
     error_message: str | None = None
 
 
@@ -78,15 +83,19 @@ class PostMergeReconciliationService:
         self,
         uow: PersistenceUnitOfWork,
         project_root: str | Path,
-        github_adapter: GitHubAdapterInterface,
+        github_adapter: GitHubAdapterInterface | None = None,
         worktree_manager: WorktreeManager | None = None,
         openspec_sync: OpenSpecSyncService | None = None,
+        saga_engine: SagaEngine | None = None,
     ):
         self.uow = uow
         self.project_root = Path(project_root).resolve()
-        self.github_adapter = github_adapter
+        from minime.adapters.github import GitHubAdapter
+
+        self.github_adapter = github_adapter or GitHubAdapter()
         self.worktree_manager = worktree_manager or WorktreeManager(self.project_root, uow=uow)
         self.openspec_sync = openspec_sync or OpenSpecSyncService(self.project_root, uow=uow)
+        self.saga_engine = saga_engine or SagaEngine(self.uow)
 
     def _authorize_managed_repo_mutation(self, project_id: str) -> None:
         """Verify project binding, canonical path match, and ManagedWorkspaceGuard authorization before Git mutations."""
@@ -156,6 +165,79 @@ class PostMergeReconciliationService:
             logger.warning("Failed candidate ancestry verification: %s", exc)
             return False
 
+    def verify_candidate_delivery(
+        self,
+        candidate_sha: str,
+        base_branch: str,
+        project_id: str,
+        pr_details: dict[str, Any] | None = None,
+    ) -> bool:
+        """Verify delivery of candidate SHA to base branch supporting both normal ancestry and squash merges."""
+        if not candidate_sha or not project_id:
+            return False
+
+        # 1. Direct ancestry check
+        if self.verify_candidate_ancestry(candidate_sha, base_branch, project_id=project_id):
+            return True
+
+        # 2. Check squash merge delivery requiring all PR metadata fields fail-closed (Defect 3)
+        if not pr_details:
+            return False
+
+        from minime.services.project_service import normalize_repository_identity
+
+        project = self.uow.projects.get_by_id(project_id) if self.uow else None
+        if not project or not project.repository or not project.base_branch:
+            logger.warning("Failing closed: missing project or project binding in verify_candidate_delivery.")
+            return False
+
+        expected_repo = normalize_repository_identity(project.repository)
+        pr_repo = pr_details.get("repository")
+        if not pr_repo or normalize_repository_identity(pr_repo) != expected_repo:
+            logger.warning("PR repository mismatch or missing in verify_candidate_delivery: expected '%s', got '%s'", expected_repo, pr_repo)
+            return False
+
+        pr_base = pr_details.get("base_branch")
+        if not pr_base or not base_branch:
+            logger.warning("Missing pr_base or base_branch in verify_candidate_delivery.")
+            return False
+
+        norm_pr_base = pr_base.replace("refs/heads/", "").strip()
+        norm_base_branch = base_branch.replace("refs/heads/", "").replace("origin/", "").strip()
+        if norm_pr_base != norm_base_branch:
+            logger.warning("PR base branch mismatch in verify_candidate_delivery: expected '%s', got '%s'", norm_base_branch, norm_pr_base)
+            return False
+
+        is_merged = pr_details.get("is_merged", False)
+        merge_commit_sha = pr_details.get("merge_commit_sha")
+        pr_head_sha = pr_details.get("head_sha")
+
+        if not is_merged or not merge_commit_sha or not pr_head_sha:
+            logger.warning("Failing closed: missing is_merged (%s), merge_commit_sha (%s), or head_sha (%s) in PR details.", is_merged, merge_commit_sha, pr_head_sha)
+            return False
+
+        if pr_head_sha != candidate_sha:
+            logger.warning("PR head SHA mismatch: expected candidate '%s', got PR head '%s'", candidate_sha, pr_head_sha)
+            return False
+
+        # Check merge_commit_sha ancestry on base_branch
+        try:
+            self._authorize_managed_repo_mutation(project_id)
+            res = subprocess.run(
+                ["git", "merge-base", "--is-ancestor", merge_commit_sha, base_branch],
+                cwd=self.project_root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if res.returncode == 0:
+                logger.info("Squash merge delivery verified for candidate '%s' via merge commit '%s'", candidate_sha, merge_commit_sha)
+                return True
+        except Exception as exc:
+            logger.warning("Squash merge verification exception: %s", exc)
+
+        return False
+
     def reconcile_post_merge(
         self,
         project_id: str,
@@ -164,7 +246,6 @@ class PostMergeReconciliationService:
     ) -> PostMergeReconciliationResult:
         """Execute the complete post-merge closure cycle idempotently."""
         start_time = time.time()
-        native_phases = 0
 
         # 1. Locate Run and Job
         if run_id:
@@ -189,14 +270,143 @@ class PostMergeReconciliationService:
         job = self.uow.jobs.get_by_id(run.active_job_id) if run.active_job_id else None
         job_id = job.job_id if job else ""
 
-        # Check if already closed
-        if (
+        # Check if already closed and saga completed
+        existing_saga = self.saga_engine.get_active_saga(project_id, change_name, SagaType.CLOSURE)
+        completed_sagas = self.uow.durable_sagas.list_by_project(
+            project_id, saga_type=SagaType.CLOSURE, status=SagaStatus.COMPLETED
+        )
+        has_completed_saga = any(
+            s.work_item_key == change_name or s.change_name == change_name for s in completed_sagas
+        )
+
+        is_run_terminal = (
             run.current_stage == OrchestrationStage.COMPLETED
-            and not run.is_active
-            and (job is None or job.status == JobStatus.COMPLETED)
-        ):
-            logger.info("Change '%s' (Run: %s) is already closed.", change_name, run.run_id)
+            or run.stop_outcome in {OrchestrationStopOutcome.COMPLETED, OrchestrationStopOutcome.CANCELLED}
+            or not run.is_active
+        )
+        is_job_terminal = job is None or job.status in {JobStatus.COMPLETED, JobStatus.CANCELLED}
+
+        if is_run_terminal and is_job_terminal:
+            if has_completed_saga or (existing_saga is not None and existing_saga.status == SagaStatus.COMPLETED):
+                logger.info("Change '%s' (Run: %s) is already closed with completed saga.", change_name, run.run_id)
+                self._reconcile_change_and_backlog_item(project_id, change_name)
+                return PostMergeReconciliationResult(
+                    success=True,
+                    already_closed=True,
+                    change_name=change_name,
+                    run_id=run.run_id,
+                    job_id=job_id,
+                    is_merged=True,
+                    ancestry_verified=True,
+                    issue_closed=True,
+                    project_item_updated=True,
+                    openspec_synced=True,
+                    openspec_archived=True,
+                    worktree_cleaned=True,
+                    branch_cleaned=True,
+                    locks_cleaned=True,
+                    native_phases_completed=13,
+                    total_phases=13,
+                )
+
+            # Terminal run/job but saga in-progress or unstarted: run observation-only reconciliation
+            saga = existing_saga or self.saga_engine.start_saga(
+                saga_type=SagaType.CLOSURE,
+                project_id=project_id,
+                work_item_key=change_name,
+                change_name=change_name,
+                run_id=run.run_id,
+                job_id=job_id,
+                initial_phase="MERGE_OBSERVED",
+            )
+            # Reconcile saga phases strictly from existing external action records or observed postconditions (Defect 4)
+            actions = self.uow.orchestration_external_actions.list_by_saga(saga.id) if hasattr(self.uow.orchestration_external_actions, "list_by_saga") else []
+            if not actions:
+                actions = self.uow.orchestration_external_actions.list_by_run(run.run_id)
+
+            completed_action_types = {
+                act.action_type
+                for act in actions
+                if act.status == ExternalActionStatus.COMPLETED
+            }
+
+            binding = self.uow.bindings.get_by_project_and_change(project_id, change_name)
+            issue_required = bool(binding and binding.github_issue_number)
+            project_item_required = bool(binding and (binding.github_project_item_id or binding.github_issue_number))
+
+            merge_observed_ev = (run.stop_outcome == OrchestrationStopOutcome.COMPLETED or bool(run.stop_details and run.stop_details.get("is_merged")))
+            delivery_verified_ev = (run.stop_outcome == OrchestrationStopOutcome.COMPLETED or bool(run.stop_details and run.stop_details.get("ancestry_verified")))
+            run_job_reconciled_ev = is_run_terminal and is_job_terminal
+            issue_closed_ev = (not issue_required) or (ExternalActionType.ISSUE_CLOSE in completed_action_types)
+            project_done_ev = (not project_item_required) or (ExternalActionType.PROJECT_ITEM_EDIT in completed_action_types)
+            spec_synced_ev = (ExternalActionType.OPENSPEC_SYNC in completed_action_types)
+            sync_verified_ev = (ExternalActionType.OPENSPEC_SYNC in completed_action_types)
+            spec_archived_ev = (ExternalActionType.OPENSPEC_ARCHIVE in completed_action_types)
+            archive_verified_ev = (ExternalActionType.OPENSPEC_ARCHIVE in completed_action_types)
+            worktree_clean_ev = (ExternalActionType.WORKTREE_DELETE in completed_action_types)
+            branch_clean_ev = (ExternalActionType.BRANCH_DELETE in completed_action_types)
+            locks_released_ev = True
+
+            missing_phases: list[str] = []
+            if not merge_observed_ev:
+                missing_phases.append("MERGE_OBSERVED")
+            if not delivery_verified_ev:
+                missing_phases.append("MERGED_DELIVERY_VERIFIED")
+            if not run_job_reconciled_ev:
+                missing_phases.append("RUN_JOB_RECONCILED")
+            if not issue_closed_ev:
+                missing_phases.append("ISSUE_CLOSED")
+            if not project_done_ev:
+                missing_phases.append("PROJECT_ITEM_DONE")
+            if not spec_synced_ev:
+                missing_phases.append("SPEC_SYNCED")
+            if not sync_verified_ev:
+                missing_phases.append("SYNC_VERIFIED")
+            if not spec_archived_ev:
+                missing_phases.append("SPEC_ARCHIVED")
+            if not archive_verified_ev:
+                missing_phases.append("ARCHIVE_VERIFIED")
+            if not worktree_clean_ev:
+                missing_phases.append("WORKTREE_CLEANED")
+            if not branch_clean_ev:
+                missing_phases.append("BRANCH_CLEANED")
+            if not locks_released_ev:
+                missing_phases.append("LOCKS_RELEASED")
+
+            if missing_phases:
+                reason = f"Terminal closure reconciliation missing positive evidence for phase(s): {', '.join(missing_phases)}"
+                logger.warning(reason)
+                self.saga_engine.block_saga(saga, blocking_reason=reason)
+                self.uow.commit()
+                return PostMergeReconciliationResult(
+                    success=False,
+                    already_closed=False,
+                    change_name=change_name,
+                    run_id=run.run_id,
+                    job_id=job_id,
+                    is_merged=True,
+                    ancestry_verified=True,
+                    error_message=reason,
+                )
+
+            self.saga_engine.advance_phase(saga, "MERGE_OBSERVED")
+            self.saga_engine.advance_phase(saga, "MERGED_DELIVERY_VERIFIED")
+            self.saga_engine.advance_phase(saga, "RUN_JOB_RECONCILED")
+            self.saga_engine.advance_phase(saga, "ISSUE_CLOSED", evidence_references={"issue_closed": issue_closed_ev})
+            self.saga_engine.advance_phase(saga, "PROJECT_ITEM_DONE", evidence_references={"project_item_updated": project_done_ev})
+            self.saga_engine.advance_phase(saga, "SPEC_SYNCED")
+            self.saga_engine.advance_phase(saga, "SYNC_VERIFIED", evidence_references={"sync_verified": sync_verified_ev})
+            self.saga_engine.advance_phase(saga, "SPEC_ARCHIVED")
+            self.saga_engine.advance_phase(saga, "ARCHIVE_VERIFIED", evidence_references={"archive_verified": archive_verified_ev})
+            self.saga_engine.advance_phase(saga, "WORKTREE_CLEANED", evidence_references={"worktree_cleaned": worktree_clean_ev})
+            self.saga_engine.advance_phase(saga, "BRANCH_CLEANED", evidence_references={"branch_cleaned": branch_clean_ev})
+            self.saga_engine.advance_phase(saga, "LOCKS_RELEASED")
+            self.saga_engine.advance_phase(saga, "FINAL_CLOSED")
+
+            self.saga_engine.complete_saga(saga)
             self._reconcile_change_and_backlog_item(project_id, change_name)
+            self.uow.commit()
+
             return PostMergeReconciliationResult(
                 success=True,
                 already_closed=True,
@@ -212,8 +422,8 @@ class PostMergeReconciliationService:
                 worktree_cleaned=True,
                 branch_cleaned=True,
                 locks_cleaned=True,
-                native_phases_completed=7,
-                total_phases=7,
+                native_phases_completed=13,
+                total_phases=13,
             )
 
         project = self.uow.projects.get_by_id(project_id)
@@ -278,8 +488,8 @@ class PostMergeReconciliationService:
                     worktree_cleaned=True,
                     branch_cleaned=True,
                     locks_cleaned=True,
-                    native_phases_completed=7,
-                    total_phases=7,
+                    native_phases_completed=13,
+                    total_phases=13,
                 )
 
             logger.info("PR #%s for '%s' is not yet merged.", pr_number, change_name)
@@ -293,30 +503,49 @@ class PostMergeReconciliationService:
                 error_message=f"PR #{pr_number} is not merged.",
             )
 
-        native_phases += 1  # Phase 1: Merge detection passed
+        # Drive CLOSURE DurableSaga across 13 phases
+        saga = self.saga_engine.start_saga(
+            saga_type=SagaType.CLOSURE,
+            project_id=project_id,
+            work_item_key=change_name,
+            change_name=change_name,
+            run_id=run.run_id,
+            job_id=job_id,
+            initial_phase="MERGE_OBSERVED",
+        )
 
         merged_by = pr_details.get("merged_by_login") or "human"
         merged_at = pr_details.get("merged_at")
         merge_commit_sha = pr_details.get("merge_commit_sha")
         cand_sha = run.candidate_sha or pr_details.get("head_sha") or ""
 
-        native_phases += 1  # Phase 2: Executor classified
-
-        # 3. Ancestry verification
-        # Fetch latest main in local repository
-        self._authorize_managed_repo_mutation(project_id)
-        subprocess.run(
-            ["git", "fetch", "origin", f"{base_branch}:{base_branch}"],
-            cwd=self.project_root,
-            capture_output=True,
-            text=True,
-            check=False,
+        self.saga_engine.advance_phase(
+            saga,
+            "MERGE_OBSERVED",
+            evidence_references={
+                "pr_number": pr_number,
+                "is_merged": is_merged,
+                "merged_by": merged_by,
+                "merged_at": merged_at,
+                "merge_commit_sha": merge_commit_sha,
+                "candidate_sha": cand_sha,
+            },
         )
-        ancestry_ok = self.verify_candidate_ancestry(cand_sha, base_branch, project_id=project_id)
-        if not ancestry_ok and merge_commit_sha:
-            ancestry_ok = self.verify_candidate_ancestry(cand_sha, merge_commit_sha, project_id=project_id)
 
-        native_phases += 1  # Phase 3: Ancestry verified
+        # 3. Delivery verification (ancestry + squash merge support)
+        delivery_ok = self.verify_candidate_delivery(
+            candidate_sha=cand_sha,
+            base_branch=base_branch,
+            project_id=project_id,
+            pr_details=pr_details,
+        )
+
+        if delivery_ok:
+            self.saga_engine.advance_phase(
+                saga,
+                "MERGED_DELIVERY_VERIFIED",
+                evidence_references={"delivery_verified": delivery_ok},
+            )
 
         # Record merge detected event
         self.uow.events.save(
@@ -331,7 +560,7 @@ class PostMergeReconciliationService:
                     "merged_at": merged_at,
                     "merge_commit_sha": merge_commit_sha,
                     "candidate_sha": cand_sha,
-                    "ancestry_verified": ancestry_ok,
+                    "ancestry_verified": delivery_ok,
                 },
                 timestamp=utc_now(),
             )
@@ -340,17 +569,26 @@ class PostMergeReconciliationService:
 
         # 4. Stage Transition to POST_MERGE_RECONCILING
         run.current_stage = OrchestrationStage.POST_MERGE_RECONCILING
-        if job:
+        if job and job.status != JobStatus.COMPLETED:
             job.status = JobStatus.POST_MERGE_RECONCILING
             self.uow.jobs.save(job)
         self.uow.orchestration_runs.save(run)
         self.uow.commit()
+        self.saga_engine.advance_phase(saga, "RUN_JOB_RECONCILED")
 
-        # 5. GitHub Issue Closure
+        # 5. GitHub Issue Closure with action reservation
         issue_required = bool(binding and binding.github_issue_number)
         issue_closed = False
         issue_num = binding.github_issue_number if binding else None
         if issue_num:
+            op_key = f"issue_close:{project_id}:{change_name}"
+            self.saga_engine.reserve_action(
+                action_key=op_key,
+                action_type=ExternalActionType.ISSUE_CLOSE,
+                target_identity=change_name,
+                request_fingerprint=run.run_id,
+                saga_id=saga.id,
+            )
             try:
                 close_res = self.github_adapter.close_issue(
                     repository,
@@ -359,6 +597,7 @@ class PostMergeReconciliationService:
                 )
                 issue_closed = close_res.outcome == ExternalOutcome.SUCCESS and close_res.data is True
                 if issue_closed:
+                    self.saga_engine.record_action_result(op_key, status=ExternalActionStatus.COMPLETED, remote_identifier=str(issue_num))
                     self.uow.events.save(
                         Event(
                             event_type=EventType.ISSUE_CLOSED,
@@ -368,37 +607,67 @@ class PostMergeReconciliationService:
                             timestamp=utc_now(),
                         )
                     )
+                else:
+                    self.saga_engine.record_action_result(op_key, status=ExternalActionStatus.FAILED, error_message=close_res.error_message)
             except Exception as exc:
                 logger.warning("Failed to close GitHub Issue #%d: %s", issue_num, exc)
+                self.saga_engine.record_action_result(op_key, status=ExternalActionStatus.FAILED, error_message=str(exc))
 
-        # 6. GitHub Project Item Done
+        if issue_closed or not issue_required:
+            self.saga_engine.advance_phase(saga, "ISSUE_CLOSED", evidence_references={"issue_closed": issue_closed})
+
+        # 6. GitHub Project Item Done with action reservation
         project_item_required = bool(binding and (binding.github_project_item_id or binding.github_issue_number))
         project_item_updated = False
         project_item_id = binding.github_project_item_id if binding else None
-        try:
-            update_res = self.github_adapter.update_project_item_status(
-                project_number=2,
-                owner="silverberdi",
-                item_id=project_item_id or str(issue_num),
-                status="Done",
+        if project_item_required:
+            op_key = f"project_item_done:{project_id}:{change_name}"
+            self.saga_engine.reserve_action(
+                action_key=op_key,
+                action_type=ExternalActionType.PROJECT_ITEM_EDIT,
+                target_identity=change_name,
+                request_fingerprint=run.run_id,
+                saga_id=saga.id,
             )
-            project_item_updated = update_res.outcome == ExternalOutcome.SUCCESS and update_res.data is True
-            if project_item_updated:
-                self.uow.events.save(
-                    Event(
-                        event_type=EventType.PROJECT_ITEM_DONE,
-                        project_id=project_id,
-                        change_id=change_name,
-                        payload={"project_item_id": project_item_id or issue_num, "status": "Done"},
-                        timestamp=utc_now(),
-                    )
+            try:
+                update_res = self.github_adapter.update_project_item_status(
+                    project_number=2,
+                    owner="silverberdi",
+                    item_id=project_item_id or str(issue_num),
+                    status="Done",
                 )
-        except Exception as exc:
-            logger.warning("Failed to update GitHub Project item: %s", exc)
+                project_item_updated = update_res.outcome == ExternalOutcome.SUCCESS and update_res.data is True
+                if project_item_updated:
+                    self.saga_engine.record_action_result(op_key, status=ExternalActionStatus.COMPLETED, remote_identifier=str(project_item_id or issue_num))
+                    self.uow.events.save(
+                        Event(
+                            event_type=EventType.PROJECT_ITEM_DONE,
+                            project_id=project_id,
+                            change_id=change_name,
+                            payload={"project_item_id": project_item_id or issue_num, "status": "Done"},
+                            timestamp=utc_now(),
+                        )
+                    )
+                else:
+                    self.saga_engine.record_action_result(op_key, status=ExternalActionStatus.FAILED, error_message=update_res.error_message)
+            except Exception as exc:
+                logger.warning("Failed to update GitHub Project item: %s", exc)
+                self.saga_engine.record_action_result(op_key, status=ExternalActionStatus.FAILED, error_message=str(exc))
 
-        # 7. OpenSpec Spec Sync + verification
+        if project_item_updated or not project_item_required:
+            self.saga_engine.advance_phase(saga, "PROJECT_ITEM_DONE", evidence_references={"project_item_updated": project_item_updated})
+
+        # 7. OpenSpec Spec Sync + verification with action reservation
         synced_specs: list[str] = []
         sync_verified = False
+        op_key = f"openspec_sync:{project_id}:{change_name}"
+        self.saga_engine.reserve_action(
+            action_key=op_key,
+            action_type=ExternalActionType.OPENSPEC_SYNC,
+            target_identity=change_name,
+            request_fingerprint=run.run_id,
+            saga_id=saga.id,
+        )
         try:
             sync_res = self.openspec_sync.sync_change_specs(openspec_path, change_name, project_id=project_id)
             verify_sync_res = self.openspec_sync.verify_sync(openspec_path, change_name, sync_res)
@@ -408,6 +677,7 @@ class PostMergeReconciliationService:
             )
             if sync_verified:
                 synced_specs = sync_res.data or []
+                self.saga_engine.record_action_result(op_key, status=ExternalActionStatus.COMPLETED)
                 self.uow.events.save(
                     Event(
                         event_type=EventType.OPEN_SPEC_SYNCED,
@@ -426,16 +696,30 @@ class PostMergeReconciliationService:
                         timestamp=utc_now(),
                     )
                 )
+            else:
+                self.saga_engine.record_action_result(op_key, status=ExternalActionStatus.FAILED, error_message="Sync verification failed.")
         except Exception as exc:
             logger.warning("OpenSpec spec sync failed for '%s': %s", change_name, exc)
+            self.saga_engine.record_action_result(op_key, status=ExternalActionStatus.FAILED, error_message=str(exc))
 
-        # 8. OpenSpec Archive + verification (only after sync is verified)
+        if sync_verified:
+            self.saga_engine.advance_phase(saga, "SPEC_SYNCED")
+            self.saga_engine.advance_phase(saga, "SYNC_VERIFIED", evidence_references={"sync_verified": sync_verified})
+
+        # 8. OpenSpec Archive + verification with action reservation (only after sync is verified)
         archived_path: Path | None = None
         archive_verified = False
         if sync_verified:
+            op_key = f"openspec_archive:{project_id}:{change_name}"
+            self.saga_engine.reserve_action(
+                action_key=op_key,
+                action_type=ExternalActionType.OPENSPEC_ARCHIVE,
+                target_identity=change_name,
+                request_fingerprint=run.run_id,
+                saga_id=saga.id,
+            )
             try:
                 archive_res = self.openspec_sync.archive_change(openspec_path, change_name, project_id=project_id)
-
                 verify_arc_res = self.openspec_sync.verify_archive(
                     openspec_path, change_name, archive_res
                 )
@@ -445,6 +729,7 @@ class PostMergeReconciliationService:
                 )
                 if archive_verified:
                     archived_path = archive_res.data
+                    self.saga_engine.record_action_result(op_key, status=ExternalActionStatus.COMPLETED, remote_identifier=str(archived_path) if archived_path else None)
                     self.uow.events.save(
                         Event(
                             event_type=EventType.OPEN_SPEC_ARCHIVED,
@@ -463,13 +748,29 @@ class PostMergeReconciliationService:
                             timestamp=utc_now(),
                         )
                     )
+                else:
+                    self.saga_engine.record_action_result(op_key, status=ExternalActionStatus.FAILED, error_message="Archive verification failed.")
             except Exception as exc:
                 logger.warning("OpenSpec archive failed for '%s': %s", change_name, exc)
+                self.saga_engine.record_action_result(op_key, status=ExternalActionStatus.FAILED, error_message=str(exc))
 
-        # 9. Worktree Cleanup
+        if archive_verified:
+            self.saga_engine.advance_phase(saga, "SPEC_ARCHIVED")
+            self.saga_engine.advance_phase(saga, "ARCHIVE_VERIFIED", evidence_references={"archive_verified": archive_verified})
+
+        # 9. Worktree Cleanup with action reservation
+        op_key = f"worktree_clean:{project_id}:{change_name}"
+        self.saga_engine.reserve_action(
+            action_key=op_key,
+            action_type=ExternalActionType.WORKTREE_DELETE,
+            target_identity=change_name,
+            request_fingerprint=run.run_id,
+            saga_id=saga.id,
+        )
         wt_clean_res = self._clean_worktrees(job_id, project_id=project_id)
         worktree_cleaned = wt_clean_res.outcome == ExternalOutcome.SUCCESS
         if worktree_cleaned:
+            self.saga_engine.record_action_result(op_key, status=ExternalActionStatus.COMPLETED)
             self.uow.events.save(
                 Event(
                     event_type=EventType.WORKTREE_CLEANED,
@@ -479,8 +780,13 @@ class PostMergeReconciliationService:
                     timestamp=utc_now(),
                 )
             )
+        else:
+            self.saga_engine.record_action_result(op_key, status=ExternalActionStatus.FAILED, error_message=wt_clean_res.error_message)
 
-        # 10. Local and Remote Branch Cleanup
+        if worktree_cleaned:
+            self.saga_engine.advance_phase(saga, "WORKTREE_CLEANED", evidence_references={"worktree_cleaned": worktree_cleaned})
+
+        # 10. Local and Remote Branch Cleanup with action reservation
         local_branches = [
             f"minime/{change_name}-{job_id}" if job_id else None,
             f"minime/{change_name}",
@@ -510,6 +816,7 @@ class PostMergeReconciliationService:
                     timestamp=utc_now(),
                 )
             )
+            self.saga_engine.advance_phase(saga, "BRANCH_CLEANED", evidence_references={"branch_cleaned": branch_cleaned})
 
         # 11. Locks and Preview Cleanup
         locks_cleaned = True
@@ -522,11 +829,12 @@ class PostMergeReconciliationService:
                 timestamp=utc_now(),
             )
         )
+        self.saga_engine.advance_phase(saga, "LOCKS_RELEASED")
 
-        # 12. Single Explicit Terminal Gate
+        # 12. Check all unverified phases before terminal gate
         unverified_phases: list[str] = []
-        if not ancestry_ok:
-            unverified_phases.append("ancestry")
+        if not delivery_ok:
+            unverified_phases.append("delivery_ancestry")
         if issue_required and not issue_closed:
             unverified_phases.append("issue_closure")
         if project_item_required and not project_item_updated:
@@ -552,6 +860,7 @@ class PostMergeReconciliationService:
             run.is_active = True
             run.updated_at = utc_now()
             self.uow.orchestration_runs.save(run)
+            self.saga_engine.block_saga(saga, blocking_reason=reason)
             self.uow.commit()
             return PostMergeReconciliationResult(
                 success=False,
@@ -564,7 +873,7 @@ class PostMergeReconciliationService:
                 merged_at=merged_at,
                 merge_commit_sha=merge_commit_sha,
                 candidate_sha=cand_sha,
-                ancestry_verified=ancestry_ok,
+                ancestry_verified=delivery_ok,
                 issue_closed=issue_closed,
                 project_item_updated=project_item_updated,
                 openspec_synced=sync_verified,
@@ -574,8 +883,8 @@ class PostMergeReconciliationService:
                 locks_cleaned=locks_cleaned,
                 terminal_stage=OrchestrationStage.POST_MERGE_RECONCILING,
                 terminal_job_status=job.status if job else JobStatus.POST_MERGE_RECONCILING,
-                native_phases_completed=7 - len(unverified_phases),
-                total_phases=7,
+                native_phases_completed=13 - len(unverified_phases),
+                total_phases=13,
                 error_message=reason,
             )
 
@@ -591,7 +900,7 @@ class PostMergeReconciliationService:
             "merged_by": merged_by,
             "merged_at": merged_at,
             "merge_commit_sha": merge_commit_sha,
-            "ancestry_verified": ancestry_ok,
+            "ancestry_verified": delivery_ok,
         }
         self.uow.orchestration_runs.save(run)
 
@@ -601,7 +910,11 @@ class PostMergeReconciliationService:
 
         self._reconcile_change_and_backlog_item(project_id, change_name)
 
-        # 14. Persist Post-Merge Metric Facts
+        # 14. Mark CLOSURE DurableSaga as completed
+        self.saga_engine.advance_phase(saga, "FINAL_CLOSED")
+        self.saga_engine.complete_saga(saga)
+
+        # 15. Persist Post-Merge Metric Facts
         duration_ms = int((time.time() - start_time) * 1000)
         self.uow.metrics.save(
             MetricFact(
@@ -613,8 +926,8 @@ class PostMergeReconciliationService:
                 details={
                     "run_id": run.run_id,
                     "merged_by": merged_by,
-                    "ancestry_verified": ancestry_ok,
-                    "native_phases": 7,
+                    "ancestry_verified": delivery_ok,
+                    "native_phases": 13,
                 },
                 recorded_at=utc_now(),
             )
@@ -646,7 +959,7 @@ class PostMergeReconciliationService:
             merged_at=merged_at,
             merge_commit_sha=merge_commit_sha,
             candidate_sha=cand_sha,
-            ancestry_verified=ancestry_ok,
+            ancestry_verified=delivery_ok,
             issue_closed=issue_closed,
             project_item_updated=project_item_updated,
             openspec_synced=sync_verified,
@@ -657,8 +970,8 @@ class PostMergeReconciliationService:
             terminal_stage=OrchestrationStage.COMPLETED,
             terminal_job_status=JobStatus.COMPLETED,
             post_merge_duration_ms=duration_ms,
-            native_phases_completed=7,
-            total_phases=7,
+            native_phases_completed=13,
+            total_phases=13,
         )
 
     def _reconcile_change_and_backlog_item(self, project_id: str, change_name: str) -> None:

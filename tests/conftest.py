@@ -30,6 +30,8 @@ from minime.domain.enums import (
     RetrySafety,
     ReviewStatus,
     ReviewVerdict,
+    SagaStatus,
+    SagaType,
     WorktreeCreationState,
 )
 from minime.domain.exceptions import LifecycleBypassError
@@ -46,6 +48,7 @@ from minime.domain.interfaces import (
     CapacityWindowRepositoryInterface,
     ChangeRepositoryInterface,
     CheckResultRepositoryInterface,
+    DurableSagaRepositoryInterface,
     EventRepositoryInterface,
     EvidenceDiagnosticRepositoryInterface,
     GitOperationRepositoryInterface,
@@ -89,6 +92,7 @@ from minime.domain.models import (
     CapacityWindow,
     Change,
     CheckResult,
+    DurableSaga,
     Event,
     EvidenceDiagnostic,
     ExternalActionResult,
@@ -1388,6 +1392,8 @@ class InMemoryOrchestrationExternalActionRepository(OrchestrationExternalActionR
         self._store: dict[str, OrchestrationExternalAction] = {}
 
     def reserve(self, action: OrchestrationExternalAction) -> None:
+        if action.run_id is None and action.saga_id is None:
+            raise ValueError("OrchestrationExternalAction must have at least run_id or saga_id set.")
         for existing in self._store.values():
             if existing.action_key == action.action_key:
                 raise ValueError(f"Action key '{action.action_key}' already exists")
@@ -1401,6 +1407,11 @@ class InMemoryOrchestrationExternalActionRepository(OrchestrationExternalActionR
 
     def list_by_run(self, run_id: str) -> list[OrchestrationExternalAction]:
         actions = [a.model_copy(deep=True) for a in self._store.values() if a.run_id == run_id]
+        actions.sort(key=lambda a: a.created_at)
+        return actions
+
+    def list_by_saga(self, saga_id: str) -> list[OrchestrationExternalAction]:
+        actions = [a.model_copy(deep=True) for a in self._store.values() if a.saga_id == saga_id]
         actions.sort(key=lambda a: a.created_at)
         return actions
 
@@ -1977,8 +1988,73 @@ class InMemoryOrchestrationWorktreeOwnershipRepository:
         self._store.pop(worktree_id, None)
 
 
+class InMemoryDurableSagaRepository(DurableSagaRepositoryInterface):
+    def __init__(self):
+        self._store: dict[str, DurableSaga] = {}
+
+    def save(self, saga: DurableSaga) -> None:
+        self._store[saga.id] = saga.model_copy(deep=True)
+
+    def get_by_id(self, saga_id: str) -> DurableSaga | None:
+        s = self._store.get(saga_id)
+        return s.model_copy(deep=True) if s else None
+
+    def get_for_update(self, saga_id: str) -> DurableSaga | None:
+        return self.get_by_id(saga_id)
+
+    def get_active_saga(self, project_id: str, work_item_key: str, saga_type: SagaType | str) -> DurableSaga | None:
+        st_val = saga_type.value if isinstance(saga_type, SagaType) else saga_type
+        for s in self._store.values():
+            if s.project_id == project_id and s.work_item_key == work_item_key and s.saga_type.value == st_val:
+                if s.status.value in {"IN_PROGRESS", "BLOCKED"} or s.status in {SagaStatus.IN_PROGRESS, SagaStatus.BLOCKED}:
+                    return s.model_copy(deep=True)
+        return None
+
+    def list_by_project(self, project_id: str, saga_type: SagaType | str | None = None, status: SagaStatus | str | None = None) -> list[DurableSaga]:
+        res = [s for s in self._store.values() if s.project_id == project_id]
+        if saga_type:
+            st_val = saga_type.value if isinstance(saga_type, SagaType) else saga_type
+            res = [s for s in res if s.saga_type.value == st_val]
+        if status:
+            stat_val = status.value if isinstance(status, SagaStatus) else status
+            res = [s for s in res if s.status.value == stat_val]
+        return [s.model_copy(deep=True) for s in res]
+
+    def list_active(self, saga_type: SagaType | str | None = None) -> list[DurableSaga]:
+        active_statuses = {"IN_PROGRESS", "BLOCKED"}
+        res = [s for s in self._store.values() if s.status.value in active_statuses]
+        if saga_type:
+            st_val = saga_type.value if isinstance(saga_type, SagaType) else saga_type
+            res = [s for s in res if s.saga_type.value == st_val]
+        return [s.model_copy(deep=True) for s in res]
+
+    def update_phase(self, saga_id: str, current_phase: str, evidence_references: dict | None = None, last_observed_outcome: Any | None = None) -> DurableSaga:
+        saga = self._store[saga_id]
+        refs = dict(saga.evidence_references)
+        if evidence_references:
+            refs.update(evidence_references)
+        saga.current_phase = current_phase
+        saga.evidence_references = refs
+        if last_observed_outcome is not None:
+            saga.last_observed_outcome = last_observed_outcome
+        saga.updated_at = utc_now()
+        return saga.model_copy(deep=True)
+
+    def update_status(self, saga_id: str, status: SagaStatus | str, blocking_reason: str | None = None, last_observed_outcome: Any | None = None) -> DurableSaga:
+        saga = self._store[saga_id]
+        st_enum = SagaStatus(status) if isinstance(status, str) else status
+        saga.status = st_enum
+        if blocking_reason is not None:
+            saga.blocking_reason = blocking_reason
+        if last_observed_outcome is not None:
+            saga.last_observed_outcome = last_observed_outcome
+        saga.updated_at = utc_now()
+        return saga.model_copy(deep=True)
+
+
 class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
     def __init__(self):
+        self.durable_sagas = InMemoryDurableSagaRepository()
         self.projects = InMemoryProjectRepository()
         self.changes = InMemoryChangeRepository()
         self.bindings = InMemoryProjectBindingRepository()

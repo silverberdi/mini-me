@@ -10,11 +10,15 @@ from minime.adapters.openspec import OpenSpecAdapter
 from minime.domain.enums import (
     ChangeStatus,
     EventType,
+    ExternalActionStatus,
+    ExternalActionType,
     ExternalOutcome,
     OrchestrationStage,
     OrchestrationStopOutcome,
     QueuePriority,
     ReadinessState,
+    SagaStatus,
+    SagaType,
     WorkItemStatus,
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
@@ -35,8 +39,31 @@ from minime.logging import get_logger, set_correlation_context
 from minime.services.lifecycle_transition_authority import LifecycleTransitionAuthority
 from minime.services.openspec_generator import OpenSpecGenerator, slugify
 from minime.services.readiness_service import ReadinessService
+from minime.services.saga_engine import SagaEngine
 
 logger = get_logger("services.intake")
+
+INTAKE_PHASES = [
+    "INTAKE_CREATED",
+    "CONTEXT_CHECKED",
+    "OPENSPEC_AUTHORED",
+    "ISSUE_BOUND",
+    "PROJECT_ITEM_BOUND",
+    "READINESS_EVALUATED",
+    "READY",
+]
+
+
+def _has_passed_intake_phase(current_phase: str, target_phase: str) -> bool:
+    try:
+        curr_idx = INTAKE_PHASES.index(current_phase)
+    except ValueError:
+        curr_idx = 0
+    try:
+        targ_idx = INTAKE_PHASES.index(target_phase)
+    except ValueError:
+        targ_idx = 0
+    return curr_idx >= targ_idx
 
 
 class IntakeService:
@@ -50,6 +77,7 @@ class IntakeService:
         openspec_adapter: OpenSpecAdapter | None = None,
         readiness_service: ReadinessService | None = None,
         openspec_generator: OpenSpecGenerator | None = None,
+        saga_engine: SagaEngine | None = None,
     ):
         self.uow = uow
         self.project_root = Path(project_root).resolve()
@@ -64,6 +92,7 @@ class IntakeService:
             project_root=self.project_root,
             uow=self.uow,
         )
+        self.saga_engine = saga_engine or SagaEngine(self.uow)
 
     def create_work_item(
         self,
@@ -283,6 +312,41 @@ class IntakeService:
             raise ValueError(f"Work item '{item_key}' not found in project '{project_id}'.")
 
         now = utc_now()
+        change_name = item.openspec_change_name or slugify(item.item_key)
+        change_record = self.uow.changes.get_by_name(project_id, change_name)
+
+        # Terminal Intake Protection (Root Cause 1 / Defect 1)
+        is_terminal = (
+            item.status in (WorkItemStatus.COMPLETED, WorkItemStatus.CANCELLED)
+            or (change_record is not None and change_record.status in (ChangeStatus.DONE, ChangeStatus.CANCELLED))
+        )
+        if is_terminal:
+            logger.info("Work item '%s' / change '%s' is in terminal state. Intake preparation denied.", item_key, change_name)
+            return WorkItemPrepareResult(
+                item=item,
+                openspec_change_name=change_name,
+                readiness_state=item.readiness_state,
+                unmet_readiness_reasons=item.unmet_readiness_reasons,
+            )
+
+        # Start or retrieve active INTAKE saga
+        saga = self.saga_engine.start_saga(
+            saga_type=SagaType.INTAKE,
+            project_id=project_id,
+            work_item_key=item_key,
+            change_name=change_name,
+            initial_phase="INTAKE_CREATED",
+        )
+
+        if saga.status == SagaStatus.COMPLETED or saga.current_phase == "READY":
+            logger.info("Saga '%s' is already COMPLETED at phase '%s'. Returning existing item.", saga.id, saga.current_phase)
+            return WorkItemPrepareResult(
+                item=item,
+                openspec_change_name=change_name,
+                readiness_state=item.readiness_state,
+                unmet_readiness_reasons=item.unmet_readiness_reasons,
+            )
+
         if item.status in (WorkItemStatus.BACKLOG, WorkItemStatus.CONTEXT_CHECK, WorkItemStatus.BLOCKED):
             authority = LifecycleTransitionAuthority(self.uow)
             item = authority.transition_backlog_item(
@@ -294,51 +358,64 @@ class IntakeService:
                 actor=operator_email,
             )
 
-        change_name = item.openspec_change_name or slugify(item.item_key)
+        if not _has_passed_intake_phase(saga.current_phase, "CONTEXT_CHECKED"):
+            self.saga_engine.advance_phase(saga, "CONTEXT_CHECKED")
 
-        # 1. Generate OpenSpec artifacts
-        generated = self.openspec_generator.generate_from_backlog_item(
-            item, project_name=project.display_name
-        )
-
-        # If incomplete / ambiguous -> set NEEDS_HUMAN
-        if not generated.is_complete:
-            updated_item = item.model_copy(
-                update={
-                    "readiness_state": ReadinessState.NOT_READY,
-                    "unmet_readiness_reasons": generated.missing_reasons,
-                    "human_questions": generated.human_questions,
-                    "updated_at": now,
-                }
+        # 1. OpenSpec Authored Phase
+        author_action_key = f"openspec_author:{project_id}:{change_name}"
+        if not _has_passed_intake_phase(saga.current_phase, "OPENSPEC_AUTHORED"):
+            generated = self.openspec_generator.generate_from_backlog_item(
+                item, project_name=project.display_name
             )
-            self.uow.backlog_items.save(updated_item)
-            if item.status != WorkItemStatus.NEEDS_HUMAN:
-                authority = LifecycleTransitionAuthority(self.uow)
-                updated_item = authority.transition_backlog_item(
-                    project_id=project_id,
-                    item_key=item_key,
-                    expected_from_state=item.status,
-                    to_state=WorkItemStatus.NEEDS_HUMAN,
-                    reason_code="prepare_incomplete",
-                    actor=operator_email,
+
+            if not generated.is_complete:
+                updated_item = item.model_copy(
+                    update={
+                        "readiness_state": ReadinessState.NOT_READY,
+                        "unmet_readiness_reasons": generated.missing_reasons,
+                        "human_questions": generated.human_questions,
+                        "updated_at": now,
+                    }
                 )
-            self.uow.commit()
+                self.uow.backlog_items.save(updated_item)
+                if item.status != WorkItemStatus.NEEDS_HUMAN:
+                    authority = LifecycleTransitionAuthority(self.uow)
+                    updated_item = authority.transition_backlog_item(
+                        project_id=project_id,
+                        item_key=item_key,
+                        expected_from_state=item.status,
+                        to_state=WorkItemStatus.NEEDS_HUMAN,
+                        reason_code="prepare_incomplete",
+                        actor=operator_email,
+                    )
+                self.saga_engine.block_saga(saga, blocking_reason="OpenSpec generation incomplete; human clarification required.")
+                self.uow.commit()
 
-            return WorkItemPrepareResult(
-                item=updated_item,
-                openspec_change_name=change_name,
-                readiness_state=ReadinessState.NOT_READY,
-                unmet_readiness_reasons=generated.missing_reasons,
-                human_questions=generated.human_questions,
-            )
+                return WorkItemPrepareResult(
+                    item=updated_item,
+                    openspec_change_name=change_name,
+                    readiness_state=ReadinessState.NOT_READY,
+                    unmet_readiness_reasons=generated.missing_reasons,
+                    human_questions=generated.human_questions,
+                )
 
-        # 2. Write OpenSpec files to disk
-        self.openspec_generator.write_change_to_disk(
-            project.openspec_path, generated, overwrite=True, project_id=project_id, uow=self.uow
-        )
+            existing_author_action = self.uow.orchestration_external_actions.get_by_action_key(author_action_key)
+            if not existing_author_action or existing_author_action.status != ExternalActionStatus.COMPLETED:
+                self.saga_engine.reserve_action(
+                    action_key=author_action_key,
+                    action_type=ExternalActionType.OPENSPEC_SYNC,
+                    target_identity=change_name,
+                    request_fingerprint=item_key,
+                    saga_id=saga.id,
+                )
+                self.openspec_generator.write_change_to_disk(
+                    project.openspec_path, generated, overwrite=True, project_id=project_id, uow=self.uow
+                )
+                self.saga_engine.record_action_result(author_action_key, status=ExternalActionStatus.COMPLETED)
 
-        # Save/update Change entity in DB
-        change_record = self.uow.changes.get_by_name(project_id, change_name)
+            self.saga_engine.advance_phase(saga, "OPENSPEC_AUTHORED")
+
+        # Save/update Change entity in DB if missing
         if not change_record:
             change_record = Change(
                 project_id=project_id,
@@ -353,50 +430,171 @@ class IntakeService:
             )
             self.uow.changes.save(change_record)
 
-        # 3. Create or sync GitHub Issue
+        # 3. Create or sync GitHub Issue with observe-before-repeat reconciliation & operation_key marker matching
         issue_number = item.github_issue_number
         issue_url = item.github_issue_url
-        if not issue_number:
-            try:
-                op_key = f"issue_create:{project.project_id}:{change_name}"
-                issue_res = self.github_adapter.create_issue(
+        op_key = f"issue_create:{project.project_id}:{change_name}"
+
+        if not _has_passed_intake_phase(saga.current_phase, "ISSUE_BOUND"):
+            existing_issue_action = self.uow.orchestration_external_actions.get_by_action_key(op_key)
+            if existing_issue_action and existing_issue_action.status == ExternalActionStatus.COMPLETED and existing_issue_action.remote_identifier:
+                issue_number = int(existing_issue_action.remote_identifier)
+                issue_url = f"https://github.com/{project.repository}/issues/{issue_number}"
+            else:
+                from minime.services.reconciliation_authority import ReconciliationAuthority
+                rec_auth = ReconciliationAuthority(self.uow)
+                rec_res = rec_auth.reconcile_issue_creation(
+                    github_adapter=self.github_adapter,
                     repository=project.repository,
-                    title=f"[{change_name}] {item.title}",
-                    body=f"## Work Item: {item.title}\n\n{item.description}\n\n**OpenSpec Change:** `{change_name}`",
-                    labels=[f"priority:{item.priority.value.lower()}"],
                     operation_key=op_key,
+                    title=item.title,
                 )
-                if issue_res.outcome == ExternalOutcome.SUCCESS and issue_res.data:
-                    issue_number = issue_res.data.get("number")
-                    issue_url = issue_res.data.get("html_url")
-            except Exception as exc:
-                logger.warning(
-                    "Could not create remote GitHub issue for '%s' in '%s': %s",
-                    change_name,
-                    project.repository,
-                    exc,
+                if existing_issue_action:
+                    retry_auth = (rec_res.outcome != ExternalOutcome.SUCCESS)
+                    action = rec_auth.reconcile_observe_before_repeat(op_key, rec_res, original_mutation_retry_authorized=retry_auth)
+                else:
+                    action = None
+
+                if rec_res.outcome == ExternalOutcome.SUCCESS and rec_res.data:
+                    issue_number = rec_res.data.get("number")
+                    issue_url = rec_res.data.get("html_url")
+                    self.saga_engine.reserve_action(
+                        action_key=op_key,
+                        action_type=ExternalActionType.ISSUE_CREATE,
+                        target_identity=change_name,
+                        request_fingerprint=item_key,
+                        saga_id=saga.id,
+                    )
+                    self.saga_engine.record_action_result(
+                        op_key, status=ExternalActionStatus.COMPLETED, remote_identifier=str(issue_number)
+                    )
+                elif action and action.status in (ExternalActionStatus.AMBIGUOUS, ExternalActionStatus.UNKNOWN):
+                    self.saga_engine.block_saga(saga, blocking_reason=f"GitHub Issue creation action is in ambiguous status ({action.status.value}). Safe retry unproven.")
+                    self.uow.commit()
+                    return WorkItemPrepareResult(
+                        item=item,
+                        openspec_change_name=change_name,
+                        readiness_state=ReadinessState.NOT_READY,
+                        unmet_readiness_reasons=[f"GitHub Issue creation action is in status {action.status.value}."],
+                    )
+                else:
+                    self.saga_engine.reserve_action(
+                        action_key=op_key,
+                        action_type=ExternalActionType.ISSUE_CREATE,
+                        target_identity=change_name,
+                        request_fingerprint=item_key,
+                        saga_id=saga.id,
+                    )
+                    try:
+                        issue_res = self.github_adapter.create_issue(
+                            repository=project.repository,
+                            title=f"[{change_name}] {item.title}",
+                            body=f"## Work Item: {item.title}\n\n{item.description}\n\n**OpenSpec Change:** `{change_name}`\n\n<!-- minime-opkey: {op_key} -->",
+                            labels=[f"priority:{item.priority.value.lower()}"],
+                            operation_key=op_key,
+                        )
+                        if issue_res.outcome == ExternalOutcome.SUCCESS and issue_res.data:
+                            issue_number = issue_res.data.get("number")
+                            issue_url = issue_res.data.get("html_url")
+                            self.saga_engine.record_action_result(
+                                op_key, status=ExternalActionStatus.COMPLETED, remote_identifier=str(issue_number)
+                            )
+                        else:
+                            st = ExternalActionStatus.FAILED if issue_res.outcome == ExternalOutcome.FAILURE else ExternalActionStatus.AMBIGUOUS
+                            self.saga_engine.record_action_result(
+                                op_key, status=st, error_message=issue_res.error_message
+                            )
+                    except Exception as exc:
+                        logger.warning("Could not create remote GitHub issue for '%s': %s", change_name, exc)
+                        self.saga_engine.record_action_result(op_key, status=ExternalActionStatus.FAILED, error_message=str(exc))
+
+            if not issue_number:
+                self.saga_engine.block_saga(saga, blocking_reason=f"GitHub Issue creation for '{change_name}' failed or unverified.")
+                self.uow.commit()
+                return WorkItemPrepareResult(
+                    item=item,
+                    openspec_change_name=change_name,
+                    readiness_state=ReadinessState.NOT_READY,
+                    unmet_readiness_reasons=["GitHub Issue creation unverified."],
                 )
 
-        # 4. Sync GitHub Project v2 item if configured
+            self.saga_engine.advance_phase(saga, "ISSUE_BOUND", evidence_references={"issue_number": issue_number, "issue_url": issue_url})
+
+        # 4. Sync GitHub Project v2 item with observe-before-repeat reconciliation
         project_item_id = item.github_project_item_id
-        if not project_item_id and project.github_project_number and issue_url:
-            try:
+        if not _has_passed_intake_phase(saga.current_phase, "PROJECT_ITEM_BOUND"):
+            if not project_item_id and project.github_project_number and issue_url:
                 op_key = f"project_item_add:{project.project_id}:{change_name}"
-                project_res = self.github_adapter.add_issue_to_project(
-                    project_number=project.github_project_number,
-                    owner=project.github_project_owner or "silverberdi",
-                    issue_url=issue_url,
-                    operation_key=op_key,
-                )
-                if project_res.outcome == ExternalOutcome.SUCCESS and project_res.data:
-                    project_item_id = project_res.data
-            except Exception as exc:
-                logger.warning(
-                    "Could not sync issue '%s' to GitHub Project %s: %s",
-                    issue_url,
-                    project.github_project_number,
-                    exc,
-                )
+                existing_proj_action = self.uow.orchestration_external_actions.get_by_action_key(op_key)
+                if existing_proj_action and existing_proj_action.status == ExternalActionStatus.COMPLETED and existing_proj_action.remote_identifier:
+                    project_item_id = existing_proj_action.remote_identifier
+                else:
+                    from minime.services.reconciliation_authority import ReconciliationAuthority
+                    rec_auth = ReconciliationAuthority(self.uow)
+                    rec_res = rec_auth.reconcile_project_item_add(
+                        github_adapter=self.github_adapter,
+                        project_number=project.github_project_number,
+                        owner=project.github_project_owner or "silverberdi",
+                        issue_url=issue_url,
+                        operation_key=op_key,
+                    )
+                    if existing_proj_action:
+                        retry_auth = (rec_res.outcome != ExternalOutcome.SUCCESS)
+                        action = rec_auth.reconcile_observe_before_repeat(op_key, rec_res, original_mutation_retry_authorized=retry_auth)
+                    else:
+                        action = None
+
+                    if rec_res.outcome == ExternalOutcome.SUCCESS and rec_res.data:
+                        project_item_id = str(rec_res.data)
+                        self.saga_engine.reserve_action(
+                            action_key=op_key,
+                            action_type=ExternalActionType.PROJECT_ITEM_ADD,
+                            target_identity=change_name,
+                            request_fingerprint=item_key,
+                            saga_id=saga.id,
+                        )
+                        self.saga_engine.record_action_result(
+                            op_key, status=ExternalActionStatus.COMPLETED, remote_identifier=project_item_id
+                        )
+                    elif action and action.status in (ExternalActionStatus.AMBIGUOUS, ExternalActionStatus.UNKNOWN):
+                        self.saga_engine.block_saga(saga, blocking_reason=f"Project item action is in ambiguous status ({action.status.value}). Safe retry unproven.")
+                        self.uow.commit()
+                        return WorkItemPrepareResult(
+                            item=item,
+                            openspec_change_name=change_name,
+                            readiness_state=ReadinessState.NOT_READY,
+                            unmet_readiness_reasons=[f"Project item action is in status {action.status.value}."],
+                        )
+                    else:
+                        self.saga_engine.reserve_action(
+                            action_key=op_key,
+                            action_type=ExternalActionType.PROJECT_ITEM_ADD,
+                            target_identity=change_name,
+                            request_fingerprint=item_key,
+                            saga_id=saga.id,
+                        )
+                        try:
+                            project_res = self.github_adapter.add_issue_to_project(
+                                project_number=project.github_project_number,
+                                owner=project.github_project_owner or "silverberdi",
+                                issue_url=issue_url,
+                                operation_key=op_key,
+                            )
+                            if project_res.outcome == ExternalOutcome.SUCCESS and project_res.data:
+                                project_item_id = str(project_res.data)
+                                self.saga_engine.record_action_result(
+                                    op_key, status=ExternalActionStatus.COMPLETED, remote_identifier=project_item_id
+                                )
+                            else:
+                                st = ExternalActionStatus.FAILED if project_res.outcome == ExternalOutcome.FAILURE else ExternalActionStatus.AMBIGUOUS
+                                self.saga_engine.record_action_result(
+                                    op_key, status=st, error_message=project_res.error_message
+                                )
+                        except Exception as exc:
+                            logger.warning("Could not sync issue '%s' to GitHub Project: %s", issue_url, exc)
+                            self.saga_engine.record_action_result(op_key, status=ExternalActionStatus.FAILED, error_message=str(exc))
+
+            self.saga_engine.advance_phase(saga, "PROJECT_ITEM_BOUND", evidence_references={"github_project_item_id": project_item_id})
 
         # 5. Create or sync durable ProjectBinding
         binding = self.uow.bindings.get_by_project_and_change(project_id, change_name)
@@ -430,6 +628,12 @@ class IntakeService:
         final_status = WorkItemStatus.READY if readiness_eval.is_ready else WorkItemStatus.PREPARING
         final_readiness = readiness_eval.status
 
+        self.saga_engine.advance_phase(
+            saga,
+            "READINESS_EVALUATED",
+            evidence_references={"is_ready": readiness_eval.is_ready, "status": final_readiness.value},
+        )
+
         # 7. Update BacklogItem state
         updated_item = item.model_copy(
             update={
@@ -454,6 +658,23 @@ class IntakeService:
                 reason_code="prepare_complete",
                 actor=operator_email,
             )
+
+        if readiness_eval.is_ready:
+            authority = LifecycleTransitionAuthority(self.uow)
+            c_rec = self.uow.changes.get_by_name(project_id, change_name)
+            if c_rec and c_rec.status != ChangeStatus.READY:
+                authority.transition_change(
+                    project_id=project_id,
+                    name=change_name,
+                    expected_from_state=c_rec.status,
+                    to_state=ChangeStatus.READY,
+                    reason_code="dor_ready",
+                    actor=operator_email,
+                )
+            self.saga_engine.advance_phase(saga, "READY")
+            self.saga_engine.complete_saga(saga)
+        else:
+            self.saga_engine.block_saga(saga, blocking_reason="; ".join(readiness_eval.unmet_reasons))
 
         # 8. Update WorkQueueItem for scheduler discovery
         queue_item = self.uow.work_queue.get_by_project_and_change(project_id, change_name)

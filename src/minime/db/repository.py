@@ -25,6 +25,7 @@ from minime.db.models import (
     CapacityWindowModel,
     ChangeModel,
     CheckResultModel,
+    DurableSagaModel,
     EventModel,
     EvidenceDiagnosticModel,
     GitOperationModel,
@@ -75,6 +76,7 @@ from minime.domain.enums import (
     ExecutionOutcome,
     ExternalActionStatus,
     ExternalActionType,
+    ExternalOutcome,
     FindingSeverity,
     GitOperationStatus,
     HumanGate,
@@ -97,6 +99,8 @@ from minime.domain.enums import (
     RemediationStatus,
     ReviewStatus,
     ReviewVerdict,
+    SagaStatus,
+    SagaType,
     TaskClass,
     ValidationVerdict,
     WorkItemSource,
@@ -119,6 +123,7 @@ from minime.domain.interfaces import (
     CapacityWindowRepositoryInterface,
     ChangeRepositoryInterface,
     CheckResultRepositoryInterface,
+    DurableSagaRepositoryInterface,
     EventRepositoryInterface,
     EvidenceDiagnosticRepositoryInterface,
     GitOperationRepositoryInterface,
@@ -167,6 +172,7 @@ from minime.domain.models import (
     CapacityWindow,
     Change,
     CheckResult,
+    DurableSaga,
     Event,
     EvidenceDiagnostic,
     GitOperation,
@@ -825,12 +831,35 @@ def candidate_remediation_model_to_domain(model: CandidateRemediationModel) -> C
     )
 
 
+def durable_saga_model_to_domain(model: DurableSagaModel) -> DurableSaga:
+    return DurableSaga(
+        id=model.id,
+        saga_type=SagaType(model.saga_type),
+        project_id=model.project_id,
+        work_item_key=model.work_item_key,
+        change_name=model.change_name,
+        run_id=model.run_id,
+        job_id=model.job_id,
+        generation=model.generation,
+        current_phase=model.current_phase,
+        status=SagaStatus(model.status),
+        last_observed_outcome=ExternalOutcome(model.last_observed_outcome)
+        if model.last_observed_outcome
+        else None,
+        blocking_reason=model.blocking_reason,
+        evidence_references=model.evidence_references or {},
+        created_at=model.created_at,
+        updated_at=model.updated_at,
+    )
+
+
 def orchestration_external_action_model_to_domain(
     model: OrchestrationExternalActionModel,
 ) -> OrchestrationExternalAction:
     return OrchestrationExternalAction(
         action_id=model.id,
         run_id=model.run_id,
+        saga_id=model.saga_id,
         action_key=model.action_key,
         action_type=ExternalActionType(model.action_type),
         target_identity=model.target_identity,
@@ -2880,17 +2909,172 @@ class PostgresCandidateRemediationRepository:
         return [candidate_remediation_model_to_domain(m) for m in self.session.scalars(stmt).all()]
 
 
+class PostgresDurableSagaRepository(DurableSagaRepositoryInterface):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def save(self, saga: DurableSaga) -> None:
+        existing = self.session.get(DurableSagaModel, saga.id)
+        if existing:
+            existing.saga_type = saga.saga_type.value if isinstance(saga.saga_type, SagaType) else str(saga.saga_type)
+            existing.project_id = saga.project_id
+            existing.work_item_key = saga.work_item_key
+            existing.change_name = saga.change_name
+            existing.run_id = saga.run_id
+            existing.job_id = saga.job_id
+            existing.generation = saga.generation
+            existing.current_phase = saga.current_phase
+            existing.status = saga.status.value if isinstance(saga.status, SagaStatus) else str(saga.status)
+            existing.last_observed_outcome = (
+                saga.last_observed_outcome.value
+                if isinstance(saga.last_observed_outcome, ExternalOutcome)
+                else saga.last_observed_outcome
+            )
+            existing.blocking_reason = saga.blocking_reason
+            existing.evidence_references = saga.evidence_references
+            existing.updated_at = utc_now()
+        else:
+            self.session.add(
+                DurableSagaModel(
+                    id=saga.id,
+                    saga_type=saga.saga_type.value if isinstance(saga.saga_type, SagaType) else str(saga.saga_type),
+                    project_id=saga.project_id,
+                    work_item_key=saga.work_item_key,
+                    change_name=saga.change_name,
+                    run_id=saga.run_id,
+                    job_id=saga.job_id,
+                    generation=saga.generation,
+                    current_phase=saga.current_phase,
+                    status=saga.status.value if isinstance(saga.status, SagaStatus) else str(saga.status),
+                    last_observed_outcome=(
+                        saga.last_observed_outcome.value
+                        if isinstance(saga.last_observed_outcome, ExternalOutcome)
+                        else saga.last_observed_outcome
+                    ),
+                    blocking_reason=saga.blocking_reason,
+                    evidence_references=saga.evidence_references,
+                    created_at=saga.created_at,
+                    updated_at=saga.updated_at,
+                )
+            )
+
+    def get_by_id(self, saga_id: str) -> DurableSaga | None:
+        model = self.session.get(DurableSagaModel, saga_id)
+        return durable_saga_model_to_domain(model) if model else None
+
+    def get_for_update(self, saga_id: str) -> DurableSaga | None:
+        stmt = (
+            select(DurableSagaModel)
+            .where(DurableSagaModel.id == saga_id)
+            .with_for_update()
+        )
+        model = self.session.scalars(stmt).first()
+        return durable_saga_model_to_domain(model) if model else None
+
+    def get_active_saga(
+        self,
+        project_id: str,
+        work_item_key: str,
+        saga_type: SagaType | str,
+    ) -> DurableSaga | None:
+        type_str = saga_type.value if isinstance(saga_type, SagaType) else str(saga_type)
+        stmt = select(DurableSagaModel).where(
+            DurableSagaModel.project_id == project_id,
+            DurableSagaModel.work_item_key == work_item_key,
+            DurableSagaModel.saga_type == type_str,
+            DurableSagaModel.status.in_([SagaStatus.IN_PROGRESS.value, SagaStatus.BLOCKED.value]),
+        )
+        model = self.session.scalars(stmt).first()
+        return durable_saga_model_to_domain(model) if model else None
+
+    def list_by_project(
+        self,
+        project_id: str,
+        saga_type: SagaType | str | None = None,
+        status: SagaStatus | str | None = None,
+    ) -> list[DurableSaga]:
+        stmt = select(DurableSagaModel).where(DurableSagaModel.project_id == project_id)
+        if saga_type:
+            type_str = saga_type.value if isinstance(saga_type, SagaType) else str(saga_type)
+            stmt = stmt.where(DurableSagaModel.saga_type == type_str)
+        if status:
+            status_str = status.value if isinstance(status, SagaStatus) else str(status)
+            stmt = stmt.where(DurableSagaModel.status == status_str)
+        stmt = stmt.order_by(DurableSagaModel.created_at.desc())
+        return [durable_saga_model_to_domain(m) for m in self.session.scalars(stmt).all()]
+
+    def list_active(self, saga_type: SagaType | str | None = None) -> list[DurableSaga]:
+        stmt = select(DurableSagaModel).where(
+            DurableSagaModel.status.in_([SagaStatus.IN_PROGRESS.value, SagaStatus.BLOCKED.value])
+        )
+        if saga_type:
+            type_str = saga_type.value if isinstance(saga_type, SagaType) else str(saga_type)
+            stmt = stmt.where(DurableSagaModel.saga_type == type_str)
+        stmt = stmt.order_by(DurableSagaModel.created_at.asc())
+        return [durable_saga_model_to_domain(m) for m in self.session.scalars(stmt).all()]
+
+    def update_phase(
+        self,
+        saga_id: str,
+        current_phase: str,
+        evidence_references: dict[str, Any] | None = None,
+        last_observed_outcome: ExternalOutcome | str | None = None,
+    ) -> DurableSaga:
+        model = self.session.get(DurableSagaModel, saga_id)
+        if not model:
+            raise ValueError(f"Durable saga '{saga_id}' not found")
+        model.current_phase = current_phase
+        if evidence_references is not None:
+            updated_refs = dict(model.evidence_references or {})
+            updated_refs.update(evidence_references)
+            model.evidence_references = updated_refs
+        if last_observed_outcome is not None:
+            model.last_observed_outcome = (
+                last_observed_outcome.value
+                if isinstance(last_observed_outcome, ExternalOutcome)
+                else str(last_observed_outcome)
+            )
+        model.updated_at = utc_now()
+        return durable_saga_model_to_domain(model)
+
+    def update_status(
+        self,
+        saga_id: str,
+        status: SagaStatus | str,
+        blocking_reason: str | None = None,
+        last_observed_outcome: ExternalOutcome | str | None = None,
+    ) -> DurableSaga:
+        model = self.session.get(DurableSagaModel, saga_id)
+        if not model:
+            raise ValueError(f"Durable saga '{saga_id}' not found")
+        status_str = status.value if isinstance(status, SagaStatus) else str(status)
+        model.status = status_str
+        if blocking_reason is not None:
+            model.blocking_reason = blocking_reason
+        if last_observed_outcome is not None:
+            model.last_observed_outcome = (
+                last_observed_outcome.value
+                if isinstance(last_observed_outcome, ExternalOutcome)
+                else str(last_observed_outcome)
+            )
+        model.updated_at = utc_now()
+        return durable_saga_model_to_domain(model)
+
+
 class PostgresOrchestrationExternalActionRepository(OrchestrationExternalActionRepositoryInterface):
     def __init__(self, session: Session):
         self.session = session
 
     def reserve(self, action: OrchestrationExternalAction) -> None:
+        if action.run_id is None and action.saga_id is None:
+            raise ValueError("OrchestrationExternalAction must have at least run_id or saga_id set.")
         existing = self.session.get(OrchestrationExternalActionModel, action.action_id)
         if not existing:
             self.session.add(
                 OrchestrationExternalActionModel(
                     id=action.action_id,
                     run_id=action.run_id,
+                    saga_id=action.saga_id,
                     action_key=action.action_key,
                     action_type=action.action_type.value,
                     target_identity=action.target_identity,
@@ -2919,6 +3103,17 @@ class PostgresOrchestrationExternalActionRepository(OrchestrationExternalActionR
         stmt = (
             select(OrchestrationExternalActionModel)
             .where(OrchestrationExternalActionModel.run_id == run_id)
+            .order_by(OrchestrationExternalActionModel.created_at.asc())
+        )
+        return [
+            orchestration_external_action_model_to_domain(m)
+            for m in self.session.scalars(stmt).all()
+        ]
+
+    def list_by_saga(self, saga_id: str) -> list[OrchestrationExternalAction]:
+        stmt = (
+            select(OrchestrationExternalActionModel)
+            .where(OrchestrationExternalActionModel.saga_id == saga_id)
             .order_by(OrchestrationExternalActionModel.created_at.asc())
         )
         return [
@@ -4461,6 +4656,7 @@ class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.orchestration_worktree_ownerships = PostgresOrchestrationWorktreeOwnershipRepository(
             session
         )
+        self.durable_sagas = PostgresDurableSagaRepository(session)
 
     def commit(self) -> None:
         self.session.commit()

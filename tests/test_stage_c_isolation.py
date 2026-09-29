@@ -173,6 +173,12 @@ class MockOrchestrationRunRepo:
 
 class MockUOW:
     def __init__(self):
+        from tests.conftest import (
+            InMemoryDurableSagaRepository,
+            InMemoryOrchestrationExternalActionRepository,
+        )
+        self.durable_sagas = InMemoryDurableSagaRepository()
+        self.orchestration_external_actions = InMemoryOrchestrationExternalActionRepository()
         self.project_managed_repository_bindings = MockBindingRepo()
         self.orchestration_worktree_ownerships = MockWorktreeOwnershipRepo()
         self.projects = MockProjectRepo()
