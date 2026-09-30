@@ -25,7 +25,7 @@
 
 ## Group 5: Budget & Provider Concurrency Preservation
 - [ ] 5.1 Audit `OpenRouterBudgetPolicyModel` `FOR UPDATE` row lock in `BudgetService.reserve_budget()` to ensure row lock is preserved without internal `uow.commit()` (Surface F11).
-- [ ] 5.2 Implement atomic row locking (`FOR UPDATE`) on `BudgetReservationModel` during `settle()` and `release()` operations in `BudgetService` to prevent balance skew under concurrent calls (Surface F12).
+- [ ] 5.2 Implement atomic row locking (`FOR UPDATE`) on `BudgetReservationModel` during `BudgetService.settle_reservation()` and `BudgetService.release_reservation()` to prevent balance skew under concurrent calls (Surface F12).
 - [ ] 5.3 Audit `ProviderHealthModel` `FOR UPDATE` row lock in `ProviderHealthService._try_reserve_expensive_probe()` to preserve single probe per window and internal commit before dispatch (Surface F13).
 
 ## Group 6: Candidate, Job & Stage Concurrency
