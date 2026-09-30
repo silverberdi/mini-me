@@ -138,8 +138,9 @@ def test_t08_budget_contention_serialization(pg_session_factory: sessionmaker[Se
         uow = PostgresPersistenceUnitOfWork(session)
         proj = Project(project_id=project_id, display_name="T08", repository="o/r", base_branch="main")
         uow.projects.save(proj)
-        uow.jobs.save(Job(job_id="j1", project_id=project_id, change_name="c1"))
-        uow.jobs.save(Job(job_id="j2", project_id=project_id, change_name="c2"))
+        uow.commit()
+        uow.jobs.save(Job(job_id="j1", project_id=project_id, change_name="c1", implementer_role="PRIMARY"))
+        uow.jobs.save(Job(job_id="j2", project_id=project_id, change_name="c2", implementer_role="PRIMARY"))
 
         policy = OpenRouterBudgetPolicy(
             project_id=project_id,
@@ -153,11 +154,12 @@ def test_t08_budget_contention_serialization(pg_session_factory: sessionmaker[Se
         snapshot = OpenRouterPricingSnapshot(
             snapshot_id="snap-t08",
             canonical_model_identity="m1",
+            routed_model_identity="m1",
             prompt_price_per_token=Decimal("0.001"),
             output_price_per_token=Decimal("0.002"),
             additional_cost_per_request=Decimal("0.45"),
             currency="USD",
-            source="test",
+            source="openrouter_catalog_api",
         )
         uow.pricing_snapshots.save(snapshot)
         uow.commit()
@@ -170,7 +172,14 @@ def test_t08_budget_contention_serialization(pg_session_factory: sessionmaker[Se
             uow = PostgresPersistenceUnitOfWork(session)
             srv = BudgetService(uow)
             res_a, _, _ = srv.reserve_budget(
-                project_id, "j1", "c1", "implementer", "m1", snapshot, 100, 100
+                project_id=project_id,
+                job_id="j1",
+                change_id="c1",
+                role="implementer",
+                canonical_model_identity="m1",
+                pricing_snapshot=snapshot,
+                prompt_token_upper_bound=100,
+                max_output_tokens=100,
             )
             uow.commit()
 
@@ -180,7 +189,14 @@ def test_t08_budget_contention_serialization(pg_session_factory: sessionmaker[Se
             uow = PostgresPersistenceUnitOfWork(session)
             srv = BudgetService(uow)
             res_b, _, _ = srv.reserve_budget(
-                project_id, "j2", "c2", "implementer", "m1", snapshot, 100, 100
+                project_id=project_id,
+                job_id="j2",
+                change_id="c2",
+                role="implementer",
+                canonical_model_identity="m1",
+                pricing_snapshot=snapshot,
+                prompt_token_upper_bound=100,
+                max_output_tokens=100,
             )
             uow.commit()
 
@@ -207,7 +223,7 @@ def test_t09_provider_probe_contention_serialization(
     pg_session_factory: sessionmaker[Session], monkeypatch
 ):
     """T09: Prove row locking on provider health get_by_provider_for_update() serializes expensive probe reservations."""
-    provider = "t09-provider"
+    provider = "codex"
     cfg = ProbeConfig(cooldown_seconds=0, backoff_base_seconds=0, backoff_max_seconds=0, max_per_hour=1)
     adapter = _ExpensiveAdapter(name=provider, available=False)
     monkeypatch.setattr(

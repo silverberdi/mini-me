@@ -147,6 +147,7 @@ class OrchestrationService:
         openspec_adapter: OpenSpecAdapter | None = None,
         validation_service: ValidationAuthorityService | None = None,
         preview_service: ContainerPreviewService | None = None,
+        readiness_service: ReadinessService | None = None,
     ):
         self.uow = uow
         self.project_root = Path(project_root).resolve()
@@ -158,7 +159,9 @@ class OrchestrationService:
         self.openspec_adapter = openspec_adapter or OpenSpecAdapter()
         self.project_service = ProjectService(self.uow)
         # Admission and execution must share the same canonical GitHub authority.
-        self.readiness_service = ReadinessService(self.uow, github_adapter=self.github_adapter)
+        self.readiness_service = readiness_service or ReadinessService(
+            self.uow, github_adapter=self.github_adapter
+        )
         self.remediation_service = CandidateRemediationService(
             self.uow,
             self.project_root,

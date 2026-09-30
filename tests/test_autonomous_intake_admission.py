@@ -11,6 +11,7 @@ from tests.conftest import InMemoryPersistenceUnitOfWork, setup_managed_reposito
 from minime.domain.enums import (
     AdmissionDecision,
     AdmissionRefusalCode,
+    ChangeStatus,
     ExternalOutcome,
     ExternalReasonCode,
     OrchestrationStage,
@@ -24,6 +25,7 @@ from minime.domain.enums import (
 from minime.domain.models import (
     BacklogItem,
     CapacityWindow,
+    Change,
     ExternalActionResult,
     OrchestrationRun,
     Project,
@@ -303,6 +305,16 @@ def test_auto_admit_single_concurrency_deterministic_selection(
             updated_at=now,
         )
     )
+    from minime.domain.enums import ChangeStatus
+    from minime.domain.models import Change
+
+    in_memory_uow.changes.save(
+        Change(project_id="sched-project", name="item-normal", status=ChangeStatus.READY)
+    )
+    in_memory_uow.changes.save(
+        Change(project_id="sched-project", name="item-critical", status=ChangeStatus.READY)
+    )
+
     in_memory_uow.bindings.save(
         ProjectBinding(
             project_id="sched-project",
@@ -373,9 +385,11 @@ def test_auto_admit_single_concurrency_deterministic_selection(
     mock_orch.admit_change.return_value = MagicMock(admitted=True, run=mock_run)
 
     mock_readiness = MagicMock()
-    mock_readiness.evaluate_change_readiness.return_value = MagicMock(
+    readiness_mock_ret = MagicMock(
         is_ready=True, status=ReadinessState.READY, unmet_reasons=[]
     )
+    mock_readiness.evaluate_change_readiness.return_value = readiness_mock_ret
+    mock_readiness.evaluate_and_persist_change_readiness.return_value = readiness_mock_ret
 
     scheduler = SchedulerService(
         in_memory_uow,
@@ -457,6 +471,10 @@ def test_primary_provider_unavailable_waiting_prevents_drain(
             updated_at=now,
         )
     )
+    in_memory_uow.changes.save(
+        Change(project_id="exhausted-project", name="item-waiting", status=ChangeStatus.READY)
+    )
+
     in_memory_uow.bindings.save(
         ProjectBinding(
             project_id="exhausted-project",
@@ -479,9 +497,11 @@ def test_primary_provider_unavailable_waiting_prevents_drain(
     )
 
     mock_readiness = MagicMock()
-    mock_readiness.evaluate_change_readiness.return_value = MagicMock(
+    readiness_mock_ret = MagicMock(
         is_ready=True, status=ReadinessState.READY, unmet_reasons=[]
     )
+    mock_readiness.evaluate_change_readiness.return_value = readiness_mock_ret
+    mock_readiness.evaluate_and_persist_change_readiness.return_value = readiness_mock_ret
 
     scheduler = SchedulerService(
         in_memory_uow,

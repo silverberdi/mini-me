@@ -135,13 +135,14 @@ def test_t06_saga_resume_row_locking(pg_session_factory: sessionmaker[Session]):
     saga_id = "saga-t06"
     with pg_session_factory() as session:
         uow = PostgresPersistenceUnitOfWork(session)
+        uow.projects.save(Project(project_id="proj-t06", display_name="P06", repository="o/r", base_branch="main"))
         saga = DurableSaga(
-            saga_id=saga_id,
+            id=saga_id,
             project_id="proj-t06",
             work_item_key="key-t06",
             saga_type=SagaType.INTAKE,
             current_phase="PHASE_1",
-            status=SagaStatus.ACTIVE,
+            status=SagaStatus.IN_PROGRESS,
         )
         uow.durable_sagas.save(saga)
         uow.commit()
@@ -196,17 +197,19 @@ def test_t07_saga_creation_savepoint_recovery(pg_session_factory: sessionmaker[S
     # Create initial active intake saga
     with pg_session_factory() as session:
         uow = PostgresPersistenceUnitOfWork(session)
+        uow.projects.save(Project(project_id=project_id, display_name="P07", repository="o/r", base_branch="main"))
         engine = SagaEngine(uow)
-        saga1 = engine.start_saga(project_id, work_item_key, SagaType.INTAKE)
-        assert saga1.status == SagaStatus.ACTIVE
+        saga1 = engine.start_saga(SagaType.INTAKE, project_id, work_item_key)
+        uow.commit()
+        assert saga1.status == SagaStatus.IN_PROGRESS
 
     # Attempt concurrent creation of another intake saga for the same active work item
     with pg_session_factory() as session2:
         uow2 = PostgresPersistenceUnitOfWork(session2)
         engine2 = SagaEngine(uow2)
-        saga2 = engine2.start_saga(project_id, work_item_key, SagaType.INTAKE)
+        saga2 = engine2.start_saga(SagaType.INTAKE, project_id, work_item_key)
         # Savepoint recovery returns the existing active saga
-        assert saga2.saga_id == saga1.saga_id
+        assert saga2.id == saga1.id
 
 
 def test_t10_candidate_generation_savepoint_recovery(pg_session_factory: sessionmaker[Session]):
@@ -232,7 +235,7 @@ def test_t10_candidate_generation_savepoint_recovery(pg_session_factory: session
             generation=1,
             base_sha="base-sha",
             candidate_sha="cand-sha-1",
-            manifest_id="m1",
+            manifest_id=None,
             manifest_hash="hash1",
             is_frozen=True,
         )
@@ -249,7 +252,7 @@ def test_t10_candidate_generation_savepoint_recovery(pg_session_factory: session
             generation=1,  # Conflict on (run_id, generation)
             base_sha="base-sha",
             candidate_sha="cand-sha-2",
-            manifest_id="m2",
+            manifest_id=None,
             manifest_hash="hash2",
             is_frozen=True,
         )
@@ -312,11 +315,13 @@ def test_t12_job_status_stale_writer(pg_session_factory: sessionmaker[Session]):
     job_id = "job-t12"
     with pg_session_factory() as session:
         uow = PostgresPersistenceUnitOfWork(session)
+        uow.projects.save(Project(project_id="p-t12", display_name="P12", repository="o/r", base_branch="main"))
         job = Job(
             job_id=job_id,
             project_id="p-t12",
             change_name="c-t12",
             status=JobStatus.QUEUED,
+            implementer_role="PRIMARY",
         )
         uow.jobs.save(job)
         uow.commit()

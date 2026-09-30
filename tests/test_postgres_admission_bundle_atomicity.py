@@ -141,6 +141,19 @@ def test_t05_admission_bundle_failure_injection_rollback(
     project_id = "t05-proj"
     change_name = "t05-change"
     issue_number = 505
+    cdir = tmp_path / "openspec" / "changes" / change_name
+    cdir.mkdir(parents=True, exist_ok=True)
+    (cdir / "proposal.md").write_text("# Proposal")
+    (cdir / "tasks.md").write_text("# Tasks")
+    (cdir / "design.md").write_text("# Design")
+    (cdir / "specs").mkdir(exist_ok=True)
+    (cdir / "specs" / "test.md").write_text("# Spec")
+    import subprocess
+    subprocess.run(["git", "init", str(tmp_path)], check=False, capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "checkout", "-b", "main"], check=False, capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.name", "Test"], check=False, capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.email", "test@example.com"], check=False, capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "--allow-empty", "-m", "init"], check=False, capture_output=True)
 
     with pg_session_factory() as session:
         uow = PostgresPersistenceUnitOfWork(session)
@@ -159,7 +172,7 @@ def test_t05_admission_bundle_failure_injection_rollback(
             project_id=project_id,
             openspec_change_name=change_name,
             github_issue_number=issue_number,
-            github_repository="owner/repo",
+            repository="owner/repo",
             is_valid=True,
             bound_at=utc_now(),
         )
@@ -189,6 +202,7 @@ def test_t05_admission_bundle_failure_injection_rollback(
             item_id=f"item-{project_id}-{change_name}",
             project_id=project_id,
             item_key=f"KEY-{change_name}",
+            title=f"Title-{change_name}",
             openspec_change_name=change_name,
             status=WorkItemStatus.READY,
         )
@@ -197,7 +211,20 @@ def test_t05_admission_bundle_failure_injection_rollback(
 
     with pg_session_factory() as session:
         uow = PostgresPersistenceUnitOfWork(session)
-        orch = OrchestrationService(uow, project_root=tmp_path)
+        from unittest.mock import MagicMock
+
+        from minime.domain.models import ReadinessEvaluation
+        mock_readiness = MagicMock()
+        mock_readiness.evaluate_change_readiness.return_value = ReadinessEvaluation(
+            project_id=project_id,
+            change_id=f"ch-{project_id}-{change_name}",
+            change_name=change_name,
+            is_ready=True,
+            status=ReadinessState.READY,
+            unmet_reasons=[],
+            checks=[],
+        )
+        orch = OrchestrationService(uow, project_root=tmp_path, readiness_service=mock_readiness)
 
         # Execute transactional admission primitive
         res = orch._admit_change_in_transaction(project_id, change_name, project_root=tmp_path)

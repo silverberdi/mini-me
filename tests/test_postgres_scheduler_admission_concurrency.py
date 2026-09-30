@@ -134,13 +134,39 @@ def pg_session_factory(pg_engine: Engine) -> sessionmaker[Session]:
     return sessionmaker(bind=pg_engine, autoflush=False, expire_on_commit=False)
 
 
+@pytest.fixture(autouse=True)
+def _clean_db(pg_engine: Engine):
+    from sqlalchemy import text
+    with pg_engine.connect() as conn:
+        conn.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public;"))
+        conn.commit()
+    Base.metadata.create_all(pg_engine)
+
+
 def _seed_project_and_change(
     session_factory: sessionmaker[Session],
     project_id: str = "proj-concurrency",
     change_name: str = "change-concurrency",
     issue_number: int = 101,
     max_concurrent_jobs: int = 1,
+    project_root: Path | None = None,
 ) -> None:
+    if project_root:
+        cdir = project_root / "openspec" / "changes" / change_name
+        cdir.mkdir(parents=True, exist_ok=True)
+        (cdir / "proposal.md").write_text("# Proposal")
+        (cdir / "tasks.md").write_text("# Tasks")
+        (cdir / "design.md").write_text("# Design")
+        (cdir / "specs").mkdir(exist_ok=True)
+        (cdir / "specs" / "test.md").write_text("# Spec")
+        import subprocess
+        if not (project_root / ".git").exists():
+            subprocess.run(["git", "init", str(project_root)], check=False, capture_output=True)
+            subprocess.run(["git", "-C", str(project_root), "checkout", "-b", "main"], check=False, capture_output=True)
+            subprocess.run(["git", "-C", str(project_root), "config", "user.name", "Test"], check=False, capture_output=True)
+            subprocess.run(["git", "-C", str(project_root), "config", "user.email", "test@example.com"], check=False, capture_output=True)
+        subprocess.run(["git", "-C", str(project_root), "add", "."], check=False, capture_output=True)
+        subprocess.run(["git", "-C", str(project_root), "commit", "--allow-empty", "-m", f"seed {change_name}"], check=False, capture_output=True)
     with session_factory() as session:
         uow = PostgresPersistenceUnitOfWork(session)
         proj = Project(
@@ -159,7 +185,7 @@ def _seed_project_and_change(
             project_id=project_id,
             openspec_change_name=change_name,
             github_issue_number=issue_number,
-            github_repository="owner/repo",
+            repository="owner/repo",
             is_valid=True,
             bound_at=utc_now(),
         )
@@ -189,6 +215,7 @@ def _seed_project_and_change(
             item_id=f"item-{project_id}-{change_name}",
             project_id=project_id,
             item_key=f"KEY-{change_name}",
+            title=f"Title-{change_name}",
             openspec_change_name=change_name,
             status=WorkItemStatus.READY,
         )
@@ -205,6 +232,23 @@ def _seed_project_and_change(
         uow.commit()
 
 
+def _make_scheduler(uow: PostgresPersistenceUnitOfWork, tmp_path: Path, max_global_jobs: int = 5) -> SchedulerService:
+    from unittest.mock import MagicMock
+
+    from minime.domain.models import ReadinessEvaluation
+    mock_readiness = MagicMock()
+    mock_readiness.evaluate_change_readiness.return_value = ReadinessEvaluation(
+        project_id="proj",
+        change_id="ch-1",
+        change_name="change",
+        is_ready=True,
+        status=ReadinessState.READY,
+        unmet_reasons=[],
+        checks=[],
+    )
+    return SchedulerService(uow, project_root=tmp_path, max_global_jobs=max_global_jobs, readiness_service=mock_readiness)
+
+
 def test_t01_same_change_savepoint_recovery(pg_session_factory: sessionmaker[Session], tmp_path: Path):
     """T01: Prove same-change Savepoint conflict recovery on uq_active_orchestration_run.
 
@@ -214,14 +258,14 @@ def test_t01_same_change_savepoint_recovery(pg_session_factory: sessionmaker[Ses
     """
     project_id = "t01-proj"
     change_name = "t01-change"
-    _seed_project_and_change(pg_session_factory, project_id, change_name)
+    _seed_project_and_change(pg_session_factory, project_id, change_name, project_root=tmp_path)
 
     results: list[tuple[AdmissionDecision, Any, Any]] = [None, None]  # type: ignore
 
     def worker(idx: int):
         with pg_session_factory() as session:
             uow = PostgresPersistenceUnitOfWork(session)
-            scheduler = SchedulerService(uow, project_root=tmp_path, max_global_jobs=5)
+            scheduler = _make_scheduler(uow, tmp_path, max_global_jobs=5)
             dec, rec, run = scheduler.admit_work_item(project_id, change_name)
             results[idx] = (dec, rec, run)
 
@@ -248,15 +292,15 @@ def test_t02_project_concurrency_limit(pg_session_factory: sessionmaker[Session]
     The first change gets admitted; the second change is refused with PROJECT_CONCURRENCY_LIMIT.
     """
     project_id = "t02-proj"
-    _seed_project_and_change(pg_session_factory, project_id, "c1", issue_number=1, max_concurrent_jobs=1)
-    _seed_project_and_change(pg_session_factory, project_id, "c2", issue_number=2, max_concurrent_jobs=1)
+    _seed_project_and_change(pg_session_factory, project_id, "c1", issue_number=1, max_concurrent_jobs=1, project_root=tmp_path)
+    _seed_project_and_change(pg_session_factory, project_id, "c2", issue_number=2, max_concurrent_jobs=1, project_root=tmp_path)
 
     results: list[tuple[AdmissionDecision, Any, Any]] = [None, None]  # type: ignore
 
     def worker(idx: int, cname: str):
         with pg_session_factory() as session:
             uow = PostgresPersistenceUnitOfWork(session)
-            scheduler = SchedulerService(uow, project_root=tmp_path, max_global_jobs=5)
+            scheduler = _make_scheduler(uow, tmp_path, max_global_jobs=5)
             dec, rec, run = scheduler.admit_work_item(project_id, cname)
             results[idx] = (dec, rec, run)
 
@@ -282,15 +326,15 @@ def test_t03_global_concurrency_limit(pg_session_factory: sessionmaker[Session],
     Two changes in different projects are admitted concurrently.
     The first caller succeeds; the second receives GLOBAL_CONCURRENCY_LIMIT.
     """
-    _seed_project_and_change(pg_session_factory, "t03-p1", "c1", issue_number=1, max_concurrent_jobs=5)
-    _seed_project_and_change(pg_session_factory, "t03-p2", "c2", issue_number=2, max_concurrent_jobs=5)
+    _seed_project_and_change(pg_session_factory, "t03-p1", "c1", issue_number=1, max_concurrent_jobs=5, project_root=tmp_path)
+    _seed_project_and_change(pg_session_factory, "t03-p2", "c2", issue_number=2, max_concurrent_jobs=5, project_root=tmp_path)
 
     results: list[tuple[AdmissionDecision, Any, Any]] = [None, None]  # type: ignore
 
     def worker(idx: int, pid: str, cname: str):
         with pg_session_factory() as session:
             uow = PostgresPersistenceUnitOfWork(session)
-            scheduler = SchedulerService(uow, project_root=tmp_path, max_global_jobs=1)
+            scheduler = _make_scheduler(uow, tmp_path, max_global_jobs=1)
             dec, rec, run = scheduler.admit_work_item(pid, cname)
             results[idx] = (dec, rec, run)
 
@@ -317,15 +361,15 @@ def test_t04_project_limit_multi_slot(pg_session_factory: sessionmaker[Session],
     Both changes are successfully admitted.
     """
     project_id = "t04-proj"
-    _seed_project_and_change(pg_session_factory, project_id, "c1", issue_number=1, max_concurrent_jobs=2)
-    _seed_project_and_change(pg_session_factory, project_id, "c2", issue_number=2, max_concurrent_jobs=2)
+    _seed_project_and_change(pg_session_factory, project_id, "c1", issue_number=1, max_concurrent_jobs=2, project_root=tmp_path)
+    _seed_project_and_change(pg_session_factory, project_id, "c2", issue_number=2, max_concurrent_jobs=2, project_root=tmp_path)
 
     results: list[tuple[AdmissionDecision, Any, Any]] = [None, None]  # type: ignore
 
     def worker(idx: int, cname: str):
         with pg_session_factory() as session:
             uow = PostgresPersistenceUnitOfWork(session)
-            scheduler = SchedulerService(uow, project_root=tmp_path, max_global_jobs=5)
+            scheduler = _make_scheduler(uow, tmp_path, max_global_jobs=5)
             dec, rec, run = scheduler.admit_work_item(project_id, cname)
             results[idx] = (dec, rec, run)
 

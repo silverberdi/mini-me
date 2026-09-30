@@ -109,6 +109,7 @@ class SchedulerService:
             project_root=self.project_root,
             github_adapter=gh_adapter,
             openspec_adapter=os_adapter,
+            readiness_service=self.readiness_service,
         )
 
         self.post_merge_service = post_merge_service or PostMergeReconciliationService(
