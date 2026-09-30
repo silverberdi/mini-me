@@ -2175,6 +2175,9 @@ class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
     def commit(self) -> None:
         self.committed = True
 
+    def flush(self) -> None:
+        pass
+
     def rollback(self) -> None:
         self.rolled_back = True
 

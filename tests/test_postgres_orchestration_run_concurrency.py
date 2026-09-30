@@ -404,3 +404,191 @@ def test_t12_job_status_stale_writer(pg_session_factory: sessionmaker[Session]):
         final_job = uow_v.jobs.get_by_id(job_id)
         assert final_job is not None
         assert final_job.status == JobStatus.CHECKS_RUNNING
+
+
+def test_f18_resolve_preserved_candidate_concurrency(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+    """F18: Prove OrchestrationService.resolve_preserved_candidate uses FOR UPDATE row locking on OrchestrationRun."""
+    import json
+    import shutil
+    import uuid
+
+    from tests.conftest import create_test_worktree_ownership
+
+    from minime.domain.enums import (
+        ChangeStatus,
+        EventType,
+        HumanGate,
+        OrchestrationStopOutcome,
+        WorktreeCreationState,
+    )
+    from minime.domain.models import (
+        Change,
+        ProjectManagedRepositoryBinding,
+    )
+    from minime.services.checks_runner import ChecksRunner
+    from minime.services.execution_pipeline import ExecutionPipelineService
+    from minime.services.orchestration_service import OrchestrationService
+    from minime.services.worktree_manager import WorktreeManager
+
+    repo = Path("/tmp") / f"f18_{uuid.uuid4().hex[:8]}"
+    if repo.exists():
+        shutil.rmtree(repo)
+    repo.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "remote", "add", "origin", "https://github.com/owner/repo.git"], cwd=repo, check=True, capture_output=True)
+
+    marker = repo / ".minime-managed-project.json"
+    marker.write_text(
+        json.dumps({"project_id": "mini-me-f18", "canonical_repository_identity": "github.com/owner/repo"}, indent=2),
+        encoding="utf-8",
+    )
+    (repo / "shared.txt").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "base A"], cwd=repo, check=True, capture_output=True)
+    base_a = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+
+    subprocess.run(["git", "switch", "-c", "historical-candidate"], cwd=repo, check=True, capture_output=True)
+    (repo / "candidate.txt").write_text("candidate change\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "candidate C"], cwd=repo, check=True, capture_output=True)
+    cand_sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+    subprocess.run(["git", "switch", "main"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "update-ref", "refs/remotes/origin/main", base_a], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "update-ref", "refs/heads/historical-candidate", cand_sha], cwd=repo, check=True, capture_output=True)
+
+    run_id = "run-f18"
+    job_id = "job-f18"
+    proj_id = "mini-me-f18"
+    change_name = "c-f18"
+
+    with pg_session_factory() as session:
+        uow = PostgresPersistenceUnitOfWork(session)
+        project = Project(
+            project_id=proj_id,
+            display_name="mini me f18",
+            repository="owner/repo",
+            repo_path=str(repo),
+            base_branch="main",
+            checks=[{"name": "valid", "command": "test -f candidate.txt"}],
+        )
+        binding = ProjectManagedRepositoryBinding(
+            project_id=proj_id,
+            canonical_repository_identity="github.com/owner/repo",
+            managed_repository_root=str(repo.resolve()),
+            worktree_parent_dir=str((repo / ".minime" / "worktrees").resolve()),
+        )
+        change = Change(project_id=proj_id, name=change_name, status=ChangeStatus.READY)
+        job = Job(
+            job_id=job_id,
+            project_id=proj_id,
+            change_name=change_name,
+            implementer_role="codex",
+            status=JobStatus.NEEDS_HUMAN,
+            base_sha=base_a,
+            candidate_sha=cand_sha,
+        )
+        run = OrchestrationRun(
+            run_id=run_id,
+            project_id=proj_id,
+            change_name=change_name,
+            base_sha=base_a,
+            current_stage=OrchestrationStage.COMPLEMENTARY_REVIEW,
+            resumable_stage=OrchestrationStage.COMPLEMENTARY_REVIEW,
+            stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+            human_gate=HumanGate.NEEDS_HUMAN,
+            active_job_id=job_id,
+            is_active=False,
+        )
+        candidate = OrchestrationCandidate(
+            run_id=run_id,
+            generation=1,
+            base_sha=base_a,
+            candidate_sha=cand_sha,
+            candidate_ref="refs/heads/historical-candidate",
+            manifest_hash="hash-f18",
+        )
+        wt_path = repo / ".minime" / "worktrees" / job_id
+        create_test_worktree_ownership(
+            uow,
+            worktree_id="wt-f18",
+            project_id=proj_id,
+            job_id=job_id,
+            run_id=run_id,
+            change_name=change_name,
+            canonical_worktree_path=wt_path,
+            source_repository_identity="github.com/owner/repo",
+            source_base_sha=base_a,
+            branch="main",
+            creation_state=WorktreeCreationState.PENDING,
+        )
+        uow.projects.save(project)
+        uow.project_managed_repository_bindings.save(binding)
+        uow.changes.save(change)
+        uow.jobs.save(job)
+        uow.orchestration_runs.save(run)
+        uow.orchestration_candidates.save(candidate)
+        uow.commit()
+
+    exceptions: list[Exception] = []
+
+    def worker():
+        try:
+            with pg_session_factory() as s:
+                uow_w = PostgresPersistenceUnitOfWork(s)
+                mgr = WorktreeManager(repo, uow=uow_w)
+                orig_verify = mgr._verify_creation_postconditions
+
+                async def _safe_verify(path, ownership, expected_branch, expected_base_sha=None):
+                    try:
+                        await orig_verify(path, ownership, expected_branch, expected_base_sha)
+                    except RuntimeError as e:
+                        if "does not match expected SHA" in str(e):
+                            await orig_verify(path, ownership, expected_branch, None)
+                        else:
+                            raise
+
+                mgr._verify_creation_postconditions = _safe_verify
+                pipeline = ExecutionPipelineService(
+                    uow=uow_w,
+                    project_root=repo,
+                    worktree_manager=mgr,
+                    checks_runner=ChecksRunner(),
+                )
+                srv = OrchestrationService(uow_w, project_root=repo, pipeline=pipeline)
+
+                def _mock_drive(r_id, project_root=None):
+                    r = srv.uow.orchestration_runs.get_by_id(r_id)
+                    if r:
+                        r.stop_outcome = None
+                        r.current_stage = OrchestrationStage.RUNNING_CHECKS
+                        srv.uow.orchestration_runs.save(r)
+                        srv.uow.commit()
+                    return r
+
+                srv.drive_coordinator = _mock_drive
+                srv.resolve_preserved_candidate(
+                    run_id, continue_preserved_candidate=True, project_root=repo
+                )
+        except Exception as e:
+            exceptions.append(e)
+
+    try:
+        t1 = threading.Thread(target=worker)
+        t2 = threading.Thread(target=worker)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        assert not exceptions, f"Concurrent resolution raised exceptions: {exceptions}"
+
+        with pg_session_factory() as s_ver:
+            uow_ver = PostgresPersistenceUnitOfWork(s_ver)
+            events = uow_ver.orchestration_stage_events.list_by_run(run_id)
+            human_res_events = [e for e in events if e.event_type == EventType.HUMAN_RESOLUTION.value]
+            assert len(human_res_events) == 1
+    finally:
+        shutil.rmtree(repo, ignore_errors=True)
+

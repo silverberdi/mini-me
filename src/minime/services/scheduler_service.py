@@ -151,11 +151,10 @@ class SchedulerService:
         )
         self.provider_health_service = provider_health_service or ProviderHealthService(uow)
         self.model_independence_policy = model_independence_policy or ModelIndependencePolicy()
-        self.max_global_jobs = (
-            _test_global_max_jobs_override
-            if _test_global_max_jobs_override is not None
-            else max_global_jobs
-        )
+        if _test_global_max_jobs_override is not None:
+            self.max_global_jobs = _test_global_max_jobs_override
+        else:
+            self.max_global_jobs = CANONICAL_GLOBAL_MAX_JOBS
         self.one_active_implementation_per_project = one_active_implementation_per_project
         self.mode = mode
         self._admission_health_truth: dict[str, ProviderHealth | None] | None = None

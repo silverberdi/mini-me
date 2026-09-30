@@ -552,7 +552,10 @@ class OrchestrationService:
         """Resolve a human stop only after proving the immutable candidate ref."""
         if not continue_preserved_candidate:
             raise ValueError("Explicit --continue-preserved-candidate is required.")
-        run = self.uow.orchestration_runs.get_by_id(run_id)
+        raw_run = self.uow.orchestration_runs.get_for_update(run_id)
+        if not isinstance(raw_run, OrchestrationRun):
+            raw_run = self.uow.orchestration_runs.get_by_id(run_id)
+        run = raw_run
         if not run:
             raise ValueError(f"Orchestration run '{run_id}' not found.")
         prior_resolution = next(
@@ -787,7 +790,7 @@ class OrchestrationService:
                     timestamp=utc_now(),
                 )
             )
-            self.uow.commit()
+            self.uow.flush()
 
         if candidate.candidate_ref:
             if candidate_ref and candidate_ref != candidate.candidate_ref:
@@ -855,7 +858,7 @@ class OrchestrationService:
                         timestamp=utc_now(),
                     )
                 )
-                self.uow.commit()
+                self.uow.flush()
         ref = candidate.candidate_ref
         resolved = subprocess.run(
             ["git", "rev-parse", "--verify", f"{ref}^{{commit}}"],
@@ -1096,9 +1099,9 @@ class OrchestrationService:
             for diagnostic in check_run.diagnostics:
                 self.uow.evidence_diagnostics.save(diagnostic)
             if not check_run.passed:
-                self.uow.commit()
+                self.uow.flush()
                 raise ValueError("Preserved candidate deterministic checks failed.")
-            self.uow.commit()
+            self.uow.flush()
         finally:
             run_coroutine_sync(manager.remove_clean_worktree(job.job_id, project_id=run.project_id))
 
@@ -1147,6 +1150,9 @@ class OrchestrationService:
                 timestamp=utc_now(),
             )
         )
+        run.stop_outcome = None
+        run.human_gate = None
+        self.uow.orchestration_runs.save(run)
         self.uow.commit()
         return self.drive_coordinator(run_id, project_root=project_root)
 

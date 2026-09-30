@@ -232,7 +232,11 @@ def _seed_project_and_change(
         uow.commit()
 
 
-def _make_scheduler(uow: PostgresPersistenceUnitOfWork, tmp_path: Path, max_global_jobs: int = 5) -> SchedulerService:
+def _make_scheduler(
+    uow: PostgresPersistenceUnitOfWork,
+    tmp_path: Path,
+    _test_global_max_jobs_override: int | None = None,
+) -> SchedulerService:
     from unittest.mock import MagicMock
 
     from minime.domain.models import ReadinessEvaluation
@@ -248,8 +252,12 @@ def _make_scheduler(uow: PostgresPersistenceUnitOfWork, tmp_path: Path, max_glob
     )
     mock_readiness.evaluate_change_readiness.return_value = eval_res
     mock_readiness.evaluate_change_readiness_pure.return_value = eval_res
-    return SchedulerService(uow, project_root=tmp_path, max_global_jobs=max_global_jobs, readiness_service=mock_readiness)
-
+    return SchedulerService(
+        uow,
+        project_root=tmp_path,
+        _test_global_max_jobs_override=_test_global_max_jobs_override,
+        readiness_service=mock_readiness,
+    )
 
 
 def test_t01_same_change_savepoint_recovery(pg_session_factory: sessionmaker[Session], tmp_path: Path):
@@ -268,7 +276,7 @@ def test_t01_same_change_savepoint_recovery(pg_session_factory: sessionmaker[Ses
     def worker(idx: int):
         with pg_session_factory() as session:
             uow = PostgresPersistenceUnitOfWork(session)
-            scheduler = _make_scheduler(uow, tmp_path, max_global_jobs=5)
+            scheduler = _make_scheduler(uow, tmp_path, _test_global_max_jobs_override=5)
             dec, rec, run = scheduler.admit_work_item(project_id, change_name)
             results[idx] = (dec, rec, run)
 
@@ -303,7 +311,7 @@ def test_t02_project_concurrency_limit(pg_session_factory: sessionmaker[Session]
     def worker(idx: int, cname: str):
         with pg_session_factory() as session:
             uow = PostgresPersistenceUnitOfWork(session)
-            scheduler = _make_scheduler(uow, tmp_path, max_global_jobs=5)
+            scheduler = _make_scheduler(uow, tmp_path, _test_global_max_jobs_override=5)
             dec, rec, run = scheduler.admit_work_item(project_id, cname)
             results[idx] = (dec, rec, run)
 
@@ -324,9 +332,9 @@ def test_t02_project_concurrency_limit(pg_session_factory: sessionmaker[Session]
 
 
 def test_t03_global_concurrency_limit(pg_session_factory: sessionmaker[Session], tmp_path: Path):
-    """T03: Prove global concurrency limit (max_global_jobs=1) under advisory locks.
+    """T03: Prove canonical global concurrency limit (max_global_jobs=1) under advisory locks without test override.
 
-    Two changes in different projects are admitted concurrently.
+    Two changes in different projects are admitted concurrently under normal production construction.
     The first caller succeeds; the second receives GLOBAL_CONCURRENCY_LIMIT.
     """
     _seed_project_and_change(pg_session_factory, "t03-p1", "c1", issue_number=1, max_concurrent_jobs=5, project_root=tmp_path)
@@ -337,7 +345,9 @@ def test_t03_global_concurrency_limit(pg_session_factory: sessionmaker[Session],
     def worker(idx: int, pid: str, cname: str):
         with pg_session_factory() as session:
             uow = PostgresPersistenceUnitOfWork(session)
-            scheduler = _make_scheduler(uow, tmp_path, max_global_jobs=1)
+            # Production construction with no override -> enforces max_global_jobs = 1
+            scheduler = _make_scheduler(uow, tmp_path)
+            assert scheduler.max_global_jobs == 1
             dec, rec, run = scheduler.admit_work_item(pid, cname)
             results[idx] = (dec, rec, run)
 
@@ -358,9 +368,9 @@ def test_t03_global_concurrency_limit(pg_session_factory: sessionmaker[Session],
 
 
 def test_t04_project_limit_multi_slot(pg_session_factory: sessionmaker[Session], tmp_path: Path):
-    """T04: Prove project concurrency limit > 1 (max_concurrent_jobs=2) allows multi-slot admission.
+    """T04: Prove project concurrency limit > 1 (max_concurrent_jobs=2) allows multi-slot admission when global limit is explicitly overridden.
 
-    Two different changes for the same project with max_concurrent_jobs=2 and max_global_jobs=5.
+    Two different changes for the same project with max_concurrent_jobs=2 and _test_global_max_jobs_override=5.
     Both changes are successfully admitted.
     """
     project_id = "t04-proj"
@@ -372,7 +382,7 @@ def test_t04_project_limit_multi_slot(pg_session_factory: sessionmaker[Session],
     def worker(idx: int, cname: str):
         with pg_session_factory() as session:
             uow = PostgresPersistenceUnitOfWork(session)
-            scheduler = _make_scheduler(uow, tmp_path, max_global_jobs=5)
+            scheduler = _make_scheduler(uow, tmp_path, _test_global_max_jobs_override=5)
             dec, rec, run = scheduler.admit_work_item(project_id, cname)
             results[idx] = (dec, rec, run)
 
@@ -386,3 +396,14 @@ def test_t04_project_limit_multi_slot(pg_session_factory: sessionmaker[Session],
 
     assert results[0][0] == AdmissionDecision.ADMITTED
     assert results[1][0] == AdmissionDecision.ADMITTED
+
+
+def test_f04_scheduler_global_concurrency_immutability_regression(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+    """F04: Prove max_global_jobs parameter is ignored in production construction and only _test_global_max_jobs_override can set >1."""
+    with pg_session_factory() as session:
+        uow = PostgresPersistenceUnitOfWork(session)
+        s1 = SchedulerService(uow, project_root=tmp_path, max_global_jobs=999)
+        assert s1.max_global_jobs == 1
+
+        s2 = SchedulerService(uow, project_root=tmp_path, _test_global_max_jobs_override=5)
+        assert s2.max_global_jobs == 5

@@ -4699,6 +4699,9 @@ class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
     def commit(self) -> None:
         self.session.commit()
 
+    def flush(self) -> None:
+        self.session.flush()
+
     def rollback(self) -> None:
         self.session.rollback()
 

@@ -788,6 +788,10 @@ class PersistenceUnitOfWork(ABC):
     @abstractmethod
     def commit(self) -> None: ...
 
+    def flush(self) -> None:
+        """Flush pending changes to the underlying storage without committing transaction."""
+        pass
+
     @abstractmethod
     def rollback(self) -> None: ...
 
