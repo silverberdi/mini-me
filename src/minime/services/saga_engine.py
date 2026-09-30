@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from minime.db.savepoint import execute_with_savepoint_recovery
 from minime.domain.enums import (
     EventType,
     ExternalActionStatus,
@@ -73,7 +74,30 @@ class SagaEngine:
             status=SagaStatus.IN_PROGRESS,
             evidence_references={},
         )
-        self.uow.durable_sagas.save(saga)
+
+        constraint_name = (
+            "uq_active_intake_saga" if st_enum == SagaType.INTAKE else "uq_active_closure_saga"
+        )
+
+        def _recovery_saga() -> DurableSaga:
+            winner = self.uow.durable_sagas.get_active_saga(project_id, work_item_key, st_enum)
+            if winner:
+                return winner
+            raise RuntimeError(f"Failed to recover active saga for {work_item_key}")
+
+        from minime.db.savepoint import execute_with_savepoint_recovery
+        session = getattr(self.uow, "session", None)
+        if session is not None and hasattr(session, "begin_nested"):
+            saved, recovery_res = execute_with_savepoint_recovery(
+                session=session,
+                save_fn=lambda: self.uow.durable_sagas.save(saga),
+                constraint_name=constraint_name,
+                recovery_fn=_recovery_saga,
+            )
+            if not saved and recovery_res is not None:
+                return recovery_res
+        else:
+            self.uow.durable_sagas.save(saga)
 
         event = Event(
             project_id=project_id,
@@ -273,7 +297,25 @@ class SagaEngine:
             status=ExternalActionStatus.RESERVED,
         )
 
-        self.uow.orchestration_external_actions.reserve(action)
+        def _recovery_action() -> OrchestrationExternalAction:
+            res = self.uow.orchestration_external_actions.get_by_action_key(action_key)
+            if res:
+                return res
+            raise RuntimeError(f"Failed to recover action for {action_key}")
+
+        session = getattr(self.uow, "session", None)
+        if session is not None and hasattr(session, "begin_nested"):
+            saved, recovery_res = execute_with_savepoint_recovery(
+                session=session,
+                save_fn=lambda: self.uow.orchestration_external_actions.reserve(action),
+                constraint_name="action_key",
+                recovery_fn=_recovery_action,
+            )
+            if not saved and recovery_res is not None:
+                return recovery_res
+        else:
+            self.uow.orchestration_external_actions.reserve(action)
+
 
         event = Event(
             project_id="system",

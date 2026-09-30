@@ -15,6 +15,7 @@ from typing import Any
 from minime.adapters.github import GitHubAdapter
 from minime.adapters.openspec import OpenSpecAdapter
 from minime.domain.enums import (
+    AdmissionDecision,
     AuditFindingSeverity,
     AuditStatus,
     ChangeStatus,
@@ -171,13 +172,13 @@ class OrchestrationService:
         self.provider_policy = ProviderPolicyService(self.uow)
         self.reconciliation_service = LightweightReconciliationService(self.uow)
 
-    def admit_change(
+    def _admit_change_in_transaction(
         self,
         project_id: str,
         change_name: str,
         project_root: str | Path | None = None,
     ) -> AdmissionResult:
-        """Admit one project/change pair into orchestration after re-verifying all requirements."""
+        """Internal transactional admission primitive; creates records without committing."""
         root = Path(project_root).resolve() if project_root else self.project_root
 
         # 1. Project existence check
@@ -261,10 +262,7 @@ class OrchestrationService:
                 existing_run_id=existing_active.run_id,
             )
 
-        # 7. APPLY attribution gate: implementation must be attributable to an
-        # admitted OpenSpec APPLY lifecycle, with no pre-admission drift. This
-        # composes with Phase A readiness (strict validation) and fails closed
-        # when attribution is ambiguous or unverifiable.
+        # 7. APPLY attribution gate
         apply_result = ApplyAttributionGate(self.openspec_adapter).evaluate(
             project=project,
             change_name=change_name,
@@ -282,7 +280,6 @@ class OrchestrationService:
                 },
             )
 
-        # Determine registered base SHA from repo or project
         base_sha = self._resolve_base_sha(project, root)
 
         run = OrchestrationRun(
@@ -299,7 +296,30 @@ class OrchestrationService:
             updated_at=utc_now(),
         )
 
-        self.uow.orchestration_runs.save(run)
+        def _recovery_on_active_run_conflict() -> AdmissionResult:
+            existing = self.uow.orchestration_runs.get_active_run(project_id, change_name)
+            run_id = existing.run_id if existing else "unknown"
+            return AdmissionResult(
+                admitted=False,
+                refusal_reason=f"Active orchestration run '{run_id}' already exists for project '{project_id}' and change '{change_name}'.",
+                refusal_details={"code": "DUPLICATE_ACTIVE_RUN", "existing_run_id": run_id},
+                existing_run_id=run_id,
+            )
+
+        from minime.db.savepoint import execute_with_savepoint_recovery
+        session = getattr(self.uow, "session", None)
+        if session is not None and hasattr(session, "begin_nested"):
+            saved, recovery_res = execute_with_savepoint_recovery(
+                session=session,
+                save_fn=lambda: self.uow.orchestration_runs.save(run),
+                constraint_name="uq_active_orchestration_run",
+                recovery_fn=_recovery_on_active_run_conflict,
+            )
+            if not saved and recovery_res is not None:
+                return recovery_res
+        else:
+            self.uow.orchestration_runs.save(run)
+
         self.uow.orchestration_stage_events.save(
             OrchestrationStageEvent(
                 run_id=run.run_id,
@@ -328,10 +348,36 @@ class OrchestrationService:
         )
 
         self._try_classify_pre_execution(change)
-
-        self.uow.commit()
-
+        # Note: DOES NOT commit internally! Caller transaction (SchedulerService) owns commit.
         return AdmissionResult(admitted=True, run=run)
+
+    def admit_change(
+        self,
+        project_id: str,
+        change_name: str,
+        project_root: str | Path | None = None,
+    ) -> AdmissionResult:
+        """Public admission entry point; delegates through canonical SchedulerService.admit_work_item authority."""
+        from minime.services.scheduler_service import SchedulerService
+        scheduler = getattr(self, "_scheduler_service_override", None) or SchedulerService(
+            self.uow,
+            project_root=project_root or self.project_root,
+            orchestration_service=self,
+            readiness_service=self.readiness_service,
+        )
+        dec, dec_rec, run = scheduler.admit_work_item(project_id, change_name)
+        if dec == AdmissionDecision.ADMITTED and run:
+            return AdmissionResult(admitted=True, run=run)
+
+        reason = dec_rec.reason_summary if dec_rec else "Admission refused by scheduler authority"
+        refusal_code = dec_rec.reason_code.value if dec_rec and dec_rec.reason_code else "REFUSED"
+        refusal_details = dec_rec.refusal_details if dec_rec and dec_rec.refusal_details else {"code": refusal_code}
+        return AdmissionResult(
+            admitted=False,
+            refusal_reason=reason,
+            refusal_details=refusal_details,
+            existing_run_id=dec_rec.run_id if dec_rec else None,
+        )
 
     def start(
         self,

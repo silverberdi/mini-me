@@ -1,0 +1,341 @@
+"""PostgreSQL adversarial tests for Scheduler admission serialization & concurrency (T01-T04)."""
+
+import os
+import subprocess
+import threading
+import time
+from pathlib import Path
+from typing import Any, Generator
+
+import pytest
+from sqlalchemy import Engine, create_engine
+from sqlalchemy.orm import Session, sessionmaker
+
+from minime.db.models import Base
+from minime.db.repository import PostgresPersistenceUnitOfWork
+from minime.domain.enums import (
+    AdmissionDecision,
+    AdmissionRefusalCode,
+    ChangeStatus,
+    ProviderHealthStatus,
+    QueuePriority,
+    ReadinessState,
+    WorkItemStatus,
+)
+from minime.domain.models import (
+    BacklogItem,
+    Change,
+    Project,
+    ProjectBinding,
+    ProviderHealth,
+    WorkQueueItem,
+    utc_now,
+)
+from minime.services.scheduler_service import SchedulerService
+
+
+def _ensure_pg_server() -> str | None:
+    candidate_urls = [
+        os.environ.get("MINIME_TEST_DATABASE_URL"),
+        "postgresql+psycopg://testuser@localhost:54333/minime_test",
+    ]
+    for url in candidate_urls:
+        if not url:
+            continue
+        try:
+            eng = create_engine(url, pool_pre_ping=True)
+            with eng.connect() as conn:
+                conn.exec_driver_sql("SELECT 1")
+            eng.dispose()
+            return url
+        except Exception:
+            continue
+
+    pg_ctl = Path("/Library/PostgreSQL/17/bin/pg_ctl")
+    initdb = Path("/Library/PostgreSQL/17/bin/initdb")
+    psql = Path("/Library/PostgreSQL/17/bin/psql")
+    data_dir = Path("/tmp/minime_pg_test_data")
+
+    if pg_ctl.exists() and initdb.exists():
+        if not data_dir.exists():
+            subprocess.run(
+                [str(initdb), "-D", str(data_dir), "-U", "testuser", "-A", "trust"],
+                check=False,
+                capture_output=True,
+            )
+        subprocess.run(
+            [
+                str(pg_ctl),
+                "-D",
+                str(data_dir),
+                "-o",
+                "-p 54333 -k /tmp",
+                "-l",
+                "/tmp/minime_pg_test.log",
+                "start",
+            ],
+            check=False,
+            capture_output=True,
+        )
+        time.sleep(0.5)
+        if psql.exists():
+            subprocess.run(
+                [
+                    str(psql),
+                    "-h",
+                    "localhost",
+                    "-p",
+                    "54333",
+                    "-U",
+                    "testuser",
+                    "-d",
+                    "postgres",
+                    "-c",
+                    "CREATE DATABASE minime_test;",
+                ],
+                check=False,
+                capture_output=True,
+            )
+        try:
+            test_url = "postgresql+psycopg://testuser@localhost:54333/minime_test"
+            eng = create_engine(test_url, pool_pre_ping=True)
+            with eng.connect() as conn:
+                conn.exec_driver_sql("SELECT 1")
+            eng.dispose()
+            return test_url
+        except Exception:
+            pass
+    return None
+
+
+PG_TEST_URL = _ensure_pg_server()
+
+
+@pytest.fixture(scope="module")
+def pg_engine() -> Generator[Engine, None, None]:
+    if not PG_TEST_URL:
+        pytest.skip("PostgreSQL test database server is not reachable.")
+    engine = create_engine(PG_TEST_URL, pool_size=10, max_overflow=20, pool_pre_ping=True)
+    from sqlalchemy import text
+
+    with engine.connect() as conn:
+        conn.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public;"))
+        conn.commit()
+    Base.metadata.create_all(engine)
+    yield engine
+    with engine.connect() as conn:
+        conn.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public;"))
+        conn.commit()
+    engine.dispose()
+
+
+@pytest.fixture
+def pg_session_factory(pg_engine: Engine) -> sessionmaker[Session]:
+    return sessionmaker(bind=pg_engine, autoflush=False, expire_on_commit=False)
+
+
+def _seed_project_and_change(
+    session_factory: sessionmaker[Session],
+    project_id: str = "proj-concurrency",
+    change_name: str = "change-concurrency",
+    issue_number: int = 101,
+    max_concurrent_jobs: int = 1,
+) -> None:
+    with session_factory() as session:
+        uow = PostgresPersistenceUnitOfWork(session)
+        proj = Project(
+            project_id=project_id,
+            display_name=f"Project {project_id}",
+            repository="owner/repo",
+            base_branch="main",
+            implementer="codex",
+            reviewer="antigravity",
+            max_concurrent_jobs=max_concurrent_jobs,
+        )
+        uow.projects.save(proj)
+
+        binding = ProjectBinding(
+            binding_id=f"bind-{project_id}-{change_name}",
+            project_id=project_id,
+            openspec_change_name=change_name,
+            github_issue_number=issue_number,
+            github_repository="owner/repo",
+            is_valid=True,
+            bound_at=utc_now(),
+        )
+        uow.bindings.save(binding)
+
+        ch = Change(
+            change_id=f"ch-{project_id}-{change_name}",
+            project_id=project_id,
+            name=change_name,
+            status=ChangeStatus.READY,
+            last_readiness_status=ReadinessState.READY,
+        )
+        uow.changes.save(ch)
+
+        item = WorkQueueItem(
+            project_id=project_id,
+            change_name=change_name,
+            github_issue_number=issue_number,
+            priority=QueuePriority.NORMAL,
+            readiness_state=ReadinessState.READY,
+            admission_eligible=True,
+            discovered_at=utc_now(),
+        )
+        uow.work_queue.save(item)
+
+        backlog = BacklogItem(
+            item_id=f"item-{project_id}-{change_name}",
+            project_id=project_id,
+            item_key=f"KEY-{change_name}",
+            openspec_change_name=change_name,
+            status=WorkItemStatus.READY,
+        )
+        uow.backlog_items.save(backlog)
+
+        for provider in ["codex", "antigravity"]:
+            uow.provider_health.save(
+                ProviderHealth(
+                    health_id=f"ph-{provider}",
+                    provider=provider,
+                    status=ProviderHealthStatus.AVAILABLE,
+                )
+            )
+        uow.commit()
+
+
+def test_t01_same_change_savepoint_recovery(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+    """T01: Prove same-change Savepoint conflict recovery on uq_active_orchestration_run.
+
+    Two concurrent threads attempt to admit the exact same change.
+    One caller succeeds in creating active run, second caller hits uq_active_orchestration_run
+    and recovers via Pattern A Savepoint to return REFUSED with CHANGE_ALREADY_ACTIVE.
+    """
+    project_id = "t01-proj"
+    change_name = "t01-change"
+    _seed_project_and_change(pg_session_factory, project_id, change_name)
+
+    results: list[tuple[AdmissionDecision, Any, Any]] = [None, None]  # type: ignore
+
+    def worker(idx: int):
+        with pg_session_factory() as session:
+            uow = PostgresPersistenceUnitOfWork(session)
+            scheduler = SchedulerService(uow, project_root=tmp_path, max_global_jobs=5)
+            dec, rec, run = scheduler.admit_work_item(project_id, change_name)
+            results[idx] = (dec, rec, run)
+
+    t1 = threading.Thread(target=worker, args=(0,))
+    t2 = threading.Thread(target=worker, args=(1,))
+
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    decisions = [r[0] for r in results]
+    assert AdmissionDecision.ADMITTED in decisions
+    assert AdmissionDecision.REFUSED in decisions
+
+    refused_rec = [r[1] for r in results if r[0] == AdmissionDecision.REFUSED][0]
+    assert refused_rec.reason_code == AdmissionRefusalCode.CHANGE_ALREADY_ACTIVE
+
+
+def test_t02_project_concurrency_limit(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+    """T02: Prove project concurrency limit (max_concurrent_jobs=1) under advisory locks.
+
+    Two different changes for the same project are admitted concurrently.
+    The first change gets admitted; the second change is refused with PROJECT_CONCURRENCY_LIMIT.
+    """
+    project_id = "t02-proj"
+    _seed_project_and_change(pg_session_factory, project_id, "c1", issue_number=1, max_concurrent_jobs=1)
+    _seed_project_and_change(pg_session_factory, project_id, "c2", issue_number=2, max_concurrent_jobs=1)
+
+    results: list[tuple[AdmissionDecision, Any, Any]] = [None, None]  # type: ignore
+
+    def worker(idx: int, cname: str):
+        with pg_session_factory() as session:
+            uow = PostgresPersistenceUnitOfWork(session)
+            scheduler = SchedulerService(uow, project_root=tmp_path, max_global_jobs=5)
+            dec, rec, run = scheduler.admit_work_item(project_id, cname)
+            results[idx] = (dec, rec, run)
+
+    t1 = threading.Thread(target=worker, args=(0, "c1"))
+    t2 = threading.Thread(target=worker, args=(1, "c2"))
+
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    decisions = [r[0] for r in results]
+    assert AdmissionDecision.ADMITTED in decisions
+    assert AdmissionDecision.REFUSED in decisions
+
+    refused_rec = [r[1] for r in results if r[0] == AdmissionDecision.REFUSED][0]
+    assert refused_rec.reason_code == AdmissionRefusalCode.PROJECT_CONCURRENCY_LIMIT
+
+
+def test_t03_global_concurrency_limit(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+    """T03: Prove global concurrency limit (max_global_jobs=1) under advisory locks.
+
+    Two changes in different projects are admitted concurrently.
+    The first caller succeeds; the second receives GLOBAL_CONCURRENCY_LIMIT.
+    """
+    _seed_project_and_change(pg_session_factory, "t03-p1", "c1", issue_number=1, max_concurrent_jobs=5)
+    _seed_project_and_change(pg_session_factory, "t03-p2", "c2", issue_number=2, max_concurrent_jobs=5)
+
+    results: list[tuple[AdmissionDecision, Any, Any]] = [None, None]  # type: ignore
+
+    def worker(idx: int, pid: str, cname: str):
+        with pg_session_factory() as session:
+            uow = PostgresPersistenceUnitOfWork(session)
+            scheduler = SchedulerService(uow, project_root=tmp_path, max_global_jobs=1)
+            dec, rec, run = scheduler.admit_work_item(pid, cname)
+            results[idx] = (dec, rec, run)
+
+    t1 = threading.Thread(target=worker, args=(0, "t03-p1", "c1"))
+    t2 = threading.Thread(target=worker, args=(1, "t03-p2", "c2"))
+
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    decisions = [r[0] for r in results]
+    assert AdmissionDecision.ADMITTED in decisions
+    assert AdmissionDecision.REFUSED in decisions
+
+    refused_rec = [r[1] for r in results if r[0] == AdmissionDecision.REFUSED][0]
+    assert refused_rec.reason_code == AdmissionRefusalCode.GLOBAL_CONCURRENCY_LIMIT
+
+
+def test_t04_project_limit_multi_slot(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+    """T04: Prove project concurrency limit > 1 (max_concurrent_jobs=2) allows multi-slot admission.
+
+    Two different changes for the same project with max_concurrent_jobs=2 and max_global_jobs=5.
+    Both changes are successfully admitted.
+    """
+    project_id = "t04-proj"
+    _seed_project_and_change(pg_session_factory, project_id, "c1", issue_number=1, max_concurrent_jobs=2)
+    _seed_project_and_change(pg_session_factory, project_id, "c2", issue_number=2, max_concurrent_jobs=2)
+
+    results: list[tuple[AdmissionDecision, Any, Any]] = [None, None]  # type: ignore
+
+    def worker(idx: int, cname: str):
+        with pg_session_factory() as session:
+            uow = PostgresPersistenceUnitOfWork(session)
+            scheduler = SchedulerService(uow, project_root=tmp_path, max_global_jobs=5)
+            dec, rec, run = scheduler.admit_work_item(project_id, cname)
+            results[idx] = (dec, rec, run)
+
+    t1 = threading.Thread(target=worker, args=(0, "c1"))
+    t2 = threading.Thread(target=worker, args=(1, "c2"))
+
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    assert results[0][0] == AdmissionDecision.ADMITTED
+    assert results[1][0] == AdmissionDecision.ADMITTED

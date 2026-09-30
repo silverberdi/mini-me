@@ -187,9 +187,12 @@ class BudgetService:
         total_tokens: int | None = None,
     ) -> BudgetLedgerEntry | None:
         """Settle completed reservation against ledger and handle breach if actual > reserved."""
-        reservation = self.uow.budget_reservations.get_by_id(reservation_id)
-        if not reservation:
+        reservation = getattr(
+            self.uow.budget_reservations, "get_by_id_for_update", self.uow.budget_reservations.get_by_id
+        )(reservation_id)
+        if not reservation or reservation.status != "RESERVED":
             return None
+
 
         actual_dec = (
             actual_cost_usd
@@ -309,9 +312,12 @@ class BudgetService:
         no repository-editing harness). The spend is real and is recorded; the
         reservation is NOT settled as a successful completion.
         """
-        reservation = self.uow.budget_reservations.get_by_id(reservation_id)
-        if not reservation:
+        reservation = getattr(
+            self.uow.budget_reservations, "get_by_id_for_update", self.uow.budget_reservations.get_by_id
+        )(reservation_id)
+        if not reservation or reservation.status != "RESERVED":
             return None
+
 
         actual_dec = (
             actual_cost_usd
@@ -364,9 +370,12 @@ class BudgetService:
         self, reservation_id: str, reason: str = "cancelled"
     ) -> BudgetReservation | None:
         """Release a reservation before HTTP dispatch (e.g. pricing changed or cancelled)."""
-        reservation = self.uow.budget_reservations.get_by_id(reservation_id)
-        if not reservation:
+        reservation = getattr(
+            self.uow.budget_reservations, "get_by_id_for_update", self.uow.budget_reservations.get_by_id
+        )(reservation_id)
+        if not reservation or reservation.status != "RESERVED":
             return None
+
         reservation.status = "RELEASED"
         reservation.updated_at = utc_now()
         self.uow.budget_reservations.save(reservation)

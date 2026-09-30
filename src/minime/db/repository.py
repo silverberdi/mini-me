@@ -1439,7 +1439,8 @@ class PostgresJobRepository(JobRepositoryInterface):
         return [job_model_to_domain(m) for m in models]
 
     def transition(self, job_id: str, new_status: str, error_message: str | None = None) -> Job:
-        model = self.session.get(JobModel, job_id)
+        stmt = select(JobModel).where(JobModel.id == job_id).with_for_update()
+        model = self.session.scalars(stmt).first()
         if not model:
             raise ValueError(f"Job '{job_id}' not found.")
         current = JobStatus(model.status)
@@ -1458,7 +1459,8 @@ class PostgresJobRepository(JobRepositoryInterface):
         reason: str,
         expected_reset_at: datetime | None = None,
     ) -> Job:
-        model = self.session.get(JobModel, job_id)
+        stmt = select(JobModel).where(JobModel.id == job_id).with_for_update()
+        model = self.session.scalars(stmt).first()
         if not model:
             raise ValueError(f"Job '{job_id}' not found.")
         current = JobStatus(model.status)
@@ -1473,7 +1475,8 @@ class PostgresJobRepository(JobRepositoryInterface):
         return job_model_to_domain(model)
 
     def set_recovery_blocked(self, job_id: str, reason: str) -> Job:
-        model = self.session.get(JobModel, job_id)
+        stmt = select(JobModel).where(JobModel.id == job_id).with_for_update()
+        model = self.session.scalars(stmt).first()
         if not model:
             raise ValueError(f"Job '{job_id}' not found.")
         current = JobStatus(model.status)
@@ -1484,6 +1487,7 @@ class PostgresJobRepository(JobRepositoryInterface):
         model.recovery_blocked_reason = reason
         model.updated_at = utc_now()
         return job_model_to_domain(model)
+
 
     for _status in JobStatus:
         VALID_TRANSITIONS[_status].add(JobStatus.RECOVERY_BLOCKED)
@@ -2218,6 +2222,12 @@ class PostgresBudgetReservationRepository(BudgetReservationRepositoryInterface):
         model = self.session.get(BudgetReservationModel, reservation_id)
         return budget_reservation_model_to_domain(model) if model else None
 
+    def get_by_id_for_update(self, reservation_id: str) -> BudgetReservation | None:
+        stmt = select(BudgetReservationModel).where(BudgetReservationModel.id == reservation_id).with_for_update()
+        model = self.session.scalars(stmt).first()
+        return budget_reservation_model_to_domain(model) if model else None
+
+
     def list_by_project(self, project_id: str) -> list[BudgetReservation]:
         return [
             budget_reservation_model_to_domain(m)
@@ -2651,6 +2661,12 @@ class PostgresOrchestrationRunRepository(OrchestrationRunRepositoryInterface):
     def get_by_id(self, run_id: str) -> OrchestrationRun | None:
         model = self.session.get(OrchestrationRunModel, run_id)
         return orchestration_run_model_to_domain(model) if model else None
+
+    def get_for_update(self, run_id: str) -> OrchestrationRun | None:
+        stmt = select(OrchestrationRunModel).where(OrchestrationRunModel.id == run_id).with_for_update()
+        model = self.session.scalars(stmt).first()
+        return orchestration_run_model_to_domain(model) if model else None
+
 
     def get_active_run(self, project_id: str, change_name: str) -> OrchestrationRun | None:
         stmt = select(OrchestrationRunModel).where(
@@ -4672,3 +4688,12 @@ class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
 
     def rollback(self) -> None:
         self.session.rollback()
+
+    def acquire_advisory_lock(self, key: int, lock_timeout: str = "2s") -> None:
+        """Acquire PostgreSQL transaction-scoped 64-bit advisory lock with a local lock timeout."""
+        bind_name = getattr(getattr(self.session, "bind", None), "name", "")
+        if bind_name == "postgresql" or (hasattr(self.session, "bind") and "postgres" in str(self.session.bind.url)):
+            from sqlalchemy import text
+            self.session.execute(text(f"SET LOCAL lock_timeout = '{lock_timeout}'"))
+            self.session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
+
