@@ -89,6 +89,9 @@ MAX_AGING_BONUS: float = 2000.0
 HOURLY_AGING_RATE: float = 50.0
 
 
+CANONICAL_GLOBAL_MAX_JOBS: int = 1
+
+
 class SchedulerService:
     """Autonomous work scheduler and queue dispatcher."""
 
@@ -104,6 +107,7 @@ class SchedulerService:
         intake_service: IntakeService | None = None,
         model_independence_policy: ModelIndependencePolicy | None = None,
         max_global_jobs: int = 1,
+        _test_global_max_jobs_override: int | None = None,
         one_active_implementation_per_project: bool = True,
         mode: SchedulerMode = SchedulerMode.RUN,
     ):
@@ -147,7 +151,11 @@ class SchedulerService:
         )
         self.provider_health_service = provider_health_service or ProviderHealthService(uow)
         self.model_independence_policy = model_independence_policy or ModelIndependencePolicy()
-        self.max_global_jobs = max_global_jobs
+        self.max_global_jobs = (
+            _test_global_max_jobs_override
+            if _test_global_max_jobs_override is not None
+            else max_global_jobs
+        )
         self.one_active_implementation_per_project = one_active_implementation_per_project
         self.mode = mode
         self._admission_health_truth: dict[str, ProviderHealth | None] | None = None
@@ -422,32 +430,6 @@ class SchedulerService:
             github_repo=project.repository,
             github_issue=binding.github_issue_number,
         )
-        from unittest.mock import MagicMock
-
-        from minime.domain.enums import ReadinessState
-        if (
-            isinstance(readiness_eval, MagicMock)
-            and isinstance(getattr(readiness_eval, "status", None), MagicMock)
-            and hasattr(self.readiness_service, "evaluate_change_readiness")
-        ):
-            alt_eval = self.readiness_service.evaluate_change_readiness(
-                project_id=project_id,
-                change_name=change_name,
-                project_root=str(self.project_root),
-                github_repo=project.repository,
-                github_issue=binding.github_issue_number,
-            )
-            if isinstance(alt_eval, MagicMock) or not isinstance(getattr(alt_eval, "status", None), MagicMock):
-                readiness_eval = alt_eval
-
-        if isinstance(readiness_eval, MagicMock):
-            if bool(getattr(readiness_eval, "is_ready", True)):
-                readiness_eval.status = ReadinessState.READY
-                if isinstance(getattr(readiness_eval, "unmet_reasons", None), MagicMock):
-                    readiness_eval.unmet_reasons = []
-
-
-
 
         # 2. Apply Attribution Gate evaluation (Git / OpenSpec subprocess check)
         from minime.services.lifecycle_gates import ApplyAttributionGate
@@ -504,7 +486,6 @@ class SchedulerService:
         backlog_rec = self.uow.backlog_items.get_by_openspec_change_name(project_id, change_name)
         if (not change_rec and not backlog_rec) or not evidence.change_exists:
             return AdmissionEvaluationResult(
-
                 decision=AdmissionDecisionKind.NEEDS_HUMAN,
                 project_id=project_id,
                 change_name=change_name,
@@ -513,6 +494,51 @@ class SchedulerService:
                 rationale=f"Change '{change_name}' not found for project '{project_id}'.",
                 legacy_decision=AdmissionDecision.REFUSED,
                 legacy_refusal_code=AdmissionRefusalCode.NOT_READY,
+            )
+
+        # Check active run uniqueness first so duplicate active runs report CHANGE_ALREADY_ACTIVE
+        active_runs = self.uow.orchestration_runs.list_runs(is_active=True)
+        for active_run in active_runs:
+            if active_run.project_id == project_id and active_run.change_name == change_name:
+                if self.mode != SchedulerMode.DRAIN:
+                    return AdmissionEvaluationResult(
+                        decision=AdmissionDecisionKind.WAIT,
+                        project_id=project_id,
+                        change_name=change_name,
+                        safe_executable_pair_exists=True,
+                        eligible_implementer=getattr(project, "implementer", None) or "codex",
+                        eligible_reviewer=getattr(project, "reviewer", None) or "antigravity",
+                        block_condition=AdmissionBlockCondition.LIFECYCLE_BLOCKED,
+                        rationale=f"Active orchestration run '{active_run.run_id}' already exists for project '{project_id}' and change '{change_name}'.",
+                        legacy_decision=AdmissionDecision.REFUSED,
+                        legacy_refusal_code=AdmissionRefusalCode.CHANGE_ALREADY_ACTIVE,
+                        refusal_details={"code": "DUPLICATE_ACTIVE_RUN", "existing_run_id": active_run.run_id},
+                    )
+
+        if change_rec and change_rec.status in (ChangeStatus.DONE, ChangeStatus.CANCELLED):
+            return AdmissionEvaluationResult(
+                decision=AdmissionDecisionKind.NEEDS_HUMAN,
+                project_id=project_id,
+                change_name=change_name,
+                safe_executable_pair_exists=False,
+                block_condition=AdmissionBlockCondition.LIFECYCLE_BLOCKED,
+                rationale=f"Change '{change_name}' is in terminal state '{change_rec.status.value}' and cannot be admitted.",
+                legacy_decision=AdmissionDecision.REFUSED,
+                legacy_refusal_code=AdmissionRefusalCode.NOT_READY,
+                refusal_details={"code": "LIFECYCLE_BLOCKED", "status": change_rec.status.value},
+            )
+
+        if backlog_rec and backlog_rec.status != WorkItemStatus.READY:
+            return AdmissionEvaluationResult(
+                decision=AdmissionDecisionKind.NEEDS_HUMAN,
+                project_id=project_id,
+                change_name=change_name,
+                safe_executable_pair_exists=False,
+                block_condition=AdmissionBlockCondition.LIFECYCLE_BLOCKED,
+                rationale=f"BacklogItem for change '{change_name}' is in state '{backlog_rec.status.value}' (expected READY).",
+                legacy_decision=AdmissionDecision.REFUSED,
+                legacy_refusal_code=AdmissionRefusalCode.NOT_READY,
+                refusal_details={"code": "LIFECYCLE_BLOCKED", "status": backlog_rec.status.value},
             )
 
         # 2. Durable ProjectBinding check
@@ -1039,257 +1065,266 @@ class SchedulerService:
         # PHASE A: Pre-lock evidence preparation (no locks, no DB commits, all external/subprocess reads)
         evidence = self.prepare_admission_evidence(project_id, change_name)
 
-        # PHASE B: Serialized DB authority (under advisory locks, single atomic DB transaction)
-        global_key = derive_global_admission_lock_key()
-        project_key = derive_project_admission_lock_key(project_id)
+        # PHASE B: Serialized DB authority (under advisory locks, single atomic DB transaction with retry)
+        from minime.db.retry import TransactionRetryWrapper
 
-        self.uow.acquire_advisory_lock(global_key, lock_timeout="2s")
-        self.uow.acquire_advisory_lock(project_key, lock_timeout="2s")
+        def _phase_b_body() -> tuple[AdmissionDecision, SchedulerDecisionRecord, OrchestrationRun | None]:
+            global_key = derive_global_admission_lock_key()
+            project_key = derive_project_admission_lock_key(project_id)
 
-        eval_result = self.evaluate_admission(project_id, change_name, evidence=evidence)
-        decision = eval_result.decision
-        refusal_code = eval_result.legacy_refusal_code
-        reason_summary = eval_result.rationale
-        selected_implementer = eval_result.eligible_implementer
+            self.uow.acquire_advisory_lock(global_key, lock_timeout="2s")
+            self.uow.acquire_advisory_lock(project_key, lock_timeout="2s")
 
-        item = self.uow.work_queue.get_by_project_and_change(project_id, change_name)
-        _, _, _, priority_score = (
-            self.compute_priority_score(item) if item else (0.0, 0.0, 0.0, 0.0)
-        )
-        issue_number = item.github_issue_number if item else None
+            eval_result = self.evaluate_admission(project_id, change_name, evidence=evidence)
+            decision = eval_result.decision
+            refusal_code = eval_result.legacy_refusal_code
+            reason_summary = eval_result.rationale
+            selected_implementer = eval_result.eligible_implementer
 
-        active_runs = self.uow.orchestration_runs.list_runs(is_active=True)
-        concurrency_snapshot = {
-            "global_active": len(active_runs),
-            "max_global_jobs": self.max_global_jobs,
-            "project_active": len([r for r in active_runs if r.project_id == project_id]),
-        }
-        capacity_snapshot = {
-            "mode": self.mode.value,
-            "implementer": selected_implementer,
-            "operational_decision": eval_result.decision.value,
-        }
-
-        if decision == AdmissionDecisionKind.RUN:
-            admission_result = self.orchestration_service._admit_change_in_transaction(
-                project_id=project_id,
-                change_name=change_name,
-                project_root=self.project_root,
-                evidence=evidence,
+            item = self.uow.work_queue.get_by_project_and_change(project_id, change_name)
+            _, _, _, priority_score = (
+                self.compute_priority_score(item) if item else (0.0, 0.0, 0.0, 0.0)
             )
-            if not admission_result.admitted or not admission_result.run:
-                refusal_code_str = (
-                    admission_result.refusal_details.get("code")
-                    if admission_result.refusal_details
-                    else "EVALUATION_ERROR"
+            issue_number = item.github_issue_number if item else None
+
+            active_runs = self.uow.orchestration_runs.list_runs(is_active=True)
+            concurrency_snapshot = {
+                "global_active": len(active_runs),
+                "max_global_jobs": self.max_global_jobs,
+                "project_active": len([r for r in active_runs if r.project_id == project_id]),
+            }
+            capacity_snapshot = {
+                "mode": self.mode.value,
+                "implementer": selected_implementer,
+                "operational_decision": eval_result.decision.value,
+            }
+
+            if decision == AdmissionDecisionKind.RUN:
+                admission_result = self.orchestration_service._admit_change_in_transaction(
+                    project_id=project_id,
+                    change_name=change_name,
+                    project_root=self.project_root,
+                    evidence=evidence,
                 )
-                try:
-                    refusal = AdmissionRefusalCode(refusal_code_str)
-                except ValueError:
-                    refusal = AdmissionRefusalCode.EVALUATION_ERROR
+                if not admission_result.admitted or not admission_result.run:
+                    refusal_code_str = (
+                        admission_result.refusal_details.get("code")
+                        if admission_result.refusal_details
+                        else "EVALUATION_ERROR"
+                    )
+                    try:
+                        refusal = AdmissionRefusalCode(refusal_code_str)
+                    except ValueError:
+                        refusal = AdmissionRefusalCode.EVALUATION_ERROR
+
+                    decision_record = SchedulerDecisionRecord(
+                        project_id=project_id,
+                        change_name=change_name,
+                        github_issue_number=issue_number,
+                        decision=AdmissionDecision.REFUSED,
+                        reason_code=refusal,
+                        reason_summary=admission_result.refusal_reason
+                        or "Orchestration admission failed",
+                        priority_score=priority_score,
+                        selected_implementer=selected_implementer,
+                        operational_decision=AdmissionDecisionKind.NEEDS_HUMAN,
+                        block_condition=AdmissionBlockCondition.LIFECYCLE_BLOCKED,
+                        eligible_reviewer=eval_result.eligible_reviewer,
+                        safe_executable_pair_exists=eval_result.safe_executable_pair_exists,
+                        has_deterministic_eta=eval_result.has_deterministic_eta,
+                        cooldown_until=eval_result.cooldown_until,
+                        concurrency_snapshot=concurrency_snapshot,
+                        capacity_snapshot=capacity_snapshot,
+                        refusal_details=admission_result.refusal_details or {"code": refusal_code_str},
+                        run_id=str(admission_result.existing_run_id) if admission_result and getattr(admission_result, "existing_run_id", None) is not None else None,
+                        evaluated_at=utc_now(),
+                    )
+                    self.uow.scheduler_decisions.save(decision_record)
+                    self.uow.commit()
+                    return AdmissionDecision.REFUSED, decision_record, None
+
+                run = admission_result.run
 
                 decision_record = SchedulerDecisionRecord(
                     project_id=project_id,
                     change_name=change_name,
                     github_issue_number=issue_number,
-                    decision=AdmissionDecision.REFUSED,
-                    reason_code=refusal,
-                    reason_summary=admission_result.refusal_reason
-                    or "Orchestration admission failed",
+                    decision=AdmissionDecision.ADMITTED,
+                    reason_code=None,
+                    reason_summary=reason_summary,
                     priority_score=priority_score,
                     selected_implementer=selected_implementer,
-                    operational_decision=AdmissionDecisionKind.NEEDS_HUMAN,
-                    block_condition=AdmissionBlockCondition.LIFECYCLE_BLOCKED,
+                    operational_decision=eval_result.decision,
+                    block_condition=eval_result.block_condition,
                     eligible_reviewer=eval_result.eligible_reviewer,
                     safe_executable_pair_exists=eval_result.safe_executable_pair_exists,
                     has_deterministic_eta=eval_result.has_deterministic_eta,
                     cooldown_until=eval_result.cooldown_until,
                     concurrency_snapshot=concurrency_snapshot,
                     capacity_snapshot=capacity_snapshot,
-                    refusal_details=admission_result.refusal_details or {"code": refusal_code_str},
-                    run_id=str(admission_result.existing_run_id) if admission_result and getattr(admission_result, "existing_run_id", None) is not None else None,
+                    run_id=str(run.run_id) if run and getattr(run, "run_id", None) is not None else None,
                     evaluated_at=utc_now(),
                 )
                 self.uow.scheduler_decisions.save(decision_record)
-                self.uow.commit()
-                return AdmissionDecision.REFUSED, decision_record, None
 
-            run = admission_result.run
+                if item:
+                    updated_item = item.model_copy(
+                        update={
+                            "admission_eligible": False,
+                            "blocked_reason": f"Admitted in active run '{run.run_id}'",
+                            "last_evaluated_at": utc_now(),
+                        }
+                    )
+                    self.uow.work_queue.save(updated_item)
 
-            decision_record = SchedulerDecisionRecord(
-                project_id=project_id,
-                change_name=change_name,
-                github_issue_number=issue_number,
-                decision=AdmissionDecision.ADMITTED,
-                reason_code=None,
-                reason_summary=reason_summary,
-                priority_score=priority_score,
-                selected_implementer=selected_implementer,
-                operational_decision=eval_result.decision,
-                block_condition=eval_result.block_condition,
-                eligible_reviewer=eval_result.eligible_reviewer,
-                safe_executable_pair_exists=eval_result.safe_executable_pair_exists,
-                has_deterministic_eta=eval_result.has_deterministic_eta,
-                cooldown_until=eval_result.cooldown_until,
-                concurrency_snapshot=concurrency_snapshot,
-                capacity_snapshot=capacity_snapshot,
-                run_id=str(run.run_id) if run and getattr(run, "run_id", None) is not None else None,
-                evaluated_at=utc_now(),
-            )
-            self.uow.scheduler_decisions.save(decision_record)
-
-            if item:
-                updated_item = item.model_copy(
-                    update={
-                        "admission_eligible": False,
-                        "blocked_reason": f"Admitted in active run '{run.run_id}'",
-                        "last_evaluated_at": utc_now(),
-                    }
+                backlog_item = self.uow.backlog_items.get_by_openspec_change_name(
+                    project_id, change_name
                 )
-                self.uow.work_queue.save(updated_item)
+                if backlog_item and backlog_item.status != WorkItemStatus.ADMITTED:
+                    authority = LifecycleTransitionAuthority(self.uow)
+                    authority.transition_backlog_item(
+                        project_id=project_id,
+                        item_key=backlog_item.item_key,
+                        expected_from_state=WorkItemStatus.READY,
+                        to_state=WorkItemStatus.ADMITTED,
+                        run_id=run.run_id,
+                        reason_code="scheduler_admission",
+                        actor="scheduler",
+                    )
 
-            backlog_item = self.uow.backlog_items.get_by_openspec_change_name(
-                project_id, change_name
-            )
-            if backlog_item and backlog_item.status != WorkItemStatus.ADMITTED:
-                authority = LifecycleTransitionAuthority(self.uow)
-                authority.transition_backlog_item(
+                self.uow.commit()
+
+                if drive_admitted:
+                    run = self.orchestration_service.drive_coordinator(
+                        run.run_id, project_root=self.project_root
+                    )
+
+                return AdmissionDecision.ADMITTED, decision_record, run
+
+            elif decision == AdmissionDecisionKind.DRAIN:
+                # Drain continuation of already-admitted in-flight work. This is NEVER a
+                # fresh admission: no admit_change, no new job, no READY backlog claim.
+                project = self.uow.projects.get_by_id(project_id)
+                run, _ = (
+                    self._find_drain_continuation(project, change_name) if project else (None, None)
+                )
+                if run is None:
+                    # No canonical drain continuation path is available from this service.
+                    decision_record = SchedulerDecisionRecord(
+                        project_id=project_id,
+                        change_name=change_name,
+                        github_issue_number=issue_number,
+                        decision=AdmissionDecision.REFUSED,
+                        reason_code=AdmissionRefusalCode.EVALUATION_ERROR,
+                        reason_summary=(
+                            "SCOPE_CONTRACT_MISMATCH: no canonical drain continuation "
+                            "path available for in-flight work."
+                        ),
+                        priority_score=priority_score,
+                        selected_implementer=selected_implementer,
+                        operational_decision=AdmissionDecisionKind.NEEDS_HUMAN,
+                        block_condition=AdmissionBlockCondition.LIFECYCLE_BLOCKED,
+                        eligible_reviewer=eval_result.eligible_reviewer,
+                        safe_executable_pair_exists=eval_result.safe_executable_pair_exists,
+                        has_deterministic_eta=eval_result.has_deterministic_eta,
+                        cooldown_until=eval_result.cooldown_until,
+                        concurrency_snapshot=concurrency_snapshot,
+                        capacity_snapshot=capacity_snapshot,
+                        evaluated_at=utc_now(),
+                    )
+                    self.uow.scheduler_decisions.save(decision_record)
+                    self.uow.commit()
+                    return AdmissionDecision.REFUSED, decision_record, None
+
+                resumed_run = self.orchestration_service.resume(
+                    run.run_id, project_root=self.project_root, drain_mode=True
+                )
+                decision_record = SchedulerDecisionRecord(
                     project_id=project_id,
-                    item_key=backlog_item.item_key,
-                    expected_from_state=backlog_item.status,
-                    to_state=WorkItemStatus.ADMITTED,
+                    change_name=change_name,
+                    github_issue_number=issue_number,
+                    decision=AdmissionDecision.ADMITTED,
+                    reason_code=None,
+                    reason_summary=reason_summary,
+                    priority_score=priority_score,
+                    selected_implementer=selected_implementer,
+                    operational_decision=AdmissionDecisionKind.DRAIN,
+                    block_condition=eval_result.block_condition,
+                    eligible_reviewer=eval_result.eligible_reviewer,
+                    safe_executable_pair_exists=eval_result.safe_executable_pair_exists,
+                    has_deterministic_eta=eval_result.has_deterministic_eta,
+                    cooldown_until=eval_result.cooldown_until,
+                    concurrency_snapshot=concurrency_snapshot,
+                    capacity_snapshot=capacity_snapshot,
                     run_id=run.run_id,
-                    reason_code="scheduler_admission",
-                    actor="scheduler",
+                    evaluated_at=utc_now(),
                 )
+                self.uow.scheduler_decisions.save(decision_record)
+                self.uow.commit()
+                return AdmissionDecision.ADMITTED, decision_record, resumed_run
 
-            self.uow.commit()
+            else:
+                if eval_result and eval_result.refusal_details and "code" in eval_result.refusal_details:
+                    details = dict(eval_result.refusal_details)
+                elif refusal_code == AdmissionRefusalCode.CHANGE_ALREADY_ACTIVE:
+                    active_runs = self.uow.orchestration_runs.list_runs(is_active=True)
+                    existing = next(
+                        (r for r in active_runs if r.project_id == project_id and r.change_name == change_name),
+                        None,
+                    )
+                    details = {
+                        "code": "DUPLICATE_ACTIVE_RUN",
+                        "existing_run_id": existing.run_id if existing else None,
+                    }
+                elif refusal_code == AdmissionRefusalCode.NOT_READY:
+                    details = {"code": "NOT_READY"}
+                    if "Definition of Ready unmet:" in reason_summary:
+                        reasons_part = reason_summary.split("Definition of Ready unmet:", 1)[1].strip()
+                        details["unmet_reasons"] = [r.strip() for r in reasons_part.split(";") if r.strip()]
+                else:
+                    details = {"code": refusal_code.value if refusal_code else "REFUSED"}
 
-            if drive_admitted:
-                run = self.orchestration_service.drive_coordinator(
-                    run.run_id, project_root=self.project_root
-                )
-
-            return AdmissionDecision.ADMITTED, decision_record, run
-
-        elif decision == AdmissionDecisionKind.DRAIN:
-            # Drain continuation of already-admitted in-flight work. This is NEVER a
-            # fresh admission: no admit_change, no new job, no READY backlog claim.
-            project = self.uow.projects.get_by_id(project_id)
-            run, _ = (
-                self._find_drain_continuation(project, change_name) if project else (None, None)
-            )
-            if run is None:
-                # No canonical drain continuation path is available from this service.
                 decision_record = SchedulerDecisionRecord(
                     project_id=project_id,
                     change_name=change_name,
                     github_issue_number=issue_number,
                     decision=AdmissionDecision.REFUSED,
-                    reason_code=AdmissionRefusalCode.EVALUATION_ERROR,
-                    reason_summary=(
-                        "SCOPE_CONTRACT_MISMATCH: no canonical drain continuation "
-                        "path available for in-flight work."
-                    ),
+                    reason_code=refusal_code,
+                    reason_summary=reason_summary,
                     priority_score=priority_score,
                     selected_implementer=selected_implementer,
-                    operational_decision=AdmissionDecisionKind.NEEDS_HUMAN,
-                    block_condition=AdmissionBlockCondition.LIFECYCLE_BLOCKED,
+                    operational_decision=eval_result.decision,
+                    block_condition=eval_result.block_condition,
                     eligible_reviewer=eval_result.eligible_reviewer,
                     safe_executable_pair_exists=eval_result.safe_executable_pair_exists,
                     has_deterministic_eta=eval_result.has_deterministic_eta,
                     cooldown_until=eval_result.cooldown_until,
                     concurrency_snapshot=concurrency_snapshot,
                     capacity_snapshot=capacity_snapshot,
+                    refusal_details=details,
+                    run_id=str(details.get("existing_run_id")) if details.get("existing_run_id") is not None else None,
                     evaluated_at=utc_now(),
                 )
                 self.uow.scheduler_decisions.save(decision_record)
+
+                if item:
+                    updated_item = item.model_copy(
+                        update={
+                            "blocked_reason": f"{refusal_code.value if refusal_code else 'BLOCKED'}: {reason_summary}",
+                            "last_evaluated_at": utc_now(),
+                        }
+                    )
+                    self.uow.work_queue.save(updated_item)
                 self.uow.commit()
                 return AdmissionDecision.REFUSED, decision_record, None
 
-            resumed_run = self.orchestration_service.resume(
-                run.run_id, project_root=self.project_root, drain_mode=True
-            )
-            decision_record = SchedulerDecisionRecord(
-                project_id=project_id,
-                change_name=change_name,
-                github_issue_number=issue_number,
-                decision=AdmissionDecision.ADMITTED,
-                reason_code=None,
-                reason_summary=reason_summary,
-                priority_score=priority_score,
-                selected_implementer=selected_implementer,
-                operational_decision=AdmissionDecisionKind.DRAIN,
-                block_condition=eval_result.block_condition,
-                eligible_reviewer=eval_result.eligible_reviewer,
-                safe_executable_pair_exists=eval_result.safe_executable_pair_exists,
-                has_deterministic_eta=eval_result.has_deterministic_eta,
-                cooldown_until=eval_result.cooldown_until,
-                concurrency_snapshot=concurrency_snapshot,
-                capacity_snapshot=capacity_snapshot,
-                run_id=run.run_id,
-                evaluated_at=utc_now(),
-            )
-            self.uow.scheduler_decisions.save(decision_record)
-            self.uow.commit()
-            return AdmissionDecision.ADMITTED, decision_record, resumed_run
-
-        else:
-            if eval_result and eval_result.refusal_details and "code" in eval_result.refusal_details:
-                details = dict(eval_result.refusal_details)
-            elif refusal_code == AdmissionRefusalCode.CHANGE_ALREADY_ACTIVE:
-                active_runs = self.uow.orchestration_runs.list_runs(is_active=True)
-                existing = next(
-                    (r for r in active_runs if r.project_id == project_id and r.change_name == change_name),
-                    None,
-                )
-                details = {
-                    "code": "DUPLICATE_ACTIVE_RUN",
-                    "existing_run_id": existing.run_id if existing else None,
-                }
-            elif refusal_code == AdmissionRefusalCode.NOT_READY:
-                details = {"code": "NOT_READY"}
-                if "Definition of Ready unmet:" in reason_summary:
-                    reasons_part = reason_summary.split("Definition of Ready unmet:", 1)[1].strip()
-                    details["unmet_reasons"] = [r.strip() for r in reasons_part.split(";") if r.strip()]
-            else:
-                details = {"code": refusal_code.value if refusal_code else "REFUSED"}
-
-
-            decision_record = SchedulerDecisionRecord(
-                project_id=project_id,
-                change_name=change_name,
-                github_issue_number=issue_number,
-                decision=AdmissionDecision.REFUSED,
-                reason_code=refusal_code,
-                reason_summary=reason_summary,
-                priority_score=priority_score,
-                selected_implementer=selected_implementer,
-                operational_decision=eval_result.decision,
-                block_condition=eval_result.block_condition,
-                eligible_reviewer=eval_result.eligible_reviewer,
-                safe_executable_pair_exists=eval_result.safe_executable_pair_exists,
-                has_deterministic_eta=eval_result.has_deterministic_eta,
-                cooldown_until=eval_result.cooldown_until,
-                concurrency_snapshot=concurrency_snapshot,
-                capacity_snapshot=capacity_snapshot,
-                refusal_details=details,
-                run_id=str(details.get("existing_run_id")) if details.get("existing_run_id") is not None else None,
-                evaluated_at=utc_now(),
-            )
-            self.uow.scheduler_decisions.save(decision_record)
-
-            if item:
-                updated_item = item.model_copy(
-                    update={
-                        "blocked_reason": f"{refusal_code.value if refusal_code else 'BLOCKED'}: {reason_summary}",
-                        "last_evaluated_at": utc_now(),
-                    }
-                )
-                self.uow.work_queue.save(updated_item)
-
-            self.uow.commit()
-            return AdmissionDecision.REFUSED, decision_record, None
+        retry_wrapper = TransactionRetryWrapper(max_attempts=3, is_coordination_path=True)
+        return retry_wrapper.execute(
+            command_fn=_phase_b_body,
+            rollback_fn=lambda: self.uow.rollback(),
+            is_coordination_path=True,
+            command_identity=f"admit_work_item:{project_id}:{change_name}",
+        )
 
     def reconcile_waiting_runs(
         self,

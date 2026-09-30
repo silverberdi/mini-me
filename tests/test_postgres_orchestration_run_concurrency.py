@@ -5,7 +5,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Generator
+from typing import Any, Generator
 
 import pytest
 from sqlalchemy import Engine, create_engine
@@ -13,7 +13,6 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from minime.db.models import Base
 from minime.db.repository import PostgresPersistenceUnitOfWork
-from minime.db.savepoint import execute_with_savepoint_recovery
 from minime.domain.enums import (
     JobStatus,
     OrchestrationStage,
@@ -190,30 +189,37 @@ def test_t06_saga_resume_row_locking(pg_session_factory: sessionmaker[Session]):
 
 
 def test_t07_saga_creation_savepoint_recovery(pg_session_factory: sessionmaker[Session]):
-    """T07: Prove Pattern A Savepoint conflict recovery on uq_active_intake_saga / uq_active_closure_saga."""
+    """T07: Prove concurrent Pattern A Savepoint conflict recovery on uq_active_intake_saga."""
     project_id = "proj-t07"
     work_item_key = "key-t07"
 
-    # Create initial active intake saga
     with pg_session_factory() as session:
         uow = PostgresPersistenceUnitOfWork(session)
         uow.projects.save(Project(project_id=project_id, display_name="P07", repository="o/r", base_branch="main"))
-        engine = SagaEngine(uow)
-        saga1 = engine.start_saga(SagaType.INTAKE, project_id, work_item_key)
         uow.commit()
-        assert saga1.status == SagaStatus.IN_PROGRESS
 
-    # Attempt concurrent creation of another intake saga for the same active work item
-    with pg_session_factory() as session2:
-        uow2 = PostgresPersistenceUnitOfWork(session2)
-        engine2 = SagaEngine(uow2)
-        saga2 = engine2.start_saga(SagaType.INTAKE, project_id, work_item_key)
-        # Savepoint recovery returns the existing active saga
-        assert saga2.id == saga1.id
+    results: list[DurableSaga] = [None, None]  # type: ignore
+
+    def worker(idx: int):
+        with pg_session_factory() as s:
+            uow = PostgresPersistenceUnitOfWork(s)
+            engine = SagaEngine(uow)
+            saga = engine.start_saga(SagaType.INTAKE, project_id, work_item_key)
+            uow.commit()
+            results[idx] = saga
+
+    t1 = threading.Thread(target=worker, args=(0,))
+    t2 = threading.Thread(target=worker, args=(1,))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    assert results[0].id == results[1].id
 
 
 def test_t10_candidate_generation_savepoint_recovery(pg_session_factory: sessionmaker[Session]):
-    """T10: Prove Pattern A Savepoint recovery on uq_orchestration_candidate_generation."""
+    """T10: Prove production candidate generation path uses Pattern A savepoint recovery for uq_orchestration_candidate_generation."""
     run_id = "run-t10"
     with pg_session_factory() as session:
         uow = PostgresPersistenceUnitOfWork(session)
@@ -242,39 +248,27 @@ def test_t10_candidate_generation_savepoint_recovery(pg_session_factory: session
         uow.orchestration_candidates.save(cand1)
         uow.commit()
 
-    # Attempt inserting duplicate generation candidate under Savepoint recovery
     with pg_session_factory() as session2:
         uow2 = PostgresPersistenceUnitOfWork(session2)
-        sess = getattr(uow2, "session", None)
-
+        from minime.services.orchestration_service import OrchestrationService
+        orch_srv = OrchestrationService(uow2)
         cand2 = OrchestrationCandidate(
             run_id=run_id,
-            generation=1,  # Conflict on (run_id, generation)
+            generation=1,
             base_sha="base-sha",
             candidate_sha="cand-sha-2",
             manifest_id=None,
             manifest_hash="hash2",
             is_frozen=True,
         )
-
-        def _recovery():
-            existing = uow2.orchestration_candidates.get_by_generation(run_id, 1)
-            return existing
-
-        saved, recovered = execute_with_savepoint_recovery(
-            session=sess,
-            save_fn=lambda: uow2.orchestration_candidates.save(cand2),
-            constraint_name="uq_orchestration_candidate_generation",
-            recovery_fn=_recovery,
-        )
-
+        saved, recovered = orch_srv._save_candidate_with_savepoint(cand2)
         assert saved is False
         assert recovered is not None
         assert recovered.candidate_sha == "cand-sha-1"
 
 
 def test_t11_stage_transition_contention(pg_session_factory: sessionmaker[Session]):
-    """T11: Prove row-locked monotonic stage transitions on OrchestrationRun."""
+    """T11: Prove OrchestrationService._advance_stage uses FOR UPDATE row locking on OrchestrationRun."""
     run_id = "run-t11"
     with pg_session_factory() as session:
         uow = PostgresPersistenceUnitOfWork(session)
@@ -294,13 +288,11 @@ def test_t11_stage_transition_contention(pg_session_factory: sessionmaker[Sessio
 
     with pg_session_factory() as session2:
         uow2 = PostgresPersistenceUnitOfWork(session2)
-        r = uow2.orchestration_runs.get_for_update(run_id)
-        assert r is not None
-        uow2.orchestration_runs.update_stage(
-            run_id,
-            current_stage=OrchestrationStage.PREPARING_EXECUTION,
-            resumable_stage=OrchestrationStage.PREPARING_EXECUTION,
-        )
+        from minime.services.orchestration_service import OrchestrationService
+        orch_srv = OrchestrationService(uow2)
+        run = uow2.orchestration_runs.get_by_id(run_id)
+        assert run is not None
+        orch_srv._advance_stage(run, OrchestrationStage.PREPARING_EXECUTION)
         uow2.commit()
 
     with pg_session_factory() as session3:
@@ -308,6 +300,54 @@ def test_t11_stage_transition_contention(pg_session_factory: sessionmaker[Sessio
         updated_run = uow3.orchestration_runs.get_by_id(run_id)
         assert updated_run is not None
         assert updated_run.current_stage == OrchestrationStage.PREPARING_EXECUTION
+
+
+def test_f19_worktree_ownership_savepoint_recovery(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+    """F19: Prove WorktreeManager._persist_pending_ownership uses Pattern A savepoint recovery for canonical_worktree_path."""
+    from minime.domain.models import ProjectBinding, utc_now
+    wt_path = tmp_path / "worktree_f19"
+    wt_path.mkdir(exist_ok=True)
+    proj_id = "p-f19"
+    run_id = "run-f19"
+    with pg_session_factory() as session:
+        uow = PostgresPersistenceUnitOfWork(session)
+        from tests.conftest import setup_managed_repository_fixture
+        setup_managed_repository_fixture(uow, proj_id, tmp_path, tmp_path, canonical_repository_identity="github.com/owner/repo")
+        uow.projects.save(Project(project_id=proj_id, display_name="P-F19", repository="owner/repo", base_branch="main"))
+        uow.bindings.save(ProjectBinding(binding_id="b-f19", project_id=proj_id, openspec_change_name="c-f19", github_issue_number=1919, repository="owner/repo", is_valid=True, bound_at=utc_now()))
+        uow.orchestration_runs.save(OrchestrationRun(run_id=run_id, project_id=proj_id, change_name="c-f19", base_sha="base123", current_stage=OrchestrationStage.PREPARING_EXECUTION, current_generation=1, is_active=True))
+        uow.commit()
+
+    results: list[Any] = [None, None]  # type: ignore
+
+    def worker(idx: int):
+        with pg_session_factory() as s:
+            uow = PostgresPersistenceUnitOfWork(s)
+            from minime.services.worktree_manager import WorktreeManager
+            mgr = WorktreeManager(project_root=tmp_path, uow=uow)
+            ow = mgr._persist_pending_ownership(
+                path=wt_path,
+                project_id=proj_id,
+                job_id="job-f19",
+                run_id=run_id,
+                change_name="c-f19",
+                source_repository_identity="github.com/owner/repo",
+                source_base_sha="base123",
+                branch="feature/f19",
+            )
+            results[idx] = ow
+
+    t1 = threading.Thread(target=worker, args=(0,))
+    t2 = threading.Thread(target=worker, args=(1,))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    assert results[0] is not None
+    assert results[1] is not None
+    assert results[0].canonical_worktree_path == str(wt_path.resolve())
+    assert results[1].canonical_worktree_path == str(wt_path.resolve())
 
 
 def test_t12_job_status_stale_writer(pg_session_factory: sessionmaker[Session]):

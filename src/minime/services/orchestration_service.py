@@ -194,13 +194,27 @@ class OrchestrationService:
                 refusal_details={"code": "PROJECT_NOT_FOUND", "project_id": project_id},
             )
 
-        # 2. Change existence check
+        # 2. Change existence and lifecycle status check
         change = self.uow.changes.get_by_name(project_id, change_name)
         if not change:
             return AdmissionResult(
                 admitted=False,
                 refusal_reason=f"Change '{change_name}' not found for project '{project_id}'.",
                 refusal_details={"code": "CHANGE_NOT_FOUND", "change_name": change_name},
+            )
+        if change.status in (ChangeStatus.DONE, ChangeStatus.CANCELLED):
+            return AdmissionResult(
+                admitted=False,
+                refusal_reason=f"Change '{change_name}' is in terminal state '{change.status.value}' and cannot be admitted.",
+                refusal_details={"code": "LIFECYCLE_BLOCKED", "status": change.status.value},
+            )
+
+        backlog_item = self.uow.backlog_items.get_by_openspec_change_name(project_id, change_name)
+        if backlog_item and backlog_item.status != WorkItemStatus.READY:
+            return AdmissionResult(
+                admitted=False,
+                refusal_reason=f"BacklogItem for change '{change_name}' is in state '{backlog_item.status.value}' (expected READY).",
+                refusal_details={"code": "LIFECYCLE_BLOCKED", "status": backlog_item.status.value},
             )
 
         # 3. Durable ProjectBinding validation
@@ -423,12 +437,12 @@ class OrchestrationService:
         fallback (OpenRouterEligibilityEvaluator + BudgetService) can continue the
         in-flight job. It does not bypass the NEEDS_HUMAN gate.
         """
-        run = self.uow.orchestration_runs.get_by_id(run_id)
+        run = self.uow.orchestration_runs.get_for_update(run_id) or self.uow.orchestration_runs.get_by_id(run_id)
         if not run:
             raise ValueError(f"Orchestration run '{run_id}' not found.")
 
-        # Check if already in terminal state
-        if run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE:
+        # Check if already in terminal state or inactive
+        if run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE or not run.is_active:
             return run
 
         # Revalidate / clear transient waiting states when resuming
@@ -966,7 +980,7 @@ class OrchestrationService:
                     authorship_summary={"resolution": "preserved_candidate_base_integration"},
                     is_frozen=True,
                 )
-                self.uow.orchestration_candidates.save(new_candidate)
+                self._save_candidate_with_savepoint(new_candidate)
                 self.uow.orchestration_candidates.supersede(
                     candidate.candidate_id, new_candidate.candidate_id
                 )
@@ -1322,7 +1336,7 @@ class OrchestrationService:
             },
             is_frozen=True,
         )
-        self.uow.orchestration_candidates.save(new_candidate)
+        self._save_candidate_with_savepoint(new_candidate)
         self.uow.orchestration_candidates.supersede(source.candidate_id, new_candidate.candidate_id)
         job.base_sha = target_base
         job.candidate_sha = integrated_sha
@@ -1485,8 +1499,11 @@ class OrchestrationService:
         root = Path(project_root).resolve() if project_root else self.project_root
 
         while True:
-            run = self.uow.orchestration_runs.get_by_id(run_id)
-            if not run or not run.is_active or run.stop_outcome is not None:
+            raw_run = self.uow.orchestration_runs.get_for_update(run_id)
+            if not isinstance(raw_run, OrchestrationRun):
+                raw_run = self.uow.orchestration_runs.get_by_id(run_id)
+            run = raw_run
+            if not run or not isinstance(run, OrchestrationRun) or not run.is_active or run.stop_outcome is not None:
                 break
 
             stage = run.current_stage
@@ -2887,7 +2904,28 @@ class OrchestrationService:
         correlation_id: str | None = None,
     ) -> None:
         """Advance run to next stage with finite graph validation and deterministic transition events."""
-        from_stage = run.current_stage
+        orig_run = run
+        locked_run = self.uow.orchestration_runs.get_for_update(run.run_id) or run
+        if locked_run is not orig_run:
+            locked_run.current_stage = orig_run.current_stage
+            locked_run.resumable_stage = orig_run.resumable_stage
+            locked_run.active_job_id = orig_run.active_job_id
+            locked_run.current_generation = orig_run.current_generation
+            locked_run.current_candidate_sha = orig_run.current_candidate_sha
+        from_stage = locked_run.current_stage
+        run = locked_run
+
+        def _sync_orig() -> None:
+            if orig_run is not locked_run:
+                orig_run.current_stage = locked_run.current_stage
+                orig_run.resumable_stage = locked_run.resumable_stage
+                orig_run.stop_outcome = locked_run.stop_outcome
+                orig_run.human_gate = locked_run.human_gate
+                orig_run.stop_reason = locked_run.stop_reason
+                orig_run.stop_details = locked_run.stop_details
+                orig_run.is_active = locked_run.is_active
+                orig_run.updated_at = locked_run.updated_at
+
         allowed = ALLOWED_STAGE_TRANSITIONS.get(from_stage, set())
         if to_stage not in allowed:
             error_msg = f"Illegal stage transition from '{from_stage.value}' to '{to_stage.value}'."
@@ -2899,6 +2937,7 @@ class OrchestrationService:
                 stop_reason=error_msg,
                 stop_details={"from_stage": from_stage.value, "to_stage": to_stage.value},
             )
+            _sync_orig()
             raise ValueError(error_msg)
 
         evidence_error = self._stage_evidence_error(run, to_stage)
@@ -2910,6 +2949,7 @@ class OrchestrationService:
                 stop_reason=evidence_error,
                 stop_details={"from_stage": from_stage.value, "to_stage": to_stage.value},
             )
+            _sync_orig()
             raise ValueError(evidence_error)
 
         candidate_key = run.current_candidate_sha or "none"
@@ -2950,12 +2990,14 @@ class OrchestrationService:
                     stop_reason=conflict,
                     stop_details={"transition_key": transition_key},
                 )
+                _sync_orig()
                 raise ValueError(conflict)
 
         run.current_stage = to_stage
         run.resumable_stage = to_stage
         run.updated_at = utc_now()
         self.uow.orchestration_runs.save(run)
+        _sync_orig()
 
         if not existing_event:
             self.uow.orchestration_stage_events.save(
@@ -3460,3 +3502,27 @@ class OrchestrationService:
                     timestamp=utc_now(),
                 )
             )
+
+    def _save_candidate_with_savepoint(
+        self, candidate: OrchestrationCandidate
+    ) -> tuple[bool, OrchestrationCandidate | None]:
+        """Save candidate with Pattern A savepoint recovery for uq_orchestration_candidate_generation."""
+        session = getattr(self.uow, "session", None)
+        if session is not None and hasattr(session, "begin_nested"):
+            def _recovery_fn() -> OrchestrationCandidate | None:
+                return self.uow.orchestration_candidates.get_by_generation(
+                    candidate.run_id, candidate.generation
+                )
+
+            from minime.db.savepoint import execute_with_savepoint_recovery
+            saved, recovery_res = execute_with_savepoint_recovery(
+                session=session,
+                save_fn=lambda: self.uow.orchestration_candidates.save(candidate),
+                constraint_name="uq_orchestration_candidate_generation",
+                recovery_fn=_recovery_fn,
+            )
+            if not saved and recovery_res is not None:
+                return False, recovery_res
+        else:
+            self.uow.orchestration_candidates.save(candidate)
+        return True, candidate

@@ -124,12 +124,15 @@ class TransactionRetryWrapper:
         is_coordination_path: bool | None = None,
         command_identity: str | None = None,
     ) -> T:
+        if rollback_fn is None:
+            raise ValueError("rollback_fn is required for DB transaction retry")
+
         coordination = (
             is_coordination_path
             if is_coordination_path is not None
             else self.is_coordination_path
         )
-        rb = rollback_fn or (lambda: None)
+        rb = rollback_fn
         attempt = 1
         while True:
             try:

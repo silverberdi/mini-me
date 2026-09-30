@@ -1848,9 +1848,15 @@ class PostgresProviderHealthRepository(ProviderHealthRepositoryInterface):
     def save(self, health: ProviderHealth) -> None:
         health.validate_primary()
         existing = self.session.scalars(
-            select(ProviderHealthModel).where(ProviderHealthModel.provider == health.provider)
+            select(ProviderHealthModel)
+            .where(ProviderHealthModel.provider == health.provider)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         ).first()
         if existing:
+            if existing.updated_at and health.updated_at and health.updated_at < existing.updated_at:
+                # Stale writer protection: do not overwrite newer health state
+                return
             existing.model = health.model
             existing.status = health.status.value
             existing.consecutive_failures = health.consecutive_failures
@@ -1923,12 +1929,19 @@ class PostgresProviderHealthRepository(ProviderHealthRepositoryInterface):
         result_class: str | None = None,
         error_summary: str | None = None,
         consecutive_failures: int | None = None,
+        observation_timestamp: datetime | None = None,
     ) -> ProviderHealth:
         self._validate_primary_provider(provider)
         model = self.session.scalars(
-            select(ProviderHealthModel).where(ProviderHealthModel.provider == provider)
+            select(ProviderHealthModel)
+            .where(ProviderHealthModel.provider == provider)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         ).first()
-        now = utc_now()
+        now = observation_timestamp or utc_now()
+        if model and model.updated_at and now < model.updated_at:
+            # Stale writer protection: do not overwrite newer health state
+            return provider_health_model_to_domain(model)
         target_status = ProviderHealthStatus(status)
         target_result_class = ProviderResultClass(result_class) if result_class else None
 

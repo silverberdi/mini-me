@@ -269,6 +269,58 @@ def test_t09_provider_probe_contention_serialization(
     assert adapter.probe_call_count == 1
 
 
+def test_t14_provider_health_stale_writer_protection(pg_session_factory: sessionmaker[Session]):
+    """T14: Prove PostgresProviderHealthRepository protects against stale overwrites using FOR UPDATE and updated_at checks."""
+    from datetime import datetime, timezone
+    provider = "codex"
+    t1 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    t2 = datetime(2026, 1, 1, 12, 5, 0, tzinfo=timezone.utc)
+
+    with pg_session_factory() as session:
+        uow = PostgresPersistenceUnitOfWork(session)
+        uow.projects.save(Project(project_id="p-t14", display_name="P14", repository="o/r", implementer=provider))
+        h_initial = ProviderHealth(
+            health_id=f"ph-{provider}",
+            provider=provider,
+            status=ProviderHealthStatus.AVAILABLE,
+            updated_at=t1,
+        )
+        uow.provider_health.save(h_initial)
+        uow.commit()
+
+    # Session 1: Writes newer health state at T2
+    with pg_session_factory() as session1:
+        uow1 = PostgresPersistenceUnitOfWork(session1)
+        h_newer = ProviderHealth(
+            health_id=f"ph-{provider}",
+            provider=provider,
+            status=ProviderHealthStatus.EXHAUSTED,
+            updated_at=t2,
+        )
+        uow1.provider_health.save(h_newer)
+        uow1.commit()
+
+    # Session 2: Delayed attempt to write older health state at T1 (before T2)
+    with pg_session_factory() as session2:
+        uow2 = PostgresPersistenceUnitOfWork(session2)
+        h_older = ProviderHealth(
+            health_id=f"ph-{provider}",
+            provider=provider,
+            status=ProviderHealthStatus.AVAILABLE,
+            updated_at=t1,
+        )
+        uow2.provider_health.save(h_older)
+        uow2.commit()
+
+    # Verify persisted state remains the T2 (newer) truth
+    with pg_session_factory() as session_v:
+        uow_v = PostgresPersistenceUnitOfWork(session_v)
+        final_h = uow_v.provider_health.get_by_provider(provider)
+        assert final_h is not None
+        assert final_h.status == ProviderHealthStatus.EXHAUSTED
+        assert final_h.updated_at >= t2
+
+
 def test_t15_external_effect_retry_safety(pg_session_factory: sessionmaker[Session]):
     """T15: Prove TransactionRetryWrapper excludes unreserved external side effects from retry blocks."""
     external_call_count = 0
@@ -297,7 +349,7 @@ def test_t15_external_effect_retry_safety(pg_session_factory: sessionmaker[Sessi
 
     # Rule: External side effect must NOT be placed inside retriable transaction block
     unreserved_external_action()
-    result = wrapper.execute(database_transaction_fn)
+    result = wrapper.execute(database_transaction_fn, rollback_fn=lambda: None)
 
     assert result == "success"
     assert attempt_counter == 2

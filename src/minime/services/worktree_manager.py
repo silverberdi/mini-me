@@ -638,7 +638,25 @@ class WorktreeManager:
             created_at=utc_now(),
             updated_at=utc_now(),
         )
-        repo.save(ownership)
+
+        from minime.db.savepoint import execute_with_savepoint_recovery
+
+        def _recovery_on_ownership_conflict() -> OrchestrationWorktreeOwnership | None:
+            return repo.get_by_canonical_path(canonical_path)
+
+        session = getattr(self.uow, "session", None)
+        if session is not None and hasattr(session, "begin_nested"):
+            saved, recovery_res = execute_with_savepoint_recovery(
+                session=session,
+                save_fn=lambda: repo.save(ownership),
+                constraint_name="worktree",
+                recovery_fn=_recovery_on_ownership_conflict,
+            )
+            if not saved and recovery_res is not None:
+                return recovery_res
+        else:
+            repo.save(ownership)
+
         self.uow.commit()
 
         durable = repo.get_by_id(ownership.worktree_id) or repo.get_by_canonical_path(
