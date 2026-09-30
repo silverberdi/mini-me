@@ -64,7 +64,7 @@ Budget reservations and provider health probes SHALL preserve row-level lock ser
 ### Scenario: Concurrent budget reservation under cap limit
 - **Given** a project budget policy with remaining capacity for 1 reservation
 - **When** two concurrent requests attempt budget reservation in `BudgetService.reserve_budget()`
-- **Then** `OpenRouterBudgetPolicyModel.get_for_update()` SHALL serialize callers
+- **Then** `uow.budget_policies.get_for_update(project_id)` SHALL serialize callers
 - **And** exactly one caller SHALL be granted reservation while the second caller is refused without oversubscribing the budget cap
 - **And** the caller transaction SHALL commit the reservation prior to provider dispatch.
 
