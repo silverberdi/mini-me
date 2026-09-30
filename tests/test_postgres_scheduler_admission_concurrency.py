@@ -237,7 +237,7 @@ def _make_scheduler(uow: PostgresPersistenceUnitOfWork, tmp_path: Path, max_glob
 
     from minime.domain.models import ReadinessEvaluation
     mock_readiness = MagicMock()
-    mock_readiness.evaluate_change_readiness.return_value = ReadinessEvaluation(
+    eval_res = ReadinessEvaluation(
         project_id="proj",
         change_id="ch-1",
         change_name="change",
@@ -246,7 +246,10 @@ def _make_scheduler(uow: PostgresPersistenceUnitOfWork, tmp_path: Path, max_glob
         unmet_reasons=[],
         checks=[],
     )
+    mock_readiness.evaluate_change_readiness.return_value = eval_res
+    mock_readiness.evaluate_change_readiness_pure.return_value = eval_res
     return SchedulerService(uow, project_root=tmp_path, max_global_jobs=max_global_jobs, readiness_service=mock_readiness)
+
 
 
 def test_t01_same_change_savepoint_recovery(pg_session_factory: sessionmaker[Session], tmp_path: Path):

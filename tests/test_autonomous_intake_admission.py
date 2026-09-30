@@ -267,9 +267,20 @@ def test_auto_admit_single_concurrency_deterministic_selection(
 ) -> None:
     """Verify scheduler auto-admits the highest priority item when max_concurrent_jobs = 1."""
     repo_dir = tmp_path / "sched-repo"
-    repo_dir.mkdir()
+    from conftest import create_isolated_openspec_change, setup_managed_repository_fixture
+
+    setup_managed_repository_fixture(
+        uow=in_memory_uow,
+        project_id="sched-project",
+        repo_root=repo_dir,
+        worktree_parent_dir=repo_dir / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/sched-repo",
+    )
+    create_isolated_openspec_change(repo_dir, "item-normal")
+    create_isolated_openspec_change(repo_dir, "item-critical")
 
     project = Project(
+
         project_id="sched-project",
         display_name="Sched Project",
         repository="silverberdi/sched-repo",
@@ -399,12 +410,13 @@ def test_auto_admit_single_concurrency_deterministic_selection(
         max_global_jobs=1,
     )
 
-    # Tick scheduler
     decisions = scheduler.tick()
 
     # Verify item-critical was evaluated first and admitted
     admitted = [d for d in decisions if d.decision == AdmissionDecision.ADMITTED]
     assert len(admitted) == 1
+
+
     assert admitted[0].change_name == "item-critical"
 
     # Verify item-normal was refused due to concurrency limit
@@ -422,9 +434,19 @@ def test_primary_provider_unavailable_waiting_prevents_drain(
 ) -> None:
     """Verify that when primary implementer is exhausted, work waits and OpenRouter is NOT used as starter."""
     repo_dir = tmp_path / "exhausted-repo"
-    repo_dir.mkdir()
+    from conftest import create_isolated_openspec_change, setup_managed_repository_fixture
+
+    setup_managed_repository_fixture(
+        uow=in_memory_uow,
+        project_id="exhausted-project",
+        repo_root=repo_dir,
+        worktree_parent_dir=repo_dir / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/exhausted-repo",
+    )
+    create_isolated_openspec_change(repo_dir, "item-waiting")
 
     project = Project(
+
         project_id="exhausted-project",
         display_name="Exhausted Project",
         repository="silverberdi/exhausted-repo",

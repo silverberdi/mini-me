@@ -116,6 +116,7 @@ def test_readiness_caller_classification_audit():
     assert "service.evaluate_change_readiness_pure(" in app_src
     assert "service.evaluate_change_readiness(" not in app_src
 
-    # Command scheduler service uses evaluate_and_persist_change_readiness
+    # Command scheduler service uses evaluate_change_readiness_pure (zero-commit Phase A)
     sched_src = inspect.getsource(scheduler_service)
-    assert "evaluate_and_persist_change_readiness" in sched_src
+    assert "evaluate_change_readiness_pure" in sched_src
+

@@ -180,6 +180,7 @@ class OrchestrationService:
         project_id: str,
         change_name: str,
         project_root: str | Path | None = None,
+        evidence: Any | None = None,
     ) -> AdmissionResult:
         """Internal transactional admission primitive; creates records without committing."""
         root = Path(project_root).resolve() if project_root else self.project_root
@@ -219,12 +220,18 @@ class OrchestrationService:
                 refusal_details={"code": "MISSING_GITHUB_ISSUE"},
             )
 
-        # 4. Re-evaluate change Definition of Ready (DoR)
-        eval_result = self.readiness_service.evaluate_change_readiness(
-            project_id=project_id,
-            change_name=change_name,
-            project_root=str(root),
-        )
+        # 4. Re-evaluate change Definition of Ready (DoR) using pure evaluator or prepared evidence (zero DB commits)
+        if evidence and getattr(evidence, "readiness_evaluation", None):
+            eval_result = evidence.readiness_evaluation
+        else:
+            eval_result = self.readiness_service.evaluate_change_readiness_pure(
+                project_id=project_id,
+                change_name=change_name,
+                project_root=str(root),
+                github_repo=project.repository,
+                github_issue=binding.github_issue_number,
+            )
+
         if not eval_result.is_ready or eval_result.status != ReadinessState.READY:
             refusal_code = (
                 "SCHEMA_INVARIANT_VIOLATION"
@@ -265,12 +272,15 @@ class OrchestrationService:
                 existing_run_id=existing_active.run_id,
             )
 
-        # 7. APPLY attribution gate
-        apply_result = ApplyAttributionGate(self.openspec_adapter).evaluate(
-            project=project,
-            change_name=change_name,
-            project_root=root,
-        )
+        # 7. APPLY attribution gate (using prepared evidence or fallback)
+        if evidence and getattr(evidence, "apply_attribution_result", None):
+            apply_result = evidence.apply_attribution_result
+        else:
+            apply_result = ApplyAttributionGate(self.openspec_adapter).evaluate(
+                project=project,
+                change_name=change_name,
+                project_root=root,
+            )
         if apply_result.is_blocking:
             return AdmissionResult(
                 admitted=False,
@@ -283,7 +293,11 @@ class OrchestrationService:
                 },
             )
 
-        base_sha = self._resolve_base_sha(project, root)
+        # 8. Base SHA resolution (using prepared evidence or fallback)
+        if evidence and getattr(evidence, "observed_base_sha", None):
+            base_sha = evidence.observed_base_sha
+        else:
+            base_sha = self._resolve_base_sha(project, root)
 
         run = OrchestrationRun(
             run_id=generate_uuid(),

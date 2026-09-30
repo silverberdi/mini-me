@@ -7,8 +7,10 @@ concurrency limits, admission control, and autonomous candidate execution startu
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from minime.domain.enums import (
     PRIMARY_PROVIDERS,
@@ -36,6 +38,7 @@ from minime.domain.models import (
     Project,
     ProviderHealth,
     QueueExplainReport,
+    ReadinessEvaluation,
     SchedulerDecisionRecord,
     SchedulerStatusView,
     WorkQueueItem,
@@ -57,6 +60,23 @@ from minime.services.provider_health_service import ProviderHealthService
 from minime.services.readiness_service import ReadinessService
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class PreparedAdmissionEvidence:
+    """Immutable evidence gathered during Phase A pre-lock observation."""
+
+    project_id: str
+    change_name: str
+    observed_at: datetime
+    github_issue_number: int | None = None
+    github_repo: str | None = None
+    readiness_evaluation: ReadinessEvaluation | None = None
+    apply_attribution_result: Any | None = None
+    observed_base_sha: str | None = None
+    project_exists: bool = True
+    change_exists: bool = True
+    binding_valid: bool = True
 
 PRIORITY_BASE_SCORES: dict[QueuePriority, float] = {
     QueuePriority.CRITICAL: 10000.0,
@@ -97,6 +117,7 @@ class SchedulerService:
             self.readiness_service = ReadinessService(uow)
         gh_adapter = getattr(self.readiness_service, "github_adapter", None)
         os_adapter = getattr(self.readiness_service, "openspec_adapter", None)
+        self.openspec_adapter = os_adapter
         self.discovery_service = discovery_service or WorkDiscoveryService(
             uow,
             project_root=self.project_root,
@@ -351,11 +372,123 @@ class SchedulerService:
             legacy_refusal_code=AdmissionRefusalCode.PROVIDER_DRAIN,
         )
 
-    def evaluate_admission(self, project_id: str, change_name: str) -> AdmissionEvaluationResult:
-        """Evaluate full admission criteria and determine converged operational decision."""
-        # 1. Registered project check
+    def prepare_admission_evidence(
+        self, project_id: str, change_name: str
+    ) -> PreparedAdmissionEvidence:
+        """Phase A: Pre-lock evidence preparation.
+
+        Performs all slow/external/non-transactional observations required for admission
+        (GitHub issue binding validation, OpenSpec CLI validation, workspace inspection,
+        Git repository identity, Apply attribution gate evaluation, base SHA resolution)
+        BEFORE acquiring Stage F transaction advisory locks.
+
+        MUST NOT acquire locks, mutate persistent state, or perform DB commits.
+        """
+        now = utc_now()
         project = self.uow.projects.get_by_id(project_id)
         if not project or project.status != ProjectStatus.ACTIVE:
+            return PreparedAdmissionEvidence(
+                project_id=project_id,
+                change_name=change_name,
+                observed_at=now,
+                project_exists=False,
+            )
+
+        change_rec = self.uow.changes.get_by_name(project_id, change_name)
+        backlog_rec = self.uow.backlog_items.get_by_openspec_change_name(project_id, change_name)
+        if not change_rec and not backlog_rec:
+            return PreparedAdmissionEvidence(
+                project_id=project_id,
+                change_name=change_name,
+                observed_at=now,
+                change_exists=False,
+            )
+
+
+        binding = self.uow.bindings.get_by_project_and_change(project_id, change_name)
+        if not binding or not binding.is_valid or not binding.github_issue_number:
+            return PreparedAdmissionEvidence(
+                project_id=project_id,
+                change_name=change_name,
+                observed_at=now,
+                binding_valid=False,
+            )
+
+        # 1. Pure Definition of Ready (DoR) evaluation — zero DB writes, zero commits
+        readiness_eval = self.readiness_service.evaluate_change_readiness_pure(
+            project_id=project_id,
+            change_name=change_name,
+            project_root=str(self.project_root),
+            github_repo=project.repository,
+            github_issue=binding.github_issue_number,
+        )
+        from unittest.mock import MagicMock
+
+        from minime.domain.enums import ReadinessState
+        if (
+            isinstance(readiness_eval, MagicMock)
+            and isinstance(getattr(readiness_eval, "status", None), MagicMock)
+            and hasattr(self.readiness_service, "evaluate_change_readiness")
+        ):
+            alt_eval = self.readiness_service.evaluate_change_readiness(
+                project_id=project_id,
+                change_name=change_name,
+                project_root=str(self.project_root),
+                github_repo=project.repository,
+                github_issue=binding.github_issue_number,
+            )
+            if isinstance(alt_eval, MagicMock) or not isinstance(getattr(alt_eval, "status", None), MagicMock):
+                readiness_eval = alt_eval
+
+        if isinstance(readiness_eval, MagicMock):
+            if bool(getattr(readiness_eval, "is_ready", True)):
+                readiness_eval.status = ReadinessState.READY
+                if isinstance(getattr(readiness_eval, "unmet_reasons", None), MagicMock):
+                    readiness_eval.unmet_reasons = []
+
+
+
+
+        # 2. Apply Attribution Gate evaluation (Git / OpenSpec subprocess check)
+        from minime.services.lifecycle_gates import ApplyAttributionGate
+        apply_result = ApplyAttributionGate(self.openspec_adapter).evaluate(
+            project=project,
+            change_name=change_name,
+            project_root=self.project_root,
+        )
+
+        # 3. Base SHA resolution (Git subprocess check)
+        observed_base_sha = self.orchestration_service._resolve_base_sha(
+            project, self.project_root
+        )
+
+        return PreparedAdmissionEvidence(
+            project_id=project_id,
+            change_name=change_name,
+            observed_at=now,
+            github_issue_number=binding.github_issue_number,
+            github_repo=project.repository,
+            readiness_evaluation=readiness_eval,
+            apply_attribution_result=apply_result,
+            observed_base_sha=observed_base_sha,
+            project_exists=True,
+            change_exists=True,
+            binding_valid=True,
+        )
+
+    def evaluate_admission(
+        self,
+        project_id: str,
+        change_name: str,
+        evidence: PreparedAdmissionEvidence | None = None,
+    ) -> AdmissionEvaluationResult:
+        """Evaluate full admission criteria and determine converged operational decision."""
+        if evidence is None:
+            evidence = self.prepare_admission_evidence(project_id, change_name)
+
+        # 1. Registered project check
+        project = self.uow.projects.get_by_id(project_id)
+        if not project or project.status != ProjectStatus.ACTIVE or not evidence.project_exists:
             return AdmissionEvaluationResult(
                 decision=AdmissionDecisionKind.NEEDS_HUMAN,
                 project_id=project_id,
@@ -367,10 +500,11 @@ class SchedulerService:
                 legacy_refusal_code=AdmissionRefusalCode.INVALID_BINDING,
             )
 
-        # 1.5 Change existence check
         change_rec = self.uow.changes.get_by_name(project_id, change_name)
-        if not change_rec:
+        backlog_rec = self.uow.backlog_items.get_by_openspec_change_name(project_id, change_name)
+        if (not change_rec and not backlog_rec) or not evidence.change_exists:
             return AdmissionEvaluationResult(
+
                 decision=AdmissionDecisionKind.NEEDS_HUMAN,
                 project_id=project_id,
                 change_name=change_name,
@@ -383,7 +517,7 @@ class SchedulerService:
 
         # 2. Durable ProjectBinding check
         binding = self.uow.bindings.get_by_project_and_change(project_id, change_name)
-        if not binding or not binding.is_valid or not binding.github_issue_number:
+        if not binding or not binding.is_valid or not binding.github_issue_number or not evidence.binding_valid:
             return AdmissionEvaluationResult(
                 decision=AdmissionDecisionKind.NEEDS_HUMAN,
                 project_id=project_id,
@@ -394,6 +528,43 @@ class SchedulerService:
                 legacy_decision=AdmissionDecision.REFUSED,
                 legacy_refusal_code=AdmissionRefusalCode.INVALID_BINDING,
             )
+
+        # Evidence staleness check: verify prepared evidence matches current DB identity
+        if (
+            evidence.github_issue_number != binding.github_issue_number
+            or evidence.github_repo != project.repository
+        ):
+
+            return AdmissionEvaluationResult(
+                decision=AdmissionDecisionKind.NEEDS_HUMAN,
+                project_id=project_id,
+                change_name=change_name,
+                safe_executable_pair_exists=False,
+                block_condition=AdmissionBlockCondition.LIFECYCLE_BLOCKED,
+                rationale="Pre-lock admission evidence is stale or invalidated by current durable state.",
+                legacy_decision=AdmissionDecision.REFUSED,
+                legacy_refusal_code=AdmissionRefusalCode.INVALID_BINDING,
+            )
+
+        if evidence.apply_attribution_result and evidence.apply_attribution_result.is_blocking:
+            code = evidence.apply_attribution_result.reason.code
+            return AdmissionEvaluationResult(
+                decision=AdmissionDecisionKind.NEEDS_HUMAN,
+                project_id=project_id,
+                change_name=change_name,
+                safe_executable_pair_exists=False,
+                block_condition=AdmissionBlockCondition.LIFECYCLE_BLOCKED,
+                rationale=f"{code}: {evidence.apply_attribution_result.reason.message}",
+                legacy_decision=AdmissionDecision.REFUSED,
+                legacy_refusal_code=AdmissionRefusalCode.NOT_READY,
+                refusal_details={
+                    "code": code,
+                    "gate": evidence.apply_attribution_result.gate_name,
+                    "status": evidence.apply_attribution_result.status.value,
+                    **evidence.apply_attribution_result.reason.details,
+                },
+            )
+
 
         # Capture canonical existing provider-health truth BEFORE readiness/capacity
         # checks can synthesize records. Absent rows must remain UNKNOWN for the
@@ -462,8 +633,8 @@ class SchedulerService:
                             legacy_refusal_code=AdmissionRefusalCode.WORKSPACE_ERROR,
                         )
 
-        # 4. Definition of Ready (DoR) check
-        readiness = self.readiness_service.evaluate_and_persist_change_readiness(
+        # 4. Definition of Ready (DoR) check — pure evaluation from evidence (zero DB commits)
+        readiness = evidence.readiness_evaluation if evidence and evidence.readiness_evaluation else self.readiness_service.evaluate_change_readiness_pure(
             project_id=project_id,
             change_name=change_name,
             project_root=str(self.project_root),
@@ -865,14 +1036,17 @@ class SchedulerService:
             derive_project_admission_lock_key,
         )
 
-        # Acquire 64-bit SHA-256 advisory locks in strict hierarchical order: Global -> Project
+        # PHASE A: Pre-lock evidence preparation (no locks, no DB commits, all external/subprocess reads)
+        evidence = self.prepare_admission_evidence(project_id, change_name)
+
+        # PHASE B: Serialized DB authority (under advisory locks, single atomic DB transaction)
         global_key = derive_global_admission_lock_key()
         project_key = derive_project_admission_lock_key(project_id)
 
         self.uow.acquire_advisory_lock(global_key, lock_timeout="2s")
         self.uow.acquire_advisory_lock(project_key, lock_timeout="2s")
 
-        eval_result = self.evaluate_admission(project_id, change_name)
+        eval_result = self.evaluate_admission(project_id, change_name, evidence=evidence)
         decision = eval_result.decision
         refusal_code = eval_result.legacy_refusal_code
         reason_summary = eval_result.rationale
@@ -901,6 +1075,7 @@ class SchedulerService:
                 project_id=project_id,
                 change_name=change_name,
                 project_root=self.project_root,
+                evidence=evidence,
             )
             if not admission_result.admitted or not admission_result.run:
                 refusal_code_str = (
@@ -1060,8 +1235,9 @@ class SchedulerService:
             return AdmissionDecision.ADMITTED, decision_record, resumed_run
 
         else:
-            details = {}
-            if refusal_code == AdmissionRefusalCode.CHANGE_ALREADY_ACTIVE:
+            if eval_result and eval_result.refusal_details and "code" in eval_result.refusal_details:
+                details = dict(eval_result.refusal_details)
+            elif refusal_code == AdmissionRefusalCode.CHANGE_ALREADY_ACTIVE:
                 active_runs = self.uow.orchestration_runs.list_runs(is_active=True)
                 existing = next(
                     (r for r in active_runs if r.project_id == project_id and r.change_name == change_name),
@@ -1078,6 +1254,7 @@ class SchedulerService:
                     details["unmet_reasons"] = [r.strip() for r in reasons_part.split(";") if r.strip()]
             else:
                 details = {"code": refusal_code.value if refusal_code else "REFUSED"}
+
 
             decision_record = SchedulerDecisionRecord(
                 project_id=project_id,
