@@ -1465,6 +1465,7 @@ def test_stage_transitions_graph_guards_and_idempotent_event_keys(
     run.current_stage = OrchestrationStage.ADMITTED
     run.stop_outcome = None
     run.human_gate = None
+    in_memory_uow.orchestration_runs.save(run)
     service._advance_stage(run, OrchestrationStage.PREPARING_EXECUTION, correlation_id="c-1")
     assert run.current_stage == OrchestrationStage.PREPARING_EXECUTION
 
@@ -1477,6 +1478,7 @@ def test_stage_transitions_graph_guards_and_idempotent_event_keys(
 
     # 3. Retrying the same transition adopting existing event -> 0 duplicate inserts
     run.current_stage = OrchestrationStage.ADMITTED
+    in_memory_uow.orchestration_runs.save(run)
     service._advance_stage(run, OrchestrationStage.PREPARING_EXECUTION, correlation_id="c-1")
     events_2 = in_memory_uow.orchestration_stage_events.list_by_run(run.run_id)
     transition_events_2 = [
@@ -1598,8 +1600,10 @@ def test_stage_evidence_and_conflicting_transition_fail_closed(
         service._advance_stage(run, OrchestrationStage.FREEZING_CANDIDATE)
 
     run.current_stage = OrchestrationStage.ADMITTED
+    in_memory_uow.orchestration_runs.save(run)
     service._advance_stage(run, OrchestrationStage.PREPARING_EXECUTION, correlation_id="conflict")
     run.current_stage = OrchestrationStage.ADMITTED
+    in_memory_uow.orchestration_runs.save(run)
     event = next(
         e
         for e in in_memory_uow.orchestration_stage_events._store

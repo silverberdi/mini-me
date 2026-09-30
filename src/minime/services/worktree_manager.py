@@ -658,7 +658,12 @@ class WorktreeManager:
             saved, recovery_res = execute_with_savepoint_recovery(
                 session=session,
                 save_fn=lambda: repo.save(ownership),
-                constraint_name="worktree",
+                constraint_name=(
+                    "uq_orchestration_worktree_ownership_canonical_path",
+                    "ix_owo_canonical_worktree_path",
+                    "orchestration_worktree_ownerships_canonical_worktree_path_key",
+                    "canonical_worktree_path",
+                ),
                 recovery_fn=_recovery_on_ownership_conflict,
             )
             if not saved and recovery_res is not None:

@@ -11,20 +11,24 @@ from sqlalchemy.orm import Session
 T = TypeVar("T")
 
 
-def is_expected_constraint_violation(exc: IntegrityError, constraint_name: str) -> bool:
+def is_expected_constraint_violation(
+    exc: IntegrityError, constraint_name: str | tuple[str, ...]
+) -> bool:
     """Check if an IntegrityError matches the expected named constraint or index."""
     err_str = str(exc.orig) if hasattr(exc, "orig") and exc.orig else str(exc)
-    if constraint_name in err_str:
-        return True
-    if hasattr(exc, "args") and any(constraint_name in str(a) for a in exc.args):
-        return True
+    names = (constraint_name,) if isinstance(constraint_name, str) else constraint_name
+    for name in names:
+        if name in err_str:
+            return True
+        if hasattr(exc, "args") and any(name in str(a) for a in exc.args):
+            return True
     return False
 
 
 def execute_with_savepoint_recovery(
     session: Session,
     save_fn: Callable[[], None],
-    constraint_name: str,
+    constraint_name: str | tuple[str, ...],
     recovery_fn: Callable[[], T],
 ) -> tuple[bool, T | None]:
     """Execute save operation inside a nested savepoint with Pattern A recovery.

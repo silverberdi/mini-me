@@ -498,7 +498,23 @@ class CandidateRemediationService:
                 authorship_summary={"remediation_id": remediation.remediation_id},
                 is_frozen=True,
             )
-            self.uow.orchestration_candidates.save(new_candidate)
+            from minime.db.savepoint import execute_with_savepoint_recovery
+            session = getattr(self.uow, "session", None)
+            if session is not None and hasattr(session, "begin_nested"):
+                def _recovery_fn() -> OrchestrationCandidate | None:
+                    return self.uow.orchestration_candidates.get_by_generation(
+                        new_candidate.run_id, new_candidate.generation
+                    )
+                saved, recovery_res = execute_with_savepoint_recovery(
+                    session=session,
+                    save_fn=lambda: self.uow.orchestration_candidates.save(new_candidate),
+                    constraint_name="uq_orchestration_candidate_generation",
+                    recovery_fn=_recovery_fn,
+                )
+                if not saved and recovery_res is not None:
+                    new_candidate = recovery_res
+            else:
+                self.uow.orchestration_candidates.save(new_candidate)
             self.uow.orchestration_candidates.supersede(
                 candidate.candidate_id, new_candidate.candidate_id
             )

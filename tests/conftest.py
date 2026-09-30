@@ -886,9 +886,10 @@ class InMemoryProviderHealthRepository(ProviderHealthRepositoryInterface):
         result_class: str | None = None,
         error_summary: str | None = None,
         consecutive_failures: int | None = None,
+        observation_timestamp: datetime | None = None,
     ) -> ProviderHealth:
         self._validate_primary_provider(provider)
-        now = utc_now()
+        now = observation_timestamp or utc_now()
         target_status = ProviderHealthStatus(status)
         target_result_class = ProviderResultClass(result_class) if result_class else None
         h = self._store.get(provider)

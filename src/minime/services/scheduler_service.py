@@ -1193,11 +1193,6 @@ class SchedulerService:
 
                 self.uow.commit()
 
-                if drive_admitted:
-                    run = self.orchestration_service.drive_coordinator(
-                        run.run_id, project_root=self.project_root
-                    )
-
                 return AdmissionDecision.ADMITTED, decision_record, run
 
             elif decision == AdmissionDecisionKind.DRAIN:
@@ -1318,12 +1313,17 @@ class SchedulerService:
                 return AdmissionDecision.REFUSED, decision_record, None
 
         retry_wrapper = TransactionRetryWrapper(max_attempts=3, is_coordination_path=True)
-        return retry_wrapper.execute(
+        decision, decision_record, run = retry_wrapper.execute(
             command_fn=_phase_b_body,
             rollback_fn=lambda: self.uow.rollback(),
             is_coordination_path=True,
             command_identity=f"admit_work_item:{project_id}:{change_name}",
         )
+        if drive_admitted and decision == AdmissionDecision.ADMITTED and run is not None:
+            run = self.orchestration_service.drive_coordinator(
+                run.run_id, project_root=self.project_root
+            )
+        return decision, decision_record, run
 
     def reconcile_waiting_runs(
         self,

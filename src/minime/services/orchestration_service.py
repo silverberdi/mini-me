@@ -473,7 +473,7 @@ class OrchestrationService:
                             job.waiting_provider = None
                             self.uow.jobs.save(job)
                     self.uow.orchestration_runs.save(run)
-                    self.uow.commit()
+                    self.uow.flush()
                 else:
                     logger.info(
                         f"Resume for run '{run_id}' skipped: provider '{provider}' still {health.status.value}."
@@ -494,7 +494,7 @@ class OrchestrationService:
                     job.waiting_provider = None
                     self.uow.jobs.save(job)
             self.uow.orchestration_runs.save(run)
-            self.uow.commit()
+            self.uow.flush()
 
         elif run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN:
             if not force:
@@ -513,7 +513,7 @@ class OrchestrationService:
                     job.escalation_reason = None
                     self.uow.jobs.save(job)
             self.uow.orchestration_runs.save(run)
-            self.uow.commit()
+            self.uow.flush()
 
         resumable_stage = (
             run.resumable_stage or run.current_stage or OrchestrationStage.IMPLEMENTING
@@ -532,13 +532,14 @@ class OrchestrationService:
                     created_at=utc_now(),
                 )
             )
-            self.uow.commit()
+            self.uow.flush()
 
         if force:
             run.current_stage = resumable_stage
             self.uow.orchestration_runs.save(run)
-            self.uow.commit()
+            self.uow.flush()
 
+        self.uow.commit()
         return self.drive_coordinator(run.run_id, project_root=project_root)
 
     def resolve_preserved_candidate(
@@ -1010,7 +1011,7 @@ class OrchestrationService:
                     self.uow.evidence_diagnostics.save(diagnostic)
                 if not check_run.passed:
                     raise ValueError("Integrated candidate deterministic checks failed.")
-                self.uow.commit()
+                self.uow.flush()
                 run_coroutine_sync(
                     manager.remove_clean_worktree_path(worktree.path, job.job_id, run.project_id)
                 )
@@ -1927,10 +1928,12 @@ class OrchestrationService:
                         authorship_summary={"authorships_count": len(authorships)},
                         is_frozen=True,
                     )
-                    self.uow.orchestration_candidates.save(cand)
-                    run.current_generation = 1
-                    run.current_candidate_sha = head_sha
-                    self.uow.orchestration_runs.update_candidate_binding(run.run_id, 1, head_sha)
+                    _, cand = self._save_candidate_with_savepoint(cand)
+                    run.current_generation = cand.generation
+                    run.current_candidate_sha = cand.candidate_sha
+                    self.uow.orchestration_runs.update_candidate_binding(
+                        run.run_id, cand.generation, cand.candidate_sha
+                    )
                 else:
                     if (
                         latest_candidate.candidate_sha != head_sha
@@ -1949,14 +1952,14 @@ class OrchestrationService:
                             authorship_summary={"authorships_count": len(authorships)},
                             is_frozen=True,
                         )
-                        self.uow.orchestration_candidates.save(new_cand)
+                        _, new_cand = self._save_candidate_with_savepoint(new_cand)
                         self.uow.orchestration_candidates.supersede(
                             latest_candidate.candidate_id, new_cand.candidate_id
                         )
-                        run.current_generation = next_gen
-                        run.current_candidate_sha = head_sha
+                        run.current_generation = new_cand.generation
+                        run.current_candidate_sha = new_cand.candidate_sha
                         self.uow.orchestration_runs.update_candidate_binding(
-                            run.run_id, next_gen, head_sha
+                            run.run_id, new_cand.generation, new_cand.candidate_sha
                         )
 
                 self.uow.commit()
@@ -2912,12 +2915,6 @@ class OrchestrationService:
         """Advance run to next stage with finite graph validation and deterministic transition events."""
         orig_run = run
         locked_run = self.uow.orchestration_runs.get_for_update(run.run_id) or run
-        if locked_run is not orig_run:
-            locked_run.current_stage = orig_run.current_stage
-            locked_run.resumable_stage = orig_run.resumable_stage
-            locked_run.active_job_id = orig_run.active_job_id
-            locked_run.current_generation = orig_run.current_generation
-            locked_run.current_candidate_sha = orig_run.current_candidate_sha
         from_stage = locked_run.current_stage
         run = locked_run
 

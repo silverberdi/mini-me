@@ -407,3 +407,106 @@ def test_f04_scheduler_global_concurrency_immutability_regression(pg_session_fac
 
         s2 = SchedulerService(uow, project_root=tmp_path, _test_global_max_jobs_override=5)
         assert s2.max_global_jobs == 5
+
+
+def test_f01_a_stale_phase_a_cancelled_change_rejection(
+    pg_session_factory: sessionmaker[Session], tmp_path: Path
+):
+    """F01-A: Prove Change cancelled between Phase A evidence prep and Phase B admission is rejected under advisory lock."""
+    project_id = "f01a-proj"
+    change_name = "f01a-change"
+    _seed_project_and_change(pg_session_factory, project_id, change_name, project_root=tmp_path)
+
+    with pg_session_factory() as s_prep:
+        uow_prep = PostgresPersistenceUnitOfWork(s_prep)
+        scheduler = _make_scheduler(uow_prep, tmp_path)
+        # Phase A: Prepare admission evidence while Change is READY
+        evidence = scheduler.prepare_admission_evidence(project_id, change_name)
+
+    # Session B: Change becomes CANCELLED before Phase B serialized admission authority
+    with pg_session_factory() as s_cancel:
+        uow_cancel = PostgresPersistenceUnitOfWork(s_cancel)
+        from minime.services.lifecycle_transition_authority import LifecycleTransitionAuthority
+        auth = LifecycleTransitionAuthority(uow_cancel)
+        auth.transition_change(
+            project_id=project_id,
+            name=change_name,
+            expected_from_state=ChangeStatus.READY,
+            to_state=ChangeStatus.CANCELLED,
+            reason_code="test_cancel",
+        )
+        uow_cancel.commit()
+
+    # Session A proceeds into Phase B with stale Phase A evidence
+    with pg_session_factory() as s_admit:
+        uow_admit = PostgresPersistenceUnitOfWork(s_admit)
+        scheduler_admit = _make_scheduler(uow_admit, tmp_path)
+
+        # Hook prepare_admission_evidence to return pre-prepared stale evidence
+        scheduler_admit.prepare_admission_evidence = lambda pid, cname: evidence
+
+        dec, rec, run = scheduler_admit.admit_work_item(project_id, change_name)
+
+        assert dec == AdmissionDecision.REFUSED
+        assert run is None
+        assert rec.reason_code in (
+            AdmissionRefusalCode.NOT_READY,
+            AdmissionRefusalCode.INVALID_BINDING,
+            AdmissionRefusalCode.EVALUATION_ERROR,
+        ) or rec.block_condition == WorkItemStatus.CANCELLED or rec.refusal_details.get("code") == "LIFECYCLE_BLOCKED"
+
+        # Assert no active OrchestrationRun exists in DB
+        active_runs = uow_admit.orchestration_runs.list_runs(is_active=True)
+        assert len([r for r in active_runs if r.project_id == project_id and r.change_name == change_name]) == 0
+
+        # Assert no ORCHESTRATION_STARTED stage event was saved
+        events = uow_admit.orchestration_stage_events.list_by_run("f01a-run")
+        start_events = [e for e in events if e.event_type == "ORCHESTRATION_STARTED"]
+        assert len(start_events) == 0
+
+
+def test_f01_b_stale_phase_a_backlog_status_rejection(
+    pg_session_factory: sessionmaker[Session], tmp_path: Path
+):
+    """F01-B: Prove BacklogItem transitioned away from READY between Phase A and Phase B is rejected under advisory lock."""
+    project_id = "f01b-proj"
+    change_name = "f01b-change"
+    _seed_project_and_change(pg_session_factory, project_id, change_name, project_root=tmp_path)
+
+    with pg_session_factory() as s_prep:
+        uow_prep = PostgresPersistenceUnitOfWork(s_prep)
+        scheduler = _make_scheduler(uow_prep, tmp_path)
+        evidence = scheduler.prepare_admission_evidence(project_id, change_name)
+
+    # Session B: BacklogItem status transitions away from READY before Phase B
+    with pg_session_factory() as s_mutate:
+        uow_mutate = PostgresPersistenceUnitOfWork(s_mutate)
+        from minime.services.lifecycle_transition_authority import LifecycleTransitionAuthority
+        auth = LifecycleTransitionAuthority(uow_mutate)
+        item = uow_mutate.backlog_items.get_by_openspec_change_name(project_id, change_name)
+        assert item is not None
+        auth.transition_backlog_item(
+            project_id=project_id,
+            item_key=item.item_key,
+            expected_from_state=WorkItemStatus.READY,
+            to_state=WorkItemStatus.CANCELLED,
+            reason_code="test_cancel",
+        )
+        uow_mutate.commit()
+
+    # Session A proceeds into Phase B with stale Phase A evidence
+    with pg_session_factory() as s_admit:
+        uow_admit = PostgresPersistenceUnitOfWork(s_admit)
+        scheduler_admit = _make_scheduler(uow_admit, tmp_path)
+        scheduler_admit.prepare_admission_evidence = lambda pid, cname: evidence
+
+        dec, rec, run = scheduler_admit.admit_work_item(project_id, change_name)
+
+        assert dec == AdmissionDecision.REFUSED
+        assert run is None
+
+        # Assert BacklogItem status remains CANCELLED (not overwritten to ADMITTED)
+        item_final = uow_admit.backlog_items.get_by_openspec_change_name(project_id, change_name)
+        assert item_final is not None
+        assert item_final.status == WorkItemStatus.CANCELLED
+

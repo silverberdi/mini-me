@@ -335,6 +335,7 @@ class ProviderHealthRepositoryInterface(ABC):
         result_class: str | None = None,
         error_summary: str | None = None,
         consecutive_failures: int | None = None,
+        observation_timestamp: datetime | None = None,
     ) -> ProviderHealth: ...
 
 
