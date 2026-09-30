@@ -260,7 +260,9 @@ class StructuredLookupGitHubAdapter(FakeGitHubAdapter):
         self.lookup_state = state
         self.lookup_mismatch = mismatch
 
-    def get_pull_request(self, repository: str, branch: str, base: str = "main") -> ExternalActionResult[dict[str, Any]]:
+    def get_pull_request(
+        self, repository: str, branch: str, base: str = "main"
+    ) -> ExternalActionResult[dict[str, Any]]:
         if self.lookup_state == PullRequestLookupState.NOT_FOUND:
             return ExternalActionResult(
                 outcome=ExternalOutcome.FAILURE,
@@ -285,7 +287,9 @@ class StructuredLookupGitHubAdapter(FakeGitHubAdapter):
                 retry_safety=RetrySafety.SAFE,
                 error_message="Pull request lookup ambiguous.",
             )
-        candidate_sha = self.pushed_branches[-1]["candidate_sha"] if self.pushed_branches else "test-cand-sha"
+        candidate_sha = (
+            self.pushed_branches[-1]["candidate_sha"] if self.pushed_branches else "test-cand-sha"
+        )
         if self.lookup_mismatch:
             candidate_sha = "different-candidate-sha"
         pr_dict = {
@@ -1902,6 +1906,7 @@ def test_coordinator_halts_on_review_remediation_retry_budget_exhaustion(
 # CHECKS_FAILED CONTINUATION DISPATCH REGRESSION TESTS
 # ---------------------------------------------------------------------------
 
+
 def test_checks_failed_production_regression_falls_back_to_job_decision(
     setup_orchestration_environment, in_memory_uow
 ):
@@ -2216,5 +2221,3 @@ def test_no_decisions_available_preserves_bounded_remediation(
 
     _ = service.drive_coordinator(run.run_id)
     assert len(executed_jobs) == 1
-
-

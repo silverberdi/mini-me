@@ -149,18 +149,14 @@ async def test_generate_success_returns_bounded_text():
     def handler(request):
         return httpx.Response(
             200,
-            json={
-                "message": {"role": "assistant", "content": '{"kind":"CHANGES_PROPOSED"}'}
-            },
+            json={"message": {"role": "assistant", "content": '{"kind":"CHANGES_PROPOSED"}'}},
         )
 
     client = httpx.AsyncClient(
         transport=httpx.MockTransport(handler), base_url="http://ollama.test"
     )
     adapter = LocalOllamaAdapter(model=QWEN2_5_CODER_7B_INSTRUCT_Q4_K_M)
-    response = await adapter.generate(
-        system_prompt="s", prompt="p", client=client
-    )
+    response = await adapter.generate(system_prompt="s", prompt="p", client=client)
     assert isinstance(response, OllamaGenerateResponse)
     assert response.text.startswith('{"kind"')
 
@@ -220,9 +216,7 @@ async def test_harness_timeout_cancels_in_flight_and_cleanup_called():
     async def slow_dispatch(_t, _n):
         await asyncio.sleep(30)  # far beyond the envelope deadline
 
-    harness = LocalWorkerHarness(
-        dispatch=slow_dispatch, cleanup=cleanup, max_corrective_attempts=0
-    )
+    harness = LocalWorkerHarness(dispatch=slow_dispatch, cleanup=cleanup, max_corrective_attempts=0)
     envelope = _envelope(LocalTaskClass.SMALL_CODE_FIX, "touch file x")
     envelope.timeout_seconds = 0.05
     envelope.forbidden_files = []
@@ -231,7 +225,6 @@ async def test_harness_timeout_cancels_in_flight_and_cleanup_called():
     assert harness.timeout_cleanup_calls == 1
     assert cleanup_calls == [1]  # in-flight work was cleaned up exactly once
     assert evidence.escalation.required is True
-
 
 
 async def test_harness_allows_exactly_one_corrective_then_escalates():
@@ -337,8 +330,3 @@ async def test_service_success_run_yields_minimal_structured_evidence():
     assert evidence.validation_result is LocalValidationVerdict.PASS
     assert evidence.escalation.required is False
     assert evidence.result is LocalResultKind.CHANGES_PROPOSED
-
-
-
-
-

@@ -48,10 +48,18 @@ class ProjectModel(Base):
         JSON, default=lambda: ["codex", "antigravity", "deepseek"], nullable=False
     )
     openrouter_drain_allowed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    strict_validation_required: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
-    verify_gate_required: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
-    sync_gate_required: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
-    archive_gate_required: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
+    strict_validation_required: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default="true", nullable=False
+    )
+    verify_gate_required: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default="true", nullable=False
+    )
+    sync_gate_required: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default="true", nullable=False
+    )
+    archive_gate_required: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default="true", nullable=False
+    )
     deployment_preview: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     deployment_production: Mapped[dict[str, Any]] = mapped_column(
         JSON, default=dict, nullable=False
@@ -524,7 +532,9 @@ class ProviderHealthModel(Base):
     consecutive_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     last_probe_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     consecutive_probe_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    probe_window_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    probe_window_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     probe_count_in_window: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     last_result_class: Mapped[str | None] = mapped_column(String(32), nullable=True)
     last_error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -1011,14 +1021,19 @@ class DurableSagaModel(Base):
     work_item_key: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     change_name: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     run_id: Mapped[str | None] = mapped_column(
-        String(64), ForeignKey("orchestration_runs.id", ondelete="SET NULL"), nullable=True, index=True
+        String(64),
+        ForeignKey("orchestration_runs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
     )
     job_id: Mapped[str | None] = mapped_column(
         String(64), ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True, index=True
     )
     generation: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     current_phase: Mapped[str] = mapped_column(String(64), nullable=False)
-    status: Mapped[str] = mapped_column(String(32), default="IN_PROGRESS", nullable=False, index=True)
+    status: Mapped[str] = mapped_column(
+        String(32), default="IN_PROGRESS", nullable=False, index=True
+    )
     last_observed_outcome: Mapped[str | None] = mapped_column(String(32), nullable=True)
     blocking_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     evidence_references: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
@@ -1038,7 +1053,9 @@ class DurableSagaModel(Base):
 class OrchestrationExternalActionModel(Base):
     __tablename__ = "orchestration_external_actions"
     __table_args__ = (
-        CheckConstraint("run_id IS NOT NULL OR saga_id IS NOT NULL", name="ck_external_action_ownership"),
+        CheckConstraint(
+            "run_id IS NOT NULL OR saga_id IS NOT NULL", name="ck_external_action_ownership"
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -1458,9 +1475,15 @@ class ProjectManagedRepositoryBindingModel(Base):
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     project_id: Mapped[str] = mapped_column(
-        String(64), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, unique=True, index=True
+        String(64),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
     )
-    canonical_repository_identity: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    canonical_repository_identity: Mapped[str] = mapped_column(
+        String(255), nullable=False, index=True
+    )
     remote_name: Mapped[str] = mapped_column(String(64), default="origin", nullable=False)
     managed_repository_root: Mapped[str] = mapped_column(String(512), nullable=False)
     worktree_parent_dir: Mapped[str] = mapped_column(String(512), nullable=False)
@@ -1468,7 +1491,9 @@ class ProjectManagedRepositoryBindingModel(Base):
     ownership_marker_filename: Mapped[str] = mapped_column(
         String(128), default=".minime-managed-project.json", nullable=False
     )
-    is_valid: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
+    is_valid: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default="true", nullable=False
+    )
     mismatch_reasons: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
@@ -1507,4 +1532,3 @@ class OrchestrationWorktreeOwnershipModel(Base):
     )
 
     project: Mapped[ProjectModel] = relationship("ProjectModel")
-

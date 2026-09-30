@@ -150,7 +150,11 @@ def test_preflight_auth_failure_does_not_consume_material_recovery_budget(in_mem
 
     # Once Antigravity is available, it is selected for premium recovery
     health_records = [
-        type("Health", (), {"provider": "codex", "status": ProviderHealthStatus.TEMPORARILY_UNAVAILABLE})(),
+        type(
+            "Health",
+            (),
+            {"provider": "codex", "status": ProviderHealthStatus.TEMPORARILY_UNAVAILABLE},
+        )(),
         type("Health", (), {"provider": "antigravity", "status": ProviderHealthStatus.AVAILABLE})(),
     ]
     expl = policy.evaluate_selection(

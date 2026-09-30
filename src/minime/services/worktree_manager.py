@@ -73,14 +73,19 @@ class WorktreeManager:
         job_id: str | None = None,
     ) -> None:
         if not project_id:
-            raise ValueError(f"project_id is mandatory for managed workspace mutation '{operation.value}'.")
+            raise ValueError(
+                f"project_id is mandatory for managed workspace mutation '{operation.value}'."
+            )
 
         canonical_path = target_path.resolve()
 
         if not self.uow:
-            raise RuntimeError(f"PersistenceUnitOfWork (uow) is required for workspace mutation '{operation.value}'.")
+            raise RuntimeError(
+                f"PersistenceUnitOfWork (uow) is required for workspace mutation '{operation.value}'."
+            )
 
         from minime.services.workspace_guard import ManagedWorkspaceGuard, is_binding_fully_valid
+
         binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
         binding = binding_repo.get_by_project_id(project_id) if binding_repo else None
 
@@ -101,6 +106,7 @@ class WorktreeManager:
 
         from minime.domain.enums import ExternalOutcome, WorkspaceRole
         from minime.domain.models import WorkspaceMutationRequest
+
         source_req = WorkspaceMutationRequest(
             project_id=project_id,
             target_path=canonical_source,
@@ -123,7 +129,9 @@ class WorktreeManager:
                 ownership = ownership_repo.get_by_canonical_path(str(canonical_path))
                 if not ownership and job_id and hasattr(ownership_repo, "get_by_job_id"):
                     cand = ownership_repo.get_by_job_id(job_id)
-                    if cand and str(Path(cand.canonical_worktree_path).resolve()) == str(canonical_path):
+                    if cand and str(Path(cand.canonical_worktree_path).resolve()) == str(
+                        canonical_path
+                    ):
                         ownership = cand
 
                 if not ownership or ownership.creation_state not in (
@@ -152,7 +160,9 @@ class WorktreeManager:
             return None
         if hasattr(self.uow, "jobs") and self.uow.jobs:
             try:
-                job = self.uow.jobs.get_by_id(job_id) if hasattr(self.uow.jobs, "get_by_id") else None
+                job = (
+                    self.uow.jobs.get_by_id(job_id) if hasattr(self.uow.jobs, "get_by_id") else None
+                )
                 if job and getattr(job, "project_id", None):
                     return job.project_id
             except Exception:
@@ -181,9 +191,15 @@ class WorktreeManager:
                 store = getattr(runs_repo, "_store", {})
                 runs = list(store.values()) if isinstance(store, dict) else []
             for r in runs:
-                if (getattr(r, "active_job_id", None) == job_id or getattr(r, "run_id", None) == job_id) and getattr(r, "project_id", None):
+                if (
+                    getattr(r, "active_job_id", None) == job_id
+                    or getattr(r, "run_id", None) == job_id
+                ) and getattr(r, "project_id", None):
                     return r.project_id
-        if hasattr(self.uow, "orchestration_worktree_ownerships") and self.uow.orchestration_worktree_ownerships:
+        if (
+            hasattr(self.uow, "orchestration_worktree_ownerships")
+            and self.uow.orchestration_worktree_ownerships
+        ):
             ow_repo = self.uow.orchestration_worktree_ownerships
             if hasattr(ow_repo, "get_by_job_id"):
                 try:
@@ -198,23 +214,33 @@ class WorktreeManager:
         if not project_id:
             raise ValueError("project_id is mandatory to resolve worktree parent directory.")
         if not self.uow:
-            raise RuntimeError("PersistenceUnitOfWork (uow) is required to resolve worktree parent directory.")
+            raise RuntimeError(
+                "PersistenceUnitOfWork (uow) is required to resolve worktree parent directory."
+            )
         binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
         if not binding_repo:
             raise RuntimeError("project_managed_repository_bindings repository is missing in uow.")
         binding = binding_repo.get_by_project_id(project_id)
         from minime.services.workspace_guard import is_binding_fully_valid
+
         if not is_binding_fully_valid(binding):
-            raise RuntimeError(f"Failing closed: no valid durable binding or worktree_parent_dir found for project_id '{project_id}'.")
+            raise RuntimeError(
+                f"Failing closed: no valid durable binding or worktree_parent_dir found for project_id '{project_id}'."
+            )
         return Path(binding.worktree_parent_dir).resolve()
 
     def worktree_path(self, job_id: str, project_id: str | None = None) -> Path:
         eff_project_id = self._resolve_project_id(project_id, job_id)
         return self.resolve_worktree_parent_dir(eff_project_id) / job_id
 
-    def remediation_worktree_path(self, job_id: str, generation: int, project_id: str | None = None) -> Path:
+    def remediation_worktree_path(
+        self, job_id: str, generation: int, project_id: str | None = None
+    ) -> Path:
         eff_project_id = self._resolve_project_id(project_id, job_id)
-        return self.resolve_worktree_parent_dir(eff_project_id) / f"{job_id}-remediation-gen{generation}"
+        return (
+            self.resolve_worktree_parent_dir(eff_project_id)
+            / f"{job_id}-remediation-gen{generation}"
+        )
 
     def review_worktree_path(
         self,
@@ -227,8 +253,10 @@ class WorktreeManager:
         sanitized_role = reviewer_role.replace("/", "_").replace("\\", "_").replace(":", "_")
         short_sha = candidate_sha[:8] if candidate_sha else ""
         suffix = f"-{short_sha}" if short_sha else ""
-        return self.resolve_worktree_parent_dir(eff_project_id) / f"{job_id}-review-{sanitized_role}{suffix}"
-
+        return (
+            self.resolve_worktree_parent_dir(eff_project_id)
+            / f"{job_id}-review-{sanitized_role}{suffix}"
+        )
 
     async def _git(
         self,
@@ -285,7 +313,11 @@ class WorktreeManager:
         return stdout.decode().strip()
 
     def _resolve_real_run_id(
-        self, job_id: str, run_id: str | None = None, project_id: str | None = None, change_name: str | None = None
+        self,
+        job_id: str,
+        run_id: str | None = None,
+        project_id: str | None = None,
+        change_name: str | None = None,
     ) -> str:
         durable_run_id = None
         if self.uow:
@@ -306,7 +338,12 @@ class WorktreeManager:
                             durable_run_id = r.run_id
                     except Exception:
                         pass
-                if not durable_run_id and project_id and change_name and hasattr(runs_repo, "get_active_run"):
+                if (
+                    not durable_run_id
+                    and project_id
+                    and change_name
+                    and hasattr(runs_repo, "get_active_run")
+                ):
                     try:
                         r = runs_repo.get_active_run(project_id, change_name)
                         if r and getattr(r, "run_id", None):
@@ -334,12 +371,19 @@ class WorktreeManager:
                         runs = list(store.values()) if isinstance(store, dict) else []
 
                     for r in runs:
-                        if (getattr(r, "active_job_id", None) == job_id or getattr(r, "run_id", None) == job_id) and getattr(r, "run_id", None):
+                        if (
+                            getattr(r, "active_job_id", None) == job_id
+                            or getattr(r, "run_id", None) == job_id
+                        ) and getattr(r, "run_id", None):
                             durable_run_id = r.run_id
                             break
 
             # 2. Check uow.candidate_remediations
-            if not durable_run_id and hasattr(self.uow, "candidate_remediations") and self.uow.candidate_remediations:
+            if (
+                not durable_run_id
+                and hasattr(self.uow, "candidate_remediations")
+                and self.uow.candidate_remediations
+            ):
                 rem_repo = self.uow.candidate_remediations
                 if hasattr(rem_repo, "list_by_job"):
                     try:
@@ -350,7 +394,11 @@ class WorktreeManager:
                         pass
 
             # 3. Check uow.orchestration_worktree_ownerships
-            if not durable_run_id and hasattr(self.uow, "orchestration_worktree_ownerships") and self.uow.orchestration_worktree_ownerships:
+            if (
+                not durable_run_id
+                and hasattr(self.uow, "orchestration_worktree_ownerships")
+                and self.uow.orchestration_worktree_ownerships
+            ):
                 ow_repo = self.uow.orchestration_worktree_ownerships
                 if hasattr(ow_repo, "get_by_job_id"):
                     try:
@@ -363,7 +411,11 @@ class WorktreeManager:
             # 4. Check uow.jobs
             if not durable_run_id and hasattr(self.uow, "jobs") and self.uow.jobs:
                 try:
-                    job = self.uow.jobs.get_by_id(job_id) if hasattr(self.uow.jobs, "get_by_id") else None
+                    job = (
+                        self.uow.jobs.get_by_id(job_id)
+                        if hasattr(self.uow.jobs, "get_by_id")
+                        else None
+                    )
                     if job and getattr(job, "run_id", None):
                         durable_run_id = job.run_id
                 except Exception:
@@ -371,27 +423,43 @@ class WorktreeManager:
 
         if durable_run_id:
             if run_id and run_id != durable_run_id:
-                raise ValueError(f"CONFLICT: Caller-supplied run_id '{run_id}' conflicts with durable run_id '{durable_run_id}' for job_id '{job_id}'.")
+                raise ValueError(
+                    f"CONFLICT: Caller-supplied run_id '{run_id}' conflicts with durable run_id '{durable_run_id}' for job_id '{job_id}'."
+                )
             return durable_run_id
 
-        raise ValueError(f"EVIDENCE_INSUFFICIENT: Durable run_id for job_id '{job_id}' is unobservable in persistence.")
+        raise ValueError(
+            f"EVIDENCE_INSUFFICIENT: Durable run_id for job_id '{job_id}' is unobservable in persistence."
+        )
 
     def _resolve_real_change_name(
-        self, job_id: str, change_name: str | None = None, project_id: str | None = None, run_id: str | None = None
+        self,
+        job_id: str,
+        change_name: str | None = None,
+        project_id: str | None = None,
+        run_id: str | None = None,
     ) -> str:
         durable_change_name = None
         if self.uow:
             # 1. Check uow.jobs
             if hasattr(self.uow, "jobs") and self.uow.jobs:
                 try:
-                    job = self.uow.jobs.get_by_id(job_id) if hasattr(self.uow.jobs, "get_by_id") else None
+                    job = (
+                        self.uow.jobs.get_by_id(job_id)
+                        if hasattr(self.uow.jobs, "get_by_id")
+                        else None
+                    )
                     if job and getattr(job, "change_name", None):
                         durable_change_name = job.change_name
                 except Exception:
                     pass
 
             # 2. Check uow.orchestration_runs
-            if not durable_change_name and hasattr(self.uow, "orchestration_runs") and self.uow.orchestration_runs:
+            if (
+                not durable_change_name
+                and hasattr(self.uow, "orchestration_runs")
+                and self.uow.orchestration_runs
+            ):
                 runs_repo = self.uow.orchestration_runs
                 eff_run = run_id
                 if eff_run and hasattr(runs_repo, "get_by_id"):
@@ -428,12 +496,20 @@ class WorktreeManager:
                         runs = list(store.values()) if isinstance(store, dict) else []
 
                     for r in runs:
-                        if (getattr(r, "active_job_id", None) == job_id or getattr(r, "run_id", None) == job_id or getattr(r, "run_id", None) == eff_run) and getattr(r, "change_name", None):
+                        if (
+                            getattr(r, "active_job_id", None) == job_id
+                            or getattr(r, "run_id", None) == job_id
+                            or getattr(r, "run_id", None) == eff_run
+                        ) and getattr(r, "change_name", None):
                             durable_change_name = r.change_name
                             break
 
             # 3. Check uow.candidate_remediations
-            if not durable_change_name and hasattr(self.uow, "candidate_remediations") and self.uow.candidate_remediations:
+            if (
+                not durable_change_name
+                and hasattr(self.uow, "candidate_remediations")
+                and self.uow.candidate_remediations
+            ):
                 rem_repo = self.uow.candidate_remediations
                 if hasattr(rem_repo, "list_by_job"):
                     try:
@@ -444,7 +520,11 @@ class WorktreeManager:
                         pass
 
             # 4. Check uow.orchestration_worktree_ownerships
-            if not durable_change_name and hasattr(self.uow, "orchestration_worktree_ownerships") and self.uow.orchestration_worktree_ownerships:
+            if (
+                not durable_change_name
+                and hasattr(self.uow, "orchestration_worktree_ownerships")
+                and self.uow.orchestration_worktree_ownerships
+            ):
                 ow_repo = self.uow.orchestration_worktree_ownerships
                 if hasattr(ow_repo, "get_by_job_id"):
                     try:
@@ -456,10 +536,14 @@ class WorktreeManager:
 
         if durable_change_name:
             if change_name and change_name != durable_change_name:
-                raise ValueError(f"CONFLICT: Caller-supplied change_name '{change_name}' conflicts with durable change_name '{durable_change_name}' for job_id '{job_id}'.")
+                raise ValueError(
+                    f"CONFLICT: Caller-supplied change_name '{change_name}' conflicts with durable change_name '{durable_change_name}' for job_id '{job_id}'."
+                )
             return durable_change_name
 
-        raise ValueError(f"EVIDENCE_INSUFFICIENT: Durable change_name for job_id '{job_id}' is unobservable in persistence.")
+        raise ValueError(
+            f"EVIDENCE_INSUFFICIENT: Durable change_name for job_id '{job_id}' is unobservable in persistence."
+        )
 
     def _persist_pending_ownership(
         self,
@@ -475,7 +559,9 @@ class WorktreeManager:
         if not project_id:
             raise ValueError("project_id is mandatory for managed worktree operations.")
         if not self.uow:
-            raise RuntimeError("PersistenceUnitOfWork (uow) is required for durable worktree ownership.")
+            raise RuntimeError(
+                "PersistenceUnitOfWork (uow) is required for durable worktree ownership."
+            )
         repo = getattr(self.uow, "orchestration_worktree_ownerships", None)
         if not repo:
             raise RuntimeError("orchestration_worktree_ownerships repository missing in uow.")
@@ -488,22 +574,34 @@ class WorktreeManager:
                 if binding:
                     eff_repo_identity = binding.canonical_repository_identity
 
-        eff_run_id = self._resolve_real_run_id(job_id, run_id, project_id=project_id, change_name=change_name)
+        eff_run_id = self._resolve_real_run_id(
+            job_id, run_id, project_id=project_id, change_name=change_name
+        )
         eff_change_name = self._resolve_real_change_name(
             job_id, change_name, project_id=project_id, run_id=eff_run_id
         )
         eff_base_sha = source_base_sha
 
         if not eff_run_id:
-            raise ValueError(f"Failing closed: run_id for job_id '{job_id}' is unobservable or empty.")
+            raise ValueError(
+                f"Failing closed: run_id for job_id '{job_id}' is unobservable or empty."
+            )
         if not eff_change_name:
-            raise ValueError(f"Failing closed: change_name for job_id '{job_id}' is unobservable or empty.")
+            raise ValueError(
+                f"Failing closed: change_name for job_id '{job_id}' is unobservable or empty."
+            )
         if not branch:
-            raise ValueError(f"Failing closed: branch for job_id '{job_id}' is unobservable or empty.")
+            raise ValueError(
+                f"Failing closed: branch for job_id '{job_id}' is unobservable or empty."
+            )
         if not eff_repo_identity:
-            raise RuntimeError(f"Failing closed: source_repository_identity for project_id '{project_id}' is unobservable.")
+            raise RuntimeError(
+                f"Failing closed: source_repository_identity for project_id '{project_id}' is unobservable."
+            )
         if not eff_base_sha:
-            raise RuntimeError(f"Failing closed: source_base_sha for job_id '{job_id}' is unobservable.")
+            raise RuntimeError(
+                f"Failing closed: source_base_sha for job_id '{job_id}' is unobservable."
+            )
 
         canonical_path = str(path.resolve())
         worktree_id = f"wt-{path.name}"
@@ -543,11 +641,14 @@ class WorktreeManager:
         repo.save(ownership)
         self.uow.commit()
 
-        durable = repo.get_by_id(ownership.worktree_id) or repo.get_by_canonical_path(canonical_path)
+        durable = repo.get_by_id(ownership.worktree_id) or repo.get_by_canonical_path(
+            canonical_path
+        )
         if not durable or durable.creation_state != WorktreeCreationState.PENDING:
-            raise RuntimeError(f"Failed to verify durable PENDING ownership record for worktree path '{canonical_path}'.")
+            raise RuntimeError(
+                f"Failed to verify durable PENDING ownership record for worktree path '{canonical_path}'."
+            )
         return durable
-
 
     async def _verify_creation_postconditions(
         self,
@@ -560,10 +661,14 @@ class WorktreeManager:
         canonical_path = str(resolved_path)
 
         if not resolved_path.exists():
-            raise RuntimeError(f"Worktree postcondition failed: path '{canonical_path}' does not exist.")
+            raise RuntimeError(
+                f"Worktree postcondition failed: path '{canonical_path}' does not exist."
+            )
 
         if str(Path(ownership.canonical_worktree_path).resolve()) != canonical_path:
-            raise RuntimeError(f"Worktree postcondition failed: path '{canonical_path}' does not match ownership '{ownership.canonical_worktree_path}'.")
+            raise RuntimeError(
+                f"Worktree postcondition failed: path '{canonical_path}' does not match ownership '{ownership.canonical_worktree_path}'."
+            )
 
         wt_list_out = await self._git(["worktree", "list", "--porcelain"], cwd=self.project_root)
         wt_paths = [
@@ -572,18 +677,24 @@ class WorktreeManager:
             if line.startswith("worktree ")
         ]
         if canonical_path not in wt_paths:
-            raise RuntimeError(f"Worktree postcondition failed: path '{canonical_path}' not present in git worktree list.")
+            raise RuntimeError(
+                f"Worktree postcondition failed: path '{canonical_path}' not present in git worktree list."
+            )
 
         actual_branch = (await self._git(["branch", "--show-current"], cwd=resolved_path)).strip()
         if not actual_branch or actual_branch != expected_branch:
-            raise RuntimeError(f"Worktree postcondition failed: actual branch '{actual_branch}' does not match expected '{expected_branch}'.")
+            raise RuntimeError(
+                f"Worktree postcondition failed: actual branch '{actual_branch}' does not match expected '{expected_branch}'."
+            )
 
         if expected_base_sha:
             head_sha = (await self._git(["rev-parse", "HEAD"], cwd=resolved_path)).strip()
             if not head_sha:
                 raise RuntimeError("Worktree postcondition failed: unable to resolve HEAD SHA.")
             try:
-                expected_sha = (await self._git(["rev-parse", expected_base_sha], cwd=self.project_root)).strip()
+                expected_sha = (
+                    await self._git(["rev-parse", expected_base_sha], cwd=self.project_root)
+                ).strip()
             except Exception:
                 expected_sha = expected_base_sha.strip()
             if head_sha != expected_sha:
@@ -597,24 +708,34 @@ class WorktreeManager:
                 binding = binding_repo.get_by_project_id(ownership.project_id)
                 if binding:
                     from minime.services.workspace_guard import ManagedWorkspaceGuard
+
                     guard = self.workspace_guard or ManagedWorkspaceGuard(self.uow)
                     valid_git, git_reason = guard.verify_git_repository_identity(
                         canonical_path, binding.canonical_repository_identity, binding.remote_name
                     )
                     if not valid_git:
-                        raise RuntimeError(f"Worktree postcondition failed: Git repository identity verification failed: {git_reason}")
+                        raise RuntimeError(
+                            f"Worktree postcondition failed: Git repository identity verification failed: {git_reason}"
+                        )
 
         marker_file = resolved_path / ".minime_worktree_ownership.json"
         if not marker_file.exists():
-            raise RuntimeError(f"Worktree postcondition failed: ownership marker file missing at '{marker_file}'.")
+            raise RuntimeError(
+                f"Worktree postcondition failed: ownership marker file missing at '{marker_file}'."
+            )
         try:
             m_data = json.loads(marker_file.read_text(encoding="utf-8"))
-            if m_data.get("worktree_id") != ownership.worktree_id or str(Path(m_data.get("canonical_worktree_path", "")).resolve()) != canonical_path:
+            if (
+                m_data.get("worktree_id") != ownership.worktree_id
+                or str(Path(m_data.get("canonical_worktree_path", "")).resolve()) != canonical_path
+            ):
                 raise RuntimeError("Worktree postcondition failed: ownership marker data mismatch.")
         except Exception as e:
             raise RuntimeError(f"Worktree postcondition failed: corrupt ownership marker: {e}")
 
-    def _write_ownership_marker(self, path: Path, ownership: OrchestrationWorktreeOwnership) -> None:
+    def _write_ownership_marker(
+        self, path: Path, ownership: OrchestrationWorktreeOwnership
+    ) -> None:
         resolved_path = path.resolve()
         if not resolved_path.exists():
             resolved_path.mkdir(parents=True, exist_ok=True)
@@ -622,16 +743,21 @@ class WorktreeManager:
 
         # Reject symlinks at marker file target
         if marker_file.is_symlink() or os.path.islink(marker_file):
-            raise RuntimeError(f"Symlink escape detected at ownership marker target '{marker_file}'. Refusing write.")
+            raise RuntimeError(
+                f"Symlink escape detected at ownership marker target '{marker_file}'. Refusing write."
+            )
 
         resolved_marker = marker_file.resolve()
         if not (resolved_marker == marker_file or resolved_path in resolved_marker.parents):
-            raise RuntimeError(f"Ownership marker target '{resolved_marker}' escapes worktree root '{resolved_path}'.")
+            raise RuntimeError(
+                f"Ownership marker target '{resolved_marker}' escapes worktree root '{resolved_path}'."
+            )
 
         # Authorize marker write with ManagedWorkspaceGuard
         from minime.domain.enums import WorktreeCreationState
         from minime.domain.models import WorkspaceMutationRequest
         from minime.services.workspace_guard import ManagedWorkspaceGuard
+
         guard = self.workspace_guard or ManagedWorkspaceGuard(self.uow)
         requested_op = (
             WorkspaceOperation.WORKTREE_CREATE
@@ -660,7 +786,9 @@ class WorktreeManager:
             "branch_name": ownership.branch_name,
             "source_repository_identity": ownership.source_repository_identity,
             "source_base_sha": ownership.source_base_sha,
-            "created_at": ownership.created_at.isoformat() if hasattr(ownership.created_at, "isoformat") else str(ownership.created_at),
+            "created_at": ownership.created_at.isoformat()
+            if hasattr(ownership.created_at, "isoformat")
+            else str(ownership.created_at),
         }
         marker_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
@@ -684,7 +812,9 @@ class WorktreeManager:
                 for target_dir in target_dirs:
                     exclude_file = target_dir / "exclude"
                     if exclude_file.is_symlink() or os.path.islink(exclude_file):
-                        raise RuntimeError(f"Symlink escape detected at Git exclude file '{exclude_file}'.")
+                        raise RuntimeError(
+                            f"Symlink escape detected at Git exclude file '{exclude_file}'."
+                        )
                     resolved_exclude = exclude_file.resolve()
                     ex_req = WorkspaceMutationRequest(
                         project_id=ownership.project_id,
@@ -697,9 +827,14 @@ class WorktreeManager:
                             f"ManagedWorkspaceGuard denied write to Git exclude file '{resolved_exclude}': {ex_decision.provider_detail}"
                         )
                     target_dir.mkdir(parents=True, exist_ok=True)
-                    content = exclude_file.read_text(encoding="utf-8") if exclude_file.exists() else ""
+                    content = (
+                        exclude_file.read_text(encoding="utf-8") if exclude_file.exists() else ""
+                    )
                     if ".minime_worktree_ownership.json" not in content:
-                        exclude_file.write_text(content.rstrip() + "\n.minime_worktree_ownership.json\n", encoding="utf-8")
+                        exclude_file.write_text(
+                            content.rstrip() + "\n.minime_worktree_ownership.json\n",
+                            encoding="utf-8",
+                        )
         except RuntimeError:
             raise
         except Exception:
@@ -816,8 +951,12 @@ class WorktreeManager:
     ) -> WorktreeInfo:
         """Create or reconcile a remediation workspace rooted at an immutable source SHA."""
         eff_project_id = self._resolve_project_id(project_id, job_id)
-        eff_run_id = self._resolve_real_run_id(job_id, run_id, project_id=eff_project_id, change_name=change_name)
-        eff_change_name = self._resolve_real_change_name(job_id, change_name, project_id=eff_project_id, run_id=eff_run_id)
+        eff_run_id = self._resolve_real_run_id(
+            job_id, run_id, project_id=eff_project_id, change_name=change_name
+        )
+        eff_change_name = self._resolve_real_change_name(
+            job_id, change_name, project_id=eff_project_id, run_id=eff_run_id
+        )
 
         branch = f"minime/{eff_change_name}-{job_id}-remediation-gen{generation}"
         path = self.remediation_worktree_path(job_id, generation, eff_project_id).resolve()
@@ -844,7 +983,13 @@ class WorktreeManager:
 
         # 2. Mandatory durable PENDING ownership before git worktree add
         ownership = self._persist_pending_ownership(
-            job_id, eff_project_id, path, branch=branch, run_id=eff_run_id, change_name=eff_change_name, source_base_sha=source_sha
+            job_id,
+            eff_project_id,
+            path,
+            branch=branch,
+            run_id=eff_run_id,
+            change_name=eff_change_name,
+            source_base_sha=source_sha,
         )
 
         try:
@@ -868,7 +1013,9 @@ class WorktreeManager:
 
         # 4. Write marker, prove postconditions, and transition to CREATED
         self._write_ownership_marker(path, ownership)
-        await self._verify_creation_postconditions(path, ownership, expected_branch=branch, expected_base_sha=source_sha)
+        await self._verify_creation_postconditions(
+            path, ownership, expected_branch=branch, expected_base_sha=source_sha
+        )
         self._finalize_created_ownership(ownership)
 
         return WorktreeInfo(path, branch, source_sha)
@@ -884,14 +1031,20 @@ class WorktreeManager:
     ) -> WorktreeInfo:
         """Create or reconcile an isolated reviewer/auditor execution workspace derived from candidate_sha."""
         eff_project_id = self._resolve_project_id(project_id, job_id)
-        eff_run_id = self._resolve_real_run_id(job_id, run_id, project_id=eff_project_id, change_name=change_name)
-        eff_change_name = self._resolve_real_change_name(job_id, change_name, project_id=eff_project_id, run_id=eff_run_id)
+        eff_run_id = self._resolve_real_run_id(
+            job_id, run_id, project_id=eff_project_id, change_name=change_name
+        )
+        eff_change_name = self._resolve_real_change_name(
+            job_id, change_name, project_id=eff_project_id, run_id=eff_run_id
+        )
 
         sanitized_role = reviewer_role.replace("/", "_").replace("\\", "_").replace(":", "_")
         short_sha = candidate_sha[:8] if candidate_sha else ""
         suffix = f"-{short_sha}" if short_sha else ""
         branch = f"minime/{eff_change_name}-{job_id}-review-{sanitized_role}{suffix}"
-        path = self.review_worktree_path(job_id, reviewer_role, eff_project_id, candidate_sha=candidate_sha).resolve()
+        path = self.review_worktree_path(
+            job_id, reviewer_role, eff_project_id, candidate_sha=candidate_sha
+        ).resolve()
         parent = self.resolve_worktree_parent_dir(eff_project_id).resolve()
         if parent not in path.parents:
             raise ValueError(f"Worktree path escapes managed root: {path}")
@@ -915,7 +1068,13 @@ class WorktreeManager:
 
         # 2. Mandatory durable PENDING ownership before git worktree add
         ownership = self._persist_pending_ownership(
-            job_id, eff_project_id, path, branch=branch, run_id=eff_run_id, change_name=eff_change_name, source_base_sha=candidate_sha
+            job_id,
+            eff_project_id,
+            path,
+            branch=branch,
+            run_id=eff_run_id,
+            change_name=eff_change_name,
+            source_base_sha=candidate_sha,
         )
 
         branch_exists = False
@@ -925,7 +1084,11 @@ class WorktreeManager:
         except Exception:
             branch_exists = False
 
-        cmd = ["worktree", "add", str(path), branch] if branch_exists else ["worktree", "add", "-b", branch, str(path), candidate_sha]
+        cmd = (
+            ["worktree", "add", str(path), branch]
+            if branch_exists
+            else ["worktree", "add", "-b", branch, str(path), candidate_sha]
+        )
 
         # 3. ONLY THEN execute git worktree add
         await self._git(
@@ -939,12 +1102,12 @@ class WorktreeManager:
 
         # 4. Write marker, prove postconditions, and transition to CREATED
         self._write_ownership_marker(path, ownership)
-        await self._verify_creation_postconditions(path, ownership, expected_branch=branch, expected_base_sha=candidate_sha)
+        await self._verify_creation_postconditions(
+            path, ownership, expected_branch=branch, expected_base_sha=candidate_sha
+        )
         self._finalize_created_ownership(ownership)
 
         return WorktreeInfo(path, branch, candidate_sha)
-
-
 
     async def changed_paths_since(
         self, worktree_path: str | Path, source_sha: str
@@ -958,11 +1121,7 @@ class WorktreeManager:
         found.update(
             line[3:].strip() for line in status.splitlines() if len(line) >= 4 and line[3:].strip()
         )
-        found = {
-            p
-            for p in found
-            if "minime_worktree_ownership.json" not in p
-        }
+        found = {p for p in found if "minime_worktree_ownership.json" not in p}
         return tuple(sorted(found))
 
     async def _verify_worktree_adoption_proof(
@@ -978,87 +1137,139 @@ class WorktreeManager:
         require_clean: bool = True,
         worktree_kind: str = "worktree",
     ) -> None:
-        ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None) if self.uow else None
-        ownership = ownership_repo.get_by_canonical_path(str(path.resolve())) if ownership_repo else None
+        ownership_repo = (
+            getattr(self.uow, "orchestration_worktree_ownerships", None) if self.uow else None
+        )
+        ownership = (
+            ownership_repo.get_by_canonical_path(str(path.resolve())) if ownership_repo else None
+        )
         if not ownership and ownership_repo and hasattr(ownership_repo, "get_by_job_id"):
             cand = ownership_repo.get_by_job_id(job_id)
             if cand and str(Path(cand.canonical_worktree_path).resolve()) == str(path.resolve()):
                 ownership = cand
 
-        binding_repo = getattr(self.uow, "project_managed_repository_bindings", None) if self.uow else None
+        binding_repo = (
+            getattr(self.uow, "project_managed_repository_bindings", None) if self.uow else None
+        )
         binding = binding_repo.get_by_project_id(eff_project_id) if binding_repo else None
 
         if not ownership:
-            raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': No durable OrchestrationWorktreeOwnership record found.")
+            raise RuntimeError(
+                f"Refusing to adopt existing {worktree_kind} at '{path}': No durable OrchestrationWorktreeOwnership record found."
+            )
         if ownership.creation_state != WorktreeCreationState.CREATED:
-            raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Worktree creation state is '{ownership.creation_state.value}', not CREATED.")
+            raise RuntimeError(
+                f"Refusing to adopt existing {worktree_kind} at '{path}': Worktree creation state is '{ownership.creation_state.value}', not CREATED."
+            )
         if getattr(ownership, "has_synthetic_placeholder", False):
-            raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Durable ownership record contains synthetic placeholders.")
+            raise RuntimeError(
+                f"Refusing to adopt existing {worktree_kind} at '{path}': Durable ownership record contains synthetic placeholders."
+            )
         if ownership.project_id != eff_project_id:
-            raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Project ID '{ownership.project_id}' does not match expected '{eff_project_id}'.")
+            raise RuntimeError(
+                f"Refusing to adopt existing {worktree_kind} at '{path}': Project ID '{ownership.project_id}' does not match expected '{eff_project_id}'."
+            )
         if ownership.job_id != job_id:
-            raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Job ID '{ownership.job_id}' does not match expected '{job_id}'.")
+            raise RuntimeError(
+                f"Refusing to adopt existing {worktree_kind} at '{path}': Job ID '{ownership.job_id}' does not match expected '{job_id}'."
+            )
         if ownership.run_id != eff_run_id:
-            raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Run ID '{ownership.run_id}' does not match durable '{eff_run_id}'.")
+            raise RuntimeError(
+                f"Refusing to adopt existing {worktree_kind} at '{path}': Run ID '{ownership.run_id}' does not match durable '{eff_run_id}'."
+            )
         if ownership.change_name != eff_change_name:
-            raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Change name '{ownership.change_name}' does not match durable '{eff_change_name}'.")
+            raise RuntimeError(
+                f"Refusing to adopt existing {worktree_kind} at '{path}': Change name '{ownership.change_name}' does not match durable '{eff_change_name}'."
+            )
         if str(Path(ownership.canonical_worktree_path).resolve()) != str(path.resolve()):
-            raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Canonical path '{ownership.canonical_worktree_path}' does not match '{path.resolve()}'.")
+            raise RuntimeError(
+                f"Refusing to adopt existing {worktree_kind} at '{path}': Canonical path '{ownership.canonical_worktree_path}' does not match '{path.resolve()}'."
+            )
         if ownership.branch != expected_branch:
-            raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Branch '{ownership.branch}' does not match expected '{expected_branch}'.")
+            raise RuntimeError(
+                f"Refusing to adopt existing {worktree_kind} at '{path}': Branch '{ownership.branch}' does not match expected '{expected_branch}'."
+            )
         if not binding:
-            raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': No valid ProjectManagedRepositoryBinding found for project '{eff_project_id}'.")
+            raise RuntimeError(
+                f"Refusing to adopt existing {worktree_kind} at '{path}': No valid ProjectManagedRepositoryBinding found for project '{eff_project_id}'."
+            )
         if ownership.source_repository_identity != binding.canonical_repository_identity:
-            raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Source repository identity '{ownership.source_repository_identity}' does not match binding '{binding.canonical_repository_identity}'.")
+            raise RuntimeError(
+                f"Refusing to adopt existing {worktree_kind} at '{path}': Source repository identity '{ownership.source_repository_identity}' does not match binding '{binding.canonical_repository_identity}'."
+            )
         if not ownership.source_base_sha or not str(ownership.source_base_sha).strip():
-            raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Durable ownership record has empty source_base_sha.")
+            raise RuntimeError(
+                f"Refusing to adopt existing {worktree_kind} at '{path}': Durable ownership record has empty source_base_sha."
+            )
 
         if expected_base_sha:
             try:
-                resolved_expected = (await self._git(["rev-parse", expected_base_sha], cwd=self.project_root)).strip()
+                resolved_expected = (
+                    await self._git(["rev-parse", expected_base_sha], cwd=self.project_root)
+                ).strip()
             except Exception:
                 resolved_expected = expected_base_sha.strip()
 
             try:
-                resolved_ownership_base = (await self._git(["rev-parse", ownership.source_base_sha], cwd=self.project_root)).strip()
+                resolved_ownership_base = (
+                    await self._git(["rev-parse", ownership.source_base_sha], cwd=self.project_root)
+                ).strip()
             except Exception:
                 resolved_ownership_base = ownership.source_base_sha.strip()
 
-            if ownership.source_base_sha != expected_base_sha and resolved_ownership_base != resolved_expected:
-                raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Source base SHA '{ownership.source_base_sha}' does not match expected '{expected_base_sha}'.")
+            if (
+                ownership.source_base_sha != expected_base_sha
+                and resolved_ownership_base != resolved_expected
+            ):
+                raise RuntimeError(
+                    f"Refusing to adopt existing {worktree_kind} at '{path}': Source base SHA '{ownership.source_base_sha}' does not match expected '{expected_base_sha}'."
+                )
 
         try:
-            wt_list_out = await self._git(["worktree", "list", "--porcelain"], cwd=self.project_root)
+            wt_list_out = await self._git(
+                ["worktree", "list", "--porcelain"], cwd=self.project_root
+            )
             wt_paths = [
                 str(Path(line[9:].strip()).resolve())
                 for line in wt_list_out.splitlines()
                 if line.startswith("worktree ")
             ]
             if str(path.resolve()) not in wt_paths:
-                raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Path '{path}' is not present in git worktree list.")
+                raise RuntimeError(
+                    f"Refusing to adopt existing {worktree_kind} at '{path}': Path '{path}' is not present in git worktree list."
+                )
 
             from minime.services.workspace_guard import ManagedWorkspaceGuard
+
             guard = self.workspace_guard or ManagedWorkspaceGuard(self.uow)
             git_ok, git_reason = guard.verify_git_repository_identity(
                 str(path.resolve()), binding.canonical_repository_identity, binding.remote_name
             )
             if not git_ok:
-                raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Git identity verification failed: {git_reason}")
+                raise RuntimeError(
+                    f"Refusing to adopt existing {worktree_kind} at '{path}': Git identity verification failed: {git_reason}"
+                )
 
             self._verify_ownership_marker(path, ownership, worktree_kind=worktree_kind)
 
             actual_branch = (await self._git(["branch", "--show-current"], cwd=path)).strip()
             if actual_branch != expected_branch:
-                raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Actual branch '{actual_branch}' does not match expected '{expected_branch}'.")
+                raise RuntimeError(
+                    f"Refusing to adopt existing {worktree_kind} at '{path}': Actual branch '{actual_branch}' does not match expected '{expected_branch}'."
+                )
 
             actual_sha = await self.current_sha(path)
             if not actual_sha or not actual_sha.strip():
-                raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Observable worktree HEAD SHA is unobservable or empty.")
+                raise RuntimeError(
+                    f"Refusing to adopt existing {worktree_kind} at '{path}': Observable worktree HEAD SHA is unobservable or empty."
+                )
             actual_sha = actual_sha.strip()
 
             eff_expected_base = expected_base_sha or ownership.source_base_sha
             try:
-                resolved_expected_sha = (await self._git(["rev-parse", eff_expected_base], cwd=self.project_root)).strip()
+                resolved_expected_sha = (
+                    await self._git(["rev-parse", eff_expected_base], cwd=self.project_root)
+                ).strip()
             except Exception:
                 resolved_expected_sha = eff_expected_base.strip()
 
@@ -1069,17 +1280,20 @@ class WorktreeManager:
                         j = self.uow.jobs.get_by_id(job_id)
                         if j and getattr(j, "candidate_sha", None) == actual_sha:
                             has_candidate_proof = True
-                    if not has_candidate_proof and hasattr(self.uow, "orchestration_runs") and self.uow.orchestration_runs:
-                        r = (
-                            self.uow.orchestration_runs.get_by_id(job_id)
-                            or (
-                                self.uow.orchestration_runs.get_by_job_id(job_id)
-                                if hasattr(self.uow.orchestration_runs, "get_by_job_id")
-                                else None
-                            )
+                    if (
+                        not has_candidate_proof
+                        and hasattr(self.uow, "orchestration_runs")
+                        and self.uow.orchestration_runs
+                    ):
+                        r = self.uow.orchestration_runs.get_by_id(job_id) or (
+                            self.uow.orchestration_runs.get_by_job_id(job_id)
+                            if hasattr(self.uow.orchestration_runs, "get_by_job_id")
+                            else None
                         )
                         if r:
-                            cand_sha = getattr(r, "candidate_sha", None) or getattr(r, "current_candidate_sha", None)
+                            cand_sha = getattr(r, "candidate_sha", None) or getattr(
+                                r, "current_candidate_sha", None
+                            )
                             if cand_sha == actual_sha:
                                 has_candidate_proof = True
                 if not has_candidate_proof:
@@ -1092,11 +1306,15 @@ class WorktreeManager:
             if require_clean:
                 state = await self.inspect_worktree_state(path)
                 if state.dirty:
-                    raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Existing integration worktree is dirty: {path}")
+                    raise RuntimeError(
+                        f"Refusing to adopt existing {worktree_kind} at '{path}': Existing integration worktree is dirty: {path}"
+                    )
         except RuntimeError:
             raise
         except Exception as err:
-            raise RuntimeError(f"Refusing to adopt existing {worktree_kind} at '{path}': Adoption check failed: {err}")
+            raise RuntimeError(
+                f"Refusing to adopt existing {worktree_kind} at '{path}': Adoption check failed: {err}"
+            )
 
     async def create_worktree(
         self,
@@ -1121,13 +1339,27 @@ class WorktreeManager:
         base_sha_raw = await self._git(["rev-parse", base_branch])
         if inspect.isawaitable(base_sha_raw):
             base_sha_raw = await base_sha_raw
-        base_sha = str(base_sha_raw).strip() if isinstance(base_sha_raw, str) else (base_sha_raw.strip() if hasattr(base_sha_raw, "strip") else str(base_sha_raw or "").strip())
+        base_sha = (
+            str(base_sha_raw).strip()
+            if isinstance(base_sha_raw, str)
+            else (
+                base_sha_raw.strip()
+                if hasattr(base_sha_raw, "strip")
+                else str(base_sha_raw or "").strip()
+            )
+        )
         if not base_sha:
-            raise RuntimeError(f"Failing closed: base_sha for base_branch '{base_branch}' is unobservable or empty.")
+            raise RuntimeError(
+                f"Failing closed: base_sha for base_branch '{base_branch}' is unobservable or empty."
+            )
 
         eff_project_id = self._resolve_project_id(project_id, job_id)
-        eff_run_id = self._resolve_real_run_id(job_id, run_id, project_id=eff_project_id, change_name=change_name)
-        eff_change_name = self._resolve_real_change_name(job_id, change_name, project_id=eff_project_id, run_id=eff_run_id)
+        eff_run_id = self._resolve_real_run_id(
+            job_id, run_id, project_id=eff_project_id, change_name=change_name
+        )
+        eff_change_name = self._resolve_real_change_name(
+            job_id, change_name, project_id=eff_project_id, run_id=eff_run_id
+        )
         branch_name = branch_name or f"minime/{eff_change_name}-{job_id}"
 
         if path.exists():
@@ -1155,7 +1387,13 @@ class WorktreeManager:
 
         # 2. Mandatory durable PENDING ownership before git worktree add
         ownership = self._persist_pending_ownership(
-            job_id, project_id, path, branch=branch_name, run_id=run_id, change_name=change_name, source_base_sha=base_sha
+            job_id,
+            project_id,
+            path,
+            branch=branch_name,
+            run_id=run_id,
+            change_name=change_name,
+            source_base_sha=base_sha,
         )
 
         branch_exists = False
@@ -1182,7 +1420,9 @@ class WorktreeManager:
 
         # 4. Write marker, prove postconditions, and transition to CREATED
         self._write_ownership_marker(path, ownership)
-        await self._verify_creation_postconditions(path, ownership, expected_branch=branch_name, expected_base_sha=base_sha)
+        await self._verify_creation_postconditions(
+            path, ownership, expected_branch=branch_name, expected_base_sha=base_sha
+        )
         self._finalize_created_ownership(ownership)
 
         # Copy active OpenSpec change directory into isolated worktree if present in project_root
@@ -1190,16 +1430,28 @@ class WorktreeManager:
         if raw_source_change_dir.exists():
             source_change_dir = raw_source_change_dir.resolve()
             openspec_changes_root = (self.project_root / "openspec" / "changes").resolve()
-            if not (source_change_dir == openspec_changes_root or openspec_changes_root in source_change_dir.parents):
-                raise RuntimeError(f"OpenSpec source change directory '{source_change_dir}' escapes '{openspec_changes_root}'.")
+            if not (
+                source_change_dir == openspec_changes_root
+                or openspec_changes_root in source_change_dir.parents
+            ):
+                raise RuntimeError(
+                    f"OpenSpec source change directory '{source_change_dir}' escapes '{openspec_changes_root}'."
+                )
 
             dest_openspec_root = path.resolve() / "openspec"
             dest_change_dir = dest_openspec_root / "changes" / change_name
-            if os.path.islink(dest_openspec_root) or os.path.islink(dest_openspec_root / "changes") or os.path.islink(dest_change_dir):
-                raise RuntimeError(f"Symlink escape detected in OpenSpec destination path under '{path}'.")
+            if (
+                os.path.islink(dest_openspec_root)
+                or os.path.islink(dest_openspec_root / "changes")
+                or os.path.islink(dest_change_dir)
+            ):
+                raise RuntimeError(
+                    f"Symlink escape detected in OpenSpec destination path under '{path}'."
+                )
 
             from minime.domain.models import WorkspaceMutationRequest
             from minime.services.workspace_guard import ManagedWorkspaceGuard
+
             guard = self.workspace_guard or ManagedWorkspaceGuard(self.uow)
             dest_req = WorkspaceMutationRequest(
                 project_id=project_id or eff_project_id,
@@ -1208,7 +1460,9 @@ class WorktreeManager:
             )
             dest_decision = guard.evaluate_mutation(dest_req)
             if not dest_decision.allowed:
-                raise RuntimeError(f"ManagedWorkspaceGuard denied OpenSpec propagation to '{dest_change_dir}': {dest_decision.provider_detail}")
+                raise RuntimeError(
+                    f"ManagedWorkspaceGuard denied OpenSpec propagation to '{dest_change_dir}': {dest_decision.provider_detail}"
+                )
 
             if not dest_change_dir.exists():
                 dest_change_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -1232,10 +1486,15 @@ class WorktreeManager:
     ) -> WorktreeInfo:
         eff_project_id = self._resolve_project_id(project_id, job_id)
         if not eff_project_id:
-            raise ValueError(f"Failing closed: project_id for job_id '{job_id}' cannot be observed.")
+            raise ValueError(
+                f"Failing closed: project_id for job_id '{job_id}' cannot be observed."
+            )
 
         suffix = f"-{target_short_sha}" if target_short_sha else ""
-        path = (self.resolve_worktree_parent_dir(eff_project_id) / f"{job_id}-integration-gen{generation}{suffix}").resolve()
+        path = (
+            self.resolve_worktree_parent_dir(eff_project_id)
+            / f"{job_id}-integration-gen{generation}{suffix}"
+        ).resolve()
         parent = self.resolve_worktree_parent_dir(eff_project_id).resolve()
         if parent not in path.parents:
             raise ValueError(f"Integration worktree path escapes managed root: {path}")
@@ -1243,7 +1502,9 @@ class WorktreeManager:
         # 1. Guard preflight evaluation before any mutation side effect or directory checks
         self._authorize_mutating_operation(eff_project_id, path, WorkspaceOperation.WORKTREE_CREATE)
 
-        eff_run_id = self._resolve_real_run_id(job_id, run_id, project_id=eff_project_id, change_name=change_name)
+        eff_run_id = self._resolve_real_run_id(
+            job_id, run_id, project_id=eff_project_id, change_name=change_name
+        )
         eff_change_name = self._resolve_real_change_name(
             job_id, change_name, project_id=eff_project_id, run_id=eff_run_id
         )
@@ -1264,7 +1525,13 @@ class WorktreeManager:
 
         # 2. Mandatory durable PENDING ownership before git worktree add
         ownership = self._persist_pending_ownership(
-            job_id, eff_project_id, path, branch=branch_name, run_id=eff_run_id, change_name=eff_change_name, source_base_sha=base_sha
+            job_id,
+            eff_project_id,
+            path,
+            branch=branch_name,
+            run_id=eff_run_id,
+            change_name=eff_change_name,
+            source_base_sha=base_sha,
         )
 
         # 3. ONLY THEN execute git worktree add
@@ -1279,7 +1546,9 @@ class WorktreeManager:
 
         # 4. Write marker, prove postconditions, and transition to CREATED
         self._write_ownership_marker(path, ownership)
-        await self._verify_creation_postconditions(path, ownership, expected_branch=branch_name, expected_base_sha=base_sha)
+        await self._verify_creation_postconditions(
+            path, ownership, expected_branch=branch_name, expected_base_sha=base_sha
+        )
         self._finalize_created_ownership(ownership)
 
         return WorktreeInfo(path, branch_name, base_sha)
@@ -1293,7 +1562,11 @@ class WorktreeManager:
     ) -> str:
         path = Path(worktree_path).resolve()
         self._authorize_mutating_operation(
-            project_id, path, WorkspaceOperation.GIT_COMMIT, require_created_ownership=True, job_id=job_id
+            project_id,
+            path,
+            WorkspaceOperation.GIT_COMMIT,
+            require_created_ownership=True,
+            job_id=job_id,
         )
         if commits:
             await self._git(
@@ -1318,7 +1591,9 @@ class WorktreeManager:
         cached = await self._git(["diff", "--cached", "--binary"], cwd=path)
         unstaged = await self._git(["diff", "--binary"], cwd=path)
         untracked = await self._git(["ls-files", "--others", "--exclude-standard", "-z"], cwd=path)
-        untracked_files = [p for p in untracked.split("\0") if p and "minime_worktree_ownership.json" not in p]
+        untracked_files = [
+            p for p in untracked.split("\0") if p and "minime_worktree_ownership.json" not in p
+        ]
         digest = hashlib.sha256()
         digest.update(cached.encode())
         digest.update(unstaged.encode())
@@ -1337,7 +1612,11 @@ class WorktreeManager:
     ) -> str | None:
         path = self.worktree_path(job_id, project_id).resolve()
         self._authorize_mutating_operation(
-            project_id, path, WorkspaceOperation.GIT_COMMIT, require_created_ownership=True, job_id=job_id
+            project_id,
+            path,
+            WorkspaceOperation.GIT_COMMIT,
+            require_created_ownership=True,
+            job_id=job_id,
         )
         state = await self.inspect_worktree_state(path)
         if not state.dirty:
@@ -1378,7 +1657,11 @@ class WorktreeManager:
     ) -> str:
         path = Path(worktree_path).resolve()
         self._authorize_mutating_operation(
-            project_id, path, WorkspaceOperation.GIT_COMMIT, require_created_ownership=True, job_id=job_id
+            project_id,
+            path,
+            WorkspaceOperation.GIT_COMMIT,
+            require_created_ownership=True,
+            job_id=job_id,
         )
         state = await self.inspect_worktree_state(path)
         if state.dirty:
@@ -1480,13 +1763,19 @@ class WorktreeManager:
             raise RuntimeError(error or "Remediation commit reconciliation failed.")
         return WorktreeInfo(path, branch, source_sha)
 
-    async def cleanup_worktree(self, job_id: str, project_id: str | None = None) -> WorktreeCleanupResult:
+    async def cleanup_worktree(
+        self, job_id: str, project_id: str | None = None
+    ) -> WorktreeCleanupResult:
         """Compatibility alias that removes clean worktree path."""
         return await self.remove_clean_worktree(job_id, project_id)
 
-    async def remove_clean_worktree(self, job_id: str, project_id: str | None = None) -> WorktreeCleanupResult:
+    async def remove_clean_worktree(
+        self, job_id: str, project_id: str | None = None
+    ) -> WorktreeCleanupResult:
         """Remove a managed worktree only after independently proving it is clean."""
-        return await self.remove_clean_worktree_path(self.worktree_path(job_id, project_id), job_id, project_id)
+        return await self.remove_clean_worktree_path(
+            self.worktree_path(job_id, project_id), job_id, project_id
+        )
 
     async def remove_clean_worktree_path(
         self,
@@ -1512,7 +1801,11 @@ class WorktreeManager:
         # Guard authorization before deleting
         try:
             self._authorize_mutating_operation(
-                project_id, path, WorkspaceOperation.WORKTREE_DELETE, require_created_ownership=True, job_id=job_id
+                project_id,
+                path,
+                WorkspaceOperation.WORKTREE_DELETE,
+                require_created_ownership=True,
+                job_id=job_id,
             )
         except (RuntimeError, ValueError) as exc:
             logger.warning(f"Refusing deletion of directory at '{path}': {exc}")
@@ -1525,7 +1818,9 @@ class WorktreeManager:
         canonical_path = str(path)
 
         # 4-Way Cleanup Reconciliation: Require durable OrchestrationWorktreeOwnership
-        ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None) if self.uow else None
+        ownership_repo = (
+            getattr(self.uow, "orchestration_worktree_ownerships", None) if self.uow else None
+        )
         if not ownership_repo:
             logger.warning(
                 f"Refusing deletion of directory at '{path}': missing ownership repository (EVIDENCE_INSUFFICIENT)"
@@ -1554,7 +1849,9 @@ class WorktreeManager:
             )
 
         if getattr(ownership, "has_synthetic_placeholder", False):
-            logger.warning(f"Refusing deletion at '{path}': DB ownership contains synthetic placeholders (POLICY_DENIED)")
+            logger.warning(
+                f"Refusing deletion at '{path}': DB ownership contains synthetic placeholders (POLICY_DENIED)"
+            )
             return WorktreeCleanupResult(
                 outcome=ExternalOutcome.FAILURE,
                 reason_code=ExternalReasonCode.POLICY_DENIED,
@@ -1583,7 +1880,9 @@ class WorktreeManager:
 
         # git worktree list must confirm exact worktree
         try:
-            wt_list_out = await self._git(["worktree", "list", "--porcelain"], cwd=self.project_root)
+            wt_list_out = await self._git(
+                ["worktree", "list", "--porcelain"], cwd=self.project_root
+            )
             wt_paths = [
                 str(Path(line[9:].strip()).resolve())
                 for line in wt_list_out.splitlines()
@@ -1627,7 +1926,9 @@ class WorktreeManager:
                 )
                 return WorktreeCleanupResult(
                     outcome=ExternalOutcome.FAILURE if is_conflict else ExternalOutcome.UNKNOWN,
-                    reason_code=ExternalReasonCode.CONFLICT if is_conflict else ExternalReasonCode.EVIDENCE_INSUFFICIENT,
+                    reason_code=ExternalReasonCode.CONFLICT
+                    if is_conflict
+                    else ExternalReasonCode.EVIDENCE_INSUFFICIENT,
                     provider_detail=f"Marker corroboration failed for '{path}': {e}.",
                 )
 
@@ -1695,7 +1996,9 @@ class WorktreeManager:
         canonical_path = str(path)
 
         # 1. 4-Way Authority Step 1: Durable DB ownership check FIRST
-        ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None) if self.uow else None
+        ownership_repo = (
+            getattr(self.uow, "orchestration_worktree_ownerships", None) if self.uow else None
+        )
         if not ownership_repo:
             return WorktreeCleanupResult(
                 outcome=ExternalOutcome.UNKNOWN,
@@ -1741,7 +2044,11 @@ class WorktreeManager:
         # Guard preflight authorization
         try:
             self._authorize_mutating_operation(
-                eff_project_id, path, WorkspaceOperation.WORKTREE_DELETE, require_created_ownership=False, job_id=job_id
+                eff_project_id,
+                path,
+                WorkspaceOperation.WORKTREE_DELETE,
+                require_created_ownership=False,
+                job_id=job_id,
             )
         except (RuntimeError, ValueError) as exc:
             logger.warning(f"Refusing deletion of review worktree at '{path}': {exc}")
@@ -1754,7 +2061,9 @@ class WorktreeManager:
         # 2. 4-Way Authority Step 3: git worktree list observation
         wt_in_git = False
         try:
-            wt_list_out = await self._git(["worktree", "list", "--porcelain"], cwd=self.project_root)
+            wt_list_out = await self._git(
+                ["worktree", "list", "--porcelain"], cwd=self.project_root
+            )
             wt_paths = [
                 str(Path(line[9:].strip()).resolve())
                 for line in wt_list_out.splitlines()
@@ -1817,7 +2126,9 @@ class WorktreeManager:
                 logger.warning(f"git worktree remove failed: {e}")
 
             try:
-                wt_list_out = await self._git(["worktree", "list", "--porcelain"], cwd=self.project_root)
+                wt_list_out = await self._git(
+                    ["worktree", "list", "--porcelain"], cwd=self.project_root
+                )
                 wt_paths = [
                     str(Path(line[9:].strip()).resolve())
                     for line in wt_list_out.splitlines()
@@ -1861,5 +2172,3 @@ class WorktreeManager:
             reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
             provider_detail=f"Successfully removed review worktree at '{path}'.",
         )
-
-

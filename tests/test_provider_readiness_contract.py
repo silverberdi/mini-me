@@ -142,8 +142,9 @@ async def test_fake_provider_retains_default_ready_readiness():
     assert adapter.probe_is_expensive is False
 
 
-
-async def test_health_gate_missing_cli_marks_misconfigured_without_probe(in_memory_uow, monkeypatch):
+async def test_health_gate_missing_cli_marks_misconfigured_without_probe(
+    in_memory_uow, monkeypatch
+):
     service = ProviderHealthService(in_memory_uow)
     service.record_outcome(
         NormalizedProviderResult(
@@ -166,7 +167,9 @@ async def test_health_gate_missing_cli_marks_misconfigured_without_probe(in_memo
     exec_mock.assert_not_awaited()
 
 
-async def test_health_gate_auth_failure_marks_auth_required_without_probe(in_memory_uow, monkeypatch):
+async def test_health_gate_auth_failure_marks_auth_required_without_probe(
+    in_memory_uow, monkeypatch
+):
     service = ProviderHealthService(in_memory_uow)
     service.record_outcome(
         NormalizedProviderResult(
@@ -202,9 +205,7 @@ async def test_health_gate_passes_and_capacity_probe_remains_separate_operation(
 ):
     service = ProviderHealthService(
         in_memory_uow,
-        probe_config=ProbeConfig(
-            cooldown_seconds=0, backoff_base_seconds=0, backoff_max_seconds=0
-        ),
+        probe_config=ProbeConfig(cooldown_seconds=0, backoff_base_seconds=0, backoff_max_seconds=0),
     )
     service.record_outcome(
         NormalizedProviderResult(

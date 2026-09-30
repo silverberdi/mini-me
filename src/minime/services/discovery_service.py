@@ -115,13 +115,9 @@ class WorkDiscoveryService:
                     db_change.name not in active_change_names
                     and db_change.status != ChangeStatus.DONE
                 ):
-                    is_archived = (
-                        db_change.name in archived_names
-                        or any(
-                            a == db_change.name
-                            or a.endswith(f"-{db_change.name}")
-                            for a in archived_names
-                        )
+                    is_archived = db_change.name in archived_names or any(
+                        a == db_change.name or a.endswith(f"-{db_change.name}")
+                        for a in archived_names
                     )
                     if is_archived:
                         updated_change = db_change.model_copy(
@@ -194,7 +190,7 @@ class WorkDiscoveryService:
                             break
 
                 # 4. Evaluate readiness
-                readiness_eval = self.readiness_service.evaluate_change_readiness(
+                readiness_eval = self.readiness_service.evaluate_and_persist_change_readiness(
                     project_id=project.project_id,
                     change_name=change_name,
                     project_root=str(self.project_root),

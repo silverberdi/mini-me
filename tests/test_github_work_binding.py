@@ -61,6 +61,7 @@ def test_github_issue_number_mandatory_for_ready(in_memory_uow, tmp_path):
     )
 
     from conftest import setup_managed_repository_fixture
+
     setup_managed_repository_fixture(
         uow=in_memory_uow,
         project_id="proj-a",

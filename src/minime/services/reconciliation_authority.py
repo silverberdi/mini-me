@@ -72,7 +72,9 @@ class ReconciliationAuthority:
                     body = issue.get("body") or ""
                     if marker in body:
                         num = issue.get("number")
-                        url = issue.get("html_url") or f"https://github.com/{repository}/issues/{num}"
+                        url = (
+                            issue.get("html_url") or f"https://github.com/{repository}/issues/{num}"
+                        )
                         return ExternalActionResult(
                             outcome=ExternalOutcome.SUCCESS,
                             source_adapter="github",
@@ -91,10 +93,14 @@ class ReconciliationAuthority:
                     outcome=ExternalOutcome.UNKNOWN,
                     source_adapter="github",
                     reason_code=ExternalReasonCode.UNOBSERVABLE,
-                    error_message=getattr(res, "error_message", "Listing issues returned non-success outcome."),
+                    error_message=getattr(
+                        res, "error_message", "Listing issues returned non-success outcome."
+                    ),
                 )
         except Exception as exc:
-            logger.warning("Failed to list issues during reconciliation for '%s': %s", operation_key, exc)
+            logger.warning(
+                "Failed to list issues during reconciliation for '%s': %s", operation_key, exc
+            )
             return ExternalActionResult(
                 outcome=ExternalOutcome.UNKNOWN,
                 source_adapter="github",
@@ -125,7 +131,15 @@ class ReconciliationAuthority:
             res = github_adapter.list_project_items(project_number=project_number, owner=owner)
             if res.outcome == ExternalOutcome.SUCCESS and res.data is not None:
                 for item in res.data:
-                    content_url = item.get("issue_url") or item.get("content_url") or (item.get("content", {}).get("url") if isinstance(item.get("content"), dict) else None)
+                    content_url = (
+                        item.get("issue_url")
+                        or item.get("content_url")
+                        or (
+                            item.get("content", {}).get("url")
+                            if isinstance(item.get("content"), dict)
+                            else None
+                        )
+                    )
                     if content_url == issue_url:
                         item_id = item.get("id") or item.get("item_id")
                         return ExternalActionResult(
@@ -146,10 +160,14 @@ class ReconciliationAuthority:
                     outcome=ExternalOutcome.UNKNOWN,
                     source_adapter="github",
                     reason_code=ExternalReasonCode.UNOBSERVABLE,
-                    error_message=getattr(res, "error_message", "Listing project items returned non-success outcome."),
+                    error_message=getattr(
+                        res, "error_message", "Listing project items returned non-success outcome."
+                    ),
                 )
         except Exception as exc:
-            logger.warning("Failed to list project items during reconciliation for '%s': %s", issue_url, exc)
+            logger.warning(
+                "Failed to list project items during reconciliation for '%s': %s", issue_url, exc
+            )
             return ExternalActionResult(
                 outcome=ExternalOutcome.UNKNOWN,
                 source_adapter="github",
@@ -163,5 +181,3 @@ class ReconciliationAuthority:
             reason_code=ExternalReasonCode.UNOBSERVABLE,
             error_message=f"Unobservable project item listing for '{issue_url}'",
         )
-
-

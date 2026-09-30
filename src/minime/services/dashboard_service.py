@@ -355,11 +355,11 @@ class OperationsDashboardService:
         """Construct high-level operational overview."""
         # 1. Capacity & Scheduler Status
         cap_service = CapacityLifecycleService(self.uow)
-        sched_status = cap_service.get_scheduler_status()
+        sched_status = cap_service.get_scheduler_status_pure()
 
         # 2. Provider Health
         health_service = ProviderHealthService(self.uow)
-        prov_health = health_service.list_all_health()
+        prov_health = health_service.list_existing_health()
         prov_dtos = [
             ProviderHealthDTO(
                 provider_id=h.provider,
@@ -415,6 +415,10 @@ class OperationsDashboardService:
         for r in all_runs:
             change_for_run = changes_map.get((r.project_id, r.change_name))
             is_change_done = change_for_run and change_for_run.status == ChangeStatus.DONE
+            is_change_terminal = change_for_run and change_for_run.status in {
+                ChangeStatus.DONE,
+                ChangeStatus.CANCELLED,
+            }
             is_run_completed = (
                 r.current_stage == OrchestrationStage.COMPLETED
                 or r.stop_outcome == OrchestrationStopOutcome.COMPLETED
@@ -432,7 +436,7 @@ class OperationsDashboardService:
             is_checks_failed = job_for_run and job_for_run.status == JobStatus.CHECKS_FAILED
 
             if (
-                not is_change_done
+                not is_change_terminal
                 and not is_run_completed
                 and not is_superseded
                 and not r.is_active
@@ -494,7 +498,7 @@ class OperationsDashboardService:
                         updated_at=_format_dt(r.updated_at),
                     )
                 )
-            elif r.is_active:
+            elif r.is_active and not is_change_terminal:
                 job_for_run = (
                     jobs_map.get(r.active_job_id)
                     if r.active_job_id
@@ -512,9 +516,13 @@ class OperationsDashboardService:
                 progress_text = "IN_PROGRESS"
                 waiting_since_str = None
                 if is_waiting:
-                    progress_text = f"{r.stop_outcome.value}: {r.stop_reason or 'Awaiting provider capacity'}"
+                    progress_text = (
+                        f"{r.stop_outcome.value}: {r.stop_reason or 'Awaiting provider capacity'}"
+                    )
                     waiting_val = r.stop_details.get("waiting_since") if r.stop_details else None
-                    waiting_since_str = _format_dt(waiting_val) if waiting_val else _format_dt(r.updated_at)
+                    waiting_since_str = (
+                        _format_dt(waiting_val) if waiting_val else _format_dt(r.updated_at)
+                    )
 
                 active_executions.append(
                     ActiveExecutionDTO(
@@ -725,7 +733,9 @@ class OperationsDashboardService:
                 "job_id": o.job_id,
                 "worktree_path": o.canonical_worktree_path,
                 "state": o.state.value if hasattr(o.state, "value") else str(o.state),
-                "created_at": o.created_at.isoformat() if hasattr(o.created_at, "isoformat") else str(o.created_at),
+                "created_at": o.created_at.isoformat()
+                if hasattr(o.created_at, "isoformat")
+                else str(o.created_at),
             }
             for o in active_ownerships
         ]
@@ -740,14 +750,20 @@ class OperationsDashboardService:
         runtime_head_sha = None
         if os.path.exists(os.path.join(runtime_path, ".git")):
             try:
-                cp = subprocess.run(["git", "rev-parse", "HEAD"], cwd=runtime_path, capture_output=True, text=True)
+                cp = subprocess.run(
+                    ["git", "rev-parse", "HEAD"], cwd=runtime_path, capture_output=True, text=True
+                )
                 if cp.returncode == 0:
                     runtime_head_sha = cp.stdout.strip()
             except Exception:
                 runtime_head_sha = None
 
         metrics_repo = getattr(self.uow, "metrics", None)
-        denied_facts = metrics_repo.list_facts(metric_name="workspace_mutation_denied_total") if metrics_repo else []
+        denied_facts = (
+            metrics_repo.list_facts(metric_name="workspace_mutation_denied_total")
+            if metrics_repo
+            else []
+        )
         total_denied_mutations = len(denied_facts)
 
         bindings_repo = getattr(self.uow, "project_managed_repository_bindings", None)
@@ -765,14 +781,18 @@ class OperationsDashboardService:
             m_head_sha = None
             if m_root and os.path.exists(os.path.join(m_root, ".git")):
                 try:
-                    cp = subprocess.run(["git", "rev-parse", "HEAD"], cwd=m_root, capture_output=True, text=True)
+                    cp = subprocess.run(
+                        ["git", "rev-parse", "HEAD"], cwd=m_root, capture_output=True, text=True
+                    )
                     if cp.returncode == 0:
                         m_head_sha = cp.stdout.strip()
                 except Exception:
                     m_head_sha = None
 
             canon_id = getattr(b, "canonical_repository_identity", "")
-            v_git_ok, _ = guard.verify_git_repository_identity(m_root, canon_id, remote_name=getattr(b, "remote_name", "origin"))
+            v_git_ok, _ = guard.verify_git_repository_identity(
+                m_root, canon_id, remote_name=getattr(b, "remote_name", "origin")
+            )
             verified_canon_id = canon_id if v_git_ok else None
 
             p_isolated = (
@@ -784,8 +804,14 @@ class OperationsDashboardService:
                 and not guard._paths_overlap(wt_root, runtime_path)
             )
             if guard.trusted_managed_root:
-                p_isolated = p_isolated and (guard._is_path_inside(m_root, guard.trusted_managed_root) or m_root == guard.trusted_managed_root)
-                p_isolated = p_isolated and (guard._is_path_inside(wt_root, guard.trusted_managed_root) or wt_root == guard.trusted_managed_root)
+                p_isolated = p_isolated and (
+                    guard._is_path_inside(m_root, guard.trusted_managed_root)
+                    or m_root == guard.trusted_managed_root
+                )
+                p_isolated = p_isolated and (
+                    guard._is_path_inside(wt_root, guard.trusted_managed_root)
+                    or wt_root == guard.trusted_managed_root
+                )
 
             if not p_isolated:
                 overall_isolated = False
@@ -1004,8 +1030,11 @@ class OperationsDashboardService:
     ) -> str:
         """Derive the canonical high-level status for a change."""
         # 1. Change-level terminal authority has highest precedence
-        if change and change.status == ChangeStatus.DONE:
-            return "COMPLETED"
+        if change:
+            if change.status == ChangeStatus.DONE:
+                return "COMPLETED"
+            if change.status == ChangeStatus.CANCELLED:
+                return "CANCELLED"
 
         if not run:
             if not change:

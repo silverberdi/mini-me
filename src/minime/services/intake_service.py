@@ -158,7 +158,9 @@ class IntakeService:
         # Auto-prepare if project policy enables auto_prepare
         if getattr(project, "auto_prepare", True):
             logger.info("Auto-preparing backlog item '%s' for project '%s'", item_key, project_id)
-            prep_result = self.prepare_work_item(project_id, item_key, operator_email=operator_email)
+            prep_result = self.prepare_work_item(
+                project_id, item_key, operator_email=operator_email
+            )
             auto_prep_event = Event(
                 event_type=EventType.WORK_ITEM_AUTO_PREPARED,
                 project_id=project_id,
@@ -316,12 +318,16 @@ class IntakeService:
         change_record = self.uow.changes.get_by_name(project_id, change_name)
 
         # Terminal Intake Protection (Root Cause 1 / Defect 1)
-        is_terminal = (
-            item.status in (WorkItemStatus.COMPLETED, WorkItemStatus.CANCELLED)
-            or (change_record is not None and change_record.status in (ChangeStatus.DONE, ChangeStatus.CANCELLED))
+        is_terminal = item.status in (WorkItemStatus.COMPLETED, WorkItemStatus.CANCELLED) or (
+            change_record is not None
+            and change_record.status in (ChangeStatus.DONE, ChangeStatus.CANCELLED)
         )
         if is_terminal:
-            logger.info("Work item '%s' / change '%s' is in terminal state. Intake preparation denied.", item_key, change_name)
+            logger.info(
+                "Work item '%s' / change '%s' is in terminal state. Intake preparation denied.",
+                item_key,
+                change_name,
+            )
             return WorkItemPrepareResult(
                 item=item,
                 openspec_change_name=change_name,
@@ -339,7 +345,11 @@ class IntakeService:
         )
 
         if saga.status == SagaStatus.COMPLETED or saga.current_phase == "READY":
-            logger.info("Saga '%s' is already COMPLETED at phase '%s'. Returning existing item.", saga.id, saga.current_phase)
+            logger.info(
+                "Saga '%s' is already COMPLETED at phase '%s'. Returning existing item.",
+                saga.id,
+                saga.current_phase,
+            )
             return WorkItemPrepareResult(
                 item=item,
                 openspec_change_name=change_name,
@@ -347,7 +357,11 @@ class IntakeService:
                 unmet_readiness_reasons=item.unmet_readiness_reasons,
             )
 
-        if item.status in (WorkItemStatus.BACKLOG, WorkItemStatus.CONTEXT_CHECK, WorkItemStatus.BLOCKED):
+        if item.status in (
+            WorkItemStatus.BACKLOG,
+            WorkItemStatus.CONTEXT_CHECK,
+            WorkItemStatus.BLOCKED,
+        ):
             authority = LifecycleTransitionAuthority(self.uow)
             item = authority.transition_backlog_item(
                 project_id=project_id,
@@ -388,7 +402,10 @@ class IntakeService:
                         reason_code="prepare_incomplete",
                         actor=operator_email,
                     )
-                self.saga_engine.block_saga(saga, blocking_reason="OpenSpec generation incomplete; human clarification required.")
+                self.saga_engine.block_saga(
+                    saga,
+                    blocking_reason="OpenSpec generation incomplete; human clarification required.",
+                )
                 self.uow.commit()
 
                 return WorkItemPrepareResult(
@@ -399,8 +416,13 @@ class IntakeService:
                     human_questions=generated.human_questions,
                 )
 
-            existing_author_action = self.uow.orchestration_external_actions.get_by_action_key(author_action_key)
-            if not existing_author_action or existing_author_action.status != ExternalActionStatus.COMPLETED:
+            existing_author_action = self.uow.orchestration_external_actions.get_by_action_key(
+                author_action_key
+            )
+            if (
+                not existing_author_action
+                or existing_author_action.status != ExternalActionStatus.COMPLETED
+            ):
                 self.saga_engine.reserve_action(
                     action_key=author_action_key,
                     action_type=ExternalActionType.OPENSPEC_SYNC,
@@ -409,9 +431,15 @@ class IntakeService:
                     saga_id=saga.id,
                 )
                 self.openspec_generator.write_change_to_disk(
-                    project.openspec_path, generated, overwrite=True, project_id=project_id, uow=self.uow
+                    project.openspec_path,
+                    generated,
+                    overwrite=True,
+                    project_id=project_id,
+                    uow=self.uow,
                 )
-                self.saga_engine.record_action_result(author_action_key, status=ExternalActionStatus.COMPLETED)
+                self.saga_engine.record_action_result(
+                    author_action_key, status=ExternalActionStatus.COMPLETED
+                )
 
             self.saga_engine.advance_phase(saga, "OPENSPEC_AUTHORED")
 
@@ -436,12 +464,19 @@ class IntakeService:
         op_key = f"issue_create:{project.project_id}:{change_name}"
 
         if not _has_passed_intake_phase(saga.current_phase, "ISSUE_BOUND"):
-            existing_issue_action = self.uow.orchestration_external_actions.get_by_action_key(op_key)
-            if existing_issue_action and existing_issue_action.status == ExternalActionStatus.COMPLETED and existing_issue_action.remote_identifier:
+            existing_issue_action = self.uow.orchestration_external_actions.get_by_action_key(
+                op_key
+            )
+            if (
+                existing_issue_action
+                and existing_issue_action.status == ExternalActionStatus.COMPLETED
+                and existing_issue_action.remote_identifier
+            ):
                 issue_number = int(existing_issue_action.remote_identifier)
                 issue_url = f"https://github.com/{project.repository}/issues/{issue_number}"
             else:
                 from minime.services.reconciliation_authority import ReconciliationAuthority
+
                 rec_auth = ReconciliationAuthority(self.uow)
                 rec_res = rec_auth.reconcile_issue_creation(
                     github_adapter=self.github_adapter,
@@ -450,8 +485,10 @@ class IntakeService:
                     title=item.title,
                 )
                 if existing_issue_action:
-                    retry_auth = (rec_res.outcome != ExternalOutcome.SUCCESS)
-                    action = rec_auth.reconcile_observe_before_repeat(op_key, rec_res, original_mutation_retry_authorized=retry_auth)
+                    retry_auth = rec_res.outcome != ExternalOutcome.SUCCESS
+                    action = rec_auth.reconcile_observe_before_repeat(
+                        op_key, rec_res, original_mutation_retry_authorized=retry_auth
+                    )
                 else:
                     action = None
 
@@ -466,16 +503,26 @@ class IntakeService:
                         saga_id=saga.id,
                     )
                     self.saga_engine.record_action_result(
-                        op_key, status=ExternalActionStatus.COMPLETED, remote_identifier=str(issue_number)
+                        op_key,
+                        status=ExternalActionStatus.COMPLETED,
+                        remote_identifier=str(issue_number),
                     )
-                elif action and action.status in (ExternalActionStatus.AMBIGUOUS, ExternalActionStatus.UNKNOWN):
-                    self.saga_engine.block_saga(saga, blocking_reason=f"GitHub Issue creation action is in ambiguous status ({action.status.value}). Safe retry unproven.")
+                elif action and action.status in (
+                    ExternalActionStatus.AMBIGUOUS,
+                    ExternalActionStatus.UNKNOWN,
+                ):
+                    self.saga_engine.block_saga(
+                        saga,
+                        blocking_reason=f"GitHub Issue creation action is in ambiguous status ({action.status.value}). Safe retry unproven.",
+                    )
                     self.uow.commit()
                     return WorkItemPrepareResult(
                         item=item,
                         openspec_change_name=change_name,
                         readiness_state=ReadinessState.NOT_READY,
-                        unmet_readiness_reasons=[f"GitHub Issue creation action is in status {action.status.value}."],
+                        unmet_readiness_reasons=[
+                            f"GitHub Issue creation action is in status {action.status.value}."
+                        ],
                     )
                 else:
                     self.saga_engine.reserve_action(
@@ -497,19 +544,32 @@ class IntakeService:
                             issue_number = issue_res.data.get("number")
                             issue_url = issue_res.data.get("html_url")
                             self.saga_engine.record_action_result(
-                                op_key, status=ExternalActionStatus.COMPLETED, remote_identifier=str(issue_number)
+                                op_key,
+                                status=ExternalActionStatus.COMPLETED,
+                                remote_identifier=str(issue_number),
                             )
                         else:
-                            st = ExternalActionStatus.FAILED if issue_res.outcome == ExternalOutcome.FAILURE else ExternalActionStatus.AMBIGUOUS
+                            st = (
+                                ExternalActionStatus.FAILED
+                                if issue_res.outcome == ExternalOutcome.FAILURE
+                                else ExternalActionStatus.AMBIGUOUS
+                            )
                             self.saga_engine.record_action_result(
                                 op_key, status=st, error_message=issue_res.error_message
                             )
                     except Exception as exc:
-                        logger.warning("Could not create remote GitHub issue for '%s': %s", change_name, exc)
-                        self.saga_engine.record_action_result(op_key, status=ExternalActionStatus.FAILED, error_message=str(exc))
+                        logger.warning(
+                            "Could not create remote GitHub issue for '%s': %s", change_name, exc
+                        )
+                        self.saga_engine.record_action_result(
+                            op_key, status=ExternalActionStatus.FAILED, error_message=str(exc)
+                        )
 
             if not issue_number:
-                self.saga_engine.block_saga(saga, blocking_reason=f"GitHub Issue creation for '{change_name}' failed or unverified.")
+                self.saga_engine.block_saga(
+                    saga,
+                    blocking_reason=f"GitHub Issue creation for '{change_name}' failed or unverified.",
+                )
                 self.uow.commit()
                 return WorkItemPrepareResult(
                     item=item,
@@ -518,18 +578,29 @@ class IntakeService:
                     unmet_readiness_reasons=["GitHub Issue creation unverified."],
                 )
 
-            self.saga_engine.advance_phase(saga, "ISSUE_BOUND", evidence_references={"issue_number": issue_number, "issue_url": issue_url})
+            self.saga_engine.advance_phase(
+                saga,
+                "ISSUE_BOUND",
+                evidence_references={"issue_number": issue_number, "issue_url": issue_url},
+            )
 
         # 4. Sync GitHub Project v2 item with observe-before-repeat reconciliation
         project_item_id = item.github_project_item_id
         if not _has_passed_intake_phase(saga.current_phase, "PROJECT_ITEM_BOUND"):
             if not project_item_id and project.github_project_number and issue_url:
                 op_key = f"project_item_add:{project.project_id}:{change_name}"
-                existing_proj_action = self.uow.orchestration_external_actions.get_by_action_key(op_key)
-                if existing_proj_action and existing_proj_action.status == ExternalActionStatus.COMPLETED and existing_proj_action.remote_identifier:
+                existing_proj_action = self.uow.orchestration_external_actions.get_by_action_key(
+                    op_key
+                )
+                if (
+                    existing_proj_action
+                    and existing_proj_action.status == ExternalActionStatus.COMPLETED
+                    and existing_proj_action.remote_identifier
+                ):
                     project_item_id = existing_proj_action.remote_identifier
                 else:
                     from minime.services.reconciliation_authority import ReconciliationAuthority
+
                     rec_auth = ReconciliationAuthority(self.uow)
                     rec_res = rec_auth.reconcile_project_item_add(
                         github_adapter=self.github_adapter,
@@ -539,8 +610,10 @@ class IntakeService:
                         operation_key=op_key,
                     )
                     if existing_proj_action:
-                        retry_auth = (rec_res.outcome != ExternalOutcome.SUCCESS)
-                        action = rec_auth.reconcile_observe_before_repeat(op_key, rec_res, original_mutation_retry_authorized=retry_auth)
+                        retry_auth = rec_res.outcome != ExternalOutcome.SUCCESS
+                        action = rec_auth.reconcile_observe_before_repeat(
+                            op_key, rec_res, original_mutation_retry_authorized=retry_auth
+                        )
                     else:
                         action = None
 
@@ -554,16 +627,26 @@ class IntakeService:
                             saga_id=saga.id,
                         )
                         self.saga_engine.record_action_result(
-                            op_key, status=ExternalActionStatus.COMPLETED, remote_identifier=project_item_id
+                            op_key,
+                            status=ExternalActionStatus.COMPLETED,
+                            remote_identifier=project_item_id,
                         )
-                    elif action and action.status in (ExternalActionStatus.AMBIGUOUS, ExternalActionStatus.UNKNOWN):
-                        self.saga_engine.block_saga(saga, blocking_reason=f"Project item action is in ambiguous status ({action.status.value}). Safe retry unproven.")
+                    elif action and action.status in (
+                        ExternalActionStatus.AMBIGUOUS,
+                        ExternalActionStatus.UNKNOWN,
+                    ):
+                        self.saga_engine.block_saga(
+                            saga,
+                            blocking_reason=f"Project item action is in ambiguous status ({action.status.value}). Safe retry unproven.",
+                        )
                         self.uow.commit()
                         return WorkItemPrepareResult(
                             item=item,
                             openspec_change_name=change_name,
                             readiness_state=ReadinessState.NOT_READY,
-                            unmet_readiness_reasons=[f"Project item action is in status {action.status.value}."],
+                            unmet_readiness_reasons=[
+                                f"Project item action is in status {action.status.value}."
+                            ],
                         )
                     else:
                         self.saga_engine.reserve_action(
@@ -583,18 +666,32 @@ class IntakeService:
                             if project_res.outcome == ExternalOutcome.SUCCESS and project_res.data:
                                 project_item_id = str(project_res.data)
                                 self.saga_engine.record_action_result(
-                                    op_key, status=ExternalActionStatus.COMPLETED, remote_identifier=project_item_id
+                                    op_key,
+                                    status=ExternalActionStatus.COMPLETED,
+                                    remote_identifier=project_item_id,
                                 )
                             else:
-                                st = ExternalActionStatus.FAILED if project_res.outcome == ExternalOutcome.FAILURE else ExternalActionStatus.AMBIGUOUS
+                                st = (
+                                    ExternalActionStatus.FAILED
+                                    if project_res.outcome == ExternalOutcome.FAILURE
+                                    else ExternalActionStatus.AMBIGUOUS
+                                )
                                 self.saga_engine.record_action_result(
                                     op_key, status=st, error_message=project_res.error_message
                                 )
                         except Exception as exc:
-                            logger.warning("Could not sync issue '%s' to GitHub Project: %s", issue_url, exc)
-                            self.saga_engine.record_action_result(op_key, status=ExternalActionStatus.FAILED, error_message=str(exc))
+                            logger.warning(
+                                "Could not sync issue '%s' to GitHub Project: %s", issue_url, exc
+                            )
+                            self.saga_engine.record_action_result(
+                                op_key, status=ExternalActionStatus.FAILED, error_message=str(exc)
+                            )
 
-            self.saga_engine.advance_phase(saga, "PROJECT_ITEM_BOUND", evidence_references={"github_project_item_id": project_item_id})
+            self.saga_engine.advance_phase(
+                saga,
+                "PROJECT_ITEM_BOUND",
+                evidence_references={"github_project_item_id": project_item_id},
+            )
 
         # 5. Create or sync durable ProjectBinding
         binding = self.uow.bindings.get_by_project_and_change(project_id, change_name)
@@ -617,7 +714,7 @@ class IntakeService:
         self.uow.commit()
 
         # 6. Evaluate Definition of Ready (DoR)
-        readiness_eval = self.readiness_service.evaluate_change_readiness(
+        readiness_eval = self.readiness_service.evaluate_and_persist_change_readiness(
             project_id=project_id,
             change_name=change_name,
             project_root=str(self.project_root),
@@ -631,7 +728,10 @@ class IntakeService:
         self.saga_engine.advance_phase(
             saga,
             "READINESS_EVALUATED",
-            evidence_references={"is_ready": readiness_eval.is_ready, "status": final_readiness.value},
+            evidence_references={
+                "is_ready": readiness_eval.is_ready,
+                "status": final_readiness.value,
+            },
         )
 
         # 7. Update BacklogItem state
@@ -674,7 +774,9 @@ class IntakeService:
             self.saga_engine.advance_phase(saga, "READY")
             self.saga_engine.complete_saga(saga)
         else:
-            self.saga_engine.block_saga(saga, blocking_reason="; ".join(readiness_eval.unmet_reasons))
+            self.saga_engine.block_saga(
+                saga, blocking_reason="; ".join(readiness_eval.unmet_reasons)
+            )
 
         # 8. Update WorkQueueItem for scheduler discovery
         queue_item = self.uow.work_queue.get_by_project_and_change(project_id, change_name)
@@ -923,13 +1025,20 @@ class IntakeService:
                     or latest_run.stop_outcome == OrchestrationStopOutcome.COMPLETED
                 )
             )
-            is_done = is_archived or is_run_completed or bool(change_rec and change_rec.status == ChangeStatus.DONE)
+            is_done = (
+                is_archived
+                or is_run_completed
+                or bool(change_rec and change_rec.status == ChangeStatus.DONE)
+            )
+            is_cancelled = bool(change_rec and change_rec.status == ChangeStatus.CANCELLED)
 
             new_status = item.status
             new_run_id = item.run_id
 
             if is_done:
                 new_status = WorkItemStatus.COMPLETED
+            elif is_cancelled:
+                new_status = WorkItemStatus.CANCELLED
             elif latest_run:
                 new_run_id = latest_run.run_id
                 if latest_run.is_active:
@@ -1030,5 +1139,3 @@ class IntakeService:
                     )
 
         return prepared_items
-
-

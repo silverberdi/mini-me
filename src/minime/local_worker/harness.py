@@ -186,9 +186,7 @@ class LocalWorkerHarness:
                     or "Structured result requested escalation to existing provider policy",
                 )
             else:
-                escalation = EscalationDecision(
-                    required=False, target=EscalationTarget.NONE
-                )
+                escalation = EscalationDecision(required=False, target=EscalationTarget.NONE)
         else:
             escalation = escalation or EscalationDecision(
                 required=False, target=EscalationTarget.NONE
@@ -226,4 +224,3 @@ class LocalWorkerHarness:
                     logger.exception("Local worker timeout cleanup failed on attempt %s", attempt)
             self.timeout_cleanup_calls += 1
             return None
-

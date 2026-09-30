@@ -265,7 +265,9 @@ class QueueView(Widget):
         op_style = (
             "bold green"
             if op in {"RUN", "DRAIN"}
-            else "bold yellow" if op == "WAIT" else "bold red"
+            else "bold yellow"
+            if op == "WAIT"
+            else "bold red"
         )
         txt.append(f"  • Status: {op}\n", style=op_style)
         if rep.block_condition:

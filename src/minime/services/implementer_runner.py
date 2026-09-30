@@ -77,7 +77,12 @@ class CliImplementerRunner(ImplementerRunnerInterface):
                 exit_code=-2,
                 timed_out=False,
                 stdout=[],
-                stderr=[redact_secrets(preflight_check.error_message or 'Agent process confinement preflight failed')],
+                stderr=[
+                    redact_secrets(
+                        preflight_check.error_message
+                        or "Agent process confinement preflight failed"
+                    )
+                ],
                 duration_ms=0,
                 preflight_error=preflight_check.error_message,
             )
@@ -89,7 +94,7 @@ class CliImplementerRunner(ImplementerRunnerInterface):
                     exit_code=-2,
                     timed_out=False,
                     stdout=[],
-                    stderr=[redact_secrets(preflight.reason or 'preflight failed')],
+                    stderr=[redact_secrets(preflight.reason or "preflight failed")],
                     duration_ms=0,
                     preflight_error=preflight.reason,
                 )

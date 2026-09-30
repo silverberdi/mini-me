@@ -228,9 +228,7 @@ def get_context_service(uow: UowDep) -> ContextDiscoveryService:
 ContextServiceDep = Annotated[ContextDiscoveryService, Depends(get_context_service)]
 
 
-def get_intake_service(
-    uow: UowDep, github_adapter: GitHubAdapterDep
-) -> IntakeService:
+def get_intake_service(uow: UowDep, github_adapter: GitHubAdapterDep) -> IntakeService:
     return IntakeService(uow, github_adapter=github_adapter)
 
 
@@ -301,19 +299,14 @@ async def auth_middleware(request: Request, call_next):
         session_mgr = SessionManager(uow)
         operator_svc = AuthorizedOperatorService(uow)
 
-        client_ip = request.client.host if request.client else None
-        user_agent = request.headers.get("user-agent")
-
-        auth_session = session_mgr.validate_session(
-            token, ip_address=client_ip, user_agent=user_agent
-        )
+        auth_session = session_mgr.validate_session_pure(token)
         if not auth_session:
             return JSONResponse(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 content={"detail": "Session expired or invalid", "code": "SESSION_EXPIRED"},
             )
 
-        decision, operator = operator_svc.evaluate_operator(
+        decision, operator = operator_svc.evaluate_operator_pure(
             auth_session.operator_email, auth_session.google_sub
         )
         if decision == OperatorAuthDecision.IDENTITY_NOT_ALLOWLISTED:
@@ -364,17 +357,15 @@ def get_current_operator(
 
     session_mgr = SessionManager(uow)
     operator_svc = AuthorizedOperatorService(uow)
-    client_ip = request.client.host if request.client else None
-    user_agent = request.headers.get("user-agent")
 
-    auth_session = session_mgr.validate_session(token, ip_address=client_ip, user_agent=user_agent)
+    auth_session = session_mgr.validate_session_pure(token)
     if not auth_session:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Session expired or invalid",
         )
 
-    decision, operator = operator_svc.evaluate_operator(
+    decision, operator = operator_svc.evaluate_operator_pure(
         auth_session.operator_email, auth_session.google_sub
     )
     if decision == OperatorAuthDecision.IDENTITY_NOT_ALLOWLISTED:
@@ -474,7 +465,7 @@ def get_budget_usage(uow: UowDep, project_id: str | None = None) -> dict[str, An
     if not project_id:
         projects = uow.projects.list_all()
         project_id = projects[0].project_id if projects else ""
-    policy = uow.budget_policies.get_for_update(project_id) if project_id else None
+    policy = uow.budget_policies.get_by_project_id(project_id) if project_id else None
     if not policy:
         return {
             "project_id": project_id,
@@ -506,7 +497,7 @@ def get_openrouter_status(uow: UowDep, project_id: str | None = None) -> dict[st
     if not project_id:
         projects = uow.projects.list_all()
         project_id = projects[0].project_id if projects else ""
-    policy = uow.budget_policies.get_for_update(project_id) if project_id else None
+    policy = uow.budget_policies.get_by_project_id(project_id) if project_id else None
     if not policy:
         return {
             "project_id": project_id,
@@ -652,7 +643,8 @@ def get_project_context_endpoint(
 ) -> ContextDiscoveryReport:
     """Get categorized context report (discovered facts, inferred structure, missing context)."""
     try:
-        return context_service.discover_context(project_id)
+        report, _ = context_service.discover_context_pure(project_id)
+        return report
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
 
@@ -848,7 +840,7 @@ def evaluate_readiness(
     current_active_change: str | None = None,
 ) -> dict[str, Any]:
     service = ReadinessService(uow)
-    eval_result = service.evaluate_change_readiness(
+    eval_result = service.evaluate_change_readiness_pure(
         project_id=project_id,
         change_name=change_name,
         project_root=project_root,
@@ -875,9 +867,7 @@ async def run_project_job(
             project_id, req.change_name, drive_admitted=True
         )
         if run is None:
-            reason = (
-                record.reason_summary if record else "Admission blocked by scheduler policy."
-            )
+            reason = record.reason_summary if record else "Admission blocked by scheduler policy."
             raise ValueError(reason)
         job = uow.jobs.get_by_id(run.active_job_id) if run.active_job_id else None
         if not job:
@@ -1218,9 +1208,7 @@ def start_orchestration(
             req.project_id, req.change_name, drive_admitted=True
         )
         if run is None:
-            reason = (
-                record.reason_summary if record else "Admission blocked by scheduler policy."
-            )
+            reason = record.reason_summary if record else "Admission blocked by scheduler policy."
             raise ValueError(reason)
         status_view = scheduler.orchestration_service.get_status(run.run_id)
         return status_view.model_dump()
@@ -1985,14 +1973,12 @@ def get_auth_me_endpoint(request: Request, uow: UowDep) -> AuthStatusDTO:
 
     session_mgr = SessionManager(uow)
     operator_svc = AuthorizedOperatorService(uow)
-    client_ip = request.client.host if request.client else None
-    user_agent = request.headers.get("user-agent")
 
-    auth_session = session_mgr.validate_session(token, ip_address=client_ip, user_agent=user_agent)
+    auth_session = session_mgr.validate_session_pure(token)
     if not auth_session:
         return AuthStatusDTO(authenticated=False)
 
-    decision, operator = operator_svc.evaluate_operator(
+    decision, operator = operator_svc.evaluate_operator_pure(
         auth_session.operator_email, auth_session.google_sub
     )
     if decision != OperatorAuthDecision.AUTHORIZED or not operator:

@@ -14,6 +14,7 @@ from minime.domain.models import ExternalActionResult
 
 class AgentConfinementError(RuntimeError):
     """Raised when process confinement capability is unavailable or breached."""
+
     pass
 
 
@@ -28,7 +29,8 @@ class AgentProcessConfinement:
     ):
         self.allowed_worktree_path = os.path.realpath(allowed_worktree_path)
         self.runtime_root = os.path.realpath(
-            runtime_root or os.environ.get("MINIME_RUNTIME_ROOT", os.path.join(os.getcwd(), ".minime"))
+            runtime_root
+            or os.environ.get("MINIME_RUNTIME_ROOT", os.path.join(os.getcwd(), ".minime"))
         )
         self.require_kernel_confinement = require_kernel_confinement
         self.confinement_mechanism = self._detect_confinement_mechanism()
@@ -107,20 +109,21 @@ class AgentProcessConfinement:
             "(version 1)\n"
             "(allow default)\n"
             "(deny file-write*)\n"
-            f"(allow file-write* (subpath \"{self.allowed_worktree_path}\"))\n"
-            "(allow file-write* (literal \"/dev/null\"))\n"
-            "(allow file-write* (literal \"/dev/zero\"))\n"
-            "(allow file-write* (literal \"/dev/tty\"))\n"
-            "(allow file-write* (regex #\"^/dev/fd/\"))\n"
-            "(allow file-write* (regex #\"^/dev/std(in|out|err)\"))\n"
-            f"(deny file-write* (subpath \"{self.runtime_root}\"))\n"
+            f'(allow file-write* (subpath "{self.allowed_worktree_path}"))\n'
+            '(allow file-write* (literal "/dev/null"))\n'
+            '(allow file-write* (literal "/dev/zero"))\n'
+            '(allow file-write* (literal "/dev/tty"))\n'
+            '(allow file-write* (regex #"^/dev/fd/"))\n'
+            '(allow file-write* (regex #"^/dev/std(in|out|err)"))\n'
+            f'(deny file-write* (subpath "{self.runtime_root}"))\n'
         )
-
 
     def wrap_command(self, cmd: Sequence[str] | str) -> list[str]:
         """Wrap command with OS-level sandbox confinement binary (bwrap / sandbox-exec)."""
         if not self.is_confinement_available():
-            raise AgentConfinementError("Confinement unavailable; cannot execute agent process unconstrained.")
+            raise AgentConfinementError(
+                "Confinement unavailable; cannot execute agent process unconstrained."
+            )
 
         if isinstance(cmd, str):
             command_args = ["sh", "-c", cmd]
@@ -131,16 +134,27 @@ class AgentProcessConfinement:
             # Bubblewrap sandbox on Linux: bind worktree RW, bind runtime RO
             return [
                 "bwrap",
-                "--ro-bind", "/", "/",
-                "--bind", self.allowed_worktree_path, self.allowed_worktree_path,
-                "--ro-bind", self.runtime_root, self.runtime_root,
+                "--ro-bind",
+                "/",
+                "/",
+                "--bind",
+                self.allowed_worktree_path,
+                self.allowed_worktree_path,
+                "--ro-bind",
+                self.runtime_root,
+                self.runtime_root,
                 "--unshare-pid",
-                "--chdir", self.allowed_worktree_path,
+                "--chdir",
+                self.allowed_worktree_path,
             ] + command_args
 
         elif self.confinement_mechanism == "darwin_sandbox":
             profile = self._generate_darwin_sandbox_profile()
-            sandbox_bin = "/usr/bin/sandbox-exec" if os.path.exists("/usr/bin/sandbox-exec") else "sandbox-exec"
+            sandbox_bin = (
+                "/usr/bin/sandbox-exec"
+                if os.path.exists("/usr/bin/sandbox-exec")
+                else "sandbox-exec"
+            )
             return [sandbox_bin, "-p", profile] + command_args
 
         raise AgentConfinementError(
@@ -157,7 +171,9 @@ class AgentProcessConfinement:
         """Execute arbitrary agent subprocess under OS confinement, failing closed on violations."""
         preflight = self.validate_command_preflight(cwd=cwd)
         if preflight.outcome != ExternalOutcome.SUCCESS:
-            raise AgentConfinementError(f"Preflight confinement check failed: {preflight.error_message}")
+            raise AgentConfinementError(
+                f"Preflight confinement check failed: {preflight.error_message}"
+            )
 
         wrapped_cmd = self.wrap_command(cmd)
         exec_env = self.prepare_environment(env)
@@ -171,9 +187,7 @@ class AgentProcessConfinement:
             timeout=timeout_seconds,
         )
 
-    def prepare_environment(
-        self, base_env: dict[str, str] | None = None
-    ) -> dict[str, str]:
+    def prepare_environment(self, base_env: dict[str, str] | None = None) -> dict[str, str]:
         """Construct isolated environment variables for agent subprocess execution."""
         env = dict(base_env or os.environ)
         env["PWD"] = self.allowed_worktree_path

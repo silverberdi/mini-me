@@ -47,15 +47,26 @@ class InMemoryDurableSagaRepository:
     def get_for_update(self, saga_id: str) -> DurableSaga | None:
         return self._sagas.get(saga_id)
 
-    def get_active_saga(self, project_id: str, work_item_key: str, saga_type: SagaType | str) -> DurableSaga | None:
+    def get_active_saga(
+        self, project_id: str, work_item_key: str, saga_type: SagaType | str
+    ) -> DurableSaga | None:
         st_val = saga_type.value if isinstance(saga_type, SagaType) else saga_type
         for s in self._sagas.values():
-            if s.project_id == project_id and s.work_item_key == work_item_key and s.saga_type.value == st_val:
+            if (
+                s.project_id == project_id
+                and s.work_item_key == work_item_key
+                and s.saga_type.value == st_val
+            ):
                 if s.status in {SagaStatus.IN_PROGRESS, SagaStatus.BLOCKED}:
                     return s
         return None
 
-    def list_by_project(self, project_id: str, saga_type: SagaType | str | None = None, status: SagaStatus | str | None = None) -> list[DurableSaga]:
+    def list_by_project(
+        self,
+        project_id: str,
+        saga_type: SagaType | str | None = None,
+        status: SagaStatus | str | None = None,
+    ) -> list[DurableSaga]:
         res = [s for s in self._sagas.values() if s.project_id == project_id]
         if saga_type:
             st_val = saga_type.value if isinstance(saga_type, SagaType) else saga_type
@@ -66,25 +77,53 @@ class InMemoryDurableSagaRepository:
         return res
 
     def list_active(self, saga_type: SagaType | str | None = None) -> list[DurableSaga]:
-        res = [s for s in self._sagas.values() if s.status in {SagaStatus.IN_PROGRESS, SagaStatus.BLOCKED}]
+        res = [
+            s
+            for s in self._sagas.values()
+            if s.status in {SagaStatus.IN_PROGRESS, SagaStatus.BLOCKED}
+        ]
         if saga_type:
             st_val = saga_type.value if isinstance(saga_type, SagaType) else saga_type
             res = [s for s in res if s.saga_type.value == st_val]
         return res
 
-    def update_phase(self, saga_id: str, current_phase: str, evidence_references: dict | None = None, last_observed_outcome: Any | None = None) -> DurableSaga:
+    def update_phase(
+        self,
+        saga_id: str,
+        current_phase: str,
+        evidence_references: dict | None = None,
+        last_observed_outcome: Any | None = None,
+    ) -> DurableSaga:
         saga = self._sagas[saga_id]
         refs = dict(saga.evidence_references)
         if evidence_references:
             refs.update(evidence_references)
-        updated = saga.model_copy(update={"current_phase": current_phase, "evidence_references": refs, "last_observed_outcome": last_observed_outcome})
+        updated = saga.model_copy(
+            update={
+                "current_phase": current_phase,
+                "evidence_references": refs,
+                "last_observed_outcome": last_observed_outcome,
+            }
+        )
         self._sagas[saga_id] = updated
         return updated
 
-    def update_status(self, saga_id: str, status: SagaStatus | str, blocking_reason: str | None = None, last_observed_outcome: Any | None = None) -> DurableSaga:
+    def update_status(
+        self,
+        saga_id: str,
+        status: SagaStatus | str,
+        blocking_reason: str | None = None,
+        last_observed_outcome: Any | None = None,
+    ) -> DurableSaga:
         saga = self._sagas[saga_id]
         st_enum = SagaStatus(status) if isinstance(status, str) else status
-        updated = saga.model_copy(update={"status": st_enum, "blocking_reason": blocking_reason, "last_observed_outcome": last_observed_outcome})
+        updated = saga.model_copy(
+            update={
+                "status": st_enum,
+                "blocking_reason": blocking_reason,
+                "last_observed_outcome": last_observed_outcome,
+            }
+        )
         self._sagas[saga_id] = updated
         return updated
 
@@ -105,18 +144,42 @@ class InMemoryExternalActionRepository:
     def list_by_saga(self, saga_id: str) -> list[OrchestrationExternalAction]:
         return [a for a in self._actions.values() if a.saga_id == saga_id]
 
-    def update_status(self, action_key: str, status: ExternalActionStatus, remote_identifier: str | None = None, result_payload: dict | None = None, error_message: str | None = None) -> OrchestrationExternalAction:
+    def update_status(
+        self,
+        action_key: str,
+        status: ExternalActionStatus,
+        remote_identifier: str | None = None,
+        result_payload: dict | None = None,
+        error_message: str | None = None,
+    ) -> OrchestrationExternalAction:
         act = self._actions[action_key]
-        updated = act.model_copy(update={"status": status, "remote_identifier": remote_identifier, "result_payload": result_payload or {}, "error_message": error_message})
+        updated = act.model_copy(
+            update={
+                "status": status,
+                "remote_identifier": remote_identifier,
+                "result_payload": result_payload or {},
+                "error_message": error_message,
+            }
+        )
         self._actions[action_key] = updated
         return updated
 
-    def reconcile_observe_before_repeat(self, action_key: str, observed_result: Any, original_mutation_retry_authorized: bool = False) -> OrchestrationExternalAction:
+    def reconcile_observe_before_repeat(
+        self,
+        action_key: str,
+        observed_result: Any,
+        original_mutation_retry_authorized: bool = False,
+    ) -> OrchestrationExternalAction:
         act = self._actions.get(action_key)
         if not act:
             raise ValueError(f"Action '{action_key}' not found.")
         if observed_result.outcome == ExternalOutcome.SUCCESS:
-            updated = act.model_copy(update={"status": ExternalActionStatus.COMPLETED, "remote_identifier": observed_result.remote_identifier or act.remote_identifier})
+            updated = act.model_copy(
+                update={
+                    "status": ExternalActionStatus.COMPLETED,
+                    "remote_identifier": observed_result.remote_identifier or act.remote_identifier,
+                }
+            )
             self._actions[action_key] = updated
             return updated
         return act
@@ -149,8 +212,8 @@ class DummyUOW:
         self.changes = MagicMock()
         self.changes.return_value = None
         self.changes._store = {}
-        self.changes.get_by_name.side_effect = (
-            lambda pid, name: self.changes._store.get(name)
+        self.changes.get_by_name.side_effect = lambda pid, name: (
+            self.changes._store.get(name)
             if self.changes._store.get(name) is not None
             else self.changes.return_value
         )
@@ -165,8 +228,8 @@ class DummyUOW:
         self.backlog_items = MagicMock()
         self.backlog_items.return_value = None
         self.backlog_items._store = {}
-        self.backlog_items.get_by_project_and_key.side_effect = (
-            lambda pid, key: self.backlog_items._store.get(key)
+        self.backlog_items.get_by_project_and_key.side_effect = lambda pid, key: (
+            self.backlog_items._store.get(key)
             if self.backlog_items._store.get(key) is not None
             else self.backlog_items.return_value
         )
@@ -269,10 +332,14 @@ def test_forbidden_persisted_statuses():
         saga_id="s1",
     )
 
-    with pytest.raises(ValueError, match="not a valid ExternalActionStatus|Invalid external action status"):
+    with pytest.raises(
+        ValueError, match="not a valid ExternalActionStatus|Invalid external action status"
+    ):
         engine.record_action_result("test_act", status="SUCCESS")
 
-    with pytest.raises(ValueError, match="not a valid ExternalActionStatus|Invalid external action status"):
+    with pytest.raises(
+        ValueError, match="not a valid ExternalActionStatus|Invalid external action status"
+    ):
         engine.record_action_result("test_act", status="RECONCILED")
 
     # Valid status
@@ -285,6 +352,7 @@ def test_stage_b_issue_comment_marker_matching():
     """Verify Issue reconciliation matches exact comment marker and forbids title-only matching."""
     from minime.domain.enums import ExternalReasonCode
     from minime.domain.models import ExternalActionResult
+
     uow = DummyUOW()
     uow.orchestration_external_actions.reserve(
         OrchestrationExternalAction(
@@ -304,7 +372,13 @@ def test_stage_b_issue_comment_marker_matching():
         outcome=ExternalOutcome.SUCCESS,
         source_adapter="github",
         reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
-        data=[{"number": 42, "html_url": "http://gh/issue/42", "body": "<!-- minime-opkey: issue_create:p:c -->\nIssue body"}],
+        data=[
+            {
+                "number": 42,
+                "html_url": "http://gh/issue/42",
+                "body": "<!-- minime-opkey: issue_create:p:c -->\nIssue body",
+            }
+        ],
     )
 
     res = rec_auth.reconcile_issue_creation(
@@ -323,6 +397,7 @@ def test_stage_b_project_item_url_lookup():
     """Verify Project Item reconciliation uses exact issue URL lookup and forbids title search."""
     from minime.domain.enums import ExternalReasonCode
     from minime.domain.models import ExternalActionResult
+
     uow = DummyUOW()
     uow.orchestration_external_actions.reserve(
         OrchestrationExternalAction(
@@ -375,6 +450,7 @@ def test_squash_merge_delivery_verification(tmp_path, monkeypatch):
     svc.verify_candidate_ancestry = MagicMock(return_value=False)
 
     import subprocess
+
     mock_run = MagicMock()
     mock_run.returncode = 0
     monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: mock_run)
@@ -560,7 +636,13 @@ def test_intake_resume_from_persisted_phase_no_replay():
         openspec_change_name="k1",
     )
     uow.backlog_items.save(item)
-    uow.projects.get_by_id.return_value = MagicMock(display_name="Proj", openspec_path="openspec", repository="owner/repo", base_branch="main", project_id="p1")
+    uow.projects.get_by_id.return_value = MagicMock(
+        display_name="Proj",
+        openspec_path="openspec",
+        repository="owner/repo",
+        base_branch="main",
+        project_id="p1",
+    )
     uow.changes.get_by_name.return_value = None
 
     _saga = engine.start_saga(
@@ -572,7 +654,9 @@ def test_intake_resume_from_persisted_phase_no_replay():
     )
 
     gen_mock = MagicMock()
-    service = IntakeService(uow=uow, project_root=".", openspec_generator=gen_mock, saga_engine=engine)
+    service = IntakeService(
+        uow=uow, project_root=".", openspec_generator=gen_mock, saga_engine=engine
+    )
     service.prepare_work_item("p1", "k1")
     gen_mock.generate_from_backlog_item.assert_not_called()
 
@@ -593,7 +677,13 @@ def test_openspec_generation_not_replayed_after_authored():
         openspec_change_name="k1",
     )
     uow.backlog_items.save(item)
-    uow.projects.get_by_id.return_value = MagicMock(display_name="Proj", openspec_path="openspec", repository="owner/repo", base_branch="main", project_id="p1")
+    uow.projects.get_by_id.return_value = MagicMock(
+        display_name="Proj",
+        openspec_path="openspec",
+        repository="owner/repo",
+        base_branch="main",
+        project_id="p1",
+    )
     uow.changes.get_by_name.return_value = None
 
     _saga = engine.start_saga(
@@ -604,7 +694,9 @@ def test_openspec_generation_not_replayed_after_authored():
         initial_phase="ISSUE_BOUND",
     )
     gen_mock = MagicMock()
-    service = IntakeService(uow=uow, project_root=".", openspec_generator=gen_mock, saga_engine=engine)
+    service = IntakeService(
+        uow=uow, project_root=".", openspec_generator=gen_mock, saga_engine=engine
+    )
     service.prepare_work_item("p1", "k1")
     gen_mock.generate_from_backlog_item.assert_not_called()
     gen_mock.write_change_to_disk.assert_not_called()
@@ -675,7 +767,13 @@ def test_ambiguous_action_without_safe_retry_blocks():
         openspec_change_name="k1",
     )
     uow.backlog_items.save(item)
-    uow.projects.get_by_id.return_value = MagicMock(display_name="Proj", openspec_path="openspec", repository="owner/repo", base_branch="main", project_id="p1")
+    uow.projects.get_by_id.return_value = MagicMock(
+        display_name="Proj",
+        openspec_path="openspec",
+        repository="owner/repo",
+        base_branch="main",
+        project_id="p1",
+    )
     uow.changes.get_by_name.return_value = None
 
     saga = engine.start_saga(
@@ -699,7 +797,9 @@ def test_ambiguous_action_without_safe_retry_blocks():
     mock_github = MagicMock()
     mock_github.list_issues.return_value = MagicMock(outcome=ExternalOutcome.FAILURE, data=[])
 
-    service = IntakeService(uow=uow, project_root=".", github_adapter=mock_github, saga_engine=engine)
+    service = IntakeService(
+        uow=uow, project_root=".", github_adapter=mock_github, saga_engine=engine
+    )
     service.prepare_work_item("p1", "k1")
 
     updated_saga = engine.get_saga(saga.id)
@@ -744,11 +844,22 @@ def test_terminal_closure_reconciliation_missing_evidence_blocks():
     uow = DummyUOW()
     engine = SagaEngine(uow)
 
-    run = MagicMock(run_id="run_1", project_id="p1", change_name="c1", current_stage=OrchestrationStage.COMPLETED, stop_outcome=OrchestrationStopOutcome.COMPLETED, is_active=False, active_job_id="job_1", candidate_sha="sha123")
+    run = MagicMock(
+        run_id="run_1",
+        project_id="p1",
+        change_name="c1",
+        current_stage=OrchestrationStage.COMPLETED,
+        stop_outcome=OrchestrationStopOutcome.COMPLETED,
+        is_active=False,
+        active_job_id="job_1",
+        candidate_sha="sha123",
+    )
     job = MagicMock(job_id="job_1", status=JobStatus.COMPLETED)
     uow.orchestration_runs.get_by_id.return_value = run
     uow.jobs.get_by_id.return_value = job
-    uow.bindings.get_by_project_and_change.return_value = MagicMock(github_issue_number=123, github_project_item_id="item_1")
+    uow.bindings.get_by_project_and_change.return_value = MagicMock(
+        github_issue_number=123, github_project_item_id="item_1"
+    )
 
     service = PostMergeReconciliationService(uow=uow, project_root=".", saga_engine=engine)
     res = service.reconcile_post_merge("p1", "c1", run_id="run_1")
@@ -761,26 +872,68 @@ def test_terminal_closure_missing_one_phase_does_not_reach_final_closed():
     uow = DummyUOW()
     engine = SagaEngine(uow)
 
-    run = MagicMock(run_id="run_1", project_id="p1", change_name="c1", current_stage=OrchestrationStage.COMPLETED, stop_outcome=OrchestrationStopOutcome.COMPLETED, is_active=False, active_job_id="job_1", candidate_sha="sha123")
+    run = MagicMock(
+        run_id="run_1",
+        project_id="p1",
+        change_name="c1",
+        current_stage=OrchestrationStage.COMPLETED,
+        stop_outcome=OrchestrationStopOutcome.COMPLETED,
+        is_active=False,
+        active_job_id="job_1",
+        candidate_sha="sha123",
+    )
     job = MagicMock(job_id="job_1", status=JobStatus.COMPLETED)
     uow.orchestration_runs.get_by_id.return_value = run
     uow.jobs.get_by_id.return_value = job
-    c = Change(project_id="p1", name="c1", status=ChangeStatus.IN_PROGRESS, proposal_path="p", tasks_path="t", design_path="d")
+    c = Change(
+        project_id="p1",
+        name="c1",
+        status=ChangeStatus.IN_PROGRESS,
+        proposal_path="p",
+        tasks_path="t",
+        design_path="d",
+    )
     uow.changes.save(c)
-    item = BacklogItem(project_id="p1", item_key="c1", title="T", description="D", priority=QueuePriority.HIGH, status=WorkItemStatus.RUNNING, readiness_state=ReadinessState.READY, openspec_change_name="c1")
+    item = BacklogItem(
+        project_id="p1",
+        item_key="c1",
+        title="T",
+        description="D",
+        priority=QueuePriority.HIGH,
+        status=WorkItemStatus.RUNNING,
+        readiness_state=ReadinessState.READY,
+        openspec_change_name="c1",
+    )
     uow.backlog_items.save(item)
 
-    saga = engine.start_saga(saga_type=SagaType.CLOSURE, project_id="p1", work_item_key="c1", change_name="c1", run_id="run_1", job_id="job_1")
-    for act_type in [ExternalActionType.ISSUE_CLOSE, ExternalActionType.PROJECT_ITEM_EDIT, ExternalActionType.OPENSPEC_SYNC, ExternalActionType.OPENSPEC_ARCHIVE, ExternalActionType.BRANCH_DELETE]:
-        uow.orchestration_external_actions.reserve(OrchestrationExternalAction(
-            saga_id=saga.id,
-            action_key=f"act:{act_type.value}",
-            action_type=act_type,
-            target_identity="c1",
-            request_fingerprint="fp",
-            status=ExternalActionStatus.COMPLETED,
-        ))
-    uow.bindings.get_by_project_and_change.return_value = MagicMock(github_issue_number=123, github_project_item_id="item_1")
+    saga = engine.start_saga(
+        saga_type=SagaType.CLOSURE,
+        project_id="p1",
+        work_item_key="c1",
+        change_name="c1",
+        run_id="run_1",
+        job_id="job_1",
+    )
+    for act_type in [
+        ExternalActionType.ISSUE_CLOSE,
+        ExternalActionType.PROJECT_ITEM_EDIT,
+        ExternalActionType.OPENSPEC_SYNC,
+        ExternalActionType.OPENSPEC_ARCHIVE,
+        ExternalActionType.BRANCH_DELETE,
+    ]:
+        uow.orchestration_external_actions.reserve(
+            OrchestrationExternalAction(
+                saga_id=saga.id,
+                action_key=f"act:{act_type.value}",
+                action_type=act_type,
+                target_identity="c1",
+                request_fingerprint="fp",
+                status=ExternalActionStatus.COMPLETED,
+            )
+        )
+    uow.bindings.get_by_project_and_change.return_value = MagicMock(
+        github_issue_number=123, github_project_item_id="item_1"
+    )
 
     service = PostMergeReconciliationService(uow=uow, project_root=".", saga_engine=engine)
     res = service.reconcile_post_merge("p1", "c1", run_id="run_1")
@@ -794,26 +947,69 @@ def test_terminal_closure_all_13_proven_reaches_final_closed():
     uow = DummyUOW()
     engine = SagaEngine(uow)
 
-    run = MagicMock(run_id="run_1", project_id="p1", change_name="c1", current_stage=OrchestrationStage.COMPLETED, stop_outcome=OrchestrationStopOutcome.COMPLETED, is_active=False, active_job_id="job_1", candidate_sha="sha123")
+    run = MagicMock(
+        run_id="run_1",
+        project_id="p1",
+        change_name="c1",
+        current_stage=OrchestrationStage.COMPLETED,
+        stop_outcome=OrchestrationStopOutcome.COMPLETED,
+        is_active=False,
+        active_job_id="job_1",
+        candidate_sha="sha123",
+    )
     job = MagicMock(job_id="job_1", status=JobStatus.COMPLETED)
     uow.orchestration_runs.get_by_id.return_value = run
     uow.jobs.get_by_id.return_value = job
-    c = Change(project_id="p1", name="c1", status=ChangeStatus.IN_PROGRESS, proposal_path="p", tasks_path="t", design_path="d")
+    c = Change(
+        project_id="p1",
+        name="c1",
+        status=ChangeStatus.IN_PROGRESS,
+        proposal_path="p",
+        tasks_path="t",
+        design_path="d",
+    )
     uow.changes.save(c)
-    item = BacklogItem(project_id="p1", item_key="c1", title="T", description="D", priority=QueuePriority.HIGH, status=WorkItemStatus.RUNNING, readiness_state=ReadinessState.READY, openspec_change_name="c1")
+    item = BacklogItem(
+        project_id="p1",
+        item_key="c1",
+        title="T",
+        description="D",
+        priority=QueuePriority.HIGH,
+        status=WorkItemStatus.RUNNING,
+        readiness_state=ReadinessState.READY,
+        openspec_change_name="c1",
+    )
     uow.backlog_items.save(item)
 
-    saga = engine.start_saga(saga_type=SagaType.CLOSURE, project_id="p1", work_item_key="c1", change_name="c1", run_id="run_1", job_id="job_1")
-    for act_type in [ExternalActionType.ISSUE_CLOSE, ExternalActionType.PROJECT_ITEM_EDIT, ExternalActionType.OPENSPEC_SYNC, ExternalActionType.OPENSPEC_ARCHIVE, ExternalActionType.WORKTREE_DELETE, ExternalActionType.BRANCH_DELETE]:
-        uow.orchestration_external_actions.reserve(OrchestrationExternalAction(
-            saga_id=saga.id,
-            action_key=f"act:{act_type.value}",
-            action_type=act_type,
-            target_identity="c1",
-            request_fingerprint="fp",
-            status=ExternalActionStatus.COMPLETED,
-        ))
-    uow.bindings.get_by_project_and_change.return_value = MagicMock(github_issue_number=123, github_project_item_id="item_1")
+    saga = engine.start_saga(
+        saga_type=SagaType.CLOSURE,
+        project_id="p1",
+        work_item_key="c1",
+        change_name="c1",
+        run_id="run_1",
+        job_id="job_1",
+    )
+    for act_type in [
+        ExternalActionType.ISSUE_CLOSE,
+        ExternalActionType.PROJECT_ITEM_EDIT,
+        ExternalActionType.OPENSPEC_SYNC,
+        ExternalActionType.OPENSPEC_ARCHIVE,
+        ExternalActionType.WORKTREE_DELETE,
+        ExternalActionType.BRANCH_DELETE,
+    ]:
+        uow.orchestration_external_actions.reserve(
+            OrchestrationExternalAction(
+                saga_id=saga.id,
+                action_key=f"act:{act_type.value}",
+                action_type=act_type,
+                target_identity="c1",
+                request_fingerprint="fp",
+                status=ExternalActionStatus.COMPLETED,
+            )
+        )
+    uow.bindings.get_by_project_and_change.return_value = MagicMock(
+        github_issue_number=123, github_project_item_id="item_1"
+    )
 
     service = PostMergeReconciliationService(uow=uow, project_root=".", saga_engine=engine)
     res = service.reconcile_post_merge("p1", "c1", run_id="run_1")
@@ -886,7 +1082,9 @@ def test_valid_squash_passes():
     uow = DummyUOW()
     uow.projects.get_by_id.return_value = MagicMock(repository="owner/repo")
     service = PostMergeReconciliationService(uow=uow, project_root=".")
-    service.verify_candidate_ancestry = MagicMock(side_effect=lambda cand, base, **kw: base == "merge123")
+    service.verify_candidate_ancestry = MagicMock(
+        side_effect=lambda cand, base, **kw: base == "merge123"
+    )
     service._authorize_managed_repo_mutation = MagicMock()
 
     pr_details = {
@@ -898,7 +1096,9 @@ def test_valid_squash_passes():
     }
 
     import subprocess
+
     orig_run = subprocess.run
+
     def mock_run(cmd, **kwargs):
         if "merge-base" in cmd:
             return MagicMock(returncode=0)
@@ -952,6 +1152,7 @@ def test_reconcile_issue_creation_unobservable_returns_unknown():
     """Verify reconcile_issue_creation returns ExternalOutcome.UNKNOWN when list_issues query fails or throws."""
     from minime.domain.enums import ExternalReasonCode
     from minime.domain.models import ExternalActionResult
+
     uow = DummyUOW()
     rec_auth = ReconciliationAuthority(uow)
     gh_mock = MagicMock()
@@ -980,6 +1181,7 @@ def test_reconcile_project_item_add_unobservable_returns_unknown():
     """Verify reconcile_project_item_add returns ExternalOutcome.UNKNOWN when list_project_items query fails or throws."""
     from minime.domain.enums import ExternalReasonCode
     from minime.domain.models import ExternalActionResult
+
     uow = DummyUOW()
     rec_auth = ReconciliationAuthority(uow)
     gh_mock = MagicMock()

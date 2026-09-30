@@ -47,9 +47,21 @@ def _setup_test_env(tmp_path):
 
     for d in (wt_dir, managed_repo):
         subprocess.run(["git", "init"], cwd=d, capture_output=True, check=False)
-        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=d, capture_output=True, check=False)
-        subprocess.run(["git", "config", "user.name", "Test"], cwd=d, capture_output=True, check=False)
-        subprocess.run(["git", "remote", "add", "origin", "https://github.com/silverberdi/mini-me.git"], cwd=d, capture_output=True, check=False)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"],
+            cwd=d,
+            capture_output=True,
+            check=False,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Test"], cwd=d, capture_output=True, check=False
+        )
+        subprocess.run(
+            ["git", "remote", "add", "origin", "https://github.com/silverberdi/mini-me.git"],
+            cwd=d,
+            capture_output=True,
+            check=False,
+        )
         marker = {
             "project_id": "mini-me",
             "canonical_repository_identity": "github.com/silverberdi/mini-me",
@@ -83,8 +95,10 @@ def _setup_test_env(tmp_path):
     class MockOwnershipRepo:
         def get_by_job_id(self, job_id):
             return ownership
+
         def get_by_canonical_path(self, path):
             return ownership
+
         def list_by_project(self, project_id):
             return [ownership]
 

@@ -43,6 +43,7 @@ def test_strict_validation_gate_accepts_canonical_cli_success(tmp_path: Path):
     script.write_text("#!/bin/sh\necho valid\nexit 0\n", encoding="utf-8")
     script.chmod(0o755)
     from minime.services.lifecycle_gates import GateStatus, StrictValidationGate
+
     result = StrictValidationGate(OpenSpecAdapter(cli_command=str(script))).evaluate(
         change_name="valid-change", project_root=tmp_path
     )
@@ -55,12 +56,36 @@ def test_disabled_strict_policy_does_not_require_cli_evidence(in_memory_uow, tmp
         create_isolated_openspec_change,
         setup_managed_repository_fixture,
     )
+
     create_isolated_openspec_change(tmp_path, "policy-disabled")
-    project = Project(project_id="mini-me", display_name="mini me", repository="silverberdi/mini-me", strict_validation_required=False)
+    project = Project(
+        project_id="mini-me",
+        display_name="mini me",
+        repository="silverberdi/mini-me",
+        strict_validation_required=False,
+    )
     in_memory_uow.projects.save(project)
-    in_memory_uow.bindings.save(ProjectBinding(project_id="mini-me", repository=project.repository, github_issue_number=1, openspec_change_name="policy-disabled"))
-    setup_managed_repository_fixture(uow=in_memory_uow, project_id="mini-me", repo_root=tmp_path, worktree_parent_dir=tmp_path / ".minime" / "worktrees", canonical_repository_identity="github.com/silverberdi/mini-me", remote_name="origin")
-    result = ReadinessService(in_memory_uow, openspec_adapter=OpenSpecAdapter(cli_command="does-not-exist"), github_adapter=ReadinessGitHubStub()).evaluate_change_readiness("mini-me", "policy-disabled", str(tmp_path))
+    in_memory_uow.bindings.save(
+        ProjectBinding(
+            project_id="mini-me",
+            repository=project.repository,
+            github_issue_number=1,
+            openspec_change_name="policy-disabled",
+        )
+    )
+    setup_managed_repository_fixture(
+        uow=in_memory_uow,
+        project_id="mini-me",
+        repo_root=tmp_path,
+        worktree_parent_dir=tmp_path / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+        remote_name="origin",
+    )
+    result = ReadinessService(
+        in_memory_uow,
+        openspec_adapter=OpenSpecAdapter(cli_command="does-not-exist"),
+        github_adapter=ReadinessGitHubStub(),
+    ).evaluate_change_readiness("mini-me", "policy-disabled", str(tmp_path))
     assert result.is_ready
     assert not any(check.name == "openspec_strict_validation" for check in result.checks)
 
@@ -81,7 +106,10 @@ def test_real_cli_missing_artifact_fails_with_evidence(tmp_path: Path):
     change = _real_change_root(tmp_path, "missing-artifact")
     (change / "design.md").unlink()
     from minime.services.lifecycle_gates import GateStatus, StrictValidationGate
-    result = StrictValidationGate(OpenSpecAdapter()).evaluate(change_name="missing-artifact", project_root=tmp_path)
+
+    result = StrictValidationGate(OpenSpecAdapter()).evaluate(
+        change_name="missing-artifact", project_root=tmp_path
+    )
     assert result.status is GateStatus.PASS
     assert result.reason.details["returncode"] == 0
 
@@ -89,15 +117,37 @@ def test_real_cli_missing_artifact_fails_with_evidence(tmp_path: Path):
 def test_missing_artifact_blocks_composite_readiness(in_memory_uow, tmp_path: Path):
     change = _real_change_root(tmp_path, "missing-readiness")
     (change / "design.md").unlink()
-    project = Project(project_id="mini-me", display_name="mini me", repository="silverberdi/mini-me")
+    project = Project(
+        project_id="mini-me", display_name="mini me", repository="silverberdi/mini-me"
+    )
     project.openspec_path = "openspec"
     in_memory_uow.projects.save(project)
-    in_memory_uow.bindings.save(ProjectBinding(project_id="mini-me", repository=project.repository, github_issue_number=1, openspec_change_name="missing-readiness"))
+    in_memory_uow.bindings.save(
+        ProjectBinding(
+            project_id="mini-me",
+            repository=project.repository,
+            github_issue_number=1,
+            openspec_change_name="missing-readiness",
+        )
+    )
     from conftest import ReadinessGitHubStub, setup_managed_repository_fixture
-    setup_managed_repository_fixture(uow=in_memory_uow, project_id="mini-me", repo_root=tmp_path, worktree_parent_dir=tmp_path / ".minime" / "worktrees", canonical_repository_identity="github.com/silverberdi/mini-me", remote_name="origin")
-    result = ReadinessService(in_memory_uow, github_adapter=ReadinessGitHubStub()).evaluate_change_readiness("mini-me", "missing-readiness", str(tmp_path))
+
+    setup_managed_repository_fixture(
+        uow=in_memory_uow,
+        project_id="mini-me",
+        repo_root=tmp_path,
+        worktree_parent_dir=tmp_path / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+        remote_name="origin",
+    )
+    result = ReadinessService(
+        in_memory_uow, github_adapter=ReadinessGitHubStub()
+    ).evaluate_change_readiness("mini-me", "missing-readiness", str(tmp_path))
     assert not result.is_ready
-    assert any("Missing required OpenSpec artifacts: design.md" in reason for reason in result.unmet_reasons)
+    assert any(
+        "Missing required OpenSpec artifacts: design.md" in reason
+        for reason in result.unmet_reasons
+    )
 
 
 def test_real_cli_malformed_spec_fails_with_evidence(tmp_path: Path):
@@ -105,27 +155,49 @@ def test_real_cli_malformed_spec_fails_with_evidence(tmp_path: Path):
     spec_file = next((change / "specs").rglob("spec.md"))
     spec_file.write_text("not a valid delta spec")
     from minime.services.lifecycle_gates import GateStatus, StrictValidationGate
-    result = StrictValidationGate(OpenSpecAdapter()).evaluate(change_name="malformed-spec", project_root=tmp_path)
+
+    result = StrictValidationGate(OpenSpecAdapter()).evaluate(
+        change_name="malformed-spec", project_root=tmp_path
+    )
     assert result.status is GateStatus.FAIL
     assert result.reason.details["returncode"] != 0
 
 
 def test_real_complete_change_passes_both_readiness_gates(in_memory_uow, tmp_path: Path):
     _real_change_root(tmp_path, "real-valid")
-    project = Project(project_id="mini-me", display_name="mini me", repository="silverberdi/mini-me")
+    project = Project(
+        project_id="mini-me", display_name="mini me", repository="silverberdi/mini-me"
+    )
     in_memory_uow.projects.save(project)
-    in_memory_uow.bindings.save(ProjectBinding(project_id="mini-me", repository=project.repository, github_issue_number=1, openspec_change_name="real-valid"))
+    in_memory_uow.bindings.save(
+        ProjectBinding(
+            project_id="mini-me",
+            repository=project.repository,
+            github_issue_number=1,
+            openspec_change_name="real-valid",
+        )
+    )
     from conftest import ReadinessGitHubStub, setup_managed_repository_fixture
-    setup_managed_repository_fixture(uow=in_memory_uow, project_id="mini-me", repo_root=tmp_path, worktree_parent_dir=tmp_path / ".minime" / "worktrees", canonical_repository_identity="github.com/silverberdi/mini-me", remote_name="origin")
-    result = ReadinessService(in_memory_uow, github_adapter=ReadinessGitHubStub()).evaluate_change_readiness("mini-me", "real-valid", str(tmp_path))
+
+    setup_managed_repository_fixture(
+        uow=in_memory_uow,
+        project_id="mini-me",
+        repo_root=tmp_path,
+        worktree_parent_dir=tmp_path / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+        remote_name="origin",
+    )
+    result = ReadinessService(
+        in_memory_uow, github_adapter=ReadinessGitHubStub()
+    ).evaluate_change_readiness("mini-me", "real-valid", str(tmp_path))
     assert result.is_ready
     assert any(check.name == "openspec_artifacts" and check.passed for check in result.checks)
-    assert any(check.name == "openspec_strict_validation" and check.passed for check in result.checks)
+    assert any(
+        check.name == "openspec_strict_validation" and check.passed for check in result.checks
+    )
 
 
-def test_readiness_blocks_when_required_strict_validation_fails(
-    in_memory_uow, tmp_path: Path
-):
+def test_readiness_blocks_when_required_strict_validation_fails(in_memory_uow, tmp_path: Path):
     """Strict-validation evidence is a distinct, fail-closed readiness criterion."""
     from conftest import (
         ReadinessGitHubStub,
@@ -148,7 +220,14 @@ def test_readiness_blocks_when_required_strict_validation_fails(
             openspec_change_name="strictly-invalid",
         )
     )
-    setup_managed_repository_fixture(uow=in_memory_uow, project_id="mini-me", repo_root=tmp_path, worktree_parent_dir=tmp_path / ".minime" / "worktrees", canonical_repository_identity="github.com/silverberdi/mini-me", remote_name="origin")
+    setup_managed_repository_fixture(
+        uow=in_memory_uow,
+        project_id="mini-me",
+        repo_root=tmp_path,
+        worktree_parent_dir=tmp_path / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+        remote_name="origin",
+    )
 
     adapter = OpenSpecAdapter(cli_command="does-not-exist")
     result = ReadinessService(

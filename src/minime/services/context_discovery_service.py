@@ -52,8 +52,10 @@ class ContextDiscoveryService:
         self.project_root = Path(project_root).resolve()
         self.openspec_adapter = openspec_adapter or OpenSpecAdapter()
 
-    def discover_context(self, project_id: str) -> ContextDiscoveryReport:
-        """Scan repository context sources and reconcile backlog items."""
+    def discover_context_pure(
+        self, project_id: str
+    ) -> tuple[ContextDiscoveryReport, list[BacklogItem]]:
+        """Scan repository context sources purely without writing to DB or committing."""
         project = self.uow.projects.get_by_id(project_id)
         if not project:
             raise ValueError(f"Project '{project_id}' not found.")
@@ -290,6 +292,21 @@ class ContextDiscoveryService:
                 )
             )
 
+        report = ContextDiscoveryReport(
+            project_id=project_id,
+            discovered_facts=facts,
+            inferred_structure=inferred_structure,
+            missing_required_context=missing_context,
+            discovered_items_count=len(discovered_items),
+            discovered_at=now,
+        )
+        return report, discovered_items
+
+    def discover_context(self, project_id: str) -> ContextDiscoveryReport:
+        """Scan repository context sources and reconcile backlog items."""
+        report, discovered_items = self.discover_context_pure(project_id)
+        now = report.discovered_at
+
         # 6. Reconcile discovered items into PostgreSQL non-destructively
         for item in discovered_items:
             existing = self.uow.backlog_items.get_by_project_and_key(project_id, item.item_key)
@@ -315,9 +332,9 @@ class ContextDiscoveryService:
             project_id=project_id,
             payload={
                 "project_id": project_id,
-                "facts_count": len(facts),
-                "inferred_count": len(inferred_structure),
-                "missing_count": len(missing_context),
+                "facts_count": len(report.discovered_facts),
+                "inferred_count": len(report.inferred_structure),
+                "missing_count": len(report.missing_required_context),
                 "items_count": len(discovered_items),
             },
             timestamp=now,
@@ -325,14 +342,7 @@ class ContextDiscoveryService:
         self.uow.events.save(event)
         self.uow.commit()
 
-        return ContextDiscoveryReport(
-            project_id=project_id,
-            discovered_facts=facts,
-            inferred_structure=inferred_structure,
-            missing_required_context=missing_context,
-            discovered_items_count=len(discovered_items),
-            discovered_at=now,
-        )
+        return report
 
     def discover_and_sync_backlog(
         self,

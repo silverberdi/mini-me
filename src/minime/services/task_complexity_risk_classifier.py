@@ -114,12 +114,8 @@ class TaskComplexityRiskClassifier:
 
         if not diff_file_paths:
             return self._unknown_snapshot(
-                change_id=(
-                    pre_execution_snapshot.change_id if pre_execution_snapshot else None
-                ),
-                job_id=(
-                    pre_execution_snapshot.job_id if pre_execution_snapshot else None
-                ),
+                change_id=(pre_execution_snapshot.change_id if pre_execution_snapshot else None),
+                job_id=(pre_execution_snapshot.job_id if pre_execution_snapshot else None),
                 missing=["no diff file paths available"],
                 pre_snapshot_id=pre_execution_snapshot.id if pre_execution_snapshot else None,
             )
@@ -140,12 +136,8 @@ class TaskComplexityRiskClassifier:
             )
 
         return TaskClassificationSnapshot(
-            change_id=(
-                pre_execution_snapshot.change_id if pre_execution_snapshot else None
-            ),
-            job_id=(
-                pre_execution_snapshot.job_id if pre_execution_snapshot else None
-            ),
+            change_id=(pre_execution_snapshot.change_id if pre_execution_snapshot else None),
+            job_id=(pre_execution_snapshot.job_id if pre_execution_snapshot else None),
             stage=ClassificationStage.POST_MATERIALIZATION,
             classifier_version=CLASSIFIER_VERSION,
             complexity=complexity,
@@ -272,9 +264,7 @@ class TaskComplexityRiskClassifier:
 
         return TaskComplexity.UNKNOWN
 
-    def _extract_pre_execution_complexity(
-        self, signals: dict[str, Any]
-    ) -> TaskComplexity:
+    def _extract_pre_execution_complexity(self, signals: dict[str, Any]) -> TaskComplexity:
         """Extract complexity from pre-execution signals (metadata only)."""
         task_count = signals.get("task_count", 0)
 
@@ -299,9 +289,7 @@ class TaskComplexityRiskClassifier:
         destructive = signals.get("destructive_migration_detected", False)
         cross_module = signals.get("cross_module", False)
 
-        def _breadth_level(
-            count: int, dirs: int, xmod: bool
-        ) -> str:
+        def _breadth_level(count: int, dirs: int, xmod: bool) -> str:
             if count > 15 or xmod:
                 return "HIGH"
             elif count > 3 or dirs > 1:
@@ -320,7 +308,9 @@ class TaskComplexityRiskClassifier:
                 profile.persistence_impact = "HIGH"
 
         if has_security:
-            profile.security_auth_impact = "HIGH" if top_dir_count > 1 or file_count > 5 else "MEDIUM"
+            profile.security_auth_impact = (
+                "HIGH" if top_dir_count > 1 or file_count > 5 else "MEDIUM"
+            )
 
         if has_provider:
             profile.provider_orchestration = "HIGH" if cross_module else "MEDIUM"
@@ -436,9 +426,7 @@ class TaskComplexityRiskClassifier:
             TaskComplexity.HIGH: 3,
         }
 
-        if complexity_order.get(post_complexity, 0) > complexity_order.get(
-            pre_complexity, 0
-        ):
+        if complexity_order.get(post_complexity, 0) > complexity_order.get(pre_complexity, 0):
             return True
 
         if (

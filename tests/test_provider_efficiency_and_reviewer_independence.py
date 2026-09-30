@@ -354,8 +354,9 @@ def test_same_sha_anti_loop_suppression():
     assert res.suppressed_same_sha is True
 
 
-
-def test_lightweight_in_process_reconciliation(tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork):
+def test_lightweight_in_process_reconciliation(
+    tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork
+):
     """Mandatory Rule D: In-process reconciliation marks remaining tasks and records evidence at 0 LLM cost."""
     setup_managed_repository_fixture(
         in_memory_uow,
@@ -694,4 +695,3 @@ def test_continuation_engine_allows_premium_recovery_on_reassignment_ceiling():
     decision_max = engine.decide(ctx_max)
     assert decision_max.decision == ContinuationDecision.NEEDS_HUMAN
     assert "NON_CONVERGENT_EXECUTION" in decision_max.escalation_reason
-

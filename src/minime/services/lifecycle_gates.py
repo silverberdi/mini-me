@@ -70,10 +70,35 @@ class StrictValidationGate(LifecycleGate):
     def evaluate(self, *, change_name: str, project_root: str | Path, **_: Any) -> GateResult:
         evidence = self.openspec_adapter.validate_change_strict(change_name, project_root)
         if evidence["status"] == "PASS":
-            return GateResult(self.name, GateStatus.PASS, GateReason("OPENSPEC_STRICT_VALIDATION_PASSED", "OpenSpec strict validation passed.", severity="INFO", details=evidence))
+            return GateResult(
+                self.name,
+                GateStatus.PASS,
+                GateReason(
+                    "OPENSPEC_STRICT_VALIDATION_PASSED",
+                    "OpenSpec strict validation passed.",
+                    severity="INFO",
+                    details=evidence,
+                ),
+            )
         if evidence["status"] == "UNKNOWN":
-            return GateResult(self.name, GateStatus.UNKNOWN, GateReason("OPENSPEC_CLI_UNAVAILABLE", "OpenSpec strict validation could not be evaluated.", details=evidence))
-        return GateResult(self.name, GateStatus.FAIL, GateReason("OPENSPEC_STRICT_VALIDATION_FAILED", "OpenSpec strict validation failed.", details=evidence))
+            return GateResult(
+                self.name,
+                GateStatus.UNKNOWN,
+                GateReason(
+                    "OPENSPEC_CLI_UNAVAILABLE",
+                    "OpenSpec strict validation could not be evaluated.",
+                    details=evidence,
+                ),
+            )
+        return GateResult(
+            self.name,
+            GateStatus.FAIL,
+            GateReason(
+                "OPENSPEC_STRICT_VALIDATION_FAILED",
+                "OpenSpec strict validation failed.",
+                details=evidence,
+            ),
+        )
 
 
 class ApplyAttributionGate(LifecycleGate):

@@ -56,7 +56,9 @@ async def test_concurrent_expensive_probes_serialized_at_cooldown_boundary(
     clock = _Clock()
     monkeypatch.setattr("minime.services.provider_health_service.utc_now", clock)
     # Seed actionable READY work queue item so expensive probe is eligible under current governance contract
-    p = Project(project_id="test-p", display_name="Test", repository="owner/repo", implementer="codex")
+    p = Project(
+        project_id="test-p", display_name="Test", repository="owner/repo", implementer="codex"
+    )
     in_memory_uow.projects.save(p)
     w = WorkQueueItem(
         project_id="test-p",
@@ -108,9 +110,7 @@ def test_probe_verifies_capacity_flags():
 async def test_exhausted_antigravity_models_success_stays_exhausted(in_memory_uow, monkeypatch):
     service = ProviderHealthService(
         in_memory_uow,
-        probe_config=ProbeConfig(
-            cooldown_seconds=0, backoff_base_seconds=0, backoff_max_seconds=0
-        ),
+        probe_config=ProbeConfig(cooldown_seconds=0, backoff_base_seconds=0, backoff_max_seconds=0),
     )
     service.record_outcome(
         NormalizedProviderResult(
@@ -146,9 +146,7 @@ def test_service_derives_probe_configs_from_app_config(in_memory_uow, monkeypatc
     app = AppConfig(
         providers={
             "codex": ProviderConfig(command="codex", probe=ProbeConfig(cooldown_seconds=123)),
-            "antigravity": ProviderConfig(
-                command="agy", probe=ProbeConfig(cooldown_seconds=456)
-            ),
+            "antigravity": ProviderConfig(command="agy", probe=ProbeConfig(cooldown_seconds=456)),
         }
     )
     monkeypatch.setattr("minime.services.provider_health_service.load_config", lambda: app)
@@ -163,8 +161,6 @@ def test_explicit_probe_config_suppresses_app_config_loading(in_memory_uow, monk
         raise AssertionError("load_config must not be called when probe_config is explicit")
 
     monkeypatch.setattr("minime.services.provider_health_service.load_config", boom)
-    service = ProviderHealthService(
-        in_memory_uow, probe_config=ProbeConfig(cooldown_seconds=7)
-    )
+    service = ProviderHealthService(in_memory_uow, probe_config=ProbeConfig(cooldown_seconds=7))
     assert service.probe_configs == {}
     assert service._probe_config("codex").cooldown_seconds == 7

@@ -123,15 +123,32 @@ class GitFakeWorktreeManager:
             (path / "openspec").mkdir(parents=True, exist_ok=True)
 
         subprocess.run(["git", "init"], cwd=str(path), check=True, capture_output=True)
-        subprocess.run(["git", "config", "user.name", "Test"], cwd=str(path), check=True, capture_output=True)
-        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(path), check=True, capture_output=True)
+        subprocess.run(
+            ["git", "config", "user.name", "Test"], cwd=str(path), check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"],
+            cwd=str(path),
+            check=True,
+            capture_output=True,
+        )
         subprocess.run(["git", "add", "."], cwd=str(path), check=True, capture_output=True)
-        subprocess.run(["git", "commit", "--allow-empty", "-m", "init review wt"], cwd=str(path), check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "--allow-empty", "-m", "init review wt"],
+            cwd=str(path),
+            check=True,
+            capture_output=True,
+        )
         self.created_paths[f"{job_id}-review"] = path
-        return WorktreeInfo(path=path, branch_name=f"minime/{change_name}-{job_id}-review-{sanitized_role}", base_sha=candidate_sha)
+        return WorktreeInfo(
+            path=path,
+            branch_name=f"minime/{change_name}-{job_id}-review-{sanitized_role}",
+            base_sha=candidate_sha,
+        )
 
-
-    async def remove_review_worktree(self, worktree_path: str | Path, job_id: str, *args, **kwargs) -> None:
+    async def remove_review_worktree(
+        self, worktree_path: str | Path, job_id: str, *args, **kwargs
+    ) -> None:
         self.cleaned.append(f"{job_id}-review")
 
     async def current_sha(self, worktree_path: str | Path) -> str:
@@ -240,7 +257,6 @@ def test_broken_symlink_rejected(tmp_path):
     view_mgr = ReviewerViewManager(tmp_path)
     with pytest.raises(SymlinkInCandidateError, match="prohibited symlink"):
         view_mgr.verify_candidate_tree(source)
-
 
 
 @pytest.mark.asyncio

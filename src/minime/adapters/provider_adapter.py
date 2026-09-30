@@ -78,9 +78,7 @@ class ProviderAdapterInterface(ABC):
         # do NOT prove capacity and must NOT promote a provider back to AVAILABLE.
         return False
 
-    def extract_capacity_signal(
-        self, raw_output: str, exit_code: int = 0
-    ) -> CapacitySignal | None:
+    def extract_capacity_signal(self, raw_output: str, exit_code: int = 0) -> CapacitySignal | None:
         """Extract capacity/quota signal from raw output or error if supported."""
         return None
 
@@ -105,7 +103,7 @@ class CodexProviderAdapter(ProviderAdapterInterface):
     def _resolve_executable(self) -> str | None:
         search_path = (
             f"{Path.home()}/.local/bin:/opt/homebrew/bin:/usr/local/bin:"
-            f"{os.environ.get("PATH", "")}"
+            f"{os.environ.get('PATH', '')}"
         )
         return shutil.which(self._executable, path=search_path)
 
@@ -196,9 +194,7 @@ class CodexProviderAdapter(ProviderAdapterInterface):
             logger.debug(f"Codex availability probe failed: {exc}")
             return False
 
-    def extract_capacity_signal(
-        self, raw_output: str, exit_code: int = 0
-    ) -> CapacitySignal | None:
+    def extract_capacity_signal(self, raw_output: str, exit_code: int = 0) -> CapacitySignal | None:
         lower_out = raw_output.lower()
         auth_keywords = [
             "401",
@@ -220,7 +216,6 @@ class CodexProviderAdapter(ProviderAdapterInterface):
         return None
 
 
-
 class AntigravityProviderAdapter(ProviderAdapterInterface):
     """Provider adapter for Antigravity (agy) CLI."""
 
@@ -230,7 +225,7 @@ class AntigravityProviderAdapter(ProviderAdapterInterface):
     def _resolve_executable(self) -> str | None:
         search_path = (
             f"{Path.home()}/.local/bin:/opt/homebrew/bin:/usr/local/bin:"
-            f"{os.environ.get("PATH", "")}"
+            f"{os.environ.get('PATH', '')}"
         )
         return shutil.which(self._executable, path=search_path)
 
@@ -437,8 +432,12 @@ def get_provider_adapter(
         cmd = p_config.command if p_config and p_config.command else "agy"
         adapter = AntigravityProviderAdapter(executable=cmd)
     elif provider == "openrouter":
-        url = p_config.base_url if p_config and p_config.base_url else "https://openrouter.ai/api/v1"
-        key_env = p_config.api_key_env if p_config and p_config.api_key_env else "OPENROUTER_API_KEY"
+        url = (
+            p_config.base_url if p_config and p_config.base_url else "https://openrouter.ai/api/v1"
+        )
+        key_env = (
+            p_config.api_key_env if p_config and p_config.api_key_env else "OPENROUTER_API_KEY"
+        )
         adapter = OpenRouterProviderAdapter(base_url=url, api_key_env=key_env)
     elif provider == "deepseek":
         url = p_config.base_url if p_config and p_config.base_url else "https://api.deepseek.com"

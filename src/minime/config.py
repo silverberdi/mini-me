@@ -64,7 +64,9 @@ class ProbeConfig(BaseModel):
     backoff_max_seconds: int = 3600
     max_per_hour: int = 4
 
-    @field_validator("cooldown_seconds", "backoff_base_seconds", "backoff_max_seconds", "max_per_hour")
+    @field_validator(
+        "cooldown_seconds", "backoff_base_seconds", "backoff_max_seconds", "max_per_hour"
+    )
     @classmethod
     def _non_negative(cls, v: int) -> int:
         if v < 0:

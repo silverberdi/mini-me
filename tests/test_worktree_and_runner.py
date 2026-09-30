@@ -27,8 +27,9 @@ async def run(cmd: list[str], cwd: Path) -> None:
     assert proc.returncode == 0, (stdout.decode(), stderr.decode())
 
 
-
-async def setup_test_repo(repo_path: Path, uow: InMemoryPersistenceUnitOfWork, project_id: str = "test-project") -> None:
+async def setup_test_repo(
+    repo_path: Path, uow: InMemoryPersistenceUnitOfWork, project_id: str = "test-project"
+) -> None:
     setup_managed_repository_fixture(
         uow,
         project_id,
@@ -45,18 +46,43 @@ async def test_worktree_manager_create_collision_and_cleanup(tmp_path):
     await setup_test_repo(repo, uow, "job-1-proj")
     from minime.domain.enums import OrchestrationStage
     from minime.domain.models import Job, OrchestrationRun, utc_now
-    uow.jobs.save(Job(job_id="job-1", project_id="job-1-proj", change_name="002-implementation-pipeline", implementer_role="codex"))
-    uow.orchestration_runs.save(OrchestrationRun(run_id="run-1", active_job_id="job-1", project_id="job-1-proj", change_name="002-implementation-pipeline", base_sha="main", current_stage=OrchestrationStage.IMPLEMENTING, resumable_stage=OrchestrationStage.IMPLEMENTING, is_active=True, created_at=utc_now(), updated_at=utc_now()))
+
+    uow.jobs.save(
+        Job(
+            job_id="job-1",
+            project_id="job-1-proj",
+            change_name="002-implementation-pipeline",
+            implementer_role="codex",
+        )
+    )
+    uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id="run-1",
+            active_job_id="job-1",
+            project_id="job-1-proj",
+            change_name="002-implementation-pipeline",
+            base_sha="main",
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            resumable_stage=OrchestrationStage.IMPLEMENTING,
+            is_active=True,
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        )
+    )
 
     manager = WorktreeManager(repo, uow=uow)
-    info = await manager.create_worktree("job-1", "002-implementation-pipeline", "main", project_id="job-1-proj", run_id="run-1")
+    info = await manager.create_worktree(
+        "job-1", "002-implementation-pipeline", "main", project_id="job-1-proj", run_id="run-1"
+    )
 
     assert info.path.exists()
     assert info.branch_name.startswith("minime/002-implementation-pipeline-job-1")
     assert await manager.current_sha(info.path) == info.base_sha
 
     with pytest.raises(ValueError, match="not empty"):
-        await manager.create_worktree("job-1", "002-implementation-pipeline", "main", project_id="job-1-proj", run_id="run-1")
+        await manager.create_worktree(
+            "job-1", "002-implementation-pipeline", "main", project_id="job-1-proj", run_id="run-1"
+        )
 
     await manager.cleanup_worktree("job-1", project_id="job-1-proj")
     assert not info.path.exists()
@@ -69,11 +95,34 @@ async def test_cleanup_worktree_refuses_dirty_worktree_without_deleting_it(tmp_p
     await setup_test_repo(repo, uow, "job-rec-proj")
     from minime.domain.enums import OrchestrationStage
     from minime.domain.models import Job, OrchestrationRun, utc_now
-    uow.jobs.save(Job(job_id="job-recovery", project_id="job-rec-proj", change_name="010-change", implementer_role="codex"))
-    uow.orchestration_runs.save(OrchestrationRun(run_id="run-rec", active_job_id="job-recovery", project_id="job-rec-proj", change_name="010-change", base_sha="main", current_stage=OrchestrationStage.IMPLEMENTING, resumable_stage=OrchestrationStage.IMPLEMENTING, is_active=True, created_at=utc_now(), updated_at=utc_now()))
+
+    uow.jobs.save(
+        Job(
+            job_id="job-recovery",
+            project_id="job-rec-proj",
+            change_name="010-change",
+            implementer_role="codex",
+        )
+    )
+    uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id="run-rec",
+            active_job_id="job-recovery",
+            project_id="job-rec-proj",
+            change_name="010-change",
+            base_sha="main",
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            resumable_stage=OrchestrationStage.IMPLEMENTING,
+            is_active=True,
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        )
+    )
 
     manager = WorktreeManager(repo, uow=uow)
-    info = await manager.create_worktree("job-recovery", "010-change", "main", project_id="job-rec-proj", run_id="run-rec")
+    info = await manager.create_worktree(
+        "job-recovery", "010-change", "main", project_id="job-rec-proj", run_id="run-rec"
+    )
     (info.path / "README.md").write_text("recovered\n", encoding="utf-8")
     (info.path / "new.py").write_text("candidate = True\n", encoding="utf-8")
     git_commands: list[list[str]] = []
@@ -87,6 +136,7 @@ async def test_cleanup_worktree_refuses_dirty_worktree_without_deleting_it(tmp_p
 
     res = await manager.cleanup_worktree("job-recovery", project_id="job-rec-proj")
     from minime.domain.enums import ExternalOutcome, ExternalReasonCode
+
     assert res.outcome == ExternalOutcome.FAILURE
     assert res.reason_code == ExternalReasonCode.POLICY_DENIED
 
@@ -108,11 +158,34 @@ async def test_remove_clean_worktree_removes_clean_managed_worktree(tmp_path):
     await setup_test_repo(repo, uow, "job-clean-proj")
     from minime.domain.enums import OrchestrationStage
     from minime.domain.models import Job, OrchestrationRun, utc_now
-    uow.jobs.save(Job(job_id="job-clean", project_id="job-clean-proj", change_name="010-change", implementer_role="codex"))
-    uow.orchestration_runs.save(OrchestrationRun(run_id="run-clean", active_job_id="job-clean", project_id="job-clean-proj", change_name="010-change", base_sha="main", current_stage=OrchestrationStage.IMPLEMENTING, resumable_stage=OrchestrationStage.IMPLEMENTING, is_active=True, created_at=utc_now(), updated_at=utc_now()))
+
+    uow.jobs.save(
+        Job(
+            job_id="job-clean",
+            project_id="job-clean-proj",
+            change_name="010-change",
+            implementer_role="codex",
+        )
+    )
+    uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id="run-clean",
+            active_job_id="job-clean",
+            project_id="job-clean-proj",
+            change_name="010-change",
+            base_sha="main",
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            resumable_stage=OrchestrationStage.IMPLEMENTING,
+            is_active=True,
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        )
+    )
 
     manager = WorktreeManager(repo, uow=uow)
-    info = await manager.create_worktree("job-clean", "010-change", "main", project_id="job-clean-proj", run_id="run-clean")
+    info = await manager.create_worktree(
+        "job-clean", "010-change", "main", project_id="job-clean-proj", run_id="run-clean"
+    )
 
     await manager.remove_clean_worktree("job-clean", project_id="job-clean-proj")
 
@@ -123,26 +196,56 @@ async def test_remove_clean_worktree_removes_clean_managed_worktree(tmp_path):
 async def test_production_push_uses_repository_root_after_worktree_cleanup(tmp_path):
     """A finalized candidate remains pushable after its managed worktree is removed."""
     import json
+
     repo = tmp_path / "repo"
     remote = tmp_path / "remote.git"
     uow = InMemoryPersistenceUnitOfWork()
     await setup_test_repo(repo, uow, "job-push-proj")
     from minime.domain.enums import OrchestrationStage
     from minime.domain.models import Job, OrchestrationRun, utc_now
-    uow.jobs.save(Job(job_id="job-push", project_id="job-push-proj", change_name="008-autonomous-change-orchestration", implementer_role="codex"))
-    uow.orchestration_runs.save(OrchestrationRun(run_id="run-push", active_job_id="job-push", project_id="job-push-proj", change_name="008-autonomous-change-orchestration", base_sha="main", current_stage=OrchestrationStage.IMPLEMENTING, resumable_stage=OrchestrationStage.IMPLEMENTING, is_active=True, created_at=utc_now(), updated_at=utc_now()))
+
+    uow.jobs.save(
+        Job(
+            job_id="job-push",
+            project_id="job-push-proj",
+            change_name="008-autonomous-change-orchestration",
+            implementer_role="codex",
+        )
+    )
+    uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id="run-push",
+            active_job_id="job-push",
+            project_id="job-push-proj",
+            change_name="008-autonomous-change-orchestration",
+            base_sha="main",
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            resumable_stage=OrchestrationStage.IMPLEMENTING,
+            is_active=True,
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        )
+    )
     await run(["git", "init", "--bare", str(remote)], repo)
     await run(["git", "remote", "set-url", "origin", str(remote)], repo)
     binding = uow.project_managed_repository_bindings.get_by_project_id("job-push-proj")
     binding.canonical_repository_identity = str(remote.resolve())
     uow.project_managed_repository_bindings.save(binding)
     (repo / ".minime-managed-project.json").write_text(
-        json.dumps({"project_id": "job-push-proj", "canonical_repository_identity": str(remote.resolve())}),
+        json.dumps(
+            {"project_id": "job-push-proj", "canonical_repository_identity": str(remote.resolve())}
+        ),
         encoding="utf-8",
     )
 
     manager = WorktreeManager(repo, uow=uow)
-    info = await manager.create_worktree("job-push", "008-autonomous-change-orchestration", "main", project_id="job-push-proj", run_id="run-push")
+    info = await manager.create_worktree(
+        "job-push",
+        "008-autonomous-change-orchestration",
+        "main",
+        project_id="job-push-proj",
+        run_id="run-push",
+    )
     (info.path / "candidate.py").write_text("candidate = True\n", encoding="utf-8")
     await run(["git", "add", "candidate.py"], info.path)
     await run(["git", "commit", "-m", "candidate"], info.path)

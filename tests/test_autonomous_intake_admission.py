@@ -213,7 +213,10 @@ def test_auto_prepare_needs_human_on_ambiguity_and_resume(
         source_adapter="mock",
         reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
         retry_safety=RetrySafety.UNSAFE,
-        data={"number": 105, "html_url": "https://github.com/silverberdi/ambiguous-repo/issues/105"},
+        data={
+            "number": 105,
+            "html_url": "https://github.com/silverberdi/ambiguous-repo/issues/105",
+        },
         external_id="105",
     )
     mock_gh.validate_issue_binding.return_value = ExternalActionResult(

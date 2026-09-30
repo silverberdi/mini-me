@@ -87,18 +87,35 @@ class InMemoryUnitOfWork(PersistenceUnitOfWork):
 
         self._managed_bindings = {}
         self.project_managed_repository_bindings = MagicMock()
-        self.project_managed_repository_bindings.get_by_project_id.side_effect = lambda pid: self._managed_bindings.get(pid)
-        self.project_managed_repository_bindings.get_by_repository_path.side_effect = lambda path: next((b for b in self._managed_bindings.values() if b.managed_repository_root == str(path)), None)
+        self.project_managed_repository_bindings.get_by_project_id.side_effect = lambda pid: (
+            self._managed_bindings.get(pid)
+        )
+        self.project_managed_repository_bindings.get_by_repository_path.side_effect = lambda path: (
+            next(
+                (
+                    b
+                    for b in self._managed_bindings.values()
+                    if b.managed_repository_root == str(path)
+                ),
+                None,
+            )
+        )
+
         def _save_managed_binding(b):
             self._managed_bindings[b.project_id] = b
             if b.managed_repository_root and Path(b.managed_repository_root).exists():
                 try:
                     import json
+
                     marker_file = Path(b.managed_repository_root) / ".minime-managed-project.json"
-                    marker_file.write_text(json.dumps({
-                        "project_id": b.project_id,
-                        "canonical_repository_identity": b.canonical_repository_identity,
-                    }))
+                    marker_file.write_text(
+                        json.dumps(
+                            {
+                                "project_id": b.project_id,
+                                "canonical_repository_identity": b.canonical_repository_identity,
+                            }
+                        )
+                    )
                 except Exception:
                     pass
 
@@ -111,6 +128,7 @@ class InMemoryUnitOfWork(PersistenceUnitOfWork):
             InMemoryDurableSagaRepository,
             InMemoryOrchestrationExternalActionRepository,
         )
+
         self.durable_sagas = InMemoryDurableSagaRepository()
         self.orchestration_external_actions = InMemoryOrchestrationExternalActionRepository()
 
@@ -198,11 +216,29 @@ def mock_github_adapter():
 def test_openspec_sync_and_archive(tmp_path: Path):
     project_root = tmp_path
     import subprocess
+
     subprocess.run(["git", "init"], cwd=project_root, capture_output=True, check=False)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=project_root, capture_output=True, check=False)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=project_root, capture_output=True, check=False)
-    subprocess.run(["git", "remote", "add", "origin", "https://github.com/silverberdi/mini-me.git"], cwd=project_root, capture_output=True, check=False)
-    subprocess.run(["git", "commit", "--allow-empty", "-m", "init"], cwd=project_root, capture_output=True, check=False)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=project_root,
+        capture_output=True,
+        check=False,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=project_root, capture_output=True, check=False
+    )
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/silverberdi/mini-me.git"],
+        cwd=project_root,
+        capture_output=True,
+        check=False,
+    )
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "init"],
+        cwd=project_root,
+        capture_output=True,
+        check=False,
+    )
 
     openspec_dir = project_root / "openspec"
     change_dir = openspec_dir / "changes" / "test-change"
@@ -226,6 +262,7 @@ The system SHALL execute autonomous actions.
 
     uow = InMemoryUnitOfWork()
     from minime.domain.models import ProjectManagedRepositoryBinding
+
     uow.project_managed_repository_bindings.save(
         ProjectManagedRepositoryBinding(
             project_id="mini-me",
@@ -244,7 +281,9 @@ The system SHALL execute autonomous actions.
     assert "## Requirement: Autonomous Action" in main_spec.read_text()
 
     # Archive
-    archive_res = sync_service.archive_change("openspec", "test-change", target_date="2026-09-03", project_id="mini-me")
+    archive_res = sync_service.archive_change(
+        "openspec", "test-change", target_date="2026-09-03", project_id="mini-me"
+    )
     assert archive_res.outcome == ExternalOutcome.SUCCESS
     archived_dir = archive_res.data
     assert archived_dir is not None
@@ -256,6 +295,7 @@ The system SHALL execute autonomous actions.
 def test_post_merge_reconciliation_full_cycle(tmp_path: Path, mock_github_adapter):
     uow = InMemoryUnitOfWork()
     from minime.domain.models import ProjectManagedRepositoryBinding
+
     uow.project_managed_repository_bindings.save(
         ProjectManagedRepositoryBinding(
             project_id="mini-me",
@@ -309,11 +349,29 @@ def test_post_merge_reconciliation_full_cycle(tmp_path: Path, mock_github_adapte
 
     # Setup dummy change directory and git repo
     import subprocess
+
     subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=False)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, capture_output=True, check=False)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=False)
-    subprocess.run(["git", "remote", "add", "origin", "https://github.com/silverberdi/mini-me.git"], cwd=tmp_path, capture_output=True, check=False)
-    subprocess.run(["git", "commit", "--allow-empty", "-m", "init"], cwd=tmp_path, capture_output=True, check=False)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=tmp_path,
+        capture_output=True,
+        check=False,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=False
+    )
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/silverberdi/mini-me.git"],
+        cwd=tmp_path,
+        capture_output=True,
+        check=False,
+    )
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "init"],
+        cwd=tmp_path,
+        capture_output=True,
+        check=False,
+    )
 
     change_dir = tmp_path / "openspec" / "changes" / "test-change" / "specs" / "cap1"
     change_dir.mkdir(parents=True)
@@ -431,11 +489,29 @@ def test_control_plane_reconcile_post_merge(tmp_path: Path, mock_github_adapter)
 
     # Setup dummy change directory and git repo
     import subprocess
+
     subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=False)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, capture_output=True, check=False)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=False)
-    subprocess.run(["git", "remote", "add", "origin", "https://github.com/silverberdi/mini-me.git"], cwd=tmp_path, capture_output=True, check=False)
-    subprocess.run(["git", "commit", "--allow-empty", "-m", "init"], cwd=tmp_path, capture_output=True, check=False)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=tmp_path,
+        capture_output=True,
+        check=False,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=False
+    )
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/silverberdi/mini-me.git"],
+        cwd=tmp_path,
+        capture_output=True,
+        check=False,
+    )
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "init"],
+        cwd=tmp_path,
+        capture_output=True,
+        check=False,
+    )
 
     change_dir = tmp_path / "openspec" / "changes" / "test-change" / "specs" / "cap1"
     change_dir.mkdir(parents=True)

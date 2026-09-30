@@ -236,7 +236,7 @@ def readiness_cmd(
         with db_manager.session() as session:
             uow = PostgresPersistenceUnitOfWork(session)
             service = ReadinessService(uow)
-            result = service.evaluate_change_readiness(
+            result = service.evaluate_and_persist_change_readiness(
                 project_id=project_id,
                 change_name=change_name,
                 project_root=project_root,
@@ -674,11 +674,11 @@ def scheduler_status_cmd(
             if sched_status.recent_decisions:
                 typer.echo("\nRecent Decisions:")
                 for d in sched_status.recent_decisions[:5]:
-                    op = d.operational_decision.value if d.operational_decision else d.decision.value
-                    d_color = typer.colors.GREEN if op in {"RUN", "DRAIN"} else typer.colors.YELLOW
-                    typer.secho(
-                        f"  • [{op}] {d.change_name} — {d.reason_summary}", fg=d_color
+                    op = (
+                        d.operational_decision.value if d.operational_decision else d.decision.value
                     )
+                    d_color = typer.colors.GREEN if op in {"RUN", "DRAIN"} else typer.colors.YELLOW
+                    typer.secho(f"  • [{op}] {d.change_name} — {d.reason_summary}", fg=d_color)
 
     except Exception as e:
         typer.secho(f"Error fetching scheduler status: {e}", fg=typer.colors.RED)
@@ -760,7 +760,9 @@ def scheduler_run_cmd(
                 admitted = [
                     d
                     for d in decisions
-                    if (d.operational_decision.value if d.operational_decision else d.decision.value)
+                    if (
+                        d.operational_decision.value if d.operational_decision else d.decision.value
+                    )
                     in {"RUN", "DRAIN"}
                 ]
                 if admitted:
@@ -937,7 +939,7 @@ def budget_status_cmd(
             if not project_id:
                 projects = uow.projects.list_all()
                 project_id = projects[0].project_id if projects else ""
-            policy = uow.budget_policies.get_for_update(project_id) if project_id else None
+            policy = uow.budget_policies.get_by_project_id(project_id) if project_id else None
             if not policy:
                 typer.echo("No OpenRouter budget policy found.")
                 return
@@ -1001,7 +1003,7 @@ def providers_openrouter_cmd(
             if not project_id:
                 projects = uow.projects.list_all()
                 project_id = projects[0].project_id if projects else ""
-            policy = uow.budget_policies.get_for_update(project_id) if project_id else None
+            policy = uow.budget_policies.get_by_project_id(project_id) if project_id else None
             headroom = service._compute_headroom(project_id, policy) if policy else None
             payload = {
                 "project_id": project_id,
@@ -1113,7 +1115,9 @@ def orchestrate_start_cmd(
 def orchestrate_resume_cmd(
     run_id: str = typer.Argument(..., help="Orchestration run identifier"),
     project_root: str = typer.Option(".", "--path", "-p", help="Filesystem path to project root"),
-    force: bool = typer.Option(False, "--force", "-f", help="Force resumption even if waiting or gated"),
+    force: bool = typer.Option(
+        False, "--force", "-f", help="Force resumption even if waiting or gated"
+    ),
     json_output: bool = typer.Option(False, "--json", help="Output result as JSON"),
 ) -> None:
     """Resume an existing orchestration run from its persisted checkpoint."""

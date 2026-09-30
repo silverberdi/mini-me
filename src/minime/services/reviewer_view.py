@@ -77,4 +77,3 @@ class ReviewerViewManager:
                 f"Candidate tree contains prohibited symlink(s): {', '.join(detected_symlinks[:5])}. "
                 "Read-only review view cannot be safely established."
             )
-

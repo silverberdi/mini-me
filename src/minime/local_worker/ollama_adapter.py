@@ -68,9 +68,7 @@ class LocalOllamaAdapter:
                     names.append(str(name))
         return names
 
-    async def preflight(
-        self, *, client: httpx.AsyncClient | None = None
-    ) -> PreflightResult:
+    async def preflight(self, *, client: httpx.AsyncClient | None = None) -> PreflightResult:
         """Reachability + canonical-model-existence preflight.
 
         Reachability: GET /api/tags returns 200 -> reachable.
@@ -218,4 +216,3 @@ class LocalOllamaAdapter:
             text=text,
             done=bool(payload.get("done", True)),
         )
-

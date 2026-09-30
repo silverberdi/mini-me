@@ -77,18 +77,40 @@ def _make_change(
 ) -> Path:
     import json
     import subprocess
+
     if not (tmp_path / ".git").exists():
         subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=False)
-        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, capture_output=True, check=False)
-        subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=False)
-        subprocess.run(["git", "remote", "add", "origin", "https://github.com/silverberdi/mini-me.git"], cwd=tmp_path, capture_output=True, check=False)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"],
+            cwd=tmp_path,
+            capture_output=True,
+            check=False,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=False
+        )
+        subprocess.run(
+            ["git", "remote", "add", "origin", "https://github.com/silverberdi/mini-me.git"],
+            cwd=tmp_path,
+            capture_output=True,
+            check=False,
+        )
         marker_file = tmp_path / ".minime-managed-project.json"
-        marker_file.write_text(json.dumps({
-            "project_id": "mini-me",
-            "canonical_repository_identity": "github.com/silverberdi/mini-me",
-        }))
+        marker_file.write_text(
+            json.dumps(
+                {
+                    "project_id": "mini-me",
+                    "canonical_repository_identity": "github.com/silverberdi/mini-me",
+                }
+            )
+        )
         subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=False)
-        subprocess.run(["git", "commit", "--allow-empty", "-m", "init"], cwd=tmp_path, capture_output=True, check=False)
+        subprocess.run(
+            ["git", "commit", "--allow-empty", "-m", "init"],
+            cwd=tmp_path,
+            capture_output=True,
+            check=False,
+        )
     change_dir = tmp_path / "openspec" / "changes" / name
     specs_dir = change_dir / "specs" / "cap1"
     specs_dir.mkdir(parents=True, exist_ok=True)
@@ -98,17 +120,27 @@ def _make_change(
     return change_dir
 
 
-def _setup_uow(uow: InMemoryUnitOfWork, change_name: str = "test-change", run_id: str = "run-123", tmp_path: Path | None = None):
+def _setup_uow(
+    uow: InMemoryUnitOfWork,
+    change_name: str = "test-change",
+    run_id: str = "run-123",
+    tmp_path: Path | None = None,
+):
     import json
 
     from minime.domain.models import ProjectManagedRepositoryBinding
+
     if tmp_path and (tmp_path / ".git").exists():
         marker_file = tmp_path / ".minime-managed-project.json"
         if not marker_file.exists():
-            marker_file.write_text(json.dumps({
-                "project_id": "mini-me",
-                "canonical_repository_identity": "github.com/silverberdi/mini-me",
-            }))
+            marker_file.write_text(
+                json.dumps(
+                    {
+                        "project_id": "mini-me",
+                        "canonical_repository_identity": "github.com/silverberdi/mini-me",
+                    }
+                )
+            )
     uow.projects.save(
         Project(
             project_id="mini-me",
@@ -134,7 +166,9 @@ def _setup_uow(uow: InMemoryUnitOfWork, change_name: str = "test-change", run_id
             project_id="mini-me",
             canonical_repository_identity="github.com/silverberdi/mini-me",
             managed_repository_root=str(tmp_path) if tmp_path else "/tmp",
-            worktree_parent_dir=str(tmp_path / ".minime" / "worktrees") if tmp_path else "/tmp/.minime/worktrees",
+            worktree_parent_dir=str(tmp_path / ".minime" / "worktrees")
+            if tmp_path
+            else "/tmp/.minime/worktrees",
         )
     )
     uow.orchestration_runs.save(
@@ -200,7 +234,9 @@ def test_archive_change_raises_on_collision(tmp_path: Path):
     (archive_root / "spec.md").write_text("existing archive\n")
 
     service = _make_sync_service(tmp_path)
-    res = service.archive_change("openspec", "test-change", target_date="2026-09-03", project_id="mini-me")
+    res = service.archive_change(
+        "openspec", "test-change", target_date="2026-09-03", project_id="mini-me"
+    )
     assert res.outcome == ExternalOutcome.AMBIGUOUS
     assert res.reason_code == ExternalReasonCode.POSTCONDITION_NOT_PROVEN
 
@@ -388,7 +424,9 @@ def test_post_merge_blocks_when_worktree_cleanup_fails(tmp_path: Path):
     wt_dir = tmp_path / ".minime" / "worktrees" / "job-123"
     wt_dir.mkdir(parents=True)
 
-    service = PostMergeReconciliationService(uow=uow, project_root=tmp_path, github_adapter=_github_adapter())
+    service = PostMergeReconciliationService(
+        uow=uow, project_root=tmp_path, github_adapter=_github_adapter()
+    )
     service.verify_candidate_ancestry = MagicMock(return_value=True)
     # Mock _clean_worktrees to return failure
     service._clean_worktrees = MagicMock(
@@ -441,7 +479,9 @@ def test_archive_preservation_manifest_verification(tmp_path: Path):
     service = _make_sync_service(tmp_path)
 
     # Archive happy path
-    arc_res = service.archive_change("openspec", "test-change", target_date="2026-09-03", project_id="mini-me")
+    arc_res = service.archive_change(
+        "openspec", "test-change", target_date="2026-09-03", project_id="mini-me"
+    )
     assert arc_res.outcome == ExternalOutcome.SUCCESS
     assert arc_res.retry_safety == RetrySafety.UNSAFE
     archived_dir = arc_res.data
@@ -469,7 +509,9 @@ def test_sync_and_archive_retry_safety_semantics(tmp_path: Path):
     assert sync_res.retry_safety == RetrySafety.UNSAFE
 
     # Mutating archive -> RetrySafety.UNSAFE
-    archive_res = service.archive_change("openspec", "test-change", target_date="2026-09-03", project_id="mini-me")
+    archive_res = service.archive_change(
+        "openspec", "test-change", target_date="2026-09-03", project_id="mini-me"
+    )
     assert archive_res.outcome == ExternalOutcome.SUCCESS
     assert archive_res.retry_safety == RetrySafety.UNSAFE
 
@@ -478,7 +520,9 @@ def test_local_branch_authoritative_absent_returns_success_already_absent(tmp_pa
     _make_change(tmp_path)
     uow = InMemoryUnitOfWork()
     _setup_uow(uow, tmp_path=tmp_path)
-    service = PostMergeReconciliationService(uow=uow, project_root=tmp_path, github_adapter=_github_adapter())
+    service = PostMergeReconciliationService(
+        uow=uow, project_root=tmp_path, github_adapter=_github_adapter()
+    )
     res = service._delete_local_branch("non-existent-branch", project_id="mini-me")
     assert res.outcome == ExternalOutcome.SUCCESS
     assert res.reason_code == ExternalReasonCode.ALREADY_ABSENT
@@ -486,12 +530,16 @@ def test_local_branch_authoritative_absent_returns_success_already_absent(tmp_pa
 
 def test_local_branch_show_ref_error_returns_unknown(tmp_path: Path, monkeypatch):
     import subprocess
+
     _make_change(tmp_path)
     uow = InMemoryUnitOfWork()
     _setup_uow(uow, tmp_path=tmp_path)
-    service = PostMergeReconciliationService(uow=uow, project_root=tmp_path, github_adapter=_github_adapter())
+    service = PostMergeReconciliationService(
+        uow=uow, project_root=tmp_path, github_adapter=_github_adapter()
+    )
 
     orig_run = subprocess.run
+
     def mock_run(cmd, **kwargs):
         if isinstance(cmd, list) and "show-ref" in cmd:
             proc = MagicMock()
@@ -509,13 +557,17 @@ def test_local_branch_show_ref_error_returns_unknown(tmp_path: Path, monkeypatch
 
 def test_local_branch_post_check_unobservable_returns_unknown(tmp_path: Path, monkeypatch):
     import subprocess
+
     _make_change(tmp_path)
     uow = InMemoryUnitOfWork()
     _setup_uow(uow, tmp_path=tmp_path)
-    service = PostMergeReconciliationService(uow=uow, project_root=tmp_path, github_adapter=_github_adapter())
+    service = PostMergeReconciliationService(
+        uow=uow, project_root=tmp_path, github_adapter=_github_adapter()
+    )
     calls = 0
 
     orig_run = subprocess.run
+
     def mock_run(cmd, **kwargs):
         nonlocal calls
         if isinstance(cmd, list) and ("show-ref" in cmd or "branch" in cmd):
@@ -544,7 +596,9 @@ def test_worktree_scan_failure_returns_unknown_and_blocks_completion(tmp_path: P
     _setup_uow(uow, tmp_path=tmp_path)
     _make_change(tmp_path)
 
-    service = PostMergeReconciliationService(uow=uow, project_root=tmp_path, github_adapter=_github_adapter())
+    service = PostMergeReconciliationService(
+        uow=uow, project_root=tmp_path, github_adapter=_github_adapter()
+    )
     service.verify_candidate_ancestry = MagicMock(return_value=True)
 
     # Force worktree_path scanning to throw an exception
@@ -564,8 +618,11 @@ def test_worktree_scan_failure_returns_unknown_and_blocks_completion(tmp_path: P
     assert EventType.WORKTREE_CLEANED not in event_types
 
 
-def test_archive_verify_fails_when_historical_manifest_missing_and_canonical_artifact_absent(tmp_path: Path):
+def test_archive_verify_fails_when_historical_manifest_missing_and_canonical_artifact_absent(
+    tmp_path: Path,
+):
     import shutil
+
     _make_change(tmp_path)
     shutil.rmtree(tmp_path / "openspec" / "changes" / "test-change")
     service = _make_sync_service(tmp_path)
@@ -605,8 +662,11 @@ def test_sync_change_specs_capability_dir_missing_spec_md_returns_failure(tmp_pa
     assert not canonical_cap1.exists()
 
 
-def test_archive_verify_reused_existing_without_independent_manifest_returns_unknown(tmp_path: Path):
+def test_archive_verify_reused_existing_without_independent_manifest_returns_unknown(
+    tmp_path: Path,
+):
     import shutil
+
     _make_change(tmp_path)
     shutil.rmtree(tmp_path / "openspec" / "changes" / "test-change")
     service = _make_sync_service(tmp_path)
@@ -630,9 +690,12 @@ def test_cleanup_branch_and_worktree_mutations_return_retry_safety_unsafe(tmp_pa
     _setup_uow(uow, tmp_path=tmp_path)
 
     import subprocess
+
     subprocess.run(["git", "branch", "to-delete"], cwd=tmp_path, capture_output=True, check=False)
 
-    service = PostMergeReconciliationService(uow=uow, project_root=tmp_path, github_adapter=_github_adapter())
+    service = PostMergeReconciliationService(
+        uow=uow, project_root=tmp_path, github_adapter=_github_adapter()
+    )
 
     # Actual git branch -D executed and verified -> RetrySafety.UNSAFE
     del_res = service._delete_local_branch("to-delete", project_id="mini-me")
@@ -651,5 +714,3 @@ def test_cleanup_branch_and_worktree_mutations_return_retry_safety_unsafe(tmp_pa
     assert wt_absent.outcome == ExternalOutcome.SUCCESS
     assert wt_absent.reason_code == ExternalReasonCode.ALREADY_ABSENT
     assert wt_absent.retry_safety == RetrySafety.SAFE
-
-

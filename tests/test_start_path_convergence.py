@@ -25,9 +25,7 @@ from minime.domain.models import (
 from minime.services.intake_service import IntakeService
 
 
-def _setup_ready_item(
-    uow: InMemoryPersistenceUnitOfWork, tmp_path: Path
-) -> IntakeService:
+def _setup_ready_item(uow: InMemoryPersistenceUnitOfWork, tmp_path: Path) -> IntakeService:
     repo_dir = tmp_path / "app-repo"
     setup_managed_repository_fixture(uow, "app-proj", repo_dir, tmp_path / "worktrees")
 
@@ -57,9 +55,7 @@ def _setup_ready_item(
     )
     uow.backlog_items.save(item)
 
-    service = IntakeService(
-        uow, project_root=repo_dir, github_adapter=ReadinessGitHubStub()
-    )
+    service = IntakeService(uow, project_root=repo_dir, github_adapter=ReadinessGitHubStub())
     service.prepare_work_item("app-proj", "025-ready-task", operator_email="op@example.com")
     return service
 

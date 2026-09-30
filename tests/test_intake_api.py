@@ -28,7 +28,9 @@ def test_api_onboard_project(in_memory_uow: InMemoryPersistenceUnitOfWork, tmp_p
     runtime_root.mkdir(parents=True, exist_ok=True)
     (runtime_root / "openspec").mkdir(parents=True, exist_ok=True)
     (runtime_root / "docs").mkdir(parents=True, exist_ok=True)
-    (runtime_root / "docs" / "ROADMAP.md").write_text("# Roadmap\n- 030-feature: Feature A\n", encoding="utf-8")
+    (runtime_root / "docs" / "ROADMAP.md").write_text(
+        "# Roadmap\n- 030-feature: Feature A\n", encoding="utf-8"
+    )
 
     trusted_root = tmp_path / "managed"
     trusted_root.mkdir(parents=True, exist_ok=True)
@@ -36,25 +38,38 @@ def test_api_onboard_project(in_memory_uow: InMemoryPersistenceUnitOfWork, tmp_p
     import subprocess
 
     remote_bare = tmp_path / "remote_api_repo.git"
-    subprocess.run(["git", "init", "--bare", "-b", "main", str(remote_bare)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "init", "--bare", "-b", "main", str(remote_bare)], check=True, capture_output=True
+    )
 
     seed_dir = tmp_path / "seed"
-    subprocess.run(["git", "clone", str(remote_bare), str(seed_dir)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "clone", str(remote_bare), str(seed_dir)], check=True, capture_output=True
+    )
     subprocess.run(["git", "config", "user.name", "Test Dev"], cwd=seed_dir, check=True)
     subprocess.run(["git", "config", "user.email", "dev@test.local"], cwd=seed_dir, check=True)
-    (seed_dir / "README.md").write_text("# API Repo\nA test repository for onboarding.\n", encoding="utf-8")
+    (seed_dir / "README.md").write_text(
+        "# API Repo\nA test repository for onboarding.\n", encoding="utf-8"
+    )
     (seed_dir / "openspec").mkdir(exist_ok=True)
     (seed_dir / "docs").mkdir(exist_ok=True)
-    (seed_dir / "docs" / "ROADMAP.md").write_text("# Roadmap\n- 030-feature: Feature A\n", encoding="utf-8")
+    (seed_dir / "docs" / "ROADMAP.md").write_text(
+        "# Roadmap\n- 030-feature: Feature A\n", encoding="utf-8"
+    )
     subprocess.run(["git", "add", "."], cwd=seed_dir, check=True)
-    subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=seed_dir, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "Initial commit"], cwd=seed_dir, check=True, capture_output=True
+    )
     subprocess.run(["git", "push", "origin", "main"], cwd=seed_dir, check=True, capture_output=True)
 
     github_stub = ReadinessGitHubStub()
     app.dependency_overrides[get_uow] = lambda: in_memory_uow
     app.dependency_overrides[get_github_adapter] = lambda: github_stub
     app.dependency_overrides[get_onboarding_service] = lambda: ProjectOnboardingService(
-        in_memory_uow, project_root=runtime_root, github_adapter=github_stub, trusted_managed_root=trusted_root
+        in_memory_uow,
+        project_root=runtime_root,
+        github_adapter=github_stub,
+        trusted_managed_root=trusted_root,
     )
     client = TestClient(app)
 
@@ -103,6 +118,22 @@ def test_api_backlog_crud_and_lifecycle(
         base_branch="main",
     )
     in_memory_uow.projects.save(project)
+
+    from minime.domain.enums import ProviderHealthStatus
+    from minime.domain.models import ProviderHealth
+
+    in_memory_uow.provider_health.save(
+        ProviderHealth(
+            health_id="ph-codex", provider="codex", status=ProviderHealthStatus.AVAILABLE
+        )
+    )
+    in_memory_uow.provider_health.save(
+        ProviderHealth(
+            health_id="ph-antigravity",
+            provider="antigravity",
+            status=ProviderHealthStatus.AVAILABLE,
+        )
+    )
 
     # 1. Create work item
     create_resp = client.post(

@@ -373,6 +373,9 @@ class GitOperationRepositoryInterface(ABC):
 
 class OpenRouterBudgetPolicyRepositoryInterface(ABC):
     @abstractmethod
+    def get_by_project_id(self, project_id: str) -> OpenRouterBudgetPolicy | None: ...
+
+    @abstractmethod
     def get_for_update(self, project_id: str) -> OpenRouterBudgetPolicy | None: ...
 
     @abstractmethod
@@ -1090,11 +1093,7 @@ class TaskClassificationSnapshotRepositoryInterface(ABC):
     ) -> list[TaskClassificationSnapshot]: ...
 
     @abstractmethod
-    def find_latest_by_change(
-        self, change_id: str
-    ) -> TaskClassificationSnapshot | None: ...
+    def find_latest_by_change(self, change_id: str) -> TaskClassificationSnapshot | None: ...
 
     @abstractmethod
-    def find_latest_by_job(
-        self, job_id: str
-    ) -> TaskClassificationSnapshot | None: ...
+    def find_latest_by_job(self, job_id: str) -> TaskClassificationSnapshot | None: ...

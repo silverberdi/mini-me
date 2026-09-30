@@ -16,7 +16,9 @@ def test_create_and_update_work_item(
     in_memory_uow: InMemoryPersistenceUnitOfWork, tmp_path: Path
 ) -> None:
     repo_dir = tmp_path / "work-repo"
-    setup_managed_repository_fixture(in_memory_uow, "work-project", repo_dir, tmp_path / "worktrees")
+    setup_managed_repository_fixture(
+        in_memory_uow, "work-project", repo_dir, tmp_path / "worktrees"
+    )
 
     project = Project(
         project_id="work-project",
@@ -70,7 +72,9 @@ def test_create_duplicate_work_item_fails(
     in_memory_uow: InMemoryPersistenceUnitOfWork, tmp_path: Path
 ) -> None:
     repo_dir = tmp_path / "work-repo"
-    setup_managed_repository_fixture(in_memory_uow, "work-project", repo_dir, tmp_path / "worktrees")
+    setup_managed_repository_fixture(
+        in_memory_uow, "work-project", repo_dir, tmp_path / "worktrees"
+    )
 
     project = Project(
         project_id="work-project",
@@ -115,7 +119,9 @@ def test_reconcile_backlog_projections_with_terminal_and_human_states(
     from minime.domain.models import BacklogItem, Change, OrchestrationRun, utc_now
 
     repo_dir = tmp_path / "work-repo"
-    setup_managed_repository_fixture(in_memory_uow, "work-project", repo_dir, tmp_path / "worktrees")
+    setup_managed_repository_fixture(
+        in_memory_uow, "work-project", repo_dir, tmp_path / "worktrees"
+    )
 
     project = Project(
         project_id="work-project",
@@ -212,7 +218,9 @@ def test_reconcile_backlog_projections_with_terminal_and_human_states(
     assert rec_merged.status == WorkItemStatus.COMPLETED
 
     # DB state remains PREPARING (pure, zero DB mutation)
-    db_merged = in_memory_uow.backlog_items.get_by_project_and_key("work-project", "generic-provider-capacity-recovery-drain")
+    db_merged = in_memory_uow.backlog_items.get_by_project_and_key(
+        "work-project", "generic-provider-capacity-recovery-drain"
+    )
     assert db_merged is not None
     assert db_merged.status == WorkItemStatus.PREPARING
 
@@ -222,7 +230,9 @@ def test_reconcile_backlog_projections_with_terminal_and_human_states(
     assert rec_pr.status == WorkItemStatus.NEEDS_HUMAN
 
     # DB state remains RUNNING (pure)
-    db_pr = in_memory_uow.backlog_items.get_by_project_and_key("work-project", "021-runtime-latency-header")
+    db_pr = in_memory_uow.backlog_items.get_by_project_and_key(
+        "work-project", "021-runtime-latency-header"
+    )
     assert db_pr is not None
     assert db_pr.status == WorkItemStatus.RUNNING
 
@@ -231,4 +241,3 @@ def test_reconcile_backlog_projections_with_terminal_and_human_states(
     assert rec_pristine is not None
     assert rec_pristine.status == WorkItemStatus.BACKLOG
     assert rec_pristine.readiness_state == ReadinessState.NOT_READY
-

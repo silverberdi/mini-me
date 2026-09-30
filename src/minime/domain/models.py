@@ -908,7 +908,9 @@ class OrchestrationExternalAction(BaseModel):
     @model_validator(mode="after")
     def validate_ownership(self) -> OrchestrationExternalAction:
         if self.run_id is None and self.saga_id is None:
-            raise ValueError("OrchestrationExternalAction must have at least run_id or saga_id set.")
+            raise ValueError(
+                "OrchestrationExternalAction must have at least run_id or saga_id set."
+            )
         return self
 
 
@@ -1662,4 +1664,3 @@ class WorkspaceMutationDecision(BaseModel):
     workspace_role: WorkspaceRole
     resolved_path: str
     provider_detail: str | None = None
-

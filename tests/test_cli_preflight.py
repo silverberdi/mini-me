@@ -31,14 +31,28 @@ AGY_IMPL = CliInvocationProfile(
     "antigravity",
     "implementer",
     "agy",
-    ("--mode", "accept-edits", "--dangerously-skip-permissions", "--print-timeout", "1h", "--print={prompt}"),
+    (
+        "--mode",
+        "accept-edits",
+        "--dangerously-skip-permissions",
+        "--print-timeout",
+        "1h",
+        "--print={prompt}",
+    ),
     "argument",
 )
 AGY_REV = CliInvocationProfile(
     "antigravity",
     "reviewer",
     "agy",
-    ("--mode", "plan", "--dangerously-skip-permissions", "--print-timeout", "1h", "--print={prompt}"),
+    (
+        "--mode",
+        "plan",
+        "--dangerously-skip-permissions",
+        "--print-timeout",
+        "1h",
+        "--print={prompt}",
+    ),
     "argument",
 )
 

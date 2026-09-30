@@ -62,16 +62,32 @@ def test_exhaustive_change_matrix(in_memory_uow, state):
     disallowed = all_states - allowed
 
     for target in allowed:
-        c = Change(project_id="test-proj", name=f"ch-{state.value}-{target.value}", status=state, discovered_at=now, updated_at=now)
+        c = Change(
+            project_id="test-proj",
+            name=f"ch-{state.value}-{target.value}",
+            status=state,
+            discovered_at=now,
+            updated_at=now,
+        )
         in_memory_uow.changes.save(c)
-        res = authority.transition_change("test-proj", f"ch-{state.value}-{target.value}", state, target)
+        res = authority.transition_change(
+            "test-proj", f"ch-{state.value}-{target.value}", state, target
+        )
         assert res.status == target
 
     for target in disallowed:
-        c = Change(project_id="test-proj", name=f"ch-dis-{state.value}-{target.value}", status=state, discovered_at=now, updated_at=now)
+        c = Change(
+            project_id="test-proj",
+            name=f"ch-dis-{state.value}-{target.value}",
+            status=state,
+            discovered_at=now,
+            updated_at=now,
+        )
         in_memory_uow.changes.save(c)
         with pytest.raises(LifecycleInvalidTransitionError):
-            authority.transition_change("test-proj", f"ch-dis-{state.value}-{target.value}", state, target)
+            authority.transition_change(
+                "test-proj", f"ch-dis-{state.value}-{target.value}", state, target
+            )
 
 
 @pytest.mark.parametrize("state", list(WorkItemStatus))
@@ -122,7 +138,13 @@ def test_generic_save_bypass_protection_change(in_memory_uow):
     """Generic repository.save() must raise LifecycleBypassError on status change for existing Change."""
     _setup_project(in_memory_uow)
     now = utc_now()
-    c = Change(project_id="test-proj", name="ch-bypass", status=ChangeStatus.READY, discovered_at=now, updated_at=now)
+    c = Change(
+        project_id="test-proj",
+        name="ch-bypass",
+        status=ChangeStatus.READY,
+        discovered_at=now,
+        updated_at=now,
+    )
     in_memory_uow.changes.save(c)
 
     bypassed_c = c.model_copy(update={"status": ChangeStatus.DONE})
@@ -149,7 +171,9 @@ def test_generic_save_bypass_protection_backlog_item(in_memory_uow):
     )
     in_memory_uow.backlog_items.save(bk)
 
-    bypassed_bk = bk.model_copy(update={"status": WorkItemStatus.RUNNING, "description": "bypassed desc"})
+    bypassed_bk = bk.model_copy(
+        update={"status": WorkItemStatus.RUNNING, "description": "bypassed desc"}
+    )
     with pytest.raises(LifecycleBypassError):
         in_memory_uow.backlog_items.save(bypassed_bk)
 
@@ -202,13 +226,25 @@ def test_atomic_cas_stale_conflict_and_event_exactness(in_memory_uow):
     in_memory_uow.backlog_items.save(bk)
 
     with pytest.raises(LifecycleTransitionConflictError):
-        authority.transition_backlog_item("test-proj", "bk-cas", WorkItemStatus.ADMITTED, WorkItemStatus.RUNNING)
+        authority.transition_backlog_item(
+            "test-proj", "bk-cas", WorkItemStatus.ADMITTED, WorkItemStatus.RUNNING
+        )
 
-    events = [e for e in in_memory_uow.events.list_events("test-proj") if e.event_type == EventType.LIFECYCLE_TRANSITION]
+    events = [
+        e
+        for e in in_memory_uow.events.list_events("test-proj")
+        if e.event_type == EventType.LIFECYCLE_TRANSITION
+    ]
     assert len(events) == 0
 
-    authority.transition_backlog_item("test-proj", "bk-cas", WorkItemStatus.READY, WorkItemStatus.ADMITTED)
-    events = [e for e in in_memory_uow.events.list_events("test-proj") if e.event_type == EventType.LIFECYCLE_TRANSITION]
+    authority.transition_backlog_item(
+        "test-proj", "bk-cas", WorkItemStatus.READY, WorkItemStatus.ADMITTED
+    )
+    events = [
+        e
+        for e in in_memory_uow.events.list_events("test-proj")
+        if e.event_type == EventType.LIFECYCLE_TRANSITION
+    ]
     assert len(events) == 1
     assert events[0].payload["from_state"] == WorkItemStatus.READY.value
     assert events[0].payload["to_state"] == WorkItemStatus.ADMITTED.value
@@ -242,11 +278,19 @@ def test_readiness_service_purity(in_memory_uow, tmp_path: Path):
     """ReadinessService.evaluate must be side-effect-free with respect to Change.status."""
     _setup_project(in_memory_uow)
     now = utc_now()
-    c = Change(project_id="test-proj", name="ch-pure", status=ChangeStatus.DISCOVERED, discovered_at=now, updated_at=now)
+    c = Change(
+        project_id="test-proj",
+        name="ch-pure",
+        status=ChangeStatus.DISCOVERED,
+        discovered_at=now,
+        updated_at=now,
+    )
     in_memory_uow.changes.save(c)
 
     readiness = ReadinessService(in_memory_uow)
-    eval_res = readiness.evaluate_change_readiness("test-proj", "ch-pure", project_root=str(tmp_path))
+    eval_res = readiness.evaluate_change_readiness(
+        "test-proj", "ch-pure", project_root=str(tmp_path)
+    )
 
     db_c = in_memory_uow.changes.get_by_name("test-proj", "ch-pure")
     assert db_c.status == ChangeStatus.DISCOVERED
@@ -257,7 +301,13 @@ def test_post_merge_authority_integration_and_readiness_orthogonality(in_memory_
     """PostMergeService reconciliation routes DONE/COMPLETED through authority and preserves readiness_state."""
     _setup_project(in_memory_uow)
     now = utc_now()
-    c = Change(project_id="test-proj", name="ch-pm", status=ChangeStatus.IN_PROGRESS, discovered_at=now, updated_at=now)
+    c = Change(
+        project_id="test-proj",
+        name="ch-pm",
+        status=ChangeStatus.IN_PROGRESS,
+        discovered_at=now,
+        updated_at=now,
+    )
     in_memory_uow.changes.save(c)
     bk = BacklogItem(
         project_id="test-proj",
@@ -272,7 +322,9 @@ def test_post_merge_authority_integration_and_readiness_orthogonality(in_memory_
     )
     in_memory_uow.backlog_items.save(bk)
 
-    post_merge = PostMergeReconciliationService(in_memory_uow, project_root=".", github_adapter=None)
+    post_merge = PostMergeReconciliationService(
+        in_memory_uow, project_root=".", github_adapter=None
+    )
     post_merge._reconcile_change_and_backlog_item("test-proj", "ch-pm")
 
     db_c = in_memory_uow.changes.get_by_name("test-proj", "ch-pm")
@@ -286,6 +338,7 @@ def test_post_merge_authority_integration_and_readiness_orthogonality(in_memory_
 # -----------------------------------------------------------------------------
 # Projection Purity Tests (Requirement 8)
 # -----------------------------------------------------------------------------
+
 
 def test_projection_purity_archive_directory_no_persistence(in_memory_uow, tmp_path: Path):
     """A. Archive directory exists + Backlog nonterminal -> reconcile_backlog_projections() does NOT persist COMPLETED in DB."""
@@ -315,7 +368,11 @@ def test_projection_purity_archive_directory_no_persistence(in_memory_uow, tmp_p
     db_bk = in_memory_uow.backlog_items.get_by_project_and_key("test-proj", "archived-change")
     assert db_bk.status == WorkItemStatus.BACKLOG
 
-    events = [e for e in in_memory_uow.events.list_events("test-proj") if e.event_type == EventType.LIFECYCLE_TRANSITION]
+    events = [
+        e
+        for e in in_memory_uow.events.list_events("test-proj")
+        if e.event_type == EventType.LIFECYCLE_TRANSITION
+    ]
     assert len(events) == 0
 
 
@@ -355,7 +412,11 @@ def test_projection_purity_active_run_no_persistence(in_memory_uow):
     db_bk = in_memory_uow.backlog_items.get_by_project_and_key("test-proj", "active-item")
     assert db_bk.status == WorkItemStatus.BACKLOG
 
-    events = [e for e in in_memory_uow.events.list_events("test-proj") if e.event_type == EventType.LIFECYCLE_TRANSITION]
+    events = [
+        e
+        for e in in_memory_uow.events.list_events("test-proj")
+        if e.event_type == EventType.LIFECYCLE_TRANSITION
+    ]
     assert len(events) == 0
 
 
@@ -395,7 +456,11 @@ def test_projection_purity_stop_outcome_no_persistence(in_memory_uow):
     db_bk = in_memory_uow.backlog_items.get_by_project_and_key("test-proj", "pr-item")
     assert db_bk.status == WorkItemStatus.BACKLOG
 
-    events = [e for e in in_memory_uow.events.list_events("test-proj") if e.event_type == EventType.LIFECYCLE_TRANSITION]
+    events = [
+        e
+        for e in in_memory_uow.events.list_events("test-proj")
+        if e.event_type == EventType.LIFECYCLE_TRANSITION
+    ]
     assert len(events) == 0
 
 
@@ -417,7 +482,11 @@ def test_projection_purity_repeated_calls_zero_events(in_memory_uow):
     for _ in range(5):
         intake.reconcile_backlog_projections("test-proj")
 
-    events = [e for e in in_memory_uow.events.list_events("test-proj") if e.event_type == EventType.LIFECYCLE_TRANSITION]
+    events = [
+        e
+        for e in in_memory_uow.events.list_events("test-proj")
+        if e.event_type == EventType.LIFECYCLE_TRANSITION
+    ]
     assert len(events) == 0
 
 
@@ -484,14 +553,19 @@ def test_terminal_item_no_resurrection_on_external_evidence(in_memory_uow):
 
     authority = LifecycleTransitionAuthority(in_memory_uow)
     with pytest.raises(LifecycleInvalidTransitionError):
-        authority.transition_backlog_item("test-proj", "term-completed", WorkItemStatus.COMPLETED, WorkItemStatus.RUNNING)
+        authority.transition_backlog_item(
+            "test-proj", "term-completed", WorkItemStatus.COMPLETED, WorkItemStatus.RUNNING
+        )
     with pytest.raises(LifecycleInvalidTransitionError):
-        authority.transition_backlog_item("test-proj", "term-cancelled", WorkItemStatus.CANCELLED, WorkItemStatus.RUNNING)
+        authority.transition_backlog_item(
+            "test-proj", "term-cancelled", WorkItemStatus.CANCELLED, WorkItemStatus.RUNNING
+        )
 
 
 # -----------------------------------------------------------------------------
 # Concurrency & Event Transactionality Proofs (Requirements 6 & 9)
 # -----------------------------------------------------------------------------
+
 
 def test_real_persistence_concurrency_cas_conflict():
     """Requirement 9: Prove concurrent CAS using two SQLAlchemy sessions against real persistence engine (stale-CAS integration proof)."""
@@ -540,12 +614,16 @@ def test_real_persistence_concurrency_cas_conflict():
     auth_b = LifecycleTransitionAuthority(uow_b)
 
     # Session A executes READY -> ADMITTED successfully
-    auth_a.transition_backlog_item("concurr-proj", "conc-item", WorkItemStatus.READY, WorkItemStatus.ADMITTED)
+    auth_a.transition_backlog_item(
+        "concurr-proj", "conc-item", WorkItemStatus.READY, WorkItemStatus.ADMITTED
+    )
     session_a.commit()
 
     # Session B attempts stale READY -> ADMITTED
     with pytest.raises(LifecycleTransitionConflictError):
-        auth_b.transition_backlog_item("concurr-proj", "conc-item", WorkItemStatus.READY, WorkItemStatus.ADMITTED)
+        auth_b.transition_backlog_item(
+            "concurr-proj", "conc-item", WorkItemStatus.READY, WorkItemStatus.ADMITTED
+        )
         session_b.commit()
     session_b.rollback()
 
@@ -556,7 +634,11 @@ def test_real_persistence_concurrency_cas_conflict():
         item = verify_session.query(BacklogItemModel).filter_by(item_key="conc-item").first()
         assert item.status == WorkItemStatus.ADMITTED.value
 
-        event_count = verify_session.query(EventModel).filter_by(event_type=EventType.LIFECYCLE_TRANSITION.value).count()
+        event_count = (
+            verify_session.query(EventModel)
+            .filter_by(event_type=EventType.LIFECYCLE_TRANSITION.value)
+            .count()
+        )
         assert event_count == 1
 
 
@@ -609,7 +691,9 @@ def test_event_transactionality_and_rollback():
     authority = LifecycleTransitionAuthority(uow)
     # Authority automatically calls session.rollback() before re-raising exception
     with pytest.raises(RuntimeError, match="DB event write failure"):
-        authority.transition_backlog_item("roll-proj", "roll-item", WorkItemStatus.READY, WorkItemStatus.ADMITTED)
+        authority.transition_backlog_item(
+            "roll-proj", "roll-item", WorkItemStatus.READY, WorkItemStatus.ADMITTED
+        )
 
     session.close()
 
@@ -617,13 +701,18 @@ def test_event_transactionality_and_rollback():
         item = verify_session.query(BacklogItemModel).filter_by(item_key="roll-item").first()
         assert item.status == WorkItemStatus.READY.value
 
-        event_count = verify_session.query(EventModel).filter_by(event_type=EventType.LIFECYCLE_TRANSITION.value).count()
+        event_count = (
+            verify_session.query(EventModel)
+            .filter_by(event_type=EventType.LIFECYCLE_TRANSITION.value)
+            .count()
+        )
         assert event_count == 0
 
 
 # -----------------------------------------------------------------------------
 # GET Purity Test (Requirement 10)
 # -----------------------------------------------------------------------------
+
 
 def test_get_purity_endpoint_zero_mutations(in_memory_uow):
     """Requirement 10: Prove HTTP GET requests on status/backlog produce zero lifecycle mutations or transition events."""
@@ -641,7 +730,13 @@ def test_get_purity_endpoint_zero_mutations(in_memory_uow):
 
     initial_bk = in_memory_uow.backlog_items.get_by_project_and_key("test-proj", "get-pure-item")
     initial_status = initial_bk.status
-    initial_events = len([e for e in in_memory_uow.events.list_events("test-proj") if e.event_type == EventType.LIFECYCLE_TRANSITION])
+    initial_events = len(
+        [
+            e
+            for e in in_memory_uow.events.list_events("test-proj")
+            if e.event_type == EventType.LIFECYCLE_TRANSITION
+        ]
+    )
 
     app.dependency_overrides[get_uow] = lambda: in_memory_uow
     client = TestClient(app)
@@ -651,9 +746,14 @@ def test_get_purity_endpoint_zero_mutations(in_memory_uow):
     assert response.status_code == 200
 
     final_bk = in_memory_uow.backlog_items.get_by_project_and_key("test-proj", "get-pure-item")
-    final_events = len([e for e in in_memory_uow.events.list_events("test-proj") if e.event_type == EventType.LIFECYCLE_TRANSITION])
+    final_events = len(
+        [
+            e
+            for e in in_memory_uow.events.list_events("test-proj")
+            if e.event_type == EventType.LIFECYCLE_TRANSITION
+        ]
+    )
 
     assert final_bk.status == initial_status
     assert final_events == initial_events
     app.dependency_overrides.clear()
-

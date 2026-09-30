@@ -62,9 +62,7 @@ def _project(project_id: str = "mini-me", drain_allowed: bool = True) -> Project
         implementer="codex",
         reviewer="antigravity",
         openrouter_drain_allowed=drain_allowed,
-        checks=[
-            {"name": "test-check", "command": f"{sys.executable} -c print(1)"}
-        ],
+        checks=[{"name": "test-check", "command": f"{sys.executable} -c print(1)"}],
     )
 
 
@@ -161,7 +159,6 @@ class GitFakeWorktreeManager:
         head_sha = proc.stdout.strip()
         self.created_paths[job_id] = path
         return WorktreeInfo(path=path, branch_name=f"minime/test-{job_id}", base_sha=head_sha)
-
 
     async def current_sha(self, worktree_path: str | Path) -> str:
         proc = subprocess.run(
@@ -284,9 +281,7 @@ async def test_openrouter_fallback_success_creates_no_fabricated_candidate(in_me
         worktree_manager=worktrees,
         openrouter_adapter=mock_openrouter,
         auditor_runner=MockAuditorRunner(
-            output=[
-                json.dumps({"risk": "low", "summary": "Audit passed cleanly", "findings": []})
-            ]
+            output=[json.dumps({"risk": "low", "summary": "Audit passed cleanly", "findings": []})]
         ),
     )
 
@@ -317,9 +312,7 @@ async def test_openrouter_fallback_success_creates_no_fabricated_candidate(in_me
     assert "openrouter candidate changes" not in log_proc.stdout
 
 
-async def test_openrouter_success_without_harness_returns_truthful_outcome(
-    in_memory_uow, tmp_path
-):
+async def test_openrouter_success_without_harness_returns_truthful_outcome(in_memory_uow, tmp_path):
     # Textual provider success must never become implementation success without a
     # material repository change. Assert a truthful governed outcome and no false
     # progress/lifecycle evidence.
@@ -357,12 +350,19 @@ async def test_openrouter_success_without_harness_returns_truthful_outcome(
         role="fallback",
         model="anthropic/claude-3.5-sonnet",
         summary="Text only",
-        raw_output=json.dumps({"verdict": "READY_TO_MERGE", "summary": "Text only", "findings": []}),
+        raw_output=json.dumps(
+            {"verdict": "READY_TO_MERGE", "summary": "Text only", "findings": []}
+        ),
     )
     worktrees = GitFakeWorktreeManager(tmp_path)
     mock_openrouter = MockOpenRouterAdapter(
         canned_result=canned_success,
-        canned_meta={"prompt_tokens": 500, "completion_tokens": 200, "total_tokens": 700, "actual_cost_usd": 0.005},
+        canned_meta={
+            "prompt_tokens": 500,
+            "completion_tokens": 200,
+            "total_tokens": 700,
+            "actual_cost_usd": 0.005,
+        },
     )
     pipeline = ExecutionPipelineService(
         uow=in_memory_uow,

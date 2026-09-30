@@ -52,7 +52,9 @@ def test_codex_adapter_extracts_auth_error_signal():
     assert signal.result_class == ProviderResultClass.AUTH_ERROR
     assert "authentication token is expired" in signal.summary.lower()
 
-    untrusted_dir_out = "Not inside a trusted directory and --skip-git-repo-check was not specified."
+    untrusted_dir_out = (
+        "Not inside a trusted directory and --skip-git-repo-check was not specified."
+    )
     signal_untrusted = adapter.extract_capacity_signal(untrusted_dir_out, exit_code=1)
     assert signal_untrusted is None
 
@@ -82,9 +84,7 @@ async def test_expensive_probe_gated_when_no_ready_work(in_memory_uow):
         )
     )
 
-    with patch(
-        "minime.services.provider_health_service.get_provider_adapter"
-    ) as mock_get_adapter:
+    with patch("minime.services.provider_health_service.get_provider_adapter") as mock_get_adapter:
         mock_adapter = MagicMock()
         mock_adapter.check_cli_present = AsyncMock(return_value=True)
         mock_adapter.check_auth_ready = AsyncMock(return_value=True)
@@ -136,9 +136,7 @@ async def test_expensive_probe_runs_when_actionable_ready_work_exists(in_memory_
         )
     )
 
-    with patch(
-        "minime.services.provider_health_service.get_provider_adapter"
-    ) as mock_get_adapter:
+    with patch("minime.services.provider_health_service.get_provider_adapter") as mock_get_adapter:
         mock_adapter = MagicMock()
         mock_adapter.check_cli_present = AsyncMock(return_value=True)
         mock_adapter.check_auth_ready = AsyncMock(return_value=True)
@@ -198,18 +196,14 @@ async def test_auth_401_transitions_health_to_auth_required(in_memory_uow):
         )
     )
 
-    with patch(
-        "minime.services.provider_health_service.get_provider_adapter"
-    ) as mock_get_adapter:
+    with patch("minime.services.provider_health_service.get_provider_adapter") as mock_get_adapter:
         mock_adapter = MagicMock()
         mock_adapter.check_cli_present = AsyncMock(return_value=True)
         mock_adapter.check_auth_ready = AsyncMock(return_value=True)
         mock_adapter.probe_is_expensive = True
         mock_adapter.probe_verifies_capacity = True
         mock_adapter.probe_availability = AsyncMock(return_value=False)
-        mock_adapter._last_probe_output = (
-            "HTTP 401 Unauthorized: Provided authentication token is expired. Please try signing in again."
-        )
+        mock_adapter._last_probe_output = "HTTP 401 Unauthorized: Provided authentication token is expired. Please try signing in again."
         mock_adapter._last_exit_code = 1
         mock_adapter.extract_capacity_signal = CodexProviderAdapter.extract_capacity_signal.__get__(
             mock_adapter
@@ -287,18 +281,14 @@ async def test_subsequent_tick_bypasses_probing_when_auth_required(in_memory_uow
         )
     )
 
-    with patch(
-        "minime.services.provider_health_service.get_provider_adapter"
-    ) as mock_get_adapter:
+    with patch("minime.services.provider_health_service.get_provider_adapter") as mock_get_adapter:
         mock_adapter = MagicMock()
         mock_adapter.check_cli_present = AsyncMock(return_value=True)
         mock_adapter.check_auth_ready = AsyncMock(return_value=True)
         mock_adapter.probe_is_expensive = True
         mock_adapter.probe_verifies_capacity = True
         mock_adapter.probe_availability = AsyncMock(return_value=False)
-        mock_adapter._last_probe_output = (
-            "HTTP 401 Unauthorized: Provided authentication token is expired. Please try signing in again."
-        )
+        mock_adapter._last_probe_output = "HTTP 401 Unauthorized: Provided authentication token is expired. Please try signing in again."
         mock_adapter._last_exit_code = 1
         mock_adapter.extract_capacity_signal = CodexProviderAdapter.extract_capacity_signal.__get__(
             mock_adapter

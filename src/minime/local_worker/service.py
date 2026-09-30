@@ -36,9 +36,7 @@ from minime.local_worker.policy import evaluate_eligibility
 
 logger = logging.getLogger(__name__)
 
-Validator = Callable[
-    [LocalTaskEnvelope, LocalWorkerResult, int], Awaitable[ValidationResult]
-]
+Validator = Callable[[LocalTaskEnvelope, LocalWorkerResult, int], Awaitable[ValidationResult]]
 
 SYSTEM_PROMPT = (
     "You are the mini me local worker. Take only the smallest possible patch within the "
@@ -184,4 +182,3 @@ def _unexpected_failure_evidence(task_class: str) -> LocalExecutionEvidence:
         validation_result=LocalValidationVerdict.FAIL,
         escalation=_escalate("Unexpected local worker failure; escalate"),
     )
-

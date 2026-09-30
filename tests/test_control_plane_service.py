@@ -354,4 +354,3 @@ def test_continue_preserves_reassignment_counters(in_memory_uow, seeded_project_
     updated_job = in_memory_uow.jobs.get_by_id("job-c-1")
     assert updated_job.reassignment_count == 2
     assert updated_job.attempt_count == 3
-

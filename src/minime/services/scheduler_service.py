@@ -259,9 +259,7 @@ class SchedulerService:
         try:
             return self.provider_health_service.get_existing_health(provider)
         except Exception as exc:
-            logger.warning(
-                "Provider health lookup failed for '%s': %s", provider, exc
-            )
+            logger.warning("Provider health lookup failed for '%s': %s", provider, exc)
             return None
 
     def _provider_has_probe_path(self, provider: str) -> bool:
@@ -276,9 +274,7 @@ class SchedulerService:
         self, project: Project, change_name: str
     ) -> tuple[OrchestrationRun | None, Job | None]:
         """Locate an active, materially-started in-flight job eligible for drain continuation."""
-        active_run = self.uow.orchestration_runs.get_active_run(
-            project.project_id, change_name
-        )
+        active_run = self.uow.orchestration_runs.get_active_run(project.project_id, change_name)
         if not active_run or not active_run.active_job_id:
             return None, None
         job = self.uow.jobs.get_by_id(active_run.active_job_id)
@@ -348,9 +344,7 @@ class SchedulerService:
             legacy_refusal_code=AdmissionRefusalCode.PROVIDER_DRAIN,
         )
 
-    def evaluate_admission(
-        self, project_id: str, change_name: str
-    ) -> AdmissionEvaluationResult:
+    def evaluate_admission(self, project_id: str, change_name: str) -> AdmissionEvaluationResult:
         """Evaluate full admission criteria and determine converged operational decision."""
         # 1. Registered project check
         project = self.uow.projects.get_by_id(project_id)
@@ -410,9 +404,8 @@ class SchedulerService:
                         "normalized_outcome",
                         getattr(latest_attempt, "execution_outcome", None),
                     )
-                    fail_reason = (
-                        getattr(latest_attempt, "failure_reason", "")
-                        or str(getattr(latest_attempt, "error_details", {}))
+                    fail_reason = getattr(latest_attempt, "failure_reason", "") or str(
+                        getattr(latest_attempt, "error_details", {})
                     )
                     if (
                         exec_outcome == ExecutionOutcome.EVIDENCE_INSUFFICIENT
@@ -449,7 +442,7 @@ class SchedulerService:
                         )
 
         # 4. Definition of Ready (DoR) check
-        readiness = self.readiness_service.evaluate_change_readiness(
+        readiness = self.readiness_service.evaluate_and_persist_change_readiness(
             project_id=project_id,
             change_name=change_name,
             project_root=str(self.project_root),
@@ -459,14 +452,13 @@ class SchedulerService:
         non_capacity_unmet = [
             r
             for r in readiness.unmet_reasons
-            if "primary pair capacity shortage" not in r.lower() and "capacity shortage" not in r.lower()
+            if "primary pair capacity shortage" not in r.lower()
+            and "capacity shortage" not in r.lower()
         ]
         if non_capacity_unmet:
             reasons_str = "; ".join(non_capacity_unmet)
             if any(
-                "complementary" in r.lower()
-                or "independent" in r.lower()
-                or "same" in r.lower()
+                "complementary" in r.lower() or "independent" in r.lower() or "same" in r.lower()
                 for r in non_capacity_unmet
             ):
                 block_cond = AdmissionBlockCondition.REVIEWER_INDEPENDENCE_UNAVAILABLE
@@ -487,8 +479,7 @@ class SchedulerService:
                 block_cond = AdmissionBlockCondition.LIFECYCLE_BLOCKED
                 op_decision = AdmissionDecisionKind.NEEDS_HUMAN
             elif any(
-                "predecessor" in r.lower() or "dependency" in r.lower()
-                for r in non_capacity_unmet
+                "predecessor" in r.lower() or "dependency" in r.lower() for r in non_capacity_unmet
             ):
                 block_cond = AdmissionBlockCondition.LIFECYCLE_BLOCKED
                 op_decision = AdmissionDecisionKind.WAIT
@@ -607,9 +598,7 @@ class SchedulerService:
 
             eligibility = self._evaluate_drain_eligibility(project, run, job)
             if not eligibility.eligible:
-                return self._drain_denial_result(
-                    project_id, change_name, eligibility.denial_reason
-                )
+                return self._drain_denial_result(project_id, change_name, eligibility.denial_reason)
 
             return AdmissionEvaluationResult(
                 decision=AdmissionDecisionKind.DRAIN,
@@ -740,12 +729,17 @@ class SchedulerService:
             ProviderHealthStatus.DEGRADED,
         ):
             cooldown_until, has_deterministic_eta = _capacity_eta(configured_implementer)
+            block_cond = (
+                AdmissionBlockCondition.UNKNOWN_CAPACITY
+                if impl_health.status == ProviderHealthStatus.UNKNOWN
+                else AdmissionBlockCondition.CAPACITY_EXHAUSTED
+            )
             return AdmissionEvaluationResult(
                 decision=AdmissionDecisionKind.WAIT,
                 project_id=project_id,
                 change_name=change_name,
                 safe_executable_pair_exists=False,
-                block_condition=AdmissionBlockCondition.CAPACITY_EXHAUSTED,
+                block_condition=block_cond,
                 rationale=f"Configured implementer '{configured_implementer}' is {impl_health.status.value}.",
                 cooldown_until=cooldown_until,
                 has_deterministic_eta=has_deterministic_eta,
@@ -758,12 +752,17 @@ class SchedulerService:
             ProviderHealthStatus.DEGRADED,
         ):
             cooldown_until, has_deterministic_eta = _capacity_eta(configured_reviewer)
+            block_cond = (
+                AdmissionBlockCondition.UNKNOWN_CAPACITY
+                if rev_health.status == ProviderHealthStatus.UNKNOWN
+                else AdmissionBlockCondition.CAPACITY_EXHAUSTED
+            )
             return AdmissionEvaluationResult(
                 decision=AdmissionDecisionKind.WAIT,
                 project_id=project_id,
                 change_name=change_name,
                 safe_executable_pair_exists=False,
-                block_condition=AdmissionBlockCondition.CAPACITY_EXHAUSTED,
+                block_condition=block_cond,
                 rationale=f"Configured reviewer '{configured_reviewer}' is {rev_health.status.value}.",
                 cooldown_until=cooldown_until,
                 has_deterministic_eta=has_deterministic_eta,
@@ -968,9 +967,7 @@ class SchedulerService:
             # fresh admission: no admit_change, no new job, no READY backlog claim.
             project = self.uow.projects.get_by_id(project_id)
             run, _ = (
-                self._find_drain_continuation(project, change_name)
-                if project
-                else (None, None)
+                self._find_drain_continuation(project, change_name) if project else (None, None)
             )
             if run is None:
                 # No canonical drain continuation path is available from this service.
@@ -1201,13 +1198,13 @@ class SchedulerService:
         # helpers may synthesize default records, so this tick's admission decisions
         # reflect the true (possibly UNKNOWN) state rather than fabricated AVAILABLE.
         self._admission_health_truth = {
-            provider: self._safe_lookup_provider_health(provider)
-            for provider in PRIMARY_PROVIDERS
+            provider: self._safe_lookup_provider_health(provider) for provider in PRIMARY_PROVIDERS
         }
 
         # 0.0 Proactively probe unavailable providers to detect recovery without creating Runs/Jobs
         try:
             import asyncio
+
             try:
                 asyncio.get_running_loop()
                 # If running loop exists, run probe in background task or skip blocking
@@ -1248,16 +1245,23 @@ class SchedulerService:
 
         # 0.15 Check and drive active queued runs after daemon restart or in-flight continuation
         if drive_admitted:
-            active_runs_to_drive = self.uow.orchestration_runs.list_runs(project_id=project_id, is_active=True)
+            active_runs_to_drive = self.uow.orchestration_runs.list_runs(
+                project_id=project_id, is_active=True
+            )
             for r in active_runs_to_drive:
                 if (
                     r.active_job_id
                     and r.stop_outcome is None
-                    and r.current_stage not in (OrchestrationStage.COMPLETED, OrchestrationStage.PR_PREPARED)
+                    and r.current_stage
+                    not in (OrchestrationStage.COMPLETED, OrchestrationStage.PR_PREPARED)
                 ):
                     job = self.uow.jobs.get_by_id(r.active_job_id)
                     if job and job.status == JobStatus.QUEUED:
-                        logger.info("Driving active queued run '%s' (%s) after restart.", r.run_id, r.change_name)
+                        logger.info(
+                            "Driving active queued run '%s' (%s) after restart.",
+                            r.run_id,
+                            r.change_name,
+                        )
                         try:
                             self.orchestration_service.drive_coordinator(
                                 r.run_id, project_root=self.project_root
@@ -1290,9 +1294,7 @@ class SchedulerService:
 
         for candidate in ranked_candidates:
             try:
-                eval_result = self.evaluate_admission(
-                    candidate.project_id, candidate.change_name
-                )
+                eval_result = self.evaluate_admission(candidate.project_id, candidate.change_name)
                 if eval_result.decision == AdmissionDecisionKind.RUN and available_slots > 0:
                     dec, record, run = self.admit_work_item(
                         candidate.project_id, candidate.change_name, drive_admitted=drive_admitted
@@ -1310,14 +1312,9 @@ class SchedulerService:
                     # only; the authoritative result remains eval_result.decision.
                     reason_code = eval_result.legacy_refusal_code
                     reason_summary = eval_result.rationale
-                    if (
-                        eval_result.decision == AdmissionDecisionKind.RUN
-                        and available_slots <= 0
-                    ):
+                    if eval_result.decision == AdmissionDecisionKind.RUN and available_slots <= 0:
                         reason_code = AdmissionRefusalCode.GLOBAL_CONCURRENCY_LIMIT
-                        reason_summary = (
-                            f"Global concurrency limit reached ({self.max_global_jobs} active runs)."
-                        )
+                        reason_summary = f"Global concurrency limit reached ({self.max_global_jobs} active runs)."
 
                     record = SchedulerDecisionRecord(
                         project_id=candidate.project_id,

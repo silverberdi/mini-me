@@ -110,7 +110,11 @@ def test_postgres_repository_logical_upsert_and_ambiguity():
         )
         repo.save(first)
         session.commit()
-        repo.save(make_change(change_id="new-id", status=ChangeStatus.READY, proposal_path="new/proposal.md"))
+        repo.save(
+            make_change(
+                change_id="new-id", status=ChangeStatus.READY, proposal_path="new/proposal.md"
+            )
+        )
         session.commit()
 
         saved = repo.get_by_name("mini-me", "010-logical-identity")

@@ -40,7 +40,7 @@ class ReadinessService:
         self.openspec_adapter = openspec_adapter or OpenSpecAdapter()
         self.github_adapter = github_adapter or GitHubAdapter()
 
-    def evaluate_change_readiness(
+    def evaluate_change_readiness_pure(
         self,
         project_id: str,
         change_name: str,
@@ -49,7 +49,7 @@ class ReadinessService:
         github_repo: str | None = None,
         github_issue: int | None = None,
     ) -> ReadinessEvaluation:
-        """Evaluate Definition of Ready against canonical criteria."""
+        """Evaluate Definition of Ready purely against canonical criteria."""
         set_correlation_context(
             project_id=project_id,
             change_id=change_name,
@@ -177,11 +177,19 @@ class ReadinessService:
                         )
                     )
             except Exception as e:
+                from minime.logging import redact_secrets
+
+                safe_diag = redact_secrets(str(e)).strip() or "Capacity observation failed"
+                reason = f"Primary pair capacity unavailable/unobservable: {safe_diag}."
+                checks.append(ReadinessCheck(name="primary_capacity", passed=False, reason=reason))
+                unmet_reasons.append(reason)
                 logger.warning(f"Capacity check error: {e}")
 
         # Stage C Admission Fence: Re-validate CURRENT Stage C truth using canonical authorities
         managed_binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
-        managed_binding = managed_binding_repo.get_by_project_id(project_id) if managed_binding_repo else None
+        managed_binding = (
+            managed_binding_repo.get_by_project_id(project_id) if managed_binding_repo else None
+        )
 
         from minime.services.agent_confinement import AgentProcessConfinement
         from minime.services.workspace_guard import ManagedWorkspaceGuard, is_binding_fully_valid
@@ -194,7 +202,9 @@ class ReadinessService:
         if managed_binding is None:
             stage_c_reason = f"Stage C Admission Fence: Missing managed repository binding for project '{project_id}'."
         elif not is_binding_fully_valid(managed_binding):
-            m_reasons = getattr(managed_binding, "mismatch_reasons", None) or ["Invalid ProjectManagedRepositoryBinding"]
+            m_reasons = getattr(managed_binding, "mismatch_reasons", None) or [
+                "Invalid ProjectManagedRepositoryBinding"
+            ]
             stage_c_reason = f"Stage C Admission Fence: Managed repository binding is invalid: {'; '.join(m_reasons)}."
         else:
             managed_root = managed_binding.managed_repository_root
@@ -209,7 +219,9 @@ class ReadinessService:
                 runtime_root = guard.runtime_root
 
                 # 2. Prove BOTH have no equality/parent/child overlap with RUNTIME using guard path helpers
-                if guard._paths_overlap(managed_root, runtime_root) or guard._paths_overlap(wt_parent, runtime_root):
+                if guard._paths_overlap(managed_root, runtime_root) or guard._paths_overlap(
+                    wt_parent, runtime_root
+                ):
                     stage_c_reason = f"Stage C Admission Fence: Runtime root '{runtime_root}' collides or overlaps with managed workspace or worktree parent directory."
                 elif guard.trusted_managed_root and (
                     not guard._is_path_inside(managed_root, guard.trusted_managed_root)
@@ -221,13 +233,17 @@ class ReadinessService:
                 if not stage_c_reason:
                     from minime.domain.enums import WorkspaceOperation, WorkspaceRole
                     from minime.domain.models import WorkspaceMutationRequest
+
                     class_req = WorkspaceMutationRequest(
                         project_id=project_id,
                         target_path=managed_root,
                         requested_operation=WorkspaceOperation.READ,
                     )
-                    class_decision = guard.evaluate_mutation(class_req)
-                    if not class_decision.allowed or class_decision.workspace_role != WorkspaceRole.MANAGED_REPOSITORY:
+                    class_decision = guard.evaluate_mutation_pure(class_req)
+                    if (
+                        not class_decision.allowed
+                        or class_decision.workspace_role != WorkspaceRole.MANAGED_REPOSITORY
+                    ):
                         stage_c_reason = f"Stage C Admission Fence: Managed root '{managed_root}' failed workspace classification: {class_decision.provider_detail}"
 
                 # 4. Re-observe Git repository identity
@@ -260,7 +276,11 @@ class ReadinessService:
                         stage_c_reason = "Stage C Admission Fence: Agent process confinement capability is unavailable."
 
         if stage_c_reason:
-            checks.append(ReadinessCheck(name="stage_c_workspace_isolation", passed=False, reason=stage_c_reason))
+            checks.append(
+                ReadinessCheck(
+                    name="stage_c_workspace_isolation", passed=False, reason=stage_c_reason
+                )
+            )
             unmet_reasons.append(stage_c_reason)
         else:
             checks.append(
@@ -343,7 +363,9 @@ class ReadinessService:
                     binding_res = self.github_adapter.validate_issue_binding(
                         project.repository, effective_issue, github_repository=github_repo
                     )
-                    issue_valid = binding_res.outcome == ExternalOutcome.SUCCESS and binding_res.data is True
+                    issue_valid = (
+                        binding_res.outcome == ExternalOutcome.SUCCESS and binding_res.data is True
+                    )
                     issue_reason = binding_res.error_message
                 except GitHubRemoteError as exc:
                     issue_valid = False
@@ -459,7 +481,7 @@ class ReadinessService:
         status = ReadinessState.READY if is_ready else ReadinessState.NOT_READY
 
         now = utc_now()
-        evaluation = ReadinessEvaluation(
+        return ReadinessEvaluation(
             change_id=change_name,
             project_id=project_id,
             status=status,
@@ -468,6 +490,49 @@ class ReadinessService:
             checks=checks,
             evaluated_at=now,
         )
+
+    def evaluate_change_readiness(
+        self,
+        project_id: str,
+        change_name: str,
+        project_root: str,
+        current_active_change: str | None = None,
+        github_repo: str | None = None,
+        github_issue: int | None = None,
+    ) -> ReadinessEvaluation:
+        """Command alias: Evaluate Definition of Ready and persist updated Change, Event, and MetricFact."""
+        return self.evaluate_and_persist_change_readiness(
+            project_id=project_id,
+            change_name=change_name,
+            project_root=project_root,
+            current_active_change=current_active_change,
+            github_repo=github_repo,
+            github_issue=github_issue,
+        )
+
+    def evaluate_and_persist_change_readiness(
+        self,
+        project_id: str,
+        change_name: str,
+        project_root: str,
+        current_active_change: str | None = None,
+        github_repo: str | None = None,
+        github_issue: int | None = None,
+    ) -> ReadinessEvaluation:
+        """Command: Evaluate Definition of Ready and persist updated Change, Event, and MetricFact."""
+        evaluation = self.evaluate_change_readiness_pure(
+            project_id=project_id,
+            change_name=change_name,
+            project_root=project_root,
+            current_active_change=current_active_change,
+            github_repo=github_repo,
+            github_issue=github_issue,
+        )
+
+        status = evaluation.status
+        is_ready = evaluation.is_ready
+        unmet_reasons = evaluation.unmet_reasons
+        now = evaluation.evaluated_at
 
         # Update change record in persistence if exists, or create if absent
         change_record = self.uow.changes.get_by_name(project_id, change_name)

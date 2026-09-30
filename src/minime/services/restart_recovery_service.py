@@ -123,27 +123,34 @@ class RestartRecoveryService:
             if saga.status in {SagaStatus.COMPLETED, SagaStatus.FAILED}:
                 continue
 
-            item = self.uow.backlog_items.get_by_project_and_key(saga.project_id, saga.work_item_key)
-            change = self.uow.changes.get_by_name(saga.project_id, saga.change_name or saga.work_item_key)
+            item = self.uow.backlog_items.get_by_project_and_key(
+                saga.project_id, saga.work_item_key
+            )
+            change = self.uow.changes.get_by_name(
+                saga.project_id, saga.change_name or saga.work_item_key
+            )
 
             is_terminal = (
-                (item and item.status in {WorkItemStatus.COMPLETED, WorkItemStatus.CANCELLED})
-                or (change and change.status in {ChangeStatus.DONE, ChangeStatus.CANCELLED})
-            )
+                item and item.status in {WorkItemStatus.COMPLETED, WorkItemStatus.CANCELLED}
+            ) or (change and change.status in {ChangeStatus.DONE, ChangeStatus.CANCELLED})
 
             if is_terminal and saga.saga_type == SagaType.INTAKE:
                 logger.info(
                     "Intake saga '%s' belongs to terminal item/change; cancelling saga to preserve terminal identity.",
                     saga.id,
                 )
-                updated = saga_engine.cancel_saga(saga, cancellation_reason="Parent backlog item or change is terminal.")
+                updated = saga_engine.cancel_saga(
+                    saga, cancellation_reason="Parent backlog item or change is terminal."
+                )
                 reconciled.append(updated)
                 continue
 
             if is_terminal and saga.saga_type == SagaType.CLOSURE:
                 from minime.services.post_merge_service import PostMergeReconciliationService
 
-                post_merge_service = PostMergeReconciliationService(self.uow, project_root=self.project_root)
+                post_merge_service = PostMergeReconciliationService(
+                    self.uow, project_root=self.project_root
+                )
                 post_merge_service.reconcile_post_merge(
                     project_id=saga.project_id,
                     change_name=saga.change_name or saga.work_item_key,
@@ -162,7 +169,9 @@ class RestartRecoveryService:
                 elif saga.saga_type == SagaType.CLOSURE:
                     from minime.services.post_merge_service import PostMergeReconciliationService
 
-                    post_merge_svc = PostMergeReconciliationService(self.uow, project_root=self.project_root)
+                    post_merge_svc = PostMergeReconciliationService(
+                        self.uow, project_root=self.project_root
+                    )
                     post_merge_svc.reconcile_post_merge(
                         project_id=saga.project_id,
                         change_name=saga.change_name or saga.work_item_key,
@@ -176,7 +185,6 @@ class RestartRecoveryService:
 
         self.uow.commit()
         return reconciled
-
 
     def reconcile_orchestration_runs(
         self,
@@ -341,6 +349,7 @@ class RestartRecoveryService:
 
         # 3. Inspect and recover Git locks fail-closed with concrete ownership proof
         from minime.services.worktree_manager import WorktreeManager
+
         wt_manager = WorktreeManager(self.project_root, uow=self.uow)
         try:
             wt_parent = wt_manager.resolve_worktree_parent_dir(job.project_id)
@@ -381,6 +390,7 @@ class RestartRecoveryService:
         from minime.domain.enums import WorkspaceOperation
         from minime.domain.models import WorkspaceMutationRequest
         from minime.services.workspace_guard import ManagedWorkspaceGuard
+
         guard = ManagedWorkspaceGuard(self.uow)
 
         for safe_res in lock_results:
@@ -394,7 +404,9 @@ class RestartRecoveryService:
                 )
                 decision = guard.evaluate_mutation(req)
                 if not decision.allowed:
-                    logger.warning(f"Refusing lock removal at '{lock_file_path}': guard denied mutation: {decision.provider_detail}")
+                    logger.warning(
+                        f"Refusing lock removal at '{lock_file_path}': guard denied mutation: {decision.provider_detail}"
+                    )
                     continue
 
                 lock_file_path.unlink(missing_ok=True)

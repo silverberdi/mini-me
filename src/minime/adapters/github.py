@@ -206,7 +206,9 @@ class GitHubAdapter(GitHubAdapterInterface):
                 return ExternalActionResult(
                     outcome=ExternalOutcome.UNKNOWN,
                     source_adapter="github_rest",
-                    reason_code=ExternalReasonCode.RATE_LIMITED if response.status_code == 429 else ExternalReasonCode.UNOBSERVABLE,
+                    reason_code=ExternalReasonCode.RATE_LIMITED
+                    if response.status_code == 429
+                    else ExternalReasonCode.UNOBSERVABLE,
                     retry_safety=RetrySafety.SAFE,
                     data=False,
                     provider_detail=f"HTTP {response.status_code}",
@@ -322,7 +324,9 @@ class GitHubAdapter(GitHubAdapterInterface):
                 return ExternalActionResult(
                     outcome=ExternalOutcome.UNKNOWN,
                     source_adapter="github_rest",
-                    reason_code=ExternalReasonCode.RATE_LIMITED if response.status_code == 429 else ExternalReasonCode.UNOBSERVABLE,
+                    reason_code=ExternalReasonCode.RATE_LIMITED
+                    if response.status_code == 429
+                    else ExternalReasonCode.UNOBSERVABLE,
                     retry_safety=RetrySafety.SAFE,
                     data=False,
                     provider_detail=f"HTTP {response.status_code}",
@@ -515,7 +519,12 @@ class GitHubAdapter(GitHubAdapterInterface):
                     data=[],
                     provider_detail=stderr,
                 )
-            if "auth" in stderr.lower() or "unauthorized" in stderr.lower() or "401" in stderr or "403" in stderr:
+            if (
+                "auth" in stderr.lower()
+                or "unauthorized" in stderr.lower()
+                or "401" in stderr
+                or "403" in stderr
+            ):
                 return ExternalActionResult(
                     outcome=ExternalOutcome.FAILURE,
                     source_adapter="github_cli",
@@ -570,7 +579,10 @@ class GitHubAdapter(GitHubAdapterInterface):
                     error_message=f"Pre-observation of issues ambiguous for operation_key '{operation_key}': {list_res.error_message}",
                     operation_key=operation_key,
                 )
-            if list_res.outcome == ExternalOutcome.FAILURE and list_res.reason_code == ExternalReasonCode.AUTH_REQUIRED:
+            if (
+                list_res.outcome == ExternalOutcome.FAILURE
+                and list_res.reason_code == ExternalReasonCode.AUTH_REQUIRED
+            ):
                 return ExternalActionResult(
                     outcome=ExternalOutcome.FAILURE,
                     source_adapter="github_rest",
@@ -728,7 +740,10 @@ class GitHubAdapter(GitHubAdapterInterface):
                 error_message=f"Pre-observation of project items ambiguous: {list_res.error_message}",
                 operation_key=operation_key,
             )
-        if list_res.outcome == ExternalOutcome.FAILURE and list_res.reason_code == ExternalReasonCode.AUTH_REQUIRED:
+        if (
+            list_res.outcome == ExternalOutcome.FAILURE
+            and list_res.reason_code == ExternalReasonCode.AUTH_REQUIRED
+        ):
             return ExternalActionResult(
                 outcome=ExternalOutcome.FAILURE,
                 source_adapter="github_cli",
@@ -786,7 +801,12 @@ class GitHubAdapter(GitHubAdapterInterface):
                         operation_key=operation_key,
                     )
             stderr = result.stderr.strip()
-            if "401" in stderr or "403" in stderr or "auth" in stderr.lower() or "unauthorized" in stderr.lower():
+            if (
+                "401" in stderr
+                or "403" in stderr
+                or "auth" in stderr.lower()
+                or "unauthorized" in stderr.lower()
+            ):
                 return ExternalActionResult(
                     outcome=ExternalOutcome.FAILURE,
                     source_adapter="github_cli",
@@ -1008,7 +1028,8 @@ class GitHubAdapter(GitHubAdapterInterface):
                 source_adapter="github_rest",
                 reason_code=ExternalReasonCode.UNOBSERVABLE,
                 retry_safety=RetrySafety.UNKNOWN,
-                error_message=existing.error_message or "PR lookup unobservable; creation POST blocked.",
+                error_message=existing.error_message
+                or "PR lookup unobservable; creation POST blocked.",
             )
         if existing.outcome == ExternalOutcome.AMBIGUOUS:
             return ExternalActionResult(
@@ -1016,9 +1037,13 @@ class GitHubAdapter(GitHubAdapterInterface):
                 source_adapter="github_rest",
                 reason_code=ExternalReasonCode.CONFLICT,
                 retry_safety=RetrySafety.UNKNOWN,
-                error_message=existing.error_message or "Ambiguous PR lookup state; creation POST blocked.",
+                error_message=existing.error_message
+                or "Ambiguous PR lookup state; creation POST blocked.",
             )
-        if existing.outcome != ExternalOutcome.FAILURE or existing.reason_code != ExternalReasonCode.NOT_FOUND:
+        if (
+            existing.outcome != ExternalOutcome.FAILURE
+            or existing.reason_code != ExternalReasonCode.NOT_FOUND
+        ):
             return ExternalActionResult(
                 outcome=ExternalOutcome.UNKNOWN,
                 source_adapter="github_rest",
@@ -1532,7 +1557,9 @@ class GitHubAdapter(GitHubAdapterInterface):
                     for itm in items_res.data:
                         itm_id = str(itm.get("id") or "")
                         if itm_id == str(item_id):
-                            st = str(itm.get("status") or itm.get("fieldValues", {}).get("Status") or "")
+                            st = str(
+                                itm.get("status") or itm.get("fieldValues", {}).get("Status") or ""
+                            )
                             if st.lower() == status.lower() or status.lower() in st.lower():
                                 observed = True
                                 break
@@ -1563,7 +1590,12 @@ class GitHubAdapter(GitHubAdapterInterface):
                     error_message="Project item status update postcondition unobservable after edit command.",
                 )
             stderr = res.stderr.strip()
-            if "401" in stderr or "403" in stderr or "auth" in stderr.lower() or "unauthorized" in stderr.lower():
+            if (
+                "401" in stderr
+                or "403" in stderr
+                or "auth" in stderr.lower()
+                or "unauthorized" in stderr.lower()
+            ):
                 return ExternalActionResult(
                     outcome=ExternalOutcome.FAILURE,
                     source_adapter="github_cli",
@@ -1612,7 +1644,10 @@ class GitHubAdapter(GitHubAdapterInterface):
             if res.status_code == 404:
                 # Require positive ls-remote confirmation under valid authorization
                 head_res = self.get_remote_branch_head(repository, branch, remote)
-                if head_res.outcome == ExternalOutcome.FAILURE and head_res.reason_code == ExternalReasonCode.NOT_FOUND:
+                if (
+                    head_res.outcome == ExternalOutcome.FAILURE
+                    and head_res.reason_code == ExternalReasonCode.NOT_FOUND
+                ):
                     return ExternalActionResult(
                         outcome=ExternalOutcome.SUCCESS,
                         source_adapter="github_rest",
@@ -1620,7 +1655,10 @@ class GitHubAdapter(GitHubAdapterInterface):
                         retry_safety=RetrySafety.UNSAFE,
                         data=True,
                     )
-                if head_res.outcome == ExternalOutcome.FAILURE and head_res.reason_code == ExternalReasonCode.AUTH_REQUIRED:
+                if (
+                    head_res.outcome == ExternalOutcome.FAILURE
+                    and head_res.reason_code == ExternalReasonCode.AUTH_REQUIRED
+                ):
                     return ExternalActionResult(
                         outcome=ExternalOutcome.FAILURE,
                         source_adapter="github_rest",

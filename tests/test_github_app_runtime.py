@@ -217,7 +217,10 @@ def test_issue_validation_rejects_repository_mismatch_and_malformed_fixture():
     }
     res_malformed = GitHubAdapter(auth=_issue_auth(malformed)).validate_issue_binding("o/r", 12)
     assert res_malformed.is_unknown_or_ambiguous or res_malformed.is_failure
-    assert res_malformed.reason_code in (ExternalReasonCode.MALFORMED_RESPONSE, ExternalReasonCode.CONFLICT)
+    assert res_malformed.reason_code in (
+        ExternalReasonCode.MALFORMED_RESPONSE,
+        ExternalReasonCode.CONFLICT,
+    )
 
 
 def test_git_timeout_and_generic_failures_do_not_expose_command_or_chain(monkeypatch, tmp_path):
@@ -396,10 +399,13 @@ def test_readiness_fails_closed_when_issue_validation_returns_false(in_memory_uo
         _ReadinessGitHubStub(result=(False, "Issue repository mismatch")),
     )
     assert not result.is_ready
-    assert any("Issue repository mismatch" in r or "Issue binding" in r for r in result.unmet_reasons)
+    assert any(
+        "Issue repository mismatch" in r or "Issue binding" in r for r in result.unmet_reasons
+    )
 
 
 # Adversarial Unit Tests for Stage B Requirements (Task 15 & Task 16)
+
 
 def test_create_issue_timeout_returns_ambiguous_without_fabricated_defaults(monkeypatch):
     adapter = GitHubAdapter()
@@ -414,6 +420,7 @@ def test_create_issue_timeout_returns_ambiguous_without_fabricated_defaults(monk
             data=[],
         ),
     )
+
     def mock_request(method, path, **kwargs):
         raise httpx.TimeoutException("POST timeout")
 
@@ -431,7 +438,9 @@ def test_close_issue_404_returns_failure_not_found_no_true_fallback():
     class NotFoundAuth:
         _cached = None
         client = httpx.Client(
-            transport=httpx.MockTransport(lambda req: httpx.Response(404, json={"message": "Not Found"})),
+            transport=httpx.MockTransport(
+                lambda req: httpx.Response(404, json={"message": "Not Found"})
+            ),
             base_url="https://api.github.com",
         )
 
@@ -450,7 +459,9 @@ def test_add_issue_to_project_auth_rejection_returns_failure_no_pvti_mock():
     class AuthRejectionAuth:
         _cached = None
         client = httpx.Client(
-            transport=httpx.MockTransport(lambda req: httpx.Response(403, json={"message": "Resource protected"})),
+            transport=httpx.MockTransport(
+                lambda req: httpx.Response(403, json={"message": "Resource protected"})
+            ),
             base_url="https://api.github.com",
         )
 
@@ -459,7 +470,11 @@ def test_add_issue_to_project_auth_rejection_returns_failure_no_pvti_mock():
 
     adapter = GitHubAdapter(auth=AuthRejectionAuth())
     res = adapter.add_issue_to_project(1, "https://github.com/o/r/issues/12", "owner")
-    assert res.outcome in (ExternalOutcome.UNKNOWN, ExternalOutcome.FAILURE, ExternalOutcome.AMBIGUOUS)
+    assert res.outcome in (
+        ExternalOutcome.UNKNOWN,
+        ExternalOutcome.FAILURE,
+        ExternalOutcome.AMBIGUOUS,
+    )
     assert res.data is None
     assert res.external_id != "PVTI_mock_1"
 

@@ -70,7 +70,6 @@ def git(root, *args):
     return subprocess.check_output(["git", *args], cwd=root, text=True).strip()
 
 
-
 def test_real_git_remediation_creates_preserved_next_generation(tmp_path, in_memory_uow):
     setup_managed_repository_fixture(
         in_memory_uow,
@@ -677,7 +676,9 @@ def test_real_git_reconciliation_rejects_wrong_remediation_trailer(tmp_path, in_
     source_sha = git(tmp_path, "rev-parse", "HEAD")
     in_memory_uow.projects.save(Project(project_id="p", display_name="p", repository=str(tmp_path)))
     manager = WorktreeManager(tmp_path, uow=in_memory_uow)
-    in_memory_uow.jobs.save(Job(job_id="job", project_id="p", change_name="change", implementer_role="codex"))
+    in_memory_uow.jobs.save(
+        Job(job_id="job", project_id="p", change_name="change", implementer_role="codex")
+    )
     in_memory_uow.orchestration_runs.save(
         OrchestrationRun(
             run_id="run",
@@ -693,7 +694,9 @@ def test_real_git_reconciliation_rejects_wrong_remediation_trailer(tmp_path, in_
         )
     )
     workspace = asyncio.run(
-        manager.create_remediation_worktree("job", "change", source_sha, 2, project_id="p", run_id="run")
+        manager.create_remediation_worktree(
+            "job", "change", source_sha, 2, project_id="p", run_id="run"
+        )
     )
     (workspace.path / "src").mkdir()
     (workspace.path / "src" / "fix.py").write_text("fixed = True\n", encoding="utf-8")
@@ -825,7 +828,9 @@ def test_real_git_restart_after_candidate_persisted_reuses_exact_result(
     job.candidate_sha = result_sha
     in_memory_uow.jobs.save(job)
     in_memory_uow.orchestration_runs.update_candidate_binding("run", 2, result_sha)
-    ownership = in_memory_uow.orchestration_worktree_ownerships.get_by_canonical_path(str(workspace.path))
+    ownership = in_memory_uow.orchestration_worktree_ownerships.get_by_canonical_path(
+        str(workspace.path)
+    )
     if ownership:
         ownership.source_base_sha = result_sha
         in_memory_uow.orchestration_worktree_ownerships.save(ownership)

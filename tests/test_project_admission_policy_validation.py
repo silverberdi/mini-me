@@ -6,12 +6,8 @@ from pydantic import ValidationError
 from minime.api.app import ProjectCreateRequest, ProjectUpdateRequest, register_project
 from minime.services.project_service import ProjectService
 
-INVALID_POLICIES = [
-    {"max_concurrent_jobs": value} for value in (0, -1, True, 1.5, "2")
-] + [
-    {field: value}
-    for field in ("auto_prepare", "auto_admit")
-    for value in (0, 1, "false")
+INVALID_POLICIES = [{"max_concurrent_jobs": value} for value in (0, -1, True, 1.5, "2")] + [
+    {field: value} for field in ("auto_prepare", "auto_admit") for value in (0, 1, "false")
 ]
 
 
@@ -29,7 +25,6 @@ def test_service_rejects_invalid_policy_without_mutation(in_memory_uow, policy):
     assert project.auto_prepare is True
     assert project.auto_admit is True
     assert project.max_concurrent_jobs == 1
-
 
 
 def test_create_endpoint_preserves_explicit_policy(in_memory_uow):

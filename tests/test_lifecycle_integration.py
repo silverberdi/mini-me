@@ -48,9 +48,7 @@ def _record_event(uow, change_name: str, event_type: EventType) -> None:
 def test_lifecycle_gate_chain_end_to_end(in_memory_uow, tmp_path: Path):
     """Strict-validity -> APPLY -> VERIFY -> sync -> archive -> integrity audit PASS."""
     init_git_repo(tmp_path)
-    create_isolated_openspec_change(
-        tmp_path, "chain-change", tasks_content="- [x] 1.1 Do thing\n"
-    )
+    create_isolated_openspec_change(tmp_path, "chain-change", tasks_content="- [x] 1.1 Do thing\n")
     project = _project()
     in_memory_uow.projects.save(project)
     in_memory_uow.bindings.save(
@@ -65,6 +63,7 @@ def test_lifecycle_gate_chain_end_to_end(in_memory_uow, tmp_path: Path):
     in_memory_uow.changes.save(Change(project_id="mini-me", name="chain-change"))
 
     from conftest import setup_managed_repository_fixture
+
     setup_managed_repository_fixture(
         uow=in_memory_uow,
         project_id="mini-me",
@@ -207,5 +206,3 @@ def test_closed_satisfied_with_lifecycle_and_delivery(in_memory_uow):
     assert result.delivery_complete is True
     assert result.satisfied is True
     assert result.missing_requirements == ()
-
-

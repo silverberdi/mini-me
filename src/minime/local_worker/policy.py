@@ -135,9 +135,7 @@ def decision_as_escalation(
 def assert_no_local_authority(*, authority: str) -> None:
     """Raise if ``authority`` is forbidden for local Qwen (e.g. 'review', 'audit', 'merge')."""
     normalized = authority.strip().lower()
-    if normalized in LOCAL_QWEN_FORBIDDEN_AUTHORITIES or normalized not in {
-        "implement"
-    }:
+    if normalized in LOCAL_QWEN_FORBIDDEN_AUTHORITIES or normalized not in {"implement"}:
         raise PermissionError(
             f"Local Qwen has no '{authority}' authority. It may only implement. "
             "Use the existing provider policy for reviewer/audit/merge/approve gates."

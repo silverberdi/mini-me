@@ -129,7 +129,10 @@ def test_push_branch_verifies_remote_sha(tmp_path, monkeypatch):
         adapter,
         "get_remote_branch_head",
         lambda *a, **k: ExternalActionResult(
-            outcome=ExternalOutcome.SUCCESS, source_adapter="git_cli", data="target_sha_123", reason_code=ExternalReasonCode.EXECUTION_SUCCESS
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="git_cli",
+            data="target_sha_123",
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
         ),
     )
     res_success = adapter.push_branch(str(tmp_path), "origin", "feat", "target_sha_123")
@@ -140,7 +143,10 @@ def test_push_branch_verifies_remote_sha(tmp_path, monkeypatch):
         adapter,
         "get_remote_branch_head",
         lambda *a, **k: ExternalActionResult(
-            outcome=ExternalOutcome.SUCCESS, source_adapter="git_cli", data="different_sha_999", reason_code=ExternalReasonCode.EXECUTION_SUCCESS
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="git_cli",
+            data="different_sha_999",
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
         ),
     )
     res_conflict = adapter.push_branch(str(tmp_path), "origin", "feat", "target_sha_123")
@@ -152,7 +158,9 @@ def test_push_branch_verifies_remote_sha(tmp_path, monkeypatch):
         adapter,
         "get_remote_branch_head",
         lambda *a, **k: ExternalActionResult(
-            outcome=ExternalOutcome.UNKNOWN, source_adapter="git_cli", reason_code=ExternalReasonCode.UNOBSERVABLE
+            outcome=ExternalOutcome.UNKNOWN,
+            source_adapter="git_cli",
+            reason_code=ExternalReasonCode.UNOBSERVABLE,
         ),
     )
     res_ambiguous = adapter.push_branch(str(tmp_path), "origin", "feat", "target_sha_123")

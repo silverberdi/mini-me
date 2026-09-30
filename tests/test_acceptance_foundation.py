@@ -270,6 +270,7 @@ def test_acceptance_runtime_state_outside_openspec(in_memory_uow, tmp_path):
     in_memory_uow.bindings.save(binding)
 
     from conftest import setup_managed_repository_fixture
+
     setup_managed_repository_fixture(
         uow=in_memory_uow,
         project_id="mini-me",

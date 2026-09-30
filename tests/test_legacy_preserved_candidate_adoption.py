@@ -185,7 +185,12 @@ def test_legacy_ref_adoption_validates_real_git_and_continues_resolution(tmp_pat
         "adopted_candidate_ref": ref,
     }
 
-    git(repo, "update-ref", "refs/heads/main", in_memory_uow.orchestration_candidates.get_by_generation(run_id, 2).candidate_sha)
+    git(
+        repo,
+        "update-ref",
+        "refs/heads/main",
+        in_memory_uow.orchestration_candidates.get_by_generation(run_id, 2).candidate_sha,
+    )
     again = service.resolve_preserved_candidate(
         run_id,
         continue_preserved_candidate=True,

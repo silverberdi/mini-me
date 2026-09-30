@@ -114,6 +114,7 @@ def pg_engine() -> Generator[Engine, None, None]:
         pytest.skip("PostgreSQL test database server is not reachable.")
     engine = create_engine(PG_TEST_URL, pool_size=10, max_overflow=20, pool_pre_ping=True)
     from sqlalchemy import text
+
     with engine.connect() as conn:
         conn.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public;"))
         conn.commit()
@@ -139,7 +140,9 @@ class _ExpensiveCountingFake(FakeProviderAdapter):
 def _seed_exhausted_provider(session_factory: sessionmaker[Session], provider: str) -> None:
     with session_factory() as session:
         uow = PostgresPersistenceUnitOfWork(session)
-        p = Project(project_id="test-p", display_name="Test", repository="owner/repo", implementer=provider)
+        p = Project(
+            project_id="test-p", display_name="Test", repository="owner/repo", implementer=provider
+        )
         uow.projects.save(p)
         w = WorkQueueItem(
             project_id="test-p",
@@ -224,8 +227,7 @@ def test_two_sessions_single_expensive_probe_reservation(
         f"exactly one probe must dispatch, got {adapter.probe_call_count}"
     )
     assert all(r is False for r in results), (
-        "every caller must return a truthful False (suppressed/not eligible), got "
-        f"{results}"
+        f"every caller must return a truthful False (suppressed/not eligible), got {results}"
     )
 
     with pg_session_factory() as session:
@@ -236,13 +238,10 @@ def test_two_sessions_single_expensive_probe_reservation(
         assert health.last_probe_at is not None
         assert health.probe_window_started_at is not None
         assert (
-            uow.events.count_events(EventType.PROVIDER_PROBE_EXECUTED.value, provider=provider)
-            == 1
+            uow.events.count_events(EventType.PROVIDER_PROBE_EXECUTED.value, provider=provider) == 1
         )
         assert (
-            uow.events.count_events(
-                EventType.PROVIDER_PROBE_SUPPRESSED.value, provider=provider
-            )
+            uow.events.count_events(EventType.PROVIDER_PROBE_SUPPRESSED.value, provider=provider)
             == 1
         )
 
@@ -281,12 +280,9 @@ def test_multi_worker_expensive_probe_no_oversubscription(
         assert health.probe_window_started_at is not None
         # Suppression evidence is bounded to one event per provider per hour.
         assert (
-            uow.events.count_events(EventType.PROVIDER_PROBE_EXECUTED.value, provider=provider)
-            == 1
+            uow.events.count_events(EventType.PROVIDER_PROBE_EXECUTED.value, provider=provider) == 1
         )
         assert (
-            uow.events.count_events(
-                EventType.PROVIDER_PROBE_SUPPRESSED.value, provider=provider
-            )
+            uow.events.count_events(EventType.PROVIDER_PROBE_SUPPRESSED.value, provider=provider)
             == 1
         )

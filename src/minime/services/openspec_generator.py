@@ -199,11 +199,15 @@ class OpenSpecGenerator:
         """Write the generated OpenSpec change directory and markdown files to disk under authorized MANAGED_REPOSITORY workspace."""
         eff_uow = uow or self.uow
         if not eff_uow or not project_id:
-            raise RuntimeError("OpenSpec write denied: uow and project_id are mandatory for disk mutation.")
+            raise RuntimeError(
+                "OpenSpec write denied: uow and project_id are mandatory for disk mutation."
+            )
 
         # Path confinement check on inputs
         if Path(openspec_path).is_absolute() or ".." in Path(openspec_path).parts:
-            raise RuntimeError(f"OpenSpec write denied: openspec_path '{openspec_path}' fails path confinement check.")
+            raise RuntimeError(
+                f"OpenSpec write denied: openspec_path '{openspec_path}' fails path confinement check."
+            )
         if (
             Path(generated.change_name).is_absolute()
             or ".." in Path(generated.change_name).parts
@@ -354,4 +358,6 @@ class OpenSpecGenerator:
         uow: Any | None = None,
     ) -> Path:
         """Write generated OpenSpec artifacts to disk."""
-        return self.write_change_to_disk(openspec_path, generated, overwrite=overwrite, project_id=project_id, uow=uow)
+        return self.write_change_to_disk(
+            openspec_path, generated, overwrite=overwrite, project_id=project_id, uow=uow
+        )

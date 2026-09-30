@@ -432,9 +432,7 @@ class TestTaskComplexityRiskClassifier:
         classifier = TaskComplexityRiskClassifier()
         snapshot = classifier.classify_post_materialization(
             pre_execution_snapshot=None,
-            diff_file_paths=[
-                f"src/minime/utils/helper_{i}.py" for i in range(20)
-            ],
+            diff_file_paths=[f"src/minime/utils/helper_{i}.py" for i in range(20)],
         )
         assert snapshot.complexity == TaskComplexity.HIGH
         assert snapshot.risk_profile.security_auth_impact == "NONE"
@@ -501,9 +499,7 @@ class TestTaskComplexityRiskClassifier:
         )
         post_snapshot = classifier.classify_post_materialization(
             pre_execution_snapshot=pre_snapshot,
-            diff_file_paths=[
-                f"src/minime/services/mod_{i}.py" for i in range(20)
-            ],
+            diff_file_paths=[f"src/minime/services/mod_{i}.py" for i in range(20)],
         )
         assert post_snapshot.breadth_mismatch_detected is True
         assert post_snapshot.pre_execution_snapshot_id == "pre-1"
@@ -756,9 +752,7 @@ class TestFailClosedEvidence:
     def test_pre_execution_fail_closed_does_not_silently_classify_low(self):
         classifier = TaskComplexityRiskClassifier()
         change = Change(change_id="ch-fc", project_id="p-fc", name="mystery-change")
-        snapshot = classifier.classify_pre_execution(
-            change, tasks=[], proposal_text=None
-        )
+        snapshot = classifier.classify_pre_execution(change, tasks=[], proposal_text=None)
         assert snapshot.complexity == TaskComplexity.UNKNOWN
         assert snapshot.classification_completeness == ClassificationCompleteness.MINIMAL
         assert "no proposal text" in snapshot.missing_signals
@@ -781,9 +775,7 @@ class TestFailClosedEvidence:
         classifier = TaskComplexityRiskClassifier()
         post = classifier.classify_post_materialization(
             pre_execution_snapshot=pre_snapshot,
-            diff_file_paths=[
-                f"src/minime/services/mod_{i}.py" for i in range(20)
-            ],
+            diff_file_paths=[f"src/minime/services/mod_{i}.py" for i in range(20)],
         )
 
         assert pre_snapshot.complexity == original_complexity
