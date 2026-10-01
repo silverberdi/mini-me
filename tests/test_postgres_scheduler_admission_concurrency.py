@@ -510,3 +510,148 @@ def test_f01_b_stale_phase_a_backlog_status_rejection(
         assert item_final is not None
         assert item_final.status == WorkItemStatus.CANCELLED
 
+
+def test_f20_drain_retry_boundary_isolation(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+    """F20: Prove SchedulerService.admit_work_item retry closure performs ONLY DB-safe decision work, and DRAIN resume/coordinator runs OUTSIDE retry wrapper exactly once."""
+    from minime.domain.enums import (
+        AdmissionDecisionKind,
+        OrchestrationStage,
+        OrchestrationStopOutcome,
+        SchedulerMode,
+    )
+    from minime.domain.models import OrchestrationRun
+
+    project_id = "p-f20"
+    change_name = "c-f20"
+    issue_number = 2020
+    run_id = "run-f20"
+
+    _seed_project_and_change(pg_session_factory, project_id, change_name, issue_number, project_root=tmp_path)
+
+    with pg_session_factory() as session:
+        uow = PostgresPersistenceUnitOfWork(session)
+        from decimal import Decimal
+
+        from minime.domain.enums import JobStatus
+        from minime.domain.models import Job, OpenRouterBudgetPolicy
+        proj = uow.projects.get_by_id(project_id)
+        assert proj is not None
+        proj.openrouter_drain_allowed = True
+        uow.projects.save(proj)
+
+        policy = OpenRouterBudgetPolicy(
+            project_id=project_id,
+            enabled=True,
+            daily_cap_usd=Decimal("10.00"),
+            monthly_cap_usd=Decimal("100.00"),
+            currency="USD",
+        )
+        uow.budget_policies.save(policy)
+
+        job = Job(
+            job_id="job-f20",
+            project_id=project_id,
+            change_name=change_name,
+            status=JobStatus.WAITING_CAPACITY,
+            implementer_role="codex",
+            attempt_count=1,
+        )
+        uow.jobs.save(job)
+        # Set both primary providers health to EXHAUSTED to satisfy OpenRouter drain eligibility
+        for p_name in ["codex", "antigravity"]:
+            uow.provider_health.save(
+                ProviderHealth(
+                    health_id=f"ph-{p_name}",
+                    provider=p_name,
+                    status=ProviderHealthStatus.EXHAUSTED,
+                )
+            )
+        # Create an active run in WAITING_CAPACITY state so evaluate_admission returns DRAIN
+        run = OrchestrationRun(
+            run_id=run_id,
+            project_id=project_id,
+            change_name=change_name,
+            base_sha="base20",
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            stop_outcome=OrchestrationStopOutcome.WAITING_CAPACITY,
+            stop_details={"provider": "codex"},
+            active_job_id="job-f20",
+            is_active=True,
+        )
+        uow.orchestration_runs.save(run)
+        uow.commit()
+
+    resume_execution_count = 0
+
+    with pg_session_factory() as session_admit:
+        uow_admit = PostgresPersistenceUnitOfWork(session_admit)
+        scheduler = _make_scheduler(uow_admit, tmp_path)
+        scheduler.mode = SchedulerMode.DRAIN
+
+        def _mock_resume(r_id, project_root=None, drain_mode=False):
+            nonlocal resume_execution_count
+            resume_execution_count += 1
+            r = uow_admit.orchestration_runs.get_by_id(r_id)
+            if r:
+                r.stop_outcome = None
+                uow_admit.orchestration_runs.save(r)
+                uow_admit.commit()
+            return r
+
+        scheduler.orchestration_service.resume = _mock_resume
+
+        # Instrument a synthetic DB 40001 serialization error on the first attempt of _phase_b_body
+        attempts = 0
+        orig_evaluate = scheduler.evaluate_admission
+
+        def _evaluate_with_synthetic_retry(pid, cname, evidence=None):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                class Synthetic40001(Exception):
+                    pass
+                err = Synthetic40001("Synthetic DB serialization failure")
+                err.pgcode = "40001"  # type: ignore
+                raise err
+            return orig_evaluate(pid, cname, evidence=evidence)
+
+        scheduler.evaluate_admission = _evaluate_with_synthetic_retry
+
+        dec, record, run_res = scheduler.admit_work_item(project_id, change_name)
+
+        assert dec == AdmissionDecision.ADMITTED
+        assert record.operational_decision == AdmissionDecisionKind.DRAIN
+        assert attempts == 2, "DB admission decision block must retry exactly once on 40001"
+        assert resume_execution_count == 1, "External resume/coordinator must execute EXACTLY ONCE AFTER retry wrapper succeeds"
+
+    # Part B: Prove a retryable DB exception raised inside downstream coordinator/resume is NOT caught/replayed by admission retry
+    with pg_session_factory() as session_fail:
+        uow_fail = PostgresPersistenceUnitOfWork(session_fail)
+        scheduler_fail = _make_scheduler(uow_fail, tmp_path)
+        scheduler_fail.mode = SchedulerMode.DRAIN
+
+        class Downstream40001(Exception):
+            pass
+
+        def _failing_resume(r_id, project_root=None, drain_mode=False):
+            err = Downstream40001("Downstream coordinator 40001 error")
+            err.pgcode = "40001"  # type: ignore
+            raise err
+
+        scheduler_fail.orchestration_service.resume = _failing_resume
+
+        adm_attempts = 0
+        orig_eval2 = scheduler_fail.evaluate_admission
+
+        def _count_eval(pid, cname, evidence=None):
+            nonlocal adm_attempts
+            adm_attempts += 1
+            return orig_eval2(pid, cname, evidence=evidence)
+
+        scheduler_fail.evaluate_admission = _count_eval
+
+        with pytest.raises(Downstream40001):
+            scheduler_fail.admit_work_item(project_id, change_name)
+
+        assert adm_attempts == 1, "Admission retry wrapper must NOT catch or replay exceptions from downstream coordinator/resume"
+

@@ -270,49 +270,58 @@ def test_t09_provider_probe_contention_serialization(
 
 
 def test_t14_provider_health_stale_writer_protection(pg_session_factory: sessionmaker[Session]):
-    """T14: Prove PostgresProviderHealthRepository protects against stale overwrites using FOR UPDATE and updated_at checks."""
-    from datetime import datetime, timezone
+    """T14 / F14: Prove ProviderHealthService.record_outcome() chronology protection preserves newer T2 truth when delayed T1 observation arrives."""
+    from datetime import timedelta
+
+    from minime.domain.enums import ProviderResultClass, RetrySafety
+    from minime.domain.models import NormalizedProviderResult, utc_now
+    from minime.services.provider_health_service import ProviderHealthService
+
     provider = "codex"
-    t1 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-    t2 = datetime(2026, 1, 1, 12, 5, 0, tzinfo=timezone.utc)
+    base_time = utc_now()
+    t1 = base_time + timedelta(seconds=10)
+    t2 = base_time + timedelta(seconds=20)
 
     with pg_session_factory() as session:
         uow = PostgresPersistenceUnitOfWork(session)
         uow.projects.save(Project(project_id="p-t14", display_name="P14", repository="o/r", implementer=provider))
-        h_initial = ProviderHealth(
-            health_id=f"ph-{provider}",
+        srv = ProviderHealthService(uow)
+        out_init = NormalizedProviderResult(
             provider=provider,
-            status=ProviderHealthStatus.AVAILABLE,
-            updated_at=t1,
+            role="implementer",
+            result_class=ProviderResultClass.SUCCESS,
+            summary="Initial state at base_time",
+            retry_safety=RetrySafety.SAFE,
         )
-        uow.provider_health.save(h_initial)
-        uow.commit()
+        srv.record_outcome(out_init, observed_at=base_time)
 
-    # Session 1: Writes newer health state at T2
-    with pg_session_factory() as session1:
-        uow1 = PostgresPersistenceUnitOfWork(session1)
-        h_newer = ProviderHealth(
-            health_id=f"ph-{provider}",
-            provider=provider,
-            status=ProviderHealthStatus.EXHAUSTED,
-            updated_at=t2,
-        )
-        uow1.provider_health.save(h_newer)
-        uow1.commit()
-
-    # Session 2: Delayed attempt to write older health state at T1 (before T2)
+    # Step 1: Record newer observation at T2 via ProviderHealthService.record_outcome (EXHAUSTED)
     with pg_session_factory() as session2:
         uow2 = PostgresPersistenceUnitOfWork(session2)
-        h_older = ProviderHealth(
-            health_id=f"ph-{provider}",
+        srv2 = ProviderHealthService(uow2)
+        out2 = NormalizedProviderResult(
             provider=provider,
-            status=ProviderHealthStatus.AVAILABLE,
-            updated_at=t1,
+            role="implementer",
+            result_class=ProviderResultClass.QUOTA_LIMIT,
+            summary="Quota limit reached at T2",
+            retry_safety=RetrySafety.SAFE,
         )
-        uow2.provider_health.save(h_older)
-        uow2.commit()
+        srv2.record_outcome(out2, observed_at=t2)
 
-    # Verify persisted state remains the T2 (newer) truth
+    # Step 2: Later invoke record_outcome at T1 < T2 (attempting to set AVAILABLE based on stale T1 observation)
+    with pg_session_factory() as session1:
+        uow1 = PostgresPersistenceUnitOfWork(session1)
+        srv1 = ProviderHealthService(uow1)
+        out1 = NormalizedProviderResult(
+            provider=provider,
+            role="implementer",
+            result_class=ProviderResultClass.SUCCESS,
+            summary="Stale success from T1",
+            retry_safety=RetrySafety.SAFE,
+        )
+        srv1.record_outcome(out1, observed_at=t1)
+
+    # Step 3: Verify persisted state remains the T2 (newer) EXHAUSTED truth
     with pg_session_factory() as session_v:
         uow_v = PostgresPersistenceUnitOfWork(session_v)
         final_h = uow_v.provider_health.get_by_provider(provider)

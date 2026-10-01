@@ -613,13 +613,20 @@ class WorktreeManager:
             )
 
         canonical_path = str(path.resolve())
-        worktree_id = f"wt-{job_id}" if job_id else f"wt-{path.name}"
+        default_worktree_id = f"wt-{job_id}" if job_id else f"wt-{path.name}"
+        existing_by_id = repo.get_by_id(default_worktree_id) if hasattr(repo, "get_by_id") else None
+        if existing_by_id and existing_by_id.canonical_worktree_path != canonical_path:
+            worktree_id = f"wt-{job_id}-{path.name}" if job_id else f"wt-{path.name}"
+        else:
+            worktree_id = default_worktree_id
+
         existing = (
             repo.get_by_canonical_path(canonical_path)
             if hasattr(repo, "get_by_canonical_path")
             else None
         ) or (repo.get_by_id(worktree_id) if hasattr(repo, "get_by_id") else None)
         if existing:
+            existing.canonical_worktree_path = canonical_path
             existing.project_id = project_id
             existing.job_id = job_id
             existing.run_id = eff_run_id
@@ -632,6 +639,10 @@ class WorktreeManager:
             repo.save(existing)
             self._flush_uow()
             return existing
+
+        hook = getattr(self, "_test_pre_ownership_insert_hook", None)
+        if hook is not None:
+            hook()
 
         ownership = OrchestrationWorktreeOwnership(
             worktree_id=worktree_id,

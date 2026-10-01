@@ -285,8 +285,11 @@ def test_t10_candidate_generation_savepoint_recovery(pg_session_factory: session
                 assert run_w is not None and job_w is not None
                 assert uow_w.orchestration_candidates.get_latest_for_run(run_id) is None, "Must observe no candidate generation 1 row before race"
 
-                # Synchronize workers at pre-freeze point so both race _freeze_candidate_if_needed concurrently
-                barrier.wait(timeout=5.0)
+                # Instrument test-only hook AFTER production _freeze_candidate_if_needed has observed generation absent but BEFORE _save_candidate_with_savepoint attempts insert
+                def _pre_insert_hook():
+                    barrier.wait(timeout=5.0)
+
+                orch_srv._test_pre_candidate_freeze_hook = _pre_insert_hook
 
                 cand = orch_srv._freeze_candidate_if_needed(run_w, job_w)
                 uow_w.commit()
@@ -419,8 +422,11 @@ def test_f19_worktree_ownership_savepoint_recovery(pg_session_factory: sessionma
                 mgr = WorktreeManager(project_root=tmp_path, uow=uow)
                 assert uow.orchestration_worktree_ownerships.get_by_canonical_path(str(wt_path.resolve())) is None, "Must observe no ownership row before race"
 
-                # Synchronize workers at pre-insert observation point so both pass initial check before either insert becomes durable
-                barrier.wait(timeout=5.0)
+                # Instrument test-only hook AFTER internal get_by_canonical_path check returns None, BEFORE Pattern A insert
+                def _pre_insert_hook():
+                    barrier.wait(timeout=5.0)
+
+                mgr._test_pre_ownership_insert_hook = _pre_insert_hook
 
                 ow = mgr._persist_pending_ownership(
                     path=wt_path,

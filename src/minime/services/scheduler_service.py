@@ -1230,9 +1230,6 @@ class SchedulerService:
                     self.uow.commit()
                     return AdmissionDecision.REFUSED, decision_record, None
 
-                resumed_run = self.orchestration_service.resume(
-                    run.run_id, project_root=self.project_root, drain_mode=True
-                )
                 decision_record = SchedulerDecisionRecord(
                     project_id=project_id,
                     change_name=change_name,
@@ -1255,7 +1252,7 @@ class SchedulerService:
                 )
                 self.uow.scheduler_decisions.save(decision_record)
                 self.uow.commit()
-                return AdmissionDecision.ADMITTED, decision_record, resumed_run
+                return AdmissionDecision.ADMITTED, decision_record, run
 
             else:
                 if eval_result and eval_result.refusal_details and "code" in eval_result.refusal_details:
@@ -1319,10 +1316,15 @@ class SchedulerService:
             is_coordination_path=True,
             command_identity=f"admit_work_item:{project_id}:{change_name}",
         )
-        if drive_admitted and decision == AdmissionDecision.ADMITTED and run is not None:
-            run = self.orchestration_service.drive_coordinator(
-                run.run_id, project_root=self.project_root
-            )
+        if decision == AdmissionDecision.ADMITTED and run is not None:
+            if decision_record.operational_decision == AdmissionDecisionKind.DRAIN:
+                run = self.orchestration_service.resume(
+                    run.run_id, project_root=self.project_root, drain_mode=True
+                )
+            elif drive_admitted:
+                run = self.orchestration_service.drive_coordinator(
+                    run.run_id, project_root=self.project_root
+                )
         return decision, decision_record, run
 
     def reconcile_waiting_runs(

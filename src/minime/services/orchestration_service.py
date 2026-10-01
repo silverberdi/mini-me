@@ -3463,6 +3463,10 @@ class OrchestrationService:
 
         latest_candidate = self.uow.orchestration_candidates.get_latest_for_run(run.run_id)
         if not latest_candidate:
+            hook = getattr(self, "_test_pre_candidate_freeze_hook", None)
+            if hook is not None:
+                hook()
+
             # Generation 1
             cand = OrchestrationCandidate(
                 run_id=run.run_id,
