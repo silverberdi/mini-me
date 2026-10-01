@@ -564,7 +564,7 @@ def test_f18_resolve_preserved_candidate_concurrency(pg_session_factory: session
         json.dumps({"project_id": "mini-me-f18", "canonical_repository_identity": "github.com/owner/repo"}, indent=2),
         encoding="utf-8",
     )
-    (repo / "shared.txt").write_text("base\n", encoding="utf-8")
+    (repo / "shared.txt").write_text("base A\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
     subprocess.run(["git", "commit", "-m", "base A"], cwd=repo, check=True, capture_output=True)
     base_a = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
@@ -574,9 +574,17 @@ def test_f18_resolve_preserved_candidate_concurrency(pg_session_factory: session
     subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
     subprocess.run(["git", "commit", "-m", "candidate C"], cwd=repo, check=True, capture_output=True)
     cand_sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+
     subprocess.run(["git", "switch", "main"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "update-ref", "refs/remotes/origin/main", base_a], cwd=repo, check=True, capture_output=True)
+    (repo / "shared.txt").write_text("base A + B\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "base B"], cwd=repo, check=True, capture_output=True)
+    base_b = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+
+    subprocess.run(["git", "update-ref", "refs/remotes/origin/main", base_b], cwd=repo, check=True, capture_output=True)
     subprocess.run(["git", "update-ref", "refs/heads/historical-candidate", cand_sha], cwd=repo, check=True, capture_output=True)
+
+    assert base_b != base_a, f"base_b '{base_b}' must be distinct from base_a '{base_a}'"
 
     run_id = "run-f18"
     job_id = "job-f18"
@@ -591,7 +599,7 @@ def test_f18_resolve_preserved_candidate_concurrency(pg_session_factory: session
             repository="owner/repo",
             repo_path=str(repo),
             base_branch="main",
-            checks=[{"name": "valid", "command": "test -f candidate.txt"}],
+            checks=[{"name": "valid", "command": "true"}],
         )
         binding = ProjectManagedRepositoryBinding(
             project_id=proj_id,
@@ -699,16 +707,28 @@ def test_f18_resolve_preserved_candidate_concurrency(pg_session_factory: session
         t2 = threading.Thread(target=worker)
         t1.start()
         t2.start()
-        t1.join()
-        t2.join()
+        t1.join(timeout=10.0)
+        t2.join(timeout=10.0)
 
+        assert not t1.is_alive(), "Worker 1 thread timed out during join"
+        assert not t2.is_alive(), "Worker 2 thread timed out during join"
         assert not exceptions, f"Concurrent resolution raised exceptions: {exceptions}"
 
         with pg_session_factory() as s_ver:
             uow_ver = PostgresPersistenceUnitOfWork(s_ver)
             events = uow_ver.orchestration_stage_events.list_by_run(run_id)
             human_res_events = [e for e in events if e.event_type == EventType.HUMAN_RESOLUTION.value]
-            assert len(human_res_events) == 1
+            assert len(human_res_events) == 1, "Exactly one canonical HUMAN_RESOLUTION authority event must exist"
+
+            latest_cand = uow_ver.orchestration_candidates.get_latest_for_run(run_id)
+            assert latest_cand is not None
+            assert latest_cand.generation == 2, "Candidate generation must advance to 2 for divergent-base integration"
+            assert latest_cand.base_sha == base_b, "Latest candidate base_sha must equal base_b"
+
+            final_job = uow_ver.jobs.get_by_id(job_id)
+            assert final_job is not None
+            assert final_job.base_sha == base_b, "Job base_sha must equal base_b"
+            assert final_job.candidate_sha == latest_cand.candidate_sha, "Job candidate_sha must match latest integrated candidate"
     finally:
         shutil.rmtree(repo, ignore_errors=True)
 
