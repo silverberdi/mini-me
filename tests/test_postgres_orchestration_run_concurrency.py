@@ -272,6 +272,7 @@ def test_t10_candidate_generation_savepoint_recovery(pg_session_factory: session
 
     results: list[Any] = [None, None]  # type: ignore
     exceptions: list[Exception] = []
+    barrier = threading.Barrier(2)
 
     def worker(idx: int):
         try:
@@ -282,6 +283,11 @@ def test_t10_candidate_generation_savepoint_recovery(pg_session_factory: session
                 run_w = uow_w.orchestration_runs.get_by_id(run_id)
                 job_w = uow_w.jobs.get_by_id(job_id)
                 assert run_w is not None and job_w is not None
+                assert uow_w.orchestration_candidates.get_latest_for_run(run_id) is None, "Must observe no candidate generation 1 row before race"
+
+                # Synchronize workers at pre-freeze point so both race _freeze_candidate_if_needed concurrently
+                barrier.wait(timeout=5.0)
+
                 cand = orch_srv._freeze_candidate_if_needed(run_w, job_w)
                 uow_w.commit()
                 results[idx] = cand
@@ -289,18 +295,22 @@ def test_t10_candidate_generation_savepoint_recovery(pg_session_factory: session
             exceptions.append(exc)
 
     t1 = threading.Thread(target=worker, args=(0,))
-    t1.start()
-    t1.join()
-
     t2 = threading.Thread(target=worker, args=(1,))
+    t1.start()
     t2.start()
-    t2.join()
+    t1.join(timeout=5.0)
+    t2.join(timeout=5.0)
+
+    assert not t1.is_alive(), "Worker 1 thread timed out during join"
+    assert not t2.is_alive(), "Worker 2 thread timed out during join"
 
     assert not exceptions, f"Candidate freeze raised exceptions: {exceptions}"
     assert results[0] is not None
     assert results[1] is not None
     assert results[0].generation == 1
     assert results[1].generation == 1
+    assert results[0].candidate_sha == candidate_sha
+    assert results[1].candidate_sha == candidate_sha
 
     with pg_session_factory() as session_v:
         uow_v = PostgresPersistenceUnitOfWork(session_v)
@@ -365,8 +375,8 @@ def test_t11_stage_transition_contention(pg_session_factory: sessionmaker[Sessio
         t2 = threading.Thread(target=worker_b)
         t1.start()
         t2.start()
-        t1.join()
-        t2.join()
+        t1.join(timeout=5.0)
+        t2.join(timeout=5.0)
 
         assert not exceptions, f"Stage transition raised unexpected exceptions: {exceptions}"
 
@@ -399,6 +409,7 @@ def test_f19_worktree_ownership_savepoint_recovery(pg_session_factory: sessionma
 
     results: list[Any] = [None, None]  # type: ignore
     exceptions: list[Exception] = []
+    barrier = threading.Barrier(2)
 
     def worker(idx: int):
         try:
@@ -406,6 +417,11 @@ def test_f19_worktree_ownership_savepoint_recovery(pg_session_factory: sessionma
                 uow = PostgresPersistenceUnitOfWork(s)
                 from minime.services.worktree_manager import WorktreeManager
                 mgr = WorktreeManager(project_root=tmp_path, uow=uow)
+                assert uow.orchestration_worktree_ownerships.get_by_canonical_path(str(wt_path.resolve())) is None, "Must observe no ownership row before race"
+
+                # Synchronize workers at pre-insert observation point so both pass initial check before either insert becomes durable
+                barrier.wait(timeout=5.0)
+
                 ow = mgr._persist_pending_ownership(
                     path=wt_path,
                     project_id=proj_id,
@@ -422,12 +438,14 @@ def test_f19_worktree_ownership_savepoint_recovery(pg_session_factory: sessionma
             exceptions.append(exc)
 
     t1 = threading.Thread(target=worker, args=(0,))
-    t1.start()
-    t1.join()
-
     t2 = threading.Thread(target=worker, args=(1,))
+    t1.start()
     t2.start()
-    t2.join()
+    t1.join(timeout=5.0)
+    t2.join(timeout=5.0)
+
+    assert not t1.is_alive(), "Worker 1 thread timed out during join"
+    assert not t2.is_alive(), "Worker 2 thread timed out during join"
 
     assert not exceptions, f"Concurrent worktree ownership persistence raised exceptions: {exceptions}"
     assert results[0] is not None
@@ -440,6 +458,10 @@ def test_f19_worktree_ownership_savepoint_recovery(pg_session_factory: sessionma
         ownership = uow_v.orchestration_worktree_ownerships.get_by_canonical_path(str(wt_path.resolve()))
         assert ownership is not None
         assert ownership.canonical_worktree_path == str(wt_path.resolve())
+
+        ownerships = uow_v.orchestration_worktree_ownerships.list_by_project(proj_id)
+        matching = [o for o in ownerships if o.canonical_worktree_path == str(wt_path.resolve())]
+        assert len(matching) == 1, "Exactly one durable worktree ownership row must exist for canonical path."
 
 
 def test_t12_job_status_stale_writer(pg_session_factory: sessionmaker[Session]):
