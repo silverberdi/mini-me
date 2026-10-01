@@ -219,65 +219,109 @@ def test_t07_saga_creation_savepoint_recovery(pg_session_factory: sessionmaker[S
 
 
 def test_t10_candidate_generation_savepoint_recovery(pg_session_factory: sessionmaker[Session]):
-    """T10: Prove production candidate generation path uses Pattern A savepoint recovery for uq_orchestration_candidate_generation."""
+    """T10: Prove production candidate freezing path uses Pattern A savepoint recovery for uq_orchestration_candidate_generation."""
+    from minime.domain.models import CandidateAuthorship, CandidateManifest
     run_id = "run-t10"
+    job_id = "job-t10"
+    project_id = "p-t10"
+    change_name = "c-t10"
+    candidate_sha = "cand-sha-t10"
+
     with pg_session_factory() as session:
         uow = PostgresPersistenceUnitOfWork(session)
-        proj = Project(project_id="p-t10", display_name="P10", repository="o/r", base_branch="main")
+        proj = Project(project_id=project_id, display_name="P10", repository="o/r", base_branch="main")
         uow.projects.save(proj)
         run = OrchestrationRun(
             run_id=run_id,
-            project_id="p-t10",
-            change_name="c-t10",
+            project_id=project_id,
+            change_name=change_name,
             base_sha="base-sha",
             current_stage=OrchestrationStage.FREEZING_CANDIDATE,
             current_generation=1,
             is_active=True,
         )
         uow.orchestration_runs.save(run)
-
-        cand1 = OrchestrationCandidate(
-            run_id=run_id,
-            generation=1,
-            base_sha="base-sha",
-            candidate_sha="cand-sha-1",
-            manifest_id=None,
-            manifest_hash="hash1",
-            is_frozen=True,
+        job = Job(
+            job_id=job_id,
+            project_id=project_id,
+            change_name=change_name,
+            status=JobStatus.RUNNING,
+            candidate_sha=candidate_sha,
+            implementer_role="codex",
         )
-        uow.orchestration_candidates.save(cand1)
+        uow.jobs.save(job)
+        manifest = CandidateManifest(
+            manifest_id="man-t10",
+            job_id=job_id,
+            candidate_sha=candidate_sha,
+            manifest_hash="hash-t10",
+            total_files_count=1,
+            file_paths=["file.py"],
+        )
+        uow.candidate_manifests.save(manifest)
+        uow.candidate_authorships.save(
+            CandidateAuthorship(
+                job_id=job_id,
+                agent_role="codex",
+                model_identity="codex-model",
+                attempt_number=1,
+                files_touched=["file.py"],
+            )
+        )
         uow.commit()
 
-    with pg_session_factory() as session2:
-        uow2 = PostgresPersistenceUnitOfWork(session2)
-        from minime.services.orchestration_service import OrchestrationService
-        orch_srv = OrchestrationService(uow2)
-        cand2 = OrchestrationCandidate(
-            run_id=run_id,
-            generation=1,
-            base_sha="base-sha",
-            candidate_sha="cand-sha-2",
-            manifest_id=None,
-            manifest_hash="hash2",
-            is_frozen=True,
-        )
-        saved, recovered = orch_srv._save_candidate_with_savepoint(cand2)
-        assert saved is False
-        assert recovered is not None
-        assert recovered.candidate_sha == "cand-sha-1"
+    results: list[Any] = [None, None]  # type: ignore
+    exceptions: list[Exception] = []
+
+    def worker(idx: int):
+        try:
+            with pg_session_factory() as s:
+                uow_w = PostgresPersistenceUnitOfWork(s)
+                from minime.services.orchestration_service import OrchestrationService
+                orch_srv = OrchestrationService(uow_w)
+                run_w = uow_w.orchestration_runs.get_by_id(run_id)
+                job_w = uow_w.jobs.get_by_id(job_id)
+                assert run_w is not None and job_w is not None
+                cand = orch_srv._freeze_candidate_if_needed(run_w, job_w)
+                uow_w.commit()
+                results[idx] = cand
+        except Exception as exc:
+            exceptions.append(exc)
+
+    t1 = threading.Thread(target=worker, args=(0,))
+    t1.start()
+    t1.join()
+
+    t2 = threading.Thread(target=worker, args=(1,))
+    t2.start()
+    t2.join()
+
+    assert not exceptions, f"Candidate freeze raised exceptions: {exceptions}"
+    assert results[0] is not None
+    assert results[1] is not None
+    assert results[0].generation == 1
+    assert results[1].generation == 1
+
+    with pg_session_factory() as session_v:
+        uow_v = PostgresPersistenceUnitOfWork(session_v)
+        candidates = uow_v.orchestration_candidates.list_by_run(run_id)
+        assert len(candidates) == 1, "Exactly one generation-1 candidate row must persist."
+        assert candidates[0].candidate_sha == candidate_sha
 
 
 def test_t11_stage_transition_contention(pg_session_factory: sessionmaker[Session]):
-    """T11: Prove OrchestrationService._advance_stage uses FOR UPDATE row locking on OrchestrationRun."""
+    """T11: Prove OrchestrationService._advance_stage uses FOR UPDATE row locking and locked DB row authority under concurrent callers."""
     run_id = "run-t11"
+    project_id = "p-t11"
+    change_name = "c-t11"
     with pg_session_factory() as session:
         uow = PostgresPersistenceUnitOfWork(session)
-        proj = Project(project_id="p-t11", display_name="P11", repository="o/r", base_branch="main")
+        proj = Project(project_id=project_id, display_name="P11", repository="o/r", base_branch="main")
         uow.projects.save(proj)
         run = OrchestrationRun(
             run_id=run_id,
-            project_id="p-t11",
-            change_name="c-t11",
+            project_id=project_id,
+            change_name=change_name,
             base_sha="base-sha",
             current_stage=OrchestrationStage.ADMITTED,
             resumable_stage=OrchestrationStage.ADMITTED,
@@ -286,24 +330,59 @@ def test_t11_stage_transition_contention(pg_session_factory: sessionmaker[Sessio
         uow.orchestration_runs.save(run)
         uow.commit()
 
-    with pg_session_factory() as session2:
-        uow2 = PostgresPersistenceUnitOfWork(session2)
+    # Pre-load stale run objects in two separate sessions while stage is ADMITTED
+    with pg_session_factory() as s_a, pg_session_factory() as s_b:
+        uow_a = PostgresPersistenceUnitOfWork(s_a)
+        uow_b = PostgresPersistenceUnitOfWork(s_b)
         from minime.services.orchestration_service import OrchestrationService
-        orch_srv = OrchestrationService(uow2)
-        run = uow2.orchestration_runs.get_by_id(run_id)
-        assert run is not None
-        orch_srv._advance_stage(run, OrchestrationStage.PREPARING_EXECUTION)
-        uow2.commit()
+        orch_srv_a = OrchestrationService(uow_a)
+        orch_srv_b = OrchestrationService(uow_b)
 
-    with pg_session_factory() as session3:
-        uow3 = PostgresPersistenceUnitOfWork(session3)
-        updated_run = uow3.orchestration_runs.get_by_id(run_id)
+        run_a = uow_a.orchestration_runs.get_by_id(run_id)
+        run_b = uow_b.orchestration_runs.get_by_id(run_id)
+        assert run_a is not None and run_b is not None
+        assert run_a.current_stage == OrchestrationStage.ADMITTED
+        assert run_b.current_stage == OrchestrationStage.ADMITTED
+
+        exceptions: list[Exception] = []
+
+        def worker_a():
+            try:
+                orch_srv_a._advance_stage(run_a, OrchestrationStage.PREPARING_EXECUTION, correlation_id="t11-corr")
+                uow_a.commit()
+            except Exception as e:
+                exceptions.append(e)
+
+        def worker_b():
+            try:
+                time.sleep(0.05)
+                orch_srv_b._advance_stage(run_b, OrchestrationStage.PREPARING_EXECUTION, correlation_id="t11-corr")
+                uow_b.commit()
+            except Exception as e:
+                exceptions.append(e)
+
+        t1 = threading.Thread(target=worker_a)
+        t2 = threading.Thread(target=worker_b)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        assert not exceptions, f"Stage transition raised unexpected exceptions: {exceptions}"
+
+    with pg_session_factory() as session_verify:
+        uow_v = PostgresPersistenceUnitOfWork(session_verify)
+        updated_run = uow_v.orchestration_runs.get_by_id(run_id)
         assert updated_run is not None
         assert updated_run.current_stage == OrchestrationStage.PREPARING_EXECUTION
 
+        events = uow_v.orchestration_stage_events.list_by_run(run_id)
+        trans_events = [e for e in events if e.to_stage == OrchestrationStage.PREPARING_EXECUTION]
+        assert len(trans_events) == 1, "Exactly one stage transition event must be saved for idempotent key."
+
 
 def test_f19_worktree_ownership_savepoint_recovery(pg_session_factory: sessionmaker[Session], tmp_path: Path):
-    """F19: Prove WorktreeManager._persist_pending_ownership uses Pattern A savepoint recovery for canonical_worktree_path."""
+    """F19: Prove WorktreeManager._persist_pending_ownership uses Pattern A savepoint recovery for uq_orchestration_worktree_ownership_path on committed conflicts."""
     from minime.domain.models import ProjectBinding, utc_now
     wt_path = tmp_path / "worktree_f19"
     wt_path.mkdir(exist_ok=True)
@@ -319,35 +398,48 @@ def test_f19_worktree_ownership_savepoint_recovery(pg_session_factory: sessionma
         uow.commit()
 
     results: list[Any] = [None, None]  # type: ignore
+    exceptions: list[Exception] = []
 
     def worker(idx: int):
-        with pg_session_factory() as s:
-            uow = PostgresPersistenceUnitOfWork(s)
-            from minime.services.worktree_manager import WorktreeManager
-            mgr = WorktreeManager(project_root=tmp_path, uow=uow)
-            ow = mgr._persist_pending_ownership(
-                path=wt_path,
-                project_id=proj_id,
-                job_id="job-f19",
-                run_id=run_id,
-                change_name="c-f19",
-                source_repository_identity="github.com/owner/repo",
-                source_base_sha="base123",
-                branch="feature/f19",
-            )
-            results[idx] = ow
+        try:
+            with pg_session_factory() as s:
+                uow = PostgresPersistenceUnitOfWork(s)
+                from minime.services.worktree_manager import WorktreeManager
+                mgr = WorktreeManager(project_root=tmp_path, uow=uow)
+                ow = mgr._persist_pending_ownership(
+                    path=wt_path,
+                    project_id=proj_id,
+                    job_id=f"job-f19-{idx}",
+                    run_id=run_id,
+                    change_name="c-f19",
+                    source_repository_identity="github.com/owner/repo",
+                    source_base_sha="base123",
+                    branch="feature/f19",
+                )
+                uow.commit()
+                results[idx] = ow
+        except Exception as exc:
+            exceptions.append(exc)
 
     t1 = threading.Thread(target=worker, args=(0,))
-    t2 = threading.Thread(target=worker, args=(1,))
     t1.start()
-    t2.start()
     t1.join()
+
+    t2 = threading.Thread(target=worker, args=(1,))
+    t2.start()
     t2.join()
 
+    assert not exceptions, f"Concurrent worktree ownership persistence raised exceptions: {exceptions}"
     assert results[0] is not None
     assert results[1] is not None
     assert results[0].canonical_worktree_path == str(wt_path.resolve())
     assert results[1].canonical_worktree_path == str(wt_path.resolve())
+
+    with pg_session_factory() as session_verify:
+        uow_v = PostgresPersistenceUnitOfWork(session_verify)
+        ownership = uow_v.orchestration_worktree_ownerships.get_by_canonical_path(str(wt_path.resolve()))
+        assert ownership is not None
+        assert ownership.canonical_worktree_path == str(wt_path.resolve())
 
 
 def test_t12_job_status_stale_writer(pg_session_factory: sessionmaker[Session]):

@@ -1893,79 +1893,9 @@ class OrchestrationService:
                     )
                     break
 
-                # The execution pipeline generated and persisted the manifest while the
-                # managed worktree existed.  Reuse that exact immutable evidence; never
-                # regenerate it from the finalized (and cleaned) worktree path.
-                manifest = self.uow.candidate_manifests.get_by_candidate_sha(
-                    job.job_id, job.candidate_sha
-                )
-                if not manifest or not manifest.manifest_hash or manifest.total_files_count <= 0:
-                    self._stop_run(
-                        run,
-                        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
-                        human_gate=HumanGate.NEEDS_HUMAN,
-                        stop_reason="Execution pipeline did not persist a non-empty candidate manifest.",
-                        stop_details={
-                            "code": "MISSING_AUTHORITATIVE_MANIFEST",
-                            "candidate_sha": job.candidate_sha,
-                        },
-                    )
+                current_candidate = self._freeze_candidate_if_needed(run, job)
+                if not current_candidate:
                     break
-                head_sha = job.candidate_sha
-                authorships = self.uow.candidate_authorships.list_by_job(job.job_id)
-
-                latest_candidate = self.uow.orchestration_candidates.get_latest_for_run(run.run_id)
-                if not latest_candidate:
-                    # Generation 1
-                    cand = OrchestrationCandidate(
-                        run_id=run.run_id,
-                        generation=1,
-                        base_sha=run.base_sha,
-                        candidate_sha=head_sha,
-                        candidate_ref=f"refs/heads/minime/{run.change_name}-{job.job_id}",
-                        manifest_id=manifest.manifest_id,
-                        manifest_hash=manifest.manifest_hash,
-                        authorship_summary={"authorships_count": len(authorships)},
-                        is_frozen=True,
-                    )
-                    _, cand = self._save_candidate_with_savepoint(cand)
-                    run.current_generation = cand.generation
-                    run.current_candidate_sha = cand.candidate_sha
-                    self.uow.orchestration_runs.update_candidate_binding(
-                        run.run_id, cand.generation, cand.candidate_sha
-                    )
-                else:
-                    if (
-                        latest_candidate.candidate_sha != head_sha
-                        or latest_candidate.manifest_hash != manifest.manifest_hash
-                    ):
-                        # Material remediation -> increment generation
-                        next_gen = latest_candidate.generation + 1
-                        new_cand = OrchestrationCandidate(
-                            run_id=run.run_id,
-                            generation=next_gen,
-                            base_sha=run.base_sha,
-                            candidate_sha=head_sha,
-                            candidate_ref=f"refs/heads/minime/{run.change_name}-{job.job_id}",
-                            manifest_id=manifest.manifest_id,
-                            manifest_hash=manifest.manifest_hash,
-                            authorship_summary={"authorships_count": len(authorships)},
-                            is_frozen=True,
-                        )
-                        _, new_cand = self._save_candidate_with_savepoint(new_cand)
-                        self.uow.orchestration_candidates.supersede(
-                            latest_candidate.candidate_id, new_cand.candidate_id
-                        )
-                        run.current_generation = new_cand.generation
-                        run.current_candidate_sha = new_cand.candidate_sha
-                        self.uow.orchestration_runs.update_candidate_binding(
-                            run.run_id, new_cand.generation, new_cand.candidate_sha
-                        )
-
-                self.uow.commit()
-                current_candidate = self.uow.orchestration_candidates.get_latest_for_run(run.run_id)
-                if current_candidate:
-                    self._bind_current_authority_records(run, job, current_candidate)
 
                 self._advance_stage(run, OrchestrationStage.COMPLEMENTARY_REVIEW)
 
@@ -2927,7 +2857,9 @@ class OrchestrationService:
                 orig_run.stop_reason = locked_run.stop_reason
                 orig_run.stop_details = locked_run.stop_details
                 orig_run.is_active = locked_run.is_active
-                orig_run.updated_at = locked_run.updated_at
+        if from_stage == to_stage:
+            _sync_orig()
+            return
 
         allowed = ALLOWED_STAGE_TRANSITIONS.get(from_stage, set())
         if to_stage not in allowed:
@@ -3505,6 +3437,83 @@ class OrchestrationService:
                     timestamp=utc_now(),
                 )
             )
+
+    def _freeze_candidate_if_needed(
+        self, run: OrchestrationRun, job: Job
+    ) -> OrchestrationCandidate | None:
+        """Freeze candidate in current generation using Pattern A savepoint conflict recovery."""
+        manifest = self.uow.candidate_manifests.get_by_candidate_sha(
+            job.job_id, job.candidate_sha
+        )
+        if not manifest or not manifest.manifest_hash or manifest.total_files_count <= 0:
+            self._stop_run(
+                run,
+                stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+                human_gate=HumanGate.NEEDS_HUMAN,
+                stop_reason="Execution pipeline did not persist a non-empty candidate manifest.",
+                stop_details={
+                    "code": "MISSING_AUTHORITATIVE_MANIFEST",
+                    "candidate_sha": job.candidate_sha,
+                },
+            )
+            return None
+
+        head_sha = job.candidate_sha
+        authorships = self.uow.candidate_authorships.list_by_job(job.job_id)
+
+        latest_candidate = self.uow.orchestration_candidates.get_latest_for_run(run.run_id)
+        if not latest_candidate:
+            # Generation 1
+            cand = OrchestrationCandidate(
+                run_id=run.run_id,
+                generation=1,
+                base_sha=run.base_sha,
+                candidate_sha=head_sha,
+                candidate_ref=f"refs/heads/minime/{run.change_name}-{job.job_id}",
+                manifest_id=manifest.manifest_id,
+                manifest_hash=manifest.manifest_hash,
+                authorship_summary={"authorships_count": len(authorships)},
+                is_frozen=True,
+            )
+            _, cand = self._save_candidate_with_savepoint(cand)
+            run.current_generation = cand.generation
+            run.current_candidate_sha = cand.candidate_sha
+            self.uow.orchestration_runs.update_candidate_binding(
+                run.run_id, cand.generation, cand.candidate_sha
+            )
+        else:
+            if (
+                latest_candidate.candidate_sha != head_sha
+                or latest_candidate.manifest_hash != manifest.manifest_hash
+            ):
+                # Material remediation -> increment generation
+                next_gen = latest_candidate.generation + 1
+                new_cand = OrchestrationCandidate(
+                    run_id=run.run_id,
+                    generation=next_gen,
+                    base_sha=run.base_sha,
+                    candidate_sha=head_sha,
+                    candidate_ref=f"refs/heads/minime/{run.change_name}-{job.job_id}",
+                    manifest_id=manifest.manifest_id,
+                    manifest_hash=manifest.manifest_hash,
+                    authorship_summary={"authorships_count": len(authorships)},
+                    is_frozen=True,
+                )
+                _, new_cand = self._save_candidate_with_savepoint(new_cand)
+                self.uow.orchestration_candidates.supersede(
+                    latest_candidate.candidate_id, new_cand.candidate_id
+                )
+                run.current_generation = new_cand.generation
+                run.current_candidate_sha = new_cand.candidate_sha
+                self.uow.orchestration_runs.update_candidate_binding(
+                    run.run_id, new_cand.generation, new_cand.candidate_sha
+                )
+
+        self.uow.commit()
+        current_candidate = self.uow.orchestration_candidates.get_latest_for_run(run.run_id)
+        if current_candidate:
+            self._bind_current_authority_records(run, job, current_candidate)
+        return current_candidate
 
     def _save_candidate_with_savepoint(
         self, candidate: OrchestrationCandidate

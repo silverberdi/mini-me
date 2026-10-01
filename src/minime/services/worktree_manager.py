@@ -613,7 +613,7 @@ class WorktreeManager:
             )
 
         canonical_path = str(path.resolve())
-        worktree_id = f"wt-{path.name}"
+        worktree_id = f"wt-{job_id}" if job_id else f"wt-{path.name}"
         existing = (
             repo.get_by_canonical_path(canonical_path)
             if hasattr(repo, "get_by_canonical_path")
@@ -658,12 +658,7 @@ class WorktreeManager:
             saved, recovery_res = execute_with_savepoint_recovery(
                 session=session,
                 save_fn=lambda: repo.save(ownership),
-                constraint_name=(
-                    "uq_orchestration_worktree_ownership_canonical_path",
-                    "ix_owo_canonical_worktree_path",
-                    "orchestration_worktree_ownerships_canonical_worktree_path_key",
-                    "canonical_worktree_path",
-                ),
+                constraint_name="uq_orchestration_worktree_ownership_path",
                 recovery_fn=_recovery_on_ownership_conflict,
             )
             if not saved and recovery_res is not None:
