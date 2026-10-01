@@ -2,60 +2,63 @@
 
 ## Context
 
-Stage F closed the transaction/concurrency boundary for fresh admission and command mutation. Stage G now converges autonomous scheduling, daemon startup recovery, waiting-state recovery, saga recovery, post-merge reconciliation, and active-run continuation so they all resume work from durable truth without duplicate execution or parallel recovery authorities.
+Stage F closed fresh-admission and command-side transaction/concurrency authority. Stage G converges autonomous scheduling, daemon startup recovery, direct continuation commands, waiting-state recovery, durable saga recovery, post-merge reconciliation, and repeated ticks so all continuation paths resolve from the same durable truth.
 
-Canonical base: `15e55c515ae917c2f0330809f0d9e44d49bce12b`
-
-Branch: `architecture/scheduler-and-recovery-convergence`
-
-OpenSpec change: `scheduler-and-recovery-convergence`
+- Canonical base: `15e55c515ae917c2f0330809f0d9e44d49bce12b`
+- Branch: `architecture/scheduler-and-recovery-convergence`
+- OpenSpec change: `scheduler-and-recovery-convergence`
 
 ## Problem
 
-The current repository contains multiple overlapping recovery paths:
+The current repository has several partially-overlapping continuation/recovery authorities:
 
-- `RestartRecoveryService.reconcile_on_startup()` scans active jobs, active runs, and durable sagas.
+- `RestartRecoveryService.reconcile_on_startup()` scans and mutates Jobs, Runs, and durable sagas.
 - Startup saga recovery directly invokes `IntakeService.prepare_work_item()` and `PostMergeReconciliationService.reconcile_post_merge()`.
 - Startup run recovery may directly invoke `OrchestrationService.resume()`.
-- Every `SchedulerService.tick()` independently performs post-merge reconciliation, waiting-run recovery, queued-run driving, intake sweep, discovery, and fresh admission.
-- `scheduler-capacity-policy-convergence` is already fully implemented but remains an active OpenSpec change, creating overlapping scheduler contract authority.
+- `SchedulerService.tick()` independently reconciles post-merge state, waiting runs, queued active runs, intake, discovery, and fresh admission.
+- Direct API/CLI/control-plane CONTINUE/RESUME/RETRY paths can invoke continuation semantics outside startup/tick recovery.
+- Existing external-action rows may be RESERVED, EXECUTING, COMPLETED, FAILED, UNKNOWN, or AMBIGUOUS and require status-specific observe/repeat rules.
+- A Stage F row lock protects short DB mutations but does not by itself prevent two processes from sequentially acquiring the lock and both performing slow Git/GitHub/provider work after the lock is released.
+- `scheduler-capacity-policy-convergence` is already delivered but remains an active overlapping OpenSpec contract.
 
-These mechanisms can individually be valid while still failing to converge as one deterministic recovery model across restart, repeated ticks, concurrent scheduler processes, and partial external effects.
+Stage G must therefore solve both **logical convergence** and **cross-process continuation ownership**.
 
 ## Stage G Exit Requirement
 
-> Repeated startup recovery and scheduler ticks converge to one durable next action per work item/run without guessing success, replaying completed work, bypassing Stage F admission, or duplicating external side effects.
+> Repeated startup recovery, periodic ticks, and direct continuation commands converge to one durable next action per identity without guessing success, replaying completed work, bypassing Stage F admission, resurrecting terminal execution, or duplicating external effects.
 
 ## What Changes
 
-1. Establish one canonical recovery planner/driver used by daemon startup and periodic scheduler ticks.
-2. Enforce recovery-before-fresh-admission ordering.
-3. Resume orchestration only from persisted safe checkpoints.
-4. Route saga recovery through durable saga authority instead of direct service bypasses.
-5. Route ambiguous external actions through observe-before-repeat semantics.
-6. Preserve terminal dominance and fail closed when evidence is unavailable or contradictory.
-7. Ensure waiting-capacity recovery is based on verified provider truth only.
-8. Ensure post-merge continuation uses canonical closure saga / post-merge authority exactly once.
-9. Preserve Stage F transaction, row-lock, advisory-lock, and retry guarantees.
-10. Produce durable recovery decisions/events sufficient to explain what was resumed, deferred, blocked, or adopted.
-11. Treat the already-delivered `scheduler-capacity-policy-convergence` contract as satisfied predecessor behavior and remove duplicate active contractual ownership during Stage G closure.
+1. Introduce one canonical `RecoveryConvergenceService` for startup, tick, and direct continuation requests.
+2. Introduce a durable `RecoveryClaim` lease/fencing mechanism for slow continuation ownership.
+3. Introduce a durable `RecoveryDecision` record with one decision per recovery cycle/identity.
+4. Require recovery-before-fresh-admission ordering.
+5. Route active-run, waiting-run, queued-run, API/CLI resume, control-plane continue/retry, and post-merge triggers through the canonical authority.
+6. Route intake/closure recovery through durable SagaEngine checkpoints.
+7. Define status-specific observe-before-repeat semantics for every nonterminal ExternalActionStatus.
+8. Preserve safe candidate/check/review/audit checkpoints and never infer success from interruption.
+9. Distinguish temporary unobservability (WAITING_EXTERNAL) from contradictory evidence (NEEDS_HUMAN).
+10. Define terminal-parent behavior: terminal execution never resumes, while already-authorized closure/cleanup may finish without reopening lifecycle.
+11. Preserve Stage F row locks/advisory locks/savepoints/retry boundaries inside short DB transactions.
+12. Preserve Stage B/D action identity and mutation authorization around every slow external effect.
+13. Preserve delivered scheduler capacity semantics as predecessor behavior and remove duplicate active contractual ownership only at Stage G closure.
 
 ## Non-Goals
 
 - No deployment.
 - Do not enable `minime-scheduler.service`.
-- No provider/model capability-selection redesign.
-- No dynamic routing or scoring.
+- No provider/model routing or capability selection.
+- No scoring redesign.
 - No unrelated UI redesign.
-- No Stage H documentation-wide convergence beyond Stage G-owned overlap cleanup.
-- No change to human merge authority.
+- No automated merge.
+- No broad Stage H documentation cleanup beyond Stage G-owned overlap.
+- Do not replace Stages A–F authority.
 
 ## Preservation
 
-Stages A–F remain authoritative. In particular:
-- lifecycle transitions remain Stage A single-writer controlled;
-- external effects remain Stage B/D observable/idempotent/resumable;
-- runtime/worktree isolation remains Stage C;
-- intake/closure sagas remain Stage D durable authorities;
-- query paths remain Stage E pure;
-- fresh admission and concurrent command mutation remain Stage F serialized.
+- Stage A remains the only lifecycle-transition writer.
+- Stage B/D remain the authority for external action identity, observation, and authorized repeat.
+- Stage C remains authority for managed workspace/lock safety.
+- Stage D remains authority for durable intake and closure sagas.
+- Stage E query paths remain side-effect-free.
+- Stage F remains sole fresh-admission authority and final DB concurrency authority for short transactions.

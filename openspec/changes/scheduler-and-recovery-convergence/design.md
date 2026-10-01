@@ -1,134 +1,271 @@
 # Design: Stage G — Scheduler and Recovery Convergence
 
 ## Canonical Base
+
 `15e55c515ae917c2f0330809f0d9e44d49bce12b`
 
 ## Existing Reality
 
-The current daemon already calls `RestartRecoveryService.reconcile_on_startup()` before entering its loop. However, recovery authority is distributed:
+Recovery exists but authority is split across `RestartRecoveryService`, `SchedulerService.tick()`, `OrchestrationService.resume()`, control-plane actions, saga helpers, and post-merge reconciliation. The current code can therefore classify the same durable identity from more than one entry point.
 
-1. `RestartRecoveryService.reconcile_on_startup()`
-   - scans active jobs;
-   - scans active runs;
-   - resumes durable sagas;
-   - may call `OrchestrationService.resume()`.
-2. `RestartRecoveryService.reconcile_durable_sagas()`
-   - directly calls `IntakeService.prepare_work_item()` and `PostMergeReconciliationService.reconcile_post_merge()`.
-3. `SchedulerService.tick()`
-   - reconciles post-merge runs;
-   - reconciles waiting runs;
-   - drives queued active runs;
-   - sweeps intake;
-   - discovers work;
-   - evaluates fresh admission.
-4. Stage F now guarantees fresh admission serialization, but it intentionally did not define scheduler/recovery ordering.
+Stage F row locks serialize short state transitions. They intentionally do not solve ownership of a long continuation after the DB lock is released. Stage G adds that missing durable ownership layer without holding PostgreSQL locks during slow I/O.
 
-The problem is therefore not “missing recovery”; it is multiple partially-overlapping recovery authorities.
+## Architectural Laws G1–G10
 
-## Architectural Laws G1–G7
+- **G1 Durable State First:** every mutating recovery decision re-reads canonical durable state.
+- **G2 One Canonical Recovery Authority:** startup, tick, API/CLI resume, control-plane continue/retry, waiting wake-up, queued-run drive, and post-merge continuation delegate to one convergence authority.
+- **G3 Durable Continuation Ownership:** any slow mutating continuation requires a durable recovery claim/fence.
+- **G4 Observe Before Repeat:** a claim never authorizes blind replay of an external effect.
+- **G5 Checkpoint Preservation:** committed candidate-bound checks/review/audit evidence survives restart.
+- **G6 Recovery Before Admission:** interrupted/continuable work is converged before fresh READY admission.
+- **G7 No Lock Across Slow I/O:** DB row/advisory locks are held only in bounded transactions, never around Git/GitHub/provider/subprocess waits.
+- **G8 Terminal Dominance:** terminal execution cannot be resurrected; closure-only convergence may finish strictly within its existing durable saga.
+- **G9 Fenced Result Application:** a worker whose claim token is stale may not advance Run/Job/Saga lifecycle.
+- **G10 External Ambiguity Is Stronger Than Lease Expiry:** an expired recovery claim never makes an unresolved external mutation safe to repeat.
 
-- **G1 — Durable State First:** recovery decisions are authorized only after re-reading canonical durable state.
-- **G2 — One Recovery Decision Per Identity:** one run/job/saga has one recovery decision authority per cycle.
-- **G3 — Observe Before Repeat:** external mutation is never repeated until ambiguity is reconciled.
-- **G4 — Checkpoint Preservation:** committed candidate-bound evidence is never discarded merely due to restart.
-- **G5 — Recovery Before Admission:** interrupted in-flight work is classified before new READY work is admitted.
-- **G6 — Concurrency Preservation:** recovery commands reuse Stage F row locks, savepoints, and retry boundaries; no process-local singleton assumption is correctness-critical.
-- **G7 — Terminal Dominance:** terminal Change/Backlog/Run/Saga state cannot be resurrected by startup or periodic recovery.
+## Canonical Recovery Service
 
-## Proposed Service Boundary
+Introduce `RecoveryConvergenceService` as the only public continuation/recovery authority.
 
-Introduce a canonical `RecoveryConvergenceService` (name may be adjusted if an existing service can be safely elevated) responsible for planning and dispatching recovery.
-
-It SHALL expose conceptually:
+Conceptual entry points:
 
 - `reconcile_cycle(project_id=None, source=STARTUP|TICK)`
-- `reconcile_run(run_id)`
-- `reconcile_saga(saga_id)`
-- `reconcile_waiting_run(run_id)`
+- `request_run_continuation(run_id, source, requested_action=None)`
+- `reconcile_saga(saga_id, source)`
+- `reconcile_action(action_key, source)`
 
-The service does not become a new lifecycle writer. It delegates lifecycle transitions to existing authorities.
+`RestartRecoveryService` becomes a restart-evidence helper for process interruption and Git-lock inspection, not an orchestration driver.
 
-`RestartRecoveryService` becomes a specialized adapter/helper for restart-specific evidence such as interrupted process classification and Git lock inspection, not an independent orchestration authority.
+Low-level methods such as `OrchestrationService.resume()`, `drive_coordinator()`, `SagaEngine.resume_saga()`, and `PostMergeReconciliationService.reconcile_post_merge()` remain implementation primitives but must not be reachable as public bypasses without a validated recovery claim context when they can drive slow mutation.
 
-`SchedulerService.tick()` delegates recovery convergence rather than duplicating post-merge/waiting/queued-run continuation logic.
+## Durable Recovery Claim / Fence
 
-## Canonical Tick Order
+Stage G introduces PostgreSQL `recovery_claims`.
 
-1. Capture existing provider/external truth required for fail-closed decisions.
-2. Execute recovery convergence for active/non-terminal durable work.
-3. Reconcile closure and waiting continuations through canonical authorities.
-4. Perform autonomous intake preparation sweep.
-5. Discover/project queue truth.
-6. Rank candidate projections.
-7. Fresh admission only through Stage F `admit_work_item()`.
-8. Persist decision/recovery observability.
-9. Return.
+### Identity
 
-Fresh admission pre-counts may be retained as optimization only; they are never authority.
+Canonical `claim_key`:
+
+- orchestration/run continuation, waiting wake-up, queued-run drive, post-merge continuation, closure saga bound to a run, and direct operator resume/retry: `run:<run_id>`
+- intake saga before a run exists: `intake:<project_id>:<work_item_key>`
+- orphan/non-run job only if no run identity exists: `job:<job_id>`
+
+External actions do not get an independent competing claim when a parent run/saga claim exists; they execute under the parent claim plus their Stage B/D `action_key`.
+
+### Schema
+
+`RecoveryClaim` SHALL contain at least:
+
+- `claim_key` UNIQUE / primary identity
+- `fence_token BIGINT NOT NULL`, monotonic per claim key
+- `owner_instance_id UUID/string NOT NULL`
+- `claimed_at`
+- `heartbeat_at`
+- `lease_expires_at`
+- `released_at` nullable
+- `last_decision_id` nullable
+
+### Lease Policy
+
+- Default lease: 60 seconds, configuration-backed (not hidden magic).
+- Heartbeat interval: 15 seconds, and MUST remain strictly less than one-third of lease duration if configuration changes.
+- Claim acquisition/reacquisition happens in a short DB transaction.
+- Existing unexpired claim owned by another instance => no continuation; classify as `NO_ACTION/CLAIMED_ELSEWHERE`.
+- Released or expired claim may be reacquired by atomically incrementing `fence_token`.
+- Expiry only transfers planning/driver ownership. It does **not** authorize repeating any unresolved external effect.
+
+### Acquisition Transaction
+
+1. begin transaction;
+2. select claim row FOR UPDATE (or insert if absent);
+3. re-read canonical Run/Job/Saga and terminal state;
+4. reconcile whether an unresolved external action/attempt blocks mutation;
+5. create/update RecoveryDecision;
+6. atomically acquire claim and increment fence when permitted;
+7. commit;
+8. perform slow observation/external work outside DB locks.
+
+Before every external mutation dispatch and before applying its result, the worker SHALL perform a short claim validation transaction proving the same `claim_key + fence_token + owner_instance_id` is current.
+
+If the fence is stale, the worker SHALL NOT advance Run/Job/Saga. Any remote result may only be persisted through monotonic action/evidence reconciliation, after which the current owner adopts it.
+
+### Crash / Lease Expiry
+
+A successor may acquire an expired claim, but MUST first classify in-flight provider/external work:
+
+- resolvable external action => observe and adopt/retry under Stage B/D rules;
+- provider invocation with committed completion => adopt checkpoint;
+- provider invocation interrupted with no verifiable completion => unfinished/WAITING_EXTERNAL or NEEDS_HUMAN according to existing outcome evidence; never infer success or blindly re-dispatch merely because the lease expired.
+
+## Durable Recovery Decision
+
+Introduce PostgreSQL `recovery_decisions`.
+
+Minimum fields:
+
+- `decision_id UUID`
+- `cycle_id UUID`
+- `claim_key`
+- `identity_type`
+- `identity_id`
+- `project_id`, `change_name` where applicable
+- `source` (STARTUP/TICK/API/CLI/TUI/CONTROL_PLANE)
+- `prior_checkpoint` JSON
+- `observation_refs` JSON
+- `classification`
+- `planned_action`
+- `fence_token` nullable
+- `status` (PLANNED/CLAIMED/EXECUTING/COMPLETED/BLOCKED/NO_ACTION)
+- `result_payload` / `reason_code`
+- timestamps
+
+Unique invariant: `UNIQUE(cycle_id, claim_key)`.
+
+The recovery claim prevents cross-cycle concurrent driving; the unique decision record prevents duplicate decision authority inside one cycle.
 
 ## Recovery Classification
 
-Each recoverable identity resolves to one of:
+- `NO_ACTION`
+- `CLAIMED_ELSEWHERE`
+- `RESUME_SAFE_CHECKPOINT`
+- `ADOPT_OBSERVED_EFFECT`
+- `WAITING_CAPACITY`
+- `WAITING_EXTERNAL`
+- `NEEDS_HUMAN`
+- `TERMINAL_EXECUTION_BLOCKED`
+- `CLOSURE_ONLY_CONTINUATION`
 
-- `NO_ACTION`: already converged.
-- `RESUME_SAFE_CHECKPOINT`: exactly one safe continuation exists.
-- `ADOPT_OBSERVED_EFFECT`: external effect already happened and is verified.
-- `WAITING_CAPACITY`: provider truth proves a temporary capacity block.
-- `WAITING_EXTERNAL`: required external evidence is temporarily unobservable.
-- `NEEDS_HUMAN`: evidence is contradictory, structurally invalid, or unsafe.
-- `TERMINAL_DOMINATES`: parent lifecycle is terminal; no execution continuation allowed.
+These are recovery classifications and need not become lifecycle enums.
 
-These are recovery classifications, not new lifecycle enums unless existing domain types cannot represent them cleanly.
+## External Action Status Matrix
 
-## Surface Audit
+Every Stage B/D action is evaluated by `action_key` and action-specific observation/postcondition.
 
-| ID | Surface | Current Behavior | Stage G Requirement |
+| Existing status | Required Stage G behavior |
+|---|---|
+| `COMPLETED` | adopt canonical result; never repeat mutation |
+| `RESERVED` | before first/recovered dispatch, observe postcondition when action is observable; if effect exists adopt COMPLETED; if conclusively absent, dispatch only under current recovery claim; if unobservable => WAITING_EXTERNAL |
+| `EXECUTING` | assume mutation may have occurred; observe before any repeat; success => COMPLETED/adopt; conclusively absent + existing Stage B/D retry authorization => repeat allowed; otherwise wait/human |
+| `FAILED` | repeat only when failure evidence proves effect absent AND `original_mutation_retry_authorized=True`; otherwise preserve failure/human classification |
+| `UNKNOWN` | mandatory observation; observed success => COMPLETED; proven absent + explicit retry authorization => authorized repeat; unobservable => WAITING_EXTERNAL; contradiction => NEEDS_HUMAN |
+| `AMBIGUOUS` | mandatory observation with same outcomes as UNKNOWN; never auto-repeat merely because time/lease elapsed |
+
+No recovery code may interpret reservation existence alone as permission to execute. Existing reservations are identities to reconcile, not invitations to rerun.
+
+## Direct Entry-Point Migration
+
+The following mutating continuation entry points SHALL route through `RecoveryConvergenceService` or be made internal claim-requiring primitives:
+
+1. daemon startup recovery;
+2. periodic `SchedulerService.tick()`;
+3. `OrchestrationService.resume()`;
+4. direct `drive_coordinator()` recovery/queued-run invocation;
+5. REST orchestration resume endpoint;
+6. CLI orchestration resume/retry paths;
+7. `ControlPlaneService` CONTINUE/RESUME/RETRY;
+8. scheduler DRAIN continuation;
+9. WAITING_CAPACITY wake-up;
+10. WAITING_EXTERNAL continuation;
+11. operator `RECONCILE_POST_MERGE`;
+12. scheduler post-merge polling/reconciliation.
+
+Read-only status and query paths remain outside this command authority.
+
+## Terminal Parent / Closure Rules
+
+### DONE / COMPLETED parent
+
+- execution implementation/review/audit must never resume;
+- an already-existing closure saga bound to the verified merge may continue only from its durable closure checkpoint;
+- closure continuation may finish spec/archive/Issue/Project/worktree cleanup and final evidence, but may not create a fresh Run/Job or move Change/Backlog to a nonterminal state.
+
+### CANCELLED parent
+
+- no execution resume;
+- no new closure saga based on an unmerged PR;
+- only bounded cleanup already authorized by durable ownership/action identity may proceed;
+- cleanup must not infer merge/closure success.
+
+### PR closed unmerged
+
+- classify as not merged;
+- do not enter merged closure phases;
+- any branch/worktree/project cleanup is a separate idempotent cleanup action with durable action identity;
+- lifecycle cancellation requests go through Stage A authority;
+- repeated startup/tick/control-plane calls adopt existing cleanup records and do not re-run destructive cleanup blindly.
+
+## Canonical Tick / Startup Order
+
+1. capture provider/external observation inputs needed for fail-closed planning;
+2. create recovery cycle;
+3. classify/claim/reconcile active Runs/Jobs/Sagas;
+4. converge waiting/external/post-merge/cleanup continuations;
+5. release/complete claims as appropriate;
+6. autonomous intake preparation;
+7. discovery/queue projection;
+8. fresh admission only through Stage F `SchedulerService.admit_work_item()`;
+9. persist scheduler decisions and recovery observability.
+
+Pre-counts are optimization only.
+
+## Surface Audit G01–G20
+
+| ID | Surface | Current state | Stage G requirement |
 |---|---|---|---|
-| G01 | daemon startup | restart recovery runs before loop | preserve, route through canonical recovery cycle |
-| G02 | periodic tick recovery | post-merge/waiting/queued recovery embedded in tick | delegate to same recovery authority |
-| G03 | active job interruption | resets using checkpoint heuristics | bind decision to durable candidate/evidence and fail closed on ambiguity |
-| G04 | active run recovery | may call `resume()` directly | locked canonical re-read + unique safe continuation |
-| G05 | intake saga recovery | direct `prepare_work_item()` call | resume via SagaEngine durable phase/checkpoint |
-| G06 | closure saga recovery | direct post-merge call | resume/adopt through closure saga authority |
-| G07 | external actions | AMBIGUOUS currently broadly blocks human | observe-before-repeat; WAITING_EXTERNAL when merely unobservable, NEEDS_HUMAN when contradictory |
-| G08 | waiting capacity | tick independently resumes | canonical verified provider truth + locked resume |
-| G09 | queued active runs | tick directly drives coordinator | canonical recovery classification then locked continuation |
-| G10 | post-merge runs | every tick polls/reconciles | closure convergence authority, idempotent adoption |
-| G11 | fresh admission ordering | same tick mixes recovery and admission | recovery convergence before fresh admission |
-| G12 | repeated tick/restart | multiple recovery paths may overlap | idempotent no-duplicate convergence |
-| G13 | concurrent scheduler processes | no singleton correctness guarantee | Stage F DB concurrency remains final authority |
-| G14 | Git lock recovery | strong Stage C ownership proof exists | preserve unchanged, expose through convergence result |
-| G15 | recovery observability | events exist but no single decision envelope | durable correlated recovery decision/evidence |
-| G16 | entry-point parity | CLI/API/TUI/daemon all reach tick but startup differs | one canonical semantics for recovery + scheduling |
+| G01 | daemon startup | separate RestartRecoveryService authority | delegate canonical cycle |
+| G02 | periodic tick | embeds multiple recovery paths | delegate canonical cycle |
+| G03 | interrupted Job checkpoints | partial candidate/check preservation | complete candidate/check/review/audit checkpoint mapping |
+| G04 | active Run recovery | unlocked enumeration + direct resume | claim + locked re-read + fenced continuation |
+| G05 | intake saga | direct prepare_work_item | SagaEngine checkpoint resume under intake claim |
+| G06 | closure saga | direct reconcile_post_merge | durable closure checkpoint under run claim |
+| G07 | external ambiguity | broad human escalation / direct resume gap | full action-status observation matrix |
+| G08 | WAITING_CAPACITY | independent stale-data wake-up | claim + verified health + locked re-read |
+| G09 | queued active Run | direct drive_coordinator | claim + canonical classification |
+| G10 | post-merge | every tick may drive closure | run claim + closure saga + action reconciliation |
+| G11 | recovery-before-admission ordering | substantially present | preserve and make contractual |
+| G12 | repeated startup/tick | can overlap | durable claim + no-op convergence |
+| G13 | concurrent scheduler processes | Stage F only protects fresh admission | durable recovery claim/fence |
+| G14 | Git lock recovery | Stage C proof exists | preserve and include in decision envelope |
+| G15 | observability | unconstrained events | durable RecoveryDecision invariant |
+| G16 | entry-point parity | startup/direct resume differ | canonical service |
+| G17 | direct CONTINUE/RESUME/RETRY | public/control-plane bypasses | canonical claim-required route |
+| G18 | nonterminal ExternalAction statuses | inconsistent repeat boundaries | complete status matrix |
+| G19 | PR closed unmerged / cleanup | cleanup/lifecycle can bypass closure saga semantics | terminal/cleanup rules + action identity |
+| G20 | slow-I/O ownership gap | row lock ends before external work | lease/fence + heartbeat + pre-dispatch/result validation |
 
-## Transaction Rules
+## Transaction / I/O Rules
 
-- Do not hold DB locks around long provider/GitHub/Git subprocess operations.
-- Prepare external observations outside lock where necessary.
-- Acquire row lock, re-read canonical state, verify observation still applies, then persist decision.
-- External mutation uses Stage B/D reservation/observe-before-repeat.
-- Recovery retry never wraps an unreserved external side effect.
+- Never keep row/advisory locks open while waiting on Git/GitHub/provider/subprocess I/O.
+- Claim acquisition and decision persistence are short DB transactions.
+- Slow I/O occurs after claim commit.
+- External mutation requires durable action reservation/identity before call.
+- Before external mutation dispatch, validate current fence.
+- After external result, validate fence before advancing Run/Job/Saga.
+- TransactionRetryWrapper must not wrap unreserved external side effects.
 - Fresh admission remains Stage F-owned.
 
-## Test Strategy
+## Required Adversarial Evidence
 
-Mandatory evidence shall include:
+Real PostgreSQL tests SHALL prove:
 
-- real PostgreSQL multi-session restart/tick contention on same run;
-- repeated recovery no-op proof;
-- interrupted job checkpoint preservation;
-- ambiguous external action observable-adopt / unavailable-wait / contradictory-human cases;
-- intake saga resume from non-zero checkpoint without duplicated external action;
-- closure saga resume/adopt after observed merge;
-- waiting capacity recovery only after verified health;
-- terminal parent prevents recovery resurrection;
-- recovery-before-admission ordering;
-- two scheduler processes cannot double-drive continuation;
-- daemon/CLI/API/TUI parity at canonical decision layer;
-- Stage A–F regression suite.
+1. startup vs tick contention for same run => one claim/token drives;
+2. tick vs direct API/control-plane resume => one driver;
+3. expired claim increments fence; stale owner cannot apply lifecycle result;
+4. no DB lock remains held during intentionally blocked slow external I/O;
+5. repeated cycle with unchanged truth => no duplicate transitions/actions/provider calls;
+6. existing RESERVED/EXECUTING/FAILED/UNKNOWN/AMBIGUOUS actions follow the table above;
+7. pre-existing reservation does not itself cause duplicate Issue/Project/spec/worktree/branch mutation;
+8. WAITING_EXTERNAL direct resume observes before clearing;
+9. intake saga resumes from non-zero checkpoint;
+10. closure saga resumes/adopts observed merge exactly once;
+11. PR closed unmerged never enters merged closure and cleanup is idempotent;
+12. candidate + checks + review + audit checkpoints are preserved;
+13. terminal parent cannot restart execution;
+14. waiting capacity requires verified provider truth;
+15. recovery completes/classifies before fresh admission;
+16. CLI/API/TUI/daemon/control-plane entry-point parity at canonical decision layer;
+17. Stage A–F targeted regressions plus full suite after focused proving.
 
 ## OpenSpec Overlap
 
-`scheduler-capacity-policy-convergence` is fully checked off and its delivered behavior is treated as a predecessor. Stage G shall preserve that behavior and, at archive/closure time, remove the stale active duplicate contract so scheduler convergence has one active owner.
-
-Other unrelated active changes are not folded into Stage G.
+`scheduler-capacity-policy-convergence` is an already-delivered predecessor. Stage G preserves its four-decision capacity semantics and safe-pair behavior. At Stage G closure the stale active contract is archived/resolved without reimplementation.
