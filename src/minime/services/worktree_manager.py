@@ -210,6 +210,15 @@ class WorktreeManager:
                     pass
         return None
 
+    def _flush_uow(self) -> None:
+        if not self.uow:
+            return
+        flush_fn = getattr(self.uow, "flush", None)
+        if callable(flush_fn):
+            flush_fn()
+        elif hasattr(self.uow, "commit") and callable(getattr(self.uow, "commit", None)):
+            self.uow.commit()
+
     def resolve_worktree_parent_dir(self, project_id: str | None) -> Path:
         if not project_id:
             raise ValueError("project_id is mandatory to resolve worktree parent directory.")
@@ -281,7 +290,7 @@ class WorktreeManager:
                 started_at=utc_now(),
             )
             self.uow.git_operations.save(git_op)
-            self.uow.commit()
+            self._flush_uow()
 
         proc = await asyncio.create_subprocess_exec(
             "git",
@@ -294,7 +303,7 @@ class WorktreeManager:
         if git_op and self.uow and proc.pid:
             git_op.pid = proc.pid
             self.uow.git_operations.save(git_op)
-            self.uow.commit()
+            self._flush_uow()
 
         stdout, stderr = await proc.communicate()
         success = proc.returncode == 0
@@ -306,7 +315,7 @@ class WorktreeManager:
                 new_status,
                 completed_at=utc_now(),
             )
-            self.uow.commit()
+            self._flush_uow()
 
         if not success:
             raise RuntimeError(stderr.decode().strip() or stdout.decode().strip())
@@ -604,13 +613,20 @@ class WorktreeManager:
             )
 
         canonical_path = str(path.resolve())
-        worktree_id = f"wt-{path.name}"
+        default_worktree_id = f"wt-{job_id}" if job_id else f"wt-{path.name}"
+        existing_by_id = repo.get_by_id(default_worktree_id) if hasattr(repo, "get_by_id") else None
+        if existing_by_id and existing_by_id.canonical_worktree_path != canonical_path:
+            worktree_id = f"wt-{job_id}-{path.name}" if job_id else f"wt-{path.name}"
+        else:
+            worktree_id = default_worktree_id
+
         existing = (
             repo.get_by_canonical_path(canonical_path)
             if hasattr(repo, "get_by_canonical_path")
             else None
         ) or (repo.get_by_id(worktree_id) if hasattr(repo, "get_by_id") else None)
         if existing:
+            existing.canonical_worktree_path = canonical_path
             existing.project_id = project_id
             existing.job_id = job_id
             existing.run_id = eff_run_id
@@ -621,8 +637,12 @@ class WorktreeManager:
             existing.creation_state = WorktreeCreationState.PENDING
             existing.updated_at = utc_now()
             repo.save(existing)
-            self.uow.commit()
+            self._flush_uow()
             return existing
+
+        hook = getattr(self, "_test_pre_ownership_insert_hook", None)
+        if hook is not None:
+            hook()
 
         ownership = OrchestrationWorktreeOwnership(
             worktree_id=worktree_id,
@@ -638,8 +658,26 @@ class WorktreeManager:
             created_at=utc_now(),
             updated_at=utc_now(),
         )
-        repo.save(ownership)
-        self.uow.commit()
+
+        from minime.db.savepoint import execute_with_savepoint_recovery
+
+        def _recovery_on_ownership_conflict() -> OrchestrationWorktreeOwnership | None:
+            return repo.get_by_canonical_path(canonical_path)
+
+        session = getattr(self.uow, "session", None)
+        if session is not None and hasattr(session, "begin_nested"):
+            saved, recovery_res = execute_with_savepoint_recovery(
+                session=session,
+                save_fn=lambda: repo.save(ownership),
+                constraint_name="uq_orchestration_worktree_ownership_path",
+                recovery_fn=_recovery_on_ownership_conflict,
+            )
+            if not saved and recovery_res is not None:
+                return recovery_res
+        else:
+            repo.save(ownership)
+
+        self._flush_uow()
 
         durable = repo.get_by_id(ownership.worktree_id) or repo.get_by_canonical_path(
             canonical_path
@@ -938,7 +976,7 @@ class WorktreeManager:
         ownership.creation_state = WorktreeCreationState.CREATED
         ownership.updated_at = utc_now()
         repo.save(ownership)
-        self.uow.commit()
+        self._flush_uow()
 
     async def create_remediation_worktree(
         self,
@@ -1945,7 +1983,7 @@ class WorktreeManager:
         ownership.creation_state = WorktreeCreationState.DELETING
         ownership.updated_at = utc_now()
         ownership_repo.save(ownership)
-        self.uow.commit()
+        self._flush_uow()
 
         # Remove git worktree
         await self._git(
@@ -1969,7 +2007,7 @@ class WorktreeManager:
         ownership.creation_state = WorktreeCreationState.DELETED
         ownership.updated_at = utc_now()
         ownership_repo.save(ownership)
-        self.uow.commit()
+        self._flush_uow()
 
         return WorktreeCleanupResult(
             outcome=ExternalOutcome.SUCCESS,
@@ -2111,7 +2149,7 @@ class WorktreeManager:
             ownership.creation_state = WorktreeCreationState.DELETING
             ownership.updated_at = utc_now()
             ownership_repo.save(ownership)
-            self.uow.commit()
+            self._flush_uow()
 
             try:
                 await self._git(
@@ -2158,7 +2196,7 @@ class WorktreeManager:
         ownership.creation_state = WorktreeCreationState.DELETED
         ownership.updated_at = utc_now()
         ownership_repo.save(ownership)
-        self.uow.commit()
+        self._flush_uow()
 
         if not dir_exists and not wt_in_git:
             return WorktreeCleanupResult(

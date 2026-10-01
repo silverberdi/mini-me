@@ -1507,6 +1507,9 @@ class ProjectManagedRepositoryBindingModel(Base):
 
 class OrchestrationWorktreeOwnershipModel(Base):
     __tablename__ = "orchestration_worktree_ownerships"
+    __table_args__ = (
+        UniqueConstraint("canonical_worktree_path", name="uq_orchestration_worktree_ownership_path"),
+    )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     project_id: Mapped[str] = mapped_column(
@@ -1516,7 +1519,7 @@ class OrchestrationWorktreeOwnershipModel(Base):
     run_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     change_name: Mapped[str] = mapped_column(String(128), nullable=False)
     canonical_worktree_path: Mapped[str] = mapped_column(
-        String(512), nullable=False, unique=True, index=True
+        String(512), nullable=False, index=True
     )
     source_repository_identity: Mapped[str] = mapped_column(String(255), nullable=False)
     source_base_sha: Mapped[str] = mapped_column(String(64), nullable=False)

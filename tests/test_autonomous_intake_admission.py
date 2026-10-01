@@ -11,6 +11,7 @@ from tests.conftest import InMemoryPersistenceUnitOfWork, setup_managed_reposito
 from minime.domain.enums import (
     AdmissionDecision,
     AdmissionRefusalCode,
+    ChangeStatus,
     ExternalOutcome,
     ExternalReasonCode,
     OrchestrationStage,
@@ -24,6 +25,7 @@ from minime.domain.enums import (
 from minime.domain.models import (
     BacklogItem,
     CapacityWindow,
+    Change,
     ExternalActionResult,
     OrchestrationRun,
     Project,
@@ -265,9 +267,20 @@ def test_auto_admit_single_concurrency_deterministic_selection(
 ) -> None:
     """Verify scheduler auto-admits the highest priority item when max_concurrent_jobs = 1."""
     repo_dir = tmp_path / "sched-repo"
-    repo_dir.mkdir()
+    from conftest import create_isolated_openspec_change, setup_managed_repository_fixture
+
+    setup_managed_repository_fixture(
+        uow=in_memory_uow,
+        project_id="sched-project",
+        repo_root=repo_dir,
+        worktree_parent_dir=repo_dir / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/sched-repo",
+    )
+    create_isolated_openspec_change(repo_dir, "item-normal")
+    create_isolated_openspec_change(repo_dir, "item-critical")
 
     project = Project(
+
         project_id="sched-project",
         display_name="Sched Project",
         repository="silverberdi/sched-repo",
@@ -303,6 +316,16 @@ def test_auto_admit_single_concurrency_deterministic_selection(
             updated_at=now,
         )
     )
+    from minime.domain.enums import ChangeStatus
+    from minime.domain.models import Change
+
+    in_memory_uow.changes.save(
+        Change(project_id="sched-project", name="item-normal", status=ChangeStatus.READY)
+    )
+    in_memory_uow.changes.save(
+        Change(project_id="sched-project", name="item-critical", status=ChangeStatus.READY)
+    )
+
     in_memory_uow.bindings.save(
         ProjectBinding(
             project_id="sched-project",
@@ -373,9 +396,11 @@ def test_auto_admit_single_concurrency_deterministic_selection(
     mock_orch.admit_change.return_value = MagicMock(admitted=True, run=mock_run)
 
     mock_readiness = MagicMock()
-    mock_readiness.evaluate_change_readiness.return_value = MagicMock(
+    readiness_mock_ret = MagicMock(
         is_ready=True, status=ReadinessState.READY, unmet_reasons=[]
     )
+    mock_readiness.evaluate_change_readiness.return_value = readiness_mock_ret
+    mock_readiness.evaluate_and_persist_change_readiness.return_value = readiness_mock_ret
 
     scheduler = SchedulerService(
         in_memory_uow,
@@ -385,12 +410,13 @@ def test_auto_admit_single_concurrency_deterministic_selection(
         max_global_jobs=1,
     )
 
-    # Tick scheduler
     decisions = scheduler.tick()
 
     # Verify item-critical was evaluated first and admitted
     admitted = [d for d in decisions if d.decision == AdmissionDecision.ADMITTED]
     assert len(admitted) == 1
+
+
     assert admitted[0].change_name == "item-critical"
 
     # Verify item-normal was refused due to concurrency limit
@@ -408,9 +434,19 @@ def test_primary_provider_unavailable_waiting_prevents_drain(
 ) -> None:
     """Verify that when primary implementer is exhausted, work waits and OpenRouter is NOT used as starter."""
     repo_dir = tmp_path / "exhausted-repo"
-    repo_dir.mkdir()
+    from conftest import create_isolated_openspec_change, setup_managed_repository_fixture
+
+    setup_managed_repository_fixture(
+        uow=in_memory_uow,
+        project_id="exhausted-project",
+        repo_root=repo_dir,
+        worktree_parent_dir=repo_dir / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/exhausted-repo",
+    )
+    create_isolated_openspec_change(repo_dir, "item-waiting")
 
     project = Project(
+
         project_id="exhausted-project",
         display_name="Exhausted Project",
         repository="silverberdi/exhausted-repo",
@@ -457,6 +493,10 @@ def test_primary_provider_unavailable_waiting_prevents_drain(
             updated_at=now,
         )
     )
+    in_memory_uow.changes.save(
+        Change(project_id="exhausted-project", name="item-waiting", status=ChangeStatus.READY)
+    )
+
     in_memory_uow.bindings.save(
         ProjectBinding(
             project_id="exhausted-project",
@@ -479,9 +519,11 @@ def test_primary_provider_unavailable_waiting_prevents_drain(
     )
 
     mock_readiness = MagicMock()
-    mock_readiness.evaluate_change_readiness.return_value = MagicMock(
+    readiness_mock_ret = MagicMock(
         is_ready=True, status=ReadinessState.READY, unmet_reasons=[]
     )
+    mock_readiness.evaluate_change_readiness.return_value = readiness_mock_ret
+    mock_readiness.evaluate_and_persist_change_readiness.return_value = readiness_mock_ret
 
     scheduler = SchedulerService(
         in_memory_uow,

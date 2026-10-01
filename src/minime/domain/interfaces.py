@@ -335,6 +335,7 @@ class ProviderHealthRepositoryInterface(ABC):
         result_class: str | None = None,
         error_summary: str | None = None,
         consecutive_failures: int | None = None,
+        observation_timestamp: datetime | None = None,
     ) -> ProviderHealth: ...
 
 
@@ -396,6 +397,10 @@ class BudgetReservationRepositoryInterface(ABC):
 
     @abstractmethod
     def get_by_id(self, reservation_id: str) -> BudgetReservation | None: ...
+
+    def get_by_id_for_update(self, reservation_id: str) -> BudgetReservation | None:
+        return self.get_by_id(reservation_id)
+
 
     @abstractmethod
     def list_by_project(self, project_id: str) -> list[BudgetReservation]: ...
@@ -497,6 +502,10 @@ class OrchestrationRunRepositoryInterface(ABC):
 
     @abstractmethod
     def get_by_id(self, run_id: str) -> OrchestrationRun | None: ...
+
+    def get_for_update(self, run_id: str) -> OrchestrationRun | None:
+        return self.get_by_id(run_id)
+
 
     @abstractmethod
     def get_active_run(self, project_id: str, change_name: str) -> OrchestrationRun | None: ...
@@ -780,8 +789,17 @@ class PersistenceUnitOfWork(ABC):
     @abstractmethod
     def commit(self) -> None: ...
 
+    def flush(self) -> None:
+        """Flush pending changes to the underlying storage without committing transaction."""
+        pass
+
     @abstractmethod
     def rollback(self) -> None: ...
+
+    def acquire_advisory_lock(self, key: int, lock_timeout: str = "2s") -> None:
+        """Acquire a transaction-scoped PostgreSQL 64-bit advisory lock."""
+        pass
+
 
 
 class ProviderEfficiencyMetricsRepositoryInterface(ABC):

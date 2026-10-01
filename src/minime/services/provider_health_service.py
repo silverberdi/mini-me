@@ -159,11 +159,12 @@ class ProviderHealthService:
     def record_outcome(
         self,
         outcome: NormalizedProviderResult,
+        observed_at: datetime | None = None,
     ) -> ProviderHealth:
         """Record an operation outcome and update health/capacity states accordingly."""
         self._validate_primary(outcome.provider)
         current = self.get_health(outcome.provider)
-        now = utc_now()
+        now = observed_at or utc_now()
         prev_status = current.status
 
         if outcome.result_class == ProviderResultClass.SUCCESS:
@@ -174,6 +175,7 @@ class ProviderHealthService:
                 result_class=outcome.result_class.value,
                 error_summary=outcome.summary,
                 consecutive_failures=0,
+                observation_timestamp=now,
             )
             if prev_status != ProviderHealthStatus.AVAILABLE:
                 self.uow.events.save(
@@ -207,6 +209,7 @@ class ProviderHealthService:
                 result_class=outcome.result_class.value,
                 error_summary=outcome.summary,
                 consecutive_failures=current.consecutive_failures + 1,
+                observation_timestamp=now,
             )
 
             # Record capacity window
@@ -260,6 +263,7 @@ class ProviderHealthService:
                 result_class=outcome.result_class.value,
                 error_summary=outcome.summary,
                 consecutive_failures=current.consecutive_failures + 1,
+                observation_timestamp=now,
             )
             self.uow.events.save(
                 Event(
@@ -289,6 +293,7 @@ class ProviderHealthService:
                 result_class=outcome.result_class.value,
                 error_summary=outcome.summary,
                 consecutive_failures=new_failures,
+                observation_timestamp=now,
             )
             self.uow.events.save(
                 Event(

@@ -1134,6 +1134,8 @@ class AdmissionEvaluationResult(BaseModel):
     evidence_complete: bool = True
     legacy_decision: AdmissionDecision = AdmissionDecision.REFUSED
     legacy_refusal_code: AdmissionRefusalCode | None = None
+    refusal_details: dict[str, Any] = Field(default_factory=dict)
+
 
     def __iter__(self):
         return iter(
@@ -1174,6 +1176,7 @@ class SchedulerDecisionRecord(BaseModel):
     cooldown_until: datetime | None = None
     concurrency_snapshot: dict[str, Any] = Field(default_factory=dict)
     capacity_snapshot: dict[str, Any] = Field(default_factory=dict)
+    refusal_details: dict[str, Any] = Field(default_factory=dict)
     run_id: str | None = None
     evaluated_at: datetime = Field(default_factory=utc_now)
 

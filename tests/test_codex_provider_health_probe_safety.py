@@ -1,3 +1,4 @@
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -6,12 +7,13 @@ from minime.adapters.provider_adapter import CodexProviderAdapter
 from minime.domain.enums import (
     AdmissionBlockCondition,
     AdmissionDecisionKind,
+    ChangeStatus,
     ProviderHealthStatus,
     ProviderResultClass,
     QueuePriority,
     ReadinessState,
 )
-from minime.domain.models import Project, ProjectBinding, WorkQueueItem
+from minime.domain.models import Change, Project, ProjectBinding, WorkQueueItem
 from minime.services.provider_health_service import ProviderHealthService
 from minime.services.scheduler_service import SchedulerService
 
@@ -153,9 +155,18 @@ async def test_expensive_probe_runs_when_actionable_ready_work_exists(in_memory_
 
 
 @pytest.mark.asyncio
-async def test_auth_401_transitions_health_to_auth_required(in_memory_uow):
+async def test_auth_401_transitions_health_to_auth_required(in_memory_uow, tmp_path: Path):
     """Verify HTTP 401 / token_expired transitions health to AUTH_REQUIRED and yields NEEDS_HUMAN."""
+    from conftest import setup_managed_repository_fixture
+    setup_managed_repository_fixture(
+        uow=in_memory_uow,
+        project_id="mini-me",
+        repo_root=tmp_path,
+        worktree_parent_dir=tmp_path / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+    )
     svc = ProviderHealthService(uow=in_memory_uow)
+
 
     in_memory_uow.projects.save(
         Project(
@@ -165,6 +176,17 @@ async def test_auth_401_transitions_health_to_auth_required(in_memory_uow):
             base_branch="main",
             implementer="codex",
             reviewer="antigravity",
+        )
+    )
+
+    from minime.domain.enums import ChangeStatus
+    from minime.domain.models import Change
+
+    in_memory_uow.changes.save(
+        Change(
+            project_id="mini-me",
+            name="001-ready-task",
+            status=ChangeStatus.READY,
         )
     )
 
@@ -220,25 +242,36 @@ async def test_auth_401_transitions_health_to_auth_required(in_memory_uow):
 
     # Verify Scheduler admission yields NEEDS_HUMAN with block_condition AUTH_REQUIRED
     mock_readiness = MagicMock()
-    mock_readiness.evaluate_change_readiness.return_value = MagicMock(
-        is_ready=True, unmet_reasons=[]
-    )
+    readiness_mock_ret = MagicMock(is_ready=True, unmet_reasons=[])
+    mock_readiness.evaluate_change_readiness.return_value = readiness_mock_ret
+    mock_readiness.evaluate_and_persist_change_readiness.return_value = readiness_mock_ret
     scheduler = SchedulerService(
         uow=in_memory_uow,
+        project_root=tmp_path,
         provider_health_service=svc,
         readiness_service=mock_readiness,
     )
     eval_res = scheduler.evaluate_admission("mini-me", "001-ready-task")
-
     assert eval_res.decision == AdmissionDecisionKind.NEEDS_HUMAN
+
+
     assert eval_res.block_condition == AdmissionBlockCondition.AUTH_REQUIRED
     assert "credentials missing or invalid" in eval_res.rationale.lower()
 
 
 @pytest.mark.asyncio
-async def test_subsequent_tick_bypasses_probing_when_auth_required(in_memory_uow):
+async def test_subsequent_tick_bypasses_probing_when_auth_required(in_memory_uow, tmp_path: Path):
     """Regression test: AUTH_REQUIRED is terminal for automatic probing; subsequent ticks do NOT dispatch paid probes."""
+    from conftest import setup_managed_repository_fixture
+    setup_managed_repository_fixture(
+        uow=in_memory_uow,
+        project_id="mini-me",
+        repo_root=tmp_path,
+        worktree_parent_dir=tmp_path / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+    )
     svc = ProviderHealthService(uow=in_memory_uow)
+
 
     in_memory_uow.projects.save(
         Project(
@@ -248,6 +281,14 @@ async def test_subsequent_tick_bypasses_probing_when_auth_required(in_memory_uow
             base_branch="main",
             implementer="codex",
             reviewer="antigravity",
+        )
+    )
+
+    in_memory_uow.changes.save(
+        Change(
+            project_id="mini-me",
+            name="001-ready-task",
+            status=ChangeStatus.READY,
         )
     )
 
@@ -326,14 +367,16 @@ async def test_subsequent_tick_bypasses_probing_when_auth_required(in_memory_uow
 
         # - Scheduler admission remains NEEDS_HUMAN / AUTH_REQUIRED
         mock_readiness = MagicMock()
-        mock_readiness.evaluate_change_readiness.return_value = MagicMock(
-            is_ready=True, unmet_reasons=[]
-        )
+        readiness_mock_ret = MagicMock(is_ready=True, unmet_reasons=[])
+        mock_readiness.evaluate_change_readiness.return_value = readiness_mock_ret
+        mock_readiness.evaluate_and_persist_change_readiness.return_value = readiness_mock_ret
         scheduler = SchedulerService(
             uow=in_memory_uow,
+            project_root=tmp_path,
             provider_health_service=svc,
             readiness_service=mock_readiness,
         )
+
         eval_res = scheduler.evaluate_admission("mini-me", "001-ready-task")
         assert eval_res.decision == AdmissionDecisionKind.NEEDS_HUMAN
         assert eval_res.block_condition == AdmissionBlockCondition.AUTH_REQUIRED

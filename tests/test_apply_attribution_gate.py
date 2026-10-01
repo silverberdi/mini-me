@@ -221,6 +221,8 @@ def test_admission_blocks_predating_implementation_commit(in_memory_uow, tmp_pat
 
     admission = _service(in_memory_uow, tmp_path).admit_change("mini-me", "drift-admit", tmp_path)
     assert admission.admitted is False
+
+
     assert admission.refusal_details["code"] == "LIFECYCLE_DRIFT"
     assert in_memory_uow.orchestration_runs.list_runs() == []
 
