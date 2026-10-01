@@ -1,4 +1,8 @@
-# Delta Specification: Transaction and Concurrency Contract
+# transaction-and-concurrency-contract Specification
+
+## Purpose
+
+Establish a process-independent, PostgreSQL-authoritative transaction and concurrency model for command execution so concurrent admission and command mutations cannot create duplicate active execution, violate configured concurrency limits, replay external side effects, or overwrite newer durable state.
 
 ## Requirements
 
