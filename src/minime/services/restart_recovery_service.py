@@ -111,37 +111,19 @@ class RestartRecoveryService:
                 continue
 
             if is_terminal and saga.saga_type == SagaType.CLOSURE:
-                from minime.services.post_merge_service import PostMergeReconciliationService
-
-                post_merge_service = PostMergeReconciliationService(
+                convergence_svc = RecoveryConvergenceService(
                     self.uow, project_root=self.project_root
                 )
-                post_merge_service.reconcile_post_merge(
-                    project_id=saga.project_id,
-                    change_name=saga.change_name or saga.work_item_key,
-                    run_id=saga.run_id,
-                )
+                convergence_svc.reconcile_saga(saga.id, source=RecoverySource.STARTUP)
                 updated = self.uow.durable_sagas.get_by_id(saga.id) or saga
                 reconciled.append(updated)
                 continue
 
             try:
-                if saga.saga_type == SagaType.INTAKE:
-                    from minime.services.intake_service import IntakeService
-
-                    intake_svc = IntakeService(self.uow, project_root=self.project_root)
-                    intake_svc.prepare_work_item(saga.project_id, saga.work_item_key)
-                elif saga.saga_type == SagaType.CLOSURE:
-                    from minime.services.post_merge_service import PostMergeReconciliationService
-
-                    post_merge_svc = PostMergeReconciliationService(
-                        self.uow, project_root=self.project_root
-                    )
-                    post_merge_svc.reconcile_post_merge(
-                        project_id=saga.project_id,
-                        change_name=saga.change_name or saga.work_item_key,
-                        run_id=saga.run_id,
-                    )
+                convergence_svc = RecoveryConvergenceService(
+                    self.uow, project_root=self.project_root
+                )
+                convergence_svc.reconcile_saga(saga.id, source=RecoverySource.STARTUP)
             except Exception as exc:
                 logger.warning("Failed to resume saga '%s' on startup: %s", saga.id, exc)
 
@@ -232,10 +214,13 @@ class RestartRecoveryService:
             )
         )
 
-        # 4. If orchestration_service provided, resume the run safely
-        if orchestration_service is not None and run.is_active:
+        # 4. Resume the run safely through canonical RecoveryConvergenceService
+        if run.is_active:
             try:
-                orchestration_service.resume(run.run_id)
+                convergence_svc = RecoveryConvergenceService(
+                    self.uow, project_root=self.project_root
+                )
+                convergence_svc.request_run_continuation(run.run_id, source=RecoverySource.STARTUP)
             except Exception as exc:
                 logger.warning(
                     f"Failed to auto-resume run '{run.run_id}' during restart recovery: {exc}"

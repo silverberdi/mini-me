@@ -811,3 +811,102 @@ def test_gr03_db_authoritative_claim_context_validation(pg_session_factory: sess
 
     session.close()
 
+
+def test_gr08_scheduler_drain_routes_through_recovery_convergence(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+    """BLOCKER G-R08 proof: Scheduler DRAIN decision routes through RecoveryConvergenceService and creates RecoveryClaim/Decision."""
+    from minime.domain.enums import JobStatus
+    from minime.domain.models import Job
+
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "gr08-change")
+
+    uow = PostgresPersistenceUnitOfWork(session)
+    job = Job(
+        job_id="job-gr08",
+        project_id=project_id,
+        change_name=change_name,
+        status=JobStatus.RUNNING,
+        implementer_role="codex",
+        candidate_sha="cand123",
+        current_attempt=1,
+    )
+    uow.jobs.save(job)
+    run = OrchestrationRun(
+        run_id="run-gr08",
+        project_id=project_id,
+        change_name=change_name,
+        base_sha="15e55c515ae917c2f0330809f0d9e44d49bce12b",
+        current_stage=OrchestrationStage.ADMITTED,
+        active_job_id="job-gr08",
+        is_active=True,
+        created_at=utc_now(),
+    )
+    uow.orchestration_runs.save(run)
+    session.commit()
+
+    rec_svc = RecoveryConvergenceService(uow, project_root=tmp_path)
+    decision_obj = rec_svc.request_run_continuation(
+        run.run_id, source=RecoverySource.TICK, drain_mode=True
+    )
+
+    # Verify a RecoveryClaim and RecoveryDecision were created
+    claim = uow.claims.get_by_key("run:run-gr08")
+    assert claim is not None
+    decisions = uow.recovery_decisions.list_by_claim_key("run:run-gr08")
+    assert len(decisions) >= 1
+    assert decisions[0].source == RecoverySource.TICK
+    assert decision_obj.status in {RecoveryDecisionStatus.COMPLETED, RecoveryDecisionStatus.PLANNED, RecoveryDecisionStatus.NO_ACTION}
+
+    session.close()
+
+
+def test_gr09_restart_recovery_service_delegates_to_recovery_convergence(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+    """BLOCKER G-R09 proof: RestartRecoveryService saga and run reconciliation delegate to RecoveryConvergenceService."""
+    from minime.services.restart_recovery_service import RestartRecoveryService
+
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "gr09-change")
+
+    uow = PostgresPersistenceUnitOfWork(session)
+    saga = DurableSaga(
+        id="saga-gr09",
+        saga_type=SagaType.INTAKE,
+        project_id=project_id,
+        work_item_key=change_name,
+        change_name=change_name,
+        current_phase="STARTED",
+        status=SagaStatus.IN_PROGRESS,
+        created_at=utc_now(),
+        updated_at=utc_now(),
+    )
+    uow.durable_sagas.save(saga)
+    session.commit()
+
+    restart_svc = RestartRecoveryService(uow, project_root=tmp_path)
+    sagas = restart_svc.reconcile_durable_sagas()
+    assert any(s.id == "saga-gr09" for s in sagas)
+
+    # Verify claim was acquired via RecoveryConvergenceService
+    claim = uow.claims.get_by_key(f"intake:{project_id}:{change_name}")
+    assert claim is not None
+
+    session.close()
+
+
+def test_gr10_direct_entry_point_census():
+    """BLOCKER G-R10 proof: Production census verifies zero un-fenced OrchestrationService.resume() calls in production code."""
+    src_dir = Path(__file__).parent.parent / "src"
+
+    violations = []
+    for py_file in src_dir.glob("**/*.py"):
+        text_content = py_file.read_text(encoding="utf-8")
+        lines = text_content.splitlines()
+        for idx, line in enumerate(lines, 1):
+            if "orchestration_svc.resume(" in line or "orchestration_service.resume(" in line or "service.resume(" in line:
+                if "def resume(" in line or "recovery_convergence_service.py" in str(py_file):
+                    continue
+                violations.append(f"{py_file.name}:{idx}: {line.strip()}")
+
+    assert violations == [], f"Found Category 4 resume() direct invocation violations: {violations}"
+
+

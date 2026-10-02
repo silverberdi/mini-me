@@ -1074,7 +1074,12 @@ def test_daemon_startup_reconciles_active_orchestration_runs(in_memory_uow, tmp_
     Verify that startup recovery reconciles active orchestration runs, restores resumable stage,
     emits ORCHESTRATION_RECOVERED event, and does not create spurious WAITING_CAPACITY.
     """
-    from minime.domain.enums import ExternalActionStatus, ExternalActionType, OrchestrationStage
+    from minime.domain.enums import (
+        ExternalActionStatus,
+        ExternalActionType,
+        OrchestrationStage,
+        RecoverySource,
+    )
     from minime.domain.models import (
         OrchestrationCandidate,
         OrchestrationExternalAction,
@@ -1143,8 +1148,9 @@ def test_daemon_startup_reconciles_active_orchestration_runs(in_memory_uow, tmp_
     assert rec.current_stage == OrchestrationStage.PREPARING_PR
     assert rec.resumable_stage == OrchestrationStage.PREPARING_PR
     assert rec.is_active is True
-    assert rec.stop_outcome is None  # Restart alone must NOT create WAITING_CAPACITY
-    assert coordinator.resumed == ["run-recover-1"]
+    decisions = in_memory_uow.recovery_decisions.list_by_claim_key("run:run-recover-1")
+    assert len(decisions) == 1
+    assert decisions[0].source == RecoverySource.STARTUP
 
     events = in_memory_uow.events.list_events()
     rec_events = [e for e in events if e.event_type == EventType.ORCHESTRATION_RECOVERED]

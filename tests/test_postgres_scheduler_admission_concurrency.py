@@ -6,6 +6,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Generator
+from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import Engine, create_engine
@@ -588,17 +589,12 @@ def test_f20_drain_retry_boundary_isolation(pg_session_factory: sessionmaker[Ses
         scheduler = _make_scheduler(uow_admit, tmp_path)
         scheduler.mode = SchedulerMode.DRAIN
 
-        def _mock_resume(r_id, project_root=None, drain_mode=False):
+        def _mock_continuation(run_id, source=None, requested_action=None, drain_mode=False, force=False):
             nonlocal resume_execution_count
             resume_execution_count += 1
-            r = uow_admit.orchestration_runs.get_by_id(r_id)
-            if r:
-                r.stop_outcome = None
-                uow_admit.orchestration_runs.save(r)
-                uow_admit.commit()
-            return r
+            return MagicMock()
 
-        scheduler.orchestration_service.resume = _mock_resume
+        scheduler.recovery_convergence_service.request_run_continuation = _mock_continuation
 
         # Instrument a synthetic DB 40001 serialization error on the first attempt of _phase_b_body
         attempts = 0
@@ -633,12 +629,12 @@ def test_f20_drain_retry_boundary_isolation(pg_session_factory: sessionmaker[Ses
         class Downstream40001(Exception):
             pass
 
-        def _failing_resume(r_id, project_root=None, drain_mode=False):
+        def _failing_continuation(run_id, source=None, requested_action=None, drain_mode=False, force=False):
             err = Downstream40001("Downstream coordinator 40001 error")
             err.pgcode = "40001"  # type: ignore
             raise err
 
-        scheduler_fail.orchestration_service.resume = _failing_resume
+        scheduler_fail.recovery_convergence_service.request_run_continuation = _failing_continuation
 
         adm_attempts = 0
         orig_eval2 = scheduler_fail.evaluate_admission

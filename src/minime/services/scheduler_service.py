@@ -1336,9 +1336,12 @@ class SchedulerService:
         )
         if decision == AdmissionDecision.ADMITTED and run is not None:
             if decision_record.operational_decision == AdmissionDecisionKind.DRAIN:
-                run = self.orchestration_service.resume(
-                    run.run_id, project_root=self.project_root, drain_mode=True
+                self.recovery_convergence_service.request_run_continuation(
+                    run.run_id,
+                    source=RecoverySource.TICK,
+                    drain_mode=True,
                 )
+                run = self.uow.orchestration_runs.get_by_id(run.run_id)
             elif drive_admitted:
                 run = self.orchestration_service.drive_coordinator(
                     run.run_id, project_root=self.project_root

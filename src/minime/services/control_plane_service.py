@@ -878,7 +878,9 @@ class ControlPlaneService:
         self.uow.orchestration_runs.save(run)
         self.uow.commit()
 
-        resumed_run = self.orchestration_service.resume(run.run_id, project_root=self.project_root)
+        rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
+        rec_svc.request_run_continuation(run.run_id, source=RecoverySource.CONTROL_PLANE)
+        resumed_run = self.uow.orchestration_runs.get_by_id(run.run_id) or run
 
         summary = (
             f"Run reassigned to {target_executor} (reassignment #{resumed_run.reassignment_count})."
@@ -982,10 +984,10 @@ class ControlPlaneService:
                 run_id=run.run_id,
             )
 
-            # Advance orchestration
-            resumed_run = self.orchestration_service.resume(
-                run.run_id, project_root=self.project_root
-            )
+            # Advance orchestration through RecoveryConvergenceService
+            rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
+            rec_svc.request_run_continuation(run.run_id, source=RecoverySource.CONTROL_PLANE)
+            resumed_run = self.uow.orchestration_runs.get_by_id(run.run_id) or run
 
             summary = f"UI Validation recorded ({verdict.value}); run advanced to stage {resumed_run.current_stage.value}."
             record = OperatorActionRecord(
@@ -1417,6 +1419,8 @@ class ControlPlaneService:
         run: OrchestrationRun,
         sanitized_params: dict[str, Any],
     ) -> OperatorActionResult:
+        rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
+        rec_svc.request_run_continuation(run.run_id, source=RecoverySource.CONTROL_PLANE)
         res = self.post_merge_service.reconcile_post_merge(
             project_id=run.project_id,
             change_name=run.change_name,

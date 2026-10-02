@@ -1228,10 +1228,14 @@ def resume_orchestration(
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> dict[str, Any]:
     """Resume an existing orchestration run from its persisted checkpoint."""
-    service = OrchestrationService(uow, project_root=req.project_root or ".")
     try:
-        run = service.resume(req.run_id, project_root=req.project_root)
-        status_view = service.get_status(run.run_id)
+        from minime.domain.enums import RecoverySource
+        from minime.services.recovery_convergence_service import RecoveryConvergenceService
+
+        rec_svc = RecoveryConvergenceService(uow, project_root=req.project_root or ".")
+        rec_svc.request_run_continuation(req.run_id, source=RecoverySource.API)
+        service = OrchestrationService(uow, project_root=req.project_root or ".")
+        status_view = service.get_status(req.run_id)
         return status_view.model_dump()
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
