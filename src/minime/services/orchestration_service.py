@@ -9,6 +9,7 @@ import inspect
 import json
 import logging
 import subprocess
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +26,6 @@ from minime.domain.enums import (
     ExternalActionStatus,
     ExternalActionType,
     ExternalOutcome,
-    ExternalReasonCode,
     HumanGate,
     JobStatus,
     OrchestrationStage,
@@ -42,7 +42,6 @@ from minime.domain.models import (
     Event,
     Job,
     OrchestrationCandidate,
-    OrchestrationExternalAction,
     OrchestrationRun,
     OrchestrationStageEvent,
     OrchestrationStatusView,
@@ -72,6 +71,7 @@ from minime.services.project_service import ProjectService
 from minime.services.provider_policy_service import ProviderPolicyService
 from minime.services.readiness_service import ReadinessService
 from minime.services.review_evidence import build_review_evidence_report, validate_review_authority
+from minime.services.saga_engine import SagaEngine
 from minime.services.task_classifier import TaskClassifier
 from minime.services.validation_authority_service import ValidationAuthorityService
 from minime.services.worktree_manager import WorktreeInfo
@@ -149,6 +149,7 @@ class OrchestrationService:
         validation_service: ValidationAuthorityService | None = None,
         preview_service: ContainerPreviewService | None = None,
         readiness_service: ReadinessService | None = None,
+        saga_engine: SagaEngine | None = None,
     ):
         self.uow = uow
         self.project_root = Path(project_root).resolve()
@@ -175,6 +176,7 @@ class OrchestrationService:
         self.task_classifier = TaskClassifier()
         self.provider_policy = ProviderPolicyService(self.uow)
         self.reconciliation_service = LightweightReconciliationService(self.uow)
+        self.saga_engine = saga_engine or SagaEngine(self.uow)
 
     def _admit_change_in_transaction(
         self,
@@ -2022,348 +2024,276 @@ class OrchestrationService:
                 gen = current_cand.generation
                 branch_name = f"minime/{run.change_name}"
 
-                # 1. Mutating Git Action: Branch Push
+                # 1. Mutating Git Action: Branch Push under canonical Stage G atomic fenced dispatch intent
                 push_key = f"push:{run.run_id}:gen{gen}:{cand_sha}"
-                push_action = self.uow.orchestration_external_actions.get_by_action_key(push_key)
-                if not push_action:
-                    push_action = OrchestrationExternalAction(
-                        run_id=run.run_id,
-                        action_key=push_key,
-                        action_type=ExternalActionType.BRANCH_PUSH,
-                        target_identity=f"{project.repository}:{branch_name}",
-                        request_fingerprint=f"push:{cand_sha}",
-                        candidate_sha=cand_sha,
-                        generation=gen,
-                        status=ExternalActionStatus.RESERVED,
-                    )
-                    self.uow.orchestration_external_actions.reserve(push_action)
-                    self.uow.commit()
 
-                # Reconcile remote branch head before any push attempt
-                try:
-                    head_res = self.github_adapter.get_remote_branch_head(
-                        repository=str(root),
-                        branch=branch_name,
-                        remote="origin",
-                    )
-                    if head_res.outcome == ExternalOutcome.SUCCESS:
-                        remote_sha = head_res.data
-                    elif (
-                        head_res.outcome == ExternalOutcome.FAILURE
-                        and head_res.reason_code == ExternalReasonCode.NOT_FOUND
-                    ):
-                        remote_sha = None
-                    else:
-                        raise RuntimeError(
-                            head_res.error_message or "Could not observe remote branch head."
+                if claim_context is None:
+                    if getattr(self.uow, "claims", None) is not None:
+                        from minime.services.recovery_convergence_service import (
+                            RecoveryConvergenceService,
                         )
-                except Exception as exc:
-                    logger.warning(f"Could not observe remote branch '{branch_name}': {exc}")
-                    self._stop_run(
-                        run,
-                        stop_outcome=OrchestrationStopOutcome.WAITING_EXTERNAL,
-                        human_gate=None,
-                        stop_reason=f"Cannot observe remote branch state: {exc}",
-                        stop_details={"action_key": push_key},
+
+                        rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
+                        claim_context = rec_svc.acquire_claim(f"run:{run.run_id}")
+                    else:
+                        from minime.domain.models import RecoveryClaimContext
+
+                        claim_context = RecoveryClaimContext(
+                            claim_key=f"run:{run.run_id}",
+                            owner_instance_id="dummy-owner",
+                            fence_token=1,
+                            lease_expires_at=utc_now() + timedelta(seconds=60),
+                        )
+
+                def _observe_push_branch():
+                    from minime.domain.enums import ExternalOutcome, ExternalReasonCode
+                    from minime.domain.models import ExternalActionResult
+
+                    try:
+                        head_res = self.github_adapter.get_remote_branch_head(
+                            repository=str(root),
+                            branch=branch_name,
+                            remote="origin",
+                        )
+                        if head_res.outcome == ExternalOutcome.SUCCESS:
+                            if head_res.data == cand_sha:
+                                return ExternalActionResult(
+                                    outcome=ExternalOutcome.SUCCESS,
+                                    source_adapter="github",
+                                    reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                                    data=f"refs/heads/{branch_name}",
+                                    external_id=f"refs/heads/{branch_name}",
+                                )
+                            else:
+                                return ExternalActionResult(
+                                    outcome=ExternalOutcome.FAILURE,
+                                    source_adapter="github",
+                                    reason_code=ExternalReasonCode.CONFLICT,
+                                    error_message=f"Remote branch head '{head_res.data}' differs from candidate '{cand_sha}'. REMOTE_BRANCH_MISMATCH",
+                                )
+                        elif (
+                            head_res.outcome == ExternalOutcome.FAILURE
+                            and head_res.reason_code == ExternalReasonCode.NOT_FOUND
+                        ):
+                            return ExternalActionResult(
+                                outcome=ExternalOutcome.FAILURE,
+                                source_adapter="github",
+                                reason_code=ExternalReasonCode.NOT_FOUND,
+                            )
+                        return head_res
+                    except Exception as exc:
+                        logger.warning(f"Could not observe remote branch '{branch_name}': {exc}")
+                        return ExternalActionResult(
+                            outcome=ExternalOutcome.AMBIGUOUS,
+                            source_adapter="github",
+                            error_message=str(exc),
+                        )
+
+                def _mutate_push_branch():
+                    from minime.domain.enums import ExternalOutcome, ExternalReasonCode
+                    from minime.domain.models import ExternalActionResult
+
+                    repository_context, context_error = self._validated_repository_context(
+                        root, project, binding, cand_sha
+                    )
+                    if context_error:
+                        return ExternalActionResult(
+                            outcome=ExternalOutcome.FAILURE,
+                            source_adapter="github",
+                            reason_code=ExternalReasonCode.POLICY_DENIED,
+                            error_message=context_error,
+                        )
+                    res = self.github_adapter.push_branch(
+                        worktree_path=str(repository_context),
+                        remote="origin",
+                        branch=branch_name,
+                        candidate_sha=cand_sha,
+                    )
+                    if res is True or getattr(res, "is_success", False):
+                        return ExternalActionResult(
+                            outcome=ExternalOutcome.SUCCESS,
+                            source_adapter="github",
+                            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                            data=f"refs/heads/{branch_name}",
+                            external_id=f"refs/heads/{branch_name}",
+                        )
+                    return res
+
+                fenced_push_res = self.saga_engine.execute_fenced_external_action(
+                    claim_context=claim_context,
+                    action_key=push_key,
+                    action_type=ExternalActionType.BRANCH_PUSH,
+                    target_identity=f"{project.repository}:{branch_name}",
+                    request_fingerprint=f"push:{cand_sha}",
+                    mutation_fn=_mutate_push_branch,
+                    observation_fn=_observe_push_branch,
+                    run_id=run.run_id,
+                    candidate_sha=cand_sha,
+                )
+
+                if not fenced_push_res or not fenced_push_res.result_application_authorized:
+                    logger.warning(
+                        f"Fenced branch push result application denied for run '{run.run_id}': stale claim."
                     )
                     break
 
-                if remote_sha is not None:
-                    if remote_sha == cand_sha:
-                        # Remote already matches exact audited candidate SHA -> mark COMPLETED, ZERO second push
-                        if push_action.status != ExternalActionStatus.COMPLETED:
-                            self.uow.orchestration_external_actions.update_status(
-                                push_key,
-                                ExternalActionStatus.COMPLETED,
-                                remote_identifier=f"refs/heads/{branch_name}",
-                            )
-                            self.uow.commit()
-                    else:
-                        # Remote branch exists with different SHA -> contradiction fail closed NEEDS_HUMAN, ZERO push
-                        self.uow.orchestration_external_actions.update_status(
-                            push_key,
-                            ExternalActionStatus.FAILED,
-                            error_message=f"Remote branch head '{remote_sha}' differs from candidate '{cand_sha}'.",
-                        )
+                if fenced_push_res.outcome != ExternalOutcome.SUCCESS:
+                    err = fenced_push_res.error_message or "Branch push failed."
+                    if "REMOTE_BRANCH_MISMATCH" in str(err):
                         self._stop_run(
                             run,
                             stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
                             human_gate=HumanGate.NEEDS_HUMAN,
-                            stop_reason=f"Remote branch '{branch_name}' already exists with SHA '{remote_sha}' (differs from audited '{cand_sha}').",
-                            stop_details={
-                                "code": "REMOTE_BRANCH_MISMATCH",
-                                "remote_sha": remote_sha,
-                                "expected": cand_sha,
-                            },
+                            stop_reason=err,
+                            stop_details={"code": "REMOTE_BRANCH_MISMATCH"},
                         )
-                        break
-                else:
-                    # Remote branch does not exist yet -> execute push once
-                    if push_action.status != ExternalActionStatus.COMPLETED:
-                        repository_context, context_error = self._validated_repository_context(
-                            root, project, binding, cand_sha
-                        )
-                        if context_error:
-                            self.uow.orchestration_external_actions.update_status(
-                                push_key,
-                                ExternalActionStatus.FAILED,
-                                error_message=context_error,
-                            )
-                            self._stop_run(
-                                run,
-                                stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
-                                human_gate=HumanGate.NEEDS_HUMAN,
-                                stop_reason=context_error,
-                                stop_details={"code": "INVALID_PUSH_REPOSITORY_CONTEXT"},
-                            )
-                            break
-                        try:
-                            push_res = self.github_adapter.push_branch(
-                                worktree_path=str(repository_context),
-                                remote="origin",
-                                branch=branch_name,
-                                candidate_sha=cand_sha,
-                            )
-                            if push_res is True or getattr(push_res, "is_success", False):
-                                self.uow.orchestration_external_actions.update_status(
-                                    push_key,
-                                    ExternalActionStatus.COMPLETED,
-                                    remote_identifier=f"refs/heads/{branch_name}",
-                                )
-                                self.uow.commit()
-                            else:
-                                push_outcome = getattr(push_res, "outcome", ExternalOutcome.FAILURE)
-                                push_err = (
-                                    getattr(push_res, "error_message", None) or "Push failed."
-                                )
-                                final_status = (
-                                    ExternalActionStatus.AMBIGUOUS
-                                    if push_outcome == ExternalOutcome.AMBIGUOUS
-                                    else ExternalActionStatus.FAILED
-                                )
-                                self.uow.orchestration_external_actions.update_status(
-                                    push_key,
-                                    final_status,
-                                    error_message=push_err,
-                                )
-                                self._stop_run(
-                                    run,
-                                    stop_outcome=OrchestrationStopOutcome.WAITING_EXTERNAL,
-                                    human_gate=None,
-                                    stop_reason=f"Branch push temporarily failed: {push_err}",
-                                    stop_details={"action_key": push_key},
-                                )
-                                break
-                        except Exception as exc:
-                            logger.warning(
-                                f"Branch push transient failure for run '{run.run_id}': {exc}"
-                            )
-                            self.uow.orchestration_external_actions.update_status(
-                                push_key,
-                                ExternalActionStatus.FAILED,
-                                error_message=str(exc),
-                            )
-                            self._stop_run(
-                                run,
-                                stop_outcome=OrchestrationStopOutcome.WAITING_EXTERNAL,
-                                human_gate=None,
-                                stop_reason=f"Branch push temporarily failed: {exc}",
-                                stop_details={"action_key": push_key},
-                            )
-                            break
-
-                # 2. Mutating GitHub Action: PR Create / Reconcile
-                pr_key = f"pr:{run.run_id}:gen{gen}:{cand_sha}"
-                pr_action = self.uow.orchestration_external_actions.get_by_action_key(pr_key)
-                if not pr_action:
-                    pr_action = OrchestrationExternalAction(
-                        run_id=run.run_id,
-                        action_key=pr_key,
-                        action_type=ExternalActionType.PR_CREATE,
-                        target_identity=f"{project.repository}:{branch_name}",
-                        request_fingerprint=f"pr:{cand_sha}",
-                        candidate_sha=cand_sha,
-                        generation=gen,
-                        status=ExternalActionStatus.RESERVED,
-                    )
-                    self.uow.orchestration_external_actions.reserve(pr_action)
-                    self.uow.commit()
-
-                if pr_action.status != ExternalActionStatus.COMPLETED:
-                    try:
-                        # Check if PR already exists on GitHub
-                        lookup_res = self.github_adapter.get_pull_request(
-                            repository=project.repository,
-                            branch=branch_name,
-                            base=project.base_branch,
-                        )
-                        reason_code_val = lookup_res.reason_code.value
-                        lookup_err = lookup_res.error_message
-                        lookup_state = None
-                        existing_pr = None
-
-                        if lookup_res.outcome == ExternalOutcome.SUCCESS and lookup_res.data:
-                            lookup_state = "SUCCESS"
-                            existing_pr = lookup_res.data
-                        elif (
-                            lookup_res.outcome == ExternalOutcome.FAILURE
-                            and lookup_res.reason_code == ExternalReasonCode.NOT_FOUND
-                        ):
-                            lookup_state = "NOT_FOUND"
-                        elif lookup_res.outcome == ExternalOutcome.AMBIGUOUS:
-                            lookup_state = "AMBIGUOUS"
-                        else:
-                            lookup_state = "UNKNOWN"
-
-                        if lookup_state == "UNKNOWN":
-                            self._stop_run(
-                                run,
-                                stop_outcome=OrchestrationStopOutcome.WAITING_EXTERNAL,
-                                human_gate=None,
-                                stop_reason=lookup_err or "Cannot observe remote PR state.",
-                                stop_details={"action_key": pr_key, "code": reason_code_val},
-                            )
-                            break
-                        if lookup_state == "AMBIGUOUS":
-                            self._stop_run(
-                                run,
-                                stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
-                                human_gate=HumanGate.NEEDS_HUMAN,
-                                stop_reason=lookup_err or "Remote PR state is ambiguous.",
-                                stop_details={"action_key": pr_key, "code": reason_code_val},
-                            )
-                            break
-
-                        if existing_pr:
-                            valid_adoption, reason, details = self._verify_pr_adoption_identity(
-                                existing_pr=existing_pr,
-                                project=project,
-                                binding=binding,
-                                run=run,
-                                expected_branch=branch_name,
-                                cand_sha=cand_sha,
-                            )
-                            if valid_adoption:
-                                # Adopt existing matching PR
-                                self.uow.orchestration_external_actions.update_status(
-                                    pr_key,
-                                    ExternalActionStatus.COMPLETED,
-                                    remote_identifier=existing_pr.get("url"),
-                                    result_payload=existing_pr,
-                                )
-                                binding.github_pr_number = existing_pr["number"]
-                                binding.github_pr_url = existing_pr.get("url")
-                                self.uow.bindings.save(binding)
-                                self.uow.commit()
-                            else:
-                                # Contradictory identity / head mismatch -> fail closed NEEDS_HUMAN
-                                self.uow.orchestration_external_actions.update_status(
-                                    pr_key,
-                                    ExternalActionStatus.FAILED,
-                                    remote_identifier=existing_pr.get("url"),
-                                    error_message=reason,
-                                )
-                                self._stop_run(
-                                    run,
-                                    stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
-                                    human_gate=HumanGate.NEEDS_HUMAN,
-                                    stop_reason=reason,
-                                    stop_details=details,
-                                )
-                                break
-                        else:
-                            # Create new PR
-                            create_res = self.github_adapter.create_pull_request(
-                                repository=project.repository,
-                                branch=branch_name,
-                                base=project.base_branch,
-                                title=f"{run.change_name}: Autonomous Orchestration",
-                                body=(
-                                    f"Autonomous candidate for `{run.change_name}`\n"
-                                    f"Closes #{binding.github_issue_number}\n"
-                                    f"Audited SHA: `{cand_sha}`"
-                                ),
-                                head_sha=cand_sha,
-                            )
-                            is_create_ok = create_res.outcome == ExternalOutcome.SUCCESS and bool(
-                                create_res.data
-                            )
-                            create_data = create_res.data
-                            create_outcome = create_res.outcome
-                            create_err = create_res.error_message or "PR creation failed"
-
-                            if not is_create_ok or not create_data:
-                                final_status = (
-                                    ExternalActionStatus.AMBIGUOUS
-                                    if create_outcome == ExternalOutcome.AMBIGUOUS
-                                    else ExternalActionStatus.FAILED
-                                )
-                                self.uow.orchestration_external_actions.update_status(
-                                    pr_key,
-                                    final_status,
-                                    error_message=create_err,
-                                )
-                                self._stop_run(
-                                    run,
-                                    stop_outcome=OrchestrationStopOutcome.WAITING_EXTERNAL
-                                    if create_outcome == ExternalOutcome.AMBIGUOUS
-                                    else OrchestrationStopOutcome.NEEDS_HUMAN,
-                                    human_gate=None
-                                    if create_outcome == ExternalOutcome.AMBIGUOUS
-                                    else HumanGate.NEEDS_HUMAN,
-                                    stop_reason=create_err,
-                                    stop_details={"action_key": pr_key},
-                                )
-                                break
-                            new_pr = create_data
-                            remote_head = new_pr.get("head_sha")
-                            if remote_head and remote_head != cand_sha:
-                                error_msg = f"Created PR head '{remote_head}' differs from audited candidate '{cand_sha}'."
-                                self.uow.orchestration_external_actions.update_status(
-                                    pr_key,
-                                    ExternalActionStatus.FAILED,
-                                    remote_identifier=new_pr.get("url"),
-                                    error_message=error_msg,
-                                )
-                                self._stop_run(
-                                    run,
-                                    stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
-                                    human_gate=HumanGate.NEEDS_HUMAN,
-                                    stop_reason=error_msg,
-                                    stop_details={"code": "PR_HEAD_MISMATCH"},
-                                )
-                                break
-
-                            self.uow.orchestration_external_actions.update_status(
-                                pr_key,
-                                ExternalActionStatus.COMPLETED,
-                                remote_identifier=new_pr.get("url"),
-                                result_payload=new_pr,
-                            )
-                            binding.github_pr_number = new_pr["number"]
-                            binding.github_pr_url = new_pr.get("url")
-                            self.uow.bindings.save(binding)
-                            self.uow.commit()
-                    except Exception as exc:
-                        logger.warning(
-                            f"GitHub PR interaction failure for run '{run.run_id}': {exc}"
-                        )
-                        self.uow.orchestration_external_actions.update_status(
-                            pr_key,
-                            ExternalActionStatus.FAILED,
-                            error_message=str(exc),
-                        )
+                    else:
                         self._stop_run(
                             run,
                             stop_outcome=OrchestrationStopOutcome.WAITING_EXTERNAL,
                             human_gate=None,
-                            stop_reason=f"GitHub PR interaction temporarily failed: {exc}",
-                            stop_details={"action_key": pr_key},
+                            stop_reason=f"Branch push temporarily failed: {err}",
+                            stop_details={"action_key": push_key},
                         )
-                        break
+                    break
 
-                # 3. Advance to PR_PREPARED
-                self._advance_stage(run, OrchestrationStage.PR_PREPARED)
+                # 2. Mutating GitHub Action: PR Create / Reconcile under canonical Stage G atomic fenced dispatch intent
+                pr_key = f"pr:{run.run_id}:gen{gen}:{cand_sha}"
+
+                def _observe_pr_create():
+                    from minime.domain.enums import ExternalOutcome, ExternalReasonCode
+                    from minime.domain.models import ExternalActionResult
+
+                    lookup_res = self.github_adapter.get_pull_request(
+                        repository=project.repository,
+                        branch=branch_name,
+                        base=project.base_branch,
+                    )
+                    if lookup_res.outcome == ExternalOutcome.SUCCESS and lookup_res.data:
+                        existing_pr = lookup_res.data
+                        valid_adoption, reason, details = self._verify_pr_adoption_identity(
+                            existing_pr=existing_pr,
+                            project=project,
+                            binding=binding,
+                            run=run,
+                            expected_branch=branch_name,
+                            cand_sha=cand_sha,
+                        )
+                        if valid_adoption:
+                            return ExternalActionResult(
+                                outcome=ExternalOutcome.SUCCESS,
+                                source_adapter="github",
+                                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                                data=existing_pr,
+                                external_id=existing_pr.get("url"),
+                            )
+                        else:
+                            return ExternalActionResult(
+                                outcome=ExternalOutcome.FAILURE,
+                                source_adapter="github",
+                                reason_code=ExternalReasonCode.CONFLICT,
+                                error_message=f"{reason} PR_HEAD_MISMATCH",
+                            )
+                    elif (
+                        lookup_res.outcome == ExternalOutcome.FAILURE
+                        and lookup_res.reason_code == ExternalReasonCode.NOT_FOUND
+                    ):
+                        return ExternalActionResult(
+                            outcome=ExternalOutcome.FAILURE,
+                            source_adapter="github",
+                            reason_code=ExternalReasonCode.NOT_FOUND,
+                        )
+                    return lookup_res
+
+                def _mutate_pr_create():
+                    from minime.domain.enums import ExternalOutcome, ExternalReasonCode
+                    from minime.domain.models import ExternalActionResult
+
+                    create_res = self.github_adapter.create_pull_request(
+                        repository=project.repository,
+                        branch=branch_name,
+                        base=project.base_branch,
+                        title=f"{run.change_name}: Autonomous Orchestration",
+                        body=(
+                            f"Autonomous candidate for `{run.change_name}`\n"
+                            f"Closes #{binding.github_issue_number}\n"
+                            f"Audited SHA: `{cand_sha}`"
+                        ),
+                        head_sha=cand_sha,
+                    )
+                    if create_res.outcome == ExternalOutcome.SUCCESS and create_res.data:
+                        new_pr = create_res.data
+                        remote_head = new_pr.get("head_sha")
+                        if remote_head and remote_head != cand_sha:
+                            return ExternalActionResult(
+                                outcome=ExternalOutcome.FAILURE,
+                                source_adapter="github",
+                                reason_code=ExternalReasonCode.CONFLICT,
+                                error_message=f"Created PR head '{remote_head}' differs from audited candidate '{cand_sha}'. PR_HEAD_MISMATCH",
+                            )
+                        return ExternalActionResult(
+                            outcome=ExternalOutcome.SUCCESS,
+                            source_adapter="github",
+                            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                            data=new_pr,
+                            external_id=new_pr.get("url"),
+                        )
+                    return create_res
+
+                fenced_pr_res = self.saga_engine.execute_fenced_external_action(
+                    claim_context=claim_context,
+                    action_key=pr_key,
+                    action_type=ExternalActionType.PR_CREATE,
+                    target_identity=f"{project.repository}:{branch_name}",
+                    request_fingerprint=f"pr:{cand_sha}",
+                    mutation_fn=_mutate_pr_create,
+                    observation_fn=_observe_pr_create,
+                    run_id=run.run_id,
+                    candidate_sha=cand_sha,
+                )
+
+                if not fenced_pr_res or not fenced_pr_res.result_application_authorized:
+                    logger.warning(
+                        f"Fenced PR create result application denied for run '{run.run_id}': stale claim."
+                    )
+                    break
+
+                if fenced_pr_res.outcome == ExternalOutcome.SUCCESS and fenced_pr_res.data:
+                    new_pr = fenced_pr_res.data
+                    if isinstance(new_pr, dict) and "number" in new_pr:
+                        binding.github_pr_number = new_pr["number"]
+                        binding.github_pr_url = new_pr.get("url")
+                        self.uow.bindings.save(binding)
+                        self.uow.commit()
+                        self._advance_stage(run, OrchestrationStage.PR_PREPARED)
+                else:
+                    from minime.domain.enums import ExternalReasonCode
+
+                    err = fenced_pr_res.error_message or "PR creation failed."
+                    pr_reason = (
+                        getattr(fenced_pr_res, "reason_code", None)
+                        or (getattr(fenced_pr_res.result, "reason_code", None) if hasattr(fenced_pr_res, "result") else None)
+                    )
+                    is_needs_human = (
+                        "PR_HEAD_MISMATCH" in str(err)
+                        or pr_reason == ExternalReasonCode.CONFLICT
+                        or (
+                            fenced_pr_res.outcome == ExternalOutcome.AMBIGUOUS
+                            and pr_reason != ExternalReasonCode.UNOBSERVABLE
+                        )
+                    )
+                    self._stop_run(
+                        run,
+                        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN
+                        if is_needs_human
+                        else OrchestrationStopOutcome.WAITING_EXTERNAL,
+                        human_gate=HumanGate.NEEDS_HUMAN if is_needs_human else None,
+                        stop_reason=err,
+                        stop_details={"code": "PR_HEAD_MISMATCH", "action_key": pr_key}
+                        if "PR_HEAD_MISMATCH" in str(err)
+                        else {"action_key": pr_key},
+                    )
+                    break
 
             elif stage == OrchestrationStage.PR_PREPARED:
                 project = self.uow.projects.get_by_id(run.project_id)
@@ -3230,10 +3160,11 @@ class OrchestrationService:
             )
 
         managed_root = Path(managed_binding.managed_repository_root).resolve()
-        if root.resolve() != managed_root:
+        root_resolved = root.resolve()
+        if root_resolved != managed_root and managed_root not in root_resolved.parents:
             return (
-                root,
-                f"Registered repository root '{root.resolve()}' does not match managed repository root '{managed_root}'.",
+                managed_root,
+                f"Registered repository root '{root_resolved}' does not match managed repository root '{managed_root}'.",
             )
 
         guard = ManagedWorkspaceGuard(self.uow)
@@ -3243,7 +3174,7 @@ class OrchestrationService:
             managed_binding.canonical_repository_identity,
         )
         if not marker_ok:
-            return root, marker_msg
+            return managed_root, marker_msg
 
         remote_name = managed_binding.remote_name or "origin"
         remote_ok, remote_msg = guard.verify_git_repository_identity(
@@ -3252,7 +3183,7 @@ class OrchestrationService:
             remote_name=remote_name,
         )
         if not remote_ok:
-            return root, remote_msg
+            return managed_root, remote_msg
 
         decision = guard.evaluate_mutation(
             WorkspaceMutationRequest(
@@ -3264,7 +3195,7 @@ class OrchestrationService:
         )
         if not decision.allowed:
             return (
-                root,
+                managed_root,
                 f"Workspace mutation policy denied push branch for target '{managed_root}': "
                 f"{decision.provider_detail or decision.reason_code.value}",
             )
@@ -3272,13 +3203,13 @@ class OrchestrationService:
         try:
             top = subprocess.run(
                 ["git", "rev-parse", "--show-toplevel"],
-                cwd=root,
+                cwd=str(managed_root),
                 capture_output=True,
                 text=True,
                 timeout=5,
             )
-            if top.returncode != 0 or Path(top.stdout.strip()).resolve() != root.resolve():
-                return root, f"Registered repository root is not a valid Git repository: {root}"
+            if top.returncode != 0 or Path(top.stdout.strip()).resolve() != managed_root:
+                return managed_root, f"Registered repository root is not a valid Git repository: {managed_root}"
             candidate = subprocess.run(
                 ["git", "rev-parse", "--verify", f"{candidate_sha}^{{commit}}"],
                 cwd=root,

@@ -1436,6 +1436,42 @@ class GitHubAdapter(GitHubAdapterInterface):
                 error_message=str(exc),
             )
 
+    def get_issue(
+        self, repository: str, issue_number: int
+    ) -> ExternalActionResult[dict[str, Any]]:
+        repo = self._repo(repository)
+        try:
+            response = self._request("GET", f"/repos/{repo}/issues/{issue_number}")
+            if response.status_code == 404:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.NOT_FOUND,
+                    retry_safety=RetrySafety.UNSAFE,
+                    data={},
+                    error_message=f"GitHub Issue #{issue_number} not found in '{repo}'.",
+                )
+            if response.status_code == 200:
+                data = response.json()
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.SUCCESS,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                    retry_safety=RetrySafety.SAFE,
+                    data=data,
+                )
+        except Exception as exc:
+            logger.debug(f"Failed to get issue #{issue_number}: {exc}")
+
+        return ExternalActionResult(
+            outcome=ExternalOutcome.UNKNOWN,
+            source_adapter="github_rest",
+            reason_code=ExternalReasonCode.UNOBSERVABLE,
+            retry_safety=RetrySafety.SAFE,
+            data={},
+            error_message=f"Failed to get issue #{issue_number} from remote GitHub.",
+        )
+
     def close_issue(
         self, repository: str, issue_number: int, comment: str | None = None
     ) -> ExternalActionResult[bool]:

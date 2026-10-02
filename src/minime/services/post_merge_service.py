@@ -701,6 +701,7 @@ class PostMergeReconciliationService:
                         return ExternalActionResult(
                             outcome=ExternalOutcome.FAILURE,
                             source_adapter="github",
+                            reason_code=ExternalReasonCode.NOT_FOUND,
                             error_message="Issue is open",
                         )
                 return None
@@ -720,6 +721,7 @@ class PostMergeReconciliationService:
                     close_res is not None
                     and getattr(close_res, "outcome", None) == ExternalOutcome.SUCCESS
                     and (getattr(close_res, "data", None) is True or getattr(close_res, "external_id", None) is not None)
+                    and getattr(close_res, "result_application_authorized", True)
                 )
                 if issue_closed:
                     self.uow.events.save(
@@ -768,6 +770,7 @@ class PostMergeReconciliationService:
                     update_res is not None
                     and getattr(update_res, "outcome", None) == ExternalOutcome.SUCCESS
                     and (getattr(update_res, "data", None) is True or getattr(update_res, "external_id", None) is not None)
+                    and getattr(update_res, "result_application_authorized", True)
                 )
                 if project_item_updated:
                     self.uow.events.save(
@@ -823,7 +826,11 @@ class PostMergeReconciliationService:
                 mutation_fn=_mutate_sync,
                 saga_id=saga.id,
             )
-            sync_verified = sync_res_val is not None and getattr(sync_res_val, "outcome", None) == ExternalOutcome.SUCCESS
+            sync_verified = (
+                sync_res_val is not None
+                and getattr(sync_res_val, "outcome", None) == ExternalOutcome.SUCCESS
+                and getattr(sync_res_val, "result_application_authorized", True)
+            )
             if sync_verified and getattr(sync_res_val, "data", None):
                 synced_specs = getattr(sync_res_val, "data", [])
                 self.uow.events.save(
@@ -888,7 +895,11 @@ class PostMergeReconciliationService:
                     mutation_fn=_mutate_archive,
                     saga_id=saga.id,
                 )
-                archive_verified = arc_res_val is not None and getattr(arc_res_val, "outcome", None) == ExternalOutcome.SUCCESS
+                archive_verified = (
+                    arc_res_val is not None
+                    and getattr(arc_res_val, "outcome", None) == ExternalOutcome.SUCCESS
+                    and getattr(arc_res_val, "result_application_authorized", True)
+                )
                 if archive_verified:
                     archived_path = getattr(arc_res_val, "data", None)
                     self.uow.events.save(
@@ -933,7 +944,11 @@ class PostMergeReconciliationService:
                 mutation_fn=_mutate_wt,
                 saga_id=saga.id,
             )
-            worktree_cleaned = wt_res_val is not None and getattr(wt_res_val, "outcome", None) == ExternalOutcome.SUCCESS
+            worktree_cleaned = (
+                wt_res_val is not None
+                and getattr(wt_res_val, "outcome", None) == ExternalOutcome.SUCCESS
+                and getattr(wt_res_val, "result_application_authorized", True)
+            )
             if worktree_cleaned:
                 self.uow.events.save(
                     Event(
@@ -995,7 +1010,11 @@ class PostMergeReconciliationService:
                 mutation_fn=_mutate_branch,
                 saga_id=saga.id,
             )
-            branch_cleaned = branch_res_val is not None and getattr(branch_res_val, "outcome", None) == ExternalOutcome.SUCCESS
+            branch_cleaned = (
+                branch_res_val is not None
+                and getattr(branch_res_val, "outcome", None) == ExternalOutcome.SUCCESS
+                and getattr(branch_res_val, "result_application_authorized", True)
+            )
         except Exception as exc:
             logger.warning("Branch cleanup failed for '%s': %s", change_name, exc)
             branch_cleaned = False

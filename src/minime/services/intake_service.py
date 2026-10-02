@@ -429,25 +429,80 @@ class IntakeService:
                 not existing_author_action
                 or existing_author_action.status != ExternalActionStatus.COMPLETED
             ):
-                self.saga_engine.reserve_action(
+                if claim_context is None:
+                    if getattr(self.uow, "claims", None) is not None:
+                        from minime.services.recovery_convergence_service import (
+                            RecoveryConvergenceService,
+                        )
+
+                        rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
+                        claim_context = rec_svc.acquire_claim(f"intake:{project_id}:{item_key}")
+                    else:
+                        from minime.domain.models import RecoveryClaimContext
+
+                        claim_context = RecoveryClaimContext(
+                            claim_key=f"intake:{project_id}:{item_key}",
+                            owner_instance_id="dummy-owner",
+                            fence_token=1,
+                            lease_expires_at=utc_now() + timedelta(seconds=60),
+                        )
+
+                def _observe_openspec():
+                    from minime.domain.models import ExternalActionResult
+
+                    change_dir = (
+                        self.project_root / project.openspec_path / "changes" / change_name
+                    )
+                    proposal_file = change_dir / "proposal.md"
+                    tasks_file = change_dir / "tasks.md"
+                    design_file = change_dir / "design.md"
+                    if proposal_file.exists() and tasks_file.exists() and design_file.exists():
+                        return ExternalActionResult(
+                            outcome=ExternalOutcome.SUCCESS,
+                            source_adapter="filesystem",
+                            reason_code="OBSERVED_ON_DISK",
+                            data={"change_name": change_name, "path": str(change_dir)},
+                            external_id=change_name,
+                        )
+                    return ExternalActionResult(
+                        outcome=ExternalOutcome.FAILURE,
+                        source_adapter="filesystem",
+                        reason_code="NOT_FOUND",
+                    )
+
+                def _mutate_openspec():
+                    from minime.domain.models import ExternalActionResult
+
+                    self.openspec_generator.write_change_to_disk(
+                        project.openspec_path,
+                        generated,
+                        overwrite=True,
+                        project_id=project_id,
+                        uow=self.uow,
+                    )
+                    return ExternalActionResult(
+                        outcome=ExternalOutcome.SUCCESS,
+                        source_adapter="filesystem",
+                        reason_code="EXECUTION_SUCCESS",
+                        data={"change_name": change_name},
+                        external_id=change_name,
+                    )
+
+                fenced_res = self.saga_engine.execute_fenced_external_action(
+                    claim_context=claim_context,
                     action_key=author_action_key,
                     action_type=ExternalActionType.OPENSPEC_SYNC,
                     target_identity=change_name,
                     request_fingerprint=item_key,
+                    mutation_fn=_mutate_openspec,
+                    observation_fn=_observe_openspec,
                     saga_id=saga.id,
                 )
-                self.openspec_generator.write_change_to_disk(
-                    project.openspec_path,
-                    generated,
-                    overwrite=True,
-                    project_id=project_id,
-                    uow=self.uow,
-                )
-                self.saga_engine.record_action_result(
-                    author_action_key, status=ExternalActionStatus.COMPLETED
-                )
 
-            self.saga_engine.advance_phase(saga, "OPENSPEC_AUTHORED")
+                if fenced_res and getattr(fenced_res, "result_application_authorized", False):
+                    self.saga_engine.advance_phase(saga, "OPENSPEC_AUTHORED")
+            else:
+                self.saga_engine.advance_phase(saga, "OPENSPEC_AUTHORED")
 
         # Save/update Change entity in DB if missing
         if not change_record:

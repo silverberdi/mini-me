@@ -1016,6 +1016,16 @@ class GitHubAdapterInterface(ABC):
             reason_code=ExternalReasonCode.UNSUPPORTED,
         )
 
+    def get_issue(
+        self, repository: str, issue_number: int
+    ) -> ExternalActionResult[dict[str, Any]]:
+        return ExternalActionResult[dict[str, Any]](
+            outcome=ExternalOutcome.UNKNOWN,
+            value={},
+            source_adapter="interface",
+            reason_code=ExternalReasonCode.UNSUPPORTED,
+        )
+
     def close_issue(
         self, repository: str, issue_number: int, comment: str | None = None
     ) -> ExternalActionResult[bool]:

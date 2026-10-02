@@ -910,3 +910,227 @@ def test_gr10_direct_entry_point_census():
     assert violations == [], f"Found Category 4 resume() direct invocation violations: {violations}"
 
 
+def test_gr11_stale_owner_cannot_push_or_create_pr(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+    """BLOCKER G-R11 proof: Stale claim owner cannot push branch or create PR."""
+    from minime.domain.enums import ExternalOutcome
+    from minime.domain.models import ExternalActionResult
+
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "gr11-change")
+
+    uow = PostgresPersistenceUnitOfWork(session)
+    rec_a = RecoveryConvergenceService(uow, owner_instance_id="worker-A")
+    rec_b = RecoveryConvergenceService(PostgresPersistenceUnitOfWork(pg_session_factory()), owner_instance_id="worker-B")
+
+    claim_key = "run:run-gr11"
+    ctx_a = rec_a.acquire_claim(claim_key, lease_seconds=3600)
+    assert ctx_a.fence_token == 1
+
+    # Simulate Worker A lease expiry & Worker B acquisition in DB
+    session.execute(
+        text("UPDATE recovery_claims SET lease_expires_at = NOW() - INTERVAL '10 seconds' WHERE claim_key = :k"),
+        {"k": claim_key},
+    )
+    session.commit()
+
+    ctx_b = rec_b.acquire_claim(claim_key, lease_seconds=3600)
+    assert ctx_b.fence_token == 2
+
+    # Attempt execute_fenced_external_action with stale ctx_a (fails DB-authoritative CAS)
+    saga_engine = SagaEngine(uow)
+    with pytest.raises(StaleClaimError):
+        saga_engine.execute_fenced_external_action(
+            claim_context=ctx_a,
+            action_key="push:run-gr11:gen1:cand123",
+            action_type=ExternalActionType.BRANCH_PUSH,
+            target_identity="silverberdi/mini-me:minime/gr11-change",
+            request_fingerprint="push:cand123",
+            run_id="run-gr11",
+            mutation_fn=lambda: ExternalActionResult(outcome=ExternalOutcome.SUCCESS, source_adapter="git"),
+        )
+
+    session.close()
+
+
+def test_gr11_dispatch_intent_committed_before_adapter(pg_session_factory: sessionmaker[Session]):
+    """BLOCKER G-R11 proof: Fenced dispatch intent is committed before mutation execution."""
+    from minime.domain.enums import ExternalOutcome
+    from minime.domain.models import ExternalActionResult
+
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "gr11-intent-change")
+
+    uow = PostgresPersistenceUnitOfWork(session)
+    run = OrchestrationRun(
+        run_id="run-gr11-intent",
+        project_id=project_id,
+        change_name=change_name,
+        base_sha="15e55c515ae917c2f0330809f0d9e44d49bce12b",
+        current_stage=OrchestrationStage.PREPARING_PR,
+        created_at=utc_now(),
+    )
+    uow.orchestration_runs.save(run)
+    session.commit()
+
+    rec = RecoveryConvergenceService(uow, owner_instance_id="worker-gr11")
+    ctx = rec.acquire_claim("run:run-gr11-intent", lease_seconds=3600)
+
+    saga_engine = SagaEngine(uow)
+    action_key = "pr:run-gr11-intent:gen1:cand456"
+
+    executed_after_intent = []
+
+    def _mutate():
+        # Check that dispatch intent already exists in DB when mutation runs
+        att = uow.external_action_attempts.list_by_action_key(action_key)
+        executed_after_intent.append(len(att) >= 1)
+        return ExternalActionResult(outcome=ExternalOutcome.SUCCESS, source_adapter="github", data={"number": 42})
+
+    res = saga_engine.execute_fenced_external_action(
+        claim_context=ctx,
+        action_key=action_key,
+        action_type=ExternalActionType.PR_CREATE,
+        target_identity="silverberdi/mini-me:minime/gr11-intent-change",
+        request_fingerprint="pr:cand456",
+        run_id="run-gr11-intent",
+        mutation_fn=_mutate,
+    )
+
+    assert res.result_application_authorized is True
+    assert executed_after_intent == [True]
+
+    session.close()
+
+
+def test_gr12_stale_intake_owner_cannot_write_openspec(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+    """BLOCKER G-R12 proof: Stale intake worker cannot write OpenSpec artifacts or advance phase."""
+    from minime.services.intake_service import IntakeService
+
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "gr12-change")
+
+    uow = PostgresPersistenceUnitOfWork(session)
+    rec_a = RecoveryConvergenceService(uow, owner_instance_id="worker-A")
+    rec_b = RecoveryConvergenceService(PostgresPersistenceUnitOfWork(pg_session_factory()), owner_instance_id="worker-B")
+
+    claim_key = f"intake:{project_id}:gr12-change"
+    ctx_a = rec_a.acquire_claim(claim_key, lease_seconds=3600)
+    assert ctx_a.fence_token == 1
+
+    # Supersede fence in DB
+    session.execute(
+        text("UPDATE recovery_claims SET lease_expires_at = NOW() - INTERVAL '10 seconds' WHERE claim_key = :k"),
+        {"k": claim_key},
+    )
+    session.commit()
+
+    ctx_b = rec_b.acquire_claim(claim_key, lease_seconds=3600)
+    assert ctx_b.fence_token == 2
+
+    # Attempt IntakeService.prepare_work_item with stale ctx_a
+    intake_svc = IntakeService(uow, project_root=tmp_path)
+    with pytest.raises(StaleClaimError):
+        intake_svc.prepare_work_item(project_id, "gr12-change", claim_context=ctx_a)
+
+    session.close()
+
+
+def test_gr13_adversarial_slow_io_fence_expiration_and_successor_adoption(pg_session_factory: sessionmaker[Session]):
+    """BLOCKER G-R13 proof: Worker A slow I/O fence expiration records remote evidence monotonically, denies A advancement, and Worker B adopts successor evidence without re-executing mutation."""
+    from minime.domain.enums import ExternalOutcome
+    from minime.domain.models import ExternalActionResult
+
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "gr13-change")
+
+    uow_a = PostgresPersistenceUnitOfWork(session)
+    uow_b = PostgresPersistenceUnitOfWork(pg_session_factory())
+
+    run = OrchestrationRun(
+        run_id="run-gr13",
+        project_id=project_id,
+        change_name=change_name,
+        base_sha="15e55c515ae917c2f0330809f0d9e44d49bce12b",
+        current_stage=OrchestrationStage.POST_MERGE_RECONCILING,
+        created_at=utc_now(),
+    )
+    uow_a.orchestration_runs.save(run)
+    session.commit()
+
+    rec_a = RecoveryConvergenceService(uow_a, owner_instance_id="worker-A")
+    rec_b = RecoveryConvergenceService(uow_b, owner_instance_id="worker-B")
+
+    claim_key = "run:run-gr13"
+
+    # 1. Worker A acquires claim (fence 1)
+    ctx_a = rec_a.acquire_claim(claim_key, lease_seconds=3600)
+    assert ctx_a.fence_token == 1
+
+    action_key = "issue_close:proj:gr13-change"
+    saga_engine_a = SagaEngine(uow_a)
+    saga_engine_b = SagaEngine(uow_b)
+
+    mutation_call_count = 0
+    ctx_b = None
+
+    def _slow_mutation():
+        nonlocal mutation_call_count, ctx_b
+        mutation_call_count += 1
+        # During slow I/O, Worker A's lease expires and Worker B acquires fence 2
+        with pg_session_factory() as aux_session:
+            aux_session.execute(
+                text("UPDATE recovery_claims SET lease_expires_at = NOW() - INTERVAL '10 seconds' WHERE claim_key = :k"),
+                {"k": claim_key},
+            )
+            aux_session.commit()
+        # Worker B acquires fence 2
+        ctx_b = rec_b.acquire_claim(claim_key, lease_seconds=3600)
+        assert ctx_b.fence_token == 2
+        return ExternalActionResult(
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="github",
+            data=True,
+            external_id="123",
+        )
+
+    # Worker A executes fenced external action
+    res_a = saga_engine_a.execute_fenced_external_action(
+        claim_context=ctx_a,
+        action_key=action_key,
+        action_type=ExternalActionType.ISSUE_CLOSE,
+        target_identity=change_name,
+        request_fingerprint="run-gr13",
+        run_id="run-gr13",
+        mutation_fn=_slow_mutation,
+    )
+
+    # Worker A post-I/O fence CAS validation fails -> result application denied
+    assert res_a.result_application_authorized is False
+    assert res_a.is_stale is True
+    assert mutation_call_count == 1
+
+    # Remote result IS monotonically recorded in DB despite stale worker
+    act_in_db = uow_b.orchestration_external_actions.get_by_action_key(action_key)
+    assert act_in_db is not None
+    assert act_in_db.status == ExternalActionStatus.COMPLETED
+
+    # Worker B comes along as successor holding fence 2
+    res_b = saga_engine_b.execute_fenced_external_action(
+        claim_context=ctx_b,
+        action_key=action_key,
+        action_type=ExternalActionType.ISSUE_CLOSE,
+        target_identity=change_name,
+        request_fingerprint="run-gr13",
+        run_id="run-gr13",
+        mutation_fn=_slow_mutation,
+    )
+
+    # Worker B adopts existing COMPLETED remote evidence without repeating mutation!
+    assert res_b.result_application_authorized is True
+    assert res_b.is_stale is False
+    assert mutation_call_count == 1  # Mutation was NOT called a second time!
+
+    session.close()
+
+
+

@@ -1790,6 +1790,31 @@ class DispatchAuthorization:
     observation_proven_absent: bool = False
 
 
+@dataclass(frozen=True)
+class FencedDispatchResult:
+    """Structured dispatch result representing fenced external action execution and lifecycle application authorization."""
+
+    action_key: str
+    result: Any = None
+    outcome: ExternalOutcome | str | None = None
+    result_application_authorized: bool = False
+    fence_token: int = 0
+    is_stale: bool = False
+    remote_identifier: str | None = None
+    result_payload: dict[str, Any] | None = None
+    error_message: str | None = None
+
+    @property
+    def data(self) -> Any:
+        if isinstance(self.result, dict):
+            return self.result.get("data", self.result)
+        return getattr(self.result, "data", self.result)
+
+    @property
+    def external_id(self) -> str | None:
+        return self.remote_identifier or getattr(self.result, "external_id", None)
+
+
 def evaluate_dispatch_authorization(
     action: OrchestrationExternalAction,
     observation: ExternalActionObservation | None = None,

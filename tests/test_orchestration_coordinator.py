@@ -283,7 +283,7 @@ class StructuredLookupGitHubAdapter(FakeGitHubAdapter):
             return ExternalActionResult(
                 outcome=ExternalOutcome.AMBIGUOUS,
                 source_adapter="fake",
-                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                reason_code=ExternalReasonCode.CONFLICT,
                 retry_safety=RetrySafety.SAFE,
                 error_message="Pull request lookup ambiguous.",
             )
