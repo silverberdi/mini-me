@@ -22,6 +22,8 @@ Stage F row locks serialize short state transitions. They intentionally do not s
 - **G8 Terminal Dominance:** terminal execution cannot be resurrected; closure-only convergence may finish strictly within its existing durable saga.
 - **G9 Fenced Result Application:** a worker whose claim token is stale may not advance Run/Job/Saga lifecycle.
 - **G10 External Ambiguity Is Stronger Than Lease Expiry:** an expired recovery claim never makes an unresolved external mutation safe to repeat.
+- **G11 Atomic Dispatch Intent:** fence validation and durable dispatch-intent persistence occur atomically in one short transaction immediately before slow mutation I/O.
+- **G12 Fenced Claim Mutation:** heartbeat, release, dispatch-intent creation, and result application are compare-and-swap operations scoped to the current claim key, owner, fence token, and expected lease state.
 
 ## Canonical Recovery Service
 
@@ -85,9 +87,22 @@ External actions do not get an independent competing claim when a parent run/sag
 7. commit;
 8. perform slow observation/external work outside DB locks.
 
-Before every external mutation dispatch and before applying its result, the worker SHALL perform a short claim validation transaction proving the same `claim_key + fence_token + owner_instance_id` is current.
+Heartbeat, release, pre-dispatch validation, dispatch-intent creation, and result application SHALL all use fenced compare-and-swap semantics. The write predicate SHALL include at least `claim_key`, `owner_instance_id`, `fence_token`, and the expected current lease/release state. A stale owner therefore cannot renew, release, dispatch under, or finalize a successor's claim.
 
-If the fence is stale, the worker SHALL NOT advance Run/Job/Saga. Any remote result may only be persisted through monotonic action/evidence reconciliation, after which the current owner adopts it.
+Immediately before every slow external mutation, the current worker SHALL open a short transaction that atomically:
+
+1. re-validates the current RecoveryClaim by compare-and-swap predicate;
+2. re-reads the canonical parent Run/Job/Saga state;
+3. re-validates Stage B/D mutation authorization;
+4. creates a unique durable external-action attempt/dispatch-intent identity bound to `action_key + claim_key + fence_token + attempt_id`;
+5. transitions the external action/attempt into an execution-intent state (`RESERVED -> EXECUTING` or equivalent canonical attempt record) only when that transition is authorized;
+6. commits before the network/Git/provider/subprocess mutation begins.
+
+The uniqueness contract SHALL prevent two dispatch intents for the same logical action attempt. Once an EXECUTING/dispatch-intent record exists, any successor SHALL treat the action as **possibly executed** and MUST observe/reconcile its postcondition before any repeat.
+
+There is therefore no bare 'validate fence, then call network' gap. The durable dispatch intent is the crash boundary.
+
+Before applying a slow-operation result to Run/Job/Saga lifecycle, the worker SHALL again perform a fenced compare-and-swap validation. If the fence is stale, the worker SHALL NOT advance lifecycle. Remote evidence may still be persisted only through monotonic Stage B/D action/evidence reconciliation for adoption by the current owner.
 
 ### Crash / Lease Expiry
 
@@ -144,13 +159,13 @@ Every Stage B/D action is evaluated by `action_key` and action-specific observat
 | Existing status | Required Stage G behavior |
 |---|---|
 | `COMPLETED` | adopt canonical result; never repeat mutation |
-| `RESERVED` | before first/recovered dispatch, observe postcondition when action is observable; if effect exists adopt COMPLETED; if conclusively absent, dispatch only under current recovery claim; if unobservable => WAITING_EXTERNAL |
+| `RESERVED` | reservation identity alone never authorizes dispatch. Observe the postcondition when observable. If effect exists, adopt COMPLETED. If conclusively absent, dispatch is allowed only when the original Stage B/D mutation authorization or explicit retry authorization still permits it, the current fenced claim is valid, and an atomic durable dispatch intent is committed first. If prior-dispatch possibility cannot be excluded or the postcondition is unobservable => WAITING_EXTERNAL. |
 | `EXECUTING` | assume mutation may have occurred; observe before any repeat; success => COMPLETED/adopt; conclusively absent + existing Stage B/D retry authorization => repeat allowed; otherwise wait/human |
 | `FAILED` | repeat only when failure evidence proves effect absent AND `original_mutation_retry_authorized=True`; otherwise preserve failure/human classification |
 | `UNKNOWN` | mandatory observation; observed success => COMPLETED; proven absent + explicit retry authorization => authorized repeat; unobservable => WAITING_EXTERNAL; contradiction => NEEDS_HUMAN |
 | `AMBIGUOUS` | mandatory observation with same outcomes as UNKNOWN; never auto-repeat merely because time/lease elapsed |
 
-No recovery code may interpret reservation existence alone as permission to execute. Existing reservations are identities to reconcile, not invitations to rerun.
+No recovery code may interpret reservation existence alone as permission to execute. Existing reservations are identities to reconcile, not invitations to rerun. For a recovered RESERVED record, the recovery planner MUST distinguish `PROVEN_NEVER_DISPATCHED` from `POSSIBLY_DISPATCHED`; only the former may proceed toward a first dispatch, and even then only with Stage B/D original-mutation authorization plus a newly committed fenced dispatch intent. `POSSIBLY_DISPATCHED` requires observation before any repeat.
 
 ## Direct Entry-Point Migration
 
@@ -167,7 +182,11 @@ The following mutating continuation entry points SHALL route through `RecoveryCo
 9. WAITING_CAPACITY wake-up;
 10. WAITING_EXTERNAL continuation;
 11. operator `RECONCILE_POST_MERGE`;
-12. scheduler post-merge polling/reconciliation.
+12. scheduler post-merge polling/reconciliation;
+13. provider execution primitives that can issue model/provider calls outside `drive_coordinator()`;
+14. pipeline stage primitives that can directly perform Git/GitHub/provider/subprocess mutation outside `drive_coordinator()`.
+
+Any provider/pipeline primitive reachable from a recovery/continuation path SHALL either be private behind `RecoveryConvergenceService` or require a validated `RecoveryClaimContext` carrying `claim_key`, `owner_instance_id`, and `fence_token`. Fresh-admission-only primitives remain governed by Stage F as applicable.
 
 Read-only status and query paths remain outside this command authority.
 
@@ -231,7 +250,9 @@ Pre-counts are optimization only.
 | G17 | direct CONTINUE/RESUME/RETRY | public/control-plane bypasses | canonical claim-required route |
 | G18 | nonterminal ExternalAction statuses | inconsistent repeat boundaries | complete status matrix |
 | G19 | PR closed unmerged / cleanup | cleanup/lifecycle can bypass closure saga semantics | terminal/cleanup rules + action identity |
-| G20 | slow-I/O ownership gap | row lock ends before external work | lease/fence + heartbeat + pre-dispatch/result validation |
+| G20 | slow-I/O ownership gap | row lock ends before external work | lease/fence + heartbeat + fenced CAS + atomic dispatch intent |
+| G21 | provider/pipeline direct primitives | can be invoked below coordinator boundary | require RecoveryClaimContext or make internal |
+| G22 | stale claim maintenance writes | stale owner could heartbeat/release without explicit CAS contract | fenced CAS for heartbeat/release/pre-dispatch/result apply |
 
 ## Transaction / I/O Rules
 
@@ -239,8 +260,9 @@ Pre-counts are optimization only.
 - Claim acquisition and decision persistence are short DB transactions.
 - Slow I/O occurs after claim commit.
 - External mutation requires durable action reservation/identity before call.
-- Before external mutation dispatch, validate current fence.
-- After external result, validate fence before advancing Run/Job/Saga.
+- Immediately before external mutation dispatch, atomically CAS-validate the current fence, verify Stage B/D authorization, and persist a unique durable dispatch intent/attempt in the same short transaction.
+- Heartbeat and release are fenced CAS operations; stale owners cannot extend or release a successor's claim.
+- After external result, fenced CAS validation is required before advancing Run/Job/Saga.
 - TransactionRetryWrapper must not wrap unreserved external side effects.
 - Fresh admission remains Stage F-owned.
 
@@ -264,7 +286,11 @@ Real PostgreSQL tests SHALL prove:
 14. waiting capacity requires verified provider truth;
 15. recovery completes/classifies before fresh admission;
 16. CLI/API/TUI/daemon/control-plane entry-point parity at canonical decision layer;
-17. Stage A–F targeted regressions plus full suite after focused proving.
+17. Stage A–F targeted regressions plus full suite after focused proving;
+18. stale worker validates claim, lease expires before dispatch, successor acquires higher fence, and only one durable dispatch intent/network mutation is possible;
+19. stale heartbeat and stale release both affect zero rows after fence increment;
+20. RESERVED distinguishes proven-never-dispatched from possibly-dispatched and requires Stage B/D authorization in either eligible first/repeat path;
+21. direct provider/pipeline primitive invocation without valid RecoveryClaimContext is rejected.
 
 ## OpenSpec Overlap
 

@@ -39,8 +39,15 @@ Recovery claims SHALL use configuration-backed leases with default 60 seconds an
 #### Scenario: Healthy driver renews claim
 GIVEN a driver performs slow external work
 WHEN heartbeat executes before lease expiry
-THEN the same fencing token remains valid
+THEN renewal SHALL succeed only through fenced compare-and-swap on the current claim identity
+AND the same fencing token remains valid
 AND another process SHALL NOT acquire the claim.
+
+#### Scenario: Stale owner cannot heartbeat or release successor claim
+GIVEN worker B has already acquired a higher fencing token
+WHEN stale worker A attempts heartbeat or release with its prior token
+THEN the compare-and-swap SHALL affect zero rows
+AND worker B's lease/ownership SHALL remain unchanged.
 
 ### Requirement: No Database Lock Across Slow External I/O
 Recovery SHALL persist claim/decision state in short transactions and SHALL release PostgreSQL row/advisory locks before slow Git, GitHub, provider, or subprocess I/O.
@@ -50,8 +57,25 @@ GIVEN an external operation is intentionally blocked
 WHEN another DB session queries unrelated rows
 THEN no recovery-held row/advisory transaction lock SHALL remain open solely for the slow I/O.
 
-### Requirement: Fenced Result Application
-A recovery worker SHALL revalidate claim key, owner, and fencing token before dispatching an external mutation and before applying a slow-operation result to canonical Run/Job/Saga state.
+### Requirement: Atomic Fenced Dispatch Intent
+A recovery worker SHALL NOT perform a slow external mutation after a standalone fence check. Immediately before dispatch it SHALL atomically compare-and-swap validate the current claim and persist a unique durable dispatch intent/attempt bound to the logical action, claim key, owner, fencing token, and attempt identity in the same short transaction.
+
+#### Scenario: Lease expires between planning and dispatch
+GIVEN worker A previously held a valid claim
+AND its lease expires before external dispatch
+AND worker B acquires a higher fencing token
+WHEN worker A attempts to create the dispatch intent
+THEN the fenced compare-and-swap SHALL affect zero rows or fail deterministically
+AND worker A SHALL NOT issue the external mutation.
+
+#### Scenario: Crash after dispatch intent commit
+GIVEN a durable dispatch intent was committed as EXECUTING
+WHEN the worker crashes before recording the remote result
+THEN a successor SHALL treat the mutation as possibly executed
+AND SHALL observe/reconcile the action before any repeat.
+
+### Requirement: Fenced Claim Maintenance and Result Application
+Heartbeat, release, pre-dispatch intent creation, and result application SHALL be fenced compare-and-swap operations using the current claim key, owner instance, fencing token, and expected lease/release state.
 
 #### Scenario: Old worker returns after losing fence
 GIVEN worker A loses its claim and worker B owns a higher fencing token
@@ -100,9 +124,11 @@ THEN it SHALL adopt the result and SHALL never repeat the mutation.
 
 #### Scenario: RESERVED action
 WHEN recovery sees RESERVED
-THEN it SHALL observe the action-specific postcondition where observable
+THEN reservation existence SHALL NOT authorize mutation
+AND recovery SHALL classify whether the action is PROVEN_NEVER_DISPATCHED or POSSIBLY_DISPATCHED
+AND it SHALL observe the action-specific postcondition whenever prior dispatch cannot be excluded
 AND adopt if already present
-AND dispatch only when the effect is conclusively absent and the current recovery fence is valid
+AND a first/repeat dispatch SHALL be allowed only when the effect is conclusively absent, Stage B/D original-mutation or explicit retry authorization permits dispatch, the current fence is valid, and a durable fenced dispatch intent is atomically committed before I/O
 AND WAITING_EXTERNAL if the postcondition cannot be observed.
 
 #### Scenario: EXECUTING action
@@ -184,8 +210,16 @@ One blocked/failed recovery identity SHALL be durably classified without prevent
 ### Requirement: Recovery Observability
 Status SHALL expose durable RecoveryDecision evidence sufficient to explain source, prior checkpoint, observations, claim/fence, classification, and result without mutating state.
 
+### Requirement: Provider and Pipeline Primitive Claim Context
+Provider/pipeline execution primitives that can perform Git, GitHub, provider, model, or subprocess mutation from a continuation/recovery path SHALL be private behind the canonical convergence authority or SHALL require a validated RecoveryClaimContext.
+
+#### Scenario: Direct primitive invocation without claim context
+GIVEN a provider or pipeline primitive is reachable outside `drive_coordinator()` from a continuation/recovery path
+WHEN it is invoked without a current `claim_key + owner_instance_id + fence_token`
+THEN the mutation SHALL be rejected before external work begins.
+
 ### Requirement: Scheduler Entry-Point Convergence
-CLI tick/run, REST tick, TUI tick, daemon loop, API/CLI resume, control-plane continue/retry, scheduler DRAIN continuation, waiting wake-up, queued-run drive, and post-merge continuation SHALL share canonical convergence semantics.
+CLI tick/run, REST tick, TUI tick, daemon loop, API/CLI resume, control-plane continue/retry, scheduler DRAIN continuation, waiting wake-up, queued-run drive, post-merge continuation, and direct provider/pipeline continuation primitives SHALL share canonical convergence semantics.
 
 ### Requirement: Legacy Capacity Contract Preservation
 Delivered `scheduler-capacity-policy-convergence` behavior SHALL remain unchanged and SHALL be treated as predecessor behavior, not reimplemented.

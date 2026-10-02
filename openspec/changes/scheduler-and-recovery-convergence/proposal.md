@@ -41,7 +41,10 @@ Stage G must therefore solve both **logical convergence** and **cross-process co
 10. Define terminal-parent behavior: terminal execution never resumes, while already-authorized closure/cleanup may finish without reopening lifecycle.
 11. Preserve Stage F row locks/advisory locks/savepoints/retry boundaries inside short DB transactions.
 12. Preserve Stage B/D action identity and mutation authorization around every slow external effect.
-13. Preserve delivered scheduler capacity semantics as predecessor behavior and remove duplicate active contractual ownership only at Stage G closure.
+13. Before every slow external mutation, atomically persist a fenced dispatch intent/attempt under the current RecoveryClaim so the validation-to-network-call gap cannot produce an unrecorded stale dispatch.
+14. Require fenced compare-and-swap semantics for claim heartbeat, release, dispatch-intent creation, and result application.
+15. Require claim context on provider/pipeline execution primitives whenever they are invoked as continuation/recovery paths outside the canonical coordinator.
+16. Preserve delivered scheduler capacity semantics as predecessor behavior and remove duplicate active contractual ownership only at Stage G closure.
 
 ## Non-Goals
 

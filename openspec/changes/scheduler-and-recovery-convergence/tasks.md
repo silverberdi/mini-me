@@ -10,9 +10,11 @@
 ## 2. Durable Recovery Persistence
 - [ ] 2.1 Add RecoveryClaim model/repository/migration with unique claim_key and monotonic fence_token.
 - [ ] 2.2 Add configurable 60s lease / 15s heartbeat defaults with validation heartbeat < lease/3.
-- [ ] 2.3 Implement atomic acquire/renew/release/reacquire semantics.
+- [ ] 2.3 Implement atomic acquire/reacquire plus fenced CAS renew/release semantics.
 - [ ] 2.4 Add RecoveryDecision model/repository/migration with UNIQUE(cycle_id, claim_key).
-- [ ] 2.5 Implement fenced pre-dispatch and result-application validation.
+- [ ] 2.5 Implement atomic fenced dispatch-intent/attempt persistence immediately before external mutation.
+- [ ] 2.6 Implement fenced CAS result application; stale owners may record monotonic evidence but cannot advance lifecycle.
+- [ ] 2.7 Add uniqueness for logical dispatch attempt identity so the validation-to-I/O crash boundary is durable.
 
 ## 3. Canonical Recovery Authority
 - [ ] 3.1 Implement/elevate RecoveryConvergenceService.
@@ -28,6 +30,7 @@
 - [ ] 4.4 Route scheduler DRAIN continuation through RecoveryConvergenceService.
 - [ ] 4.5 Route queued-run drive and WAITING_CAPACITY/WAITING_EXTERNAL continuation through canonical authority.
 - [ ] 4.6 Make low-level resume/drive primitives internal or require validated RecoveryClaimContext.
+- [ ] 4.7 Inventory provider/pipeline execution primitives reachable outside drive_coordinator() and require RecoveryClaimContext or make them private.
 
 ## 5. Checkpoint Recovery
 - [ ] 5.1 Define candidate/check/review/audit safe-checkpoint mapping.
@@ -43,7 +46,8 @@
 
 ## 7. External Action Reconciliation
 - [ ] 7.1 Implement/centralize status matrix for COMPLETED.
-- [ ] 7.2 Implement RESERVED observation-before-first/recovered-dispatch.
+- [ ] 7.2 Implement RESERVED classification as PROVEN_NEVER_DISPATCHED vs POSSIBLY_DISPATCHED; reservation alone never authorizes mutation.
+- [ ] 7.2A Require Stage B/D original/retry authorization plus atomic fenced dispatch intent for any RESERVED first/repeat dispatch.
 - [ ] 7.3 Implement EXECUTING observation-before-repeat.
 - [ ] 7.4 Implement FAILED repeat only with proven absence + explicit retry authorization.
 - [ ] 7.5 Implement UNKNOWN observation/adopt/wait/human behavior.
@@ -85,7 +89,11 @@
 - [ ] 10.17 Preserve Stage C Git-lock tests.
 - [ ] 10.18 Run Stage A–F targeted regressions.
 - [ ] 10.19 Run PostgreSQL focused Stage G suite.
-- [ ] 10.20 Run Ruff and full pytest only after focused suite is green.
+- [ ] 10.20 Stale worker validation-to-dispatch race: lease expires, successor acquires, only one dispatch intent/network mutation occurs.
+- [ ] 10.21 Stale heartbeat and stale release are rejected after fence increment.
+- [ ] 10.22 RESERVED proven-never-dispatched vs possibly-dispatched semantics require Stage B/D authorization.
+- [ ] 10.23 Direct provider/pipeline primitive invocation without RecoveryClaimContext is rejected.
+- [ ] 10.24 Run Ruff and full pytest only after focused suite is green.
 
 ## 11. Governance & Closure
 - [ ] 11.1 openspec validate scheduler-and-recovery-convergence.
