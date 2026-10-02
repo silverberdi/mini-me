@@ -533,12 +533,8 @@ def test_g09_intake_saga_resumes_from_checkpoint(pg_session_factory: sessionmake
     uow.durable_sagas.save(saga)
     session.commit()
 
-    ctx = RecoveryClaimContext(
-        claim_key="saga:saga-g09",
-        owner_instance_id="worker-g09",
-        fence_token=1,
-        lease_expires_at=utc_now() + timedelta(seconds=60),
-    )
+    rec_service = RecoveryConvergenceService(uow, owner_instance_id="worker-g09")
+    ctx = rec_service.acquire_claim("saga:saga-g09", lease_seconds=60)
     res = saga_engine.resume_saga("saga-g09", claim_context=ctx)
     assert res is not None
     assert res.id == "saga-g09"
@@ -677,7 +673,7 @@ def test_gr01_scheduler_recovery_authority_convergence(pg_session_factory: sessi
     scheduler.reconcile_waiting_runs(project_id=project_id)
     decisions = uow.recovery_decisions.list_by_claim_key("run:run-gr01-waiting")
     assert len(decisions) >= 1
-    assert decisions[-1].source == RecoverySource.SCHEDULER
+    assert decisions[-1].source == RecoverySource.TICK
 
     # 2. Verify tick() drives recovery exclusively through RecoveryConvergenceService
     scheduler.tick(project_id=project_id)

@@ -126,11 +126,17 @@ class InMemoryUnitOfWork(PersistenceUnitOfWork):
 
         from tests.conftest import (
             InMemoryDurableSagaRepository,
+            InMemoryExternalActionAttemptRepository,
             InMemoryOrchestrationExternalActionRepository,
+            InMemoryRecoveryClaimRepository,
+            InMemoryRecoveryDecisionRepository,
         )
 
         self.durable_sagas = InMemoryDurableSagaRepository()
         self.orchestration_external_actions = InMemoryOrchestrationExternalActionRepository()
+        self.claims = InMemoryRecoveryClaimRepository()
+        self.recovery_decisions = InMemoryRecoveryDecisionRepository()
+        self.external_action_attempts = InMemoryExternalActionAttemptRepository()
 
     def _save_run(self, run: OrchestrationRun):
         self._runs[run.run_id] = run

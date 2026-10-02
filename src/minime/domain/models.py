@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Generic, TypeVar
@@ -32,6 +33,7 @@ from minime.domain.enums import (
     EventType,
     EvidenceDiagnosticStatus,
     ExecutionOutcome,
+    ExternalActionObservation,
     ExternalActionStatus,
     ExternalActionType,
     ExternalOutcome,
@@ -158,7 +160,7 @@ class ExternalActionResult(BaseModel, Generic[T]):
 
     outcome: ExternalOutcome
     source_adapter: str
-    reason_code: ExternalReasonCode
+    reason_code: ExternalReasonCode = ExternalReasonCode.EXECUTION_SUCCESS
     retry_safety: RetrySafety = RetrySafety.UNKNOWN
     provider_detail: str | None = None
     data: T | None = None
@@ -1738,6 +1740,10 @@ class ExternalActionAttempt(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
+    @property
+    def id(self) -> str:
+        return self.attempt_id
+
 
 class RecoveryClaimContext(BaseModel):
     """Validated context required for running slow continuation and provider/pipeline primitives."""
@@ -1771,4 +1777,88 @@ def validate_claim_context_authoritative(
         raise StaleClaimError(
             f"Recovery claim context for '{claim_context.claim_key}' (fence token {claim_context.fence_token}) is stale, expired, or superseded in database."
         )
+
+
+@dataclass(frozen=True)
+class DispatchAuthorization:
+    """Stage B/D proof authorizing an external mutation attempt."""
+
+    action_key: str
+    is_authorized: bool
+    authorization_reason: str
+    is_retry: bool = False
+    observation_proven_absent: bool = False
+
+
+def evaluate_dispatch_authorization(
+    action: OrchestrationExternalAction,
+    observation: ExternalActionObservation | None = None,
+    is_original_request: bool = True,
+    observation_proven_absent: bool = False,
+) -> DispatchAuthorization:
+    """Evaluate Stage B/D authorization policy before dispatch-intent persistence."""
+    if action.status == ExternalActionStatus.COMPLETED:
+        return DispatchAuthorization(
+            action_key=action.action_key,
+            is_authorized=False,
+            authorization_reason="COMPLETED actions must never dispatch again.",
+        )
+
+    if action.status == ExternalActionStatus.RESERVED:
+        if observation is None:
+            if action.last_dispatch_intent_id or action.remote_identifier:
+                obs = ExternalActionObservation.POSSIBLY_DISPATCHED
+            else:
+                obs = ExternalActionObservation.PROVEN_NEVER_DISPATCHED
+        else:
+            obs = observation
+
+        if obs == ExternalActionObservation.PROVEN_NEVER_DISPATCHED and is_original_request:
+            return DispatchAuthorization(
+                action_key=action.action_key,
+                is_authorized=True,
+                authorization_reason="Authorized original mutation for RESERVED action.",
+                is_retry=False,
+            )
+        elif observation_proven_absent:
+            return DispatchAuthorization(
+                action_key=action.action_key,
+                is_authorized=True,
+                authorization_reason="Authorized retry following observation proving absence of remote effect.",
+                is_retry=True,
+                observation_proven_absent=True,
+            )
+        else:
+            return DispatchAuthorization(
+                action_key=action.action_key,
+                is_authorized=False,
+                authorization_reason="RESERVED action is POSSIBLY_DISPATCHED or lacks proof of absence; observation required before dispatch.",
+            )
+
+    if action.status in (
+        ExternalActionStatus.EXECUTING,
+        ExternalActionStatus.FAILED,
+        ExternalActionStatus.UNKNOWN,
+        ExternalActionStatus.AMBIGUOUS,
+    ):
+        if observation_proven_absent:
+            return DispatchAuthorization(
+                action_key=action.action_key,
+                is_authorized=True,
+                authorization_reason=f"Authorized retry for {action.status.value} action following observation proving absence of remote effect.",
+                is_retry=True,
+                observation_proven_absent=True,
+            )
+        return DispatchAuthorization(
+            action_key=action.action_key,
+            is_authorized=False,
+            authorization_reason=f"Action in {action.status.value} state requires observation proving absence before repeat.",
+        )
+
+    return DispatchAuthorization(
+        action_key=action.action_key,
+        is_authorized=False,
+        authorization_reason=f"Unhandled action status '{action.status.value}'.",
+    )
+
 

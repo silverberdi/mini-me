@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Callable
 
 from minime.db.savepoint import execute_with_savepoint_recovery
 from minime.domain.enums import (
@@ -341,6 +341,138 @@ class SagaEngine:
             "Reserved action '%s' (%s) in PostgreSQL BEFORE execution.", action_key, at_enum.value
         )
         return action
+
+    def execute_fenced_external_action(
+        self,
+        claim_context: RecoveryClaimContext,
+        action_key: str,
+        action_type: ExternalActionType | str,
+        target_identity: str,
+        request_fingerprint: str,
+        mutation_fn: Callable[[], Any],
+        saga_id: str | None = None,
+        run_id: str | None = None,
+        candidate_sha: str | None = None,
+        observation_fn: Callable[[], Any | None] | None = None,
+        is_original_request: bool = True,
+    ) -> Any:
+        """Execute a recoverable external mutation under canonical Stage G atomic fenced dispatch intent."""
+        from minime.domain.enums import (
+            ExternalActionObservation,
+            ExternalActionStatus,
+            ExternalOutcome,
+        )
+        from minime.domain.models import (
+            evaluate_dispatch_authorization,
+            validate_claim_context_authoritative,
+        )
+
+        validate_claim_context_authoritative(self.uow, claim_context)
+
+        # 1. Reserve action identity
+        action = self.reserve_action(
+            action_key=action_key,
+            action_type=action_type,
+            target_identity=target_identity,
+            request_fingerprint=request_fingerprint,
+            run_id=run_id,
+            saga_id=saga_id,
+            candidate_sha=candidate_sha,
+        )
+
+        if action.status == ExternalActionStatus.COMPLETED:
+            logger.info("Action '%s' is already COMPLETED; skipping remote mutation.", action_key)
+            return getattr(action, "result_payload", None)
+
+        # 2. Observation classification & remote check
+        attempts = self.uow.external_action_attempts.list_by_action_key(action_key)
+        if action.last_dispatch_intent_id or action.remote_identifier or attempts:
+            obs = ExternalActionObservation.POSSIBLY_DISPATCHED
+        else:
+            obs = ExternalActionObservation.PROVEN_NEVER_DISPATCHED
+
+        observation_proven_absent = False
+        if obs == ExternalActionObservation.POSSIBLY_DISPATCHED or action.status in (
+            ExternalActionStatus.EXECUTING,
+            ExternalActionStatus.FAILED,
+            ExternalActionStatus.UNKNOWN,
+            ExternalActionStatus.AMBIGUOUS,
+        ):
+            if observation_fn is not None:
+                obs_res = observation_fn()
+                if obs_res is not None and getattr(obs_res, "outcome", None) == ExternalOutcome.SUCCESS:
+                    remote_id = getattr(obs_res, "external_id", None) or str(getattr(obs_res, "data", ""))
+                    self.record_action_result(
+                        action_key=action_key,
+                        status=ExternalActionStatus.COMPLETED,
+                        remote_identifier=remote_id,
+                        result_payload=getattr(obs_res, "data", None) if isinstance(getattr(obs_res, "data", None), dict) else None,
+                    )
+                    return obs_res
+                elif obs_res is not None and getattr(obs_res, "outcome", None) == ExternalOutcome.FAILURE:
+                    observation_proven_absent = True
+                else:
+                    raise ValueError(
+                        f"Action '{action_key}' is in status {action.status.value} and observation was inconclusive; mutation aborted."
+                    )
+            else:
+                raise ValueError(
+                    f"Action '{action_key}' is in status {action.status.value} but no observation_fn was provided; mutation aborted."
+                )
+
+        # 3. Stage B/D Authorization evaluation
+        auth = evaluate_dispatch_authorization(
+            action=action,
+            observation=obs,
+            is_original_request=is_original_request,
+            observation_proven_absent=observation_proven_absent,
+        )
+        if not auth.is_authorized:
+            raise ValueError(
+                f"Stage B/D dispatch authorization denied for '{action_key}': {auth.authorization_reason}"
+            )
+
+        # 4. Atomic Commit Fenced Dispatch Intent (SHORT DB TRANSACTION BEFORE I/O)
+        attempt_number = len(attempts) + 1
+        self.uow.claims.commit_fenced_dispatch_intent(
+            claim_key=claim_context.claim_key,
+            owner_instance_id=claim_context.owner_instance_id,
+            fence_token=claim_context.fence_token,
+            action_key=action_key,
+            attempt_number=attempt_number,
+            authorization=auth,
+        )
+
+        # 5. Execute slow external mutation (NO DB LOCK HELD)
+        res = mutation_fn()
+
+        # 6. Record action result
+        outcome = getattr(res, "outcome", None)
+        if outcome == ExternalOutcome.SUCCESS or res is True:
+            remote_id = getattr(res, "external_id", None)
+            res_data = getattr(res, "data", None)
+            self.record_action_result(
+                action_key=action_key,
+                status=ExternalActionStatus.COMPLETED,
+                remote_identifier=remote_id,
+                result_payload=res_data if isinstance(res_data, dict) else None,
+            )
+        elif outcome == ExternalOutcome.FAILURE:
+            err_msg = getattr(res, "error_message", None) or "Mutation failed."
+            self.record_action_result(
+                action_key=action_key,
+                status=ExternalActionStatus.FAILED,
+                error_message=err_msg,
+            )
+        else:
+            err_msg = getattr(res, "error_message", None) or "Mutation outcome ambiguous."
+            self.record_action_result(
+                action_key=action_key,
+                status=ExternalActionStatus.AMBIGUOUS,
+                error_message=err_msg,
+            )
+
+        return res
 
     def record_action_result(
         self,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -530,44 +531,47 @@ class IntakeService:
                         ],
                     )
                 else:
-                    self.saga_engine.reserve_action(
-                        action_key=op_key,
-                        action_type=ExternalActionType.ISSUE_CREATE,
-                        target_identity=change_name,
-                        request_fingerprint=item_key,
-                        saga_id=saga.id,
-                    )
-                    try:
-                        issue_res = self.github_adapter.create_issue(
+                    if claim_context is None:
+                        if getattr(self.uow, "claims", None) is not None:
+                            from minime.services.recovery_convergence_service import (
+                                RecoveryConvergenceService,
+                            )
+                            rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
+                            claim_context = rec_svc.acquire_claim(f"intake:{project_id}:{item_key}")
+                        else:
+                            from minime.domain.models import RecoveryClaimContext
+                            claim_context = RecoveryClaimContext(
+                                claim_key=f"intake:{project_id}:{item_key}",
+                                owner_instance_id="dummy-owner",
+                                fence_token=1,
+                                lease_expires_at=utc_now() + timedelta(seconds=60),
+                            )
+
+                    def _mutate_issue():
+                        return self.github_adapter.create_issue(
                             repository=project.repository,
                             title=f"[{change_name}] {item.title}",
                             body=f"## Work Item: {item.title}\n\n{item.description}\n\n**OpenSpec Change:** `{change_name}`\n\n<!-- minime-opkey: {op_key} -->",
                             labels=[f"priority:{item.priority.value.lower()}"],
                             operation_key=op_key,
                         )
-                        if issue_res.outcome == ExternalOutcome.SUCCESS and issue_res.data:
-                            issue_number = issue_res.data.get("number")
-                            issue_url = issue_res.data.get("html_url")
-                            self.saga_engine.record_action_result(
-                                op_key,
-                                status=ExternalActionStatus.COMPLETED,
-                                remote_identifier=str(issue_number),
-                            )
-                        else:
-                            st = (
-                                ExternalActionStatus.FAILED
-                                if issue_res.outcome == ExternalOutcome.FAILURE
-                                else ExternalActionStatus.AMBIGUOUS
-                            )
-                            self.saga_engine.record_action_result(
-                                op_key, status=st, error_message=issue_res.error_message
-                            )
+
+                    try:
+                        issue_res = self.saga_engine.execute_fenced_external_action(
+                            claim_context=claim_context,
+                            action_key=op_key,
+                            action_type=ExternalActionType.ISSUE_CREATE,
+                            target_identity=change_name,
+                            request_fingerprint=item_key,
+                            mutation_fn=_mutate_issue,
+                            saga_id=saga.id,
+                        )
+                        if issue_res and getattr(issue_res, "outcome", None) == ExternalOutcome.SUCCESS and getattr(issue_res, "data", None):
+                            issue_number = getattr(issue_res, "data", {}).get("number")
+                            issue_url = getattr(issue_res, "data", {}).get("html_url")
                     except Exception as exc:
                         logger.warning(
                             "Could not create remote GitHub issue for '%s': %s", change_name, exc
-                        )
-                        self.saga_engine.record_action_result(
-                            op_key, status=ExternalActionStatus.FAILED, error_message=str(exc)
                         )
 
             if not issue_number:
@@ -654,36 +658,33 @@ class IntakeService:
                             ],
                         )
                     else:
-                        self.saga_engine.reserve_action(
-                            action_key=op_key,
-                            action_type=ExternalActionType.PROJECT_ITEM_ADD,
-                            target_identity=change_name,
-                            request_fingerprint=item_key,
-                            saga_id=saga.id,
-                        )
-                        try:
-                            project_res = self.github_adapter.add_issue_to_project(
+                        if claim_context is None:
+                            from minime.services.recovery_convergence_service import (
+                                RecoveryConvergenceService,
+                            )
+                            rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
+                            claim_context = rec_svc.acquire_claim(f"intake:{project_id}:{item_key}")
+
+                        def _mutate_project_item_add():
+                            return self.github_adapter.add_issue_to_project(
                                 project_number=project.github_project_number,
                                 owner=project.github_project_owner or "silverberdi",
                                 issue_url=issue_url,
                                 operation_key=op_key,
                             )
-                            if project_res.outcome == ExternalOutcome.SUCCESS and project_res.data:
-                                project_item_id = str(project_res.data)
-                                self.saga_engine.record_action_result(
-                                    op_key,
-                                    status=ExternalActionStatus.COMPLETED,
-                                    remote_identifier=project_item_id,
-                                )
-                            else:
-                                st = (
-                                    ExternalActionStatus.FAILED
-                                    if project_res.outcome == ExternalOutcome.FAILURE
-                                    else ExternalActionStatus.AMBIGUOUS
-                                )
-                                self.saga_engine.record_action_result(
-                                    op_key, status=st, error_message=project_res.error_message
-                                )
+
+                        try:
+                            project_res = self.saga_engine.execute_fenced_external_action(
+                                claim_context=claim_context,
+                                action_key=op_key,
+                                action_type=ExternalActionType.PROJECT_ITEM_ADD,
+                                target_identity=change_name,
+                                request_fingerprint=item_key,
+                                mutation_fn=_mutate_project_item_add,
+                                saga_id=saga.id,
+                            )
+                            if project_res and getattr(project_res, "outcome", None) == ExternalOutcome.SUCCESS and getattr(project_res, "data", None):
+                                project_item_id = str(getattr(project_res, "data", ""))
                         except Exception as exc:
                             logger.warning(
                                 "Could not sync issue '%s' to GitHub Project: %s", issue_url, exc

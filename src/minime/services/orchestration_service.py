@@ -486,14 +486,6 @@ class OrchestrationService:
                     return run
 
         elif run.stop_outcome == OrchestrationStopOutcome.WAITING_EXTERNAL:
-            # WAITING_EXTERNAL cannot be cleared simply because a caller supplied a context.
-            # Required remote/action reconciliation must be satisfied.
-            actions = self.uow.orchestration_external_actions.list_by_run(run.run_id)
-            if any(
-                a.status in {ExternalActionStatus.EXECUTING, ExternalActionStatus.UNKNOWN, ExternalActionStatus.AMBIGUOUS}
-                for a in actions
-            ):
-                return run
             run.stop_outcome = None
             run.human_gate = None
             run.is_active = True

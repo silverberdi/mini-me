@@ -24,6 +24,7 @@ from minime.domain.enums import (
     ProjectStatus,
     ProviderHealthStatus,
     QueuePriority,
+    RecoveryClassification,
     RecoveryDecisionStatus,
     RecoverySource,
     SchedulerMode,
@@ -1353,13 +1354,16 @@ class SchedulerService:
         """Re-evaluate active orchestration runs waiting for capacity or external environment via RecoveryConvergenceService."""
         decisions = self.recovery_convergence_service.reconcile_cycle(
             project_id=project_id,
-            source=RecoverySource.SCHEDULER,
+            source=RecoverySource.TICK,
             drive_admitted=drive_resumed,
+            timeout_hours=timeout_hours,
         )
         return [
             d.identity_id
             for d in decisions
-            if d.identity_type == "RUN" and d.status == RecoveryDecisionStatus.COMPLETED
+            if d.identity_type == "RUN"
+            and d.status == RecoveryDecisionStatus.COMPLETED
+            and d.classification != RecoveryClassification.NEEDS_HUMAN
         ]
 
     def tick(

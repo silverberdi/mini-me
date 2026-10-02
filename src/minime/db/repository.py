@@ -182,6 +182,7 @@ from minime.domain.models import (
     CapacityWindow,
     Change,
     CheckResult,
+    DispatchAuthorization,
     DurableSaga,
     Event,
     EvidenceDiagnostic,
@@ -1095,6 +1096,7 @@ class PostgresChangeRepository(ChangeRepositoryInterface):
                 updated_at=change.updated_at,
             )
             self.session.add(model)
+        self.session.flush()
 
     def get_by_id(self, change_id: str) -> Change | None:
         model = self.session.get(ChangeModel, change_id)
@@ -4822,6 +4824,7 @@ class PostgresRecoveryClaimRepository(RecoveryClaimRepositoryInterface):
         fence_token: int,
         action_key: str,
         attempt_number: int = 1,
+        authorization: DispatchAuthorization | None = None,
     ) -> ExternalActionAttempt:
         now = utc_now()
         stmt = (
@@ -4837,6 +4840,7 @@ class PostgresRecoveryClaimRepository(RecoveryClaimRepositoryInterface):
             or claim_model.released_at is not None
             or claim_model.lease_expires_at <= now
         ):
+            self.session.rollback()
             raise StaleClaimError(
                 f"Claim '{claim_key}' with fence {fence_token} is stale or expired."
             )
@@ -4848,14 +4852,33 @@ class PostgresRecoveryClaimRepository(RecoveryClaimRepositoryInterface):
         )
         action_model = self.session.scalars(action_stmt).first()
         if not action_model:
+            self.session.rollback()
             raise ValueError(f"Action '{action_key}' not found.")
 
         attempts_stmt = select(ExternalActionAttemptModel).where(
             ExternalActionAttemptModel.action_key == action_key
         )
         existing_attempts = self.session.scalars(attempts_stmt).all()
+
+        action_domain = orchestration_external_action_model_to_domain(action_model)
+        if authorization is not None:
+            if not authorization.is_authorized or authorization.action_key != action_key:
+                self.session.rollback()
+                raise ValueError(
+                    f"Dispatch intent creation rejected for '{action_key}': Stage B/D authorization not proven ({authorization.authorization_reason})."
+                )
+        else:
+            from minime.domain.models import evaluate_dispatch_authorization
+            auth_res = evaluate_dispatch_authorization(action_domain)
+            if not auth_res.is_authorized:
+                self.session.rollback()
+                raise ValueError(
+                    f"Dispatch intent creation rejected for '{action_key}': Stage B/D authorization not proven ({auth_res.authorization_reason})."
+                )
+
         if action_model.status == ExternalActionStatus.RESERVED.value:
             if action_model.last_dispatch_intent_id or action_model.remote_identifier or existing_attempts:
+                self.session.rollback()
                 raise ValueError(
                     f"Action '{action_key}' is RESERVED but POSSIBLY_DISPATCHED; observation required before dispatch."
                 )

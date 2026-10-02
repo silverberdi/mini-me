@@ -2252,10 +2252,11 @@ class InMemoryRecoveryClaimRepository(RecoveryClaimRepositoryInterface):
         fence_token: int,
         action_key: str,
         attempt_number: int = 1,
+        authorization: Any | None = None,
     ) -> ExternalActionAttempt:
         from minime.domain.enums import ExternalActionStatus
         from minime.domain.exceptions import StaleClaimError
-        from minime.domain.models import ExternalActionAttempt
+        from minime.domain.models import ExternalActionAttempt, evaluate_dispatch_authorization
 
         if not self.validate_cas(claim_key, owner_instance_id, fence_token):
             raise StaleClaimError(
@@ -2264,12 +2265,24 @@ class InMemoryRecoveryClaimRepository(RecoveryClaimRepositoryInterface):
         uow = getattr(self, "_uow", None)
         if uow and hasattr(uow, "orchestration_external_actions"):
             action = uow.orchestration_external_actions.get_by_action_key(action_key)
-            if action and action.status == ExternalActionStatus.RESERVED:
-                attempts = uow.external_action_attempts.list_by_action_key(action_key)
-                if action.last_dispatch_intent_id or action.remote_identifier or attempts:
-                    raise ValueError(
-                        f"Action '{action_key}' is RESERVED but POSSIBLY_DISPATCHED; observation required before dispatch."
-                    )
+            if action:
+                if authorization is not None:
+                    if not getattr(authorization, "is_authorized", False) or getattr(authorization, "action_key", None) != action_key:
+                        raise ValueError(
+                            f"Dispatch intent creation rejected for '{action_key}': Stage B/D authorization not proven."
+                        )
+                else:
+                    auth_res = evaluate_dispatch_authorization(action)
+                    if not auth_res.is_authorized:
+                        raise ValueError(
+                            f"Dispatch intent creation rejected for '{action_key}': Stage B/D authorization not proven ({auth_res.authorization_reason})."
+                        )
+                if action.status == ExternalActionStatus.RESERVED:
+                    attempts = uow.external_action_attempts.list_by_action_key(action_key)
+                    if action.last_dispatch_intent_id or action.remote_identifier or attempts:
+                        raise ValueError(
+                            f"Action '{action_key}' is RESERVED but POSSIBLY_DISPATCHED; observation required before dispatch."
+                        )
 
         dispatch_intent_key = f"{action_key}:{claim_key}:{fence_token}:{attempt_number}"
         attempt = ExternalActionAttempt(

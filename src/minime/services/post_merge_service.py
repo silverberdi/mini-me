@@ -6,6 +6,7 @@ import logging
 import subprocess
 import time
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -657,36 +658,70 @@ class PostMergeReconciliationService:
             self.uow.jobs.save(job)
         self.uow.orchestration_runs.save(run)
         self.uow.commit()
-        self.saga_engine.advance_phase(saga, "RUN_JOB_RECONCILED")
+        if claim_context is None:
+            if getattr(self.uow, "claims", None) is not None:
+                from minime.services.recovery_convergence_service import RecoveryConvergenceService
+                rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
+                claim_context = rec_svc.acquire_claim(f"run:{run.run_id}")
+            else:
+                from minime.domain.models import RecoveryClaimContext
+                claim_context = RecoveryClaimContext(
+                    claim_key=f"run:{run.run_id}",
+                    owner_instance_id="dummy-owner",
+                    fence_token=1,
+                    lease_expires_at=utc_now() + timedelta(seconds=60),
+                )
 
-        # 5. GitHub Issue Closure with action reservation
+        validate_claim_context_authoritative(self.uow, claim_context)
+
+        # 5. GitHub Issue Closure with fenced dispatch intent
         issue_required = bool(binding and binding.github_issue_number)
         issue_closed = False
         issue_num = binding.github_issue_number if binding else None
         if issue_num:
             op_key = f"issue_close:{project_id}:{change_name}"
-            self.saga_engine.reserve_action(
-                action_key=op_key,
-                action_type=ExternalActionType.ISSUE_CLOSE,
-                target_identity=change_name,
-                request_fingerprint=run.run_id,
-                saga_id=saga.id,
-            )
-            try:
-                close_res = self.github_adapter.close_issue(
+            def _mutate_issue_close():
+                return self.github_adapter.close_issue(
                     repository,
                     issue_num,
                     comment=f"Closed automatically by mini me upon post-merge reconciliation of `{change_name}`.",
                 )
+            def _observe_issue_close():
+                issue_res = self.github_adapter.get_issue(repository, issue_num)
+                if issue_res.outcome == ExternalOutcome.SUCCESS and issue_res.data:
+                    state = issue_res.data.get("state")
+                    if state == "closed":
+                        return ExternalActionResult(
+                            outcome=ExternalOutcome.SUCCESS,
+                            source_adapter="github",
+                            data=True,
+                            external_id=str(issue_num),
+                        )
+                    elif state == "open":
+                        return ExternalActionResult(
+                            outcome=ExternalOutcome.FAILURE,
+                            source_adapter="github",
+                            error_message="Issue is open",
+                        )
+                return None
+
+            try:
+                close_res = self.saga_engine.execute_fenced_external_action(
+                    claim_context=claim_context,
+                    action_key=op_key,
+                    action_type=ExternalActionType.ISSUE_CLOSE,
+                    target_identity=change_name,
+                    request_fingerprint=run.run_id,
+                    mutation_fn=_mutate_issue_close,
+                    saga_id=saga.id,
+                    observation_fn=_observe_issue_close,
+                )
                 issue_closed = (
-                    close_res.outcome == ExternalOutcome.SUCCESS and close_res.data is True
+                    close_res is not None
+                    and getattr(close_res, "outcome", None) == ExternalOutcome.SUCCESS
+                    and (getattr(close_res, "data", None) is True or getattr(close_res, "external_id", None) is not None)
                 )
                 if issue_closed:
-                    self.saga_engine.record_action_result(
-                        op_key,
-                        status=ExternalActionStatus.COMPLETED,
-                        remote_identifier=str(issue_num),
-                    )
                     self.uow.events.save(
                         Event(
                             event_type=EventType.ISSUE_CLOSED,
@@ -696,24 +731,15 @@ class PostMergeReconciliationService:
                             timestamp=utc_now(),
                         )
                     )
-                else:
-                    self.saga_engine.record_action_result(
-                        op_key,
-                        status=ExternalActionStatus.FAILED,
-                        error_message=close_res.error_message,
-                    )
             except Exception as exc:
                 logger.warning("Failed to close GitHub Issue #%d: %s", issue_num, exc)
-                self.saga_engine.record_action_result(
-                    op_key, status=ExternalActionStatus.FAILED, error_message=str(exc)
-                )
 
         if issue_closed or not issue_required:
             self.saga_engine.advance_phase(
                 saga, "ISSUE_CLOSED", evidence_references={"issue_closed": issue_closed}
             )
 
-        # 6. GitHub Project Item Done with action reservation
+        # 6. GitHub Project Item Done with fenced dispatch intent
         project_item_required = bool(
             binding and (binding.github_project_item_id or binding.github_issue_number)
         )
@@ -721,29 +747,29 @@ class PostMergeReconciliationService:
         project_item_id = binding.github_project_item_id if binding else None
         if project_item_required:
             op_key = f"project_item_done:{project_id}:{change_name}"
-            self.saga_engine.reserve_action(
-                action_key=op_key,
-                action_type=ExternalActionType.PROJECT_ITEM_EDIT,
-                target_identity=change_name,
-                request_fingerprint=run.run_id,
-                saga_id=saga.id,
-            )
-            try:
-                update_res = self.github_adapter.update_project_item_status(
+            def _mutate_project_item():
+                return self.github_adapter.update_project_item_status(
                     project_number=2,
                     owner="silverberdi",
                     item_id=project_item_id or str(issue_num),
                     status="Done",
                 )
+            try:
+                update_res = self.saga_engine.execute_fenced_external_action(
+                    claim_context=claim_context,
+                    action_key=op_key,
+                    action_type=ExternalActionType.PROJECT_ITEM_EDIT,
+                    target_identity=change_name,
+                    request_fingerprint=run.run_id,
+                    mutation_fn=_mutate_project_item,
+                    saga_id=saga.id,
+                )
                 project_item_updated = (
-                    update_res.outcome == ExternalOutcome.SUCCESS and update_res.data is True
+                    update_res is not None
+                    and getattr(update_res, "outcome", None) == ExternalOutcome.SUCCESS
+                    and (getattr(update_res, "data", None) is True or getattr(update_res, "external_id", None) is not None)
                 )
                 if project_item_updated:
-                    self.saga_engine.record_action_result(
-                        op_key,
-                        status=ExternalActionStatus.COMPLETED,
-                        remote_identifier=str(project_item_id or issue_num),
-                    )
                     self.uow.events.save(
                         Event(
                             event_type=EventType.PROJECT_ITEM_DONE,
@@ -756,17 +782,8 @@ class PostMergeReconciliationService:
                             timestamp=utc_now(),
                         )
                     )
-                else:
-                    self.saga_engine.record_action_result(
-                        op_key,
-                        status=ExternalActionStatus.FAILED,
-                        error_message=update_res.error_message,
-                    )
             except Exception as exc:
                 logger.warning("Failed to update GitHub Project item: %s", exc)
-                self.saga_engine.record_action_result(
-                    op_key, status=ExternalActionStatus.FAILED, error_message=str(exc)
-                )
 
         if project_item_updated or not project_item_required:
             self.saga_engine.advance_phase(
@@ -775,28 +792,40 @@ class PostMergeReconciliationService:
                 evidence_references={"project_item_updated": project_item_updated},
             )
 
-        # 7. OpenSpec Spec Sync + verification with action reservation
+        # 7. OpenSpec Spec Sync + verification with fenced dispatch intent
         synced_specs: list[str] = []
         sync_verified = False
         op_key = f"openspec_sync:{project_id}:{change_name}"
-        self.saga_engine.reserve_action(
-            action_key=op_key,
-            action_type=ExternalActionType.OPENSPEC_SYNC,
-            target_identity=change_name,
-            request_fingerprint=run.run_id,
-            saga_id=saga.id,
-        )
-        try:
+        def _mutate_sync():
             sync_res = self.openspec_sync.sync_change_specs(
                 openspec_path, change_name, project_id=project_id
             )
             verify_sync_res = self.openspec_sync.verify_sync(openspec_path, change_name, sync_res)
-            sync_verified = (
-                verify_sync_res.outcome == ExternalOutcome.SUCCESS and verify_sync_res.data is True
+            if verify_sync_res.outcome == ExternalOutcome.SUCCESS and verify_sync_res.data is True:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.SUCCESS,
+                    source_adapter="openspec",
+                    data=sync_res.data or [],
+                )
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="openspec",
+                error_message="Sync verification failed.",
             )
-            if sync_verified:
-                synced_specs = sync_res.data or []
-                self.saga_engine.record_action_result(op_key, status=ExternalActionStatus.COMPLETED)
+
+        try:
+            sync_res_val = self.saga_engine.execute_fenced_external_action(
+                claim_context=claim_context,
+                action_key=op_key,
+                action_type=ExternalActionType.OPENSPEC_SYNC,
+                target_identity=change_name,
+                request_fingerprint=run.run_id,
+                mutation_fn=_mutate_sync,
+                saga_id=saga.id,
+            )
+            sync_verified = sync_res_val is not None and getattr(sync_res_val, "outcome", None) == ExternalOutcome.SUCCESS
+            if sync_verified and getattr(sync_res_val, "data", None):
+                synced_specs = getattr(sync_res_val, "data", [])
                 self.uow.events.save(
                     Event(
                         event_type=EventType.OPEN_SPEC_SYNCED,
@@ -815,17 +844,8 @@ class PostMergeReconciliationService:
                         timestamp=utc_now(),
                     )
                 )
-            else:
-                self.saga_engine.record_action_result(
-                    op_key,
-                    status=ExternalActionStatus.FAILED,
-                    error_message="Sync verification failed.",
-                )
         except Exception as exc:
             logger.warning("OpenSpec spec sync failed for '%s': %s", change_name, exc)
-            self.saga_engine.record_action_result(
-                op_key, status=ExternalActionStatus.FAILED, error_message=str(exc)
-            )
 
         if sync_verified:
             self.saga_engine.advance_phase(saga, "SPEC_SYNCED")
@@ -833,36 +853,44 @@ class PostMergeReconciliationService:
                 saga, "SYNC_VERIFIED", evidence_references={"sync_verified": sync_verified}
             )
 
-        # 8. OpenSpec Archive + verification with action reservation (only after sync is verified)
+        # 8. OpenSpec Archive + verification with fenced dispatch intent
         archived_path: Path | None = None
         archive_verified = False
         if sync_verified:
             op_key = f"openspec_archive:{project_id}:{change_name}"
-            self.saga_engine.reserve_action(
-                action_key=op_key,
-                action_type=ExternalActionType.OPENSPEC_ARCHIVE,
-                target_identity=change_name,
-                request_fingerprint=run.run_id,
-                saga_id=saga.id,
-            )
-            try:
+            def _mutate_archive():
                 archive_res = self.openspec_sync.archive_change(
                     openspec_path, change_name, project_id=project_id
                 )
                 verify_arc_res = self.openspec_sync.verify_archive(
                     openspec_path, change_name, archive_res
                 )
-                archive_verified = (
-                    verify_arc_res.outcome == ExternalOutcome.SUCCESS
-                    and verify_arc_res.data is True
-                )
-                if archive_verified:
-                    archived_path = archive_res.data
-                    self.saga_engine.record_action_result(
-                        op_key,
-                        status=ExternalActionStatus.COMPLETED,
-                        remote_identifier=str(archived_path) if archived_path else None,
+                if verify_arc_res.outcome == ExternalOutcome.SUCCESS and verify_arc_res.data is True:
+                    return ExternalActionResult(
+                        outcome=ExternalOutcome.SUCCESS,
+                        source_adapter="openspec",
+                        data=str(archive_res.data) if archive_res.data else "",
+                        external_id=str(archive_res.data) if archive_res.data else "",
                     )
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="openspec",
+                    error_message="Archive verification failed.",
+                )
+
+            try:
+                arc_res_val = self.saga_engine.execute_fenced_external_action(
+                    claim_context=claim_context,
+                    action_key=op_key,
+                    action_type=ExternalActionType.OPENSPEC_ARCHIVE,
+                    target_identity=change_name,
+                    request_fingerprint=run.run_id,
+                    mutation_fn=_mutate_archive,
+                    saga_id=saga.id,
+                )
+                archive_verified = arc_res_val is not None and getattr(arc_res_val, "outcome", None) == ExternalOutcome.SUCCESS
+                if archive_verified:
+                    archived_path = getattr(arc_res_val, "data", None)
                     self.uow.events.save(
                         Event(
                             event_type=EventType.OPEN_SPEC_ARCHIVED,
@@ -881,17 +909,8 @@ class PostMergeReconciliationService:
                             timestamp=utc_now(),
                         )
                     )
-                else:
-                    self.saga_engine.record_action_result(
-                        op_key,
-                        status=ExternalActionStatus.FAILED,
-                        error_message="Archive verification failed.",
-                    )
             except Exception as exc:
                 logger.warning("OpenSpec archive failed for '%s': %s", change_name, exc)
-                self.saga_engine.record_action_result(
-                    op_key, status=ExternalActionStatus.FAILED, error_message=str(exc)
-                )
 
         if archive_verified:
             self.saga_engine.advance_phase(saga, "SPEC_ARCHIVED")
@@ -899,57 +918,92 @@ class PostMergeReconciliationService:
                 saga, "ARCHIVE_VERIFIED", evidence_references={"archive_verified": archive_verified}
             )
 
-        # 9. Worktree Cleanup with action reservation
+        # 9. Worktree Cleanup with fenced dispatch intent
         op_key = f"worktree_clean:{project_id}:{change_name}"
-        self.saga_engine.reserve_action(
-            action_key=op_key,
-            action_type=ExternalActionType.WORKTREE_DELETE,
-            target_identity=change_name,
-            request_fingerprint=run.run_id,
-            saga_id=saga.id,
-        )
-        wt_clean_res = self._clean_worktrees(job_id, project_id=project_id)
-        worktree_cleaned = wt_clean_res.outcome == ExternalOutcome.SUCCESS
-        if worktree_cleaned:
-            self.saga_engine.record_action_result(op_key, status=ExternalActionStatus.COMPLETED)
-            self.uow.events.save(
-                Event(
-                    event_type=EventType.WORKTREE_CLEANED,
-                    project_id=project_id,
-                    change_id=change_name,
-                    payload={"job_id": job_id},
-                    timestamp=utc_now(),
+        def _mutate_wt():
+            return self._clean_worktrees(job_id, project_id=project_id)
+
+        try:
+            wt_res_val = self.saga_engine.execute_fenced_external_action(
+                claim_context=claim_context,
+                action_key=op_key,
+                action_type=ExternalActionType.WORKTREE_DELETE,
+                target_identity=change_name,
+                request_fingerprint=run.run_id,
+                mutation_fn=_mutate_wt,
+                saga_id=saga.id,
+            )
+            worktree_cleaned = wt_res_val is not None and getattr(wt_res_val, "outcome", None) == ExternalOutcome.SUCCESS
+            if worktree_cleaned:
+                self.uow.events.save(
+                    Event(
+                        event_type=EventType.WORKTREE_CLEANED,
+                        project_id=project_id,
+                        change_id=change_name,
+                        payload={"job_id": job_id},
+                        timestamp=utc_now(),
+                    )
                 )
-            )
-        else:
-            self.saga_engine.record_action_result(
-                op_key, status=ExternalActionStatus.FAILED, error_message=wt_clean_res.error_message
-            )
+        except Exception as exc:
+            logger.warning("Worktree cleanup failed for '%s': %s", change_name, exc)
+            worktree_cleaned = False
 
         if worktree_cleaned:
             self.saga_engine.advance_phase(
                 saga, "WORKTREE_CLEANED", evidence_references={"worktree_cleaned": worktree_cleaned}
             )
 
-        # 10. Local and Remote Branch Cleanup with action reservation
+        # 10. Local and Remote Branch Cleanup with fenced dispatch intent
         local_branches = [
             f"minime/{change_name}-{job_id}" if job_id else None,
             f"minime/{change_name}",
         ]
-        local_clean_ok = True
-        for b in local_branches:
-            if b:
-                loc_res = self._delete_local_branch(b, project_id=project_id)
-                if loc_res.outcome != ExternalOutcome.SUCCESS:
-                    local_clean_ok = False
+        op_key = f"branch_clean:{project_id}:{change_name}"
+        def _mutate_branch():
+            local_clean_ok = True
+            for b in local_branches:
+                if b:
+                    loc_res = self._delete_local_branch(b, project_id=project_id)
+                    if loc_res.outcome != ExternalOutcome.SUCCESS:
+                        local_clean_ok = False
 
-        delete_remote_res = self.github_adapter.delete_remote_branch(
-            repository, f"minime/{change_name}"
-        )
-        remote_clean_ok = delete_remote_res.outcome == ExternalOutcome.SUCCESS
-        branch_cleaned = local_clean_ok and remote_clean_ok
+            delete_remote_res = self.github_adapter.delete_remote_branch(
+                repository, f"minime/{change_name}"
+            )
+            remote_clean_ok = delete_remote_res.outcome == ExternalOutcome.SUCCESS
+            if local_clean_ok and remote_clean_ok:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.SUCCESS,
+                    source_adapter="git",
+                    reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                    data={"remote_cleaned": True, "reason_code": delete_remote_res.reason_code.value},
+                )
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="git",
+                reason_code=delete_remote_res.reason_code,
+                error_message="Branch deletion failed.",
+            )
+
+        try:
+            branch_res_val = self.saga_engine.execute_fenced_external_action(
+                claim_context=claim_context,
+                action_key=op_key,
+                action_type=ExternalActionType.BRANCH_DELETE,
+                target_identity=change_name,
+                request_fingerprint=run.run_id,
+                mutation_fn=_mutate_branch,
+                saga_id=saga.id,
+            )
+            branch_cleaned = branch_res_val is not None and getattr(branch_res_val, "outcome", None) == ExternalOutcome.SUCCESS
+        except Exception as exc:
+            logger.warning("Branch cleanup failed for '%s': %s", change_name, exc)
+            branch_cleaned = False
 
         if branch_cleaned:
+            b_data = getattr(branch_res_val, "data", {}) if branch_res_val else {}
+            rem_cleaned = b_data.get("remote_cleaned", True) if isinstance(b_data, dict) else True
+            rcode_val = b_data.get("reason_code", ExternalReasonCode.EXECUTION_SUCCESS.value) if isinstance(b_data, dict) else ExternalReasonCode.EXECUTION_SUCCESS.value
             self.uow.events.save(
                 Event(
                     event_type=EventType.BRANCH_CLEANED,
@@ -957,8 +1011,8 @@ class PostMergeReconciliationService:
                     change_id=change_name,
                     payload={
                         "branches": [b for b in local_branches if b],
-                        "remote_cleaned": remote_clean_ok,
-                        "reason_code": delete_remote_res.reason_code.value,
+                        "remote_cleaned": rem_cleaned,
+                        "reason_code": rcode_val,
                     },
                     timestamp=utc_now(),
                 )

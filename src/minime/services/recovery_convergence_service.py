@@ -13,6 +13,8 @@ from minime.domain.enums import (
     EventType,
     ExternalActionObservation,
     ExternalActionStatus,
+    HumanGate,
+    JobStatus,
     OrchestrationStage,
     OrchestrationStopOutcome,
     ProviderHealthStatus,
@@ -70,6 +72,7 @@ class RecoveryConvergenceService:
         project_id: str | None = None,
         source: RecoverySource = RecoverySource.TICK,
         drive_admitted: bool = False,
+        timeout_hours: float = 2.0,
     ) -> list[RecoveryDecision]:
         """Run a canonical recovery convergence cycle across all active runs, jobs, and sagas."""
         cycle_id = generate_uuid()
@@ -115,6 +118,7 @@ class RecoveryConvergenceService:
                 claim_key=claim_key,
                 source=source,
                 drive_admitted=drive_admitted,
+                timeout_hours=timeout_hours,
             )
             decisions.append(decision)
 
@@ -286,6 +290,7 @@ class RecoveryConvergenceService:
         drain_mode: bool = False,
         force: bool = False,
         drive_admitted: bool = False,
+        timeout_hours: float = 2.0,
     ) -> RecoveryDecision:
         claim = self.uow.claims.acquire_or_reacquire(
             claim_key=claim_key,
@@ -400,6 +405,51 @@ class RecoveryConvergenceService:
             self.uow.recovery_decisions.create_decision(decision)
             self.release_claim(context)
             return decision
+
+        if run.stop_outcome in (OrchestrationStopOutcome.WAITING_CAPACITY, OrchestrationStopOutcome.WAITING_EXTERNAL):
+            waiting_since_str = (run.stop_details or {}).get("waiting_since")
+            if waiting_since_str:
+                try:
+                    from datetime import datetime, timezone
+                    ws = datetime.fromisoformat(waiting_since_str)
+                    if ws.tzinfo is None:
+                        ws = ws.replace(tzinfo=timezone.utc)
+                    elapsed_hours = (utc_now() - ws).total_seconds() / 3600.0
+                    if elapsed_hours >= timeout_hours:
+                        reason = f"Waiting capacity timeout exceeded ({elapsed_hours:.1f}h > {timeout_hours:.1f}h)"
+                        run.stop_outcome = OrchestrationStopOutcome.NEEDS_HUMAN
+                        run.human_gate = HumanGate.NEEDS_HUMAN
+                        run.is_active = False
+                        run.stop_reason = reason
+                        if run.active_job_id:
+                            job = self.uow.jobs.get_by_id(run.active_job_id)
+                            if job:
+                                job.status = JobStatus.NEEDS_HUMAN
+                                job.escalation_reason = reason
+                                self.uow.jobs.save(job)
+                        self.uow.orchestration_runs.save(run)
+                        self.uow.commit()
+
+                        decision = RecoveryDecision(
+                            cycle_id=cycle_id,
+                            claim_key=claim_key,
+                            identity_type="RUN",
+                            identity_id=run_id,
+                            project_id=run.project_id,
+                            change_name=run.change_name,
+                            source=source,
+                            fence_token=context.fence_token,
+                            classification=RecoveryClassification.NEEDS_HUMAN,
+                            planned_action="ESCALATE_NEEDS_HUMAN",
+                            status=RecoveryDecisionStatus.COMPLETED,
+                            reason_code="WAITING_TIMEOUT_EXCEEDED",
+                        )
+                        self.uow.recovery_decisions.create_decision(decision)
+                        self.uow.commit()
+                        self.release_claim(context)
+                        return decision
+                except Exception as exc:
+                    logger.warning(f"Failed to evaluate waiting_since for run '{run_id}': {exc}")
 
         if run.stop_outcome == OrchestrationStopOutcome.WAITING_CAPACITY:
             project = self.uow.projects.get_by_id(run.project_id)

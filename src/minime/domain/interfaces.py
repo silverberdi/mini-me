@@ -32,6 +32,7 @@ from minime.domain.models import (
     CapacityWindow,
     Change,
     CheckResult,
+    DispatchAuthorization,
     DurableSaga,
     Event,
     EvidenceDiagnostic,
@@ -1151,6 +1152,7 @@ class RecoveryClaimRepositoryInterface(ABC):
         fence_token: int,
         action_key: str,
         attempt_number: int = 1,
+        authorization: DispatchAuthorization | None = None,
     ) -> ExternalActionAttempt: ...
 
 
