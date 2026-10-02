@@ -16,6 +16,7 @@ from minime.domain.enums import (
     JobStatus,
     LockSafetyStatus,
     OrchestrationStopOutcome,
+    RecoverySource,
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
@@ -28,6 +29,7 @@ from minime.domain.models import (
     utc_now,
 )
 from minime.services.provider_health_service import ProviderHealthService
+from minime.services.recovery_convergence_service import RecoveryConvergenceService
 
 logger = logging.getLogger(__name__)
 
@@ -59,53 +61,16 @@ class RestartRecoveryService:
 
     def reconcile_on_startup(self, orchestration_service: Any = None) -> list[Job]:
         """Reconcile all in-flight / non-terminal jobs and active orchestration runs on daemon startup with full audit evidence."""
-        recovery_cycle_id = generate_uuid()
+        convergence_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
+        convergence_svc.reconcile_cycle(source=RecoverySource.STARTUP)
+
         active_jobs = self.uow.jobs.list_active_jobs()
-        active_runs = self.uow.orchestration_runs.list_runs(is_active=True)
-
-        interrupted_jobs = [
-            j
-            for j in active_jobs
-            if j.status
-            in {
-                JobStatus.RUNNING,
-                JobStatus.CHECKS_RUNNING,
-                JobStatus.REVIEW_RUNNING,
-                JobStatus.AUDIT_RUNNING,
-            }
-        ]
-        waiting_jobs = [j for j in active_jobs if j.status == JobStatus.WAITING_CAPACITY]
-        blocked_jobs = [j for j in active_jobs if j.status == JobStatus.RECOVERY_BLOCKED]
-        queued_jobs = [j for j in active_jobs if j.status == JobStatus.QUEUED]
-
-        # 1. Persist durable DAEMON_RESTARTED event for this startup recovery cycle
-        self.uow.events.save(
-            Event(
-                event_type=EventType.DAEMON_RESTARTED,
-                payload={
-                    "recovery_cycle_id": recovery_cycle_id,
-                    "active_jobs_count": len(active_jobs),
-                    "interrupted_jobs_count": len(interrupted_jobs),
-                    "waiting_jobs_count": len(waiting_jobs),
-                    "blocked_jobs_count": len(blocked_jobs),
-                    "queued_jobs_count": len(queued_jobs),
-                    "active_orchestration_runs_count": len(active_runs),
-                },
-                timestamp=utc_now(),
-            )
-        )
+        recovery_cycle_id = generate_uuid()
 
         reconciled = []
         for job in active_jobs:
             rec_job = self._reconcile_job(job, recovery_cycle_id)
             reconciled.append(rec_job)
-
-        self.reconcile_orchestration_runs(
-            orchestration_service=orchestration_service,
-            recovery_cycle_id=recovery_cycle_id,
-        )
-
-        self.reconcile_durable_sagas(recovery_cycle_id=recovery_cycle_id)
 
         self.uow.commit()
         return reconciled

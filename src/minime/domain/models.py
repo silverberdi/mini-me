@@ -56,6 +56,9 @@ from minime.domain.enums import (
     PullRequestLookupState,
     QueuePriority,
     ReadinessState,
+    RecoveryClassification,
+    RecoveryDecisionStatus,
+    RecoverySource,
     RemediationFailureCode,
     RemediationStatus,
     RetrySafety,
@@ -900,6 +903,9 @@ class OrchestrationExternalAction(BaseModel):
     remote_identifier: str | None = None
     result_payload: dict[str, Any] = Field(default_factory=dict)
     error_message: str | None = None
+    last_claim_key: str | None = None
+    last_fence_token: int | None = None
+    last_dispatch_intent_id: str | None = None
     reserved_at: datetime = Field(default_factory=utc_now)
     reconciled_at: datetime | None = None
     created_at: datetime = Field(default_factory=utc_now)
@@ -1667,3 +1673,80 @@ class WorkspaceMutationDecision(BaseModel):
     workspace_role: WorkspaceRole
     resolved_path: str
     provider_detail: str | None = None
+
+
+class RecoveryClaim(BaseModel):
+    """Durable recovery claim lease/fence for slow continuation ownership."""
+
+    claim_key: str
+    fence_token: int = 1
+    owner_instance_id: str
+    claimed_at: datetime = Field(default_factory=utc_now)
+    heartbeat_at: datetime = Field(default_factory=utc_now)
+    lease_expires_at: datetime
+    released_at: datetime | None = None
+    last_decision_id: str | None = None
+
+    @property
+    def is_expired(self) -> bool:
+        return utc_now() >= self.lease_expires_at
+
+    @property
+    def is_released(self) -> bool:
+        return self.released_at is not None
+
+    @property
+    def is_active(self) -> bool:
+        return not self.is_released and not self.is_expired
+
+
+class RecoveryDecision(BaseModel):
+    """Durable recovery decision record with UNIQUE(cycle_id, claim_key)."""
+
+    decision_id: str = Field(default_factory=generate_uuid)
+    cycle_id: str
+    claim_key: str
+    identity_type: str
+    identity_id: str
+    project_id: str | None = None
+    change_name: str | None = None
+    source: RecoverySource
+    prior_checkpoint: dict[str, Any] = Field(default_factory=dict)
+    observation_refs: dict[str, Any] = Field(default_factory=dict)
+    classification: RecoveryClassification
+    planned_action: str
+    fence_token: int | None = None
+    status: RecoveryDecisionStatus = RecoveryDecisionStatus.PLANNED
+    result_payload: dict[str, Any] = Field(default_factory=dict)
+    reason_code: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class ExternalActionAttempt(BaseModel):
+    """Durable dispatch attempt record for external mutation idempotency."""
+
+    attempt_id: str = Field(default_factory=generate_uuid)
+    action_key: str
+    claim_key: str
+    fence_token: int
+    attempt_number: int = 1
+    dispatch_intent_key: str
+    status: str = "EXECUTING"
+    result_payload: dict[str, Any] = Field(default_factory=dict)
+    error_message: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class RecoveryClaimContext(BaseModel):
+    """Validated context required for running slow continuation and provider/pipeline primitives."""
+
+    claim_key: str
+    owner_instance_id: str
+    fence_token: int
+    lease_expires_at: datetime
+
+    def is_valid(self) -> bool:
+        return utc_now() < self.lease_expires_at
+

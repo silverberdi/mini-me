@@ -204,11 +204,27 @@ AND repeated recovery SHALL adopt existing cleanup effects rather than rerun the
 ### Requirement: Idempotent Repeated Recovery
 Repeated startup/tick/direct requests against unchanged truth SHALL converge with zero duplicate transitions, runs, jobs, sagas, external actions, destructive cleanup, or expensive provider calls.
 
+#### Scenario: Repeated recovery on unchanged state
+GIVEN an active run has not changed state
+WHEN recovery runs multiple consecutive cycles
+THEN every cycle SHALL produce identical decisions with zero duplicate side effects.
+
 ### Requirement: Recovery Failure Isolation
 One blocked/failed recovery identity SHALL be durably classified without preventing unrelated identities from being evaluated.
 
+#### Scenario: One run fails recovery
+GIVEN two active runs where run A encounters an unhandled exception during recovery
+WHEN recovery cycle runs
+THEN run A failure SHALL be isolated
+AND run B SHALL still be evaluated and recovered.
+
 ### Requirement: Recovery Observability
 Status SHALL expose durable RecoveryDecision evidence sufficient to explain source, prior checkpoint, observations, claim/fence, classification, and result without mutating state.
+
+#### Scenario: Querying recovery decisions
+GIVEN a recovery cycle completed decisions
+WHEN status or control plane queries recovery decisions
+THEN the response SHALL expose the durable RecoveryDecision evidence.
 
 ### Requirement: Provider and Pipeline Primitive Claim Context
 Provider/pipeline execution primitives that can perform Git, GitHub, provider, model, or subprocess mutation from a continuation/recovery path SHALL be private behind the canonical convergence authority or SHALL require a validated RecoveryClaimContext.
@@ -221,5 +237,13 @@ THEN the mutation SHALL be rejected before external work begins.
 ### Requirement: Scheduler Entry-Point Convergence
 CLI tick/run, REST tick, TUI tick, daemon loop, API/CLI resume, control-plane continue/retry, scheduler DRAIN continuation, waiting wake-up, queued-run drive, post-merge continuation, and direct provider/pipeline continuation primitives SHALL share canonical convergence semantics.
 
+#### Scenario: Multiple entry points drive continuation
+WHEN continuation is triggered via CLI, daemon, REST, or control plane
+THEN all entry points SHALL route through RecoveryConvergenceService.
+
 ### Requirement: Legacy Capacity Contract Preservation
 Delivered `scheduler-capacity-policy-convergence` behavior SHALL remain unchanged and SHALL be treated as predecessor behavior, not reimplemented.
+
+#### Scenario: Capacity policy evaluation
+WHEN evaluating provider capacity during recovery
+THEN the existing Stage F capacity policy rules SHALL be strictly preserved.

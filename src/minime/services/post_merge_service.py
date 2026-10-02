@@ -24,8 +24,15 @@ from minime.domain.enums import (
     SagaType,
     WorkItemStatus,
 )
+from minime.domain.exceptions import StaleClaimError
 from minime.domain.interfaces import GitHubAdapterInterface, PersistenceUnitOfWork
-from minime.domain.models import Event, ExternalActionResult, MetricFact, utc_now
+from minime.domain.models import (
+    Event,
+    ExternalActionResult,
+    MetricFact,
+    RecoveryClaimContext,
+    utc_now,
+)
 from minime.services.lifecycle_transition_authority import LifecycleTransitionAuthority
 from minime.services.openspec_sync import OpenSpecSyncService
 from minime.services.saga_engine import SagaEngine
@@ -277,8 +284,12 @@ class PostMergeReconciliationService:
         project_id: str,
         change_name: str,
         run_id: str | None = None,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> PostMergeReconciliationResult:
         """Execute the complete post-merge closure cycle idempotently."""
+        if claim_context and not claim_context.is_valid():
+            raise StaleClaimError("Recovery claim context is expired or invalid.")
+
         start_time = time.time()
 
         # 1. Locate Run and Job

@@ -7,7 +7,7 @@ def test_resume_uses_deterministic_key_and_does_not_duplicate_event(in_memory_uo
     in_memory_uow.orchestration_runs.save(run)
     service = object.__new__(OrchestrationService)
     service.uow = in_memory_uow
-    service.drive_coordinator = lambda run_id, project_root=None: (
+    service.drive_coordinator = lambda run_id, project_root=None, **kwargs: (
         in_memory_uow.orchestration_runs.get_by_id(run_id)
     )
 

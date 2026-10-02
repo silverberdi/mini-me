@@ -14,8 +14,14 @@ from minime.domain.enums import (
     SagaStatus,
     SagaType,
 )
+from minime.domain.exceptions import StaleClaimError
 from minime.domain.interfaces import PersistenceUnitOfWork
-from minime.domain.models import DurableSaga, Event, OrchestrationExternalAction
+from minime.domain.models import (
+    DurableSaga,
+    Event,
+    OrchestrationExternalAction,
+    RecoveryClaimContext,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -421,8 +427,12 @@ class SagaEngine:
         saga_id: str,
         intake_service: Any = None,
         post_merge_service: Any = None,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> DurableSaga:
         """Resume an active or blocked saga from its persisted checkpoint with row-locking idempotency."""
+        if claim_context and not claim_context.is_valid():
+            raise StaleClaimError("Recovery claim context is expired or invalid.")
+
         saga = self.get_for_update(saga_id) or self.get_saga(saga_id)
         if not saga:
             raise ValueError(f"Saga '{saga_id}' not found.")
@@ -448,13 +458,14 @@ class SagaEngine:
 
         if saga.saga_type == SagaType.INTAKE:
             if intake_service is not None:
-                intake_service.prepare_work_item(saga.project_id, saga.work_item_key)
+                intake_service.prepare_work_item(saga.project_id, saga.work_item_key, claim_context=claim_context)
         elif saga.saga_type == SagaType.CLOSURE:
             if post_merge_service is not None:
                 post_merge_service.reconcile_post_merge(
                     project_id=saga.project_id,
                     change_name=saga.change_name or saga.work_item_key,
                     run_id=saga.run_id,
+                    claim_context=claim_context,
                 )
 
         updated = self.get_saga(saga_id) or saga

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +51,7 @@ from minime.domain.interfaces import (
     DurableSagaRepositoryInterface,
     EventRepositoryInterface,
     EvidenceDiagnosticRepositoryInterface,
+    ExternalActionAttemptRepositoryInterface,
     GitOperationRepositoryInterface,
     IntegrityFindingRepositoryInterface,
     JobAttemptRepositoryInterface,
@@ -69,6 +70,8 @@ from minime.domain.interfaces import (
     ProjectRepositoryInterface,
     ProviderEfficiencyMetricsRepositoryInterface,
     ProviderHealthRepositoryInterface,
+    RecoveryClaimRepositoryInterface,
+    RecoveryDecisionRepositoryInterface,
     ReviewFindingRepositoryInterface,
     ReviewRepositoryInterface,
     SchedulerDecisionRepositoryInterface,
@@ -95,6 +98,7 @@ from minime.domain.models import (
     DurableSaga,
     Event,
     EvidenceDiagnostic,
+    ExternalActionAttempt,
     ExternalActionResult,
     GitOperation,
     IntegrityAudit,
@@ -117,6 +121,8 @@ from minime.domain.models import (
     ProjectManagedRepositoryBinding,
     ProviderEfficiencyMetrics,
     ProviderHealth,
+    RecoveryClaim,
+    RecoveryDecision,
     Review,
     ReviewFinding,
     SchedulerDecisionRecord,
@@ -2122,6 +2128,188 @@ class InMemoryDurableSagaRepository(DurableSagaRepositoryInterface):
         return saga.model_copy(deep=True)
 
 
+class InMemoryRecoveryClaimRepository(RecoveryClaimRepositoryInterface):
+    def __init__(self):
+        self._claims: dict[str, RecoveryClaim] = {}
+
+    def acquire_or_reacquire(
+        self,
+        claim_key: str,
+        owner_instance_id: str,
+        lease_seconds: int = 60,
+    ) -> RecoveryClaim | None:
+        now = utc_now()
+        existing = self._claims.get(claim_key)
+        if existing:
+            if existing.owner_instance_id == owner_instance_id and existing.lease_expires_at > now:
+                new_expires = now + timedelta(seconds=lease_seconds)
+                updated = RecoveryClaim(
+                    claim_key=claim_key,
+                    owner_instance_id=owner_instance_id,
+                    fence_token=existing.fence_token,
+                    acquired_at=existing.acquired_at,
+                    lease_expires_at=new_expires,
+                    last_heartbeat_at=now,
+                    is_active=True,
+                    version=existing.version + 1,
+                )
+                self._claims[claim_key] = updated
+                return updated
+            if existing.lease_expires_at <= now:
+                new_expires = now + timedelta(seconds=lease_seconds)
+                updated = RecoveryClaim(
+                    claim_key=claim_key,
+                    owner_instance_id=owner_instance_id,
+                    fence_token=existing.fence_token + 1,
+                    acquired_at=now,
+                    lease_expires_at=new_expires,
+                    last_heartbeat_at=now,
+                    is_active=True,
+                    version=existing.version + 1,
+                )
+                self._claims[claim_key] = updated
+                return updated
+            return None
+        expires = now + timedelta(seconds=lease_seconds)
+        claim = RecoveryClaim(
+            claim_key=claim_key,
+            owner_instance_id=owner_instance_id,
+            fence_token=1,
+            acquired_at=now,
+            lease_expires_at=expires,
+            last_heartbeat_at=now,
+            is_active=True,
+            version=1,
+        )
+        self._claims[claim_key] = claim
+        return claim
+
+    def renew_heartbeat(
+        self,
+        claim_key: str,
+        owner_instance_id: str,
+        fence_token: int,
+        lease_seconds: int = 60,
+    ) -> bool:
+        now = utc_now()
+        existing = self._claims.get(claim_key)
+        if (
+            existing
+            and existing.owner_instance_id == owner_instance_id
+            and existing.fence_token == fence_token
+            and existing.lease_expires_at > now
+        ):
+            new_expires = now + timedelta(seconds=lease_seconds)
+            updated = RecoveryClaim(
+                claim_key=claim_key,
+                owner_instance_id=owner_instance_id,
+                fence_token=fence_token,
+                acquired_at=existing.acquired_at,
+                lease_expires_at=new_expires,
+                last_heartbeat_at=now,
+                is_active=True,
+                version=existing.version + 1,
+            )
+            self._claims[claim_key] = updated
+            return True
+        return False
+
+    def release(
+        self,
+        claim_key: str,
+        owner_instance_id: str,
+        fence_token: int,
+    ) -> bool:
+        existing = self._claims.get(claim_key)
+        if (
+            existing
+            and existing.owner_instance_id == owner_instance_id
+            and existing.fence_token == fence_token
+        ):
+            self._claims.pop(claim_key, None)
+            return True
+        return False
+
+    def validate_cas(
+        self,
+        claim_key: str,
+        owner_instance_id: str,
+        fence_token: int,
+    ) -> bool:
+        now = utc_now()
+        existing = self._claims.get(claim_key)
+        return bool(
+            existing
+            and existing.owner_instance_id == owner_instance_id
+            and existing.fence_token == fence_token
+            and existing.lease_expires_at > now
+        )
+
+    def get_by_key(self, claim_key: str) -> RecoveryClaim | None:
+        return self._claims.get(claim_key)
+
+
+class InMemoryRecoveryDecisionRepository(RecoveryDecisionRepositoryInterface):
+    def __init__(self):
+        self._store: dict[str, RecoveryDecision] = {}
+
+    def create_decision(self, decision: RecoveryDecision) -> RecoveryDecision:
+        self._store[decision.decision_id] = decision
+        return decision
+
+    def get_by_id(self, decision_id: str) -> RecoveryDecision | None:
+        return self._store.get(decision_id)
+
+    def get_by_cycle_and_claim(self, cycle_id: str, claim_key: str) -> RecoveryDecision | None:
+        for d in self._store.values():
+            if d.cycle_id == cycle_id and d.claim_key == claim_key:
+                return d
+        return None
+
+    def list_by_cycle(self, cycle_id: str) -> list[RecoveryDecision]:
+        return [d for d in self._store.values() if d.cycle_id == cycle_id]
+
+    def list_by_claim_key(self, claim_key: str) -> list[RecoveryDecision]:
+        return [d for d in self._store.values() if d.claim_key == claim_key]
+
+    def update_decision(self, decision: RecoveryDecision) -> RecoveryDecision:
+        self._store[decision.decision_id] = decision
+        return decision
+
+
+class InMemoryExternalActionAttemptRepository(ExternalActionAttemptRepositoryInterface):
+    def __init__(self):
+        self._store: dict[str, ExternalActionAttempt] = {}
+
+    def create_attempt(self, attempt: ExternalActionAttempt) -> ExternalActionAttempt:
+        self._store[attempt.id] = attempt
+        return attempt
+
+    def get_by_dispatch_intent_key(self, dispatch_intent_key: str) -> ExternalActionAttempt | None:
+        for a in self._store.values():
+            if a.dispatch_intent_key == dispatch_intent_key:
+                return a
+        return None
+
+    def list_by_action_key(self, action_key: str) -> list[ExternalActionAttempt]:
+        return [a for a in self._store.values() if a.action_key == action_key]
+
+    def update_status(
+        self,
+        attempt_id: str,
+        status: str,
+        result_payload: dict[str, Any] | None = None,
+        error_message: str | None = None,
+    ) -> ExternalActionAttempt:
+        attempt = self._store[attempt_id]
+        attempt.status = status
+        if result_payload is not None:
+            attempt.result_payload = result_payload
+        if error_message is not None:
+            attempt.error_message = error_message
+        return attempt
+
+
 class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
     def __init__(self):
         self.durable_sagas = InMemoryDurableSagaRepository()
@@ -2155,6 +2343,11 @@ class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.orchestration_stage_events = InMemoryOrchestrationStageEventRepository()
         self.orchestration_candidates = InMemoryOrchestrationCandidateRepository()
         self.orchestration_external_actions = InMemoryOrchestrationExternalActionRepository()
+        self.claims = InMemoryRecoveryClaimRepository()
+        self.recovery_claims = self.claims
+        self.recovery_decisions = InMemoryRecoveryDecisionRepository()
+        self.decisions = self.recovery_decisions
+        self.external_action_attempts = InMemoryExternalActionAttemptRepository()
         self.preview_sessions = InMemoryPreviewSessionRepository()
         self.validation_runs = InMemoryValidationRunRepository()
         self.operator_actions = InMemoryOperatorActionRepository()

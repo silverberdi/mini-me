@@ -22,6 +22,7 @@ from minime.domain.enums import (
     OrchestrationStopOutcome,
     PreviewStatus,
     ProviderHealthStatus,
+    RecoverySource,
     ValidationVerdict,
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
@@ -40,6 +41,7 @@ from minime.services.container_preview_service import ContainerPreviewService
 from minime.services.orchestration_service import OrchestrationService
 from minime.services.post_merge_service import PostMergeReconciliationService
 from minime.services.provider_health_service import ProviderHealthService
+from minime.services.recovery_convergence_service import RecoveryConvergenceService
 from minime.services.restart_recovery_service import RestartRecoveryService
 from minime.services.validation_authority_service import ValidationAuthorityService
 
@@ -71,6 +73,9 @@ class ControlPlaneService:
             uow, project_root=self.project_root
         )
         self.provider_health_service = provider_health_service or ProviderHealthService(uow)
+        self.recovery_convergence_service = RecoveryConvergenceService(
+            uow, project_root=self.project_root, health_service=self.provider_health_service
+        )
         gh_adapter = getattr(self.orchestration_service, "github_adapter", None)
         self.post_merge_service = post_merge_service or PostMergeReconciliationService(
             uow, project_root=self.project_root, github_adapter=gh_adapter
@@ -667,10 +672,11 @@ class ControlPlaneService:
             self.uow.orchestration_runs.save(run)
             self.uow.commit()
 
-        # Call orchestration service resume
-        resumed_run = self.orchestration_service.resume(
-            run.run_id, project_root=self.project_root, force=True
+        # Drive run continuation through canonical RecoveryConvergenceService
+        self.recovery_convergence_service.request_run_continuation(
+            run.run_id, source=RecoverySource.CONTROL_PLANE, force=True
         )
+        resumed_run = self.uow.orchestration_runs.get_by_id(run.run_id) or run
 
         summary = f"Run resumed successfully at stage {resumed_run.current_stage.value}."
         record = OperatorActionRecord(
@@ -756,12 +762,15 @@ class ControlPlaneService:
                 sanitized_params=sanitized_params,
             )
 
-        # Increment retry count and resume
+        # Increment retry count and resume through RecoveryConvergenceService
         run.retry_count += 1
         self.uow.orchestration_runs.save(run)
         self.uow.commit()
 
-        resumed_run = self.orchestration_service.resume(run.run_id, project_root=self.project_root)
+        self.recovery_convergence_service.request_run_continuation(
+            run.run_id, source=RecoverySource.CONTROL_PLANE
+        )
+        resumed_run = self.uow.orchestration_runs.get_by_id(run.run_id) or run
 
         summary = f"Stage retried (attempt #{resumed_run.retry_count}); stage is now {resumed_run.current_stage.value}."
         record = OperatorActionRecord(

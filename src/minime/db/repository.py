@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, select, update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from minime.db.models import (
@@ -28,6 +29,7 @@ from minime.db.models import (
     DurableSagaModel,
     EventModel,
     EvidenceDiagnosticModel,
+    ExternalActionAttemptModel,
     GitOperationModel,
     IntegrityFindingModel,
     JobAttemptModel,
@@ -49,6 +51,8 @@ from minime.db.models import (
     ProjectModel,
     ProviderEfficiencyMetricsModel,
     ProviderHealthModel,
+    RecoveryClaimModel,
+    RecoveryDecisionModel,
     ReviewFindingModel,
     ReviewModel,
     SchedulerDecisionRecordModel,
@@ -95,6 +99,9 @@ from minime.domain.enums import (
     ProviderResultClass,
     QueuePriority,
     ReadinessState,
+    RecoveryClassification,
+    RecoveryDecisionStatus,
+    RecoverySource,
     RemediationFailureCode,
     RemediationStatus,
     ReviewStatus,
@@ -126,6 +133,7 @@ from minime.domain.interfaces import (
     DurableSagaRepositoryInterface,
     EventRepositoryInterface,
     EvidenceDiagnosticRepositoryInterface,
+    ExternalActionAttemptRepositoryInterface,
     GitOperationRepositoryInterface,
     IntegrityFindingRepositoryInterface,
     JobAttemptRepositoryInterface,
@@ -148,6 +156,8 @@ from minime.domain.interfaces import (
     ProjectRepositoryInterface,
     ProviderEfficiencyMetricsRepositoryInterface,
     ProviderHealthRepositoryInterface,
+    RecoveryClaimRepositoryInterface,
+    RecoveryDecisionRepositoryInterface,
     ReviewFindingRepositoryInterface,
     ReviewRepositoryInterface,
     SchedulerDecisionRepositoryInterface,
@@ -175,6 +185,7 @@ from minime.domain.models import (
     DurableSaga,
     Event,
     EvidenceDiagnostic,
+    ExternalActionAttempt,
     GitOperation,
     HumanAnswerRecord,
     IntegrityAudit,
@@ -197,6 +208,8 @@ from minime.domain.models import (
     ProjectManagedRepositoryBinding,
     ProviderEfficiencyMetrics,
     ProviderHealth,
+    RecoveryClaim,
+    RecoveryDecision,
     Review,
     ReviewFinding,
     SchedulerDecisionRecord,
@@ -870,8 +883,63 @@ def orchestration_external_action_model_to_domain(
         remote_identifier=model.remote_identifier,
         result_payload=model.result_payload or {},
         error_message=model.error_message,
+        last_claim_key=model.last_claim_key,
+        last_fence_token=model.last_fence_token,
+        last_dispatch_intent_id=model.last_dispatch_intent_id,
         reserved_at=model.reserved_at,
         reconciled_at=model.reconciled_at,
+        created_at=model.created_at,
+        updated_at=model.updated_at,
+    )
+
+
+def recovery_claim_model_to_domain(model: RecoveryClaimModel) -> RecoveryClaim:
+    return RecoveryClaim(
+        claim_key=model.claim_key,
+        fence_token=model.fence_token,
+        owner_instance_id=model.owner_instance_id,
+        claimed_at=model.claimed_at,
+        heartbeat_at=model.heartbeat_at,
+        lease_expires_at=model.lease_expires_at,
+        released_at=model.released_at,
+        last_decision_id=model.last_decision_id,
+    )
+
+
+def recovery_decision_model_to_domain(model: RecoveryDecisionModel) -> RecoveryDecision:
+    return RecoveryDecision(
+        decision_id=model.id,
+        cycle_id=model.cycle_id,
+        claim_key=model.claim_key,
+        identity_type=model.identity_type,
+        identity_id=model.identity_id,
+        project_id=model.project_id,
+        change_name=model.change_name,
+        source=RecoverySource(model.source),
+        prior_checkpoint=model.prior_checkpoint or {},
+        observation_refs=model.observation_refs or {},
+        classification=RecoveryClassification(model.classification),
+        planned_action=model.planned_action,
+        fence_token=model.fence_token,
+        status=RecoveryDecisionStatus(model.status),
+        result_payload=model.result_payload or {},
+        reason_code=model.reason_code,
+        created_at=model.created_at,
+        updated_at=model.updated_at,
+    )
+
+
+def external_action_attempt_model_to_domain(model: ExternalActionAttemptModel) -> ExternalActionAttempt:
+    return ExternalActionAttempt(
+        attempt_id=model.id,
+        action_key=model.action_key,
+        claim_key=model.claim_key,
+        fence_token=model.fence_token,
+        attempt_number=model.attempt_number,
+        dispatch_intent_key=model.dispatch_intent_key,
+        status=model.status,
+        result_payload=model.result_payload or {},
+        error_message=model.error_message,
         created_at=model.created_at,
         updated_at=model.updated_at,
     )
@@ -3126,6 +3194,9 @@ class PostgresOrchestrationExternalActionRepository(OrchestrationExternalActionR
                     remote_identifier=action.remote_identifier,
                     result_payload=action.result_payload,
                     error_message=action.error_message,
+                    last_claim_key=action.last_claim_key,
+                    last_fence_token=action.last_fence_token,
+                    last_dispatch_intent_id=action.last_dispatch_intent_id,
                     reserved_at=action.reserved_at,
                     reconciled_at=action.reconciled_at,
                     created_at=action.created_at,
@@ -4641,6 +4712,236 @@ class PostgresOrchestrationWorktreeOwnershipRepository(
             self.session.delete(model)
 
 
+class PostgresRecoveryClaimRepository(RecoveryClaimRepositoryInterface):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def acquire_or_reacquire(
+        self, claim_key: str, owner_instance_id: str, lease_seconds: int = 60
+    ) -> RecoveryClaim | None:
+        try:
+            stmt = (
+                select(RecoveryClaimModel)
+                .where(RecoveryClaimModel.claim_key == claim_key)
+                .with_for_update(nowait=True)
+            )
+            model = self.session.scalars(stmt).first()
+        except OperationalError:
+            return None
+        now = utc_now()
+        lease_expires = now + timedelta(seconds=lease_seconds)
+
+        if model is None:
+            model = RecoveryClaimModel(
+                claim_key=claim_key,
+                fence_token=1,
+                owner_instance_id=owner_instance_id,
+                claimed_at=now,
+                heartbeat_at=now,
+                lease_expires_at=lease_expires,
+                released_at=None,
+                last_decision_id=None,
+            )
+            self.session.add(model)
+            self.session.flush()
+            return recovery_claim_model_to_domain(model)
+
+        if model.released_at is None and model.lease_expires_at > now and model.owner_instance_id != owner_instance_id:
+            return None
+
+        if model.released_at is None and model.lease_expires_at > now and model.owner_instance_id == owner_instance_id:
+            model.heartbeat_at = now
+            model.lease_expires_at = lease_expires
+            self.session.flush()
+            return recovery_claim_model_to_domain(model)
+
+        model.fence_token = model.fence_token + 1
+        model.owner_instance_id = owner_instance_id
+        model.claimed_at = now
+        model.heartbeat_at = now
+        model.lease_expires_at = lease_expires
+        model.released_at = None
+        self.session.flush()
+        return recovery_claim_model_to_domain(model)
+
+    def renew_heartbeat(
+        self, claim_key: str, owner_instance_id: str, fence_token: int, lease_seconds: int = 60
+    ) -> bool:
+        now = utc_now()
+        lease_expires = now + timedelta(seconds=lease_seconds)
+        stmt = (
+            update(RecoveryClaimModel)
+            .where(
+                RecoveryClaimModel.claim_key == claim_key,
+                RecoveryClaimModel.owner_instance_id == owner_instance_id,
+                RecoveryClaimModel.fence_token == fence_token,
+                RecoveryClaimModel.released_at.is_(None),
+                RecoveryClaimModel.lease_expires_at > now,
+            )
+            .values(heartbeat_at=now, lease_expires_at=lease_expires)
+        )
+        res = self.session.execute(stmt)
+        return res.rowcount > 0
+
+    def release(self, claim_key: str, owner_instance_id: str, fence_token: int) -> bool:
+        now = utc_now()
+        stmt = (
+            update(RecoveryClaimModel)
+            .where(
+                RecoveryClaimModel.claim_key == claim_key,
+                RecoveryClaimModel.owner_instance_id == owner_instance_id,
+                RecoveryClaimModel.fence_token == fence_token,
+                RecoveryClaimModel.released_at.is_(None),
+            )
+            .values(released_at=now)
+        )
+        res = self.session.execute(stmt)
+        return res.rowcount > 0
+
+    def get_by_key(self, claim_key: str) -> RecoveryClaim | None:
+        model = self.session.get(RecoveryClaimModel, claim_key)
+        return recovery_claim_model_to_domain(model) if model else None
+
+    def validate_cas(self, claim_key: str, owner_instance_id: str, fence_token: int) -> bool:
+        now = utc_now()
+        stmt = select(RecoveryClaimModel).where(
+            RecoveryClaimModel.claim_key == claim_key,
+            RecoveryClaimModel.owner_instance_id == owner_instance_id,
+            RecoveryClaimModel.fence_token == fence_token,
+            RecoveryClaimModel.released_at.is_(None),
+            RecoveryClaimModel.lease_expires_at > now,
+        )
+        model = self.session.scalars(stmt).first()
+        return model is not None
+
+
+class PostgresRecoveryDecisionRepository(RecoveryDecisionRepositoryInterface):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def create_decision(self, decision: RecoveryDecision) -> RecoveryDecision:
+        model = RecoveryDecisionModel(
+            id=decision.decision_id,
+            cycle_id=decision.cycle_id,
+            claim_key=decision.claim_key,
+            identity_type=decision.identity_type,
+            identity_id=decision.identity_id,
+            project_id=decision.project_id,
+            change_name=decision.change_name,
+            source=decision.source.value if isinstance(decision.source, RecoverySource) else str(decision.source),
+            prior_checkpoint=decision.prior_checkpoint,
+            observation_refs=decision.observation_refs,
+            classification=decision.classification.value if isinstance(decision.classification, RecoveryClassification) else str(decision.classification),
+            planned_action=decision.planned_action,
+            fence_token=decision.fence_token,
+            status=decision.status.value if isinstance(decision.status, RecoveryDecisionStatus) else str(decision.status),
+            result_payload=decision.result_payload,
+            reason_code=decision.reason_code,
+            created_at=decision.created_at,
+            updated_at=decision.updated_at,
+        )
+        self.session.add(model)
+        self.session.flush()
+        return recovery_decision_model_to_domain(model)
+
+    def get_by_id(self, decision_id: str) -> RecoveryDecision | None:
+        model = self.session.get(RecoveryDecisionModel, decision_id)
+        return recovery_decision_model_to_domain(model) if model else None
+
+    def get_by_cycle_and_claim(
+        self, cycle_id: str, claim_key: str
+    ) -> RecoveryDecision | None:
+        stmt = select(RecoveryDecisionModel).where(
+            RecoveryDecisionModel.cycle_id == cycle_id,
+            RecoveryDecisionModel.claim_key == claim_key,
+        )
+        model = self.session.scalars(stmt).first()
+        return recovery_decision_model_to_domain(model) if model else None
+
+    def list_by_cycle(self, cycle_id: str) -> list[RecoveryDecision]:
+        stmt = select(RecoveryDecisionModel).where(
+            RecoveryDecisionModel.cycle_id == cycle_id
+        )
+        models = self.session.scalars(stmt).all()
+        return [recovery_decision_model_to_domain(m) for m in models]
+
+    def list_by_claim_key(self, claim_key: str) -> list[RecoveryDecision]:
+        stmt = select(RecoveryDecisionModel).where(
+            RecoveryDecisionModel.claim_key == claim_key
+        ).order_by(desc(RecoveryDecisionModel.created_at))
+        models = self.session.scalars(stmt).all()
+        return [recovery_decision_model_to_domain(m) for m in models]
+
+    def update_decision(self, decision: RecoveryDecision) -> RecoveryDecision:
+        model = self.session.get(RecoveryDecisionModel, decision.decision_id)
+        if model:
+            model.status = decision.status.value if isinstance(decision.status, RecoveryDecisionStatus) else str(decision.status)
+            model.result_payload = decision.result_payload
+            model.reason_code = decision.reason_code
+            model.updated_at = utc_now()
+            self.session.flush()
+            return recovery_decision_model_to_domain(model)
+        return decision
+
+
+class PostgresExternalActionAttemptRepository(ExternalActionAttemptRepositoryInterface):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def create_attempt(self, attempt: ExternalActionAttempt) -> ExternalActionAttempt:
+        model = ExternalActionAttemptModel(
+            id=attempt.attempt_id,
+            action_key=attempt.action_key,
+            claim_key=attempt.claim_key,
+            fence_token=attempt.fence_token,
+            attempt_number=attempt.attempt_number,
+            dispatch_intent_key=attempt.dispatch_intent_key,
+            status=attempt.status,
+            result_payload=attempt.result_payload,
+            error_message=attempt.error_message,
+            created_at=attempt.created_at,
+            updated_at=attempt.updated_at,
+        )
+        self.session.add(model)
+        self.session.flush()
+        return external_action_attempt_model_to_domain(model)
+
+    def get_by_dispatch_intent_key(
+        self, dispatch_intent_key: str
+    ) -> ExternalActionAttempt | None:
+        stmt = select(ExternalActionAttemptModel).where(
+            ExternalActionAttemptModel.dispatch_intent_key == dispatch_intent_key
+        )
+        model = self.session.scalars(stmt).first()
+        return external_action_attempt_model_to_domain(model) if model else None
+
+    def list_by_action_key(self, action_key: str) -> list[ExternalActionAttempt]:
+        stmt = select(ExternalActionAttemptModel).where(
+            ExternalActionAttemptModel.action_key == action_key
+        ).order_by(ExternalActionAttemptModel.attempt_number)
+        models = self.session.scalars(stmt).all()
+        return [external_action_attempt_model_to_domain(m) for m in models]
+
+    def update_status(
+        self,
+        attempt_id: str,
+        status: str,
+        result_payload: dict[str, Any] | None = None,
+        error_message: str | None = None,
+    ) -> ExternalActionAttempt:
+        model = self.session.get(ExternalActionAttemptModel, attempt_id)
+        if model:
+            model.status = status
+            if result_payload is not None:
+                model.result_payload = result_payload
+            if error_message is not None:
+                model.error_message = error_message
+            model.updated_at = utc_now()
+            self.session.flush()
+            return external_action_attempt_model_to_domain(model)
+        raise ValueError(f"ExternalActionAttempt {attempt_id} not found")
+
+
 class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
     """Encapsulates a database session for atomic operations across repositories."""
 
@@ -4695,6 +4996,9 @@ class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
             session
         )
         self.durable_sagas = PostgresDurableSagaRepository(session)
+        self.claims = PostgresRecoveryClaimRepository(session)
+        self.recovery_decisions = PostgresRecoveryDecisionRepository(session)
+        self.external_action_attempts = PostgresExternalActionAttemptRepository(session)
 
     def commit(self) -> None:
         self.session.commit()

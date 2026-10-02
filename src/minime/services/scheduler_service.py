@@ -27,6 +27,7 @@ from minime.domain.enums import (
     ProjectStatus,
     ProviderHealthStatus,
     QueuePriority,
+    RecoverySource,
     SchedulerMode,
     WorkItemStatus,
 )
@@ -58,6 +59,7 @@ from minime.services.orchestration_service import OrchestrationService
 from minime.services.post_merge_service import PostMergeReconciliationService
 from minime.services.provider_health_service import ProviderHealthService
 from minime.services.readiness_service import ReadinessService
+from minime.services.recovery_convergence_service import RecoveryConvergenceService
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +153,9 @@ class SchedulerService:
         )
         self.provider_health_service = provider_health_service or ProviderHealthService(uow)
         self.model_independence_policy = model_independence_policy or ModelIndependencePolicy()
+        self.recovery_convergence_service = RecoveryConvergenceService(
+            uow, project_root=self.project_root, health_service=self.provider_health_service
+        )
         if _test_global_max_jobs_override is not None:
             self.max_global_jobs = _test_global_max_jobs_override
         else:
@@ -525,6 +530,20 @@ class SchedulerService:
                 legacy_decision=AdmissionDecision.REFUSED,
                 legacy_refusal_code=AdmissionRefusalCode.NOT_READY,
                 refusal_details={"code": "LIFECYCLE_BLOCKED", "status": change_rec.status.value},
+            )
+
+        existing_active = self.uow.orchestration_runs.get_active_run(project_id, change_name)
+        if existing_active and self.mode != SchedulerMode.DRAIN:
+            return AdmissionEvaluationResult(
+                decision=AdmissionDecisionKind.WAIT,
+                project_id=project_id,
+                change_name=change_name,
+                safe_executable_pair_exists=False,
+                block_condition=AdmissionBlockCondition.LIFECYCLE_BLOCKED,
+                rationale=f"Active orchestration run '{existing_active.run_id}' already exists for change '{change_name}'.",
+                legacy_decision=AdmissionDecision.REFUSED,
+                legacy_refusal_code=AdmissionRefusalCode.CHANGE_ALREADY_ACTIVE,
+                refusal_details={"code": "DUPLICATE_ACTIVE_RUN", "existing_run_id": existing_active.run_id},
             )
 
         if backlog_rec and backlog_rec.status != WorkItemStatus.READY:
@@ -1480,7 +1499,12 @@ class SchedulerService:
             except RuntimeError:
                 asyncio.run(self.provider_health_service.probe_unavailable_providers())
         except Exception as exc:
-            logger.debug(f"Background provider probing during tick encountered error: {exc}")
+            logger.warning("Provider health probe during tick encountered error: %s", exc)
+        # 0. Canonical Recovery Convergence Cycle
+        try:
+            self.recovery_convergence_service.reconcile_cycle(project_id=project_id, source=RecoverySource.TICK)
+        except Exception as exc:
+            logger.warning("Recovery convergence cycle during tick encountered error: %s", exc)
 
         # 0. Check and reconcile any merged runs waiting at READY_FOR_HUMAN_MERGE or PR_PREPARED
         all_runs_pre = self.uow.orchestration_runs.list_runs(project_id=project_id)

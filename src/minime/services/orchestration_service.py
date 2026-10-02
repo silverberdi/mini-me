@@ -35,6 +35,7 @@ from minime.domain.enums import (
     ReviewVerdict,
     WorkItemStatus,
 )
+from minime.domain.exceptions import StaleClaimError
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
     AdmissionResult,
@@ -48,6 +49,7 @@ from minime.domain.models import (
     OrchestrationStatusView,
     Project,
     ProjectBinding,
+    RecoveryClaimContext,
     generate_uuid,
     utc_now,
 )
@@ -429,6 +431,7 @@ class OrchestrationService:
         project_root: str | Path | None = None,
         force: bool = False,
         drain_mode: bool = False,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> OrchestrationRun:
         """Resume an orchestration run from its persisted resumable checkpoint.
 
@@ -437,6 +440,9 @@ class OrchestrationService:
         fallback (OpenRouterEligibilityEvaluator + BudgetService) can continue the
         in-flight job. It does not bypass the NEEDS_HUMAN gate.
         """
+        if claim_context and not claim_context.is_valid():
+            raise StaleClaimError("Recovery claim context is expired or invalid.")
+
         run = self.uow.orchestration_runs.get_for_update(run_id) or self.uow.orchestration_runs.get_by_id(run_id)
         if not run:
             raise ValueError(f"Orchestration run '{run_id}' not found.")
@@ -540,7 +546,7 @@ class OrchestrationService:
             self.uow.flush()
 
         self.uow.commit()
-        return self.drive_coordinator(run.run_id, project_root=project_root)
+        return self.drive_coordinator(run.run_id, project_root=project_root, claim_context=claim_context)
 
     def resolve_preserved_candidate(
         self,
@@ -1501,11 +1507,15 @@ class OrchestrationService:
         self,
         run_id: str,
         project_root: str | Path | None = None,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> OrchestrationRun:
         """Drive the deterministic stage state machine until a legitimate stop outcome."""
         root = Path(project_root).resolve() if project_root else self.project_root
 
         while True:
+            if claim_context and not claim_context.is_valid():
+                raise StaleClaimError("Claim context expired during coordinator execution.")
+
             raw_run = self.uow.orchestration_runs.get_for_update(run_id)
             if not isinstance(raw_run, OrchestrationRun):
                 raw_run = self.uow.orchestration_runs.get_by_id(run_id)
