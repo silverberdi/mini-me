@@ -21,7 +21,6 @@ from minime.domain.enums import (
     SagaType,
     WorkItemStatus,
 )
-from minime.domain.exceptions import StaleClaimError
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
     BacklogItem,
@@ -306,8 +305,8 @@ class IntakeService:
         claim_context: RecoveryClaimContext | None = None,
     ) -> WorkItemPrepareResult:
         """Prepare canonical execution artifacts (GitHub Issue, Project item, OpenSpec change)."""
-        if claim_context and not claim_context.is_valid():
-            raise StaleClaimError("Recovery claim context is expired or invalid.")
+        from minime.domain.models import validate_claim_context_authoritative
+        validate_claim_context_authoritative(self.uow, claim_context)
 
         set_correlation_context(project_id=project_id, operation_id="prepare_work_item")
 

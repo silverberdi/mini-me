@@ -20,13 +20,11 @@ from minime.domain.enums import (
     AdmissionRefusalCode,
     ChangeStatus,
     ExecutionOutcome,
-    HumanGate,
     JobStatus,
-    OrchestrationStage,
-    OrchestrationStopOutcome,
     ProjectStatus,
     ProviderHealthStatus,
     QueuePriority,
+    RecoveryDecisionStatus,
     RecoverySource,
     SchedulerMode,
     WorkItemStatus,
@@ -1352,131 +1350,17 @@ class SchedulerService:
         drive_resumed: bool = False,
         timeout_hours: float = 2.0,
     ) -> list[str]:
-        """Re-evaluate active orchestration runs waiting for capacity or external environment.
-
-        Automatically resumes runs when capacity/environment becomes available,
-        or transitions to NEEDS_HUMAN when the bounded waiting timeout is exceeded.
-        Does not consume retry budget merely for waiting.
-        """
-        resumed_run_ids: list[str] = []
-        now = utc_now()
-
-        all_runs = self.uow.orchestration_runs.list_runs(project_id=project_id, is_active=True)
-        waiting_runs = [
-            r
-            for r in all_runs
-            if r.stop_outcome
-            in {
-                OrchestrationStopOutcome.WAITING_CAPACITY,
-                OrchestrationStopOutcome.WAITING_EXTERNAL,
-            }
-            and (project_id is None or r.project_id == project_id)
+        """Re-evaluate active orchestration runs waiting for capacity or external environment via RecoveryConvergenceService."""
+        decisions = self.recovery_convergence_service.reconcile_cycle(
+            project_id=project_id,
+            source=RecoverySource.SCHEDULER,
+            drive_admitted=drive_resumed,
+        )
+        return [
+            d.identity_id
+            for d in decisions
+            if d.identity_type == "RUN" and d.status == RecoveryDecisionStatus.COMPLETED
         ]
-
-        for run in waiting_runs:
-            # 1. Determine waiting_since
-            waiting_since = None
-            if run.stop_details and "waiting_since" in run.stop_details:
-                try:
-                    val = run.stop_details["waiting_since"]
-                    if isinstance(val, str):
-                        waiting_since = datetime.fromisoformat(val)
-                    elif isinstance(val, datetime):
-                        waiting_since = val
-                except Exception:
-                    pass
-            if not waiting_since:
-                waiting_since = run.updated_at or run.created_at or now
-
-            # 2. Check bounded timeout
-            elapsed_seconds = max(0.0, (now - waiting_since).total_seconds())
-            if elapsed_seconds > (timeout_hours * 3600.0):
-                logger.warning(
-                    "Waiting capacity timeout (%.1fh) exceeded for run '%s' (%s). Escalating to NEEDS_HUMAN.",
-                    timeout_hours,
-                    run.run_id,
-                    run.change_name,
-                )
-                run.stop_outcome = OrchestrationStopOutcome.NEEDS_HUMAN
-                run.human_gate = HumanGate.NEEDS_HUMAN
-                run.is_active = False
-                run.stop_reason = (
-                    f"Waiting capacity timeout exceeded ({elapsed_seconds / 3600.0:.1f}h). "
-                    f"Operator intervention required."
-                )
-                details = dict(run.stop_details or {})
-                details["code"] = "WAITING_CAPACITY_TIMEOUT"
-                details["timed_out_at"] = now.isoformat()
-                run.stop_details = details
-                run.updated_at = now
-                self.uow.orchestration_runs.save(run)
-
-                if run.active_job_id:
-                    job = self.uow.jobs.get_by_id(run.active_job_id)
-                    if job and job.status in {
-                        JobStatus.WAITING_CAPACITY,
-                        JobStatus.RECOVERY_BLOCKED,
-                    }:
-                        job.status = JobStatus.NEEDS_HUMAN
-                        job.escalation_reason = run.stop_reason
-                        self.uow.jobs.save(job)
-                self.uow.commit()
-                continue
-
-            # 3. Check capacity restoration
-            if self.mode == SchedulerMode.WAIT:
-                logger.debug(
-                    "Scheduler in WAIT mode: skipping capacity wake-up for run '%s'.",
-                    run.run_id,
-                )
-                continue
-
-            project = self.uow.projects.get_by_id(run.project_id)
-            if not project:
-                continue
-
-            # Determine provider being awaited
-            provider = (
-                (run.stop_details.get("provider") if run.stop_details else None)
-                or (
-                    self.uow.jobs.get_by_id(run.active_job_id).waiting_provider
-                    if run.active_job_id
-                    else None
-                )
-                or project.implementer
-                or "codex"
-            )
-
-            # Reset timestamps are estimates, not evidence of actual recovery.
-            # Only a verified provider probe/operation restoring health to AVAILABLE may resume waiting work.
-            health = self.provider_health_service.get_health(provider)
-            is_available = health.status in (
-                ProviderHealthStatus.AVAILABLE,
-                ProviderHealthStatus.DEGRADED,
-            )
-
-            if is_available:
-                logger.info(
-                    "Capacity restored for provider '%s'; auto-resuming waiting run '%s' (%s).",
-                    provider,
-                    run.run_id,
-                    run.change_name,
-                )
-                try:
-                    self.orchestration_service.resume(
-                        run.run_id,
-                        project_root=self.project_root,
-                    )
-                    resumed_run_ids.append(run.run_id)
-                except Exception as exc:
-                    logger.error(
-                        "Error auto-resuming waiting run '%s': %s",
-                        run.run_id,
-                        exc,
-                        exc_info=True,
-                    )
-
-        return resumed_run_ids
 
     def tick(
         self, project_id: str | None = None, drive_admitted: bool = False
@@ -1500,69 +1384,18 @@ class SchedulerService:
                 asyncio.run(self.provider_health_service.probe_unavailable_providers())
         except Exception as exc:
             logger.warning("Provider health probe during tick encountered error: %s", exc)
+
         # 0. Canonical Recovery Convergence Cycle
         try:
-            self.recovery_convergence_service.reconcile_cycle(project_id=project_id, source=RecoverySource.TICK)
+            self.recovery_convergence_service.reconcile_cycle(
+                project_id=project_id,
+                source=RecoverySource.TICK,
+                drive_admitted=drive_admitted,
+            )
         except Exception as exc:
             logger.warning("Recovery convergence cycle during tick encountered error: %s", exc)
 
-        # 0. Check and reconcile any merged runs waiting at READY_FOR_HUMAN_MERGE or PR_PREPARED
-        all_runs_pre = self.uow.orchestration_runs.list_runs(project_id=project_id)
-        for r in all_runs_pre:
-            if (
-                (
-                    r.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
-                    or r.current_stage
-                    in {OrchestrationStage.PR_PREPARED, OrchestrationStage.POST_MERGE_RECONCILING}
-                )
-                and r.current_stage != OrchestrationStage.COMPLETED
-                and (project_id is None or r.project_id == project_id)
-            ):
-                try:
-                    res = self.post_merge_service.reconcile_post_merge(
-                        project_id=r.project_id,
-                        change_name=r.change_name,
-                        run_id=r.run_id,
-                    )
-                    if res.success and not res.already_closed:
-                        logger.info(
-                            "Autonomously reconciled post-merge for run '%s' (%s).",
-                            r.run_id,
-                            r.change_name,
-                        )
-                except Exception as exc:
-                    logger.warning("Post-merge check failed for run '%s': %s", r.run_id, exc)
-
-        # 0.1 Check and re-evaluate runs waiting for capacity or external environment
-        self.reconcile_waiting_runs(project_id=project_id, drive_resumed=drive_admitted)
-
-        # 0.15 Check and drive active queued runs after daemon restart or in-flight continuation
-        if drive_admitted:
-            active_runs_to_drive = self.uow.orchestration_runs.list_runs(
-                project_id=project_id, is_active=True
-            )
-            for r in active_runs_to_drive:
-                if (
-                    r.active_job_id
-                    and r.stop_outcome is None
-                    and r.current_stage
-                    not in (OrchestrationStage.COMPLETED, OrchestrationStage.PR_PREPARED)
-                ):
-                    job = self.uow.jobs.get_by_id(r.active_job_id)
-                    if job and job.status == JobStatus.QUEUED:
-                        logger.info(
-                            "Driving active queued run '%s' (%s) after restart.",
-                            r.run_id,
-                            r.change_name,
-                        )
-                        try:
-                            self.orchestration_service.drive_coordinator(
-                                r.run_id, project_root=self.project_root
-                            )
-                        except Exception as exc:
-                            logger.warning("Failed driving active run '%s': %s", r.run_id, exc)
-
-        # 0.2 Autonomous intake sweep for unprepared backlog items when auto_prepare is enabled
+        # 0.1 Autonomous intake sweep for unprepared backlog items when auto_prepare is enabled
         try:
             self.intake_service.sweep_unprepared_backlog_items(project_id=project_id)
         except Exception as exc:

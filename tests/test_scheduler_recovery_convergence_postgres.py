@@ -646,3 +646,172 @@ def test_g16_control_plane_routing_and_g22_primitive_claim_context(pg_session_fa
         orch.resume(run_id="run-g16", claim_context=stale_ctx)
 
     session.close()
+
+
+# ============================================================================
+# BLOCKER REMEDIATION TESTS: G-R01, G-R02, G-R03
+# ============================================================================
+def test_gr01_scheduler_recovery_authority_convergence(pg_session_factory: sessionmaker[Session]):
+    """BLOCKER G-R01 proof: Scheduler recovery & continuation is driven exclusively through RecoveryConvergenceService."""
+    from minime.services.scheduler_service import SchedulerService
+
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "gr01-change")
+
+    uow = PostgresPersistenceUnitOfWork(session)
+    scheduler = SchedulerService(uow)
+
+    # 1. Verify reconcile_waiting_runs delegates to RecoveryConvergenceService
+    waiting_run = OrchestrationRun(
+        run_id="run-gr01-waiting",
+        project_id=project_id,
+        change_name=change_name,
+        base_sha="15e55c515ae917c2f0330809f0d9e44d49bce12b",
+        current_stage=OrchestrationStage.ADMITTED,
+        stop_outcome=OrchestrationStopOutcome.WAITING_CAPACITY,
+        created_at=utc_now(),
+    )
+    uow.orchestration_runs.save(waiting_run)
+    session.commit()
+
+    scheduler.reconcile_waiting_runs(project_id=project_id)
+    decisions = uow.recovery_decisions.list_by_claim_key("run:run-gr01-waiting")
+    assert len(decisions) >= 1
+    assert decisions[-1].source == RecoverySource.SCHEDULER
+
+    # 2. Verify tick() drives recovery exclusively through RecoveryConvergenceService
+    scheduler.tick(project_id=project_id)
+    tick_decisions = uow.recovery_decisions.list_by_claim_key("run:run-gr01-waiting")
+    assert len(tick_decisions) >= 2
+    assert tick_decisions[-1].source == RecoverySource.TICK
+
+    session.close()
+
+
+def test_gr02_atomic_fenced_dispatch_intent_adversarial(pg_session_factory: sessionmaker[Session]):
+    """BLOCKER G-R02 proof: Stale worker whose lease expired cannot commit dispatch intent in DB after successor acquired higher fence."""
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "gr02-change")
+
+    uow = PostgresPersistenceUnitOfWork(session)
+    rec_a = RecoveryConvergenceService(uow, owner_instance_id="worker-A")
+    rec_b = RecoveryConvergenceService(PostgresPersistenceUnitOfWork(pg_session_factory()), owner_instance_id="worker-B")
+
+    claim_key = "run:run-gr02"
+    action_key = "action:test_dispatch:run-gr02"
+
+    run = OrchestrationRun(
+        run_id="run-gr02",
+        project_id=project_id,
+        change_name=change_name,
+        base_sha="15e55c515ae917c2f0330809f0d9e44d49bce12b",
+        current_stage=OrchestrationStage.ADMITTED,
+        created_at=utc_now(),
+    )
+    uow.orchestration_runs.save(run)
+
+    action = OrchestrationExternalAction(
+        action_key=action_key,
+        run_id="run-gr02",
+        action_type=ExternalActionType.BRANCH_PUSH,
+        target_identity=change_name,
+        request_fingerprint="fp-gr02",
+        status=ExternalActionStatus.RESERVED,
+    )
+    uow.orchestration_external_actions.reserve(action)
+    session.commit()
+
+    # 1. Worker A acquires claim (fence 1)
+    ctx_a = rec_a.acquire_claim(claim_key, lease_seconds=60)
+    assert ctx_a is not None
+    assert ctx_a.fence_token == 1
+
+    # 2. Simulate Worker A's lease expiring in DB
+    session.execute(
+        text("UPDATE recovery_claims SET lease_expires_at = NOW() - INTERVAL '10 seconds' WHERE claim_key = :k"),
+        {"k": claim_key},
+    )
+    session.commit()
+
+    # 3. Worker B reacquires claim (fence 2)
+    ctx_b = rec_b.acquire_claim(claim_key, lease_seconds=60)
+    assert ctx_b is not None
+    assert ctx_b.fence_token == 2
+
+    # 4. Worker A attempts atomic commit dispatch intent with stale fence 1 -> MUST FAIL with StaleClaimError
+    with pytest.raises(StaleClaimError):
+        rec_a.atomic_commit_dispatch_intent(ctx_a, action_key=action_key, attempt_number=1)
+
+    # Assert 0 attempts exist for fence 1
+    attempts = uow.external_action_attempts.list_by_action_key(action_key)
+    assert len(attempts) == 0
+
+    # 5. Worker B commits dispatch intent with fence 2 -> MUST SUCCEED
+    attempt_b = rec_b.atomic_commit_dispatch_intent(ctx_b, action_key=action_key, attempt_number=1)
+    assert attempt_b is not None
+    assert attempt_b.status == "EXECUTING"
+    assert attempt_b.dispatch_intent_key == f"{action_key}:{claim_key}:2:1"
+
+    # Exactly one dispatch intent exists in DB
+    attempts_after = uow.external_action_attempts.list_by_action_key(action_key)
+    assert len(attempts_after) == 1
+    assert attempts_after[0].dispatch_intent_key == f"{action_key}:{claim_key}:2:1"
+
+    session.close()
+
+
+def test_gr03_db_authoritative_claim_context_validation(pg_session_factory: sessionmaker[Session]):
+    """BLOCKER G-R03 proof: Locally non-expired claim context with obsolete DB fence fails DB-authoritative validation and raises StaleClaimError."""
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "gr03-change")
+
+    uow = PostgresPersistenceUnitOfWork(session)
+    rec_a = RecoveryConvergenceService(uow, owner_instance_id="worker-A")
+    rec_b = RecoveryConvergenceService(PostgresPersistenceUnitOfWork(pg_session_factory()), owner_instance_id="worker-B")
+
+    claim_key = "run:run-gr03"
+
+    run = OrchestrationRun(
+        run_id="run-gr03",
+        project_id=project_id,
+        change_name=change_name,
+        base_sha="15e55c515ae917c2f0330809f0d9e44d49bce12b",
+        current_stage=OrchestrationStage.ADMITTED,
+        created_at=utc_now(),
+    )
+    uow.orchestration_runs.save(run)
+    session.commit()
+
+    # 1. Worker A acquires claim (fence 1)
+    ctx_a = rec_a.acquire_claim(claim_key, lease_seconds=3600)
+    assert ctx_a is not None
+    assert ctx_a.fence_token == 1
+    # Notice locally ctx_a.is_valid() is True because lease_expires_at is 1 hour in future
+    assert ctx_a.is_valid() is True
+
+    # 2. Simulate Worker A's lease expiring in DB
+    session.execute(
+        text("UPDATE recovery_claims SET lease_expires_at = NOW() - INTERVAL '10 seconds' WHERE claim_key = :k"),
+        {"k": claim_key},
+    )
+    session.commit()
+
+    # 3. Worker B reacquires claim (fence 2) in DB
+    ctx_b = rec_b.acquire_claim(claim_key, lease_seconds=3600)
+    assert ctx_b is not None
+    assert ctx_b.fence_token == 2
+
+    # 4. Worker A still holds ctx_a in memory (locally valid in memory)
+    assert ctx_a.is_valid() is True
+
+    # 5. Direct primitive invocation on OrchestrationService using ctx_a MUST FAIL with StaleClaimError
+    orch_svc = OrchestrationService(uow)
+    with pytest.raises(StaleClaimError):
+        orch_svc.resume(run_id="run-gr03", claim_context=ctx_a)
+
+    # Verify run stage was NOT mutated by stale worker
+    run_after = uow.orchestration_runs.get_by_id("run-gr03")
+    assert run_after.current_stage == OrchestrationStage.ADMITTED
+
+    session.close()
+

@@ -2245,6 +2245,49 @@ class InMemoryRecoveryClaimRepository(RecoveryClaimRepositoryInterface):
             and existing.lease_expires_at > now
         )
 
+    def commit_fenced_dispatch_intent(
+        self,
+        claim_key: str,
+        owner_instance_id: str,
+        fence_token: int,
+        action_key: str,
+        attempt_number: int = 1,
+    ) -> ExternalActionAttempt:
+        from minime.domain.enums import ExternalActionStatus
+        from minime.domain.exceptions import StaleClaimError
+        from minime.domain.models import ExternalActionAttempt
+
+        if not self.validate_cas(claim_key, owner_instance_id, fence_token):
+            raise StaleClaimError(
+                f"Claim '{claim_key}' with fence {fence_token} is stale or expired."
+            )
+        uow = getattr(self, "_uow", None)
+        if uow and hasattr(uow, "orchestration_external_actions"):
+            action = uow.orchestration_external_actions.get_by_action_key(action_key)
+            if action and action.status == ExternalActionStatus.RESERVED:
+                attempts = uow.external_action_attempts.list_by_action_key(action_key)
+                if action.last_dispatch_intent_id or action.remote_identifier or attempts:
+                    raise ValueError(
+                        f"Action '{action_key}' is RESERVED but POSSIBLY_DISPATCHED; observation required before dispatch."
+                    )
+
+        dispatch_intent_key = f"{action_key}:{claim_key}:{fence_token}:{attempt_number}"
+        attempt = ExternalActionAttempt(
+            action_key=action_key,
+            claim_key=claim_key,
+            fence_token=fence_token,
+            attempt_number=attempt_number,
+            dispatch_intent_key=dispatch_intent_key,
+            status="EXECUTING",
+        )
+        if uow and hasattr(uow, "external_action_attempts"):
+            attempt = uow.external_action_attempts.create_attempt(attempt)
+            uow.orchestration_external_actions.update_status(
+                action_key=action_key,
+                status=ExternalActionStatus.EXECUTING,
+            )
+        return attempt
+
     def get_by_key(self, claim_key: str) -> RecoveryClaim | None:
         return self._claims.get(claim_key)
 
@@ -2344,6 +2387,7 @@ class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.orchestration_candidates = InMemoryOrchestrationCandidateRepository()
         self.orchestration_external_actions = InMemoryOrchestrationExternalActionRepository()
         self.claims = InMemoryRecoveryClaimRepository()
+        self.claims._uow = self
         self.recovery_claims = self.claims
         self.recovery_decisions = InMemoryRecoveryDecisionRepository()
         self.decisions = self.recovery_decisions

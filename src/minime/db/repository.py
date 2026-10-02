@@ -114,7 +114,7 @@ from minime.domain.enums import (
     WorkItemStatus,
     WorktreeCreationState,
 )
-from minime.domain.exceptions import LifecycleBypassError
+from minime.domain.exceptions import LifecycleBypassError, StaleClaimError
 from minime.domain.interfaces import (
     AuditFindingRepositoryInterface,
     AuditRepositoryInterface,
@@ -217,6 +217,7 @@ from minime.domain.models import (
     TaskRiskProfile,
     ValidationRun,
     WorkQueueItem,
+    generate_uuid,
     utc_now,
 )
 
@@ -4813,6 +4814,72 @@ class PostgresRecoveryClaimRepository(RecoveryClaimRepositoryInterface):
         )
         model = self.session.scalars(stmt).first()
         return model is not None
+
+    def commit_fenced_dispatch_intent(
+        self,
+        claim_key: str,
+        owner_instance_id: str,
+        fence_token: int,
+        action_key: str,
+        attempt_number: int = 1,
+    ) -> ExternalActionAttempt:
+        now = utc_now()
+        stmt = (
+            select(RecoveryClaimModel)
+            .where(RecoveryClaimModel.claim_key == claim_key)
+            .with_for_update()
+        )
+        claim_model = self.session.scalars(stmt).first()
+        if (
+            not claim_model
+            or claim_model.owner_instance_id != owner_instance_id
+            or claim_model.fence_token != fence_token
+            or claim_model.released_at is not None
+            or claim_model.lease_expires_at <= now
+        ):
+            raise StaleClaimError(
+                f"Claim '{claim_key}' with fence {fence_token} is stale or expired."
+            )
+
+        action_stmt = (
+            select(OrchestrationExternalActionModel)
+            .where(OrchestrationExternalActionModel.action_key == action_key)
+            .with_for_update()
+        )
+        action_model = self.session.scalars(action_stmt).first()
+        if not action_model:
+            raise ValueError(f"Action '{action_key}' not found.")
+
+        attempts_stmt = select(ExternalActionAttemptModel).where(
+            ExternalActionAttemptModel.action_key == action_key
+        )
+        existing_attempts = self.session.scalars(attempts_stmt).all()
+        if action_model.status == ExternalActionStatus.RESERVED.value:
+            if action_model.last_dispatch_intent_id or action_model.remote_identifier or existing_attempts:
+                raise ValueError(
+                    f"Action '{action_key}' is RESERVED but POSSIBLY_DISPATCHED; observation required before dispatch."
+                )
+
+        dispatch_intent_key = f"{action_key}:{claim_key}:{fence_token}:{attempt_number}"
+
+        attempt_model = ExternalActionAttemptModel(
+            id=generate_uuid(),
+            action_key=action_key,
+            claim_key=claim_key,
+            fence_token=fence_token,
+            attempt_number=attempt_number,
+            dispatch_intent_key=dispatch_intent_key,
+            status="EXECUTING",
+            created_at=now,
+            updated_at=now,
+        )
+        self.session.add(attempt_model)
+        action_model.status = ExternalActionStatus.EXECUTING.value
+        action_model.last_dispatch_intent_id = attempt_model.id
+        action_model.updated_at = now
+        self.session.commit()
+
+        return external_action_attempt_model_to_domain(attempt_model)
 
 
 class PostgresRecoveryDecisionRepository(RecoveryDecisionRepositoryInterface):

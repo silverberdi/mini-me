@@ -1143,6 +1143,16 @@ class RecoveryClaimRepositoryInterface(ABC):
     @abstractmethod
     def validate_cas(self, claim_key: str, owner_instance_id: str, fence_token: int) -> bool: ...
 
+    @abstractmethod
+    def commit_fenced_dispatch_intent(
+        self,
+        claim_key: str,
+        owner_instance_id: str,
+        fence_token: int,
+        action_key: str,
+        attempt_number: int = 1,
+    ) -> ExternalActionAttempt: ...
+
 
 class RecoveryDecisionRepositoryInterface(ABC):
     @abstractmethod

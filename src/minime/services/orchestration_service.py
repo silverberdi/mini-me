@@ -35,7 +35,6 @@ from minime.domain.enums import (
     ReviewVerdict,
     WorkItemStatus,
 )
-from minime.domain.exceptions import StaleClaimError
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
     AdmissionResult,
@@ -440,8 +439,8 @@ class OrchestrationService:
         fallback (OpenRouterEligibilityEvaluator + BudgetService) can continue the
         in-flight job. It does not bypass the NEEDS_HUMAN gate.
         """
-        if claim_context and not claim_context.is_valid():
-            raise StaleClaimError("Recovery claim context is expired or invalid.")
+        from minime.domain.models import validate_claim_context_authoritative
+        validate_claim_context_authoritative(self.uow, claim_context)
 
         run = self.uow.orchestration_runs.get_for_update(run_id) or self.uow.orchestration_runs.get_by_id(run_id)
         if not run:
@@ -487,6 +486,14 @@ class OrchestrationService:
                     return run
 
         elif run.stop_outcome == OrchestrationStopOutcome.WAITING_EXTERNAL:
+            # WAITING_EXTERNAL cannot be cleared simply because a caller supplied a context.
+            # Required remote/action reconciliation must be satisfied.
+            actions = self.uow.orchestration_external_actions.list_by_run(run.run_id)
+            if any(
+                a.status in {ExternalActionStatus.EXECUTING, ExternalActionStatus.UNKNOWN, ExternalActionStatus.AMBIGUOUS}
+                for a in actions
+            ):
+                return run
             run.stop_outcome = None
             run.human_gate = None
             run.is_active = True
@@ -1513,8 +1520,8 @@ class OrchestrationService:
         root = Path(project_root).resolve() if project_root else self.project_root
 
         while True:
-            if claim_context and not claim_context.is_valid():
-                raise StaleClaimError("Claim context expired during coordinator execution.")
+            from minime.domain.models import validate_claim_context_authoritative
+            validate_claim_context_authoritative(self.uow, claim_context)
 
             raw_run = self.uow.orchestration_runs.get_for_update(run_id)
             if not isinstance(raw_run, OrchestrationRun):

@@ -13,6 +13,7 @@ from minime.domain.enums import (
     EventType,
     ExternalActionObservation,
     ExternalActionStatus,
+    OrchestrationStage,
     OrchestrationStopOutcome,
     ProviderHealthStatus,
     RecoveryClassification,
@@ -65,7 +66,10 @@ class RecoveryConvergenceService:
         self.heartbeat_seconds = heartbeat_seconds
 
     def reconcile_cycle(
-        self, project_id: str | None = None, source: RecoverySource = RecoverySource.TICK
+        self,
+        project_id: str | None = None,
+        source: RecoverySource = RecoverySource.TICK,
+        drive_admitted: bool = False,
     ) -> list[RecoveryDecision]:
         """Run a canonical recovery convergence cycle across all active runs, jobs, and sagas."""
         cycle_id = generate_uuid()
@@ -106,7 +110,11 @@ class RecoveryConvergenceService:
         for run in active_runs:
             claim_key = f"run:{run.run_id}"
             decision = self._converge_run_identity(
-                run_id=run.run_id, cycle_id=cycle_id, claim_key=claim_key, source=source
+                run_id=run.run_id,
+                cycle_id=cycle_id,
+                claim_key=claim_key,
+                source=source,
+                drive_admitted=drive_admitted,
             )
             decisions.append(decision)
 
@@ -234,41 +242,14 @@ class RecoveryConvergenceService:
         action_key: str,
         attempt_number: int = 1,
     ) -> ExternalActionAttempt:
-        """Immediately before slow external mutation: validate fence, verify auth, persist unique dispatch intent, and commit."""
-        if not self.validate_claim(context):
-            raise StaleClaimError(
-                f"Claim '{context.claim_key}' with fence {context.fence_token} is stale or expired."
-            )
-
-        action = self.uow.orchestration_external_actions.get_by_action_key(action_key)
-        if not action:
-            raise ValueError(f"Action '{action_key}' not found.")
-
-        obs = self.classify_external_action_observation(action)
-        if action.status == ExternalActionStatus.RESERVED and obs == ExternalActionObservation.POSSIBLY_DISPATCHED:
-            raise ValueError(
-                f"Action '{action_key}' is RESERVED but POSSIBLY_DISPATCHED; observation required before dispatch."
-            )
-
-        dispatch_intent_key = f"{action_key}:{context.claim_key}:{context.fence_token}:{attempt_number}"
-
-        attempt = ExternalActionAttempt(
-            action_key=action_key,
+        """Immediately before slow external mutation: validate fence, verify auth, persist unique dispatch intent, and commit in one short atomic DB transaction."""
+        return self.uow.claims.commit_fenced_dispatch_intent(
             claim_key=context.claim_key,
+            owner_instance_id=context.owner_instance_id,
             fence_token=context.fence_token,
-            attempt_number=attempt_number,
-            dispatch_intent_key=dispatch_intent_key,
-            status="EXECUTING",
-        )
-        attempt = self.uow.external_action_attempts.create_attempt(attempt)
-
-        self.uow.orchestration_external_actions.update_status(
             action_key=action_key,
-            status=ExternalActionStatus.EXECUTING,
+            attempt_number=attempt_number,
         )
-
-        self.uow.commit()
-        return attempt
 
     def apply_lifecycle_result(
         self,
@@ -304,6 +285,7 @@ class RecoveryConvergenceService:
         requested_action: str | None = None,
         drain_mode: bool = False,
         force: bool = False,
+        drive_admitted: bool = False,
     ) -> RecoveryDecision:
         claim = self.uow.claims.acquire_or_reacquire(
             claim_key=claim_key,
@@ -351,13 +333,20 @@ class RecoveryConvergenceService:
             self.release_claim(context)
             return decision
 
-        if not run.is_active or run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE:
+        if (
+            not run.is_active
+            or run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
+            or run.current_stage in (OrchestrationStage.PR_PREPARED, OrchestrationStage.POST_MERGE_RECONCILING)
+        ):
+            from minime.services.post_merge_service import PostMergeReconciliationService
+            from minime.services.saga_engine import SagaEngine
+
             closure_sagas = [
                 s
                 for s in self.uow.durable_sagas.list_active()
                 if s.run_id == run.run_id and s.saga_type == SagaType.CLOSURE
             ]
-            if closure_sagas:
+            if closure_sagas or run.current_stage in (OrchestrationStage.PR_PREPARED, OrchestrationStage.POST_MERGE_RECONCILING) or run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE:
                 decision = RecoveryDecision(
                     cycle_id=cycle_id,
                     claim_key=claim_key,
@@ -368,16 +357,24 @@ class RecoveryConvergenceService:
                     source=source,
                     fence_token=context.fence_token,
                     classification=RecoveryClassification.CLOSURE_ONLY_CONTINUATION,
-                    planned_action="RESUME_CLOSURE_SAGA",
+                    planned_action="RECONCILE_POST_MERGE",
                     status=RecoveryDecisionStatus.PLANNED,
                 )
                 self.uow.recovery_decisions.create_decision(decision)
                 self.uow.commit()
-                from minime.services.saga_engine import SagaEngine
 
-                engine = SagaEngine(self.uow)
                 try:
-                    engine.resume_saga(closure_sagas[0].id, claim_context=context)
+                    if closure_sagas:
+                        engine = SagaEngine(self.uow)
+                        engine.resume_saga(closure_sagas[0].id, claim_context=context)
+                    else:
+                        post_merge_svc = PostMergeReconciliationService(self.uow, project_root=self.project_root)
+                        post_merge_svc.reconcile_post_merge(
+                            project_id=run.project_id,
+                            change_name=run.change_name,
+                            run_id=run.run_id,
+                            claim_context=context,
+                        )
                     decision.status = RecoveryDecisionStatus.COMPLETED
                 except Exception as exc:
                     decision.status = RecoveryDecisionStatus.BLOCKED

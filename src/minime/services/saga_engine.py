@@ -14,7 +14,6 @@ from minime.domain.enums import (
     SagaStatus,
     SagaType,
 )
-from minime.domain.exceptions import StaleClaimError
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
     DurableSaga,
@@ -430,8 +429,8 @@ class SagaEngine:
         claim_context: RecoveryClaimContext | None = None,
     ) -> DurableSaga:
         """Resume an active or blocked saga from its persisted checkpoint with row-locking idempotency."""
-        if claim_context and not claim_context.is_valid():
-            raise StaleClaimError("Recovery claim context is expired or invalid.")
+        from minime.domain.models import validate_claim_context_authoritative
+        validate_claim_context_authoritative(self.uow, claim_context)
 
         saga = self.get_for_update(saga_id) or self.get_saga(saga_id)
         if not saga:

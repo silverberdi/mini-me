@@ -1750,3 +1750,25 @@ class RecoveryClaimContext(BaseModel):
     def is_valid(self) -> bool:
         return utc_now() < self.lease_expires_at
 
+
+def validate_claim_context_authoritative(
+    uow: Any, claim_context: RecoveryClaimContext | None
+) -> None:
+    """Validate claim context against PostgreSQL / repository authoritative current ownership."""
+    from minime.domain.exceptions import StaleClaimError
+
+    if claim_context is None:
+        return
+    if not claim_context.is_valid():
+        raise StaleClaimError("Recovery claim context is locally expired or invalid.")
+    if not hasattr(uow, "claims") or uow.claims is None:
+        return
+    if not uow.claims.validate_cas(
+        claim_key=claim_context.claim_key,
+        owner_instance_id=claim_context.owner_instance_id,
+        fence_token=claim_context.fence_token,
+    ):
+        raise StaleClaimError(
+            f"Recovery claim context for '{claim_context.claim_key}' (fence token {claim_context.fence_token}) is stale, expired, or superseded in database."
+        )
+

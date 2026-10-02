@@ -24,7 +24,6 @@ from minime.domain.enums import (
     SagaType,
     WorkItemStatus,
 )
-from minime.domain.exceptions import StaleClaimError
 from minime.domain.interfaces import GitHubAdapterInterface, PersistenceUnitOfWork
 from minime.domain.models import (
     Event,
@@ -287,8 +286,8 @@ class PostMergeReconciliationService:
         claim_context: RecoveryClaimContext | None = None,
     ) -> PostMergeReconciliationResult:
         """Execute the complete post-merge closure cycle idempotently."""
-        if claim_context and not claim_context.is_valid():
-            raise StaleClaimError("Recovery claim context is expired or invalid.")
+        from minime.domain.models import validate_claim_context_authoritative
+        validate_claim_context_authoritative(self.uow, claim_context)
 
         start_time = time.time()
 
