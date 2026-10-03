@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import desc, exists, func, select, update
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from minime.db.models import (
@@ -4835,43 +4835,48 @@ class PostgresRecoveryClaimRepository(RecoveryClaimRepositoryInterface):
                 .with_for_update(nowait=True)
             )
             model = self.session.scalars(stmt).first()
-        except OperationalError:
+        except (OperationalError, IntegrityError):
+            self.session.rollback()
             return None
         now = utc_now()
         lease_expires = now + timedelta(seconds=lease_seconds)
 
-        if model is None:
-            model = RecoveryClaimModel(
-                claim_key=claim_key,
-                fence_token=1,
-                owner_instance_id=owner_instance_id,
-                claimed_at=now,
-                heartbeat_at=now,
-                lease_expires_at=lease_expires,
-                released_at=None,
-                last_decision_id=None,
-            )
-            self.session.add(model)
-            self.session.flush()
-            return recovery_claim_model_to_domain(model)
+        try:
+            if model is None:
+                model = RecoveryClaimModel(
+                    claim_key=claim_key,
+                    fence_token=1,
+                    owner_instance_id=owner_instance_id,
+                    claimed_at=now,
+                    heartbeat_at=now,
+                    lease_expires_at=lease_expires,
+                    released_at=None,
+                    last_decision_id=None,
+                )
+                self.session.add(model)
+                self.session.flush()
+                return recovery_claim_model_to_domain(model)
 
-        if model.released_at is None and model.lease_expires_at > now and model.owner_instance_id != owner_instance_id:
-            return None
+            if model.released_at is None and model.lease_expires_at > now and model.owner_instance_id != owner_instance_id:
+                return None
 
-        if model.released_at is None and model.lease_expires_at > now and model.owner_instance_id == owner_instance_id:
+            if model.released_at is None and model.lease_expires_at > now and model.owner_instance_id == owner_instance_id:
+                model.heartbeat_at = now
+                model.lease_expires_at = lease_expires
+                self.session.flush()
+                return recovery_claim_model_to_domain(model)
+
+            model.fence_token = model.fence_token + 1
+            model.owner_instance_id = owner_instance_id
+            model.claimed_at = now
             model.heartbeat_at = now
             model.lease_expires_at = lease_expires
+            model.released_at = None
             self.session.flush()
             return recovery_claim_model_to_domain(model)
-
-        model.fence_token = model.fence_token + 1
-        model.owner_instance_id = owner_instance_id
-        model.claimed_at = now
-        model.heartbeat_at = now
-        model.lease_expires_at = lease_expires
-        model.released_at = None
-        self.session.flush()
-        return recovery_claim_model_to_domain(model)
+        except (OperationalError, IntegrityError):
+            self.session.rollback()
+            return None
 
     def renew_heartbeat(
         self, claim_key: str, owner_instance_id: str, fence_token: int, lease_seconds: int = 60

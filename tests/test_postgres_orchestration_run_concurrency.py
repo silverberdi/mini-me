@@ -699,9 +699,14 @@ def test_f18_resolve_preserved_candidate_concurrency(pg_session_factory: session
                     return r
 
                 srv.drive_coordinator = _mock_drive
-                srv.resolve_preserved_candidate(
-                    run_id, continue_preserved_candidate=True, project_root=repo
-                )
+                from minime.services.recovery_convergence_service import RecoveryConvergenceService
+
+                rec_svc = RecoveryConvergenceService(uow_w, project_root=repo)
+                claim_ctx = rec_svc.acquire_claim(f"run:{run_id}")
+                if claim_ctx is not None:
+                    srv.resolve_preserved_candidate(
+                        run_id, continue_preserved_candidate=True, project_root=repo, claim_context=claim_ctx
+                    )
         except Exception as e:
             exceptions.append(e)
 

@@ -371,7 +371,7 @@ def test_transient_github_pr_failure_and_resume_recovery(setup_env, in_memory_uo
 
     rec_svc = RecoveryConvergenceService(in_memory_uow, project_root=env["project_root"])
     claim_ctx2 = rec_svc.acquire_claim(f"run:{run.run_id}")
-    resumed = service.resume(run.run_id, claim_context=claim_ctx2)
+    resumed = service.resume(run.run_id, force=True, claim_context=claim_ctx2)
     assert resumed.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
     assert resumed.human_gate == HumanGate.READY_FOR_HUMAN_MERGE
     assert fake_github.pr_calls == 2  # Total 2 attempts, second succeeded

@@ -325,14 +325,18 @@ class RecoveryConvergenceService:
                 fence_token=1,
                 lease_expires_at=utc_now() + timedelta(seconds=lease_seconds),
             )
-        claim = self.uow.claims.acquire_or_reacquire(
-            claim_key=claim_key,
-            owner_instance_id=self.owner_instance_id,
-            lease_seconds=lease_seconds,
-        )
-        if not claim:
+        try:
+            claim = self.uow.claims.acquire_or_reacquire(
+                claim_key=claim_key,
+                owner_instance_id=self.owner_instance_id,
+                lease_seconds=lease_seconds,
+            )
+            if not claim:
+                return None
+            self.uow.commit()
+        except Exception:
+            self.uow.rollback()
             return None
-        self.uow.commit()
         if isinstance(claim, RecoveryClaimContext):
             return claim
         claim_key_val = claim.claim_key if isinstance(getattr(claim, "claim_key", None), str) else claim_key
