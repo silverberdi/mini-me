@@ -852,7 +852,10 @@ def test_drain_resume_continues_inflight_job_through_real_runtime(in_memory_uow,
     )
     orch = OrchestrationService(in_memory_uow, project_root=tmp_path, pipeline=pipeline)
 
-    orch.resume(run.run_id, project_root=tmp_path, drain_mode=True)
+    from minime.services.recovery_convergence_service import RecoveryConvergenceService
+    rec_svc = RecoveryConvergenceService(in_memory_uow, project_root=tmp_path)
+    claim_ctx = rec_svc.acquire_claim(f"run:{run.run_id}")
+    orch.resume(run.run_id, project_root=tmp_path, drain_mode=True, claim_context=claim_ctx)
 
     # The real continuation advanced: OpenRouter fallback was actually invoked
     # through the pipeline (not a mocked resume()).

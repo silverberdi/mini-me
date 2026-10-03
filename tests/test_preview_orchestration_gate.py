@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from unittest.mock import MagicMock
 
 import pytest
@@ -17,14 +18,26 @@ from minime.domain.models import (
     OrchestrationRun,
     PreviewSession,
     Project,
+    RecoveryClaimContext,
     ValidationRun,
+    utc_now,
 )
 from minime.services.orchestration_service import OrchestrationService
+
+
+def _test_ctx(claim_key: str = "test-claim") -> RecoveryClaimContext:
+    return RecoveryClaimContext(
+        claim_key=claim_key,
+        owner_instance_id="test-owner",
+        fence_token=1,
+        lease_expires_at=utc_now() + timedelta(seconds=3600),
+    )
 
 
 @pytest.fixture
 def mock_uow():
     uow = MagicMock()
+    uow.claims = None
     uow.projects = MagicMock()
     uow.orchestration_runs = MagicMock()
     uow.orchestration_candidates = MagicMock()
@@ -71,7 +84,8 @@ def test_ui_change_blocked_at_pr_prepared_without_validation_pass(mock_uow):
 
     orchestrator = OrchestrationService(uow=mock_uow, validation_service=val_svc)
 
-    result = orchestrator.drive_coordinator(run.run_id)
+    ctx = _test_ctx(f"run:{run.run_id}")
+    result = orchestrator.drive_coordinator(run.run_id, claim_context=ctx)
     assert result.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
     assert result.human_gate == HumanGate.NEEDS_HUMAN
     assert "UI visual validation required" in (result.stop_reason or "")
@@ -133,7 +147,8 @@ def test_ui_change_advances_to_ready_for_human_merge_when_validation_passes(mock
 
     orchestrator = OrchestrationService(uow=mock_uow, validation_service=val_svc)
 
-    result = orchestrator.drive_coordinator(run.run_id)
+    ctx = _test_ctx(f"run:{run.run_id}")
+    result = orchestrator.drive_coordinator(run.run_id, claim_context=ctx)
     assert result.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
     assert result.human_gate == HumanGate.READY_FOR_HUMAN_MERGE
 
@@ -171,6 +186,7 @@ def test_non_ui_change_advances_directly_to_ready_for_human_merge(mock_uow):
 
     orchestrator = OrchestrationService(uow=mock_uow, validation_service=val_svc)
 
-    result = orchestrator.drive_coordinator(run.run_id)
+    ctx = _test_ctx(f"run:{run.run_id}")
+    result = orchestrator.drive_coordinator(run.run_id, claim_context=ctx)
     assert result.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
     assert result.human_gate == HumanGate.READY_FOR_HUMAN_MERGE

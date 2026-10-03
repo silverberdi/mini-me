@@ -6,7 +6,6 @@ import logging
 import subprocess
 import time
 from dataclasses import dataclass
-from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -286,32 +285,14 @@ class PostMergeReconciliationService:
         run_id: str | None = None,
         claim_context: RecoveryClaimContext | None = None,
     ) -> PostMergeReconciliationResult:
-        from minime.domain.models import RecoveryClaimContext, validate_claim_context_authoritative
-
         if claim_context is None:
-            claim_key = f"run:{run_id}" if run_id else f"closure:{change_name}"
-            if hasattr(self.uow, "claims") and self.uow.claims is not None:
-                existing = self.uow.claims.get_by_key(claim_key)
-                if existing and existing.released_at is None and existing.lease_expires_at > utc_now():
-                    claim_context = RecoveryClaimContext(
-                        claim_key=existing.claim_key,
-                        owner_instance_id=existing.owner_instance_id,
-                        fence_token=existing.fence_token,
-                        lease_expires_at=existing.lease_expires_at,
-                    )
-                else:
-                    from minime.services.recovery_convergence_service import (
-                        RecoveryConvergenceService,
-                    )
-                    rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
-                    claim_context = rec_svc.acquire_claim(claim_key)
-            if claim_context is None:
-                claim_context = RecoveryClaimContext(
-                    claim_key=claim_key,
-                    owner_instance_id="fresh-execution",
-                    fence_token=1,
-                    lease_expires_at=utc_now() + timedelta(seconds=60),
-                )
+            from minime.services.recovery_convergence_service import RecoveryConvergenceService
+
+            rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
+            claim_key = f"run:{run_id}" if run_id else f"closure:{project_id}:{change_name}"
+            claim_context = rec_svc.acquire_claim(claim_key)
+
+        from minime.domain.models import validate_claim_context_authoritative
 
         validate_claim_context_authoritative(self.uow, claim_context)
 
@@ -683,21 +664,6 @@ class PostMergeReconciliationService:
             self.uow.jobs.save(job)
         self.uow.orchestration_runs.save(run)
         self.uow.commit()
-        if claim_context is None:
-            if getattr(self.uow, "claims", None) is not None:
-                from minime.services.recovery_convergence_service import RecoveryConvergenceService
-                rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
-                claim_context = rec_svc.acquire_claim(f"run:{run.run_id}")
-            else:
-                from minime.domain.models import RecoveryClaimContext
-                claim_context = RecoveryClaimContext(
-                    claim_key=f"run:{run.run_id}",
-                    owner_instance_id="dummy-owner",
-                    fence_token=1,
-                    lease_expires_at=utc_now() + timedelta(seconds=60),
-                )
-
-        validate_claim_context_authoritative(self.uow, claim_context)
 
         # 5. GitHub Issue Closure with fenced dispatch intent
         issue_required = bool(binding and binding.github_issue_number)

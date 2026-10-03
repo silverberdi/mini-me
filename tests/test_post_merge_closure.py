@@ -392,8 +392,11 @@ def test_post_merge_reconciliation_full_cycle(tmp_path: Path, mock_github_adapte
     )
     # Mock ancestry check
     service.verify_candidate_ancestry = MagicMock(return_value=True)
+    from minime.services.recovery_convergence_service import RecoveryConvergenceService
+    rec_svc = RecoveryConvergenceService(uow, project_root=tmp_path)
+    claim_ctx = rec_svc.acquire_claim("run:run-123")
 
-    result = service.reconcile_post_merge("mini-me", "test-change", run_id="run-123")
+    result = service.reconcile_post_merge("mini-me", "test-change", run_id="run-123", claim_context=claim_ctx)
 
     assert result.success is True
     assert result.already_closed is False
@@ -427,7 +430,7 @@ def test_post_merge_reconciliation_full_cycle(tmp_path: Path, mock_github_adapte
     assert EventType.POST_MERGE_COMPLETED in event_types
 
     # Test Idempotency (Rerunning on already-completed run)
-    rerun_result = service.reconcile_post_merge("mini-me", "test-change", run_id="run-123")
+    rerun_result = service.reconcile_post_merge("mini-me", "test-change", run_id="run-123", claim_context=claim_ctx)
     assert rerun_result.success is True
     assert rerun_result.already_closed is True
     assert rerun_result.native_phases_completed == 13

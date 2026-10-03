@@ -117,7 +117,7 @@ def test_historical_record_adoption_remains_valid_after_current_generation_advan
     service, run_id, historical, current = two_generation_legacy_service(
         in_memory_uow, repo, base_a, candidate_sha, base_b
     )
-    service.drive_coordinator = lambda run_id, project_root=None: (
+    service.drive_coordinator = lambda run_id, project_root=None, claim_context=None: (
         in_memory_uow.orchestration_runs.get_by_id(run_id)
     )
 
@@ -149,7 +149,7 @@ def test_legacy_ref_adoption_validates_real_git_and_continues_resolution(tmp_pat
     repo, base_a, candidate_sha, base_b = make_repo(tmp_path, conflict=False)
     ref = prepare_legacy_branch(repo, candidate_sha)
     service, run_id = legacy_service(in_memory_uow, repo, base_a, candidate_sha)
-    service.drive_coordinator = lambda run_id, project_root=None: (
+    service.drive_coordinator = lambda run_id, project_root=None, claim_context=None: (
         in_memory_uow.orchestration_runs.get_by_id(run_id)
     )
 
@@ -265,7 +265,7 @@ def test_existing_candidate_ref_does_not_trigger_adoption(tmp_path, in_memory_uo
     repo, base_a, candidate_sha, base_b = make_repo(tmp_path, conflict=False)
     ref = "refs/heads/historical-candidate"
     service, run_id = make_service(in_memory_uow, repo, base_a, candidate_sha, ref)
-    service.drive_coordinator = lambda run_id, project_root=None: (
+    service.drive_coordinator = lambda run_id, project_root=None, claim_context=None: (
         in_memory_uow.orchestration_runs.get_by_id(run_id)
     )
 

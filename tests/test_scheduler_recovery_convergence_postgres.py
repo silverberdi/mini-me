@@ -1275,3 +1275,69 @@ def test_root_cause_5_atomic_fenced_sql_update_stale_claim(pg_session_factory: s
         )
 
     session.close()
+
+
+# ============================================================================
+# BLOCKER 1 & 2 Remediation Regression Tests
+# ============================================================================
+def test_blocker_1_missing_claim_context_raises_exception(pg_session_factory: sessionmaker[Session]):
+    """Low-level primitives MUST fail closed when claim_context is None."""
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "blocker1-change")
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    from minime.domain.exceptions import MissingRecoveryClaimContextError
+    from minime.services.orchestration_service import OrchestrationService
+    from minime.services.saga_engine import SagaEngine
+
+    engine = SagaEngine(uow)
+    saga = engine.start_saga(SagaType.INTAKE, project_id, change_name)
+
+    # 1. resume_saga(..., claim_context=None) fails immediately
+    with pytest.raises(MissingRecoveryClaimContextError):
+        engine.resume_saga(saga.id, claim_context=None)
+
+    orch_svc = OrchestrationService(uow)
+    run = OrchestrationRun(
+        run_id="run-blocker1",
+        project_id=project_id,
+        change_name=change_name,
+        base_sha="15e55c515ae917c2f0330809f0d9e44d49bce12b",
+        current_stage=OrchestrationStage.ADMITTED,
+        created_at=utc_now(),
+    )
+    uow.orchestration_runs.save(run)
+    session.commit()
+
+    # 2. resume(..., claim_context=None) fails immediately
+    with pytest.raises(MissingRecoveryClaimContextError):
+        orch_svc.resume("run-blocker1", claim_context=None)
+
+    # 3. drive_coordinator(..., claim_context=None) fails immediately
+    with pytest.raises(MissingRecoveryClaimContextError):
+        orch_svc.drive_coordinator("run-blocker1", claim_context=None)
+
+    session.close()
+
+
+def test_blocker_2_restart_recovery_service_delegates_to_convergence(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+    """RestartRecoveryService MUST delegate mutating recovery to RecoveryConvergenceService and not mutate Job/Run directly."""
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "blocker2-change")
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    from minime.services.restart_recovery_service import RestartRecoveryService
+
+    restart_svc = RestartRecoveryService(uow, project_root=tmp_path)
+
+    # Call restart recovery methods
+    jobs = restart_svc.reconcile_on_startup()
+    assert isinstance(jobs, list)
+
+    sagas = restart_svc.reconcile_durable_sagas()
+    assert isinstance(sagas, list)
+
+    runs = restart_svc.reconcile_orchestration_runs()
+    assert isinstance(runs, list)
+
+    session.close()

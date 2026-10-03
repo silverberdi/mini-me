@@ -632,49 +632,7 @@ class SagaEngine:
         post_merge_service: Any = None,
         claim_context: RecoveryClaimContext | None = None,
     ) -> DurableSaga:
-        from datetime import timedelta
-
-        from minime.domain.models import (
-            RecoveryClaimContext,
-            utc_now,
-            validate_claim_context_authoritative,
-        )
-
-        if claim_context is None:
-            saga_obj = self.get_saga(saga_id)
-            claim_key = f"saga:{saga_id}"
-            if saga_obj:
-                claim_key = (
-                    f"run:{saga_obj.run_id}"
-                    if saga_obj.run_id
-                    else (
-                        f"intake:{saga_obj.project_id}:{saga_obj.work_item_key}"
-                        if saga_obj.saga_type == SagaType.INTAKE
-                        else f"closure:{saga_obj.id}"
-                    )
-                )
-            if hasattr(self.uow, "claims") and self.uow.claims is not None:
-                existing = self.uow.claims.get_by_key(claim_key)
-                if existing and existing.released_at is None and existing.lease_expires_at > utc_now():
-                    claim_context = RecoveryClaimContext(
-                        claim_key=existing.claim_key,
-                        owner_instance_id=existing.owner_instance_id,
-                        fence_token=existing.fence_token,
-                        lease_expires_at=existing.lease_expires_at,
-                    )
-                else:
-                    from minime.services.recovery_convergence_service import (
-                        RecoveryConvergenceService,
-                    )
-                    rec_svc = RecoveryConvergenceService(self.uow)
-                    claim_context = rec_svc.acquire_claim(claim_key)
-            if claim_context is None:
-                claim_context = RecoveryClaimContext(
-                    claim_key=claim_key,
-                    owner_instance_id="fresh-execution",
-                    fence_token=1,
-                    lease_expires_at=utc_now() + timedelta(seconds=60),
-                )
+        from minime.domain.models import validate_claim_context_authoritative
 
         validate_claim_context_authoritative(self.uow, claim_context)
 

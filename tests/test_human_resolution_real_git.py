@@ -179,7 +179,7 @@ def test_advanced_base_real_git_integration_and_idempotency(tmp_path, in_memory_
     service, run_id = make_service(
         in_memory_uow, repo, base_a, candidate_sha, "refs/heads/historical-candidate"
     )
-    service.drive_coordinator = lambda run_id, project_root=None: (
+    service.drive_coordinator = lambda run_id, project_root=None, claim_context=None: (
         in_memory_uow.orchestration_runs.get_by_id(run_id)
     )
 
@@ -275,7 +275,7 @@ def test_completed_human_integration_is_reconciled_idempotently(tmp_path, in_mem
     service, run_id = make_service(
         in_memory_uow, repo, base_a, candidate_sha, "refs/heads/historical-candidate"
     )
-    service.drive_coordinator = lambda run_id, project_root=None: (
+    service.drive_coordinator = lambda run_id, project_root=None, claim_context=None: (
         in_memory_uow.orchestration_runs.get_by_id(run_id)
     )
 

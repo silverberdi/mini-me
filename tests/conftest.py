@@ -2147,11 +2147,9 @@ class InMemoryRecoveryClaimRepository(RecoveryClaimRepositoryInterface):
                     claim_key=claim_key,
                     owner_instance_id=owner_instance_id,
                     fence_token=existing.fence_token,
-                    acquired_at=existing.acquired_at,
+                    claimed_at=existing.claimed_at,
                     lease_expires_at=new_expires,
-                    last_heartbeat_at=now,
-                    is_active=True,
-                    version=existing.version + 1,
+                    heartbeat_at=now,
                 )
                 self._claims[claim_key] = updated
                 return updated
@@ -2161,11 +2159,9 @@ class InMemoryRecoveryClaimRepository(RecoveryClaimRepositoryInterface):
                     claim_key=claim_key,
                     owner_instance_id=owner_instance_id,
                     fence_token=existing.fence_token + 1,
-                    acquired_at=now,
+                    claimed_at=now,
                     lease_expires_at=new_expires,
-                    last_heartbeat_at=now,
-                    is_active=True,
-                    version=existing.version + 1,
+                    heartbeat_at=now,
                 )
                 self._claims[claim_key] = updated
                 return updated
@@ -2175,11 +2171,9 @@ class InMemoryRecoveryClaimRepository(RecoveryClaimRepositoryInterface):
             claim_key=claim_key,
             owner_instance_id=owner_instance_id,
             fence_token=1,
-            acquired_at=now,
+            claimed_at=now,
             lease_expires_at=expires,
-            last_heartbeat_at=now,
-            is_active=True,
-            version=1,
+            heartbeat_at=now,
         )
         self._claims[claim_key] = claim
         return claim

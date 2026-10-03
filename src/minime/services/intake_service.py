@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -160,8 +159,11 @@ class IntakeService:
         # Auto-prepare if project policy enables auto_prepare
         if getattr(project, "auto_prepare", True):
             logger.info("Auto-preparing backlog item '%s' for project '%s'", item_key, project_id)
+            from minime.services.recovery_convergence_service import RecoveryConvergenceService
+            rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
+            claim_ctx = rec_svc.acquire_claim(f"intake:{project_id}:{item_key}")
             prep_result = self.prepare_work_item(
-                project_id, item_key, operator_email=operator_email
+                project_id, item_key, operator_email=operator_email, claim_context=claim_ctx
             )
             auto_prep_event = Event(
                 event_type=EventType.WORK_ITEM_AUTO_PREPARED,
@@ -294,8 +296,10 @@ class IntakeService:
         self.uow.events.save(event)
         self.uow.commit()
 
-        # Re-prepare after answering
-        prep_result = self.prepare_work_item(project_id, item_key, operator_email=operator_email)
+        from minime.services.recovery_convergence_service import RecoveryConvergenceService
+        rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
+        claim_ctx = rec_svc.acquire_claim(f"intake:{project_id}:{item_key}")
+        prep_result = self.prepare_work_item(project_id, item_key, operator_email=operator_email, claim_context=claim_ctx)
         return prep_result.item
 
     def prepare_work_item(
@@ -305,32 +309,12 @@ class IntakeService:
         operator_email: str = "operator",
         claim_context: RecoveryClaimContext | None = None,
     ) -> WorkItemPrepareResult:
-        from minime.domain.models import RecoveryClaimContext, validate_claim_context_authoritative
-
         if claim_context is None:
-            claim_key = f"intake:{project_id}:{item_key}"
-            if hasattr(self.uow, "claims") and self.uow.claims is not None:
-                existing = self.uow.claims.get_by_key(claim_key)
-                if existing and existing.released_at is None and existing.lease_expires_at > utc_now():
-                    claim_context = RecoveryClaimContext(
-                        claim_key=existing.claim_key,
-                        owner_instance_id=existing.owner_instance_id,
-                        fence_token=existing.fence_token,
-                        lease_expires_at=existing.lease_expires_at,
-                    )
-                else:
-                    from minime.services.recovery_convergence_service import (
-                        RecoveryConvergenceService,
-                    )
-                    rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
-                    claim_context = rec_svc.acquire_claim(claim_key)
-            if claim_context is None:
-                claim_context = RecoveryClaimContext(
-                    claim_key=claim_key,
-                    owner_instance_id="fresh-execution",
-                    fence_token=1,
-                    lease_expires_at=utc_now() + timedelta(seconds=60),
-                )
+            from minime.services.recovery_convergence_service import RecoveryConvergenceService
+            rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
+            claim_context = rec_svc.acquire_claim(f"intake:{project_id}:{item_key}")
+
+        from minime.domain.models import validate_claim_context_authoritative
 
         validate_claim_context_authoritative(self.uow, claim_context)
 
@@ -454,24 +438,6 @@ class IntakeService:
                 not existing_author_action
                 or existing_author_action.status != ExternalActionStatus.COMPLETED
             ):
-                if claim_context is None:
-                    if getattr(self.uow, "claims", None) is not None:
-                        from minime.services.recovery_convergence_service import (
-                            RecoveryConvergenceService,
-                        )
-
-                        rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
-                        claim_context = rec_svc.acquire_claim(f"intake:{project_id}:{item_key}")
-                    else:
-                        from minime.domain.models import RecoveryClaimContext
-
-                        claim_context = RecoveryClaimContext(
-                            claim_key=f"intake:{project_id}:{item_key}",
-                            owner_instance_id="dummy-owner",
-                            fence_token=1,
-                            lease_expires_at=utc_now() + timedelta(seconds=60),
-                        )
-
                 def _observe_openspec():
                     from minime.domain.models import ExternalActionResult
 
@@ -611,22 +577,6 @@ class IntakeService:
                         ],
                     )
                 else:
-                    if claim_context is None:
-                        if getattr(self.uow, "claims", None) is not None:
-                            from minime.services.recovery_convergence_service import (
-                                RecoveryConvergenceService,
-                            )
-                            rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
-                            claim_context = rec_svc.acquire_claim(f"intake:{project_id}:{item_key}")
-                        else:
-                            from minime.domain.models import RecoveryClaimContext
-                            claim_context = RecoveryClaimContext(
-                                claim_key=f"intake:{project_id}:{item_key}",
-                                owner_instance_id="dummy-owner",
-                                fence_token=1,
-                                lease_expires_at=utc_now() + timedelta(seconds=60),
-                            )
-
                     def _mutate_issue():
                         return self.github_adapter.create_issue(
                             repository=project.repository,
@@ -738,13 +688,6 @@ class IntakeService:
                             ],
                         )
                     else:
-                        if claim_context is None:
-                            from minime.services.recovery_convergence_service import (
-                                RecoveryConvergenceService,
-                            )
-                            rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
-                            claim_context = rec_svc.acquire_claim(f"intake:{project_id}:{item_key}")
-
                         def _mutate_project_item_add():
                             return self.github_adapter.add_issue_to_project(
                                 project_number=project.github_project_number,
@@ -940,8 +883,10 @@ class IntakeService:
 
         # 1. Verify DoR Readiness
         if item.readiness_state != ReadinessState.READY:
-            # Try re-preparing once in case DoR criteria became satisfied
-            prep_res = self.prepare_work_item(project_id, item_key, operator_email=operator_email)
+            from minime.services.recovery_convergence_service import RecoveryConvergenceService
+            rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
+            claim_ctx = rec_svc.acquire_claim(f"intake:{project_id}:{item_key}")
+            prep_res = self.prepare_work_item(project_id, item_key, operator_email=operator_email, claim_context=claim_ctx)
             item = prep_res.item
             if item.readiness_state != ReadinessState.READY:
                 reasons = (
@@ -1209,10 +1154,16 @@ class IntakeService:
                         item.item_key,
                         project.project_id,
                     )
+                    from minime.services.recovery_convergence_service import (
+                        RecoveryConvergenceService,
+                    )
+                    rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
+                    claim_ctx = rec_svc.acquire_claim(f"intake:{project.project_id}:{item.item_key}")
                     res = self.prepare_work_item(
                         project.project_id,
                         item.item_key,
                         operator_email="system-autonomous-intake",
+                        claim_context=claim_ctx,
                     )
                     prepared_items.append(res.item)
                 except Exception as exc:

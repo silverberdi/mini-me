@@ -9,7 +9,6 @@ import inspect
 import json
 import logging
 import subprocess
-from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -424,7 +423,10 @@ class OrchestrationService:
         if not admission.admitted or not admission.run:
             raise ValueError(admission.refusal_reason or "Admission failed")
 
-        return self.drive_coordinator(admission.run.run_id, project_root=project_root)
+        from minime.services.recovery_convergence_service import RecoveryConvergenceService
+        rec_svc = RecoveryConvergenceService(self.uow, project_root=project_root or self.project_root)
+        claim_context = rec_svc.acquire_claim(f"run:{admission.run.run_id}")
+        return self.drive_coordinator(admission.run.run_id, project_root=project_root, claim_context=claim_context)
 
     def resume(
         self,
@@ -434,39 +436,8 @@ class OrchestrationService:
         drain_mode: bool = False,
         claim_context: RecoveryClaimContext | None = None,
     ) -> OrchestrationRun:
-        """Resume an orchestration run from its persisted resumable checkpoint.
-
-        ``drain_mode`` permits resuming a WAITING_CAPACITY run even when the primary
-        provider remains unavailable, so the pipeline's canonical bounded drain
-        fallback (OpenRouterEligibilityEvaluator + BudgetService) can continue the
-        in-flight job. It does not bypass the NEEDS_HUMAN gate.
-        """
-        from minime.domain.models import (
-            RecoveryClaimContext,
-            utc_now,
-            validate_claim_context_authoritative,
-        )
-
-        if claim_context is None:
-            claim_key = f"run:{run_id}"
-            if hasattr(self.uow, "claims") and self.uow.claims is not None:
-                existing = self.uow.claims.get_by_key(claim_key)
-                if existing and getattr(existing, "released_at", None) is None and existing.lease_expires_at > utc_now():
-                    claim_context = RecoveryClaimContext(
-                        claim_key=existing.claim_key,
-                        owner_instance_id=existing.owner_instance_id,
-                        fence_token=existing.fence_token,
-                        lease_expires_at=existing.lease_expires_at,
-                    )
-                else:
-                    from minime.services.recovery_convergence_service import (
-                        RecoveryConvergenceService,
-                    )
-
-                    rec_svc = RecoveryConvergenceService(
-                        self.uow, project_root=project_root or getattr(self, "project_root", None)
-                    )
-                    claim_context = rec_svc.acquire_claim(claim_key)
+        """Resume an orchestration run from its persisted resumable checkpoint."""
+        from minime.domain.models import validate_claim_context_authoritative
 
         validate_claim_context_authoritative(self.uow, claim_context)
 
@@ -1187,8 +1158,10 @@ class OrchestrationService:
         run.stop_outcome = None
         run.human_gate = None
         self.uow.orchestration_runs.save(run)
-        self.uow.commit()
-        return self.drive_coordinator(run_id, project_root=project_root)
+        from minime.services.recovery_convergence_service import RecoveryConvergenceService
+        rec_svc = RecoveryConvergenceService(self.uow, project_root=project_root or self.project_root)
+        claim_context = rec_svc.acquire_claim(f"run:{run_id}")
+        return self.drive_coordinator(run_id, project_root=project_root, claim_context=claim_context)
 
     def _reconcile_completed_human_integration(
         self,
@@ -1539,36 +1512,7 @@ class OrchestrationService:
         """Drive the deterministic stage state machine until a legitimate stop outcome."""
         root = Path(project_root).resolve() if project_root else self.project_root
 
-        from minime.domain.models import (
-            RecoveryClaimContext,
-            utc_now,
-            validate_claim_context_authoritative,
-        )
-
-        if claim_context is None:
-            claim_key = f"run:{run_id}"
-            if hasattr(self.uow, "claims") and self.uow.claims is not None:
-                existing = self.uow.claims.get_by_key(claim_key)
-                if existing and existing.released_at is None and existing.lease_expires_at > utc_now():
-                    claim_context = RecoveryClaimContext(
-                        claim_key=existing.claim_key,
-                        owner_instance_id=existing.owner_instance_id,
-                        fence_token=existing.fence_token,
-                        lease_expires_at=existing.lease_expires_at,
-                    )
-                else:
-                    from minime.services.recovery_convergence_service import (
-                        RecoveryConvergenceService,
-                    )
-                    rec_svc = RecoveryConvergenceService(self.uow, project_root=root)
-                    claim_context = rec_svc.acquire_claim(claim_key)
-            if claim_context is None and (not hasattr(self.uow, "claims") or self.uow.claims is None):
-                claim_context = RecoveryClaimContext(
-                    claim_key=claim_key,
-                    owner_instance_id="fresh-execution",
-                    fence_token=1,
-                    lease_expires_at=utc_now() + timedelta(seconds=60),
-                )
+        from minime.domain.models import validate_claim_context_authoritative
 
         while True:
             validate_claim_context_authoritative(self.uow, claim_context)
@@ -2083,24 +2027,6 @@ class OrchestrationService:
                 # 1. Mutating Git Action: Branch Push under canonical Stage G atomic fenced dispatch intent
                 push_key = f"push:{run.run_id}:gen{gen}:{cand_sha}"
 
-                if claim_context is None:
-                    if getattr(self.uow, "claims", None) is not None:
-                        from minime.services.recovery_convergence_service import (
-                            RecoveryConvergenceService,
-                        )
-
-                        rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
-                        claim_context = rec_svc.acquire_claim(f"run:{run.run_id}")
-                    else:
-                        from minime.domain.models import RecoveryClaimContext
-
-                        claim_context = RecoveryClaimContext(
-                            claim_key=f"run:{run.run_id}",
-                            owner_instance_id="dummy-owner",
-                            fence_token=1,
-                            lease_expires_at=utc_now() + timedelta(seconds=60),
-                        )
-
                 def _observe_push_branch():
                     from minime.domain.enums import ExternalOutcome, ExternalReasonCode
                     from minime.domain.models import ExternalActionResult
@@ -2496,8 +2422,10 @@ class OrchestrationService:
                     created_at=utc_now(),
                 )
             )
-            self.uow.commit()
-            return self.drive_coordinator(run_id, project_root=project_root)
+            from minime.services.recovery_convergence_service import RecoveryConvergenceService
+            rec_svc = RecoveryConvergenceService(self.uow, project_root=project_root or self.project_root)
+            claim_context = rec_svc.acquire_claim(f"run:{run_id}")
+            return self.drive_coordinator(run_id, project_root=project_root, claim_context=claim_context)
         return self.uow.orchestration_runs.get_by_id(run_id) or run
 
     def get_status(self, run_id: str) -> OrchestrationStatusView:
@@ -2766,6 +2694,9 @@ class OrchestrationService:
         """
         if not cand or not cand.candidate_sha:
             return False, False, "No active candidate recorded."
+
+        if not job:
+            return False, False, "No active job recorded for run."
 
         existing_audit = self.uow.audits.get_by_job_id(job.job_id)
         if not existing_audit:

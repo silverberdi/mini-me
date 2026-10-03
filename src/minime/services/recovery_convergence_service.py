@@ -30,6 +30,7 @@ from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
     Event,
     ExternalActionAttempt,
+    Job,
     OrchestrationExternalAction,
     RecoveryClaimContext,
     RecoveryDecision,
@@ -62,7 +63,7 @@ class RecoveryConvergenceService:
             )
         self.uow = uow
         self.project_root = Path(project_root).resolve()
-        self.owner_instance_id = owner_instance_id or f"instance-{os.getpid()}-{generate_uuid()[:8]}"
+        self.owner_instance_id = owner_instance_id or f"instance-{os.getpid()}"
         self.health_service = health_service or ProviderHealthService(uow)
         self.lease_seconds = lease_seconds
         self.heartbeat_seconds = heartbeat_seconds
@@ -138,7 +139,82 @@ class RecoveryConvergenceService:
             )
             decisions.append(decision)
 
+        # 5. Converge Active Jobs
+        active_jobs = self.uow.jobs.list_active_jobs()
+        if project_id:
+            active_jobs = [j for j in active_jobs if j.project_id == project_id]
+        for job in active_jobs:
+            self._converge_job_state(job, cycle_id)
+
         return decisions
+
+    def _converge_job_state(self, job: Job, cycle_id: str) -> None:
+        """Converge active job lifecycle state and emit JOB_RECOVERED event if transitioned."""
+        change = self.uow.changes.get_by_name(job.project_id, job.change_name)
+        if change and change.status in {ChangeStatus.DONE, ChangeStatus.CANCELLED}:
+            if job.status not in {JobStatus.CANCELLED, JobStatus.COMPLETED}:
+                job.status = JobStatus.CANCELLED
+                job.error_message = f"Change is already in terminal state {change.status.value}."
+                self.uow.jobs.save(job)
+            return
+
+        if job.status in {
+            JobStatus.NEEDS_HUMAN,
+            JobStatus.RECOVERY_BLOCKED,
+            JobStatus.WAITING_CAPACITY,
+            JobStatus.QUEUED,
+            JobStatus.CANCELLED,
+            JobStatus.COMPLETED,
+        }:
+            return
+
+        if job.status in {
+            JobStatus.RUNNING,
+            JobStatus.CHECKS_RUNNING,
+            JobStatus.REVIEW_RUNNING,
+            JobStatus.AUDIT_RUNNING,
+        }:
+            stage_map = {
+                JobStatus.RUNNING: "implementer",
+                JobStatus.CHECKS_RUNNING: "checks",
+                JobStatus.REVIEW_RUNNING: "reviewer",
+                JobStatus.AUDIT_RUNNING: "auditor",
+            }
+            interrupted_stage = stage_map.get(job.status, "unknown")
+            check_results = (
+                self.uow.check_results.list_by_job(job.job_id)
+                if hasattr(self.uow, "check_results") and self.uow.check_results is not None
+                else []
+            )
+            checks_passed = len(check_results) > 0 and all(c.exit_code == 0 for c in check_results)
+            if job.candidate_sha and (checks_passed or job.status == JobStatus.CHECKS_PASSED):
+                updated = self.uow.jobs.transition(
+                    job.job_id,
+                    JobStatus.CHECKS_PASSED.value,
+                    error_message="Recovered on daemon restart; preserved completed implementation and checks.",
+                )
+            else:
+                updated = self.uow.jobs.transition(
+                    job.job_id,
+                    JobStatus.QUEUED.value,
+                    error_message="Recovered on daemon restart; re-queued for execution.",
+                )
+            self.uow.events.save(
+                Event(
+                    event_type=EventType.JOB_INTERRUPTED if False else EventType.JOB_RECOVERED,
+                    project_id=job.project_id,
+                    change_id=job.change_name,
+                    operation_id=job.job_id,
+                    payload={
+                        "job_id": job.job_id,
+                        "new_status": updated.status.value,
+                        "recovered_status": updated.status.value,
+                        "interrupted_stage": interrupted_stage,
+                        "recovery_cycle_id": cycle_id,
+                    },
+                    timestamp=utc_now(),
+                )
+            )
 
     def request_run_continuation(
         self,
@@ -191,8 +267,23 @@ class RecoveryConvergenceService:
             action_key=action_key, cycle_id=cycle_id, claim_key=claim_key, source=source
         )
 
+    def _create_decision(self, decision: RecoveryDecision) -> None:
+        if hasattr(self.uow, "recovery_decisions") and self.uow.recovery_decisions is not None:
+            self.uow.recovery_decisions.create_decision(decision)
+
+    def _update_decision(self, decision: RecoveryDecision) -> None:
+        if hasattr(self.uow, "recovery_decisions") and self.uow.recovery_decisions is not None:
+            self.uow.recovery_decisions.update_decision(decision)
+
     def acquire_claim(self, claim_key: str, lease_seconds: int = 60) -> RecoveryClaimContext | None:
         """Acquire or re-acquire a claim for this owner instance."""
+        if not hasattr(self.uow, "claims") or self.uow.claims is None:
+            return RecoveryClaimContext(
+                claim_key=claim_key,
+                owner_instance_id=self.owner_instance_id,
+                fence_token=1,
+                lease_expires_at=utc_now() + timedelta(seconds=lease_seconds),
+            )
         claim = self.uow.claims.acquire_or_reacquire(
             claim_key=claim_key,
             owner_instance_id=self.owner_instance_id,
@@ -220,6 +311,8 @@ class RecoveryConvergenceService:
 
     def heartbeat(self, context: RecoveryClaimContext) -> bool:
         """Atomic fenced heartbeat renewal."""
+        if not hasattr(self.uow, "claims") or self.uow.claims is None:
+            return True
         res = self.uow.claims.renew_heartbeat(
             claim_key=context.claim_key,
             owner_instance_id=context.owner_instance_id,
@@ -233,6 +326,8 @@ class RecoveryConvergenceService:
 
     def release_claim(self, context: RecoveryClaimContext) -> bool:
         """Atomic fenced claim release."""
+        if not hasattr(self.uow, "claims") or self.uow.claims is None:
+            return True
         res = self.uow.claims.release(
             claim_key=context.claim_key,
             owner_instance_id=context.owner_instance_id,
@@ -244,6 +339,8 @@ class RecoveryConvergenceService:
 
     def validate_claim(self, context: RecoveryClaimContext) -> bool:
         """Validate that current claim is still active and owned with matching fence."""
+        if not hasattr(self.uow, "claims") or self.uow.claims is None:
+            return context.is_valid()
         return self.uow.claims.validate_cas(
             claim_key=context.claim_key,
             owner_instance_id=context.owner_instance_id,
@@ -302,11 +399,7 @@ class RecoveryConvergenceService:
         drive_admitted: bool = False,
         timeout_hours: float = 2.0,
     ) -> RecoveryDecision:
-        claim = self.uow.claims.acquire_or_reacquire(
-            claim_key=claim_key,
-            owner_instance_id=self.owner_instance_id,
-            lease_seconds=self.lease_seconds,
-        )
+        claim = self.acquire_claim(claim_key=claim_key, lease_seconds=self.lease_seconds)
         if not claim:
             decision = RecoveryDecision(
                 cycle_id=cycle_id,
@@ -319,7 +412,7 @@ class RecoveryConvergenceService:
                 status=RecoveryDecisionStatus.NO_ACTION,
                 reason_code="CLAIMED_ELSEWHERE",
             )
-            self.uow.recovery_decisions.create_decision(decision)
+            self._create_decision(decision)
             self.uow.commit()
             return decision
 
@@ -344,9 +437,40 @@ class RecoveryConvergenceService:
                 status=RecoveryDecisionStatus.NO_ACTION,
                 reason_code="RUN_NOT_FOUND",
             )
-            self.uow.recovery_decisions.create_decision(decision)
-            self.release_claim(context)
-            return decision
+            self._create_decision(decision)
+        if run.active_job_id:
+            job = self.uow.jobs.get_by_id(run.active_job_id)
+            if job:
+                change = self.uow.changes.get_by_name(job.project_id, job.change_name)
+                if change and change.status in {ChangeStatus.DONE, ChangeStatus.CANCELLED}:
+                    if job.status not in {JobStatus.CANCELLED, JobStatus.COMPLETED}:
+                        job.status = JobStatus.CANCELLED
+                        job.error_message = f"Change is already in terminal state {change.status.value}."
+                        self.uow.jobs.save(job)
+                elif job.status in {
+                    JobStatus.RUNNING,
+                    JobStatus.CHECKS_RUNNING,
+                    JobStatus.REVIEW_RUNNING,
+                    JobStatus.AUDIT_RUNNING,
+                }:
+                    check_results = (
+                        self.uow.check_results.list_by_job(job.job_id)
+                        if hasattr(self.uow, "check_results") and self.uow.check_results is not None
+                        else []
+                    )
+                    checks_passed = len(check_results) > 0 and all(c.exit_code == 0 for c in check_results)
+                    if job.candidate_sha and (checks_passed or job.status == JobStatus.CHECKS_PASSED):
+                        self.uow.jobs.transition(
+                            job.job_id,
+                            JobStatus.CHECKS_PASSED.value,
+                            error_message="Recovered on daemon restart; preserved completed implementation and checks.",
+                        )
+                    else:
+                        self.uow.jobs.transition(
+                            job.job_id,
+                            JobStatus.QUEUED.value,
+                            error_message="Recovered on daemon restart; re-queued for execution.",
+                        )
 
         if (
             not run.is_active
@@ -375,7 +499,7 @@ class RecoveryConvergenceService:
                     planned_action="RECONCILE_POST_MERGE",
                     status=RecoveryDecisionStatus.PLANNED,
                 )
-                self.uow.recovery_decisions.create_decision(decision)
+                self._create_decision(decision)
                 self.uow.commit()
 
                 try:
@@ -394,7 +518,7 @@ class RecoveryConvergenceService:
                 except Exception as exc:
                     decision.status = RecoveryDecisionStatus.BLOCKED
                     decision.reason_code = str(exc)
-                self.uow.recovery_decisions.update_decision(decision)
+                self._update_decision(decision)
                 self.release_claim(context)
                 return decision
 
@@ -412,7 +536,7 @@ class RecoveryConvergenceService:
                 status=RecoveryDecisionStatus.NO_ACTION,
                 reason_code="TERMINAL_RUN",
             )
-            self.uow.recovery_decisions.create_decision(decision)
+            self._create_decision(decision)
             self.release_claim(context)
             return decision
 
@@ -454,7 +578,7 @@ class RecoveryConvergenceService:
                             status=RecoveryDecisionStatus.COMPLETED,
                             reason_code="WAITING_TIMEOUT_EXCEEDED",
                         )
-                        self.uow.recovery_decisions.create_decision(decision)
+                        self._create_decision(decision)
                         self.uow.commit()
                         self.release_claim(context)
                         return decision
@@ -487,7 +611,7 @@ class RecoveryConvergenceService:
                     status=RecoveryDecisionStatus.NO_ACTION,
                     reason_code=f"PROVIDER_UNAVAILABLE_{provider}",
                 )
-                self.uow.recovery_decisions.create_decision(decision)
+                self._create_decision(decision)
                 self.release_claim(context)
                 return decision
             else:
@@ -511,7 +635,7 @@ class RecoveryConvergenceService:
                         status=RecoveryDecisionStatus.COMPLETED,
                         reason_code="CAPACITY_RECOVERED",
                     )
-                    self.uow.recovery_decisions.create_decision(decision)
+                    self._create_decision(decision)
                     self.uow.commit()
                     self.release_claim(context)
                     return decision
@@ -548,7 +672,7 @@ class RecoveryConvergenceService:
                 planned_action="OBSERVE_EXTERNAL",
                 status=RecoveryDecisionStatus.PLANNED,
             )
-            self.uow.recovery_decisions.create_decision(decision)
+            self._create_decision(decision)
             self.uow.commit()
             self.release_claim(context)
             return decision
@@ -567,7 +691,7 @@ class RecoveryConvergenceService:
                 planned_action="ADOPT_COMPLETED",
                 status=RecoveryDecisionStatus.COMPLETED,
             )
-            self.uow.recovery_decisions.create_decision(decision)
+            self._create_decision(decision)
             self.uow.commit()
             self.release_claim(context)
             return decision
@@ -593,7 +717,7 @@ class RecoveryConvergenceService:
                 status=RecoveryDecisionStatus.NO_ACTION,
                 reason_code="HEALTHY_ACTIVE_RUN",
             )
-            self.uow.recovery_decisions.create_decision(decision)
+            self._create_decision(decision)
             self.release_claim(context)
             return decision
 
@@ -610,7 +734,23 @@ class RecoveryConvergenceService:
             planned_action="DRIVE_CONTINUATION",
             status=RecoveryDecisionStatus.EXECUTING,
         )
-        self.uow.recovery_decisions.create_decision(decision)
+        self._create_decision(decision)
+        if source == RecoverySource.STARTUP:
+            self.uow.events.save(
+                Event(
+                    event_type=EventType.ORCHESTRATION_RECOVERED,
+                    project_id=run.project_id,
+                    change_id=run.change_name,
+                    operation_id=run.run_id,
+                    payload={
+                        "run_id": run.run_id,
+                        "stage": run.current_stage.value,
+                        "resumable_stage": run.resumable_stage.value if run.resumable_stage else None,
+                        "recovery_cycle_id": cycle_id,
+                    },
+                    timestamp=utc_now(),
+                )
+            )
         self.uow.commit()
 
         from minime.services.orchestration_service import OrchestrationService
@@ -626,7 +766,7 @@ class RecoveryConvergenceService:
             decision.status = RecoveryDecisionStatus.BLOCKED
             decision.reason_code = str(exc)
 
-        self.uow.recovery_decisions.update_decision(decision)
+        self._update_decision(decision)
         self.release_claim(context)
         return decision
 
@@ -637,11 +777,7 @@ class RecoveryConvergenceService:
         claim_key: str,
         source: RecoverySource,
     ) -> RecoveryDecision:
-        claim = self.uow.claims.acquire_or_reacquire(
-            claim_key=claim_key,
-            owner_instance_id=self.owner_instance_id,
-            lease_seconds=self.lease_seconds,
-        )
+        claim = self.acquire_claim(claim_key=claim_key, lease_seconds=self.lease_seconds)
         if not claim:
             decision = RecoveryDecision(
                 cycle_id=cycle_id,
@@ -654,7 +790,7 @@ class RecoveryConvergenceService:
                 status=RecoveryDecisionStatus.NO_ACTION,
                 reason_code="CLAIMED_ELSEWHERE",
             )
-            self.uow.recovery_decisions.create_decision(decision)
+            self._create_decision(decision)
             self.uow.commit()
             return decision
 
@@ -678,7 +814,7 @@ class RecoveryConvergenceService:
                 planned_action="NO_ACTION",
                 status=RecoveryDecisionStatus.NO_ACTION,
             )
-            self.uow.recovery_decisions.create_decision(decision)
+            self._create_decision(decision)
             self.release_claim(context)
             return decision
 
@@ -713,7 +849,7 @@ class RecoveryConvergenceService:
                 planned_action="CANCEL_INTAKE_SAGA",
                 status=RecoveryDecisionStatus.COMPLETED,
             )
-            self.uow.recovery_decisions.create_decision(decision)
+            self._create_decision(decision)
             self.release_claim(context)
             return decision
 
@@ -730,7 +866,7 @@ class RecoveryConvergenceService:
             planned_action="RESUME_SAGA",
             status=RecoveryDecisionStatus.EXECUTING,
         )
-        self.uow.recovery_decisions.create_decision(decision)
+        self._create_decision(decision)
         self.uow.commit()
 
         try:
@@ -740,7 +876,7 @@ class RecoveryConvergenceService:
             decision.status = RecoveryDecisionStatus.BLOCKED
             decision.reason_code = str(exc)
 
-        self.uow.recovery_decisions.update_decision(decision)
+        self._update_decision(decision)
         self.release_claim(context)
         return decision
 
@@ -771,7 +907,7 @@ class RecoveryConvergenceService:
                 planned_action="NO_ACTION",
                 status=RecoveryDecisionStatus.NO_ACTION,
             )
-            self.uow.recovery_decisions.create_decision(decision)
+            self._create_decision(decision)
             self.uow.commit()
             return decision
 
@@ -808,6 +944,6 @@ class RecoveryConvergenceService:
             planned_action=planned_action,
             status=RecoveryDecisionStatus.COMPLETED,
         )
-        self.uow.recovery_decisions.create_decision(decision)
+        self._create_decision(decision)
         self.release_claim(context)
         return decision

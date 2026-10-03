@@ -436,7 +436,10 @@ def test_scheduler_reconciles_and_resumes_waiting_capacity(in_memory_uow, tmp_pa
             last_error_summary="Quota exceeded",
         )
     )
-    run = orch_svc.drive_coordinator(admission.run.run_id)
+    from minime.services.recovery_convergence_service import RecoveryConvergenceService
+    conv_svc = RecoveryConvergenceService(in_memory_uow)
+    ctx = conv_svc.acquire_claim(f"run:{admission.run.run_id}")
+    run = orch_svc.drive_coordinator(admission.run.run_id, claim_context=ctx)
     assert run.stop_outcome == OrchestrationStopOutcome.WAITING_CAPACITY
     assert run.is_active is True
 
