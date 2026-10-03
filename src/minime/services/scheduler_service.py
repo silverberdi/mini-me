@@ -1343,8 +1343,9 @@ class SchedulerService:
                 )
                 run = self.uow.orchestration_runs.get_by_id(run.run_id)
             elif drive_admitted:
+                claim_ctx = self.recovery_convergence_service.acquire_claim(f"run:{run.run_id}")
                 run = self.orchestration_service.drive_coordinator(
-                    run.run_id, project_root=self.project_root
+                    run.run_id, project_root=self.project_root, claim_context=claim_ctx
                 )
         return decision, decision_record, run
 

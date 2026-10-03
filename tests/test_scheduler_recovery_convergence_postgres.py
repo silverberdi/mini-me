@@ -1313,15 +1313,41 @@ def test_blocker_1_missing_claim_context_raises_exception(pg_session_factory: se
     with pytest.raises(MissingRecoveryClaimContextError):
         orch_svc.resume("run-blocker1", claim_context=None)
 
-    # 3. drive_coordinator(..., claim_context=None) fails immediately
+    # 4. prepare_work_item(..., claim_context=None) fails immediately
+    from minime.services.intake_service import IntakeService
+    intake_svc = IntakeService(uow)
     with pytest.raises(MissingRecoveryClaimContextError):
-        orch_svc.drive_coordinator("run-blocker1", claim_context=None)
+        intake_svc.prepare_work_item(project_id, change_name, claim_context=None)
+
+    # 5. reconcile_post_merge(..., claim_context=None) fails immediately
+    from minime.services.post_merge_service import PostMergeReconciliationService
+    pm_svc = PostMergeReconciliationService(uow, project_root=".")
+    with pytest.raises(MissingRecoveryClaimContextError):
+        pm_svc.reconcile_post_merge(project_id, change_name, claim_context=None)
 
     session.close()
 
 
 def test_blocker_2_restart_recovery_service_delegates_to_convergence(pg_session_factory: sessionmaker[Session], tmp_path: Path):
-    """RestartRecoveryService MUST delegate mutating recovery to RecoveryConvergenceService and not mutate Job/Run directly."""
+    """RestartRecoveryService MUST delegate mutating recovery to RecoveryConvergenceService and contain ZERO Job/Run/Saga state writes."""
+    import ast
+    path = Path("src/minime/services/restart_recovery_service.py")
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+
+    # Verify AST contains zero calls mutating Job/Run/Saga repositories
+    forbidden_calls = {"save", "transition", "set_recovery_blocked", "update_status", "cancel_saga"}
+    forbidden_targets = {"jobs", "orchestration_runs", "durable_sagas"}
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            method_name = node.func.attr
+            if method_name in forbidden_calls:
+                # Check if called on uow.jobs / uow.orchestration_runs / uow.durable_sagas
+                if isinstance(node.func.value, ast.Attribute):
+                    val_attr = node.func.value.attr
+                    if val_attr in forbidden_targets:
+                        pytest.fail(f"RestartRecoveryService contains forbidden write call: uow.{val_attr}.{method_name}()")
+
     session = pg_session_factory()
     project_id, change_name = _seed_base_project_and_change(session, "blocker2-change")
     uow = PostgresPersistenceUnitOfWork(session)
@@ -1339,5 +1365,133 @@ def test_blocker_2_restart_recovery_service_delegates_to_convergence(pg_session_
 
     runs = restart_svc.reconcile_orchestration_runs()
     assert isinstance(runs, list)
+
+    session.close()
+
+
+def test_blocker_c_fresh_admission_passes_claim_context(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+    """Fresh admission with drive_admitted=True MUST acquire run claim and pass explicit claim_context to drive_coordinator."""
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "blockerc-fresh")
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    from datetime import datetime, timezone
+
+    from minime.domain.enums import (
+        AdmissionDecision,
+        ChangeStatus,
+        ProviderHealthStatus,
+        QueuePriority,
+        ReadinessState,
+        WorkItemStatus,
+    )
+    from minime.domain.models import BacklogItem, ProviderHealth, WorkQueueItem
+    from minime.services.scheduler_service import SchedulerService
+
+    uow.provider_health.save(ProviderHealth(provider="codex", status=ProviderHealthStatus.AVAILABLE))
+    uow.provider_health.save(ProviderHealth(provider="antigravity", status=ProviderHealthStatus.AVAILABLE))
+
+    proj = uow.projects.get_by_id(project_id)
+    if proj:
+        uow.projects.save(proj.model_copy(update={"max_concurrent_jobs": 100}))
+
+    ch = uow.changes.get_by_name(project_id, change_name)
+    if ch:
+        uow.changes.save(ch.model_copy(update={"last_readiness_status": ReadinessState.READY, "status": ChangeStatus.READY}))
+
+    pb = uow.bindings.get_by_project_and_change(project_id, change_name)
+    if pb:
+        uow.bindings.save(pb.model_copy(update={"github_issue_number": 1, "is_valid": True}))
+
+    now_utc = datetime.now(timezone.utc)
+    uow.work_queue.save(
+        WorkQueueItem(
+            project_id=project_id,
+            change_name=change_name,
+            github_issue_number=1,
+            priority=QueuePriority.NORMAL,
+            readiness_state=ReadinessState.READY,
+            admission_eligible=True,
+            discovered_at=now_utc,
+        )
+    )
+
+    item = BacklogItem(
+        project_id=project_id,
+        item_key=change_name,
+        title="Fresh task",
+        priority=QueuePriority.NORMAL,
+        status=WorkItemStatus.READY,
+        readiness_state=ReadinessState.READY,
+        description="Fresh description",
+        acceptance_criteria=["Criteria 1"],
+        openspec_change_name=change_name,
+    )
+    uow.backlog_items.save(item)
+    session.commit()
+
+    received_claim_ctx = []
+
+    from conftest import (
+        ReadinessGitHubStub,
+        create_isolated_openspec_change,
+        setup_managed_repository_fixture,
+    )
+    from minime.services.readiness_service import ReadinessService
+
+    setup_managed_repository_fixture(
+        uow,
+        project_id,
+        tmp_path,
+        tmp_path / ".minime" / "worktrees",
+        canonical_repository_identity="https://github.com/silverberdi/mini-me.git",
+    )
+    create_isolated_openspec_change(tmp_path, change_name=change_name)
+
+    mock_gh = ReadinessGitHubStub()
+    readiness_svc = ReadinessService(uow, github_adapter=mock_gh)
+    scheduler = SchedulerService(
+        uow,
+        project_root=tmp_path,
+        readiness_service=readiness_svc,
+        _test_global_max_jobs_override=100,
+        one_active_implementation_per_project=False,
+    )
+
+    from minime.domain.models import ReadinessEvaluation
+
+    def ready_fn(*args, **kwargs):
+        return ReadinessEvaluation(
+            change_id=f"ch-{change_name}",
+            project_id=project_id,
+            status=ReadinessState.READY,
+            is_ready=True,
+            unmet_reasons=[],
+        )
+
+    scheduler.readiness_service.evaluate_change_readiness_pure = ready_fn
+    scheduler.orchestration_service.readiness_service.evaluate_change_readiness_pure = ready_fn
+
+    # Wrap drive_coordinator to intercept claim_context
+    orig_drive = scheduler.orchestration_service.drive_coordinator
+
+    def _intercept_drive(run_id, project_root=None, claim_context=None):
+        received_claim_ctx.append(claim_context)
+        return orig_drive(run_id, project_root=project_root, claim_context=claim_context)
+
+    scheduler.orchestration_service.drive_coordinator = _intercept_drive
+
+    dec, record, run = scheduler.admit_work_item(project_id, change_name, drive_admitted=True)
+
+    assert dec == AdmissionDecision.ADMITTED
+    assert run is not None
+    assert len(received_claim_ctx) == 1
+    assert received_claim_ctx[0] is not None
+    assert received_claim_ctx[0].claim_key == f"run:{run.run_id}"
+
+    # Verify claim exists in database
+    claim = uow.claims.get_by_key(f"run:{run.run_id}")
+    assert claim is not None
+    assert claim.owner_instance_id == scheduler.recovery_convergence_service.owner_instance_id
 
     session.close()

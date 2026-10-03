@@ -285,13 +285,6 @@ class PostMergeReconciliationService:
         run_id: str | None = None,
         claim_context: RecoveryClaimContext | None = None,
     ) -> PostMergeReconciliationResult:
-        if claim_context is None:
-            from minime.services.recovery_convergence_service import RecoveryConvergenceService
-
-            rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
-            claim_key = f"run:{run_id}" if run_id else f"closure:{project_id}:{change_name}"
-            claim_context = rec_svc.acquire_claim(claim_key)
-
         from minime.domain.models import validate_claim_context_authoritative
 
         validate_claim_context_authoritative(self.uow, claim_context)

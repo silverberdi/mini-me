@@ -309,11 +309,6 @@ class IntakeService:
         operator_email: str = "operator",
         claim_context: RecoveryClaimContext | None = None,
     ) -> WorkItemPrepareResult:
-        if claim_context is None:
-            from minime.services.recovery_convergence_service import RecoveryConvergenceService
-            rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
-            claim_context = rec_svc.acquire_claim(f"intake:{project_id}:{item_key}")
-
         from minime.domain.models import validate_claim_context_authoritative
 
         validate_claim_context_authoritative(self.uow, claim_context)

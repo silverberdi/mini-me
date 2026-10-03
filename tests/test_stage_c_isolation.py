@@ -2800,8 +2800,12 @@ def test_post_merge_reconciliation_refuses_claim_when_cleanup_fails(tmp_dirs):
     )
     pm_service.verify_candidate_ancestry = MagicMock(return_value=True)
 
+    from minime.services.recovery_convergence_service import RecoveryConvergenceService
+    rec_svc = RecoveryConvergenceService(uow)
+    claim_ctx = rec_svc.acquire_claim("post_merge:proj-refuse-6:run-refuse-6")
+
     result = pm_service.reconcile_post_merge(
-        "proj-refuse-6", "change-refuse", run_id="run-refuse-6"
+        "proj-refuse-6", "change-refuse", run_id="run-refuse-6", claim_context=claim_ctx
     )
 
     assert result.success is False

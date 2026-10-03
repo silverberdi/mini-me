@@ -168,6 +168,37 @@ class RecoveryConvergenceService:
         }:
             return
 
+        # Handle pending unconsumed handoff
+        if hasattr(self.uow, "job_handoffs") and self.uow.job_handoffs is not None:
+            pending_handoff = next(
+                (h for h in self.uow.job_handoffs.list_by_job(job.job_id) if not h.is_consumed),
+                None,
+            )
+            if pending_handoff:
+                job.current_executor = pending_handoff.to_executor
+                self.uow.jobs.save(job)
+
+        # Handle RECOVERY_BLOCKED evidence recorded during lock inspection
+        if hasattr(self.uow, "events") and self.uow.events is not None:
+            if hasattr(self.uow.events, "list_by_project"):
+                events = self.uow.events.list_by_project(job.project_id)
+            elif hasattr(self.uow.events, "list_events"):
+                events = self.uow.events.list_events(project_id=job.project_id)
+            else:
+                events = []
+            blocked_event = next(
+                (
+                    e
+                    for e in events
+                    if e.event_type == EventType.RECOVERY_BLOCKED and e.operation_id == job.job_id
+                ),
+                None,
+            )
+            if blocked_event:
+                reason = blocked_event.payload.get("reason", "Unsafe Git lock condition")
+                self.uow.jobs.set_recovery_blocked(job_id=job.job_id, reason=reason)
+                return
+
         if job.status in {
             JobStatus.RUNNING,
             JobStatus.CHECKS_RUNNING,

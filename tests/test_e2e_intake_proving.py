@@ -181,11 +181,16 @@ def test_end_to_end_autonomous_intake_proving(
 
     assert work_item.item_key == "021-work-intake-project-onboarding-and-backlog-execution"
 
+    from minime.services.recovery_convergence_service import RecoveryConvergenceService
+    rec_svc = RecoveryConvergenceService(in_memory_uow)
+    claim_ctx = rec_svc.acquire_claim("intake:mini-me:021-work-intake-project-onboarding-and-backlog-execution")
+
     # Prepare canonical execution artifacts
     prep_res = intake_service.prepare_work_item(
         "mini-me",
         "021-work-intake-project-onboarding-and-backlog-execution",
         operator_email="operator@example.com",
+        claim_context=claim_ctx,
     )
 
     assert prep_res.readiness_state == ReadinessState.READY

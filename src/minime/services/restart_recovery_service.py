@@ -117,14 +117,6 @@ class RestartRecoveryService:
 
     def _reconcile_job_evidence_and_locks(self, job: Job, recovery_cycle_id: str) -> None:
         """Inspect and recover Git locks and record JOB_INTERRUPTED evidence without direct state transitions."""
-        pending_handoff = next(
-            (h for h in self.uow.job_handoffs.list_by_job(job.job_id) if not h.is_consumed),
-            None,
-        )
-        if pending_handoff:
-            job.current_executor = pending_handoff.to_executor
-            self.uow.jobs.save(job)
-
         stage_map = {
             JobStatus.RUNNING: "implementer",
             JobStatus.CHECKS_RUNNING: "checks",
@@ -169,11 +161,7 @@ class RestartRecoveryService:
         if unsafe_results:
             reasons = "; ".join([r.reason for r in unsafe_results])
             logger.warning(
-                f"Job '{job.job_id}' encountered unsafe Git lock condition: {reasons}. Marking RECOVERY_BLOCKED."
-            )
-            self.uow.jobs.set_recovery_blocked(
-                job_id=job.job_id,
-                reason=reasons,
+                f"Job '{job.job_id}' encountered unsafe Git lock condition: {reasons}. Recording RECOVERY_BLOCKED evidence."
             )
             self.uow.events.save(
                 Event(
