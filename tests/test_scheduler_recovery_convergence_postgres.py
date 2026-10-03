@@ -34,6 +34,7 @@ from minime.domain.models import (
     BacklogItem,
     Change,
     DurableSaga,
+    Job,
     OrchestrationExternalAction,
     OrchestrationRun,
     Project,
@@ -1939,4 +1940,252 @@ def test_rc15_commit_fenced_dispatch_intent_validates_parent_saga(pg_session_fac
 
     with pytest.raises(StaleClaimError):
         rec_svc.atomic_commit_dispatch_intent(claim, action_key="closure:saga-rc15:ISSUE_CLOSE")
+    session.close()
+
+
+def test_rc01_restart_matrix_implementation_only(pg_session_factory: sessionmaker[Session]):
+    """RC-01 Restart Matrix: Implementation only (candidate SHA, no checks) -> resumes in QUEUED."""
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "rc01-imp-only")
+    uow = PostgresPersistenceUnitOfWork(session)
+    job = Job(
+        job_id="job-rc01-imp",
+        project_id=project_id,
+        change_name=change_name,
+        status=JobStatus.RUNNING,
+        implementer_role="implementer",
+        candidate_sha="sha01_imp_only",
+    )
+    uow.jobs.save(job)
+    session.commit()
+
+    rec_svc = RecoveryConvergenceService(uow)
+    rec_svc._converge_job_state(job, "cycle-rc01-1")
+
+    updated = uow.jobs.get_by_id("job-rc01-imp")
+    assert updated is not None
+    assert updated.status == JobStatus.QUEUED
+    session.close()
+
+
+def test_rc01_restart_matrix_implementation_and_checks(pg_session_factory: sessionmaker[Session]):
+    """RC-01 Restart Matrix: Implementation + passed checks -> resumes in CHECKS_PASSED."""
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "rc01-imp-checks")
+    uow = PostgresPersistenceUnitOfWork(session)
+    job = Job(
+        job_id="job-rc01-checks",
+        project_id=project_id,
+        change_name=change_name,
+        status=JobStatus.CHECKS_RUNNING,
+        implementer_role="implementer",
+        candidate_sha="sha01_imp_checks",
+    )
+    uow.jobs.save(job)
+
+    from minime.domain.models import CheckResult
+    uow.check_results.save(
+        CheckResult(
+            job_id="job-rc01-checks",
+            check_name="test_suite",
+            command="pytest",
+            exit_code=0,
+            duration_ms=100,
+            output_snippet="PASSED",
+            candidate_sha="sha01_imp_checks",
+        )
+    )
+    session.commit()
+
+    rec_svc = RecoveryConvergenceService(uow)
+    rec_svc._converge_job_state(job, "cycle-rc01-2")
+
+    updated = uow.jobs.get_by_id("job-rc01-checks")
+    assert updated is not None
+    assert updated.status == JobStatus.CHECKS_PASSED
+    session.close()
+
+
+def test_rc01_restart_matrix_implementation_checks_review(pg_session_factory: sessionmaker[Session]):
+    """RC-01 Restart Matrix: Implementation + checks + review -> resumes in AUDIT_RUNNING (preserving review)."""
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "rc01-imp-checks-review")
+    uow = PostgresPersistenceUnitOfWork(session)
+    job = Job(
+        job_id="job-rc01-review",
+        project_id=project_id,
+        change_name=change_name,
+        status=JobStatus.REVIEW_RUNNING,
+        implementer_role="implementer",
+        candidate_sha="sha01_imp_review",
+    )
+    uow.jobs.save(job)
+
+    from minime.domain.enums import ReviewStatus, ReviewVerdict
+    from minime.domain.models import CheckResult, Review
+    uow.check_results.save(
+        CheckResult(
+            job_id="job-rc01-review",
+            check_name="test_suite",
+            command="pytest",
+            exit_code=0,
+            duration_ms=100,
+            output_snippet="PASSED",
+            candidate_sha="sha01_imp_review",
+        )
+    )
+    uow.reviews.save(
+        Review(
+            job_id="job-rc01-review",
+            project_id=project_id,
+            change_name=change_name,
+            reviewer_role="reviewer",
+            candidate_sha="sha01_imp_review",
+            base_sha="base_sha",
+            status=ReviewStatus.REVIEW_COMPLETED,
+            verdict=ReviewVerdict.READY_TO_MERGE,
+        )
+    )
+    session.commit()
+
+    rec_svc = RecoveryConvergenceService(uow)
+    rec_svc._converge_job_state(job, "cycle-rc01-3")
+
+    updated = uow.jobs.get_by_id("job-rc01-review")
+    assert updated is not None
+    assert updated.status == JobStatus.AUDIT_RUNNING
+    session.close()
+
+
+def test_rc01_restart_matrix_implementation_checks_review_audit(pg_session_factory: sessionmaker[Session]):
+    """RC-01 Restart Matrix: Implementation + checks + review + audit -> resumes in READY_TO_MERGE."""
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "rc01-imp-checks-review-audit")
+    uow = PostgresPersistenceUnitOfWork(session)
+    job = Job(
+        job_id="job-rc01-audit",
+        project_id=project_id,
+        change_name=change_name,
+        status=JobStatus.AUDIT_RUNNING,
+        implementer_role="implementer",
+        candidate_sha="sha01_imp_audit",
+    )
+    uow.jobs.save(job)
+
+    from minime.domain.enums import AuditStatus, ReviewStatus, ReviewVerdict
+    from minime.domain.models import AuditRecord, CheckResult, Review
+    uow.check_results.save(
+        CheckResult(
+            job_id="job-rc01-audit",
+            check_name="test_suite",
+            command="pytest",
+            exit_code=0,
+            duration_ms=100,
+            output_snippet="PASSED",
+            candidate_sha="sha01_imp_audit",
+        )
+    )
+    uow.reviews.save(
+        Review(
+            job_id="job-rc01-audit",
+            project_id=project_id,
+            change_name=change_name,
+            reviewer_role="reviewer",
+            candidate_sha="sha01_imp_audit",
+            base_sha="base_sha",
+            status=ReviewStatus.REVIEW_COMPLETED,
+            verdict=ReviewVerdict.READY_TO_MERGE,
+        )
+    )
+    uow.audits.save(
+        AuditRecord(
+            job_id="job-rc01-audit",
+            project_id=project_id,
+            change_name=change_name,
+            candidate_sha="sha01_imp_audit",
+            base_sha="base_sha",
+            status=AuditStatus.AUDIT_COMPLETED,
+        )
+    )
+    session.commit()
+
+    rec_svc = RecoveryConvergenceService(uow)
+    rec_svc._converge_job_state(job, "cycle-rc01-4")
+
+    updated = uow.jobs.get_by_id("job-rc01-audit")
+    assert updated is not None
+    assert updated.status == JobStatus.READY_TO_MERGE
+    session.close()
+
+
+def test_rc04_ast_drive_coordinator_advance_stage_claim_context_propagation():
+    """RC-04 AST Assertion: Every _advance_stage invocation inside drive_coordinator passes claim_context."""
+    import ast
+    path = Path("src/minime/services/orchestration_service.py")
+    tree = ast.parse(path.read_text())
+
+    class DriveCoordinatorVisitor(ast.NodeVisitor):
+        def __init__(self):
+            self.in_drive_coordinator = False
+            self.unpropagated_calls = []
+
+        def visit_FunctionDef(self, node):
+            if node.name == "drive_coordinator":
+                self.in_drive_coordinator = True
+                self.generic_visit(node)
+                self.in_drive_coordinator = False
+            else:
+                self.generic_visit(node)
+
+        def visit_Call(self, node):
+            if self.in_drive_coordinator:
+                func = node.func
+                if isinstance(func, ast.Attribute) and func.attr == "_advance_stage":
+                    kw_names = [kw.arg for kw in node.keywords]
+                    if "claim_context" not in kw_names:
+                        self.unpropagated_calls.append(node.lineno)
+            self.generic_visit(node)
+
+    visitor = DriveCoordinatorVisitor()
+    visitor.visit(tree)
+    assert not visitor.unpropagated_calls, (
+        f"Found _advance_stage call(s) inside drive_coordinator missing claim_context at line(s): {visitor.unpropagated_calls}"
+    )
+
+
+def test_rc04_postgres_fence_mismatch_during_stage_advance(pg_session_factory: sessionmaker[Session]):
+    """RC-04 PostgreSQL Adversarial Proof: worker A attempts next stage with fence N after worker B supersedes with N+1."""
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "rc04-fence-adv")
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    rec_svc1 = RecoveryConvergenceService(uow, owner_instance_id="worker-A")
+    rec_svc2 = RecoveryConvergenceService(uow, owner_instance_id="worker-B")
+
+    claim_ctx_A = rec_svc1.acquire_claim("run:run-rc04-adv")
+    assert claim_ctx_A is not None
+    assert claim_ctx_A.fence_token == 1
+
+    session.execute(text("UPDATE recovery_claims SET lease_expires_at = NOW() - INTERVAL '1 second' WHERE claim_key = 'run:run-rc04-adv'"))
+    session.commit()
+
+    claim_ctx_B = rec_svc2.acquire_claim("run:run-rc04-adv")
+    assert claim_ctx_B is not None
+    assert claim_ctx_B.fence_token == 2
+
+    run = OrchestrationRun(
+        run_id="run-rc04-adv",
+        project_id=project_id,
+        change_name=change_name,
+        base_sha="base_sha",
+        current_stage=OrchestrationStage.ADMITTED,
+        resumable_stage=OrchestrationStage.ADMITTED,
+    )
+    uow.orchestration_runs.save(run)
+    session.commit()
+
+    orchestration_svc = OrchestrationService(uow)
+    with pytest.raises(StaleClaimError):
+        orchestration_svc._advance_stage(run, OrchestrationStage.PREPARING_EXECUTION, claim_context=claim_ctx_A)
+
     session.close()

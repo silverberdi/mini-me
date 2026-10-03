@@ -1305,6 +1305,7 @@ class InMemoryOrchestrationRunRepository(OrchestrationRunRepositoryInterface):
         run_id: str,
         current_stage: OrchestrationStage,
         resumable_stage: OrchestrationStage,
+        claim_context: Any | None = None,
     ) -> OrchestrationRun:
         r = self._store.get(run_id)
         if not r:
@@ -1322,6 +1323,7 @@ class InMemoryOrchestrationRunRepository(OrchestrationRunRepositoryInterface):
         stop_reason: str | None = None,
         stop_details: dict | None = None,
         is_active: bool = False,
+        claim_context: Any | None = None,
     ) -> OrchestrationRun:
         r = self._store.get(run_id)
         if not r:

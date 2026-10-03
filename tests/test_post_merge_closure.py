@@ -46,10 +46,13 @@ class InMemoryUnitOfWork(PersistenceUnitOfWork):
         self.orchestration_runs.get_by_id.side_effect = lambda rid: self._runs.get(rid)
         self.orchestration_runs.list_runs.side_effect = self._list_runs
         self.orchestration_runs.save.side_effect = self._save_run
+        self.orchestration_runs.update_stage.side_effect = self._update_stage
+        self.orchestration_runs.update_stop_outcome.side_effect = self._update_stop_outcome
 
         self.jobs = MagicMock()
         self.jobs.get_by_id.side_effect = lambda jid: self._jobs.get(jid)
         self.jobs.save.side_effect = self._save_job
+        self.jobs.transition.side_effect = self._transition_job
 
         self.projects = MagicMock()
         self.projects.get_by_id.side_effect = lambda pid: self._projects.get(pid)
@@ -141,8 +144,33 @@ class InMemoryUnitOfWork(PersistenceUnitOfWork):
     def _save_run(self, run: OrchestrationRun):
         self._runs[run.run_id] = run
 
+    def _update_stage(self, run_id, current_stage, resumable_stage, claim_context=None):
+        r = self._runs.get(run_id)
+        if r:
+            r.current_stage = current_stage
+            r.resumable_stage = resumable_stage
+        return r
+
+    def _update_stop_outcome(self, run_id, stop_outcome, human_gate=None, stop_reason=None, stop_details=None, is_active=False, claim_context=None):
+        r = self._runs.get(run_id)
+        if r:
+            r.stop_outcome = stop_outcome
+            r.human_gate = human_gate
+            r.stop_reason = stop_reason
+            r.stop_details = stop_details or {}
+            r.is_active = is_active
+        return r
+
     def _save_job(self, job: Job):
         self._jobs[job.job_id] = job
+
+    def _transition_job(self, job_id, new_status, claim_context=None, error_message=None):
+        job = self._jobs.get(job_id)
+        if job:
+            job.status = JobStatus(new_status) if isinstance(new_status, str) else new_status
+            if error_message:
+                job.error_message = error_message
+        return job
 
     def _list_runs(self, project_id=None, change_name=None, is_active=None):
         results = list(self._runs.values())

@@ -1095,30 +1095,41 @@ class PostMergeReconciliationService:
             )
 
         # 13. Terminal State Transitions (Only reached when all required phases are verified)
-        run.current_stage = OrchestrationStage.COMPLETED
-        run.resumable_stage = OrchestrationStage.COMPLETED
-        run.stop_outcome = OrchestrationStopOutcome.COMPLETED
-        run.human_gate = None
-        run.is_active = False
-        run.stop_reason = "Autonomous post-merge closure completed successfully."
-        run.stop_details = {
+        stop_details = {
             "is_merged": True,
             "merged_by": merged_by,
             "merged_at": merged_at,
             "merge_commit_sha": merge_commit_sha,
             "ancestry_verified": delivery_ok,
         }
-        self.uow.orchestration_runs.save(run)
+        self.uow.orchestration_runs.update_stage(
+            run.run_id,
+            current_stage=OrchestrationStage.COMPLETED,
+            resumable_stage=OrchestrationStage.COMPLETED,
+            claim_context=claim_context,
+        )
+        self.uow.orchestration_runs.update_stop_outcome(
+            run.run_id,
+            stop_outcome=OrchestrationStopOutcome.COMPLETED,
+            human_gate=None,
+            stop_reason="Autonomous post-merge closure completed successfully.",
+            stop_details=stop_details,
+            is_active=False,
+            claim_context=claim_context,
+        )
 
         if job:
-            job.status = JobStatus.COMPLETED
-            self.uow.jobs.save(job)
+            self.uow.jobs.transition(
+                job.job_id,
+                new_status=JobStatus.COMPLETED.value,
+                claim_context=claim_context,
+            )
 
         self._reconcile_change_and_backlog_item(project_id, change_name)
 
         # 14. Mark CLOSURE DurableSaga as completed
-        self.saga_engine.advance_phase(saga, "FINAL_CLOSED")
-        self.saga_engine.complete_saga(saga)
+        self.saga_engine.advance_phase(saga, "FINAL_CLOSED", claim_context=claim_context)
+        self.saga_engine.complete_saga(saga, claim_context=claim_context)
 
         # 15. Persist Post-Merge Metric Facts
         duration_ms = int((time.time() - start_time) * 1000)

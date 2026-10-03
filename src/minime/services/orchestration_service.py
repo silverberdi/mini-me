@@ -1570,7 +1570,7 @@ class OrchestrationService:
                         reason_code="execution_start",
                         actor="orchestrator",
                     )
-                self._advance_stage(run, OrchestrationStage.PREPARING_EXECUTION)
+                self._advance_stage(run, OrchestrationStage.PREPARING_EXECUTION, claim_context=claim_context)
 
             elif stage == OrchestrationStage.PREPARING_EXECUTION:
                 project = self.uow.projects.get_by_id(run.project_id)
@@ -1623,7 +1623,7 @@ class OrchestrationService:
                     self.uow.orchestration_runs.update_active_job(run.run_id, job.job_id)
                     self.uow.commit()
 
-                self._advance_stage(run, OrchestrationStage.IMPLEMENTING)
+                self._advance_stage(run, OrchestrationStage.IMPLEMENTING, claim_context=claim_context)
 
             elif stage == OrchestrationStage.IMPLEMENTING:
                 job = self.uow.jobs.get_by_id(run.active_job_id)
@@ -1706,7 +1706,7 @@ class OrchestrationService:
                     )
                     break
 
-                self._advance_stage(run, OrchestrationStage.EVALUATING_ATTEMPT)
+                self._advance_stage(run, OrchestrationStage.EVALUATING_ATTEMPT, claim_context=claim_context)
 
             elif stage == OrchestrationStage.EVALUATING_ATTEMPT:
                 job = self.uow.jobs.get_by_id(run.active_job_id)
@@ -1770,7 +1770,7 @@ class OrchestrationService:
                     and job.status != JobStatus.CHECKS_FAILED
                 ):
                     # Ready for checks / freeze / review / audit stages
-                    self._advance_stage(run, OrchestrationStage.RUNNING_CHECKS)
+                    self._advance_stage(run, OrchestrationStage.RUNNING_CHECKS, claim_context=claim_context)
                 else:
                     if latest_att and latest_att.continuation_decision is not None:
                         decision = latest_att.continuation_decision
@@ -1793,7 +1793,7 @@ class OrchestrationService:
                             )
                             break
                         # Explicit operator continuation / fresh implementation attempt / checks remediation
-                        self._advance_stage(run, OrchestrationStage.IMPLEMENTING)
+                        self._advance_stage(run, OrchestrationStage.IMPLEMENTING, claim_context=claim_context)
                     elif decision in {
                         ContinuationDecision.CONTINUE_SAME_AGENT,
                         ContinuationDecision.CORRECT_AND_RETRY,
@@ -1814,7 +1814,7 @@ class OrchestrationService:
                                 },
                             )
                             break
-                        self._advance_stage(run, OrchestrationStage.IMPLEMENTING)
+                        self._advance_stage(run, OrchestrationStage.IMPLEMENTING, claim_context=claim_context)
                     elif decision == ContinuationDecision.WAIT_EXTERNAL:
                         self._stop_run(
                             run,
@@ -1842,7 +1842,7 @@ class OrchestrationService:
                         break
                     else:
                         # Verified complete or ready for checks
-                        self._advance_stage(run, OrchestrationStage.RUNNING_CHECKS)
+                        self._advance_stage(run, OrchestrationStage.RUNNING_CHECKS, claim_context=claim_context)
 
             elif stage == OrchestrationStage.RUNNING_CHECKS:
                 job = self.uow.jobs.get_by_id(run.active_job_id)
@@ -1896,11 +1896,11 @@ class OrchestrationService:
                             JobStatus.CHECKS_FAILED.value,
                             error_message="Deterministic checks failed.",
                         )
-                    self._advance_stage(run, OrchestrationStage.EVALUATING_ATTEMPT)
+                    self._advance_stage(run, OrchestrationStage.EVALUATING_ATTEMPT, claim_context=claim_context)
                 else:
                     if job.status in {JobStatus.RUNNING, JobStatus.CHECKS_RUNNING}:
                         self.uow.jobs.transition(job.job_id, JobStatus.CHECKS_PASSED.value)
-                    self._advance_stage(run, OrchestrationStage.FREEZING_CANDIDATE)
+                    self._advance_stage(run, OrchestrationStage.FREEZING_CANDIDATE, claim_context=claim_context)
 
             elif stage == OrchestrationStage.FREEZING_CANDIDATE:
                 job = self.uow.jobs.get_by_id(run.active_job_id)
@@ -1918,7 +1918,7 @@ class OrchestrationService:
                 if not current_candidate:
                     break
 
-                self._advance_stage(run, OrchestrationStage.COMPLEMENTARY_REVIEW)
+                self._advance_stage(run, OrchestrationStage.COMPLEMENTARY_REVIEW, claim_context=claim_context)
 
             elif stage == OrchestrationStage.COMPLEMENTARY_REVIEW:
                 job = self.uow.jobs.get_by_id(run.active_job_id)
@@ -1934,10 +1934,10 @@ class OrchestrationService:
 
                 valid, verdict, reason = self._validate_review_authority(run, job, current_cand)
                 if valid and verdict == ReviewVerdict.READY_TO_MERGE:
-                    self._advance_stage(run, OrchestrationStage.INDEPENDENT_AUDIT)
+                    self._advance_stage(run, OrchestrationStage.INDEPENDENT_AUDIT, claim_context=claim_context)
                 else:
                     # Changes required or invalid/missing review authority -> route to review remediation
-                    self._advance_stage(run, OrchestrationStage.REVIEW_REMEDIATION)
+                    self._advance_stage(run, OrchestrationStage.REVIEW_REMEDIATION, claim_context=claim_context)
 
             elif stage == OrchestrationStage.REVIEW_REMEDIATION:
                 job = self.uow.jobs.get_by_id(run.active_job_id)
@@ -1959,7 +1959,7 @@ class OrchestrationService:
                     )
                     break
                 # Review changes required -> route to continuation remediation attempt
-                self._advance_stage(run, OrchestrationStage.IMPLEMENTING)
+                self._advance_stage(run, OrchestrationStage.IMPLEMENTING, claim_context=claim_context)
 
             elif stage == OrchestrationStage.INDEPENDENT_AUDIT:
                 job = self.uow.jobs.get_by_id(run.active_job_id)
@@ -1975,10 +1975,10 @@ class OrchestrationService:
 
                 valid, is_passing, reason = self._validate_audit_authority(run, job, current_cand)
                 if valid and is_passing:
-                    self._advance_stage(run, OrchestrationStage.PREPARING_PR)
+                    self._advance_stage(run, OrchestrationStage.PREPARING_PR, claim_context=claim_context)
                 else:
                     # Audit failed or missing/invalid audit authority -> route to audit remediation
-                    self._advance_stage(run, OrchestrationStage.AUDIT_REMEDIATION)
+                    self._advance_stage(run, OrchestrationStage.AUDIT_REMEDIATION, claim_context=claim_context)
 
             elif stage == OrchestrationStage.AUDIT_REMEDIATION:
                 job = self.uow.jobs.get_by_id(run.active_job_id)
@@ -2000,7 +2000,7 @@ class OrchestrationService:
                     )
                     break
                 # Audit failed -> feed to continuation governance for corrective remediation
-                self._advance_stage(run, OrchestrationStage.IMPLEMENTING)
+                self._advance_stage(run, OrchestrationStage.IMPLEMENTING, claim_context=claim_context)
 
             elif stage == OrchestrationStage.PREPARING_PR:
                 job = self.uow.jobs.get_by_id(run.active_job_id)
@@ -2027,7 +2027,7 @@ class OrchestrationService:
                         f"PR preparation blocked: no valid passing audit for candidate '{current_cand.candidate_sha}'. Reason: {audit_reason}"
                     )
                     # Cannot prepare PR without authoritative audit -> stay in INDEPENDENT_AUDIT
-                    self._advance_stage(run, OrchestrationStage.INDEPENDENT_AUDIT)
+                    self._advance_stage(run, OrchestrationStage.INDEPENDENT_AUDIT, claim_context=claim_context)
                     continue
 
                 cand_sha = current_cand.candidate_sha
@@ -2257,7 +2257,7 @@ class OrchestrationService:
                         binding.github_pr_url = new_pr.get("url")
                         self.uow.bindings.save(binding)
                         self.uow.commit()
-                        self._advance_stage(run, OrchestrationStage.PR_PREPARED)
+                        self._advance_stage(run, OrchestrationStage.PR_PREPARED, claim_context=claim_context)
                 else:
                     from minime.domain.enums import ExternalReasonCode
 

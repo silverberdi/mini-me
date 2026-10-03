@@ -1510,7 +1510,13 @@ class PostgresJobRepository(JobRepositoryInterface):
         models = self.session.scalars(stmt).all()
         return [job_model_to_domain(m) for m in models]
 
-    def transition(self, job_id: str, new_status: str, error_message: str | None = None) -> Job:
+    def transition(
+        self,
+        job_id: str,
+        new_status: str,
+        error_message: str | None = None,
+        claim_context: RecoveryClaimContext | None = None,
+    ) -> Job:
         stmt = select(JobModel).where(JobModel.id == job_id).with_for_update()
         model = self.session.scalars(stmt).first()
         if not model:
@@ -1519,9 +1525,41 @@ class PostgresJobRepository(JobRepositoryInterface):
         target = JobStatus(new_status)
         if current != target and target not in self.VALID_TRANSITIONS[current]:
             raise ValueError(f"Invalid job status transition: {current.value} -> {target.value}.")
-        model.status = target.value
-        model.error_message = error_message
-        model.updated_at = utc_now()
+        if claim_context is not None:
+            now = utc_now()
+            claim_subquery = (
+                select(1)
+                .where(
+                    RecoveryClaimModel.claim_key == claim_context.claim_key,
+                    RecoveryClaimModel.owner_instance_id == claim_context.owner_instance_id,
+                    RecoveryClaimModel.fence_token == claim_context.fence_token,
+                    RecoveryClaimModel.released_at.is_(None),
+                    RecoveryClaimModel.lease_expires_at > now,
+                )
+                .scalar_subquery()
+            )
+            stmt_up = (
+                update(JobModel)
+                .where(
+                    JobModel.id == job_id,
+                    exists(claim_subquery),
+                )
+                .values(
+                    status=target.value,
+                    error_message=error_message,
+                    updated_at=now,
+                )
+            )
+            res = self.session.execute(stmt_up)
+            if res.rowcount == 0:
+                raise StaleClaimError(
+                    f"Fenced transition for job '{job_id}' failed: recovery claim fence is stale, expired, or superseded."
+                )
+        else:
+            model.status = target.value
+            model.error_message = error_message
+            model.updated_at = utc_now()
+        model = self.session.get(JobModel, job_id)
         return job_model_to_domain(model)
 
     def set_waiting_capacity(
@@ -1697,6 +1735,15 @@ class PostgresReviewRepository(ReviewRepositoryInterface):
         model = self.session.scalars(stmt).first()
         return review_model_to_domain(model) if model else None
 
+    def list_by_job(self, job_id: str) -> list[Review]:
+        stmt = (
+            select(ReviewModel)
+            .where(ReviewModel.job_id == job_id)
+            .order_by(desc(ReviewModel.created_at))
+        )
+        models = self.session.scalars(stmt).all()
+        return [review_model_to_domain(m) for m in models]
+
     def list_by_project(self, project_id: str, limit: int = 100) -> list[Review]:
         stmt = (
             select(ReviewModel)
@@ -1841,6 +1888,15 @@ class PostgresAuditRepository(AuditRepositoryInterface):
         )
         model = self.session.scalars(stmt).first()
         return audit_model_to_domain(model) if model else None
+
+    def list_by_job(self, job_id: str) -> list[AuditRecord]:
+        stmt = (
+            select(AuditModel)
+            .where(AuditModel.job_id == job_id)
+            .order_by(desc(AuditModel.created_at))
+        )
+        models = self.session.scalars(stmt).all()
+        return [audit_model_to_domain(m) for m in models]
 
     def list_by_project(self, project_id: str, limit: int = 100) -> list[AuditRecord]:
         stmt = (
@@ -2834,16 +2890,53 @@ class PostgresOrchestrationRunRepository(OrchestrationRunRepositoryInterface):
         stop_reason: str | None = None,
         stop_details: dict[str, Any] | None = None,
         is_active: bool = False,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> OrchestrationRun:
+        now = utc_now()
+        if claim_context is not None:
+            claim_subquery = (
+                select(1)
+                .where(
+                    RecoveryClaimModel.claim_key == claim_context.claim_key,
+                    RecoveryClaimModel.owner_instance_id == claim_context.owner_instance_id,
+                    RecoveryClaimModel.fence_token == claim_context.fence_token,
+                    RecoveryClaimModel.released_at.is_(None),
+                    RecoveryClaimModel.lease_expires_at > now,
+                )
+                .scalar_subquery()
+            )
+            stmt = (
+                update(OrchestrationRunModel)
+                .where(
+                    OrchestrationRunModel.id == run_id,
+                    exists(claim_subquery),
+                )
+                .values(
+                    stop_outcome=stop_outcome.value if stop_outcome else None,
+                    human_gate=human_gate.value if human_gate else None,
+                    stop_reason=stop_reason,
+                    stop_details=stop_details or {},
+                    is_active=is_active,
+                    updated_at=now,
+                )
+            )
+            res = self.session.execute(stmt)
+            if res.rowcount == 0:
+                raise StaleClaimError(
+                    f"Fenced stop outcome update for run '{run_id}' failed: recovery claim fence is stale, expired, or superseded."
+                )
+        else:
+            model = self.session.get(OrchestrationRunModel, run_id)
+            if not model:
+                raise ValueError(f"Orchestration run '{run_id}' not found")
+            model.stop_outcome = stop_outcome.value if stop_outcome else None
+            model.human_gate = human_gate.value if human_gate else None
+            model.stop_reason = stop_reason
+            model.stop_details = stop_details or {}
+            model.is_active = is_active
+            model.updated_at = now
+
         model = self.session.get(OrchestrationRunModel, run_id)
-        if not model:
-            raise ValueError(f"Orchestration run '{run_id}' not found")
-        model.stop_outcome = stop_outcome.value if stop_outcome else None
-        model.human_gate = human_gate.value if human_gate else None
-        model.stop_reason = stop_reason
-        model.stop_details = stop_details or {}
-        model.is_active = is_active
-        model.updated_at = utc_now()
         return orchestration_run_model_to_domain(model)
 
     def update_candidate_binding(

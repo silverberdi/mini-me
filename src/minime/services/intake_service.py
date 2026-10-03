@@ -383,7 +383,7 @@ class IntakeService:
             )
 
         if not _has_passed_intake_phase(saga.current_phase, "CONTEXT_CHECKED"):
-            self.saga_engine.advance_phase(saga, "CONTEXT_CHECKED")
+            self.saga_engine.advance_phase(saga, "CONTEXT_CHECKED", claim_context=claim_context)
 
         # 1. OpenSpec Authored Phase
         author_action_key = f"openspec_author:{project_id}:{change_name}"
@@ -415,6 +415,7 @@ class IntakeService:
                 self.saga_engine.block_saga(
                     saga,
                     blocking_reason="OpenSpec generation incomplete; human clarification required.",
+                    claim_context=claim_context,
                 )
                 self.uow.commit()
 
@@ -486,9 +487,9 @@ class IntakeService:
                 )
 
                 if fenced_res and getattr(fenced_res, "result_application_authorized", False):
-                    self.saga_engine.advance_phase(saga, "OPENSPEC_AUTHORED")
+                    self.saga_engine.advance_phase(saga, "OPENSPEC_AUTHORED", claim_context=claim_context)
             else:
-                self.saga_engine.advance_phase(saga, "OPENSPEC_AUTHORED")
+                self.saga_engine.advance_phase(saga, "OPENSPEC_AUTHORED", claim_context=claim_context)
 
         # Save/update Change entity in DB if missing
         if not change_record:
@@ -561,6 +562,7 @@ class IntakeService:
                     self.saga_engine.block_saga(
                         saga,
                         blocking_reason=f"GitHub Issue creation action is in ambiguous status ({action.status.value}). Safe retry unproven.",
+                        claim_context=claim_context,
                     )
                     self.uow.commit()
                     return WorkItemPrepareResult(
@@ -603,6 +605,7 @@ class IntakeService:
                 self.saga_engine.block_saga(
                     saga,
                     blocking_reason=f"GitHub Issue creation for '{change_name}' failed or unverified.",
+                    claim_context=claim_context,
                 )
                 self.uow.commit()
                 return WorkItemPrepareResult(
@@ -616,6 +619,7 @@ class IntakeService:
                 saga,
                 "ISSUE_BOUND",
                 evidence_references={"issue_number": issue_number, "issue_url": issue_url},
+                claim_context=claim_context,
             )
 
         # 4. Sync GitHub Project v2 item with observe-before-repeat reconciliation
@@ -672,6 +676,7 @@ class IntakeService:
                         self.saga_engine.block_saga(
                             saga,
                             blocking_reason=f"Project item action is in ambiguous status ({action.status.value}). Safe retry unproven.",
+                            claim_context=claim_context,
                         )
                         self.uow.commit()
                         return WorkItemPrepareResult(
@@ -715,6 +720,7 @@ class IntakeService:
                 saga,
                 "PROJECT_ITEM_BOUND",
                 evidence_references={"github_project_item_id": project_item_id},
+                claim_context=claim_context,
             )
 
         # 5. Create or sync durable ProjectBinding
@@ -756,6 +762,7 @@ class IntakeService:
                 "is_ready": readiness_eval.is_ready,
                 "status": final_readiness.value,
             },
+            claim_context=claim_context,
         )
 
         # 7. Update BacklogItem state
@@ -795,11 +802,11 @@ class IntakeService:
                     reason_code="dor_ready",
                     actor=operator_email,
                 )
-            self.saga_engine.advance_phase(saga, "READY")
-            self.saga_engine.complete_saga(saga)
+            self.saga_engine.advance_phase(saga, "READY", claim_context=claim_context)
+            self.saga_engine.complete_saga(saga, claim_context=claim_context)
         else:
             self.saga_engine.block_saga(
-                saga, blocking_reason="; ".join(readiness_eval.unmet_reasons)
+                saga, blocking_reason="; ".join(readiness_eval.unmet_reasons), claim_context=claim_context
             )
 
         # 8. Update WorkQueueItem for scheduler discovery

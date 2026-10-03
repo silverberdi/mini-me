@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
 from minime.domain.enums import (
+    AuditFindingSeverity,
+    AuditStatus,
     ChangeStatus,
     EventType,
     ExternalActionObservation,
@@ -24,6 +27,8 @@ from minime.domain.enums import (
     RecoveryClassification,
     RecoveryDecisionStatus,
     RecoverySource,
+    ReviewStatus,
+    ReviewVerdict,
     SagaStatus,
     SagaType,
     WorkItemStatus,
@@ -66,6 +71,8 @@ class RecoveryConvergenceService:
         health_service: ProviderHealthService | None = None,
         lease_seconds: int = DEFAULT_LEASE_SECONDS,
         heartbeat_seconds: int = DEFAULT_HEARTBEAT_SECONDS,
+        post_merge_service: Any | None = None,
+        github_adapter: Any | None = None,
     ):
         if heartbeat_seconds >= lease_seconds / 3:
             raise ValueError(
@@ -77,6 +84,8 @@ class RecoveryConvergenceService:
         self.health_service = health_service or ProviderHealthService(uow)
         self.lease_seconds = lease_seconds
         self.heartbeat_seconds = heartbeat_seconds
+        self.post_merge_service = post_merge_service
+        self.github_adapter = github_adapter
 
     def reconcile_cycle(
         self,
@@ -158,6 +167,81 @@ class RecoveryConvergenceService:
 
         return decisions
 
+    def _determine_highest_job_checkpoint(self, job: Job) -> JobStatus:
+        """Evaluate durable candidate-bound evidence to select the highest proven checkpoint stage."""
+        if not job.candidate_sha:
+            return JobStatus.QUEUED
+
+        # 1. Checks
+        check_results = (
+            self.uow.check_results.list_by_job(job.job_id)
+            if hasattr(self.uow, "check_results") and self.uow.check_results is not None
+            else []
+        )
+        checks_passed = (
+            (len(check_results) > 0 and all(c.exit_code == 0 for c in check_results))
+            or job.status in {
+                JobStatus.CHECKS_PASSED,
+                JobStatus.REVIEW_RUNNING,
+                JobStatus.AUDIT_RUNNING,
+                JobStatus.READY_TO_MERGE,
+            }
+        )
+        if not checks_passed:
+            return JobStatus.QUEUED
+
+        # 2. Review
+        if hasattr(self.uow, "reviews") and self.uow.reviews is not None:
+            if hasattr(self.uow.reviews, "list_by_job"):
+                reviews = self.uow.reviews.list_by_job(job.job_id)
+            elif hasattr(self.uow.reviews, "get_by_job_id"):
+                r = self.uow.reviews.get_by_job_id(job.job_id)
+                reviews = [r] if r else []
+            else:
+                reviews = []
+        else:
+            reviews = []
+
+        review_passed = (
+            any(
+                r.candidate_sha == job.candidate_sha
+                and r.status == ReviewStatus.REVIEW_COMPLETED
+                and r.verdict == ReviewVerdict.READY_TO_MERGE
+                for r in reviews
+            )
+            or (job.status in {JobStatus.READY_TO_MERGE, JobStatus.AUDIT_RUNNING} and bool(reviews))
+        )
+
+        # 3. Audit
+        if hasattr(self.uow, "audits") and self.uow.audits is not None:
+            if hasattr(self.uow.audits, "list_by_job"):
+                audits = self.uow.audits.list_by_job(job.job_id)
+            elif hasattr(self.uow.audits, "get_by_job_id"):
+                a = self.uow.audits.get_by_job_id(job.job_id)
+                audits = [a] if a else []
+            else:
+                audits = []
+        else:
+            audits = []
+        audit_passed = (
+            review_passed
+            and any(
+                a.candidate_sha == job.candidate_sha
+                and a.status == AuditStatus.AUDIT_COMPLETED
+                and not any(
+                    f.severity in (AuditFindingSeverity.CRITICAL, AuditFindingSeverity.HIGH, AuditFindingSeverity.BLOCKER)
+                    for f in getattr(a, "findings", [])
+                )
+                for a in audits
+            )
+        ) or (job.status == JobStatus.READY_TO_MERGE and bool(audits))
+
+        if audit_passed:
+            return JobStatus.READY_TO_MERGE
+        if review_passed:
+            return JobStatus.AUDIT_RUNNING
+        return JobStatus.CHECKS_PASSED
+
     def _converge_job_state(self, job: Job, cycle_id: str) -> None:
         """Converge active job lifecycle state and emit JOB_RECOVERED event if transitioned."""
         change = self.uow.changes.get_by_name(job.project_id, job.change_name)
@@ -222,23 +306,18 @@ class RecoveryConvergenceService:
                 JobStatus.AUDIT_RUNNING: "auditor",
             }
             interrupted_stage = stage_map.get(job.status, "unknown")
-            check_results = (
-                self.uow.check_results.list_by_job(job.job_id)
-                if hasattr(self.uow, "check_results") and self.uow.check_results is not None
-                else []
-            )
-            checks_passed = len(check_results) > 0 and all(c.exit_code == 0 for c in check_results)
-            if job.candidate_sha and (checks_passed or job.status == JobStatus.CHECKS_PASSED):
-                updated = self.uow.jobs.transition(
-                    job.job_id,
-                    JobStatus.CHECKS_PASSED.value,
-                    error_message="Recovered on daemon restart; preserved completed implementation and checks.",
-                )
-            else:
+            target_status = self._determine_highest_job_checkpoint(job)
+            if target_status == JobStatus.QUEUED:
                 updated = self.uow.jobs.transition(
                     job.job_id,
                     JobStatus.QUEUED.value,
                     error_message="Recovered on daemon restart; re-queued for execution.",
+                )
+            else:
+                updated = self.uow.jobs.transition(
+                    job.job_id,
+                    target_status.value,
+                    error_message=f"Recovered on daemon restart; preserved completed checkpoint ({target_status.value}).",
                 )
             self.uow.events.save(
                 Event(
@@ -412,12 +491,27 @@ class RecoveryConvergenceService:
         context: RecoveryClaimContext,
         apply_fn: Any,
     ) -> Any:
-        """Fenced CAS result application: validates fence before updating lifecycle state."""
-        if not self.validate_claim(context):
-            raise StaleClaimError(
-                f"Stale worker with fence {context.fence_token} cannot advance lifecycle."
-            )
+        """Atomic fenced CAS result application: validates claim fence atomically during execution."""
+        if hasattr(self.uow, "claims") and self.uow.claims is not None:
+            if not self.uow.claims.validate_cas(
+                claim_key=context.claim_key,
+                owner_instance_id=context.owner_instance_id,
+                fence_token=context.fence_token,
+            ):
+                raise StaleClaimError(
+                    f"Stale worker with fence {context.fence_token} cannot advance lifecycle."
+                )
         result = apply_fn()
+        if hasattr(self.uow, "claims") and self.uow.claims is not None:
+            if not self.uow.claims.validate_cas(
+                claim_key=context.claim_key,
+                owner_instance_id=context.owner_instance_id,
+                fence_token=context.fence_token,
+            ):
+                self.uow.rollback()
+                raise StaleClaimError(
+                    f"Stale worker with fence {context.fence_token} cannot advance lifecycle."
+                )
         self.uow.commit()
         return result
 
@@ -468,7 +562,25 @@ class RecoveryConvergenceService:
         self, action: OrchestrationExternalAction
     ) -> ActionObservationOutcome:
         atype = action.action_type
-        if atype == ExternalActionType.PR_CREATE:
+        if atype == ExternalActionType.BRANCH_PUSH:
+            target_ref = action.target_identity or f"refs/heads/candidate-{action.candidate_sha[:8]}"
+            try:
+                res = subprocess.run(
+                    ["git", "rev-parse", "--verify", f"{target_ref}^{{commit}}"],
+                    cwd=self.project_root,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if res.returncode == 0 and action.candidate_sha and res.stdout.strip() == action.candidate_sha:
+                    return ActionObservationOutcome.OBSERVED_PRESENT
+                elif res.returncode != 0:
+                    return ActionObservationOutcome.OBSERVED_ABSENT
+                return ActionObservationOutcome.UNOBSERVABLE
+            except Exception:
+                return ActionObservationOutcome.UNOBSERVABLE
+
+        elif atype == ExternalActionType.PR_CREATE:
             from minime.services.status_service import PullRequestLookupService
             pr_svc = PullRequestLookupService(self.uow, self.project_root)
             run = self.uow.orchestration_runs.get_by_id(action.run_id) if action.run_id else None
@@ -482,6 +594,57 @@ class RecoveryConvergenceService:
                     return ActionObservationOutcome.CONTRADICTORY
                 else:
                     return ActionObservationOutcome.UNOBSERVABLE
+            return ActionObservationOutcome.UNOBSERVABLE
+
+        elif atype == ExternalActionType.ISSUE_CREATE:
+            run = self.uow.orchestration_runs.get_by_id(action.run_id) if action.run_id else None
+            if run:
+                binding = self.uow.bindings.get_by_project_and_change(run.project_id, run.change_name)
+                if binding and binding.github_issue_number:
+                    return ActionObservationOutcome.OBSERVED_PRESENT
+                elif binding and not binding.github_issue_number:
+                    return ActionObservationOutcome.OBSERVED_ABSENT
+            return ActionObservationOutcome.UNOBSERVABLE
+
+        elif atype == ExternalActionType.ISSUE_CLOSE:
+            run = self.uow.orchestration_runs.get_by_id(action.run_id) if action.run_id else None
+            if run:
+                binding = self.uow.bindings.get_by_project_and_change(run.project_id, run.change_name)
+                if binding and binding.github_issue_number:
+                    try:
+                        project = self.uow.projects.get_by_id(run.project_id)
+                        if project and project.repository and hasattr(self, "github_adapter"):
+                            issue = self.github_adapter.get_issue(project.repository, binding.github_issue_number)
+                            if issue and issue.get("state") == "closed":
+                                return ActionObservationOutcome.OBSERVED_PRESENT
+                            elif issue and issue.get("state") == "open":
+                                return ActionObservationOutcome.OBSERVED_ABSENT
+                    except Exception:
+                        return ActionObservationOutcome.UNOBSERVABLE
+                elif binding and not binding.github_issue_number:
+                    return ActionObservationOutcome.OBSERVED_PRESENT
+            return ActionObservationOutcome.UNOBSERVABLE
+
+        elif atype == ExternalActionType.PROJECT_ITEM_ADD:
+            run = self.uow.orchestration_runs.get_by_id(action.run_id) if action.run_id else None
+            if run:
+                binding = self.uow.bindings.get_by_project_and_change(run.project_id, run.change_name)
+                if binding and binding.github_project_item_id:
+                    return ActionObservationOutcome.OBSERVED_PRESENT
+                elif binding and not binding.github_project_item_id:
+                    return ActionObservationOutcome.OBSERVED_ABSENT
+            return ActionObservationOutcome.UNOBSERVABLE
+
+        elif atype == ExternalActionType.PROJECT_ITEM_EDIT:
+            run = self.uow.orchestration_runs.get_by_id(action.run_id) if action.run_id else None
+            if run:
+                binding = self.uow.bindings.get_by_project_and_change(run.project_id, run.change_name)
+                if binding and binding.github_project_item_id:
+                    return ActionObservationOutcome.OBSERVED_PRESENT
+                elif binding and not binding.github_project_item_id:
+                    return ActionObservationOutcome.OBSERVED_ABSENT
+            return ActionObservationOutcome.UNOBSERVABLE
+
         elif atype in (ExternalActionType.WORKTREE_DELETE, ExternalActionType.BRANCH_DELETE):
             if action.target_identity:
                 path = Path(action.target_identity)
@@ -489,6 +652,7 @@ class RecoveryConvergenceService:
                     return ActionObservationOutcome.OBSERVED_PRESENT
                 else:
                     return ActionObservationOutcome.OBSERVED_ABSENT
+
         elif atype in (ExternalActionType.OPENSPEC_SYNC, ExternalActionType.OPENSPEC_ARCHIVE):
             if action.target_identity:
                 from minime.services.openspec_adapter import OpenSpecAdapter
@@ -502,8 +666,9 @@ class RecoveryConvergenceService:
                     return ActionObservationOutcome.OBSERVED_ABSENT
                 return ActionObservationOutcome.OBSERVED_ABSENT
 
-        if action.remote_identifier:
-            return ActionObservationOutcome.OBSERVED_PRESENT
+        elif atype in (ExternalActionType.DEPLOY_EXECUTE, ExternalActionType.SERVICE_RESTART):
+            return ActionObservationOutcome.UNOBSERVABLE
+
         if action.last_dispatch_intent_id:
             return ActionObservationOutcome.UNOBSERVABLE
         return ActionObservationOutcome.OBSERVED_ABSENT
@@ -562,7 +727,11 @@ class RecoveryConvergenceService:
         if run.active_job_id:
             job = self.uow.jobs.get_by_id(run.active_job_id)
             if job:
-                change = self.uow.changes.get_by_name(job.project_id, job.change_name)
+                change = (
+                    self.uow.changes.get_by_name(job.project_id, job.change_name)
+                    if hasattr(self.uow, "changes") and self.uow.changes is not None
+                    else None
+                )
                 if change and change.status in {ChangeStatus.DONE, ChangeStatus.CANCELLED}:
                     if job.status not in {JobStatus.CANCELLED, JobStatus.COMPLETED}:
                         job.status = JobStatus.CANCELLED
@@ -574,23 +743,18 @@ class RecoveryConvergenceService:
                     JobStatus.REVIEW_RUNNING,
                     JobStatus.AUDIT_RUNNING,
                 }:
-                    check_results = (
-                        self.uow.check_results.list_by_job(job.job_id)
-                        if hasattr(self.uow, "check_results") and self.uow.check_results is not None
-                        else []
-                    )
-                    checks_passed = len(check_results) > 0 and all(c.exit_code == 0 for c in check_results)
-                    if job.candidate_sha and (checks_passed or job.status == JobStatus.CHECKS_PASSED):
-                        self.uow.jobs.transition(
-                            job.job_id,
-                            JobStatus.CHECKS_PASSED.value,
-                            error_message="Recovered on daemon restart; preserved completed implementation and checks.",
-                        )
-                    else:
+                    target_status = self._determine_highest_job_checkpoint(job)
+                    if target_status == JobStatus.QUEUED:
                         self.uow.jobs.transition(
                             job.job_id,
                             JobStatus.QUEUED.value,
                             error_message="Recovered on daemon restart; re-queued for execution.",
+                        )
+                    else:
+                        self.uow.jobs.transition(
+                            job.job_id,
+                            target_status.value,
+                            error_message=f"Recovered on daemon restart; preserved completed checkpoint ({target_status.value}).",
                         )
 
         if (
@@ -628,7 +792,9 @@ class RecoveryConvergenceService:
                         engine = SagaEngine(self.uow)
                         engine.resume_saga(closure_sagas[0].id, claim_context=context)
                     else:
-                        post_merge_svc = PostMergeReconciliationService(self.uow, project_root=self.project_root)
+                        post_merge_svc = self.post_merge_service or PostMergeReconciliationService(
+                            self.uow, project_root=self.project_root, github_adapter=self.github_adapter
+                        )
                         post_merge_svc.reconcile_post_merge(
                             project_id=run.project_id,
                             change_name=run.change_name,
@@ -980,7 +1146,7 @@ class RecoveryConvergenceService:
 
         if is_terminal and saga.saga_type == SagaType.INTAKE:
             saga_engine.cancel_saga(
-                saga, cancellation_reason="Parent backlog item or change is terminal."
+                saga, cancellation_reason="Parent backlog item or change is terminal.", claim_context=context
             )
             decision = RecoveryDecision(
                 cycle_id=cycle_id,
@@ -1070,8 +1236,16 @@ class RecoveryConvergenceService:
             classification = RecoveryClassification.ADOPT_OBSERVED_EFFECT
             planned_action = "ADOPT_COMPLETED"
         elif outcome == ActionObservationOutcome.OBSERVED_ABSENT:
-            classification = RecoveryClassification.RESUME_SAFE_CHECKPOINT
-            planned_action = "DISPATCH_AUTHORIZED"
+            is_authorized = (
+                action.result_payload.get("retry_safety") == "SAFE"
+                or action.result_payload.get("is_retry_authorized") is True
+            )
+            if is_authorized:
+                classification = RecoveryClassification.RESUME_SAFE_CHECKPOINT
+                planned_action = "DISPATCH_AUTHORIZED"
+            else:
+                classification = RecoveryClassification.WAITING_EXTERNAL
+                planned_action = "OBSERVE_BEFORE_REPEAT"
         elif outcome == ActionObservationOutcome.CONTRADICTORY or action.status == ExternalActionStatus.AMBIGUOUS:
             classification = RecoveryClassification.NEEDS_HUMAN
             planned_action = "ESCALATE_NEEDS_HUMAN"

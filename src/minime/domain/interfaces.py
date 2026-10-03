@@ -529,6 +529,7 @@ class OrchestrationRunRepositoryInterface(ABC):
         run_id: str,
         current_stage: OrchestrationStage,
         resumable_stage: OrchestrationStage,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> OrchestrationRun: ...
 
     @abstractmethod
@@ -540,6 +541,7 @@ class OrchestrationRunRepositoryInterface(ABC):
         stop_reason: str | None = None,
         stop_details: dict[str, Any] | None = None,
         is_active: bool = False,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> OrchestrationRun: ...
 
     @abstractmethod

@@ -1442,9 +1442,24 @@ class ControlPlaneService:
         run: OrchestrationRun,
         sanitized_params: dict[str, Any],
     ) -> OperatorActionResult:
-        rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
-        claim_ctx = rec_svc.acquire_claim(f"run:{run.run_id}")
-        if claim_ctx is None:
+        from minime.domain.enums import (
+            RecoveryClassification,
+            RecoveryDecisionStatus,
+            RecoverySource,
+        )
+        gh_adapter = getattr(self.post_merge_service, "github_adapter", getattr(self.orchestration_service, "github_adapter", None))
+        rec_svc = RecoveryConvergenceService(
+            self.uow,
+            project_root=self.project_root,
+            post_merge_service=self.post_merge_service,
+            github_adapter=gh_adapter,
+        )
+        decision = rec_svc.request_run_continuation(
+            run_id=run.run_id,
+            source=RecoverySource.CONTROL_PLANE,
+            requested_action="RECONCILE_POST_MERGE",
+        )
+        if decision.classification == RecoveryClassification.CLAIMED_ELSEWHERE:
             return self._record_and_return_rejection(
                 request=request,
                 run=run,
@@ -1452,27 +1467,16 @@ class ControlPlaneService:
                 summary=f"Run '{run.run_id}' is claimed elsewhere by another active recovery context.",
                 sanitized_params=sanitized_params,
             )
-
-        res = self.post_merge_service.reconcile_post_merge(
-            project_id=run.project_id,
-            change_name=run.change_name,
-            run_id=run.run_id,
-            claim_context=claim_ctx,
-        )
-        if not res.success:
+        if decision.status == RecoveryDecisionStatus.BLOCKED:
             return self._record_and_return_rejection(
                 request=request,
                 run=run,
                 error_code=OperatorActionErrorCode.ACTION_EXECUTION_FAILED,
-                summary=res.error_message or "Post-merge reconciliation failed.",
+                summary=decision.reason_code or "Post-merge reconciliation failed.",
                 sanitized_params=sanitized_params,
             )
 
-        summary = (
-            "Post-merge reconciliation completed successfully."
-            if not res.already_closed
-            else "Post-merge reconciliation already completed."
-        )
+        summary = "Post-merge reconciliation completed successfully."
         record = OperatorActionRecord(
             action_request_id=request.action_request_id,
             project_id=request.project_id,
@@ -1490,10 +1494,8 @@ class ControlPlaneService:
             resulting_gate=None,
             parameters_json=sanitized_params,
             result_payload_json={
-                "is_merged": res.is_merged,
-                "merged_by": res.merged_by,
-                "ancestry_verified": res.ancestry_verified,
-                "native_phases_completed": res.native_phases_completed,
+                "decision_status": decision.status.value,
+                "classification": decision.classification.value,
             },
         )
         self.uow.operator_actions.save(record)
