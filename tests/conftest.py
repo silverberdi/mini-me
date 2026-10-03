@@ -2098,6 +2098,7 @@ class InMemoryDurableSagaRepository(DurableSagaRepositoryInterface):
         current_phase: str,
         evidence_references: dict | None = None,
         last_observed_outcome: Any | None = None,
+        claim_context: Any | None = None,
     ) -> DurableSaga:
         saga = self._store[saga_id]
         refs = dict(saga.evidence_references)
@@ -2116,6 +2117,7 @@ class InMemoryDurableSagaRepository(DurableSagaRepositoryInterface):
         status: SagaStatus | str,
         blocking_reason: str | None = None,
         last_observed_outcome: Any | None = None,
+        claim_context: Any | None = None,
     ) -> DurableSaga:
         saga = self._store[saga_id]
         st_enum = SagaStatus(status) if isinstance(status, str) else status

@@ -105,6 +105,7 @@ class InMemoryDurableSagaRepository:
         current_phase: str,
         evidence_references: dict | None = None,
         last_observed_outcome: Any | None = None,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> DurableSaga:
         saga = self._sagas[saga_id]
         refs = dict(saga.evidence_references)
@@ -126,6 +127,7 @@ class InMemoryDurableSagaRepository:
         status: SagaStatus | str,
         blocking_reason: str | None = None,
         last_observed_outcome: Any | None = None,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> DurableSaga:
         saga = self._sagas[saga_id]
         st_enum = SagaStatus(status) if isinstance(status, str) else status

@@ -1040,8 +1040,19 @@ class ControlPlaneService:
                     sanitized_params=sanitized_params,
                 )
 
+            rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
+            claim_ctx = rec_svc.acquire_claim(f"run:{run.run_id}")
+            if claim_ctx is None:
+                return self._record_and_return_rejection(
+                    request=request,
+                    run=run,
+                    error_code=OperatorActionErrorCode.AUTHORITY_MISMATCH,
+                    summary=f"Run '{run.run_id}' is claimed elsewhere by another active recovery context.",
+                    sanitized_params=sanitized_params,
+                )
+
             resumed_run = self.orchestration_service.remediate_preserved_candidate(
-                run.run_id, contract_path=contract, project_root=self.project_root
+                run.run_id, contract_path=contract, project_root=self.project_root, claim_context=claim_ctx
             )
             summary = f"Preserved candidate remediation started; generation is now {resumed_run.current_generation}."
             record = OperatorActionRecord(
@@ -1080,11 +1091,23 @@ class ControlPlaneService:
 
         elif resolution_type == "continue_preserved" or resolution_type is None:
             candidate_ref = sanitized_params.get("candidate_ref")
+            rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
+            claim_ctx = rec_svc.acquire_claim(f"run:{run.run_id}")
+            if claim_ctx is None:
+                return self._record_and_return_rejection(
+                    request=request,
+                    run=run,
+                    error_code=OperatorActionErrorCode.AUTHORITY_MISMATCH,
+                    summary=f"Run '{run.run_id}' is claimed elsewhere by another active recovery context.",
+                    sanitized_params=sanitized_params,
+                )
+
             resumed_run = self.orchestration_service.resolve_preserved_candidate(
                 run.run_id,
                 continue_preserved_candidate=True,
                 candidate_ref=candidate_ref,
                 project_root=self.project_root,
+                claim_context=claim_ctx,
             )
             summary = (
                 f"Preserved candidate resolved; run stage is now {resumed_run.current_stage.value}."
@@ -1419,18 +1442,15 @@ class ControlPlaneService:
         run: OrchestrationRun,
         sanitized_params: dict[str, Any],
     ) -> OperatorActionResult:
-        from datetime import timedelta
-
-        from minime.domain.models import RecoveryClaimContext, utc_now
-
         rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
         claim_ctx = rec_svc.acquire_claim(f"run:{run.run_id}")
         if claim_ctx is None:
-            claim_ctx = RecoveryClaimContext(
-                claim_key=f"run:{run.run_id}",
-                owner_instance_id="control-plane",
-                fence_token=1,
-                lease_expires_at=utc_now() + timedelta(seconds=60),
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.AUTHORITY_MISMATCH,
+                summary=f"Run '{run.run_id}' is claimed elsewhere by another active recovery context.",
+                sanitized_params=sanitized_params,
             )
 
         res = self.post_merge_service.reconcile_post_merge(

@@ -1176,7 +1176,7 @@ def test_transient_external_failure_stops_waiting_external_and_resumes(
     # Resolve network and resume
     fake_github.fail_push = False
     ctx = _test_ctx(in_memory_uow, f"run:{run.run_id}")
-    resumed_run = service.resume(run.run_id, claim_context=ctx)
+    resumed_run = service.resume(run.run_id, force=True, claim_context=ctx)
     assert resumed_run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
     assert resumed_run.human_gate == HumanGate.READY_FOR_HUMAN_MERGE
     assert resumed_run.current_stage == OrchestrationStage.PR_PREPARED

@@ -3218,21 +3218,62 @@ class PostgresDurableSagaRepository(DurableSagaRepositoryInterface):
         status: SagaStatus | str,
         blocking_reason: str | None = None,
         last_observed_outcome: ExternalOutcome | str | None = None,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> DurableSaga:
+        now = utc_now()
+        status_str = status.value if isinstance(status, SagaStatus) else str(status)
+        outcome_str = (
+            last_observed_outcome.value
+            if isinstance(last_observed_outcome, ExternalOutcome)
+            else (str(last_observed_outcome) if last_observed_outcome is not None else None)
+        )
+        if claim_context is not None:
+            claim_subquery = (
+                select(1)
+                .where(
+                    RecoveryClaimModel.claim_key == claim_context.claim_key,
+                    RecoveryClaimModel.owner_instance_id == claim_context.owner_instance_id,
+                    RecoveryClaimModel.fence_token == claim_context.fence_token,
+                    RecoveryClaimModel.released_at.is_(None),
+                    RecoveryClaimModel.lease_expires_at > now,
+                )
+                .scalar_subquery()
+            )
+            update_values: dict[str, Any] = {
+                "status": status_str,
+                "updated_at": now,
+            }
+            if blocking_reason is not None:
+                update_values["blocking_reason"] = blocking_reason
+            if outcome_str is not None:
+                update_values["last_observed_outcome"] = outcome_str
+            stmt = (
+                update(DurableSagaModel)
+                .where(
+                    DurableSagaModel.id == saga_id,
+                    exists(claim_subquery),
+                )
+                .values(**update_values)
+            )
+            result = self.session.execute(stmt)
+            if result.rowcount == 0:
+                raise StaleClaimError(
+                    f"Fenced status update for saga '{saga_id}' failed: recovery claim fence is stale, expired, or superseded."
+                )
+        else:
+            model = self.session.get(DurableSagaModel, saga_id)
+            if not model:
+                raise ValueError(f"Durable saga '{saga_id}' not found")
+            model.status = status_str
+            if blocking_reason is not None:
+                model.blocking_reason = blocking_reason
+            if outcome_str is not None:
+                model.last_observed_outcome = outcome_str
+            model.updated_at = now
+
         model = self.session.get(DurableSagaModel, saga_id)
         if not model:
             raise ValueError(f"Durable saga '{saga_id}' not found")
-        status_str = status.value if isinstance(status, SagaStatus) else str(status)
-        model.status = status_str
-        if blocking_reason is not None:
-            model.blocking_reason = blocking_reason
-        if last_observed_outcome is not None:
-            model.last_observed_outcome = (
-                last_observed_outcome.value
-                if isinstance(last_observed_outcome, ExternalOutcome)
-                else str(last_observed_outcome)
-            )
-        model.updated_at = utc_now()
         return durable_saga_model_to_domain(model)
 
 
@@ -4860,6 +4901,7 @@ class PostgresRecoveryClaimRepository(RecoveryClaimRepositoryInterface):
                 RecoveryClaimModel.owner_instance_id == owner_instance_id,
                 RecoveryClaimModel.fence_token == fence_token,
                 RecoveryClaimModel.released_at.is_(None),
+                RecoveryClaimModel.lease_expires_at > now,
             )
             .values(released_at=now)
         )
@@ -4941,16 +4983,26 @@ class PostgresRecoveryClaimRepository(RecoveryClaimRepositoryInterface):
                 raise ValueError(
                     f"Cross-parent action dispatch rejected: action '{action_key}' is bound to saga '{action_model.saga_id}', but claim key is '{claim_key}'."
                 )
+            parent_saga = self.session.get(DurableSagaModel, expected_saga_id)
+            if not parent_saga or parent_saga.status in (SagaStatus.COMPLETED.value, SagaStatus.FAILED.value):
+                self.session.rollback()
+                raise StaleClaimError(
+                    f"Parent closure saga '{expected_saga_id}' for claim '{claim_key}' is inactive or missing."
+                )
         elif claim_key.startswith("intake:"):
             if action_model.saga_id:
                 saga = self.session.get(DurableSagaModel, action_model.saga_id)
-                if saga:
-                    expected_key = f"intake:{saga.project_id}:{saga.work_item_key}"
-                    if expected_key != claim_key:
-                        self.session.rollback()
-                        raise ValueError(
-                            f"Cross-parent action dispatch rejected: action '{action_key}' is bound to intake saga '{saga.id}' ({expected_key}), but claim key is '{claim_key}'."
-                        )
+                if not saga or saga.status in (SagaStatus.COMPLETED.value, SagaStatus.FAILED.value):
+                    self.session.rollback()
+                    raise StaleClaimError(
+                        f"Parent intake saga '{action_model.saga_id}' for claim '{claim_key}' is inactive or missing."
+                    )
+                expected_key = f"intake:{saga.project_id}:{saga.work_item_key}"
+                if expected_key != claim_key:
+                    self.session.rollback()
+                    raise ValueError(
+                        f"Cross-parent action dispatch rejected: action '{action_key}' is bound to intake saga '{saga.id}' ({expected_key}), but claim key is '{claim_key}'."
+                    )
 
         attempts_stmt = select(ExternalActionAttemptModel).where(
             ExternalActionAttemptModel.action_key == action_key

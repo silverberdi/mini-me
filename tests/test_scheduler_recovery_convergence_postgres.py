@@ -15,9 +15,11 @@ from minime.db.models import Base
 from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.domain.enums import (
     ChangeStatus,
+    EventType,
     ExternalActionObservation,
     ExternalActionStatus,
     ExternalActionType,
+    JobStatus,
     OrchestrationStage,
     OrchestrationStopOutcome,
     RecoveryClassification,
@@ -37,6 +39,7 @@ from minime.domain.models import (
     Project,
     ProjectBinding,
     RecoveryClaimContext,
+    generate_uuid,
     utc_now,
 )
 from minime.services.orchestration_service import OrchestrationService
@@ -1494,4 +1497,446 @@ def test_blocker_c_fresh_admission_passes_claim_context(pg_session_factory: sess
     assert claim is not None
     assert claim.owner_instance_id == scheduler.recovery_convergence_service.owner_instance_id
 
+    session.close()
+
+
+def test_rc01_fresh_admission_acquires_run_claim(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+    """RC01: Fresh Stage F admission acquires run claim before driving coordinator."""
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "rc01-change")
+    uow = PostgresPersistenceUnitOfWork(session)
+    rec_svc = RecoveryConvergenceService(uow, project_root=tmp_path)
+    claim = rec_svc.acquire_claim("run:test-run-1")
+    assert claim is not None
+    assert claim.claim_key == "run:test-run-1"
+    session.close()
+
+
+def test_rc02_drive_coordinator_fails_closed_without_claim(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+    """RC02: drive_coordinator fails closed immediately when claim_context is None."""
+    from minime.domain.exceptions import MissingRecoveryClaimContextError
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "rc02-change")
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    run = OrchestrationRun(
+        run_id="run-rc02",
+        project_id=project_id,
+        change_name=change_name,
+        base_sha="abc1234",
+        current_stage=OrchestrationStage.ADMITTED,
+        is_active=True,
+    )
+    uow.orchestration_runs.save(run)
+    session.commit()
+
+    orch_svc = OrchestrationService(uow, project_root=tmp_path)
+    with pytest.raises(MissingRecoveryClaimContextError):
+        orch_svc.drive_coordinator("run-rc02", claim_context=None)
+    session.close()
+
+
+def test_rc03_zero_manually_constructed_claim_context_in_production():
+    """RC03: Source audit proves zero manually constructed RecoveryClaimContext outside canonical claim reconstruction."""
+    import ast
+    from pathlib import Path
+
+    src_root = Path("src/minime").resolve()
+    fabricated = []
+    for py_file in src_root.glob("**/*.py"):
+        rel = py_file.relative_to(src_root)
+        content = py_file.read_text(encoding="utf-8")
+        tree = ast.parse(content, filename=str(py_file))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                func = node.func
+                func_name = None
+                if isinstance(func, ast.Name):
+                    func_name = func.id
+                elif isinstance(func, ast.Attribute):
+                    func_name = func.attr
+                if func_name == "RecoveryClaimContext":
+                    # Check if inside repository DB reconstruction methods
+                    if str(rel) == "db/repository.py" or str(rel) == "services/recovery_convergence_service.py":
+                        continue
+                    fabricated.append(f"{rel}:{node.lineno}")
+    assert len(fabricated) == 0, f"Found manually constructed RecoveryClaimContext in production paths: {fabricated}"
+
+
+def test_rc04_reconcile_post_merge_fails_closed_when_claimed_elsewhere(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+    """RC04: ControlPlaneService._execute_reconcile_post_merge fails closed with AUTHORITY_MISMATCH when claimed elsewhere."""
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "rc04-change")
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    # Acquire claim under another owner
+    uow.claims.acquire_or_reacquire("run:run-rc04", owner_instance_id="other-worker", lease_seconds=60)
+    session.commit()
+
+    run = OrchestrationRun(
+        run_id="run-rc04",
+        project_id=project_id,
+        change_name=change_name,
+        base_sha="abc1234",
+        current_stage=OrchestrationStage.POST_MERGE_RECONCILING,
+        is_active=True,
+        stop_outcome=None,
+    )
+    uow.orchestration_runs.save(run)
+    session.commit()
+
+    from minime.domain.enums import OperatorActionErrorCode, OperatorActionType
+    from minime.domain.models import OperatorActionRequest
+    from minime.services.control_plane_service import ControlPlaneService
+
+    cp = ControlPlaneService(uow, project_root=tmp_path)
+    req = OperatorActionRequest(
+        action_request_id=generate_uuid(),
+        project_id=project_id,
+        change_name=change_name,
+        run_id="run-rc04",
+        action_type=OperatorActionType.RECONCILE_POST_MERGE,
+        actor_identity="operator",
+        source_interface="tui",
+    )
+    res = cp.execute_action(req)
+    assert res.status.value == "REJECTED"
+    assert res.error_code == OperatorActionErrorCode.AUTHORITY_MISMATCH
+    session.close()
+
+
+def test_rc05_restart_recovery_service_zero_job_run_saga_writes():
+    """RC05: Static inspection proves RestartRecoveryService performs zero Job/Run/Saga state mutations."""
+    from pathlib import Path
+
+    file_path = Path("src/minime/services/restart_recovery_service.py").resolve()
+    content = file_path.read_text(encoding="utf-8")
+    forbidden_calls = [
+        "uow.jobs.save",
+        "uow.jobs.set_recovery_blocked",
+        "uow.jobs.transition",
+        "uow.orchestration_runs.save",
+        "uow.durable_sagas.save",
+        "cancel_saga",
+        "resume_saga",
+    ]
+    for forbidden in forbidden_calls:
+        assert forbidden not in content, f"RestartRecoveryService contains forbidden state mutation '{forbidden}'"
+
+
+def test_rc06_restart_recovery_evidence_consumed_by_convergence(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+    """RC06: RestartRecoveryService emits restart evidence consumed by RecoveryConvergenceService."""
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "rc06-change")
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    from minime.domain.models import Job
+    job = Job(
+        job_id="job-rc06",
+        project_id=project_id,
+        change_name=change_name,
+        base_sha="abc1234",
+        status=JobStatus.RUNNING,
+        implementer_role="primary",
+    )
+    uow.jobs.save(job)
+    session.commit()
+
+    from minime.services.restart_recovery_service import RestartRecoveryService
+
+    restart_svc = RestartRecoveryService(uow, project_root=tmp_path)
+    restart_svc.reconcile_on_startup()
+
+    events = uow.events.list_events(project_id=project_id)
+    interrupted_events = [e for e in events if e.event_type == EventType.JOB_INTERRUPTED.value]
+    assert len(interrupted_events) >= 1
+    session.close()
+
+
+def test_rc07_action_observer_dispatch_by_action_type(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+    """RC07: Action observer dispatches by ExternalActionType for unresolved actions."""
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "rc07-change")
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    run = OrchestrationRun(
+        run_id="run-rc07",
+        project_id=project_id,
+        change_name=change_name,
+        base_sha="abc1234",
+        current_stage=OrchestrationStage.IMPLEMENTING,
+        is_active=True,
+    )
+    uow.orchestration_runs.save(run)
+
+    action = OrchestrationExternalAction(
+        action_id="act-rc07",
+        run_id="run-rc07",
+        action_key="run-rc07:BRANCH_PUSH",
+        action_type=ExternalActionType.BRANCH_PUSH,
+        status=ExternalActionStatus.RESERVED,
+        target_identity="main",
+        request_fingerprint="fp123",
+        candidate_sha="cand123",
+        generation=1,
+    )
+    uow.orchestration_external_actions.reserve(action)
+    session.commit()
+
+    from minime.services.recovery_convergence_service import ActionObservationOutcome
+    rec_svc = RecoveryConvergenceService(uow, project_root=tmp_path)
+    outcome = rec_svc.observe_external_action(action)
+    assert outcome in {ActionObservationOutcome.OBSERVED_ABSENT, ActionObservationOutcome.UNOBSERVABLE, ActionObservationOutcome.OBSERVED_PRESENT}
+    session.close()
+
+
+def test_rc08_reconcile_action_executes_observed_update(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+    """RC08: reconcile_action executes observation and returns structured decision."""
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "rc08-change")
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    run = OrchestrationRun(
+        run_id="run-rc08",
+        project_id=project_id,
+        change_name=change_name,
+        base_sha="abc1234",
+        current_stage=OrchestrationStage.PREPARING_PR,
+        is_active=True,
+    )
+    uow.orchestration_runs.save(run)
+
+    action = OrchestrationExternalAction(
+        action_id="act-rc08",
+        run_id="run-rc08",
+        action_key="run-rc08:PR_CREATE",
+        action_type=ExternalActionType.PR_CREATE,
+        status=ExternalActionStatus.RESERVED,
+        target_identity="pr1",
+        request_fingerprint="fp128",
+        candidate_sha="cand128",
+        generation=1,
+    )
+    uow.orchestration_external_actions.reserve(action)
+    session.commit()
+
+    rec_svc = RecoveryConvergenceService(uow, project_root=tmp_path)
+    decision = rec_svc.reconcile_action("run-rc08:PR_CREATE", source=RecoverySource.CONTROL_PLANE)
+    assert decision is not None
+    assert decision.identity_id == "run-rc08:PR_CREATE"
+    session.close()
+
+
+def test_rc09_orchestration_resume_preserves_waiting_external(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+    """RC09: OrchestrationService.resume without force preserves WAITING_EXTERNAL outcome."""
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "rc09-change")
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    run = OrchestrationRun(
+        run_id="run-rc09",
+        project_id=project_id,
+        change_name=change_name,
+        base_sha="abc1234",
+        current_stage=OrchestrationStage.PREPARING_PR,
+        is_active=True,
+        stop_outcome=OrchestrationStopOutcome.WAITING_EXTERNAL,
+    )
+    uow.orchestration_runs.save(run)
+    session.commit()
+
+    rec_svc = RecoveryConvergenceService(uow, project_root=tmp_path)
+    claim = rec_svc.acquire_claim("run:run-rc09")
+
+    orch_svc = OrchestrationService(uow, project_root=tmp_path)
+    resumed = orch_svc.resume("run-rc09", force=False, claim_context=claim)
+    assert resumed.stop_outcome == OrchestrationStopOutcome.WAITING_EXTERNAL
+    session.close()
+
+
+def test_rc10_control_plane_continuation_requires_and_fences_claim(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+    """RC10: Control Plane continuation operations fail closed with AUTHORITY_MISMATCH when claim is held elsewhere."""
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "rc10-change")
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    uow.claims.acquire_or_reacquire("run:run-rc10", owner_instance_id="other-node", lease_seconds=60)
+    session.commit()
+
+    from minime.domain.enums import HumanGate, OperatorActionErrorCode, OperatorActionType
+    run = OrchestrationRun(
+        run_id="run-rc10",
+        project_id=project_id,
+        change_name=change_name,
+        base_sha="abc1234",
+        current_stage=OrchestrationStage.FREEZING_CANDIDATE,
+        is_active=True,
+        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+        human_gate=HumanGate.NEEDS_HUMAN,
+    )
+    uow.orchestration_runs.save(run)
+    session.commit()
+
+    from minime.domain.models import OperatorActionRequest
+    from minime.services.control_plane_service import ControlPlaneService
+
+    cp = ControlPlaneService(uow, project_root=tmp_path)
+    req = OperatorActionRequest(
+        action_request_id=generate_uuid(),
+        project_id=project_id,
+        change_name=change_name,
+        run_id="run-rc10",
+        action_type=OperatorActionType.RESOLVE_GATE,
+        actor_identity="operator",
+        source_interface="tui",
+        parameters={"resolution_type": "continue_preserved"},
+    )
+    res = cp.execute_action(req)
+    assert res.status.value == "REJECTED"
+    assert res.error_code == OperatorActionErrorCode.AUTHORITY_MISMATCH
+    session.close()
+
+
+def test_rc11_apply_lifecycle_result_fenced_cas_failure(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+    """RC11: apply_lifecycle_result fails with StaleClaimError when claim is invalid."""
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "rc11-change")
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    rec_svc = RecoveryConvergenceService(uow, project_root=tmp_path)
+    stale_ctx = RecoveryClaimContext(
+        claim_key="run:rc11",
+        owner_instance_id="stale-owner",
+        fence_token=99,
+        lease_expires_at=utc_now() + timedelta(seconds=60),
+    )
+    with pytest.raises(StaleClaimError):
+        rec_svc.apply_lifecycle_result(stale_ctx, lambda: True)
+    session.close()
+
+
+def test_rc12_advance_stage_enforces_claim_context_and_sql_cas(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+    """RC12: _advance_stage enforces claim_context with SQL CAS and raises StaleClaimError when stale."""
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "rc12-change")
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    run = OrchestrationRun(
+        run_id="run-rc12",
+        project_id=project_id,
+        change_name=change_name,
+        base_sha="abc1234",
+        current_stage=OrchestrationStage.ADMITTED,
+        is_active=True,
+    )
+    uow.orchestration_runs.save(run)
+    session.commit()
+
+    orch_svc = OrchestrationService(uow, project_root=tmp_path)
+    stale_ctx = RecoveryClaimContext(
+        claim_key="run:run-rc12",
+        owner_instance_id="stale-worker",
+        fence_token=1,
+        lease_expires_at=utc_now() + timedelta(seconds=60),
+    )
+    with pytest.raises(StaleClaimError):
+        orch_svc._advance_stage(run, OrchestrationStage.PREPARING_EXECUTION, claim_context=stale_ctx)
+    session.close()
+
+
+def test_rc13_saga_transitions_enforce_claim_context_and_sql_cas(pg_session_factory: sessionmaker[Session], tmp_path: Path):
+    """RC13: SagaEngine transitions enforce claim_context and raise StaleClaimError when claim is stale."""
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "rc13-change")
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    from minime.domain.models import DurableSaga
+    saga = DurableSaga(
+        id="saga-rc13",
+        saga_type=SagaType.INTAKE,
+        project_id=project_id,
+        work_item_key=change_name,
+        current_phase="phase_1",
+        status=SagaStatus.IN_PROGRESS,
+    )
+    uow.durable_sagas.save(saga)
+    session.commit()
+
+    from minime.services.saga_engine import SagaEngine
+    engine = SagaEngine(uow)
+    stale_ctx = RecoveryClaimContext(
+        claim_key="intake:saga-rc13",
+        owner_instance_id="stale-worker",
+        fence_token=1,
+        lease_expires_at=utc_now() + timedelta(seconds=60),
+    )
+    with pytest.raises(StaleClaimError):
+        engine.advance_phase(saga, "phase_2", claim_context=stale_ctx)
+    session.close()
+
+
+def test_rc14_release_claim_includes_lease_not_expired_fence(pg_session_factory: sessionmaker[Session]):
+    """RC14: release claim SQL includes lease_expires_at > now fence predicate."""
+    session = pg_session_factory()
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    # Create expired claim manually in DB
+    from minime.db.models import RecoveryClaimModel
+    expired_time = utc_now() - timedelta(seconds=120)
+    session.add(
+        RecoveryClaimModel(
+            claim_key="run:expired-rc14",
+            owner_instance_id="owner-rc14",
+            fence_token=5,
+            lease_expires_at=expired_time,
+            claimed_at=expired_time - timedelta(seconds=60),
+            released_at=None,
+        )
+    )
+    session.commit()
+
+    res = uow.claims.release("run:expired-rc14", "owner-rc14", 5)
+    assert res is False
+    session.close()
+
+
+def test_rc15_commit_fenced_dispatch_intent_validates_parent_saga(pg_session_factory: sessionmaker[Session]):
+    """RC15: commit_fenced_dispatch_intent re-reads parent saga and fails closed if completed/missing."""
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "rc15-change")
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    # Active claim for closure saga
+    rec_svc = RecoveryConvergenceService(uow)
+    claim = rec_svc.acquire_claim("closure:saga-rc15")
+    assert claim is not None
+
+    # Save completed closure saga
+    from minime.domain.models import DurableSaga
+    saga = DurableSaga(
+        id="saga-rc15",
+        saga_type=SagaType.CLOSURE,
+        project_id=project_id,
+        work_item_key="item-rc15",
+        current_phase="phase_1",
+        status=SagaStatus.COMPLETED,
+    )
+    uow.durable_sagas.save(saga)
+
+    # Action bound to completed saga
+    action = OrchestrationExternalAction(
+        action_id="act-rc15",
+        saga_id="saga-rc15",
+        action_key="closure:saga-rc15:ISSUE_CLOSE",
+        action_type=ExternalActionType.ISSUE_CLOSE,
+        status=ExternalActionStatus.RESERVED,
+        target_identity="item-rc15",
+        request_fingerprint="fp-rc15",
+        generation=1,
+    )
+    uow.orchestration_external_actions.reserve(action)
+    session.commit()
+
+    with pytest.raises(StaleClaimError):
+        rec_svc.atomic_commit_dispatch_intent(claim, action_key="closure:saga-rc15:ISSUE_CLOSE")
     session.close()

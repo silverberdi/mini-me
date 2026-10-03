@@ -131,6 +131,7 @@ class SagaEngine:
         next_phase: str,
         evidence_references: dict[str, Any] | None = None,
         last_observed_outcome: ExternalOutcome | str | None = None,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> DurableSaga:
         """Advance saga checkpoint to next phase with durable evidence persistence."""
         updated = self.uow.durable_sagas.update_phase(
@@ -138,6 +139,7 @@ class SagaEngine:
             current_phase=next_phase,
             evidence_references=evidence_references,
             last_observed_outcome=last_observed_outcome,
+            claim_context=claim_context,
         )
 
         event = Event(
@@ -169,6 +171,7 @@ class SagaEngine:
         saga: DurableSaga,
         blocking_reason: str,
         last_observed_outcome: ExternalOutcome | str | None = None,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> DurableSaga:
         """Transition saga to BLOCKED status with explicit blocking reason."""
         updated = self.uow.durable_sagas.update_status(
@@ -176,6 +179,7 @@ class SagaEngine:
             status=SagaStatus.BLOCKED,
             blocking_reason=blocking_reason,
             last_observed_outcome=last_observed_outcome,
+            claim_context=claim_context,
         )
 
         event = Event(
@@ -201,6 +205,7 @@ class SagaEngine:
         self,
         saga: DurableSaga,
         evidence_references: dict[str, Any] | None = None,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> DurableSaga:
         """Mark saga as COMPLETED after all phases are proven complete."""
         if evidence_references:
@@ -208,12 +213,14 @@ class SagaEngine:
                 saga_id=saga.id,
                 current_phase=saga.current_phase,
                 evidence_references=evidence_references,
+                claim_context=claim_context,
             )
 
         updated = self.uow.durable_sagas.update_status(
             saga_id=saga.id,
             status=SagaStatus.COMPLETED,
             last_observed_outcome=ExternalOutcome.SUCCESS,
+            claim_context=claim_context,
         )
 
         event = Event(
@@ -597,6 +604,7 @@ class SagaEngine:
         self,
         saga: DurableSaga,
         cancellation_reason: str,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> DurableSaga:
         """Mark saga as CANCELLED."""
         updated = self.uow.durable_sagas.update_status(
@@ -604,6 +612,7 @@ class SagaEngine:
             status=SagaStatus.CANCELLED,
             blocking_reason=cancellation_reason,
             last_observed_outcome=ExternalOutcome.FAILURE,
+            claim_context=claim_context,
         )
 
         event = Event(

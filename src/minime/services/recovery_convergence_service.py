@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -13,11 +14,13 @@ from minime.domain.enums import (
     EventType,
     ExternalActionObservation,
     ExternalActionStatus,
+    ExternalActionType,
     HumanGate,
     JobStatus,
     OrchestrationStage,
     OrchestrationStopOutcome,
     ProviderHealthStatus,
+    PullRequestLookupState,
     RecoveryClassification,
     RecoveryDecisionStatus,
     RecoverySource,
@@ -38,6 +41,13 @@ from minime.domain.models import (
     utc_now,
 )
 from minime.services.provider_health_service import ProviderHealthService
+
+
+class ActionObservationOutcome(str, Enum):
+    OBSERVED_PRESENT = "OBSERVED_PRESENT"
+    OBSERVED_ABSENT = "OBSERVED_ABSENT"
+    UNOBSERVABLE = "UNOBSERVABLE"
+    CONTRADICTORY = "CONTRADICTORY"
 
 logger = logging.getLogger(__name__)
 
@@ -418,6 +428,82 @@ class RecoveryConvergenceService:
             return ExternalActionObservation.POSSIBLY_DISPATCHED
         return ExternalActionObservation.PROVEN_NEVER_DISPATCHED
 
+    def observe_external_action(
+        self, action: OrchestrationExternalAction
+    ) -> ActionObservationOutcome:
+        """Canonical action observer dispatch keyed by ExternalActionType."""
+        if action.status == ExternalActionStatus.COMPLETED:
+            return ActionObservationOutcome.OBSERVED_PRESENT
+
+        obs = self.classify_external_action_observation(action)
+        if obs == ExternalActionObservation.PROVEN_NEVER_DISPATCHED and action.status == ExternalActionStatus.RESERVED:
+            return ActionObservationOutcome.OBSERVED_ABSENT
+
+        try:
+            outcome = self._observe_by_action_type(action)
+        except Exception as exc:
+            logger.warning("Observer failed for action '%s': %s", action.action_key, exc)
+            outcome = ActionObservationOutcome.UNOBSERVABLE
+
+        if outcome == ActionObservationOutcome.OBSERVED_PRESENT:
+            if action.status != ExternalActionStatus.COMPLETED:
+                self.uow.orchestration_external_actions.update_status(
+                    action.action_key, ExternalActionStatus.COMPLETED
+                )
+                self.uow.commit()
+        elif outcome == ActionObservationOutcome.CONTRADICTORY:
+            if action.status != ExternalActionStatus.AMBIGUOUS:
+                self.uow.orchestration_external_actions.update_status(
+                    action.action_key, ExternalActionStatus.AMBIGUOUS
+                )
+                self.uow.commit()
+
+        return outcome
+
+    def _observe_by_action_type(
+        self, action: OrchestrationExternalAction
+    ) -> ActionObservationOutcome:
+        atype = action.action_type
+        if atype == ExternalActionType.PR_CREATE:
+            from minime.services.status_service import PullRequestLookupService
+            pr_svc = PullRequestLookupService(self.uow, self.project_root)
+            run = self.uow.orchestration_runs.get_by_id(action.run_id) if action.run_id else None
+            if run:
+                lookup = pr_svc.lookup_pr(run.project_id, run.change_name)
+                if lookup.state == PullRequestLookupState.FOUND_EXACT:
+                    return ActionObservationOutcome.OBSERVED_PRESENT
+                elif lookup.state == PullRequestLookupState.NOT_FOUND:
+                    return ActionObservationOutcome.OBSERVED_ABSENT
+                elif lookup.state == PullRequestLookupState.AMBIGUOUS:
+                    return ActionObservationOutcome.CONTRADICTORY
+                else:
+                    return ActionObservationOutcome.UNOBSERVABLE
+        elif atype in (ExternalActionType.WORKTREE_DELETE, ExternalActionType.BRANCH_DELETE):
+            if action.target_identity:
+                path = Path(action.target_identity)
+                if not path.exists():
+                    return ActionObservationOutcome.OBSERVED_PRESENT
+                else:
+                    return ActionObservationOutcome.OBSERVED_ABSENT
+        elif atype in (ExternalActionType.OPENSPEC_SYNC, ExternalActionType.OPENSPEC_ARCHIVE):
+            if action.target_identity:
+                from minime.services.openspec_adapter import OpenSpecAdapter
+                adapter = OpenSpecAdapter()
+                res = adapter.get_change_status(self.project_root, action.target_identity)
+                if res.exists:
+                    if atype == ExternalActionType.OPENSPEC_ARCHIVE and res.is_archived:
+                        return ActionObservationOutcome.OBSERVED_PRESENT
+                    elif atype == ExternalActionType.OPENSPEC_SYNC and res.is_synced:
+                        return ActionObservationOutcome.OBSERVED_PRESENT
+                    return ActionObservationOutcome.OBSERVED_ABSENT
+                return ActionObservationOutcome.OBSERVED_ABSENT
+
+        if action.remote_identifier:
+            return ActionObservationOutcome.OBSERVED_PRESENT
+        if action.last_dispatch_intent_id:
+            return ActionObservationOutcome.UNOBSERVABLE
+        return ActionObservationOutcome.OBSERVED_ABSENT
+
     def _converge_run_identity(
         self,
         run_id: str,
@@ -674,22 +760,46 @@ class RecoveryConvergenceService:
         actions = self.uow.orchestration_external_actions.list_by_run(run.run_id)
         has_ambiguous = False
         has_adoptable = False
+        has_unobservable = False
         for action in actions:
             if action.status in (
                 ExternalActionStatus.EXECUTING,
                 ExternalActionStatus.UNKNOWN,
                 ExternalActionStatus.AMBIGUOUS,
                 ExternalActionStatus.RESERVED,
+                ExternalActionStatus.FAILED,
             ):
-                obs = self.classify_external_action_observation(action)
-                if action.status == ExternalActionStatus.COMPLETED:
+                outcome = self.observe_external_action(action)
+                if outcome == ActionObservationOutcome.OBSERVED_PRESENT or action.status == ExternalActionStatus.COMPLETED:
                     has_adoptable = True
-                elif obs == ExternalActionObservation.PROVEN_NEVER_DISPATCHED:
+                elif outcome == ActionObservationOutcome.OBSERVED_ABSENT:
                     continue
-                elif action.status == ExternalActionStatus.AMBIGUOUS or obs == ExternalActionObservation.POSSIBLY_DISPATCHED:
+                elif outcome == ActionObservationOutcome.CONTRADICTORY or action.status == ExternalActionStatus.AMBIGUOUS:
                     has_ambiguous = True
+                elif outcome == ActionObservationOutcome.UNOBSERVABLE:
+                    has_unobservable = True
 
         if has_ambiguous:
+            decision = RecoveryDecision(
+                cycle_id=cycle_id,
+                claim_key=claim_key,
+                identity_type="RUN",
+                identity_id=run_id,
+                project_id=run.project_id,
+                change_name=run.change_name,
+                source=source,
+                fence_token=context.fence_token,
+                classification=RecoveryClassification.NEEDS_HUMAN,
+                planned_action="ESCALATE_NEEDS_HUMAN",
+                status=RecoveryDecisionStatus.PLANNED,
+                reason_code="CONTRADICTORY_EXTERNAL_EVIDENCE",
+            )
+            self._create_decision(decision)
+            self.uow.commit()
+            self.release_claim(context)
+            return decision
+
+        if has_unobservable:
             decision = RecoveryDecision(
                 cycle_id=cycle_id,
                 claim_key=claim_key,
@@ -702,6 +812,7 @@ class RecoveryConvergenceService:
                 classification=RecoveryClassification.WAITING_EXTERNAL,
                 planned_action="OBSERVE_EXTERNAL",
                 status=RecoveryDecisionStatus.PLANNED,
+                reason_code="EXTERNAL_ACTION_UNOBSERVABLE",
             )
             self._create_decision(decision)
             self.uow.commit()
@@ -949,17 +1060,17 @@ class RecoveryConvergenceService:
             lease_expires_at=claim.lease_expires_at,
         )
 
-        obs = self.classify_external_action_observation(action)
+        outcome = self.observe_external_action(action)
 
-        if action.status == ExternalActionStatus.COMPLETED:
+        if outcome == ActionObservationOutcome.OBSERVED_PRESENT or action.status == ExternalActionStatus.COMPLETED:
             classification = RecoveryClassification.ADOPT_OBSERVED_EFFECT
             planned_action = "ADOPT_COMPLETED"
-        elif (
-            action.status == ExternalActionStatus.RESERVED
-            and obs == ExternalActionObservation.PROVEN_NEVER_DISPATCHED
-        ):
+        elif outcome == ActionObservationOutcome.OBSERVED_ABSENT:
             classification = RecoveryClassification.RESUME_SAFE_CHECKPOINT
             planned_action = "DISPATCH_AUTHORIZED"
+        elif outcome == ActionObservationOutcome.CONTRADICTORY or action.status == ExternalActionStatus.AMBIGUOUS:
+            classification = RecoveryClassification.NEEDS_HUMAN
+            planned_action = "ESCALATE_NEEDS_HUMAN"
         else:
             classification = RecoveryClassification.WAITING_EXTERNAL
             planned_action = "OBSERVE_BEFORE_REPEAT"

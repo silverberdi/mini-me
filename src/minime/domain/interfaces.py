@@ -60,6 +60,7 @@ from minime.domain.models import (
     ProviderEfficiencyMetrics,
     ProviderHealth,
     RecoveryClaim,
+    RecoveryClaimContext,
     RecoveryDecision,
     Review,
     ReviewFinding,
@@ -624,6 +625,7 @@ class DurableSagaRepositoryInterface(ABC):
         current_phase: str,
         evidence_references: dict[str, Any] | None = None,
         last_observed_outcome: ExternalOutcome | str | None = None,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> DurableSaga: ...
 
     @abstractmethod
@@ -633,6 +635,7 @@ class DurableSagaRepositoryInterface(ABC):
         status: SagaStatus | str,
         blocking_reason: str | None = None,
         last_observed_outcome: ExternalOutcome | str | None = None,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> DurableSaga: ...
 
 

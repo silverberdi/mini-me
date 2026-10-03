@@ -485,6 +485,11 @@ class OrchestrationService:
                     return run
 
         elif run.stop_outcome == OrchestrationStopOutcome.WAITING_EXTERNAL:
+            if not force:
+                logger.info(
+                    f"Resume for run '{run_id}' skipped: WAITING_EXTERNAL must be resolved by RecoveryConvergenceService observation."
+                )
+                return run
             run.stop_outcome = None
             run.human_gate = None
             run.is_active = True
@@ -553,8 +558,13 @@ class OrchestrationService:
         continue_preserved_candidate: bool = False,
         candidate_ref: str | None = None,
         project_root: str | Path | None = None,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> OrchestrationRun:
         """Resolve a human stop only after proving the immutable candidate ref."""
+        from minime.domain.models import validate_claim_context_authoritative
+
+        validate_claim_context_authoritative(self.uow, claim_context)
+
         if not continue_preserved_candidate:
             raise ValueError("Explicit --continue-preserved-candidate is required.")
         raw_run = self.uow.orchestration_runs.get_for_update(run_id)
@@ -2377,8 +2387,12 @@ class OrchestrationService:
         run_id: str,
         contract: dict[str, Any] | str | Path,
         project_root: str | Path | None = None,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> OrchestrationRun:
         """Perform the separate, explicitly authorized remediation operation."""
+        from minime.domain.models import validate_claim_context_authoritative
+
+        validate_claim_context_authoritative(self.uow, claim_context)
         if project_root and Path(project_root).resolve() != self.project_root:
             self.remediation_service = CandidateRemediationService(
                 self.uow,
@@ -2773,6 +2787,7 @@ class OrchestrationService:
         run: OrchestrationRun,
         to_stage: OrchestrationStage,
         correlation_id: str | None = None,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> None:
         """Advance run to next stage with finite graph validation and deterministic transition events."""
         orig_run = run
@@ -2860,10 +2875,21 @@ class OrchestrationService:
                 _sync_orig()
                 raise ValueError(conflict)
 
-        run.current_stage = to_stage
-        run.resumable_stage = to_stage
-        run.updated_at = utc_now()
-        self.uow.orchestration_runs.save(run)
+        if claim_context is not None and hasattr(self.uow.orchestration_runs, "update_stage"):
+            self.uow.orchestration_runs.update_stage(
+                run.run_id,
+                current_stage=to_stage,
+                resumable_stage=to_stage,
+                claim_context=claim_context,
+            )
+            run.current_stage = to_stage
+            run.resumable_stage = to_stage
+            run.updated_at = utc_now()
+        else:
+            run.current_stage = to_stage
+            run.resumable_stage = to_stage
+            run.updated_at = utc_now()
+            self.uow.orchestration_runs.save(run)
         _sync_orig()
 
         if not existing_event:
