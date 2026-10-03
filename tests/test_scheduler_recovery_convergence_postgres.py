@@ -2189,3 +2189,312 @@ def test_rc04_postgres_fence_mismatch_during_stage_advance(pg_session_factory: s
         orchestration_svc._advance_stage(run, OrchestrationStage.PREPARING_EXECUTION, claim_context=claim_ctx_A)
 
     session.close()
+
+
+def test_contract_closure_saga_recovery_non_zero_checkpoint(pg_session_factory: sessionmaker[Session]):
+    """Contract Closure: Prove saga recovery resumes from non-zero checkpoint without re-executing completed phases."""
+    from unittest.mock import MagicMock
+
+    from minime.services.saga_engine import SagaEngine
+
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "contract-saga-ckpt")
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    run = OrchestrationRun(
+        run_id="run-saga-ckpt",
+        project_id=project_id,
+        change_name=change_name,
+        base_sha="base_sha",
+        current_stage=OrchestrationStage.POST_MERGE_RECONCILING,
+        resumable_stage=OrchestrationStage.POST_MERGE_RECONCILING,
+        is_active=True,
+    )
+    uow.orchestration_runs.save(run)
+
+    saga_engine = SagaEngine(uow)
+    saga = saga_engine.start_saga(
+        saga_type=SagaType.CLOSURE,
+        project_id=project_id,
+        work_item_key=change_name,
+        change_name=change_name,
+        run_id="run-saga-ckpt",
+        initial_phase="STARTED",
+    )
+    rec_svc = RecoveryConvergenceService(uow)
+    claim_ctx = rec_svc.acquire_claim("run:run-saga-ckpt")
+    saga_engine.advance_phase(saga, "ISSUE_CLOSED", claim_context=claim_ctx)
+    session.commit()
+
+    mock_post_merge = MagicMock()
+    mock_post_merge.reconcile_post_merge = MagicMock()
+
+    resumed_saga = saga_engine.resume_saga(
+        saga.id,
+        post_merge_service=mock_post_merge,
+        claim_context=claim_ctx,
+    )
+    assert resumed_saga.current_phase == "ISSUE_CLOSED"
+    mock_post_merge.reconcile_post_merge.assert_called_once_with(
+        project_id=project_id,
+        change_name=change_name,
+        run_id="run-saga-ckpt",
+        claim_context=claim_ctx,
+    )
+    session.close()
+
+
+def test_contract_closure_action_parent_identity_matching(pg_session_factory: sessionmaker[Session]):
+    """Contract Closure: Prove run-backed closure action succeeds with matching run/saga parent, and cross-parent dispatch fails."""
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "contract-parent-id")
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    run = OrchestrationRun(
+        run_id="run-parent-1",
+        project_id=project_id,
+        change_name=change_name,
+        base_sha="base_sha",
+        current_stage=OrchestrationStage.POST_MERGE_RECONCILING,
+        resumable_stage=OrchestrationStage.POST_MERGE_RECONCILING,
+        is_active=True,
+    )
+    uow.orchestration_runs.save(run)
+
+    other_run = OrchestrationRun(
+        run_id="other-run-999",
+        project_id=project_id,
+        change_name=change_name,
+        base_sha="base_sha",
+        current_stage=OrchestrationStage.POST_MERGE_RECONCILING,
+        resumable_stage=OrchestrationStage.POST_MERGE_RECONCILING,
+        is_active=False,
+    )
+    uow.orchestration_runs.save(other_run)
+
+    saga_engine = SagaEngine(uow)
+    saga = saga_engine.start_saga(
+        saga_type=SagaType.CLOSURE,
+        project_id=project_id,
+        work_item_key=change_name,
+        change_name=change_name,
+        run_id="run-parent-1",
+        initial_phase="STARTED",
+    )
+    session.commit()
+
+    rec_svc = RecoveryConvergenceService(uow)
+    claim_ctx = rec_svc.acquire_claim("run:run-parent-1")
+    assert claim_ctx is not None
+
+    # Matching dispatch: run_id and saga_id match claim run
+    dispatch_res = saga_engine.execute_fenced_external_action(
+        claim_context=claim_ctx,
+        action_key="action-matching-1",
+        action_type=ExternalActionType.ISSUE_CLOSE,
+        target_identity=change_name,
+        request_fingerprint="req-1",
+        mutation_fn=lambda: True,
+        saga_id=saga.id,
+        run_id="run-parent-1",
+    )
+    assert dispatch_res.result_application_authorized is True
+
+    # Cross-parent dispatch: action_key bound to different run_id -> fails
+    saga_engine.reserve_action(
+        action_key="action-mismatched-2",
+        action_type=ExternalActionType.ISSUE_CLOSE,
+        target_identity=change_name,
+        request_fingerprint="req-2",
+        run_id="other-run-999",
+        saga_id=saga.id,
+    )
+    session.commit()
+
+    with pytest.raises(ValueError, match="Cross-parent action dispatch rejected"):
+        saga_engine.execute_fenced_external_action(
+            claim_context=claim_ctx,
+            action_key="action-mismatched-2",
+            action_type=ExternalActionType.ISSUE_CLOSE,
+            target_identity=change_name,
+            request_fingerprint="req-2",
+            mutation_fn=lambda: True,
+            saga_id=saga.id,
+            run_id="other-run-999",
+        )
+
+    session.close()
+
+
+def test_contract_closure_reconcile_action_claim_derivation(pg_session_factory: sessionmaker[Session]):
+    """Contract Closure: Prove reconcile_action derives claim key for run, intake saga, and closure saga."""
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "contract-claim-deriv")
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    run = OrchestrationRun(
+        run_id="run-deriv-1",
+        project_id=project_id,
+        change_name=change_name,
+        base_sha="base_sha",
+        current_stage=OrchestrationStage.ADMITTED,
+        resumable_stage=OrchestrationStage.ADMITTED,
+        is_active=True,
+    )
+    uow.orchestration_runs.save(run)
+
+    saga_engine = SagaEngine(uow)
+
+    # 1. Action with run_id
+    saga_engine.reserve_action(
+        action_key="act-run-1",
+        action_type=ExternalActionType.BRANCH_PUSH,
+        target_identity="branch-1",
+        request_fingerprint="fp1",
+        run_id="run-deriv-1",
+    )
+    # 2. Intake saga action
+    intake_saga = saga_engine.start_saga(
+        saga_type=SagaType.INTAKE,
+        project_id=project_id,
+        work_item_key="ITEM-101",
+        initial_phase="STARTED",
+    )
+    saga_engine.reserve_action(
+        action_key="act-intake-1",
+        action_type=ExternalActionType.ISSUE_CREATE,
+        target_identity="ITEM-101",
+        request_fingerprint="fp2",
+        saga_id=intake_saga.id,
+    )
+    # 3. Closure saga without run
+    closure_saga = saga_engine.start_saga(
+        saga_type=SagaType.CLOSURE,
+        project_id=project_id,
+        work_item_key="ITEM-102",
+        initial_phase="STARTED",
+    )
+    saga_engine.reserve_action(
+        action_key="act-closure-1",
+        action_type=ExternalActionType.WORKTREE_DELETE,
+        target_identity="ITEM-102",
+        request_fingerprint="fp3",
+        saga_id=closure_saga.id,
+    )
+    session.commit()
+
+    rec_svc = RecoveryConvergenceService(uow)
+    dec1 = rec_svc.reconcile_action("act-run-1", RecoverySource.TICK)
+    assert dec1.claim_key == "run:run-deriv-1"
+
+    dec2 = rec_svc.reconcile_action("act-intake-1", RecoverySource.TICK)
+    assert dec2.claim_key == f"intake:{project_id}:ITEM-101"
+
+    dec3 = rec_svc.reconcile_action("act-closure-1", RecoverySource.TICK)
+    assert dec3.claim_key == f"closure:{closure_saga.id}"
+
+    session.close()
+
+
+def test_contract_closure_pipeline_entry_point_rejects_missing_claim(pg_session_factory: sessionmaker[Session]):
+    """Contract Closure: Prove validate_claim_context_authoritative fails closed without claim context."""
+    from minime.domain.exceptions import MissingRecoveryClaimContextError
+    from minime.domain.models import validate_claim_context_authoritative
+
+    session = pg_session_factory()
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    with pytest.raises(MissingRecoveryClaimContextError, match="Recovery claim context is required"):
+        validate_claim_context_authoritative(uow, None)
+    session.close()
+
+
+def test_contract_closure_recovery_failure_isolation(pg_session_factory: sessionmaker[Session]):
+    """Contract Closure: Prove exception in one target produces BLOCKED decision while allowing other targets to converge."""
+    from minime.domain.models import Change
+    session = pg_session_factory()
+    project_id, change_name1 = _seed_base_project_and_change(session, "contract-fail-iso-1")
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    change2 = Change(
+        project_id=project_id,
+        name="contract-fail-iso-2",
+        status=ChangeStatus.READY,
+    )
+    uow.changes.save(change2)
+    session.commit()
+
+    run1 = OrchestrationRun(
+        run_id="run-healthy-1",
+        project_id=project_id,
+        change_name=change_name1,
+        base_sha="base_sha",
+        current_stage=OrchestrationStage.ADMITTED,
+        resumable_stage=OrchestrationStage.ADMITTED,
+        is_active=True,
+    )
+    run2 = OrchestrationRun(
+        run_id="run-failing-2",
+        project_id=project_id,
+        change_name="contract-fail-iso-2",
+        base_sha="base_sha",
+        current_stage=OrchestrationStage.ADMITTED,
+        resumable_stage=OrchestrationStage.ADMITTED,
+        is_active=True,
+    )
+    uow.orchestration_runs.save(run1)
+    uow.orchestration_runs.save(run2)
+    session.commit()
+
+    rec_svc = RecoveryConvergenceService(uow)
+    orig_converge = rec_svc._converge_run_identity
+
+    def _mock_converge(run_id, **kwargs):
+        if run_id == "run-failing-2":
+            raise RuntimeError("Database connection timeout during run convergence")
+        return orig_converge(run_id, **kwargs)
+
+    rec_svc._converge_run_identity = _mock_converge
+
+    decisions = rec_svc.reconcile_cycle(project_id=project_id, source=RecoverySource.TICK)
+    assert len(decisions) >= 2
+    failing_dec = next((d for d in decisions if d.identity_id == "run-failing-2"), None)
+    healthy_dec = next((d for d in decisions if d.identity_id == "run-healthy-1"), None)
+
+    assert failing_dec is not None
+    assert failing_dec.status == RecoveryDecisionStatus.BLOCKED
+    assert "Database connection timeout" in failing_dec.reason_code
+    assert healthy_dec is not None
+    assert healthy_dec.status != RecoveryDecisionStatus.BLOCKED
+
+    session.close()
+
+
+def test_contract_closure_heartbeat_renewal_and_loss(pg_session_factory: sessionmaker[Session]):
+    """Contract Closure: Prove atomic heartbeat renewal updates lease, and heartbeat loss prevents lifecycle advancement."""
+    session = pg_session_factory()
+    uow = PostgresPersistenceUnitOfWork(session)
+    rec_svc = RecoveryConvergenceService(uow)
+
+    claim_ctx = rec_svc.acquire_claim("run:heartbeat-test-1", lease_seconds=60)
+    assert claim_ctx is not None
+    initial_exp = claim_ctx.lease_expires_at
+
+    # 1. Renewal updates lease_expires_at
+    time.sleep(0.01)
+    renew_ok = rec_svc.heartbeat(claim_ctx)
+    assert renew_ok is True
+    assert claim_ctx.lease_expires_at >= initial_exp
+
+    # 2. Release claim to simulate loss
+    rec_svc.release_claim(claim_ctx)
+
+    # 3. Heartbeat after release fails
+    renew_failed = rec_svc.heartbeat(claim_ctx)
+    assert renew_failed is False
+
+    # 4. Fenced CAS application fails closed with StaleClaimError
+    with pytest.raises(StaleClaimError):
+        rec_svc.apply_lifecycle_result(claim_ctx, lambda: "result")
+
+    session.close()

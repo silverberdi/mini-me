@@ -3,12 +3,14 @@
 import shutil
 import subprocess
 import sys
+from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from minime.domain.enums import ChangeStatus, EventType, JobStatus, ReadinessState
-from minime.domain.models import Change, JobHandoff, Project
+from minime.domain.models import Change, JobHandoff, Project, RecoveryClaimContext, utc_now
 from minime.services.deepseek_auditor_runner import MockAuditorRunner
 from minime.services.execution_pipeline import (
     ExecutionPipelineService,
@@ -19,6 +21,26 @@ from minime.services.implementer_runner import MockImplementerRunner
 from minime.services.openspec_tasks import OpenSpecTaskTracker
 from minime.services.reviewer_runner import MockReviewerRunner
 from minime.services.worktree_manager import WorktreeInfo
+
+
+def _dummy_claim_context(uow: Any, claim_key: str = "run:test-pipe") -> RecoveryClaimContext:
+    if hasattr(uow, "claims") and uow.claims is not None:
+        ctx = uow.claims.acquire_or_reacquire(claim_key, "test-instance", 3600)
+        if ctx:
+            if isinstance(ctx, RecoveryClaimContext):
+                return ctx
+            return RecoveryClaimContext(
+                claim_key=getattr(ctx, "claim_key", claim_key),
+                owner_instance_id=getattr(ctx, "owner_instance_id", "test-instance"),
+                fence_token=getattr(ctx, "fence_token", 1),
+                lease_expires_at=getattr(ctx, "lease_expires_at", utc_now() + timedelta(hours=1)),
+            )
+    return RecoveryClaimContext(
+        claim_key=claim_key,
+        owner_instance_id="test-instance",
+        fence_token=1,
+        lease_expires_at=utc_now() + timedelta(hours=1),
+    )
 
 
 def test_workspace_context_is_absolute_and_openspec_tracker_stays_task_focused(tmp_path):
@@ -277,7 +299,7 @@ async def test_execution_pipeline_success_records_evidence_and_cleans_worktree(
         worktree_manager=worktrees,
     )
 
-    job = await service.run_job("mini-me", "synthetic-pipeline-change")
+    job = await service.run_job("mini-me", "synthetic-pipeline-change", claim_context=_dummy_claim_context(in_memory_uow))
 
     assert job.status == JobStatus.READY_TO_MERGE
     assert job.base_sha is not None
@@ -330,7 +352,7 @@ async def test_recovery_evidence_is_committed_before_worktree_removal(in_memory_
         worktree_manager=worktrees,
     )
 
-    job = await service.run_job("mini-me", "synthetic-pipeline-change")
+    job = await service.run_job("mini-me", "synthetic-pipeline-change", claim_context=_dummy_claim_context(in_memory_uow))
 
     assert job.status == JobStatus.READY_TO_MERGE
     assert ordering == ["snapshot", "evidence", "remove"]
@@ -376,7 +398,7 @@ async def test_recovery_evidence_failure_blocks_without_removal(in_memory_uow, t
         worktree_manager=worktrees,
     )
 
-    job = await service.run_job("mini-me", "synthetic-pipeline-change")
+    job = await service.run_job("mini-me", "synthetic-pipeline-change", claim_context=_dummy_claim_context(in_memory_uow))
 
     assert job.status == JobStatus.RECOVERY_BLOCKED
     assert ordering == ["snapshot"]
@@ -405,7 +427,7 @@ async def test_execution_pipeline_check_failure_halts_and_records_result(in_memo
         worktree_manager=FakeWorktreeManager(tmp_path),
     )
 
-    job = await service.run_job("mini-me", "synthetic-pipeline-change")
+    job = await service.run_job("mini-me", "synthetic-pipeline-change", claim_context=_dummy_claim_context(in_memory_uow))
 
     assert job.status == JobStatus.CHECKS_FAILED
     checks = in_memory_uow.check_results.list_by_job(job.job_id)
@@ -423,7 +445,7 @@ async def test_execution_pipeline_timeout_fails_and_records_event(in_memory_uow,
         worktree_manager=FakeWorktreeManager(tmp_path),
     )
 
-    job = await service.run_job("mini-me", "synthetic-pipeline-change")
+    job = await service.run_job("mini-me", "synthetic-pipeline-change", claim_context=_dummy_claim_context(in_memory_uow))
 
     assert job.status in (JobStatus.NEEDS_HUMAN, JobStatus.FAILED)
     events = in_memory_uow.events.list_events(
@@ -442,7 +464,7 @@ async def test_execution_pipeline_incomplete_tasks_block_checks(in_memory_uow, t
         worktree_manager=FakeWorktreeManager(tmp_path),
     )
 
-    job = await service.run_job("mini-me", "synthetic-pipeline-change")
+    job = await service.run_job("mini-me", "synthetic-pipeline-change", claim_context=_dummy_claim_context(in_memory_uow))
 
     assert job.status in (JobStatus.NEEDS_HUMAN, JobStatus.FAILED)
     assert in_memory_uow.check_results.list_by_job(job.job_id) == []

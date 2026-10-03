@@ -699,6 +699,7 @@ class PostMergeReconciliationService:
                     request_fingerprint=run.run_id,
                     mutation_fn=_mutate_issue_close,
                     saga_id=saga.id,
+                    run_id=run.run_id,
                     observation_fn=_observe_issue_close,
                 )
                 issue_closed = (
@@ -749,6 +750,7 @@ class PostMergeReconciliationService:
                     request_fingerprint=run.run_id,
                     mutation_fn=_mutate_project_item,
                     saga_id=saga.id,
+                    run_id=run.run_id,
                 )
                 project_item_updated = (
                     update_res is not None
@@ -809,6 +811,7 @@ class PostMergeReconciliationService:
                 request_fingerprint=run.run_id,
                 mutation_fn=_mutate_sync,
                 saga_id=saga.id,
+                run_id=run.run_id,
             )
             sync_verified = (
                 sync_res_val is not None
@@ -878,6 +881,7 @@ class PostMergeReconciliationService:
                     request_fingerprint=run.run_id,
                     mutation_fn=_mutate_archive,
                     saga_id=saga.id,
+                    run_id=run.run_id,
                 )
                 archive_verified = (
                     arc_res_val is not None
@@ -927,6 +931,7 @@ class PostMergeReconciliationService:
                 request_fingerprint=run.run_id,
                 mutation_fn=_mutate_wt,
                 saga_id=saga.id,
+                run_id=run.run_id,
             )
             worktree_cleaned = (
                 wt_res_val is not None
@@ -993,6 +998,7 @@ class PostMergeReconciliationService:
                 request_fingerprint=run.run_id,
                 mutation_fn=_mutate_branch,
                 saga_id=saga.id,
+                run_id=run.run_id,
             )
             branch_cleaned = (
                 branch_res_val is not None

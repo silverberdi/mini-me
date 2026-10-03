@@ -1641,12 +1641,13 @@ class OrchestrationService:
 
                 try:
                     execute = self.pipeline.execute_queued_job
-                    if "candidate_generation" in inspect.signature(execute).parameters:
-                        job = run_coroutine_sync(
-                            execute(job.job_id, candidate_generation=run.current_generation)
-                        )
-                    else:
-                        job = run_coroutine_sync(execute(job.job_id))
+                    sig_params = inspect.signature(execute).parameters
+                    kwargs = {}
+                    if "candidate_generation" in sig_params:
+                        kwargs["candidate_generation"] = run.current_generation
+                    if "claim_context" in sig_params:
+                        kwargs["claim_context"] = claim_context
+                    job = run_coroutine_sync(execute(job.job_id, **kwargs))
                 except Exception as exc:
                     redacted_error = redact_secrets(str(exc))
                     logger.exception(
@@ -2406,18 +2407,26 @@ class OrchestrationService:
         if remediation.status.value == "COMPLETED":
             job = self.uow.jobs.get_by_id(run.active_job_id) if run.active_job_id else None
             if job:
-                job.status = JobStatus.CHECKS_PASSED
-                self.uow.jobs.save(job)
-            run.stop_outcome = None
-            run.human_gate = None
-            run.stop_reason = None
-            run.stop_details = {"remediation_id": remediation.remediation_id}
-            run.is_active = True
-            # Re-enter the existing coordinator at its legal post-check boundary;
-            # drive_coordinator performs RUNNING_CHECKS -> FREEZING_CANDIDATE -> review.
-            run.current_stage = OrchestrationStage.RUNNING_CHECKS
-            run.resumable_stage = OrchestrationStage.RUNNING_CHECKS
-            self.uow.orchestration_runs.save(run)
+                self.uow.jobs.transition(
+                    job.job_id,
+                    JobStatus.CHECKS_PASSED.value,
+                    claim_context=claim_context,
+                )
+            self.uow.orchestration_runs.update_stop_outcome(
+                run.run_id,
+                stop_outcome=None,
+                human_gate=None,
+                stop_reason=None,
+                stop_details={"remediation_id": remediation.remediation_id},
+                is_active=True,
+                claim_context=claim_context,
+            )
+            self.uow.orchestration_runs.update_stage(
+                run.run_id,
+                current_stage=OrchestrationStage.RUNNING_CHECKS,
+                resumable_stage=OrchestrationStage.RUNNING_CHECKS,
+                claim_context=claim_context,
+            )
             self.uow.orchestration_stage_events.save(
                 OrchestrationStageEvent(
                     run_id=run_id,
@@ -2436,9 +2445,7 @@ class OrchestrationService:
                     created_at=utc_now(),
                 )
             )
-            from minime.services.recovery_convergence_service import RecoveryConvergenceService
-            rec_svc = RecoveryConvergenceService(self.uow, project_root=project_root or self.project_root)
-            claim_context = rec_svc.acquire_claim(f"run:{run_id}")
+            self.uow.commit()
             return self.drive_coordinator(run_id, project_root=project_root, claim_context=claim_context)
         return self.uow.orchestration_runs.get_by_id(run_id) or run
 

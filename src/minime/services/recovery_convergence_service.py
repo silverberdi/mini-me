@@ -131,39 +131,60 @@ class RecoveryConvergenceService:
 
         # 3. Converge Runs
         for run in active_runs:
-            claim_key = f"run:{run.run_id}"
-            decision = self._converge_run_identity(
-                run_id=run.run_id,
-                cycle_id=cycle_id,
-                claim_key=claim_key,
-                source=source,
-                drive_admitted=drive_admitted,
-                timeout_hours=timeout_hours,
-            )
-            decisions.append(decision)
+            try:
+                claim_key = f"run:{run.run_id}"
+                decision = self._converge_run_identity(
+                    run_id=run.run_id,
+                    cycle_id=cycle_id,
+                    claim_key=claim_key,
+                    source=source,
+                    drive_admitted=drive_admitted,
+                    timeout_hours=timeout_hours,
+                )
+                decisions.append(decision)
+            except Exception as exc:
+                logger.error("Run convergence failed for '%s': %s", run.run_id, exc)
+                decisions.append(
+                    RecoveryDecision(
+                        cycle_id=cycle_id,
+                        claim_key=f"run:{run.run_id}",
+                        identity_type="RUN",
+                        identity_id=run.run_id,
+                        source=source,
+                        classification=RecoveryClassification.TERMINAL_EXECUTION_BLOCKED,
+                        planned_action="NO_ACTION",
+                        status=RecoveryDecisionStatus.BLOCKED,
+                        reason_code=str(exc),
+                    )
+                )
 
         # 4. Converge Active Sagas
         for saga in active_sagas:
-            if saga.saga_type == SagaType.INTAKE:
-                claim_key = f"intake:{saga.project_id}:{saga.work_item_key}"
-            else:
-                claim_key = f"run:{saga.run_id}" if saga.run_id else f"closure:{saga.id}"
+            try:
+                if saga.saga_type == SagaType.INTAKE:
+                    claim_key = f"intake:{saga.project_id}:{saga.work_item_key}"
+                else:
+                    claim_key = f"run:{saga.run_id}" if saga.run_id else f"closure:{saga.id}"
 
-            # Check if decision for this claim_key already exists in this cycle
-            if any(d.claim_key == claim_key for d in decisions):
-                continue
+                if any(d.claim_key == claim_key for d in decisions):
+                    continue
 
-            decision = self._converge_saga_identity(
-                saga_id=saga.id, cycle_id=cycle_id, claim_key=claim_key, source=source
-            )
-            decisions.append(decision)
+                decision = self._converge_saga_identity(
+                    saga_id=saga.id, cycle_id=cycle_id, claim_key=claim_key, source=source
+                )
+                decisions.append(decision)
+            except Exception as exc:
+                logger.error("Saga convergence failed for '%s': %s", saga.id, exc)
 
         # 5. Converge Active Jobs
         active_jobs = self.uow.jobs.list_active_jobs()
         if project_id:
             active_jobs = [j for j in active_jobs if j.project_id == project_id]
         for job in active_jobs:
-            self._converge_job_state(job, cycle_id)
+            try:
+                self._converge_job_state(job, cycle_id)
+            except Exception as exc:
+                logger.error("Job state convergence failed for '%s': %s", job.job_id, exc)
 
         return decisions
 
@@ -172,25 +193,21 @@ class RecoveryConvergenceService:
         if not job.candidate_sha:
             return JobStatus.QUEUED
 
-        # 1. Checks
+        # 1. Checks: candidate-bound passing checks evidence
         check_results = (
             self.uow.check_results.list_by_job(job.job_id)
             if hasattr(self.uow, "check_results") and self.uow.check_results is not None
             else []
         )
-        checks_passed = (
-            (len(check_results) > 0 and all(c.exit_code == 0 for c in check_results))
-            or job.status in {
-                JobStatus.CHECKS_PASSED,
-                JobStatus.REVIEW_RUNNING,
-                JobStatus.AUDIT_RUNNING,
-                JobStatus.READY_TO_MERGE,
-            }
+        checks_passed = len(check_results) > 0 and all(
+            (not getattr(c, "candidate_sha", None) or getattr(c, "candidate_sha") == job.candidate_sha)
+            and c.exit_code == 0
+            for c in check_results
         )
         if not checks_passed:
             return JobStatus.QUEUED
 
-        # 2. Review
+        # 2. Review: candidate-bound completed review evidence with READY_TO_MERGE verdict
         if hasattr(self.uow, "reviews") and self.uow.reviews is not None:
             if hasattr(self.uow.reviews, "list_by_job"):
                 reviews = self.uow.reviews.list_by_job(job.job_id)
@@ -202,17 +219,14 @@ class RecoveryConvergenceService:
         else:
             reviews = []
 
-        review_passed = (
-            any(
-                r.candidate_sha == job.candidate_sha
-                and r.status == ReviewStatus.REVIEW_COMPLETED
-                and r.verdict == ReviewVerdict.READY_TO_MERGE
-                for r in reviews
-            )
-            or (job.status in {JobStatus.READY_TO_MERGE, JobStatus.AUDIT_RUNNING} and bool(reviews))
+        review_passed = any(
+            (not getattr(r, "candidate_sha", None) or getattr(r, "candidate_sha") == job.candidate_sha)
+            and r.status == ReviewStatus.REVIEW_COMPLETED
+            and r.verdict == ReviewVerdict.READY_TO_MERGE
+            for r in reviews
         )
 
-        # 3. Audit
+        # 3. Audit: candidate-bound completed audit evidence with no critical/high/blocker findings
         if hasattr(self.uow, "audits") and self.uow.audits is not None:
             if hasattr(self.uow.audits, "list_by_job"):
                 audits = self.uow.audits.list_by_job(job.job_id)
@@ -223,18 +237,15 @@ class RecoveryConvergenceService:
                 audits = []
         else:
             audits = []
-        audit_passed = (
-            review_passed
-            and any(
-                a.candidate_sha == job.candidate_sha
-                and a.status == AuditStatus.AUDIT_COMPLETED
-                and not any(
-                    f.severity in (AuditFindingSeverity.CRITICAL, AuditFindingSeverity.HIGH, AuditFindingSeverity.BLOCKER)
-                    for f in getattr(a, "findings", [])
-                )
-                for a in audits
+        audit_passed = review_passed and any(
+            (not getattr(a, "candidate_sha", None) or getattr(a, "candidate_sha") == job.candidate_sha)
+            and a.status == AuditStatus.AUDIT_COMPLETED
+            and not any(
+                f.severity in (AuditFindingSeverity.CRITICAL, AuditFindingSeverity.HIGH, AuditFindingSeverity.BLOCKER)
+                for f in getattr(a, "findings", [])
             )
-        ) or (job.status == JobStatus.READY_TO_MERGE and bool(audits))
+            for a in audits
+        )
 
         if audit_passed:
             return JobStatus.READY_TO_MERGE
@@ -381,7 +392,21 @@ class RecoveryConvergenceService:
         action = self.uow.orchestration_external_actions.get_by_action_key(action_key)
         if not action:
             raise ValueError(f"External action '{action_key}' not found.")
-        claim_key = f"run:{action.run_id}" if action.run_id else f"closure:{action.saga_id}"
+        if action.run_id:
+            claim_key = f"run:{action.run_id}"
+        elif action.saga_id:
+            saga = self.uow.durable_sagas.get_by_id(action.saga_id)
+            if saga and saga.run_id:
+                claim_key = f"run:{saga.run_id}"
+            elif saga and saga.saga_type == SagaType.INTAKE:
+                claim_key = f"intake:{saga.project_id}:{saga.work_item_key}"
+            elif saga:
+                claim_key = f"closure:{saga.id}"
+            else:
+                claim_key = f"closure:{action.saga_id}"
+        else:
+            raise ValueError(f"Action '{action_key}' lacks parent run_id and saga_id for claim derivation.")
+
         cycle_id = generate_uuid()
         return self._converge_action_identity(
             action_key=action_key, cycle_id=cycle_id, claim_key=claim_key, source=source
@@ -562,20 +587,30 @@ class RecoveryConvergenceService:
         self, action: OrchestrationExternalAction
     ) -> ActionObservationOutcome:
         atype = action.action_type
+
         if atype == ExternalActionType.BRANCH_PUSH:
-            target_ref = action.target_identity or f"refs/heads/candidate-{action.candidate_sha[:8]}"
+            target_ref = action.target_identity or (f"refs/heads/candidate-{action.candidate_sha[:8]}" if action.candidate_sha else None)
+            if not target_ref or not action.candidate_sha:
+                return ActionObservationOutcome.UNOBSERVABLE
             try:
                 res = subprocess.run(
-                    ["git", "rev-parse", "--verify", f"{target_ref}^{{commit}}"],
+                    ["git", "ls-remote", "origin", target_ref],
                     cwd=self.project_root,
                     capture_output=True,
                     text=True,
                     check=False,
+                    timeout=15,
                 )
-                if res.returncode == 0 and action.candidate_sha and res.stdout.strip() == action.candidate_sha:
-                    return ActionObservationOutcome.OBSERVED_PRESENT
-                elif res.returncode != 0:
-                    return ActionObservationOutcome.OBSERVED_ABSENT
+                if res.returncode == 0:
+                    lines = res.stdout.strip().splitlines()
+                    if lines:
+                        remote_sha = lines[0].split()[0]
+                        if remote_sha == action.candidate_sha:
+                            return ActionObservationOutcome.OBSERVED_PRESENT
+                        else:
+                            return ActionObservationOutcome.CONTRADICTORY
+                    else:
+                        return ActionObservationOutcome.OBSERVED_ABSENT
                 return ActionObservationOutcome.UNOBSERVABLE
             except Exception:
                 return ActionObservationOutcome.UNOBSERVABLE
@@ -601,6 +636,15 @@ class RecoveryConvergenceService:
             if run:
                 binding = self.uow.bindings.get_by_project_and_change(run.project_id, run.change_name)
                 if binding and binding.github_issue_number:
+                    project = self.uow.projects.get_by_id(run.project_id)
+                    if project and project.repository and getattr(self, "github_adapter", None):
+                        try:
+                            issue = self.github_adapter.get_issue(project.repository, binding.github_issue_number)
+                            if issue:
+                                return ActionObservationOutcome.OBSERVED_PRESENT
+                            return ActionObservationOutcome.OBSERVED_ABSENT
+                        except Exception:
+                            return ActionObservationOutcome.UNOBSERVABLE
                     return ActionObservationOutcome.OBSERVED_PRESENT
                 elif binding and not binding.github_issue_number:
                     return ActionObservationOutcome.OBSERVED_ABSENT
@@ -613,7 +657,7 @@ class RecoveryConvergenceService:
                 if binding and binding.github_issue_number:
                     try:
                         project = self.uow.projects.get_by_id(run.project_id)
-                        if project and project.repository and hasattr(self, "github_adapter"):
+                        if project and project.repository and getattr(self, "github_adapter", None):
                             issue = self.github_adapter.get_issue(project.repository, binding.github_issue_number)
                             if issue and issue.get("state") == "closed":
                                 return ActionObservationOutcome.OBSERVED_PRESENT
@@ -645,26 +689,67 @@ class RecoveryConvergenceService:
                     return ActionObservationOutcome.OBSERVED_ABSENT
             return ActionObservationOutcome.UNOBSERVABLE
 
-        elif atype in (ExternalActionType.WORKTREE_DELETE, ExternalActionType.BRANCH_DELETE):
+        elif atype == ExternalActionType.BRANCH_DELETE:
+            branch_name = action.target_identity or (f"minime/{action.request_fingerprint}" if action.request_fingerprint else None)
+            if branch_name:
+                try:
+                    loc_res = subprocess.run(
+                        ["git", "rev-parse", "--verify", branch_name],
+                        cwd=self.project_root,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    local_absent = loc_res.returncode != 0
+                    rem_res = subprocess.run(
+                        ["git", "ls-remote", "origin", f"refs/heads/{branch_name}"],
+                        cwd=self.project_root,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    remote_absent = rem_res.returncode == 0 and not rem_res.stdout.strip()
+                    if local_absent and remote_absent:
+                        return ActionObservationOutcome.OBSERVED_PRESENT
+                    return ActionObservationOutcome.OBSERVED_ABSENT
+                except Exception:
+                    return ActionObservationOutcome.UNOBSERVABLE
+            return ActionObservationOutcome.UNOBSERVABLE
+
+        elif atype == ExternalActionType.WORKTREE_DELETE:
             if action.target_identity:
                 path = Path(action.target_identity)
-                if not path.exists():
+                dir_absent = not path.exists()
+                try:
+                    res = subprocess.run(
+                        ["git", "worktree", "list"],
+                        cwd=self.project_root,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    worktree_reg_absent = str(path) not in res.stdout
+                except Exception:
+                    worktree_reg_absent = dir_absent
+                if dir_absent and worktree_reg_absent:
                     return ActionObservationOutcome.OBSERVED_PRESENT
-                else:
-                    return ActionObservationOutcome.OBSERVED_ABSENT
+                return ActionObservationOutcome.OBSERVED_ABSENT
+            return ActionObservationOutcome.UNOBSERVABLE
 
         elif atype in (ExternalActionType.OPENSPEC_SYNC, ExternalActionType.OPENSPEC_ARCHIVE):
             if action.target_identity:
-                from minime.services.openspec_adapter import OpenSpecAdapter
+                from minime.adapters.openspec import OpenSpecAdapter
                 adapter = OpenSpecAdapter()
                 res = adapter.get_change_status(self.project_root, action.target_identity)
-                if res.exists:
-                    if atype == ExternalActionType.OPENSPEC_ARCHIVE and res.is_archived:
-                        return ActionObservationOutcome.OBSERVED_PRESENT
-                    elif atype == ExternalActionType.OPENSPEC_SYNC and res.is_synced:
+                if atype == ExternalActionType.OPENSPEC_ARCHIVE:
+                    if not res.exists or res.is_archived:
                         return ActionObservationOutcome.OBSERVED_PRESENT
                     return ActionObservationOutcome.OBSERVED_ABSENT
-                return ActionObservationOutcome.OBSERVED_ABSENT
+                elif atype == ExternalActionType.OPENSPEC_SYNC:
+                    if res.is_synced:
+                        return ActionObservationOutcome.OBSERVED_PRESENT
+                    return ActionObservationOutcome.OBSERVED_ABSENT
+            return ActionObservationOutcome.UNOBSERVABLE
 
         elif atype in (ExternalActionType.DEPLOY_EXECUTE, ExternalActionType.SERVICE_RESTART):
             return ActionObservationOutcome.UNOBSERVABLE
@@ -724,6 +809,9 @@ class RecoveryConvergenceService:
                 reason_code="RUN_NOT_FOUND",
             )
             self._create_decision(decision)
+            self.uow.commit()
+            self.release_claim(context)
+            return decision
         if run.active_job_id:
             job = self.uow.jobs.get_by_id(run.active_job_id)
             if job:

@@ -45,6 +45,7 @@ from minime.domain.models import (
     JobLog,
     MetricFact,
     Project,
+    RecoveryClaimContext,
     Review,
     ReviewFinding,
     utc_now,
@@ -287,11 +288,34 @@ class ExecutionPipelineService:
             self.uow.commit()
         return job
 
-    async def run_job(self, project_id: str, change_name: str) -> Job:
+    async def run_job(
+        self,
+        project_id: str,
+        change_name: str,
+        claim_context: RecoveryClaimContext | None = None,
+    ) -> Job:
         job = self.queue_job(project_id, change_name)
-        return await self.execute_queued_job(job.job_id)
+        if claim_context is None:
+            from minime.services.recovery_convergence_service import RecoveryConvergenceService
+            rec_svc = RecoveryConvergenceService(self.uow)
+            claim_context = rec_svc.acquire_claim(f"job:{job.job_id}")
+        return await self.execute_queued_job(job.job_id, claim_context=claim_context)
 
-    async def execute_queued_job(self, job_id: str, candidate_generation: int = 1) -> Job:
+    async def execute_queued_job(
+        self,
+        job_id: str,
+        candidate_generation: int = 1,
+        claim_context: RecoveryClaimContext | None = None,
+    ) -> Job:
+        from minime.domain.models import validate_claim_context_authoritative
+
+        if claim_context is None:
+            from minime.services.recovery_convergence_service import RecoveryConvergenceService
+            rec_svc = RecoveryConvergenceService(self.uow)
+            claim_context = rec_svc.acquire_claim(f"job:{job_id}")
+
+        validate_claim_context_authoritative(self.uow, claim_context)
+
         job = self._require_job(job_id)
         project = self._require_project(job.project_id)
         worktree_created = False
