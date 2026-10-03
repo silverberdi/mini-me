@@ -441,7 +441,33 @@ class OrchestrationService:
         fallback (OpenRouterEligibilityEvaluator + BudgetService) can continue the
         in-flight job. It does not bypass the NEEDS_HUMAN gate.
         """
-        from minime.domain.models import validate_claim_context_authoritative
+        from minime.domain.models import (
+            RecoveryClaimContext,
+            utc_now,
+            validate_claim_context_authoritative,
+        )
+
+        if claim_context is None:
+            claim_key = f"run:{run_id}"
+            if hasattr(self.uow, "claims") and self.uow.claims is not None:
+                existing = self.uow.claims.get_by_key(claim_key)
+                if existing and getattr(existing, "released_at", None) is None and existing.lease_expires_at > utc_now():
+                    claim_context = RecoveryClaimContext(
+                        claim_key=existing.claim_key,
+                        owner_instance_id=existing.owner_instance_id,
+                        fence_token=existing.fence_token,
+                        lease_expires_at=existing.lease_expires_at,
+                    )
+                else:
+                    from minime.services.recovery_convergence_service import (
+                        RecoveryConvergenceService,
+                    )
+
+                    rec_svc = RecoveryConvergenceService(
+                        self.uow, project_root=project_root or getattr(self, "project_root", None)
+                    )
+                    claim_context = rec_svc.acquire_claim(claim_key)
+
         validate_claim_context_authoritative(self.uow, claim_context)
 
         run = self.uow.orchestration_runs.get_for_update(run_id) or self.uow.orchestration_runs.get_by_id(run_id)
@@ -1513,8 +1539,38 @@ class OrchestrationService:
         """Drive the deterministic stage state machine until a legitimate stop outcome."""
         root = Path(project_root).resolve() if project_root else self.project_root
 
+        from minime.domain.models import (
+            RecoveryClaimContext,
+            utc_now,
+            validate_claim_context_authoritative,
+        )
+
+        if claim_context is None:
+            claim_key = f"run:{run_id}"
+            if hasattr(self.uow, "claims") and self.uow.claims is not None:
+                existing = self.uow.claims.get_by_key(claim_key)
+                if existing and existing.released_at is None and existing.lease_expires_at > utc_now():
+                    claim_context = RecoveryClaimContext(
+                        claim_key=existing.claim_key,
+                        owner_instance_id=existing.owner_instance_id,
+                        fence_token=existing.fence_token,
+                        lease_expires_at=existing.lease_expires_at,
+                    )
+                else:
+                    from minime.services.recovery_convergence_service import (
+                        RecoveryConvergenceService,
+                    )
+                    rec_svc = RecoveryConvergenceService(self.uow, project_root=root)
+                    claim_context = rec_svc.acquire_claim(claim_key)
+            if claim_context is None and (not hasattr(self.uow, "claims") or self.uow.claims is None):
+                claim_context = RecoveryClaimContext(
+                    claim_key=claim_key,
+                    owner_instance_id="fresh-execution",
+                    fence_token=1,
+                    lease_expires_at=utc_now() + timedelta(seconds=60),
+                )
+
         while True:
-            from minime.domain.models import validate_claim_context_authoritative
             validate_claim_context_authoritative(self.uow, claim_context)
 
             raw_run = self.uow.orchestration_runs.get_for_update(run_id)
@@ -2381,6 +2437,12 @@ class OrchestrationService:
                     stop_details={"code": "READY_FOR_HUMAN_MERGE"},
                 )
                 break
+
+        if claim_context is not None and hasattr(self.uow, "claims") and self.uow.claims is not None:
+            from minime.services.recovery_convergence_service import RecoveryConvergenceService
+
+            rec_svc = RecoveryConvergenceService(self.uow, project_root=root)
+            rec_svc.release_claim(claim_context)
 
         return self.uow.orchestration_runs.get_by_id(run_id) or run
 

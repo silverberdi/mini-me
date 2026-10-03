@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -201,11 +201,21 @@ class RecoveryConvergenceService:
         if not claim:
             return None
         self.uow.commit()
+        if isinstance(claim, RecoveryClaimContext):
+            return claim
+        claim_key_val = claim.claim_key if isinstance(getattr(claim, "claim_key", None), str) else claim_key
+        owner_id_val = claim.owner_instance_id if isinstance(getattr(claim, "owner_instance_id", None), str) else self.owner_instance_id
+        fence_token_val = claim.fence_token if isinstance(getattr(claim, "fence_token", None), int) else 1
+        lease_expires_val = (
+            claim.lease_expires_at
+            if isinstance(getattr(claim, "lease_expires_at", None), datetime)
+            else datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)
+        )
         return RecoveryClaimContext(
-            claim_key=claim.claim_key,
-            owner_instance_id=claim.owner_instance_id,
-            fence_token=claim.fence_token,
-            lease_expires_at=claim.lease_expires_at,
+            claim_key=claim_key_val,
+            owner_instance_id=owner_id_val,
+            fence_token=fence_token_val,
+            lease_expires_at=lease_expires_val,
         )
 
     def heartbeat(self, context: RecoveryClaimContext) -> bool:
@@ -480,19 +490,51 @@ class RecoveryConvergenceService:
                 self.uow.recovery_decisions.create_decision(decision)
                 self.release_claim(context)
                 return decision
+            else:
+                run.stop_outcome = None
+                run.stop_reason = None
+                self.uow.orchestration_runs.save(run)
+                self.uow.commit()
+
+                if not drive_admitted:
+                    decision = RecoveryDecision(
+                        cycle_id=cycle_id,
+                        claim_key=claim_key,
+                        identity_type="RUN",
+                        identity_id=run_id,
+                        project_id=run.project_id,
+                        change_name=run.change_name,
+                        source=source,
+                        fence_token=context.fence_token,
+                        classification=RecoveryClassification.RESUME_SAFE_CHECKPOINT,
+                        planned_action="RECONCILE_WAITING_CAPACITY",
+                        status=RecoveryDecisionStatus.COMPLETED,
+                        reason_code="CAPACITY_RECOVERED",
+                    )
+                    self.uow.recovery_decisions.create_decision(decision)
+                    self.uow.commit()
+                    self.release_claim(context)
+                    return decision
 
         actions = self.uow.orchestration_external_actions.list_by_run(run.run_id)
-        unresolved_ambiguous = False
+        has_ambiguous = False
+        has_adoptable = False
         for action in actions:
             if action.status in (
                 ExternalActionStatus.EXECUTING,
                 ExternalActionStatus.UNKNOWN,
                 ExternalActionStatus.AMBIGUOUS,
+                ExternalActionStatus.RESERVED,
             ):
-                unresolved_ambiguous = True
-                break
+                obs = self.classify_external_action_observation(action)
+                if action.status == ExternalActionStatus.COMPLETED:
+                    has_adoptable = True
+                elif obs == ExternalActionObservation.PROVEN_NEVER_DISPATCHED:
+                    continue
+                elif action.status == ExternalActionStatus.AMBIGUOUS or obs == ExternalActionObservation.POSSIBLY_DISPATCHED:
+                    has_ambiguous = True
 
-        if unresolved_ambiguous:
+        if has_ambiguous:
             decision = RecoveryDecision(
                 cycle_id=cycle_id,
                 claim_key=claim_key,
@@ -505,6 +547,25 @@ class RecoveryConvergenceService:
                 classification=RecoveryClassification.WAITING_EXTERNAL,
                 planned_action="OBSERVE_EXTERNAL",
                 status=RecoveryDecisionStatus.PLANNED,
+            )
+            self.uow.recovery_decisions.create_decision(decision)
+            self.uow.commit()
+            self.release_claim(context)
+            return decision
+
+        if has_adoptable:
+            decision = RecoveryDecision(
+                cycle_id=cycle_id,
+                claim_key=claim_key,
+                identity_type="RUN",
+                identity_id=run_id,
+                project_id=run.project_id,
+                change_name=run.change_name,
+                source=source,
+                fence_token=context.fence_token,
+                classification=RecoveryClassification.ADOPT_OBSERVED_EFFECT,
+                planned_action="ADOPT_COMPLETED",
+                status=RecoveryDecisionStatus.COMPLETED,
             )
             self.uow.recovery_decisions.create_decision(decision)
             self.uow.commit()

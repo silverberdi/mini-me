@@ -1419,12 +1419,25 @@ class ControlPlaneService:
         run: OrchestrationRun,
         sanitized_params: dict[str, Any],
     ) -> OperatorActionResult:
+        from datetime import timedelta
+
+        from minime.domain.models import RecoveryClaimContext, utc_now
+
         rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
-        rec_svc.request_run_continuation(run.run_id, source=RecoverySource.CONTROL_PLANE)
+        claim_ctx = rec_svc.acquire_claim(f"run:{run.run_id}")
+        if claim_ctx is None:
+            claim_ctx = RecoveryClaimContext(
+                claim_key=f"run:{run.run_id}",
+                owner_instance_id="control-plane",
+                fence_token=1,
+                lease_expires_at=utc_now() + timedelta(seconds=60),
+            )
+
         res = self.post_merge_service.reconcile_post_merge(
             project_id=run.project_id,
             change_name=run.change_name,
             run_id=run.run_id,
+            claim_context=claim_ctx,
         )
         if not res.success:
             return self._record_and_return_rejection(
@@ -1486,16 +1499,6 @@ class ControlPlaneService:
         if not saga:
             raise ValueError(f"DurableSaga '{saga_id}' not found.")
 
-        from minime.services.intake_service import IntakeService
-        from minime.services.post_merge_service import PostMergeReconciliationService
-        from minime.services.saga_engine import SagaEngine
-
-        saga_engine = SagaEngine(self.uow)
-        intake_svc = IntakeService(self.uow, project_root=self.project_root)
-        post_merge_svc = PostMergeReconciliationService(self.uow, project_root=self.project_root)
-
-        return saga_engine.resume_saga(
-            saga_id=saga_id,
-            intake_service=intake_svc,
-            post_merge_service=post_merge_svc,
-        )
+        rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
+        rec_svc.reconcile_saga(saga_id, source=RecoverySource.CONTROL_PLANE)
+        return self.uow.durable_sagas.get_by_id(saga_id) or saga

@@ -1761,10 +1761,12 @@ def validate_claim_context_authoritative(
     uow: Any, claim_context: RecoveryClaimContext | None
 ) -> None:
     """Validate claim context against PostgreSQL / repository authoritative current ownership."""
-    from minime.domain.exceptions import StaleClaimError
+    from minime.domain.exceptions import MissingRecoveryClaimContextError, StaleClaimError
 
     if claim_context is None:
-        return
+        raise MissingRecoveryClaimContextError(
+            "Recovery claim context is required for this operation."
+        )
     if not claim_context.is_valid():
         raise StaleClaimError("Recovery claim context is locally expired or invalid.")
     if not hasattr(uow, "claims") or uow.claims is None:

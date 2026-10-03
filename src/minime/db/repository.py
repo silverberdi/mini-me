@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import desc, func, select, update
+from sqlalchemy import desc, exists, func, select, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
@@ -210,6 +210,7 @@ from minime.domain.models import (
     ProviderEfficiencyMetrics,
     ProviderHealth,
     RecoveryClaim,
+    RecoveryClaimContext,
     RecoveryDecision,
     Review,
     ReviewFinding,
@@ -2782,13 +2783,47 @@ class PostgresOrchestrationRunRepository(OrchestrationRunRepositoryInterface):
         run_id: str,
         current_stage: OrchestrationStage,
         resumable_stage: OrchestrationStage,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> OrchestrationRun:
+        now = utc_now()
+        if claim_context is not None:
+            claim_subquery = (
+                select(1)
+                .where(
+                    RecoveryClaimModel.claim_key == claim_context.claim_key,
+                    RecoveryClaimModel.owner_instance_id == claim_context.owner_instance_id,
+                    RecoveryClaimModel.fence_token == claim_context.fence_token,
+                    RecoveryClaimModel.released_at.is_(None),
+                    RecoveryClaimModel.lease_expires_at > now,
+                )
+                .scalar_subquery()
+            )
+            stmt = (
+                update(OrchestrationRunModel)
+                .where(
+                    OrchestrationRunModel.id == run_id,
+                    exists(claim_subquery),
+                )
+                .values(
+                    current_stage=current_stage.value,
+                    resumable_stage=resumable_stage.value,
+                    updated_at=now,
+                )
+            )
+            result = self.session.execute(stmt)
+            if result.rowcount == 0:
+                raise StaleClaimError(
+                    f"Fenced stage update for run '{run_id}' failed: recovery claim fence is stale, expired, or superseded."
+                )
+        else:
+            model = self.session.get(OrchestrationRunModel, run_id)
+            if not model:
+                raise ValueError(f"Orchestration run '{run_id}' not found")
+            model.current_stage = current_stage.value
+            model.resumable_stage = resumable_stage.value
+            model.updated_at = now
+
         model = self.session.get(OrchestrationRunModel, run_id)
-        if not model:
-            raise ValueError(f"Orchestration run '{run_id}' not found")
-        model.current_stage = current_stage.value
-        model.resumable_stage = resumable_stage.value
-        model.updated_at = utc_now()
         return orchestration_run_model_to_domain(model)
 
     def update_stop_outcome(
@@ -3129,7 +3164,37 @@ class PostgresDurableSagaRepository(DurableSagaRepositoryInterface):
         current_phase: str,
         evidence_references: dict[str, Any] | None = None,
         last_observed_outcome: ExternalOutcome | str | None = None,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> DurableSaga:
+        now = utc_now()
+        if claim_context is not None:
+            claim_subquery = (
+                select(1)
+                .where(
+                    RecoveryClaimModel.claim_key == claim_context.claim_key,
+                    RecoveryClaimModel.owner_instance_id == claim_context.owner_instance_id,
+                    RecoveryClaimModel.fence_token == claim_context.fence_token,
+                    RecoveryClaimModel.released_at.is_(None),
+                    RecoveryClaimModel.lease_expires_at > now,
+                )
+                .scalar_subquery()
+            )
+            stmt = (
+                update(DurableSagaModel)
+                .where(
+                    DurableSagaModel.id == saga_id,
+                    exists(claim_subquery),
+                )
+                .values(
+                    current_phase=current_phase,
+                    updated_at=now,
+                )
+            )
+            result = self.session.execute(stmt)
+            if result.rowcount == 0:
+                raise StaleClaimError(
+                    f"Fenced phase update for saga '{saga_id}' failed: recovery claim fence is stale, expired, or superseded."
+                )
         model = self.session.get(DurableSagaModel, saga_id)
         if not model:
             raise ValueError(f"Durable saga '{saga_id}' not found")
@@ -3144,7 +3209,7 @@ class PostgresDurableSagaRepository(DurableSagaRepositoryInterface):
                 if isinstance(last_observed_outcome, ExternalOutcome)
                 else str(last_observed_outcome)
             )
-        model.updated_at = utc_now()
+        model.updated_at = now
         return durable_saga_model_to_domain(model)
 
     def update_status(
@@ -4854,6 +4919,38 @@ class PostgresRecoveryClaimRepository(RecoveryClaimRepositoryInterface):
         if not action_model:
             self.session.rollback()
             raise ValueError(f"Action '{action_key}' not found.")
+
+        # Cross-parent action ownership validation (ROOT CAUSE 4)
+        if claim_key.startswith("run:"):
+            expected_run_id = claim_key[len("run:"):]
+            if action_model.run_id != expected_run_id:
+                self.session.rollback()
+                raise ValueError(
+                    f"Cross-parent action dispatch rejected: action '{action_key}' is bound to run '{action_model.run_id}', but claim key is '{claim_key}'."
+                )
+            parent_run = self.session.get(OrchestrationRunModel, expected_run_id)
+            if not parent_run or not parent_run.is_active:
+                self.session.rollback()
+                raise StaleClaimError(
+                    f"Parent run '{expected_run_id}' for claim '{claim_key}' is inactive or missing."
+                )
+        elif claim_key.startswith("closure:"):
+            expected_saga_id = claim_key[len("closure:"):]
+            if action_model.saga_id != expected_saga_id:
+                self.session.rollback()
+                raise ValueError(
+                    f"Cross-parent action dispatch rejected: action '{action_key}' is bound to saga '{action_model.saga_id}', but claim key is '{claim_key}'."
+                )
+        elif claim_key.startswith("intake:"):
+            if action_model.saga_id:
+                saga = self.session.get(DurableSagaModel, action_model.saga_id)
+                if saga:
+                    expected_key = f"intake:{saga.project_id}:{saga.work_item_key}"
+                    if expected_key != claim_key:
+                        self.session.rollback()
+                        raise ValueError(
+                            f"Cross-parent action dispatch rejected: action '{action_key}' is bound to intake saga '{saga.id}' ({expected_key}), but claim key is '{claim_key}'."
+                        )
 
         attempts_stmt = select(ExternalActionAttemptModel).where(
             ExternalActionAttemptModel.action_key == action_key

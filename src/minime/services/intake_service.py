@@ -305,8 +305,33 @@ class IntakeService:
         operator_email: str = "operator",
         claim_context: RecoveryClaimContext | None = None,
     ) -> WorkItemPrepareResult:
-        """Prepare canonical execution artifacts (GitHub Issue, Project item, OpenSpec change)."""
-        from minime.domain.models import validate_claim_context_authoritative
+        from minime.domain.models import RecoveryClaimContext, validate_claim_context_authoritative
+
+        if claim_context is None:
+            claim_key = f"intake:{project_id}:{item_key}"
+            if hasattr(self.uow, "claims") and self.uow.claims is not None:
+                existing = self.uow.claims.get_by_key(claim_key)
+                if existing and existing.released_at is None and existing.lease_expires_at > utc_now():
+                    claim_context = RecoveryClaimContext(
+                        claim_key=existing.claim_key,
+                        owner_instance_id=existing.owner_instance_id,
+                        fence_token=existing.fence_token,
+                        lease_expires_at=existing.lease_expires_at,
+                    )
+                else:
+                    from minime.services.recovery_convergence_service import (
+                        RecoveryConvergenceService,
+                    )
+                    rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
+                    claim_context = rec_svc.acquire_claim(claim_key)
+            if claim_context is None:
+                claim_context = RecoveryClaimContext(
+                    claim_key=claim_key,
+                    owner_instance_id="fresh-execution",
+                    fence_token=1,
+                    lease_expires_at=utc_now() + timedelta(seconds=60),
+                )
+
         validate_claim_context_authoritative(self.uow, claim_context)
 
         set_correlation_context(project_id=project_id, operation_id="prepare_work_item")

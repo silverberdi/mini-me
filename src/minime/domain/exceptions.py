@@ -30,3 +30,6 @@ class LifecycleTransitionConflictError(LifecycleTransitionError):
 class StaleClaimError(LifecycleTransitionError):
     """Raised when an operation or lifecycle result application is rejected due to a stale or expired recovery claim fence."""
 
+
+class MissingRecoveryClaimContextError(StaleClaimError):
+    """Raised when a protected recovery/continuation primitive is invoked without a valid RecoveryClaimContext."""

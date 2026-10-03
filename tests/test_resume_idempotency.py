@@ -11,8 +11,12 @@ def test_resume_uses_deterministic_key_and_does_not_duplicate_event(in_memory_uo
         in_memory_uow.orchestration_runs.get_by_id(run_id)
     )
 
-    service.resume("run-1")
-    service.resume("run-1")
+    from minime.services.recovery_convergence_service import RecoveryConvergenceService
+    rec_svc = RecoveryConvergenceService(in_memory_uow)
+    claim_ctx = rec_svc.acquire_claim("run:run-1")
+
+    service.resume("run-1", claim_context=claim_ctx)
+    service.resume("run-1", claim_context=claim_ctx)
 
     events = in_memory_uow.orchestration_stage_events.list_by_run("run-1")
     assert len(events) == 1

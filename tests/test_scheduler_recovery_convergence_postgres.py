@@ -1133,4 +1133,145 @@ def test_gr13_adversarial_slow_io_fence_expiration_and_successor_adoption(pg_ses
     session.close()
 
 
+# ============================================================================
+# Root Cause 1: Missing RecoveryClaimContext Fails Closed
+# ============================================================================
+def test_root_cause_1_missing_claim_context_fails_closed(pg_session_factory: sessionmaker[Session]):
+    """Missing RecoveryClaimContext must fail closed with MissingRecoveryClaimContextError."""
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "rc1-change")
+    uow = PostgresPersistenceUnitOfWork(session)
 
+    run = OrchestrationRun(
+        run_id="run-rc1",
+        project_id=project_id,
+        change_name=change_name,
+        base_sha="15e55c515ae917c2f0330809f0d9e44d49bce12b",
+        current_stage=OrchestrationStage.ADMITTED,
+        created_at=utc_now(),
+    )
+    uow.orchestration_runs.save(run)
+    session.commit()
+
+    from minime.domain.exceptions import MissingRecoveryClaimContextError
+    from minime.domain.models import validate_claim_context_authoritative
+    from minime.services.saga_engine import SagaEngine
+
+    saga_engine = SagaEngine(uow)
+
+    with pytest.raises(MissingRecoveryClaimContextError):
+        validate_claim_context_authoritative(uow, None)
+
+    with pytest.raises(MissingRecoveryClaimContextError):
+        saga_engine.execute_fenced_external_action(
+            claim_context=None,
+            action_key="action-rc1",
+            action_type=ExternalActionType.ISSUE_CLOSE,
+            target_identity=change_name,
+            request_fingerprint="fp-rc1",
+            run_id="run-rc1",
+            mutation_fn=lambda: None,
+        )
+
+    session.close()
+
+
+# ============================================================================
+# Root Cause 4: Cross-Parent Action Dispatch Rejected
+# ============================================================================
+def test_root_cause_4_cross_parent_action_dispatch_rejected(pg_session_factory: sessionmaker[Session]):
+    """commit_fenced_dispatch_intent must reject action belonging to parent A when dispatched under claim for parent B."""
+    session = pg_session_factory()
+    project_id, change_a = _seed_base_project_and_change(session, "rc4-change-a")
+    _, change_b = _seed_base_project_and_change(session, "rc4-change-b")
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    rec_svc = RecoveryConvergenceService(uow, owner_instance_id="worker-rc4")
+
+    run_a = OrchestrationRun(
+        run_id="run-rc4-a",
+        project_id=project_id,
+        change_name=change_a,
+        base_sha="15e55c515ae917c2f0330809f0d9e44d49bce12b",
+        current_stage=OrchestrationStage.ADMITTED,
+        created_at=utc_now(),
+    )
+    run_b = OrchestrationRun(
+        run_id="run-rc4-b",
+        project_id=project_id,
+        change_name=change_b,
+        base_sha="15e55c515ae917c2f0330809f0d9e44d49bce12b",
+        current_stage=OrchestrationStage.ADMITTED,
+        created_at=utc_now(),
+    )
+    uow.orchestration_runs.save(run_a)
+    uow.orchestration_runs.save(run_b)
+
+    act_a = OrchestrationExternalAction(
+        action_key="act-rc4-a",
+        run_id="run-rc4-a",
+        action_type=ExternalActionType.ISSUE_CLOSE,
+        target_identity=change_a,
+        request_fingerprint="fp-rc4",
+        status=ExternalActionStatus.RESERVED,
+        created_at=utc_now(),
+    )
+    uow.orchestration_external_actions.reserve(act_a)
+    session.commit()
+
+    # Acquire claim for Run B
+    claim_b = rec_svc.acquire_claim("run:run-rc4-b", lease_seconds=60)
+    assert claim_b is not None
+
+    # Try to commit dispatch intent for Action A under Claim B -> must raise ValueError
+    with pytest.raises(ValueError, match="Cross-parent action dispatch rejected"):
+        uow.claims.commit_fenced_dispatch_intent(
+            claim_key=claim_b.claim_key,
+            owner_instance_id=claim_b.owner_instance_id,
+            fence_token=claim_b.fence_token,
+            action_key="act-rc4-a",
+        )
+
+    session.close()
+
+
+# ============================================================================
+# Root Cause 5: Atomic Fenced SQL Update Rejects Stale Claim
+# ============================================================================
+def test_root_cause_5_atomic_fenced_sql_update_stale_claim(pg_session_factory: sessionmaker[Session]):
+    """fenced stage/phase SQL update must affect 0 rows and raise StaleClaimError when claim is stale or released."""
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "rc5-change")
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    rec_svc = RecoveryConvergenceService(uow, owner_instance_id="worker-rc5")
+
+    run = OrchestrationRun(
+        run_id="run-rc5",
+        project_id=project_id,
+        change_name=change_name,
+        base_sha="15e55c515ae917c2f0330809f0d9e44d49bce12b",
+        current_stage=OrchestrationStage.ADMITTED,
+        created_at=utc_now(),
+    )
+    uow.orchestration_runs.save(run)
+    session.commit()
+
+    claim = rec_svc.acquire_claim("run:run-rc5", lease_seconds=60)
+    assert claim is not None
+
+    # Release claim so it becomes invalid/released
+    rec_svc.release_claim(claim)
+    session.commit()
+
+    # Attempting update_stage with released claim context must raise StaleClaimError
+    from minime.domain.exceptions import StaleClaimError
+    with pytest.raises(StaleClaimError):
+        uow.orchestration_runs.update_stage(
+            run_id="run-rc5",
+            current_stage=OrchestrationStage.PREPARING_PR,
+            resumable_stage=OrchestrationStage.PREPARING_PR,
+            claim_context=claim,
+        )
+
+    session.close()
