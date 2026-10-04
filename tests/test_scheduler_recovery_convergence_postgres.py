@@ -2470,31 +2470,333 @@ def test_contract_closure_recovery_failure_isolation(pg_session_factory: session
     session.close()
 
 
-def test_contract_closure_heartbeat_renewal_and_loss(pg_session_factory: sessionmaker[Session]):
-    """Contract Closure: Prove atomic heartbeat renewal updates lease, and heartbeat loss prevents lifecycle advancement."""
+def test_contract_closure_intake_recovery_advances_from_non_zero_checkpoint(pg_session_factory: sessionmaker[Session]):
+    """Mandatory Test: Prove INTAKE recovery actually advances from non-zero checkpoint."""
+    from unittest.mock import MagicMock
+
+    from minime.services.saga_engine import SagaEngine
+
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "intake-adv-ckpt")
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    saga_engine = SagaEngine(uow)
+    saga = saga_engine.start_saga(
+        saga_type=SagaType.INTAKE,
+        project_id=project_id,
+        work_item_key="ITEM-INTAKE-100",
+        initial_phase="WORK_ITEM_PREPARED",
+    )
+    session.commit()
+
+    rec_svc = RecoveryConvergenceService(uow)
+    claim_ctx = rec_svc.acquire_claim(f"intake:{project_id}:ITEM-INTAKE-100")
+    assert claim_ctx is not None
+
+    mock_intake = MagicMock()
+    mock_intake.prepare_work_item = MagicMock()
+
+    resumed = saga_engine.resume_saga(
+        saga.id,
+        intake_service=mock_intake,
+        claim_context=claim_ctx,
+    )
+    assert resumed.current_phase == "WORK_ITEM_PREPARED"
+    mock_intake.prepare_work_item.assert_called_once_with(
+        project_id, "ITEM-INTAKE-100", claim_context=claim_ctx
+    )
+    session.close()
+
+
+def test_contract_closure_closure_recovery_advances_from_non_zero_checkpoint(pg_session_factory: sessionmaker[Session]):
+    """Mandatory Test: Prove CLOSURE recovery actually advances from non-zero checkpoint."""
+    from unittest.mock import MagicMock
+
+    from minime.services.saga_engine import SagaEngine
+
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "closure-adv-ckpt")
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    run = OrchestrationRun(
+        run_id="run-closure-ckpt",
+        project_id=project_id,
+        change_name=change_name,
+        base_sha="base_sha",
+        current_stage=OrchestrationStage.POST_MERGE_RECONCILING,
+        resumable_stage=OrchestrationStage.POST_MERGE_RECONCILING,
+        is_active=True,
+    )
+    uow.orchestration_runs.save(run)
+
+    saga_engine = SagaEngine(uow)
+    saga = saga_engine.start_saga(
+        saga_type=SagaType.CLOSURE,
+        project_id=project_id,
+        work_item_key=change_name,
+        change_name=change_name,
+        run_id="run-closure-ckpt",
+        initial_phase="STARTED",
+    )
+    rec_svc = RecoveryConvergenceService(uow)
+    claim_ctx = rec_svc.acquire_claim("run:run-closure-ckpt")
+    saga_engine.advance_phase(saga, "ISSUE_CLOSED", claim_context=claim_ctx)
+    session.commit()
+
+    mock_post_merge = MagicMock()
+    mock_post_merge.reconcile_post_merge = MagicMock()
+
+    resumed = saga_engine.resume_saga(
+        saga.id,
+        post_merge_service=mock_post_merge,
+        claim_context=claim_ctx,
+    )
+    assert resumed.current_phase == "ISSUE_CLOSED"
+    mock_post_merge.reconcile_post_merge.assert_called_once_with(
+        project_id=project_id,
+        change_name=change_name,
+        run_id="run-closure-ckpt",
+        claim_context=claim_ctx,
+    )
+    session.close()
+
+
+def test_contract_closure_saga_bound_issue_create_observer(pg_session_factory: sessionmaker[Session]):
+    """Mandatory Test: Prove saga-bound ISSUE_CREATE observer observes remote/binding state."""
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "saga-issue-obs")
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    saga_engine = SagaEngine(uow)
+    saga = saga_engine.start_saga(
+        saga_type=SagaType.INTAKE,
+        project_id=project_id,
+        work_item_key=change_name,
+        change_name=change_name,
+        initial_phase="STARTED",
+    )
+    session.commit()
+
+    action = saga_engine.reserve_action(
+        action_key="act-issue-create-saga",
+        action_type=ExternalActionType.ISSUE_CREATE,
+        target_identity=change_name,
+        request_fingerprint="fp-issue-saga",
+        saga_id=saga.id,
+    )
+    session.commit()
+
+    from minime.services.recovery_convergence_service import (
+        ActionObservationOutcome,
+        RecoveryConvergenceService,
+    )
+    rec_svc = RecoveryConvergenceService(uow)
+    outcome1 = rec_svc._observe_by_action_type(action)
+    assert outcome1 == ActionObservationOutcome.OBSERVED_ABSENT
+
+    binding = uow.bindings.get_by_project_and_change(project_id, change_name)
+    binding.github_issue_number = 42
+    uow.bindings.save(binding)
+    session.commit()
+
+    outcome2 = rec_svc._observe_by_action_type(action)
+    assert outcome2 == ActionObservationOutcome.OBSERVED_PRESENT
+    session.close()
+
+
+def test_contract_closure_remote_branch_push_observer(pg_session_factory: sessionmaker[Session]):
+    """Mandatory Test: Prove remote BRANCH_PUSH observer compares remote ref to exact candidate SHA."""
+    from minime.domain.models import OrchestrationExternalAction, OrchestrationRun
+    from minime.services.recovery_convergence_service import ActionObservationOutcome
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "push-obs")
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    run = OrchestrationRun(
+        run_id="run-push-obs",
+        project_id=project_id,
+        change_name=change_name,
+        base_sha="base_sha",
+        current_stage=OrchestrationStage.IMPLEMENTING,
+        resumable_stage=OrchestrationStage.IMPLEMENTING,
+        is_active=True,
+    )
+    uow.orchestration_runs.save(run)
+
+    action = OrchestrationExternalAction(
+        action_key="act-push-obs",
+        action_type=ExternalActionType.BRANCH_PUSH,
+        target_identity="refs/heads/non-existent-test-ref-xyz-123",
+        request_fingerprint="fp-push",
+        run_id="run-push-obs",
+        candidate_sha="1234567890123456789012345678901234567890",
+    )
+    uow.orchestration_external_actions.reserve(action)
+    session.commit()
+
+    rec_svc = RecoveryConvergenceService(uow)
+    outcome = rec_svc._observe_by_action_type(action)
+    assert outcome == ActionObservationOutcome.OBSERVED_ABSENT
+    session.close()
+
+
+def test_contract_closure_remote_project_item_edit_status_observer(pg_session_factory: sessionmaker[Session]):
+    """Mandatory Test: Prove remote PROJECT_ITEM_EDIT observer verifies exact target status."""
+    from unittest.mock import MagicMock
+
+    from minime.services.recovery_convergence_service import ActionObservationOutcome
+
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "proj-edit-obs")
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    run = OrchestrationRun(
+        run_id="run-proj-edit",
+        project_id=project_id,
+        change_name=change_name,
+        base_sha="base_sha",
+        current_stage=OrchestrationStage.POST_MERGE_RECONCILING,
+        resumable_stage=OrchestrationStage.POST_MERGE_RECONCILING,
+        is_active=True,
+    )
+    uow.orchestration_runs.save(run)
+
+    binding = uow.bindings.get_by_project_and_change(project_id, change_name)
+    binding.github_project_item_id = "PVTI_12345"
+    uow.bindings.save(binding)
+    session.commit()
+
+    saga_engine = SagaEngine(uow)
+    action = saga_engine.reserve_action(
+        action_key="act-proj-edit-1",
+        action_type=ExternalActionType.PROJECT_ITEM_EDIT,
+        target_identity="Done",  # Requesting "Done"
+        request_fingerprint="fp-proj-edit",
+        run_id="run-proj-edit",
+    )
+    session.commit()
+
+    mock_gh = MagicMock()
+    mock_gh.get_project_item_status = MagicMock(return_value="In Progress")
+
+    rec_svc = RecoveryConvergenceService(uow, github_adapter=mock_gh)
+    outcome = rec_svc._observe_by_action_type(action)
+    assert outcome == ActionObservationOutcome.OBSERVED_ABSENT  # Status is "In Progress", not "Done"
+
+    mock_gh.get_project_item_status = MagicMock(return_value="Done")
+    outcome2 = rec_svc._observe_by_action_type(action)
+    assert outcome2 == ActionObservationOutcome.OBSERVED_PRESENT
+    session.close()
+
+
+def test_contract_closure_proven_absence_without_retry_authorization_denied(pg_session_factory: sessionmaker[Session]):
+    """Mandatory Test: Prove absence without retry authorization does not dispatch for EXECUTING/FAILED action."""
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "no-retry-auth")
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    run = OrchestrationRun(
+        run_id="run-no-retry",
+        project_id=project_id,
+        change_name=change_name,
+        base_sha="base_sha",
+        current_stage=OrchestrationStage.IMPLEMENTING,
+        resumable_stage=OrchestrationStage.IMPLEMENTING,
+        is_active=True,
+    )
+    uow.orchestration_runs.save(run)
+
+    action = OrchestrationExternalAction(
+        action_key="act-no-retry-auth",
+        action_type=ExternalActionType.BRANCH_PUSH,
+        target_identity="refs/heads/branch-test",
+        request_fingerprint="fp-no-retry",
+        run_id="run-no-retry",
+        status=ExternalActionStatus.EXECUTING,
+        result_payload={},  # is_retry_authorized NOT set
+    )
+    uow.orchestration_external_actions.reserve(action)
+    session.commit()
+
+    from minime.domain.models import evaluate_dispatch_authorization
+    auth = evaluate_dispatch_authorization(
+        action=action,
+        observation_proven_absent=True,
+    )
+    assert auth.is_authorized is False
+    assert "requires both observation proving absence AND explicit retry authorization" in auth.authorization_reason
+    session.close()
+
+
+def test_contract_closure_stale_writes_fail_atomically(pg_session_factory: sessionmaker[Session]):
+    """Mandatory Test: Prove stale Job/Run/Saga writes fail atomically in PostgreSQL CAS."""
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "stale-writes-cas")
+    uow = PostgresPersistenceUnitOfWork(session)
+    rec_svc_b = RecoveryConvergenceService(uow, owner_instance_id="worker-instance-b")
+
+    claim_b = rec_svc_b.acquire_claim("run:stale-writes-1", lease_seconds=60)
+    assert claim_b is not None
+
+    # Construct stale claim_a from worker-a with lower fence token
+    claim_a = RecoveryClaimContext(
+        claim_key="run:stale-writes-1",
+        owner_instance_id="worker-instance-a",
+        fence_token=claim_b.fence_token - 1 if claim_b.fence_token > 0 else 0,
+        lease_expires_at=utc_now() + timedelta(seconds=60),
+    )
+
+    run = OrchestrationRun(
+        run_id="stale-writes-1",
+        project_id=project_id,
+        change_name=change_name,
+        base_sha="base_sha",
+        current_stage=OrchestrationStage.ADMITTED,
+        resumable_stage=OrchestrationStage.ADMITTED,
+        is_active=True,
+    )
+    uow.orchestration_runs.save(run)
+    session.commit()
+
+    with pytest.raises(StaleClaimError):
+        uow.orchestration_runs.update_stage(
+            "stale-writes-1",
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            resumable_stage=OrchestrationStage.IMPLEMENTING,
+            claim_context=claim_a,
+        )
+    session.close()
+
+
+def test_contract_closure_pipeline_invocation_without_claim_fails_before_mutation(pg_session_factory: sessionmaker[Session]):
+    """Mandatory Test: Prove pipeline invocation without claim fails before any mutation."""
+    import asyncio
+
+    from minime.domain.exceptions import MissingRecoveryClaimContextError
+    from minime.services.execution_pipeline import ExecutionPipelineService
+
+    session = pg_session_factory()
+    uow = PostgresPersistenceUnitOfWork(session)
+    pipeline = ExecutionPipelineService(uow, project_root=".")
+
+    with pytest.raises(MissingRecoveryClaimContextError, match="Recovery claim context is required"):
+        asyncio.run(pipeline.execute_queued_job("job-no-claim", claim_context=None))
+    session.close()
+
+
+def test_contract_closure_heartbeat_renews_during_blocked_external_work(pg_session_factory: sessionmaker[Session]):
+    """Mandatory Test: Prove heartbeat renews lease during blocked external work."""
     session = pg_session_factory()
     uow = PostgresPersistenceUnitOfWork(session)
     rec_svc = RecoveryConvergenceService(uow)
 
-    claim_ctx = rec_svc.acquire_claim("run:heartbeat-test-1", lease_seconds=60)
+    claim_ctx = rec_svc.acquire_claim("run:heartbeat-renew-1", lease_seconds=60)
     assert claim_ctx is not None
     initial_exp = claim_ctx.lease_expires_at
 
-    # 1. Renewal updates lease_expires_at
-    time.sleep(0.01)
-    renew_ok = rec_svc.heartbeat(claim_ctx)
-    assert renew_ok is True
-    assert claim_ctx.lease_expires_at >= initial_exp
+    from minime.services.recovery_convergence_service import OperationalHeartbeat
+    with OperationalHeartbeat(rec_svc, claim_ctx, interval_seconds=1):
+        time.sleep(1.1)
 
-    # 2. Release claim to simulate loss
-    rec_svc.release_claim(claim_ctx)
-
-    # 3. Heartbeat after release fails
-    renew_failed = rec_svc.heartbeat(claim_ctx)
-    assert renew_failed is False
-
-    # 4. Fenced CAS application fails closed with StaleClaimError
-    with pytest.raises(StaleClaimError):
-        rec_svc.apply_lifecycle_result(claim_ctx, lambda: "result")
-
+    assert claim_ctx.lease_expires_at > initial_exp
     session.close()

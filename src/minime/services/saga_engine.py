@@ -464,10 +464,23 @@ class SagaEngine:
                         if obs_outcome == ExternalOutcome.AMBIGUOUS
                         else ExternalActionStatus.FAILED
                     )
+                    payload = {"retry_safety": "SAFE"} if action.action_type in (
+                        ExternalActionType.BRANCH_PUSH,
+                        ExternalActionType.PR_CREATE,
+                        ExternalActionType.ISSUE_CREATE,
+                        ExternalActionType.ISSUE_CLOSE,
+                        ExternalActionType.PROJECT_ITEM_ADD,
+                        ExternalActionType.PROJECT_ITEM_EDIT,
+                        ExternalActionType.BRANCH_DELETE,
+                        ExternalActionType.WORKTREE_DELETE,
+                        ExternalActionType.OPENSPEC_SYNC,
+                        ExternalActionType.OPENSPEC_ARCHIVE,
+                    ) else None
                     self.record_action_result(
                         action_key=action_key,
                         status=status_enum,
                         error_message=err_msg,
+                        result_payload=payload,
                     )
                     is_valid = _check_fence_valid()
                     return FencedDispatchResult(
@@ -524,17 +537,47 @@ class SagaEngine:
             )
         elif outcome == ExternalOutcome.FAILURE:
             err_msg = err_msg or "Mutation failed."
+            payload = dict(res_data) if isinstance(res_data, dict) else {}
+            if action.action_type in (
+                ExternalActionType.BRANCH_PUSH,
+                ExternalActionType.PR_CREATE,
+                ExternalActionType.ISSUE_CREATE,
+                ExternalActionType.ISSUE_CLOSE,
+                ExternalActionType.PROJECT_ITEM_ADD,
+                ExternalActionType.PROJECT_ITEM_EDIT,
+                ExternalActionType.BRANCH_DELETE,
+                ExternalActionType.WORKTREE_DELETE,
+                ExternalActionType.OPENSPEC_SYNC,
+                ExternalActionType.OPENSPEC_ARCHIVE,
+            ):
+                payload.setdefault("retry_safety", "SAFE")
             self.record_action_result(
                 action_key=action_key,
                 status=ExternalActionStatus.FAILED,
                 error_message=err_msg,
+                result_payload=payload if payload else None,
             )
         else:
             err_msg = err_msg or "Mutation outcome ambiguous."
+            payload = dict(res_data) if isinstance(res_data, dict) else {}
+            if action.action_type in (
+                ExternalActionType.BRANCH_PUSH,
+                ExternalActionType.PR_CREATE,
+                ExternalActionType.ISSUE_CREATE,
+                ExternalActionType.ISSUE_CLOSE,
+                ExternalActionType.PROJECT_ITEM_ADD,
+                ExternalActionType.PROJECT_ITEM_EDIT,
+                ExternalActionType.BRANCH_DELETE,
+                ExternalActionType.WORKTREE_DELETE,
+                ExternalActionType.OPENSPEC_SYNC,
+                ExternalActionType.OPENSPEC_ARCHIVE,
+            ):
+                payload.setdefault("retry_safety", "SAFE")
             self.record_action_result(
                 action_key=action_key,
                 status=ExternalActionStatus.AMBIGUOUS,
                 error_message=err_msg,
+                result_payload=payload if payload else None,
             )
 
         # 7. Post-I/O Fence CAS check to authorize lifecycle application

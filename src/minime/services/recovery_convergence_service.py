@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import threading
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
@@ -58,6 +59,53 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_LEASE_SECONDS = 60
 DEFAULT_HEARTBEAT_SECONDS = 15
+
+
+class OperationalHeartbeat:
+    """Async/sync operational heartbeat for long-running claimed tasks."""
+
+    def __init__(
+        self,
+        recovery_service: RecoveryConvergenceService,
+        claim_context: RecoveryClaimContext,
+        interval_seconds: int = 15,
+    ):
+        self.recovery_service = recovery_service
+        self.claim_context = claim_context
+        self.interval_seconds = interval_seconds
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.heartbeat_failed = False
+
+    def start(self) -> OperationalHeartbeat:
+        def _run():
+            while not self._stop_event.wait(self.interval_seconds):
+                try:
+                    success = self.recovery_service.heartbeat(self.claim_context)
+                    if not success:
+                        self.heartbeat_failed = True
+                        logger.warning(
+                            "Heartbeat renewal failed for claim '%s'; worker is now stale.",
+                            self.claim_context.claim_key,
+                        )
+                        break
+                except Exception as exc:
+                    logger.warning("Heartbeat error for claim '%s': %s", self.claim_context.claim_key, exc)
+
+        self._thread = threading.Thread(target=_run, daemon=True)
+        self._thread.start()
+        return self
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
+
+    def __enter__(self) -> OperationalHeartbeat:
+        return self.start()
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.stop()
 
 
 class RecoveryConvergenceService:
@@ -200,7 +248,7 @@ class RecoveryConvergenceService:
             else []
         )
         checks_passed = len(check_results) > 0 and all(
-            (not getattr(c, "candidate_sha", None) or getattr(c, "candidate_sha") == job.candidate_sha)
+            getattr(c, "candidate_sha", None) == job.candidate_sha
             and c.exit_code == 0
             for c in check_results
         )
@@ -220,7 +268,7 @@ class RecoveryConvergenceService:
             reviews = []
 
         review_passed = any(
-            (not getattr(r, "candidate_sha", None) or getattr(r, "candidate_sha") == job.candidate_sha)
+            getattr(r, "candidate_sha", None) == job.candidate_sha
             and r.status == ReviewStatus.REVIEW_COMPLETED
             and r.verdict == ReviewVerdict.READY_TO_MERGE
             for r in reviews
@@ -238,7 +286,7 @@ class RecoveryConvergenceService:
         else:
             audits = []
         audit_passed = review_passed and any(
-            (not getattr(a, "candidate_sha", None) or getattr(a, "candidate_sha") == job.candidate_sha)
+            getattr(a, "candidate_sha", None) == job.candidate_sha
             and a.status == AuditStatus.AUDIT_COMPLETED
             and not any(
                 f.severity in (AuditFindingSeverity.CRITICAL, AuditFindingSeverity.HIGH, AuditFindingSeverity.BLOCKER)
@@ -632,11 +680,23 @@ class RecoveryConvergenceService:
             return ActionObservationOutcome.UNOBSERVABLE
 
         elif atype == ExternalActionType.ISSUE_CREATE:
-            run = self.uow.orchestration_runs.get_by_id(action.run_id) if action.run_id else None
-            if run:
-                binding = self.uow.bindings.get_by_project_and_change(run.project_id, run.change_name)
+            project_id = None
+            change_name = None
+            if action.run_id:
+                run = self.uow.orchestration_runs.get_by_id(action.run_id)
+                if run:
+                    project_id = run.project_id
+                    change_name = run.change_name
+            elif action.saga_id:
+                saga = self.uow.durable_sagas.get_by_id(action.saga_id)
+                if saga:
+                    project_id = saga.project_id
+                    change_name = saga.change_name or saga.work_item_key
+
+            if project_id and change_name:
+                binding = self.uow.bindings.get_by_project_and_change(project_id, change_name)
                 if binding and binding.github_issue_number:
-                    project = self.uow.projects.get_by_id(run.project_id)
+                    project = self.uow.projects.get_by_id(project_id)
                     if project and project.repository and getattr(self, "github_adapter", None):
                         try:
                             issue = self.github_adapter.get_issue(project.repository, binding.github_issue_number)
@@ -651,12 +711,24 @@ class RecoveryConvergenceService:
             return ActionObservationOutcome.UNOBSERVABLE
 
         elif atype == ExternalActionType.ISSUE_CLOSE:
-            run = self.uow.orchestration_runs.get_by_id(action.run_id) if action.run_id else None
-            if run:
-                binding = self.uow.bindings.get_by_project_and_change(run.project_id, run.change_name)
+            project_id = None
+            change_name = None
+            if action.run_id:
+                run = self.uow.orchestration_runs.get_by_id(action.run_id)
+                if run:
+                    project_id = run.project_id
+                    change_name = run.change_name
+            elif action.saga_id:
+                saga = self.uow.durable_sagas.get_by_id(action.saga_id)
+                if saga:
+                    project_id = saga.project_id
+                    change_name = saga.change_name or saga.work_item_key
+
+            if project_id and change_name:
+                binding = self.uow.bindings.get_by_project_and_change(project_id, change_name)
                 if binding and binding.github_issue_number:
                     try:
-                        project = self.uow.projects.get_by_id(run.project_id)
+                        project = self.uow.projects.get_by_id(project_id)
                         if project and project.repository and getattr(self, "github_adapter", None):
                             issue = self.github_adapter.get_issue(project.repository, binding.github_issue_number)
                             if issue and issue.get("state") == "closed":
@@ -670,9 +742,21 @@ class RecoveryConvergenceService:
             return ActionObservationOutcome.UNOBSERVABLE
 
         elif atype == ExternalActionType.PROJECT_ITEM_ADD:
-            run = self.uow.orchestration_runs.get_by_id(action.run_id) if action.run_id else None
-            if run:
-                binding = self.uow.bindings.get_by_project_and_change(run.project_id, run.change_name)
+            project_id = None
+            change_name = None
+            if action.run_id:
+                run = self.uow.orchestration_runs.get_by_id(action.run_id)
+                if run:
+                    project_id = run.project_id
+                    change_name = run.change_name
+            elif action.saga_id:
+                saga = self.uow.durable_sagas.get_by_id(action.saga_id)
+                if saga:
+                    project_id = saga.project_id
+                    change_name = saga.change_name or saga.work_item_key
+
+            if project_id and change_name:
+                binding = self.uow.bindings.get_by_project_and_change(project_id, change_name)
                 if binding and binding.github_project_item_id:
                     return ActionObservationOutcome.OBSERVED_PRESENT
                 elif binding and not binding.github_project_item_id:
@@ -680,10 +764,30 @@ class RecoveryConvergenceService:
             return ActionObservationOutcome.UNOBSERVABLE
 
         elif atype == ExternalActionType.PROJECT_ITEM_EDIT:
-            run = self.uow.orchestration_runs.get_by_id(action.run_id) if action.run_id else None
-            if run:
-                binding = self.uow.bindings.get_by_project_and_change(run.project_id, run.change_name)
+            project_id = None
+            change_name = None
+            if action.run_id:
+                run = self.uow.orchestration_runs.get_by_id(action.run_id)
+                if run:
+                    project_id = run.project_id
+                    change_name = run.change_name
+            elif action.saga_id:
+                saga = self.uow.durable_sagas.get_by_id(action.saga_id)
+                if saga:
+                    project_id = saga.project_id
+                    change_name = saga.change_name or saga.work_item_key
+
+            if project_id and change_name:
+                binding = self.uow.bindings.get_by_project_and_change(project_id, change_name)
                 if binding and binding.github_project_item_id:
+                    if getattr(self, "github_adapter", None) and hasattr(self.github_adapter, "get_project_item_status"):
+                        try:
+                            status = self.github_adapter.get_project_item_status(binding.github_project_item_id)
+                            if status == action.target_identity:
+                                return ActionObservationOutcome.OBSERVED_PRESENT
+                            return ActionObservationOutcome.OBSERVED_ABSENT
+                        except Exception:
+                            return ActionObservationOutcome.UNOBSERVABLE
                     return ActionObservationOutcome.OBSERVED_PRESENT
                 elif binding and not binding.github_project_item_id:
                     return ActionObservationOutcome.OBSERVED_ABSENT

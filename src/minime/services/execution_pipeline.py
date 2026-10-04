@@ -295,10 +295,6 @@ class ExecutionPipelineService:
         claim_context: RecoveryClaimContext | None = None,
     ) -> Job:
         job = self.queue_job(project_id, change_name)
-        if claim_context is None:
-            from minime.services.recovery_convergence_service import RecoveryConvergenceService
-            rec_svc = RecoveryConvergenceService(self.uow)
-            claim_context = rec_svc.acquire_claim(f"job:{job.job_id}")
         return await self.execute_queued_job(job.job_id, claim_context=claim_context)
 
     async def execute_queued_job(
@@ -308,11 +304,6 @@ class ExecutionPipelineService:
         claim_context: RecoveryClaimContext | None = None,
     ) -> Job:
         from minime.domain.models import validate_claim_context_authoritative
-
-        if claim_context is None:
-            from minime.services.recovery_convergence_service import RecoveryConvergenceService
-            rec_svc = RecoveryConvergenceService(self.uow)
-            claim_context = rec_svc.acquire_claim(f"job:{job_id}")
 
         validate_claim_context_authoritative(self.uow, claim_context)
 

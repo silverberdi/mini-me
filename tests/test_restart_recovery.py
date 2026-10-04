@@ -181,6 +181,7 @@ def test_restart_recovery_preserves_completed_checkpoint(in_memory_uow, tmp_path
         exit_code=0,
         duration_ms=10,
         output_snippet="ok",
+        candidate_sha="abc1234",
     )
     in_memory_uow.check_results.save(check)
 

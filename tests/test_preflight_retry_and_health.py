@@ -2,6 +2,8 @@
 # corrective-retry budget or degrade provider health, for BOTH implementer and
 # reviewer roles.
 
+from datetime import timedelta
+
 import pytest
 from tests.test_execution_pipeline import FakeWorktreeManager, seed_ready_change
 
@@ -12,6 +14,7 @@ from minime.domain.enums import (
     JobStatus,
     ProviderHealthStatus,
 )
+from minime.domain.models import RecoveryClaimContext, utc_now
 from minime.services.continuation_engine import ContinuationContext, ContinuationEngine
 from minime.services.execution_pipeline import ExecutionPipelineService
 from minime.services.implementer_runner import ImplementerResult, MockImplementerRunner
@@ -60,6 +63,24 @@ class _PreflightFailReviewerRunner:
         )
 
 
+def _make_test_claim_context(uow=None):
+    if uow is not None and hasattr(uow, "claims") and uow.claims is not None:
+        c = uow.claims.acquire_or_reacquire("run:test-claim-key", owner_instance_id="test-owner-id")
+        if c:
+            return RecoveryClaimContext(
+                claim_key=c.claim_key,
+                owner_instance_id=c.owner_instance_id,
+                fence_token=c.fence_token,
+                lease_expires_at=c.lease_expires_at,
+            )
+    return RecoveryClaimContext(
+        claim_key="test-claim-key",
+        owner_instance_id="test-owner-id",
+        fence_token=1,
+        lease_expires_at=utc_now() + timedelta(hours=1),
+    )
+
+
 @pytest.mark.asyncio
 async def test_implementer_preflight_failure_no_retry_and_no_health_degradation(
     in_memory_uow, tmp_path
@@ -72,7 +93,9 @@ async def test_implementer_preflight_failure_no_retry_and_no_health_degradation(
         worktree_manager=FakeWorktreeManager(tmp_path),
     )
 
-    job = await service.run_job("mini-me", "synthetic-pipeline-change")
+    job = await service.run_job(
+        "mini-me", "synthetic-pipeline-change", claim_context=_make_test_claim_context(in_memory_uow)
+    )
 
     assert job.status == JobStatus.NEEDS_HUMAN
     health = in_memory_uow.provider_health.get_by_provider("codex")
@@ -96,7 +119,9 @@ async def test_reviewer_preflight_failure_no_retry_and_no_health_degradation(
         worktree_manager=FakeWorktreeManager(tmp_path),
     )
 
-    job = await service.run_job("mini-me", "synthetic-pipeline-change")
+    job = await service.run_job(
+        "mini-me", "synthetic-pipeline-change", claim_context=_make_test_claim_context(in_memory_uow)
+    )
 
     assert job.status == JobStatus.NEEDS_HUMAN
     health = in_memory_uow.provider_health.get_by_provider("antigravity")

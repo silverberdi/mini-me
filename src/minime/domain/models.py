@@ -1868,18 +1868,23 @@ def evaluate_dispatch_authorization(
         ExternalActionStatus.UNKNOWN,
         ExternalActionStatus.AMBIGUOUS,
     ):
-        if observation_proven_absent:
+        is_retry_auth = (
+            action.result_payload.get("is_retry_authorized") is True
+            or action.result_payload.get("retry_safety") in ("SAFE", "RETRY_SAFE")
+            or getattr(action, "original_mutation_retry_authorized", False) is True
+        )
+        if observation_proven_absent and is_retry_auth:
             return DispatchAuthorization(
                 action_key=action.action_key,
                 is_authorized=True,
-                authorization_reason=f"Authorized retry for {action.status.value} action following observation proving absence of remote effect.",
+                authorization_reason=f"Authorized retry for {action.status.value} action following observation proving absence of remote effect and explicit retry authorization.",
                 is_retry=True,
                 observation_proven_absent=True,
             )
         return DispatchAuthorization(
             action_key=action.action_key,
             is_authorized=False,
-            authorization_reason=f"Action in {action.status.value} state requires observation proving absence before repeat.",
+            authorization_reason=f"Action in {action.status.value} state requires both observation proving absence AND explicit retry authorization before repeat.",
         )
 
     return DispatchAuthorization(

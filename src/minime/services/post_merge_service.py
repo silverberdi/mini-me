@@ -547,17 +547,20 @@ class PostMergeReconciliationService:
                     pr_number,
                     change_name,
                 )
-                now = utc_now()
-                run.is_active = False
-                run.stop_outcome = OrchestrationStopOutcome.CANCELLED
-                run.stop_reason = f"Pull request #{pr_number} was closed without merge."
-                run.updated_at = now
-                self.uow.orchestration_runs.save(run)
+                self.uow.orchestration_runs.update_stop_outcome(
+                    run.run_id,
+                    stop_outcome=OrchestrationStopOutcome.CANCELLED,
+                    stop_reason=f"Pull request #{pr_number} was closed without merge.",
+                    is_active=False,
+                    claim_context=claim_context,
+                )
                 if job and job.status != JobStatus.COMPLETED:
-                    job.status = JobStatus.CANCELLED
-                    job.error_message = run.stop_reason
-                    job.updated_at = now
-                    self.uow.jobs.save(job)
+                    self.uow.jobs.transition(
+                        job.job_id,
+                        new_status=JobStatus.CANCELLED.value,
+                        error_message=f"Pull request #{pr_number} was closed without merge.",
+                        claim_context=claim_context,
+                    )
                 self._clean_worktree_and_branches(project_id, change_name, job_id)
                 self._reconcile_change_and_backlog_item(project_id, change_name)
                 self.uow.commit()
@@ -651,11 +654,18 @@ class PostMergeReconciliationService:
         self.uow.commit()
 
         # 4. Stage Transition to POST_MERGE_RECONCILING
-        run.current_stage = OrchestrationStage.POST_MERGE_RECONCILING
         if job and job.status != JobStatus.COMPLETED:
-            job.status = JobStatus.POST_MERGE_RECONCILING
-            self.uow.jobs.save(job)
-        self.uow.orchestration_runs.save(run)
+            self.uow.jobs.transition(
+                job.job_id,
+                new_status=JobStatus.POST_MERGE_RECONCILING.value,
+                claim_context=claim_context,
+            )
+        self.uow.orchestration_runs.update_stage(
+            run.run_id,
+            current_stage=OrchestrationStage.POST_MERGE_RECONCILING,
+            resumable_stage=OrchestrationStage.POST_MERGE_RECONCILING,
+            claim_context=claim_context,
+        )
         self.uow.commit()
 
         # 5. GitHub Issue Closure with fenced dispatch intent
@@ -1066,13 +1076,15 @@ class PostMergeReconciliationService:
                 + ", ".join(unverified_phases)
                 + " verification evidence."
             )
-            run.stop_outcome = OrchestrationStopOutcome.WAITING_EXTERNAL
-            run.human_gate = None
-            run.stop_reason = reason
-            run.is_active = True
-            run.updated_at = utc_now()
-            self.uow.orchestration_runs.save(run)
-            self.saga_engine.block_saga(saga, blocking_reason=reason)
+            self.uow.orchestration_runs.update_stop_outcome(
+                run.run_id,
+                stop_outcome=OrchestrationStopOutcome.WAITING_EXTERNAL,
+                human_gate=None,
+                stop_reason=reason,
+                is_active=True,
+                claim_context=claim_context,
+            )
+            self.saga_engine.block_saga(saga, blocking_reason=reason, claim_context=claim_context)
             self.uow.commit()
             return PostMergeReconciliationResult(
                 success=False,
