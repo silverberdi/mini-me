@@ -163,6 +163,20 @@ def test_restart_recovery_preserves_completed_checkpoint(in_memory_uow, tmp_path
     )
     in_memory_uow.projects.save(project)
 
+    in_memory_uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id="run-crash-1",
+            project_id="mini-me",
+            change_name="005-feature",
+            active_job_id="job-crash-1",
+            base_sha="def5678",
+            current_stage=OrchestrationStage.COMPLEMENTARY_REVIEW,
+            current_candidate_sha="abc1234",
+            current_generation=1,
+            is_active=True,
+        )
+    )
+
     job = Job(
         job_id="job-crash-1",
         project_id="mini-me",
@@ -182,6 +196,7 @@ def test_restart_recovery_preserves_completed_checkpoint(in_memory_uow, tmp_path
         duration_ms=10,
         output_snippet="ok",
         candidate_sha="abc1234",
+        candidate_generation=1,
     )
     in_memory_uow.check_results.save(check)
 

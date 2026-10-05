@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from tests.conftest import InMemoryRecoveryClaimRepository
 
 from minime.domain.enums import (
     ChangeStatus,
@@ -44,6 +45,12 @@ def _test_ctx(claim_key: str = "test-claim") -> RecoveryClaimContext:
         fence_token=1,
         lease_expires_at=utc_now() + timedelta(seconds=3600),
     )
+
+
+def _add_recovery_claim_authority(uow: "DummyUOW") -> None:
+    """Give recovery tests an explicit durable claim authority."""
+    uow.claims = InMemoryRecoveryClaimRepository()
+    uow.claims._uow = uow
 
 
 class InMemoryDurableSagaRepository:
@@ -593,6 +600,7 @@ def test_terminal_domain_reconciliation_mode():
 def test_terminal_identity_protection_intake():
     """Verify intake saga for terminal backlog item completes without re-opening work."""
     uow = DummyUOW()
+    _add_recovery_claim_authority(uow)
     engine = SagaEngine(uow)
 
     item = BacklogItem(
@@ -838,6 +846,7 @@ def test_ambiguous_action_without_safe_retry_blocks():
 def test_terminal_intake_recovery_cancels_saga():
     """Verify terminal intake saga transitions to CANCELLED instead of COMPLETED."""
     uow = DummyUOW()
+    _add_recovery_claim_authority(uow)
     engine = SagaEngine(uow)
 
     item = BacklogItem(

@@ -230,10 +230,12 @@ class MockUOW:
         from tests.conftest import (
             InMemoryDurableSagaRepository,
             InMemoryOrchestrationExternalActionRepository,
+            InMemoryRecoveryClaimRepository,
         )
 
         self.durable_sagas = InMemoryDurableSagaRepository()
         self.orchestration_external_actions = InMemoryOrchestrationExternalActionRepository()
+        self.claims = InMemoryRecoveryClaimRepository()
         self.project_managed_repository_bindings = MockBindingRepo()
         self.orchestration_worktree_ownerships = MockWorktreeOwnershipRepo()
         self.projects = MockProjectRepo()
@@ -2832,7 +2834,7 @@ def test_post_merge_reconciliation_refuses_claim_when_cleanup_fails(tmp_dirs):
 
     from minime.services.recovery_convergence_service import RecoveryConvergenceService
     rec_svc = RecoveryConvergenceService(uow)
-    claim_ctx = rec_svc.acquire_claim("post_merge:proj-refuse-6:run-refuse-6")
+    claim_ctx = rec_svc.acquire_claim("run:run-refuse-6")
 
     result = pm_service.reconcile_post_merge(
         "proj-refuse-6", "change-refuse", run_id="run-refuse-6", claim_context=claim_ctx

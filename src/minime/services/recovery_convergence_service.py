@@ -1114,21 +1114,48 @@ class RecoveryConvergenceService:
                     JobStatus.REVIEW_RUNNING,
                     JobStatus.AUDIT_RUNNING,
                 }:
+                    previous_status = job.status
+                    stage_map = {
+                        JobStatus.RUNNING: "implementer",
+                        JobStatus.CHECKS_RUNNING: "checks",
+                        JobStatus.REVIEW_RUNNING: "reviewer",
+                        JobStatus.AUDIT_RUNNING: "auditor",
+                    }
+                    interrupted_stage = stage_map.get(previous_status, "unknown")
                     target_status = self._determine_highest_job_checkpoint(job)
                     if target_status == JobStatus.QUEUED:
-                        self.uow.jobs.transition(
+                        updated = self.uow.jobs.transition(
                             job.job_id,
                             JobStatus.QUEUED.value,
                             error_message="Recovered on daemon restart; re-queued for execution.",
                             claim_context=context,
                         )
                     else:
-                        self.uow.jobs.transition(
+                        updated = self.uow.jobs.transition(
                             job.job_id,
                             target_status.value,
-                            error_message=f"Recovered on daemon restart; preserved completed checkpoint ({target_status.value}).",
+                            error_message=(
+                                "Recovered on daemon restart; preserved completed "
+                                f"checkpoint ({target_status.value})."
+                            ),
                             claim_context=context,
                         )
+                    self.uow.events.save(
+                        Event(
+                            event_type=EventType.JOB_RECOVERED,
+                            project_id=job.project_id,
+                            change_id=job.change_name,
+                            operation_id=job.job_id,
+                            payload={
+                                "job_id": job.job_id,
+                                "new_status": updated.status.value,
+                                "recovered_status": updated.status.value,
+                                "interrupted_stage": interrupted_stage,
+                                "recovery_cycle_id": cycle_id,
+                            },
+                            timestamp=utc_now(),
+                        )
+                    )
 
         if (
             not run.is_active

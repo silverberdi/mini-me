@@ -1517,9 +1517,12 @@ class PostgresJobRepository(JobRepositoryInterface):
         error_message: str | None = None,
         claim_context: RecoveryClaimContext | None = None,
     ) -> Job:
-        # The read establishes the expected lifecycle state; the fenced UPDATE
-        # below repeats it in SQL so a concurrent transition cannot be overwritten.
         stmt = select(JobModel).where(JobModel.id == job_id)
+        # Local lifecycle transitions retain the Stage F row lock.  Recovery
+        # transitions deliberately do not hold that lock: their short,
+        # claim-fenced SQL CAS below is the concurrency boundary.
+        if claim_context is None:
+            stmt = stmt.with_for_update()
         model = self.session.scalars(stmt).first()
         if not model:
             raise ValueError(f"Job '{job_id}' not found.")
