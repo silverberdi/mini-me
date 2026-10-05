@@ -25,7 +25,6 @@ from minime.domain.enums import (
     ExternalActionStatus,
     ExternalActionType,
     ExternalOutcome,
-    ExternalReasonCode,
     HumanGate,
     JobStatus,
     OrchestrationStage,
@@ -42,12 +41,12 @@ from minime.domain.models import (
     Event,
     Job,
     OrchestrationCandidate,
-    OrchestrationExternalAction,
     OrchestrationRun,
     OrchestrationStageEvent,
     OrchestrationStatusView,
     Project,
     ProjectBinding,
+    RecoveryClaimContext,
     generate_uuid,
     utc_now,
 )
@@ -71,6 +70,7 @@ from minime.services.project_service import ProjectService
 from minime.services.provider_policy_service import ProviderPolicyService
 from minime.services.readiness_service import ReadinessService
 from minime.services.review_evidence import build_review_evidence_report, validate_review_authority
+from minime.services.saga_engine import SagaEngine
 from minime.services.task_classifier import TaskClassifier
 from minime.services.validation_authority_service import ValidationAuthorityService
 from minime.services.worktree_manager import WorktreeInfo
@@ -148,6 +148,7 @@ class OrchestrationService:
         validation_service: ValidationAuthorityService | None = None,
         preview_service: ContainerPreviewService | None = None,
         readiness_service: ReadinessService | None = None,
+        saga_engine: SagaEngine | None = None,
     ):
         self.uow = uow
         self.project_root = Path(project_root).resolve()
@@ -174,6 +175,7 @@ class OrchestrationService:
         self.task_classifier = TaskClassifier()
         self.provider_policy = ProviderPolicyService(self.uow)
         self.reconciliation_service = LightweightReconciliationService(self.uow)
+        self.saga_engine = saga_engine or SagaEngine(self.uow)
 
     def _admit_change_in_transaction(
         self,
@@ -421,7 +423,10 @@ class OrchestrationService:
         if not admission.admitted or not admission.run:
             raise ValueError(admission.refusal_reason or "Admission failed")
 
-        return self.drive_coordinator(admission.run.run_id, project_root=project_root)
+        from minime.services.recovery_convergence_service import RecoveryConvergenceService
+        rec_svc = RecoveryConvergenceService(self.uow, project_root=project_root or self.project_root)
+        claim_context = rec_svc.acquire_claim(f"run:{admission.run.run_id}")
+        return self.drive_coordinator(admission.run.run_id, project_root=project_root, claim_context=claim_context)
 
     def resume(
         self,
@@ -429,14 +434,13 @@ class OrchestrationService:
         project_root: str | Path | None = None,
         force: bool = False,
         drain_mode: bool = False,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> OrchestrationRun:
-        """Resume an orchestration run from its persisted resumable checkpoint.
+        """Resume an orchestration run from its persisted resumable checkpoint."""
+        from minime.domain.models import validate_claim_context_authoritative
 
-        ``drain_mode`` permits resuming a WAITING_CAPACITY run even when the primary
-        provider remains unavailable, so the pipeline's canonical bounded drain
-        fallback (OpenRouterEligibilityEvaluator + BudgetService) can continue the
-        in-flight job. It does not bypass the NEEDS_HUMAN gate.
-        """
+        validate_claim_context_authoritative(self.uow, claim_context)
+
         run = self.uow.orchestration_runs.get_for_update(run_id) or self.uow.orchestration_runs.get_by_id(run_id)
         if not run:
             raise ValueError(f"Orchestration run '{run_id}' not found.")
@@ -481,6 +485,11 @@ class OrchestrationService:
                     return run
 
         elif run.stop_outcome == OrchestrationStopOutcome.WAITING_EXTERNAL:
+            if not force:
+                logger.info(
+                    f"Resume for run '{run_id}' skipped: WAITING_EXTERNAL must be resolved by RecoveryConvergenceService observation."
+                )
+                return run
             run.stop_outcome = None
             run.human_gate = None
             run.is_active = True
@@ -540,7 +549,7 @@ class OrchestrationService:
             self.uow.flush()
 
         self.uow.commit()
-        return self.drive_coordinator(run.run_id, project_root=project_root)
+        return self.drive_coordinator(run.run_id, project_root=project_root, claim_context=claim_context)
 
     def resolve_preserved_candidate(
         self,
@@ -549,8 +558,13 @@ class OrchestrationService:
         continue_preserved_candidate: bool = False,
         candidate_ref: str | None = None,
         project_root: str | Path | None = None,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> OrchestrationRun:
         """Resolve a human stop only after proving the immutable candidate ref."""
+        from minime.domain.models import validate_claim_context_authoritative
+
+        validate_claim_context_authoritative(self.uow, claim_context)
+
         if not continue_preserved_candidate:
             raise ValueError("Explicit --continue-preserved-candidate is required.")
         raw_run = self.uow.orchestration_runs.get_for_update(run_id)
@@ -1154,8 +1168,10 @@ class OrchestrationService:
         run.stop_outcome = None
         run.human_gate = None
         self.uow.orchestration_runs.save(run)
-        self.uow.commit()
-        return self.drive_coordinator(run_id, project_root=project_root)
+        from minime.services.recovery_convergence_service import RecoveryConvergenceService
+        rec_svc = RecoveryConvergenceService(self.uow, project_root=project_root or self.project_root)
+        claim_context = rec_svc.acquire_claim(f"run:{run_id}")
+        return self.drive_coordinator(run_id, project_root=project_root, claim_context=claim_context)
 
     def _reconcile_completed_human_integration(
         self,
@@ -1501,11 +1517,16 @@ class OrchestrationService:
         self,
         run_id: str,
         project_root: str | Path | None = None,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> OrchestrationRun:
         """Drive the deterministic stage state machine until a legitimate stop outcome."""
         root = Path(project_root).resolve() if project_root else self.project_root
 
+        from minime.domain.models import validate_claim_context_authoritative
+
         while True:
+            validate_claim_context_authoritative(self.uow, claim_context)
+
             raw_run = self.uow.orchestration_runs.get_for_update(run_id)
             if not isinstance(raw_run, OrchestrationRun):
                 raw_run = self.uow.orchestration_runs.get_by_id(run_id)
@@ -1549,7 +1570,7 @@ class OrchestrationService:
                         reason_code="execution_start",
                         actor="orchestrator",
                     )
-                self._advance_stage(run, OrchestrationStage.PREPARING_EXECUTION)
+                self._advance_stage(run, OrchestrationStage.PREPARING_EXECUTION, claim_context=claim_context)
 
             elif stage == OrchestrationStage.PREPARING_EXECUTION:
                 project = self.uow.projects.get_by_id(run.project_id)
@@ -1602,7 +1623,7 @@ class OrchestrationService:
                     self.uow.orchestration_runs.update_active_job(run.run_id, job.job_id)
                     self.uow.commit()
 
-                self._advance_stage(run, OrchestrationStage.IMPLEMENTING)
+                self._advance_stage(run, OrchestrationStage.IMPLEMENTING, claim_context=claim_context)
 
             elif stage == OrchestrationStage.IMPLEMENTING:
                 job = self.uow.jobs.get_by_id(run.active_job_id)
@@ -1620,12 +1641,13 @@ class OrchestrationService:
 
                 try:
                     execute = self.pipeline.execute_queued_job
-                    if "candidate_generation" in inspect.signature(execute).parameters:
-                        job = run_coroutine_sync(
-                            execute(job.job_id, candidate_generation=run.current_generation)
-                        )
-                    else:
-                        job = run_coroutine_sync(execute(job.job_id))
+                    sig_params = inspect.signature(execute).parameters
+                    kwargs = {}
+                    if "candidate_generation" in sig_params:
+                        kwargs["candidate_generation"] = run.current_generation
+                    if "claim_context" in sig_params:
+                        kwargs["claim_context"] = claim_context
+                    job = run_coroutine_sync(execute(job.job_id, **kwargs))
                 except Exception as exc:
                     redacted_error = redact_secrets(str(exc))
                     logger.exception(
@@ -1685,7 +1707,7 @@ class OrchestrationService:
                     )
                     break
 
-                self._advance_stage(run, OrchestrationStage.EVALUATING_ATTEMPT)
+                self._advance_stage(run, OrchestrationStage.EVALUATING_ATTEMPT, claim_context=claim_context)
 
             elif stage == OrchestrationStage.EVALUATING_ATTEMPT:
                 job = self.uow.jobs.get_by_id(run.active_job_id)
@@ -1749,7 +1771,7 @@ class OrchestrationService:
                     and job.status != JobStatus.CHECKS_FAILED
                 ):
                     # Ready for checks / freeze / review / audit stages
-                    self._advance_stage(run, OrchestrationStage.RUNNING_CHECKS)
+                    self._advance_stage(run, OrchestrationStage.RUNNING_CHECKS, claim_context=claim_context)
                 else:
                     if latest_att and latest_att.continuation_decision is not None:
                         decision = latest_att.continuation_decision
@@ -1772,7 +1794,7 @@ class OrchestrationService:
                             )
                             break
                         # Explicit operator continuation / fresh implementation attempt / checks remediation
-                        self._advance_stage(run, OrchestrationStage.IMPLEMENTING)
+                        self._advance_stage(run, OrchestrationStage.IMPLEMENTING, claim_context=claim_context)
                     elif decision in {
                         ContinuationDecision.CONTINUE_SAME_AGENT,
                         ContinuationDecision.CORRECT_AND_RETRY,
@@ -1793,7 +1815,7 @@ class OrchestrationService:
                                 },
                             )
                             break
-                        self._advance_stage(run, OrchestrationStage.IMPLEMENTING)
+                        self._advance_stage(run, OrchestrationStage.IMPLEMENTING, claim_context=claim_context)
                     elif decision == ContinuationDecision.WAIT_EXTERNAL:
                         self._stop_run(
                             run,
@@ -1821,7 +1843,7 @@ class OrchestrationService:
                         break
                     else:
                         # Verified complete or ready for checks
-                        self._advance_stage(run, OrchestrationStage.RUNNING_CHECKS)
+                        self._advance_stage(run, OrchestrationStage.RUNNING_CHECKS, claim_context=claim_context)
 
             elif stage == OrchestrationStage.RUNNING_CHECKS:
                 job = self.uow.jobs.get_by_id(run.active_job_id)
@@ -1875,11 +1897,11 @@ class OrchestrationService:
                             JobStatus.CHECKS_FAILED.value,
                             error_message="Deterministic checks failed.",
                         )
-                    self._advance_stage(run, OrchestrationStage.EVALUATING_ATTEMPT)
+                    self._advance_stage(run, OrchestrationStage.EVALUATING_ATTEMPT, claim_context=claim_context)
                 else:
                     if job.status in {JobStatus.RUNNING, JobStatus.CHECKS_RUNNING}:
                         self.uow.jobs.transition(job.job_id, JobStatus.CHECKS_PASSED.value)
-                    self._advance_stage(run, OrchestrationStage.FREEZING_CANDIDATE)
+                    self._advance_stage(run, OrchestrationStage.FREEZING_CANDIDATE, claim_context=claim_context)
 
             elif stage == OrchestrationStage.FREEZING_CANDIDATE:
                 job = self.uow.jobs.get_by_id(run.active_job_id)
@@ -1897,7 +1919,7 @@ class OrchestrationService:
                 if not current_candidate:
                     break
 
-                self._advance_stage(run, OrchestrationStage.COMPLEMENTARY_REVIEW)
+                self._advance_stage(run, OrchestrationStage.COMPLEMENTARY_REVIEW, claim_context=claim_context)
 
             elif stage == OrchestrationStage.COMPLEMENTARY_REVIEW:
                 job = self.uow.jobs.get_by_id(run.active_job_id)
@@ -1913,10 +1935,10 @@ class OrchestrationService:
 
                 valid, verdict, reason = self._validate_review_authority(run, job, current_cand)
                 if valid and verdict == ReviewVerdict.READY_TO_MERGE:
-                    self._advance_stage(run, OrchestrationStage.INDEPENDENT_AUDIT)
+                    self._advance_stage(run, OrchestrationStage.INDEPENDENT_AUDIT, claim_context=claim_context)
                 else:
                     # Changes required or invalid/missing review authority -> route to review remediation
-                    self._advance_stage(run, OrchestrationStage.REVIEW_REMEDIATION)
+                    self._advance_stage(run, OrchestrationStage.REVIEW_REMEDIATION, claim_context=claim_context)
 
             elif stage == OrchestrationStage.REVIEW_REMEDIATION:
                 job = self.uow.jobs.get_by_id(run.active_job_id)
@@ -1938,7 +1960,7 @@ class OrchestrationService:
                     )
                     break
                 # Review changes required -> route to continuation remediation attempt
-                self._advance_stage(run, OrchestrationStage.IMPLEMENTING)
+                self._advance_stage(run, OrchestrationStage.IMPLEMENTING, claim_context=claim_context)
 
             elif stage == OrchestrationStage.INDEPENDENT_AUDIT:
                 job = self.uow.jobs.get_by_id(run.active_job_id)
@@ -1954,10 +1976,10 @@ class OrchestrationService:
 
                 valid, is_passing, reason = self._validate_audit_authority(run, job, current_cand)
                 if valid and is_passing:
-                    self._advance_stage(run, OrchestrationStage.PREPARING_PR)
+                    self._advance_stage(run, OrchestrationStage.PREPARING_PR, claim_context=claim_context)
                 else:
                     # Audit failed or missing/invalid audit authority -> route to audit remediation
-                    self._advance_stage(run, OrchestrationStage.AUDIT_REMEDIATION)
+                    self._advance_stage(run, OrchestrationStage.AUDIT_REMEDIATION, claim_context=claim_context)
 
             elif stage == OrchestrationStage.AUDIT_REMEDIATION:
                 job = self.uow.jobs.get_by_id(run.active_job_id)
@@ -1979,7 +2001,7 @@ class OrchestrationService:
                     )
                     break
                 # Audit failed -> feed to continuation governance for corrective remediation
-                self._advance_stage(run, OrchestrationStage.IMPLEMENTING)
+                self._advance_stage(run, OrchestrationStage.IMPLEMENTING, claim_context=claim_context)
 
             elif stage == OrchestrationStage.PREPARING_PR:
                 job = self.uow.jobs.get_by_id(run.active_job_id)
@@ -2006,355 +2028,265 @@ class OrchestrationService:
                         f"PR preparation blocked: no valid passing audit for candidate '{current_cand.candidate_sha}'. Reason: {audit_reason}"
                     )
                     # Cannot prepare PR without authoritative audit -> stay in INDEPENDENT_AUDIT
-                    self._advance_stage(run, OrchestrationStage.INDEPENDENT_AUDIT)
+                    self._advance_stage(run, OrchestrationStage.INDEPENDENT_AUDIT, claim_context=claim_context)
                     continue
 
                 cand_sha = current_cand.candidate_sha
                 gen = current_cand.generation
                 branch_name = f"minime/{run.change_name}"
 
-                # 1. Mutating Git Action: Branch Push
+                # 1. Mutating Git Action: Branch Push under canonical Stage G atomic fenced dispatch intent
                 push_key = f"push:{run.run_id}:gen{gen}:{cand_sha}"
-                push_action = self.uow.orchestration_external_actions.get_by_action_key(push_key)
-                if not push_action:
-                    push_action = OrchestrationExternalAction(
-                        run_id=run.run_id,
-                        action_key=push_key,
-                        action_type=ExternalActionType.BRANCH_PUSH,
-                        target_identity=f"{project.repository}:{branch_name}",
-                        request_fingerprint=f"push:{cand_sha}",
-                        candidate_sha=cand_sha,
-                        generation=gen,
-                        status=ExternalActionStatus.RESERVED,
-                    )
-                    self.uow.orchestration_external_actions.reserve(push_action)
-                    self.uow.commit()
 
-                # Reconcile remote branch head before any push attempt
-                try:
-                    head_res = self.github_adapter.get_remote_branch_head(
-                        repository=str(root),
-                        branch=branch_name,
-                        remote="origin",
-                    )
-                    if head_res.outcome == ExternalOutcome.SUCCESS:
-                        remote_sha = head_res.data
-                    elif (
-                        head_res.outcome == ExternalOutcome.FAILURE
-                        and head_res.reason_code == ExternalReasonCode.NOT_FOUND
-                    ):
-                        remote_sha = None
-                    else:
-                        raise RuntimeError(
-                            head_res.error_message or "Could not observe remote branch head."
+                def _observe_push_branch():
+                    from minime.domain.enums import ExternalOutcome, ExternalReasonCode
+                    from minime.domain.models import ExternalActionResult
+
+                    try:
+                        head_res = self.github_adapter.get_remote_branch_head(
+                            repository=str(root),
+                            branch=branch_name,
+                            remote="origin",
                         )
-                except Exception as exc:
-                    logger.warning(f"Could not observe remote branch '{branch_name}': {exc}")
-                    self._stop_run(
-                        run,
-                        stop_outcome=OrchestrationStopOutcome.WAITING_EXTERNAL,
-                        human_gate=None,
-                        stop_reason=f"Cannot observe remote branch state: {exc}",
-                        stop_details={"action_key": push_key},
+                        if head_res.outcome == ExternalOutcome.SUCCESS:
+                            if head_res.data == cand_sha:
+                                return ExternalActionResult(
+                                    outcome=ExternalOutcome.SUCCESS,
+                                    source_adapter="github",
+                                    reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                                    data=f"refs/heads/{branch_name}",
+                                    external_id=f"refs/heads/{branch_name}",
+                                )
+                            else:
+                                return ExternalActionResult(
+                                    outcome=ExternalOutcome.FAILURE,
+                                    source_adapter="github",
+                                    reason_code=ExternalReasonCode.CONFLICT,
+                                    error_message=f"Remote branch head '{head_res.data}' differs from candidate '{cand_sha}'. REMOTE_BRANCH_MISMATCH",
+                                )
+                        elif (
+                            head_res.outcome == ExternalOutcome.FAILURE
+                            and head_res.reason_code == ExternalReasonCode.NOT_FOUND
+                        ):
+                            return ExternalActionResult(
+                                outcome=ExternalOutcome.FAILURE,
+                                source_adapter="github",
+                                reason_code=ExternalReasonCode.NOT_FOUND,
+                            )
+                        return head_res
+                    except Exception as exc:
+                        logger.warning(f"Could not observe remote branch '{branch_name}': {exc}")
+                        return ExternalActionResult(
+                            outcome=ExternalOutcome.AMBIGUOUS,
+                            source_adapter="github",
+                            error_message=str(exc),
+                        )
+
+                def _mutate_push_branch():
+                    from minime.domain.enums import ExternalOutcome, ExternalReasonCode
+                    from minime.domain.models import ExternalActionResult
+
+                    repository_context, context_error = self._validated_repository_context(
+                        root, project, binding, cand_sha
+                    )
+                    if context_error:
+                        return ExternalActionResult(
+                            outcome=ExternalOutcome.FAILURE,
+                            source_adapter="github",
+                            reason_code=ExternalReasonCode.POLICY_DENIED,
+                            error_message=context_error,
+                        )
+                    res = self.github_adapter.push_branch(
+                        worktree_path=str(repository_context),
+                        remote="origin",
+                        branch=branch_name,
+                        candidate_sha=cand_sha,
+                    )
+                    if res is True or getattr(res, "is_success", False):
+                        return ExternalActionResult(
+                            outcome=ExternalOutcome.SUCCESS,
+                            source_adapter="github",
+                            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                            data=f"refs/heads/{branch_name}",
+                            external_id=f"refs/heads/{branch_name}",
+                        )
+                    return res
+
+                fenced_push_res = self.saga_engine.execute_fenced_external_action(
+                    claim_context=claim_context,
+                    action_key=push_key,
+                    action_type=ExternalActionType.BRANCH_PUSH,
+                    target_identity=f"{project.repository}:{branch_name}",
+                    request_fingerprint=f"push:{cand_sha}",
+                    mutation_fn=_mutate_push_branch,
+                    observation_fn=_observe_push_branch,
+                    run_id=run.run_id,
+                    candidate_sha=cand_sha,
+                )
+
+                if not fenced_push_res or not fenced_push_res.result_application_authorized:
+                    logger.warning(
+                        f"Fenced branch push result application denied for run '{run.run_id}': stale claim."
                     )
                     break
 
-                if remote_sha is not None:
-                    if remote_sha == cand_sha:
-                        # Remote already matches exact audited candidate SHA -> mark COMPLETED, ZERO second push
-                        if push_action.status != ExternalActionStatus.COMPLETED:
-                            self.uow.orchestration_external_actions.update_status(
-                                push_key,
-                                ExternalActionStatus.COMPLETED,
-                                remote_identifier=f"refs/heads/{branch_name}",
-                            )
-                            self.uow.commit()
-                    else:
-                        # Remote branch exists with different SHA -> contradiction fail closed NEEDS_HUMAN, ZERO push
-                        self.uow.orchestration_external_actions.update_status(
-                            push_key,
-                            ExternalActionStatus.FAILED,
-                            error_message=f"Remote branch head '{remote_sha}' differs from candidate '{cand_sha}'.",
-                        )
+                if fenced_push_res.outcome != ExternalOutcome.SUCCESS:
+                    err = fenced_push_res.error_message or "Branch push failed."
+                    if "REMOTE_BRANCH_MISMATCH" in str(err):
                         self._stop_run(
                             run,
                             stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
                             human_gate=HumanGate.NEEDS_HUMAN,
-                            stop_reason=f"Remote branch '{branch_name}' already exists with SHA '{remote_sha}' (differs from audited '{cand_sha}').",
-                            stop_details={
-                                "code": "REMOTE_BRANCH_MISMATCH",
-                                "remote_sha": remote_sha,
-                                "expected": cand_sha,
-                            },
+                            stop_reason=err,
+                            stop_details={"code": "REMOTE_BRANCH_MISMATCH"},
                         )
-                        break
-                else:
-                    # Remote branch does not exist yet -> execute push once
-                    if push_action.status != ExternalActionStatus.COMPLETED:
-                        repository_context, context_error = self._validated_repository_context(
-                            root, project, binding, cand_sha
-                        )
-                        if context_error:
-                            self.uow.orchestration_external_actions.update_status(
-                                push_key,
-                                ExternalActionStatus.FAILED,
-                                error_message=context_error,
-                            )
-                            self._stop_run(
-                                run,
-                                stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
-                                human_gate=HumanGate.NEEDS_HUMAN,
-                                stop_reason=context_error,
-                                stop_details={"code": "INVALID_PUSH_REPOSITORY_CONTEXT"},
-                            )
-                            break
-                        try:
-                            push_res = self.github_adapter.push_branch(
-                                worktree_path=str(repository_context),
-                                remote="origin",
-                                branch=branch_name,
-                                candidate_sha=cand_sha,
-                            )
-                            if push_res is True or getattr(push_res, "is_success", False):
-                                self.uow.orchestration_external_actions.update_status(
-                                    push_key,
-                                    ExternalActionStatus.COMPLETED,
-                                    remote_identifier=f"refs/heads/{branch_name}",
-                                )
-                                self.uow.commit()
-                            else:
-                                push_outcome = getattr(push_res, "outcome", ExternalOutcome.FAILURE)
-                                push_err = (
-                                    getattr(push_res, "error_message", None) or "Push failed."
-                                )
-                                final_status = (
-                                    ExternalActionStatus.AMBIGUOUS
-                                    if push_outcome == ExternalOutcome.AMBIGUOUS
-                                    else ExternalActionStatus.FAILED
-                                )
-                                self.uow.orchestration_external_actions.update_status(
-                                    push_key,
-                                    final_status,
-                                    error_message=push_err,
-                                )
-                                self._stop_run(
-                                    run,
-                                    stop_outcome=OrchestrationStopOutcome.WAITING_EXTERNAL,
-                                    human_gate=None,
-                                    stop_reason=f"Branch push temporarily failed: {push_err}",
-                                    stop_details={"action_key": push_key},
-                                )
-                                break
-                        except Exception as exc:
-                            logger.warning(
-                                f"Branch push transient failure for run '{run.run_id}': {exc}"
-                            )
-                            self.uow.orchestration_external_actions.update_status(
-                                push_key,
-                                ExternalActionStatus.FAILED,
-                                error_message=str(exc),
-                            )
-                            self._stop_run(
-                                run,
-                                stop_outcome=OrchestrationStopOutcome.WAITING_EXTERNAL,
-                                human_gate=None,
-                                stop_reason=f"Branch push temporarily failed: {exc}",
-                                stop_details={"action_key": push_key},
-                            )
-                            break
-
-                # 2. Mutating GitHub Action: PR Create / Reconcile
-                pr_key = f"pr:{run.run_id}:gen{gen}:{cand_sha}"
-                pr_action = self.uow.orchestration_external_actions.get_by_action_key(pr_key)
-                if not pr_action:
-                    pr_action = OrchestrationExternalAction(
-                        run_id=run.run_id,
-                        action_key=pr_key,
-                        action_type=ExternalActionType.PR_CREATE,
-                        target_identity=f"{project.repository}:{branch_name}",
-                        request_fingerprint=f"pr:{cand_sha}",
-                        candidate_sha=cand_sha,
-                        generation=gen,
-                        status=ExternalActionStatus.RESERVED,
-                    )
-                    self.uow.orchestration_external_actions.reserve(pr_action)
-                    self.uow.commit()
-
-                if pr_action.status != ExternalActionStatus.COMPLETED:
-                    try:
-                        # Check if PR already exists on GitHub
-                        lookup_res = self.github_adapter.get_pull_request(
-                            repository=project.repository,
-                            branch=branch_name,
-                            base=project.base_branch,
-                        )
-                        reason_code_val = lookup_res.reason_code.value
-                        lookup_err = lookup_res.error_message
-                        lookup_state = None
-                        existing_pr = None
-
-                        if lookup_res.outcome == ExternalOutcome.SUCCESS and lookup_res.data:
-                            lookup_state = "SUCCESS"
-                            existing_pr = lookup_res.data
-                        elif (
-                            lookup_res.outcome == ExternalOutcome.FAILURE
-                            and lookup_res.reason_code == ExternalReasonCode.NOT_FOUND
-                        ):
-                            lookup_state = "NOT_FOUND"
-                        elif lookup_res.outcome == ExternalOutcome.AMBIGUOUS:
-                            lookup_state = "AMBIGUOUS"
-                        else:
-                            lookup_state = "UNKNOWN"
-
-                        if lookup_state == "UNKNOWN":
-                            self._stop_run(
-                                run,
-                                stop_outcome=OrchestrationStopOutcome.WAITING_EXTERNAL,
-                                human_gate=None,
-                                stop_reason=lookup_err or "Cannot observe remote PR state.",
-                                stop_details={"action_key": pr_key, "code": reason_code_val},
-                            )
-                            break
-                        if lookup_state == "AMBIGUOUS":
-                            self._stop_run(
-                                run,
-                                stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
-                                human_gate=HumanGate.NEEDS_HUMAN,
-                                stop_reason=lookup_err or "Remote PR state is ambiguous.",
-                                stop_details={"action_key": pr_key, "code": reason_code_val},
-                            )
-                            break
-
-                        if existing_pr:
-                            valid_adoption, reason, details = self._verify_pr_adoption_identity(
-                                existing_pr=existing_pr,
-                                project=project,
-                                binding=binding,
-                                run=run,
-                                expected_branch=branch_name,
-                                cand_sha=cand_sha,
-                            )
-                            if valid_adoption:
-                                # Adopt existing matching PR
-                                self.uow.orchestration_external_actions.update_status(
-                                    pr_key,
-                                    ExternalActionStatus.COMPLETED,
-                                    remote_identifier=existing_pr.get("url"),
-                                    result_payload=existing_pr,
-                                )
-                                binding.github_pr_number = existing_pr["number"]
-                                binding.github_pr_url = existing_pr.get("url")
-                                self.uow.bindings.save(binding)
-                                self.uow.commit()
-                            else:
-                                # Contradictory identity / head mismatch -> fail closed NEEDS_HUMAN
-                                self.uow.orchestration_external_actions.update_status(
-                                    pr_key,
-                                    ExternalActionStatus.FAILED,
-                                    remote_identifier=existing_pr.get("url"),
-                                    error_message=reason,
-                                )
-                                self._stop_run(
-                                    run,
-                                    stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
-                                    human_gate=HumanGate.NEEDS_HUMAN,
-                                    stop_reason=reason,
-                                    stop_details=details,
-                                )
-                                break
-                        else:
-                            # Create new PR
-                            create_res = self.github_adapter.create_pull_request(
-                                repository=project.repository,
-                                branch=branch_name,
-                                base=project.base_branch,
-                                title=f"{run.change_name}: Autonomous Orchestration",
-                                body=(
-                                    f"Autonomous candidate for `{run.change_name}`\n"
-                                    f"Closes #{binding.github_issue_number}\n"
-                                    f"Audited SHA: `{cand_sha}`"
-                                ),
-                                head_sha=cand_sha,
-                            )
-                            is_create_ok = create_res.outcome == ExternalOutcome.SUCCESS and bool(
-                                create_res.data
-                            )
-                            create_data = create_res.data
-                            create_outcome = create_res.outcome
-                            create_err = create_res.error_message or "PR creation failed"
-
-                            if not is_create_ok or not create_data:
-                                final_status = (
-                                    ExternalActionStatus.AMBIGUOUS
-                                    if create_outcome == ExternalOutcome.AMBIGUOUS
-                                    else ExternalActionStatus.FAILED
-                                )
-                                self.uow.orchestration_external_actions.update_status(
-                                    pr_key,
-                                    final_status,
-                                    error_message=create_err,
-                                )
-                                self._stop_run(
-                                    run,
-                                    stop_outcome=OrchestrationStopOutcome.WAITING_EXTERNAL
-                                    if create_outcome == ExternalOutcome.AMBIGUOUS
-                                    else OrchestrationStopOutcome.NEEDS_HUMAN,
-                                    human_gate=None
-                                    if create_outcome == ExternalOutcome.AMBIGUOUS
-                                    else HumanGate.NEEDS_HUMAN,
-                                    stop_reason=create_err,
-                                    stop_details={"action_key": pr_key},
-                                )
-                                break
-                            new_pr = create_data
-                            remote_head = new_pr.get("head_sha")
-                            if remote_head and remote_head != cand_sha:
-                                error_msg = f"Created PR head '{remote_head}' differs from audited candidate '{cand_sha}'."
-                                self.uow.orchestration_external_actions.update_status(
-                                    pr_key,
-                                    ExternalActionStatus.FAILED,
-                                    remote_identifier=new_pr.get("url"),
-                                    error_message=error_msg,
-                                )
-                                self._stop_run(
-                                    run,
-                                    stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
-                                    human_gate=HumanGate.NEEDS_HUMAN,
-                                    stop_reason=error_msg,
-                                    stop_details={"code": "PR_HEAD_MISMATCH"},
-                                )
-                                break
-
-                            self.uow.orchestration_external_actions.update_status(
-                                pr_key,
-                                ExternalActionStatus.COMPLETED,
-                                remote_identifier=new_pr.get("url"),
-                                result_payload=new_pr,
-                            )
-                            binding.github_pr_number = new_pr["number"]
-                            binding.github_pr_url = new_pr.get("url")
-                            self.uow.bindings.save(binding)
-                            self.uow.commit()
-                    except Exception as exc:
-                        logger.warning(
-                            f"GitHub PR interaction failure for run '{run.run_id}': {exc}"
-                        )
-                        self.uow.orchestration_external_actions.update_status(
-                            pr_key,
-                            ExternalActionStatus.FAILED,
-                            error_message=str(exc),
-                        )
+                    else:
                         self._stop_run(
                             run,
                             stop_outcome=OrchestrationStopOutcome.WAITING_EXTERNAL,
                             human_gate=None,
-                            stop_reason=f"GitHub PR interaction temporarily failed: {exc}",
-                            stop_details={"action_key": pr_key},
+                            stop_reason=f"Branch push temporarily failed: {err}",
+                            stop_details={"action_key": push_key},
                         )
-                        break
+                    break
 
-                # 3. Advance to PR_PREPARED
-                self._advance_stage(run, OrchestrationStage.PR_PREPARED)
+                # 2. Mutating GitHub Action: PR Create / Reconcile under canonical Stage G atomic fenced dispatch intent
+                pr_key = f"pr:{run.run_id}:gen{gen}:{cand_sha}"
+
+                def _observe_pr_create():
+                    from minime.domain.enums import ExternalOutcome, ExternalReasonCode
+                    from minime.domain.models import ExternalActionResult
+
+                    lookup_res = self.github_adapter.get_pull_request(
+                        repository=project.repository,
+                        branch=branch_name,
+                        base=project.base_branch,
+                    )
+                    if lookup_res.outcome == ExternalOutcome.SUCCESS and lookup_res.data:
+                        existing_pr = lookup_res.data
+                        valid_adoption, reason, details = self._verify_pr_adoption_identity(
+                            existing_pr=existing_pr,
+                            project=project,
+                            binding=binding,
+                            run=run,
+                            expected_branch=branch_name,
+                            cand_sha=cand_sha,
+                        )
+                        if valid_adoption:
+                            return ExternalActionResult(
+                                outcome=ExternalOutcome.SUCCESS,
+                                source_adapter="github",
+                                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                                data=existing_pr,
+                                external_id=existing_pr.get("url"),
+                            )
+                        else:
+                            return ExternalActionResult(
+                                outcome=ExternalOutcome.FAILURE,
+                                source_adapter="github",
+                                reason_code=ExternalReasonCode.CONFLICT,
+                                error_message=f"{reason} PR_HEAD_MISMATCH",
+                            )
+                    elif (
+                        lookup_res.outcome == ExternalOutcome.FAILURE
+                        and lookup_res.reason_code == ExternalReasonCode.NOT_FOUND
+                    ):
+                        return ExternalActionResult(
+                            outcome=ExternalOutcome.FAILURE,
+                            source_adapter="github",
+                            reason_code=ExternalReasonCode.NOT_FOUND,
+                        )
+                    return lookup_res
+
+                def _mutate_pr_create():
+                    from minime.domain.enums import ExternalOutcome, ExternalReasonCode
+                    from minime.domain.models import ExternalActionResult
+
+                    create_res = self.github_adapter.create_pull_request(
+                        repository=project.repository,
+                        branch=branch_name,
+                        base=project.base_branch,
+                        title=f"{run.change_name}: Autonomous Orchestration",
+                        body=(
+                            f"Autonomous candidate for `{run.change_name}`\n"
+                            f"Closes #{binding.github_issue_number}\n"
+                            f"Audited SHA: `{cand_sha}`"
+                        ),
+                        head_sha=cand_sha,
+                    )
+                    if create_res.outcome == ExternalOutcome.SUCCESS and create_res.data:
+                        new_pr = create_res.data
+                        remote_head = new_pr.get("head_sha")
+                        if remote_head and remote_head != cand_sha:
+                            return ExternalActionResult(
+                                outcome=ExternalOutcome.FAILURE,
+                                source_adapter="github",
+                                reason_code=ExternalReasonCode.CONFLICT,
+                                error_message=f"Created PR head '{remote_head}' differs from audited candidate '{cand_sha}'. PR_HEAD_MISMATCH",
+                            )
+                        return ExternalActionResult(
+                            outcome=ExternalOutcome.SUCCESS,
+                            source_adapter="github",
+                            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                            data=new_pr,
+                            external_id=new_pr.get("url"),
+                        )
+                    return create_res
+
+                fenced_pr_res = self.saga_engine.execute_fenced_external_action(
+                    claim_context=claim_context,
+                    action_key=pr_key,
+                    action_type=ExternalActionType.PR_CREATE,
+                    target_identity=f"{project.repository}:{branch_name}",
+                    request_fingerprint=f"pr:{cand_sha}",
+                    mutation_fn=_mutate_pr_create,
+                    observation_fn=_observe_pr_create,
+                    run_id=run.run_id,
+                    candidate_sha=cand_sha,
+                )
+
+                if not fenced_pr_res or not fenced_pr_res.result_application_authorized:
+                    logger.warning(
+                        f"Fenced PR create result application denied for run '{run.run_id}': stale claim."
+                    )
+                    break
+
+                if fenced_pr_res.outcome == ExternalOutcome.SUCCESS and fenced_pr_res.data:
+                    new_pr = fenced_pr_res.data
+                    if isinstance(new_pr, dict) and "number" in new_pr:
+                        binding.github_pr_number = new_pr["number"]
+                        binding.github_pr_url = new_pr.get("url")
+                        self.uow.bindings.save(binding)
+                        self.uow.commit()
+                        self._advance_stage(run, OrchestrationStage.PR_PREPARED, claim_context=claim_context)
+                else:
+                    from minime.domain.enums import ExternalReasonCode
+
+                    err = fenced_pr_res.error_message or "PR creation failed."
+                    pr_reason = (
+                        getattr(fenced_pr_res, "reason_code", None)
+                        or (getattr(fenced_pr_res.result, "reason_code", None) if hasattr(fenced_pr_res, "result") else None)
+                    )
+                    is_needs_human = (
+                        "PR_HEAD_MISMATCH" in str(err)
+                        or pr_reason == ExternalReasonCode.CONFLICT
+                        or (
+                            fenced_pr_res.outcome == ExternalOutcome.AMBIGUOUS
+                            and pr_reason != ExternalReasonCode.UNOBSERVABLE
+                        )
+                    )
+                    self._stop_run(
+                        run,
+                        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN
+                        if is_needs_human
+                        else OrchestrationStopOutcome.WAITING_EXTERNAL,
+                        human_gate=HumanGate.NEEDS_HUMAN if is_needs_human else None,
+                        stop_reason=err,
+                        stop_details={"code": "PR_HEAD_MISMATCH", "action_key": pr_key}
+                        if "PR_HEAD_MISMATCH" in str(err)
+                        else {"action_key": pr_key},
+                    )
+                    break
 
             elif stage == OrchestrationStage.PR_PREPARED:
                 project = self.uow.projects.get_by_id(run.project_id)
@@ -2443,6 +2375,12 @@ class OrchestrationService:
                 )
                 break
 
+        if claim_context is not None and hasattr(self.uow, "claims") and self.uow.claims is not None:
+            from minime.services.recovery_convergence_service import RecoveryConvergenceService
+
+            rec_svc = RecoveryConvergenceService(self.uow, project_root=root)
+            rec_svc.release_claim(claim_context)
+
         return self.uow.orchestration_runs.get_by_id(run_id) or run
 
     def remediate_preserved_candidate(
@@ -2450,8 +2388,12 @@ class OrchestrationService:
         run_id: str,
         contract: dict[str, Any] | str | Path,
         project_root: str | Path | None = None,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> OrchestrationRun:
         """Perform the separate, explicitly authorized remediation operation."""
+        from minime.domain.models import validate_claim_context_authoritative
+
+        validate_claim_context_authoritative(self.uow, claim_context)
         if project_root and Path(project_root).resolve() != self.project_root:
             self.remediation_service = CandidateRemediationService(
                 self.uow,
@@ -2465,18 +2407,26 @@ class OrchestrationService:
         if remediation.status.value == "COMPLETED":
             job = self.uow.jobs.get_by_id(run.active_job_id) if run.active_job_id else None
             if job:
-                job.status = JobStatus.CHECKS_PASSED
-                self.uow.jobs.save(job)
-            run.stop_outcome = None
-            run.human_gate = None
-            run.stop_reason = None
-            run.stop_details = {"remediation_id": remediation.remediation_id}
-            run.is_active = True
-            # Re-enter the existing coordinator at its legal post-check boundary;
-            # drive_coordinator performs RUNNING_CHECKS -> FREEZING_CANDIDATE -> review.
-            run.current_stage = OrchestrationStage.RUNNING_CHECKS
-            run.resumable_stage = OrchestrationStage.RUNNING_CHECKS
-            self.uow.orchestration_runs.save(run)
+                self.uow.jobs.transition(
+                    job.job_id,
+                    JobStatus.CHECKS_PASSED.value,
+                    claim_context=claim_context,
+                )
+            self.uow.orchestration_runs.update_stop_outcome(
+                run.run_id,
+                stop_outcome=None,
+                human_gate=None,
+                stop_reason=None,
+                stop_details={"remediation_id": remediation.remediation_id},
+                is_active=True,
+                claim_context=claim_context,
+            )
+            self.uow.orchestration_runs.update_stage(
+                run.run_id,
+                current_stage=OrchestrationStage.RUNNING_CHECKS,
+                resumable_stage=OrchestrationStage.RUNNING_CHECKS,
+                claim_context=claim_context,
+            )
             self.uow.orchestration_stage_events.save(
                 OrchestrationStageEvent(
                     run_id=run_id,
@@ -2496,7 +2446,7 @@ class OrchestrationService:
                 )
             )
             self.uow.commit()
-            return self.drive_coordinator(run_id, project_root=project_root)
+            return self.drive_coordinator(run_id, project_root=project_root, claim_context=claim_context)
         return self.uow.orchestration_runs.get_by_id(run_id) or run
 
     def get_status(self, run_id: str) -> OrchestrationStatusView:
@@ -2766,6 +2716,9 @@ class OrchestrationService:
         if not cand or not cand.candidate_sha:
             return False, False, "No active candidate recorded."
 
+        if not job:
+            return False, False, "No active job recorded for run."
+
         existing_audit = self.uow.audits.get_by_job_id(job.job_id)
         if not existing_audit:
             return False, False, f"No audit record exists for job '{job.job_id}'."
@@ -2841,6 +2794,7 @@ class OrchestrationService:
         run: OrchestrationRun,
         to_stage: OrchestrationStage,
         correlation_id: str | None = None,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> None:
         """Advance run to next stage with finite graph validation and deterministic transition events."""
         orig_run = run
@@ -2928,10 +2882,21 @@ class OrchestrationService:
                 _sync_orig()
                 raise ValueError(conflict)
 
-        run.current_stage = to_stage
-        run.resumable_stage = to_stage
-        run.updated_at = utc_now()
-        self.uow.orchestration_runs.save(run)
+        if claim_context is not None and hasattr(self.uow.orchestration_runs, "update_stage"):
+            self.uow.orchestration_runs.update_stage(
+                run.run_id,
+                current_stage=to_stage,
+                resumable_stage=to_stage,
+                claim_context=claim_context,
+            )
+            run.current_stage = to_stage
+            run.resumable_stage = to_stage
+            run.updated_at = utc_now()
+        else:
+            run.current_stage = to_stage
+            run.resumable_stage = to_stage
+            run.updated_at = utc_now()
+            self.uow.orchestration_runs.save(run)
         _sync_orig()
 
         if not existing_event:
@@ -3221,10 +3186,11 @@ class OrchestrationService:
             )
 
         managed_root = Path(managed_binding.managed_repository_root).resolve()
-        if root.resolve() != managed_root:
+        root_resolved = root.resolve()
+        if root_resolved != managed_root and managed_root not in root_resolved.parents:
             return (
-                root,
-                f"Registered repository root '{root.resolve()}' does not match managed repository root '{managed_root}'.",
+                managed_root,
+                f"Registered repository root '{root_resolved}' does not match managed repository root '{managed_root}'.",
             )
 
         guard = ManagedWorkspaceGuard(self.uow)
@@ -3234,7 +3200,7 @@ class OrchestrationService:
             managed_binding.canonical_repository_identity,
         )
         if not marker_ok:
-            return root, marker_msg
+            return managed_root, marker_msg
 
         remote_name = managed_binding.remote_name or "origin"
         remote_ok, remote_msg = guard.verify_git_repository_identity(
@@ -3243,7 +3209,7 @@ class OrchestrationService:
             remote_name=remote_name,
         )
         if not remote_ok:
-            return root, remote_msg
+            return managed_root, remote_msg
 
         decision = guard.evaluate_mutation(
             WorkspaceMutationRequest(
@@ -3255,7 +3221,7 @@ class OrchestrationService:
         )
         if not decision.allowed:
             return (
-                root,
+                managed_root,
                 f"Workspace mutation policy denied push branch for target '{managed_root}': "
                 f"{decision.provider_detail or decision.reason_code.value}",
             )
@@ -3263,13 +3229,13 @@ class OrchestrationService:
         try:
             top = subprocess.run(
                 ["git", "rev-parse", "--show-toplevel"],
-                cwd=root,
+                cwd=str(managed_root),
                 capture_output=True,
                 text=True,
                 timeout=5,
             )
-            if top.returncode != 0 or Path(top.stdout.strip()).resolve() != root.resolve():
-                return root, f"Registered repository root is not a valid Git repository: {root}"
+            if top.returncode != 0 or Path(top.stdout.strip()).resolve() != managed_root:
+                return managed_root, f"Registered repository root is not a valid Git repository: {managed_root}"
             candidate = subprocess.run(
                 ["git", "rev-parse", "--verify", f"{candidate_sha}^{{commit}}"],
                 cwd=root,

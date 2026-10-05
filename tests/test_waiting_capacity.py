@@ -3,6 +3,7 @@
 import shutil
 import subprocess
 import sys
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -14,12 +15,30 @@ from minime.domain.enums import (
     ProviderHealthStatus,
     ReadinessState,
 )
-from minime.domain.models import Change, Project
+from minime.domain.models import Change, Project, RecoveryClaimContext, utc_now
 from minime.services.checks_runner import ChecksRunner, ChecksRunResult
 from minime.services.execution_pipeline import ExecutionPipelineService
 from minime.services.implementer_runner import MockImplementerRunner
 from minime.services.reviewer_runner import MockReviewerRunner
 from minime.services.worktree_manager import WorktreeInfo
+
+
+def _make_test_claim_context(uow=None):
+    if uow is not None and hasattr(uow, "claims") and uow.claims is not None:
+        c = uow.claims.acquire_or_reacquire("run:test-claim-key", owner_instance_id="test-owner-id")
+        if c:
+            return RecoveryClaimContext(
+                claim_key=c.claim_key,
+                owner_instance_id=c.owner_instance_id,
+                fence_token=c.fence_token,
+                lease_expires_at=c.lease_expires_at,
+            )
+    return RecoveryClaimContext(
+        claim_key="test-claim-key",
+        owner_instance_id="test-owner-id",
+        fence_token=1,
+        lease_expires_at=utc_now() + timedelta(hours=1),
+    )
 
 
 class FakeWorktreeManager:
@@ -243,7 +262,7 @@ async def test_implementer_quota_exhaustion_transitions_to_waiting_capacity(
         worktree_manager=FakeWorktreeManager(tmp_path),
     )
 
-    job = await pipeline.run_job("mini-me", change_name)
+    job = await pipeline.run_job("mini-me", change_name, claim_context=_make_test_claim_context(in_memory_uow))
     assert job.status == JobStatus.WAITING_CAPACITY
     assert job.waiting_provider == "codex"
     assert job.expected_reset_at is not None
@@ -306,7 +325,7 @@ async def test_reviewer_rate_limit_transitions_to_waiting_capacity(in_memory_uow
         worktree_manager=FakeWorktreeManager(tmp_path),
     )
 
-    job = await pipeline.run_job("mini-me", change_name)
+    job = await pipeline.run_job("mini-me", change_name, claim_context=_make_test_claim_context(in_memory_uow))
     assert job.status == JobStatus.WAITING_CAPACITY
     assert job.waiting_provider == "antigravity"
 
@@ -340,7 +359,7 @@ async def test_pairing_invariants_prevent_self_review_and_reviewer_replacement(
         worktree_manager=FakeWorktreeManager(tmp_path),
     )
 
-    job = await pipeline.run_job("mini-me", change_name)
+    job = await pipeline.run_job("mini-me", change_name, claim_context=_make_test_claim_context(in_memory_uow))
     assert job.status == JobStatus.FAILED
 
     events = in_memory_uow.events.list_events()
@@ -436,7 +455,10 @@ def test_scheduler_reconciles_and_resumes_waiting_capacity(in_memory_uow, tmp_pa
             last_error_summary="Quota exceeded",
         )
     )
-    run = orch_svc.drive_coordinator(admission.run.run_id)
+    from minime.services.recovery_convergence_service import RecoveryConvergenceService
+    conv_svc = RecoveryConvergenceService(in_memory_uow)
+    ctx = conv_svc.acquire_claim(f"run:{admission.run.run_id}")
+    run = orch_svc.drive_coordinator(admission.run.run_id, claim_context=ctx)
     assert run.stop_outcome == OrchestrationStopOutcome.WAITING_CAPACITY
     assert run.is_active is True
 

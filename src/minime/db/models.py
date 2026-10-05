@@ -1081,6 +1081,9 @@ class OrchestrationExternalActionModel(Base):
     remote_identifier: Mapped[str | None] = mapped_column(String(255), nullable=True)
     result_payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_claim_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    last_fence_token: Mapped[int | None] = mapped_column(sa.BigInteger, nullable=True)
+    last_dispatch_intent_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     reserved_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )
@@ -1535,3 +1538,81 @@ class OrchestrationWorktreeOwnershipModel(Base):
     )
 
     project: Mapped[ProjectModel] = relationship("ProjectModel")
+
+
+class RecoveryClaimModel(Base):
+    __tablename__ = "recovery_claims"
+
+    claim_key: Mapped[str] = mapped_column(String(255), primary_key=True)
+    fence_token: Mapped[int] = mapped_column(sa.BigInteger, default=1, nullable=False)
+    owner_instance_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    claimed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    heartbeat_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    lease_expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_decision_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class RecoveryDecisionModel(Base):
+    __tablename__ = "recovery_decisions"
+    __table_args__ = (
+        UniqueConstraint("cycle_id", "claim_key", name="uq_recovery_decisions_cycle_claim"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    cycle_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    claim_key: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    identity_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    identity_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    project_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    change_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    prior_checkpoint: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    observation_refs: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    classification: Mapped[str] = mapped_column(String(64), nullable=False)
+    planned_action: Mapped[str] = mapped_column(String(64), nullable=False)
+    fence_token: Mapped[int | None] = mapped_column(sa.BigInteger, nullable=True)
+    status: Mapped[str] = mapped_column(String(64), default="PLANNED", nullable=False)
+    result_payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    reason_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+
+class ExternalActionAttemptModel(Base):
+    __tablename__ = "external_action_attempts"
+    __table_args__ = (
+        UniqueConstraint("dispatch_intent_key", name="uq_external_action_dispatch_intent"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    action_key: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("orchestration_external_actions.action_key", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    claim_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    fence_token: Mapped[int] = mapped_column(sa.BigInteger, nullable=False)
+    attempt_number: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    dispatch_intent_key: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), default="EXECUTING", nullable=False)
+    result_payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+

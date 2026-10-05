@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -174,6 +175,15 @@ class MockJobRepo:
             )
         ]
 
+    def transition(self, job_id: str, new_status: Any, error_message: str | None = None, claim_context: Any = None) -> Job | None:
+        job = self.get_by_id(job_id)
+        if job:
+            from minime.domain.enums import JobStatus
+            job.status = new_status if isinstance(new_status, JobStatus) else JobStatus(new_status)
+            if error_message:
+                job.error_message = error_message
+        return job
+
 
 class MockOrchestrationRunRepo:
     def __init__(self):
@@ -194,16 +204,38 @@ class MockOrchestrationRunRepo:
     def list_runs(self) -> list[OrchestrationRun]:
         return list(self.runs.values())
 
+    def update_stage(self, run_id: str, current_stage=None, resumable_stage=None, claim_context=None) -> OrchestrationRun | None:
+        run = self.get_by_id(run_id)
+        if run:
+            if current_stage is not None:
+                run.current_stage = current_stage
+            if resumable_stage is not None:
+                run.resumable_stage = resumable_stage
+        return run
+
+    def update_stop_outcome(self, run_id: str, stop_outcome=None, stop_reason=None, is_active=None, human_gate=None, claim_context=None) -> OrchestrationRun | None:
+        run = self.get_by_id(run_id)
+        if run:
+            if stop_outcome is not None:
+                run.stop_outcome = stop_outcome
+            if stop_reason is not None:
+                run.stop_reason = stop_reason
+            if is_active is not None:
+                run.is_active = is_active
+        return run
+
 
 class MockUOW:
     def __init__(self):
         from tests.conftest import (
             InMemoryDurableSagaRepository,
             InMemoryOrchestrationExternalActionRepository,
+            InMemoryRecoveryClaimRepository,
         )
 
         self.durable_sagas = InMemoryDurableSagaRepository()
         self.orchestration_external_actions = InMemoryOrchestrationExternalActionRepository()
+        self.claims = InMemoryRecoveryClaimRepository()
         self.project_managed_repository_bindings = MockBindingRepo()
         self.orchestration_worktree_ownerships = MockWorktreeOwnershipRepo()
         self.projects = MockProjectRepo()
@@ -2800,8 +2832,12 @@ def test_post_merge_reconciliation_refuses_claim_when_cleanup_fails(tmp_dirs):
     )
     pm_service.verify_candidate_ancestry = MagicMock(return_value=True)
 
+    from minime.services.recovery_convergence_service import RecoveryConvergenceService
+    rec_svc = RecoveryConvergenceService(uow)
+    claim_ctx = rec_svc.acquire_claim("run:run-refuse-6")
+
     result = pm_service.reconcile_post_merge(
-        "proj-refuse-6", "change-refuse", run_id="run-refuse-6"
+        "proj-refuse-6", "change-refuse", run_id="run-refuse-6", claim_context=claim_ctx
     )
 
     assert result.success is False

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -23,11 +24,19 @@ from minime.domain.models import (
     OrchestrationRun,
     Project,
     ProjectManagedRepositoryBinding,
+    RecoveryClaimContext,
 )
 from minime.services.checks_runner import ChecksRunner
 from minime.services.execution_pipeline import ExecutionPipelineService
 from minime.services.orchestration_service import OrchestrationService
 from minime.services.worktree_manager import WorktreeManager
+
+
+def make_claim(uow: Any, run_id: str, repo: Path) -> RecoveryClaimContext:
+    from minime.services.recovery_convergence_service import RecoveryConvergenceService
+
+    rec = RecoveryConvergenceService(uow, project_root=repo)
+    return rec.acquire_claim(f"run:{run_id}")
 
 
 def git(repo: Path, *args: str) -> str:
@@ -179,12 +188,12 @@ def test_advanced_base_real_git_integration_and_idempotency(tmp_path, in_memory_
     service, run_id = make_service(
         in_memory_uow, repo, base_a, candidate_sha, "refs/heads/historical-candidate"
     )
-    service.drive_coordinator = lambda run_id, project_root=None: (
+    service.drive_coordinator = lambda run_id, project_root=None, claim_context=None: (
         in_memory_uow.orchestration_runs.get_by_id(run_id)
     )
 
     resolved = service.resolve_preserved_candidate(
-        run_id, continue_preserved_candidate=True, project_root=repo
+        run_id, continue_preserved_candidate=True, project_root=repo, claim_context=make_claim(in_memory_uow, run_id, repo)
     )
 
     candidates = in_memory_uow.orchestration_candidates.list_by_run(run_id)
@@ -207,7 +216,7 @@ def test_advanced_base_real_git_integration_and_idempotency(tmp_path, in_memory_
 
     git(repo, "update-ref", "refs/heads/main", new.candidate_sha)
     again = service.resolve_preserved_candidate(
-        run_id, continue_preserved_candidate=True, project_root=repo
+        run_id, continue_preserved_candidate=True, project_root=repo, claim_context=make_claim(in_memory_uow, run_id, repo)
     )
     assert again.current_generation == 2
     assert len(in_memory_uow.orchestration_candidates.list_by_run(run_id)) == 2
@@ -227,7 +236,7 @@ def test_advanced_base_real_git_conflict_preserves_integration_state(tmp_path, i
     )
 
     resolved = service.resolve_preserved_candidate(
-        run_id, continue_preserved_candidate=True, project_root=repo
+        run_id, continue_preserved_candidate=True, project_root=repo, claim_context=make_claim(in_memory_uow, run_id, repo)
     )
     assert resolved.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
     assert len(in_memory_uow.orchestration_candidates.list_by_run(run_id)) == 1
@@ -252,7 +261,7 @@ def test_advanced_base_real_git_conflict_preserves_integration_state(tmp_path, i
 
     with pytest.raises(ValueError, match="Human integration"):
         service.resolve_preserved_candidate(
-            run_id, continue_preserved_candidate=True, project_root=repo
+            run_id, continue_preserved_candidate=True, project_root=repo, claim_context=make_claim(in_memory_uow, run_id, repo)
         )
     again = in_memory_uow.orchestration_runs.get_by_id(run_id)
     assert again.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
@@ -275,12 +284,12 @@ def test_completed_human_integration_is_reconciled_idempotently(tmp_path, in_mem
     service, run_id = make_service(
         in_memory_uow, repo, base_a, candidate_sha, "refs/heads/historical-candidate"
     )
-    service.drive_coordinator = lambda run_id, project_root=None: (
+    service.drive_coordinator = lambda run_id, project_root=None, claim_context=None: (
         in_memory_uow.orchestration_runs.get_by_id(run_id)
     )
 
     service.resolve_preserved_candidate(
-        run_id, continue_preserved_candidate=True, project_root=repo
+        run_id, continue_preserved_candidate=True, project_root=repo, claim_context=make_claim(in_memory_uow, run_id, repo)
     )
     integration_path = (
         repo / ".minime" / "worktrees" / (f"job-human-resolution-integration-gen2-{base_b[:12]}")
@@ -292,7 +301,7 @@ def test_completed_human_integration_is_reconciled_idempotently(tmp_path, in_mem
     assert git(integration_path, "status", "--porcelain") == ""
 
     resolved = service.resolve_preserved_candidate(
-        run_id, continue_preserved_candidate=True, project_root=repo
+        run_id, continue_preserved_candidate=True, project_root=repo, claim_context=make_claim(in_memory_uow, run_id, repo)
     )
     candidates = in_memory_uow.orchestration_candidates.list_by_run(run_id)
     assert resolved.current_generation == 2
@@ -304,7 +313,7 @@ def test_completed_human_integration_is_reconciled_idempotently(tmp_path, in_mem
     )
 
     again = service.resolve_preserved_candidate(
-        run_id, continue_preserved_candidate=True, project_root=repo
+        run_id, continue_preserved_candidate=True, project_root=repo, claim_context=make_claim(in_memory_uow, run_id, repo)
     )
     assert again.current_generation == 2
     assert len(in_memory_uow.orchestration_candidates.list_by_run(run_id)) == 2
@@ -323,7 +332,7 @@ def test_stale_integration_target_retries_with_distinct_target_identity(tmp_path
         in_memory_uow, repo, base_a, candidate_sha, "refs/heads/historical-candidate"
     )
     service.resolve_preserved_candidate(
-        run_id, continue_preserved_candidate=True, project_root=repo
+        run_id, continue_preserved_candidate=True, project_root=repo, claim_context=make_claim(in_memory_uow, run_id, repo)
     )
     old_event = next(
         event
@@ -338,7 +347,7 @@ def test_stale_integration_target_retries_with_distinct_target_identity(tmp_path
     git(repo, "update-ref", "refs/remotes/origin/main", base_c)
 
     resolved = service.resolve_preserved_candidate(
-        run_id, continue_preserved_candidate=True, project_root=repo
+        run_id, continue_preserved_candidate=True, project_root=repo, claim_context=make_claim(in_memory_uow, run_id, repo)
     )
     assert resolved.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
     assert len(in_memory_uow.orchestration_candidates.list_by_run(run_id)) == 1
@@ -359,7 +368,7 @@ def test_stale_integration_target_retries_with_distinct_target_identity(tmp_path
 
     with pytest.raises(ValueError, match="Human integration"):
         service.resolve_preserved_candidate(
-            run_id, continue_preserved_candidate=True, project_root=repo
+            run_id, continue_preserved_candidate=True, project_root=repo, claim_context=make_claim(in_memory_uow, run_id, repo)
         )
     assert (
         len(

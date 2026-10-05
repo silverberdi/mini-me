@@ -93,8 +93,8 @@ class ReconciliationAuthority:
                     outcome=ExternalOutcome.UNKNOWN,
                     source_adapter="github",
                     reason_code=ExternalReasonCode.UNOBSERVABLE,
-                    error_message=getattr(
-                        res, "error_message", "Listing issues returned non-success outcome."
+                    error_message=str(
+                        getattr(res, "error_message", "Listing issues returned non-success outcome.")
                     ),
                 )
         except Exception as exc:

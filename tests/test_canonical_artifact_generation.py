@@ -77,9 +77,13 @@ def test_prepare_work_item_idempotency(
         in_memory_uow, project_root=repo_dir, github_adapter=ReadinessGitHubStub()
     )
 
+    from minime.services.recovery_convergence_service import RecoveryConvergenceService
+    rec_svc = RecoveryConvergenceService(in_memory_uow)
+    claim_ctx = rec_svc.acquire_claim("intake:app-proj:023-caching")
+
     # First prepare run
     res1 = service.prepare_work_item(
-        "app-proj", "023-caching", operator_email="operator@example.com"
+        "app-proj", "023-caching", operator_email="operator@example.com", claim_context=claim_ctx
     )
     assert res1.openspec_change_name == "023-caching"
     assert res1.github_issue_number is not None
@@ -87,7 +91,7 @@ def test_prepare_work_item_idempotency(
 
     # Second prepare run (must be idempotent, not duplicate issues)
     res2 = service.prepare_work_item(
-        "app-proj", "023-caching", operator_email="operator@example.com"
+        "app-proj", "023-caching", operator_email="operator@example.com", claim_context=claim_ctx
     )
     assert res2.github_issue_number == res1.github_issue_number
     assert res2.openspec_change_name == res1.openspec_change_name

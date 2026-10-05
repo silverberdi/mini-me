@@ -22,6 +22,7 @@ from minime.domain.enums import (
     OrchestrationStopOutcome,
     PreviewStatus,
     ProviderHealthStatus,
+    RecoverySource,
     ValidationVerdict,
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
@@ -40,6 +41,7 @@ from minime.services.container_preview_service import ContainerPreviewService
 from minime.services.orchestration_service import OrchestrationService
 from minime.services.post_merge_service import PostMergeReconciliationService
 from minime.services.provider_health_service import ProviderHealthService
+from minime.services.recovery_convergence_service import RecoveryConvergenceService
 from minime.services.restart_recovery_service import RestartRecoveryService
 from minime.services.validation_authority_service import ValidationAuthorityService
 
@@ -71,6 +73,9 @@ class ControlPlaneService:
             uow, project_root=self.project_root
         )
         self.provider_health_service = provider_health_service or ProviderHealthService(uow)
+        self.recovery_convergence_service = RecoveryConvergenceService(
+            uow, project_root=self.project_root, health_service=self.provider_health_service
+        )
         gh_adapter = getattr(self.orchestration_service, "github_adapter", None)
         self.post_merge_service = post_merge_service or PostMergeReconciliationService(
             uow, project_root=self.project_root, github_adapter=gh_adapter
@@ -667,10 +672,11 @@ class ControlPlaneService:
             self.uow.orchestration_runs.save(run)
             self.uow.commit()
 
-        # Call orchestration service resume
-        resumed_run = self.orchestration_service.resume(
-            run.run_id, project_root=self.project_root, force=True
+        # Drive run continuation through canonical RecoveryConvergenceService
+        self.recovery_convergence_service.request_run_continuation(
+            run.run_id, source=RecoverySource.CONTROL_PLANE, force=True
         )
+        resumed_run = self.uow.orchestration_runs.get_by_id(run.run_id) or run
 
         summary = f"Run resumed successfully at stage {resumed_run.current_stage.value}."
         record = OperatorActionRecord(
@@ -756,12 +762,15 @@ class ControlPlaneService:
                 sanitized_params=sanitized_params,
             )
 
-        # Increment retry count and resume
+        # Increment retry count and resume through RecoveryConvergenceService
         run.retry_count += 1
         self.uow.orchestration_runs.save(run)
         self.uow.commit()
 
-        resumed_run = self.orchestration_service.resume(run.run_id, project_root=self.project_root)
+        self.recovery_convergence_service.request_run_continuation(
+            run.run_id, source=RecoverySource.CONTROL_PLANE
+        )
+        resumed_run = self.uow.orchestration_runs.get_by_id(run.run_id) or run
 
         summary = f"Stage retried (attempt #{resumed_run.retry_count}); stage is now {resumed_run.current_stage.value}."
         record = OperatorActionRecord(
@@ -869,7 +878,9 @@ class ControlPlaneService:
         self.uow.orchestration_runs.save(run)
         self.uow.commit()
 
-        resumed_run = self.orchestration_service.resume(run.run_id, project_root=self.project_root)
+        rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
+        rec_svc.request_run_continuation(run.run_id, source=RecoverySource.CONTROL_PLANE)
+        resumed_run = self.uow.orchestration_runs.get_by_id(run.run_id) or run
 
         summary = (
             f"Run reassigned to {target_executor} (reassignment #{resumed_run.reassignment_count})."
@@ -973,10 +984,10 @@ class ControlPlaneService:
                 run_id=run.run_id,
             )
 
-            # Advance orchestration
-            resumed_run = self.orchestration_service.resume(
-                run.run_id, project_root=self.project_root
-            )
+            # Advance orchestration through RecoveryConvergenceService
+            rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
+            rec_svc.request_run_continuation(run.run_id, source=RecoverySource.CONTROL_PLANE)
+            resumed_run = self.uow.orchestration_runs.get_by_id(run.run_id) or run
 
             summary = f"UI Validation recorded ({verdict.value}); run advanced to stage {resumed_run.current_stage.value}."
             record = OperatorActionRecord(
@@ -1029,8 +1040,19 @@ class ControlPlaneService:
                     sanitized_params=sanitized_params,
                 )
 
+            rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
+            claim_ctx = rec_svc.acquire_claim(f"run:{run.run_id}")
+            if claim_ctx is None:
+                return self._record_and_return_rejection(
+                    request=request,
+                    run=run,
+                    error_code=OperatorActionErrorCode.AUTHORITY_MISMATCH,
+                    summary=f"Run '{run.run_id}' is claimed elsewhere by another active recovery context.",
+                    sanitized_params=sanitized_params,
+                )
+
             resumed_run = self.orchestration_service.remediate_preserved_candidate(
-                run.run_id, contract_path=contract, project_root=self.project_root
+                run.run_id, contract_path=contract, project_root=self.project_root, claim_context=claim_ctx
             )
             summary = f"Preserved candidate remediation started; generation is now {resumed_run.current_generation}."
             record = OperatorActionRecord(
@@ -1069,11 +1091,23 @@ class ControlPlaneService:
 
         elif resolution_type == "continue_preserved" or resolution_type is None:
             candidate_ref = sanitized_params.get("candidate_ref")
+            rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
+            claim_ctx = rec_svc.acquire_claim(f"run:{run.run_id}")
+            if claim_ctx is None:
+                return self._record_and_return_rejection(
+                    request=request,
+                    run=run,
+                    error_code=OperatorActionErrorCode.AUTHORITY_MISMATCH,
+                    summary=f"Run '{run.run_id}' is claimed elsewhere by another active recovery context.",
+                    sanitized_params=sanitized_params,
+                )
+
             resumed_run = self.orchestration_service.resolve_preserved_candidate(
                 run.run_id,
                 continue_preserved_candidate=True,
                 candidate_ref=candidate_ref,
                 project_root=self.project_root,
+                claim_context=claim_ctx,
             )
             summary = (
                 f"Preserved candidate resolved; run stage is now {resumed_run.current_stage.value}."
@@ -1408,25 +1442,41 @@ class ControlPlaneService:
         run: OrchestrationRun,
         sanitized_params: dict[str, Any],
     ) -> OperatorActionResult:
-        res = self.post_merge_service.reconcile_post_merge(
-            project_id=run.project_id,
-            change_name=run.change_name,
-            run_id=run.run_id,
+        from minime.domain.enums import (
+            RecoveryClassification,
+            RecoveryDecisionStatus,
+            RecoverySource,
         )
-        if not res.success:
+        gh_adapter = getattr(self.post_merge_service, "github_adapter", getattr(self.orchestration_service, "github_adapter", None))
+        rec_svc = RecoveryConvergenceService(
+            self.uow,
+            project_root=self.project_root,
+            post_merge_service=self.post_merge_service,
+            github_adapter=gh_adapter,
+        )
+        decision = rec_svc.request_run_continuation(
+            run_id=run.run_id,
+            source=RecoverySource.CONTROL_PLANE,
+            requested_action="RECONCILE_POST_MERGE",
+        )
+        if decision.classification == RecoveryClassification.CLAIMED_ELSEWHERE:
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.AUTHORITY_MISMATCH,
+                summary=f"Run '{run.run_id}' is claimed elsewhere by another active recovery context.",
+                sanitized_params=sanitized_params,
+            )
+        if decision.status == RecoveryDecisionStatus.BLOCKED:
             return self._record_and_return_rejection(
                 request=request,
                 run=run,
                 error_code=OperatorActionErrorCode.ACTION_EXECUTION_FAILED,
-                summary=res.error_message or "Post-merge reconciliation failed.",
+                summary=decision.reason_code or "Post-merge reconciliation failed.",
                 sanitized_params=sanitized_params,
             )
 
-        summary = (
-            "Post-merge reconciliation completed successfully."
-            if not res.already_closed
-            else "Post-merge reconciliation already completed."
-        )
+        summary = "Post-merge reconciliation completed successfully."
         record = OperatorActionRecord(
             action_request_id=request.action_request_id,
             project_id=request.project_id,
@@ -1444,10 +1494,8 @@ class ControlPlaneService:
             resulting_gate=None,
             parameters_json=sanitized_params,
             result_payload_json={
-                "is_merged": res.is_merged,
-                "merged_by": res.merged_by,
-                "ancestry_verified": res.ancestry_verified,
-                "native_phases_completed": res.native_phases_completed,
+                "decision_status": decision.status.value,
+                "classification": decision.classification.value,
             },
         )
         self.uow.operator_actions.save(record)
@@ -1473,16 +1521,6 @@ class ControlPlaneService:
         if not saga:
             raise ValueError(f"DurableSaga '{saga_id}' not found.")
 
-        from minime.services.intake_service import IntakeService
-        from minime.services.post_merge_service import PostMergeReconciliationService
-        from minime.services.saga_engine import SagaEngine
-
-        saga_engine = SagaEngine(self.uow)
-        intake_svc = IntakeService(self.uow, project_root=self.project_root)
-        post_merge_svc = PostMergeReconciliationService(self.uow, project_root=self.project_root)
-
-        return saga_engine.resume_saga(
-            saga_id=saga_id,
-            intake_service=intake_svc,
-            post_merge_service=post_merge_svc,
-        )
+        rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
+        rec_svc.reconcile_saga(saga_id, source=RecoverySource.CONTROL_PLANE)
+        return self.uow.durable_sagas.get_by_id(saga_id) or saga

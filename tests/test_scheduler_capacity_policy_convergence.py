@@ -639,14 +639,15 @@ def test_drain_never_invokes_fresh_admission(
         base_sha="2c476eafb1baec38e70aa51dcc239a81c6c6be69",
         is_active=True,
     )
-    scheduler.orchestration_service = MagicMock()
-    scheduler.orchestration_service.resume.return_value = mock_run
+    scheduler.orchestration_service.admit_change = MagicMock()
+    scheduler.recovery_convergence_service = MagicMock()
+    scheduler.recovery_convergence_service.request_run_continuation.return_value = mock_run
 
-    dec, record, run = scheduler.admit_work_item("mini-me", "016-autonomous-queue-work-selection")
+    dec, record, run_res = scheduler.admit_work_item(project.project_id, "016-autonomous-queue-work-selection")
 
     assert scheduler.orchestration_service.admit_change.call_count == 0
-    assert scheduler.orchestration_service.resume.call_count == 1
     assert record.operational_decision == AdmissionDecisionKind.DRAIN
+    assert scheduler.recovery_convergence_service.request_run_continuation.call_count == 1
 
 
 # 22. New READY work never uses DRAIN

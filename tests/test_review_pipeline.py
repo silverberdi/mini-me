@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 from contextlib import contextmanager
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -23,7 +24,16 @@ from minime.domain.enums import (
     ReviewStatus,
     ReviewVerdict,
 )
-from minime.domain.models import Change, CheckResult, Job, Project, Review, ReviewFinding
+from minime.domain.models import (
+    Change,
+    CheckResult,
+    Job,
+    Project,
+    RecoveryClaimContext,
+    Review,
+    ReviewFinding,
+    utc_now,
+)
 from minime.services.candidate_integrity import (
     resolve_base_branch_sha,
     validate_post_review_integrity,
@@ -41,6 +51,24 @@ from minime.services.reviewer_contract import build_reviewer_prompt
 from minime.services.reviewer_runner import MockReviewerRunner
 from minime.services.reviewer_view import ReviewerViewManager, SymlinkInCandidateError
 from minime.services.worktree_manager import WorktreeInfo
+
+
+def _make_test_claim_context(uow=None):
+    if uow is not None and hasattr(uow, "claims") and uow.claims is not None:
+        c = uow.claims.acquire_or_reacquire("run:test-claim-key", owner_instance_id="test-owner-id")
+        if c:
+            return RecoveryClaimContext(
+                claim_key=c.claim_key,
+                owner_instance_id=c.owner_instance_id,
+                fence_token=c.fence_token,
+                lease_expires_at=c.lease_expires_at,
+            )
+    return RecoveryClaimContext(
+        claim_key="test-claim-key",
+        owner_instance_id="test-owner-id",
+        fence_token=1,
+        lease_expires_at=utc_now() + timedelta(hours=1),
+    )
 
 
 class GitFakeWorktreeManager:
@@ -286,7 +314,7 @@ async def test_reviewer_never_starts_if_symlink_detected(in_memory_uow, tmp_path
         worktree_manager=WorktreeWithSymlink(tmp_path),
     )
 
-    job = await service.run_job("review-test-project", "synthetic-review-change")
+    job = await service.run_job("review-test-project", "synthetic-review-change", claim_context=_make_test_claim_context(in_memory_uow))
 
     assert job.status == JobStatus.FAILED
     assert "prohibited symlink" in (job.error_message or "")
@@ -806,7 +834,7 @@ async def test_review_pipeline_ready_to_merge_flow(in_memory_uow, tmp_path):
         worktree_manager=GitFakeWorktreeManager(tmp_path),
     )
 
-    job = await service.run_job("review-test-project", "synthetic-review-change")
+    job = await service.run_job("review-test-project", "synthetic-review-change", claim_context=_make_test_claim_context(in_memory_uow))
 
     assert job.status == JobStatus.READY_TO_MERGE
     review = in_memory_uow.reviews.get_by_job_id(job.job_id)
@@ -848,7 +876,7 @@ async def test_review_pipeline_changes_required_flow(in_memory_uow, tmp_path):
         worktree_manager=GitFakeWorktreeManager(tmp_path),
     )
 
-    job = await service.run_job("review-test-project", "synthetic-review-change")
+    job = await service.run_job("review-test-project", "synthetic-review-change", claim_context=_make_test_claim_context(in_memory_uow))
 
     assert job.status == JobStatus.CHANGES_REQUIRED
     review = in_memory_uow.reviews.get_by_job_id(job.job_id)
@@ -876,7 +904,7 @@ async def test_review_pipeline_timeout_fails_safely(in_memory_uow, tmp_path):
         worktree_manager=GitFakeWorktreeManager(tmp_path),
     )
 
-    job = await service.run_job("review-test-project", "synthetic-review-change")
+    job = await service.run_job("review-test-project", "synthetic-review-change", claim_context=_make_test_claim_context(in_memory_uow))
 
     assert job.status == JobStatus.FAILED
     review = in_memory_uow.reviews.get_by_job_id(job.job_id)
@@ -899,7 +927,7 @@ async def test_review_pipeline_malformed_output_fails_safely(in_memory_uow, tmp_
         worktree_manager=GitFakeWorktreeManager(tmp_path),
     )
 
-    job = await service.run_job("review-test-project", "synthetic-review-change")
+    job = await service.run_job("review-test-project", "synthetic-review-change", claim_context=_make_test_claim_context(in_memory_uow))
 
     assert job.status == JobStatus.FAILED
     review = in_memory_uow.reviews.get_by_job_id(job.job_id)
@@ -930,7 +958,7 @@ async def test_review_pipeline_secret_redaction(in_memory_uow, tmp_path):
         worktree_manager=GitFakeWorktreeManager(tmp_path),
     )
 
-    job = await service.run_job("review-test-project", "synthetic-review-change")
+    job = await service.run_job("review-test-project", "synthetic-review-change", claim_context=_make_test_claim_context(in_memory_uow))
 
     assert job.status == JobStatus.READY_TO_MERGE
     logs = in_memory_uow.job_logs.list_by_job(job.job_id)

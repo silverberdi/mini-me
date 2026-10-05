@@ -55,8 +55,11 @@ def _setup_ready_item(uow: InMemoryPersistenceUnitOfWork, tmp_path: Path) -> Int
     )
     uow.backlog_items.save(item)
 
+    from minime.services.recovery_convergence_service import RecoveryConvergenceService
+    rec_svc = RecoveryConvergenceService(uow)
+    claim_ctx = rec_svc.acquire_claim("intake:app-proj:025-ready-task")
     service = IntakeService(uow, project_root=repo_dir, github_adapter=ReadinessGitHubStub())
-    service.prepare_work_item("app-proj", "025-ready-task", operator_email="op@example.com")
+    service.prepare_work_item("app-proj", "025-ready-task", operator_email="op@example.com", claim_context=claim_ctx)
     return service
 
 

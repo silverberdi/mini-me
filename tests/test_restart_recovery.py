@@ -163,6 +163,20 @@ def test_restart_recovery_preserves_completed_checkpoint(in_memory_uow, tmp_path
     )
     in_memory_uow.projects.save(project)
 
+    in_memory_uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id="run-crash-1",
+            project_id="mini-me",
+            change_name="005-feature",
+            active_job_id="job-crash-1",
+            base_sha="def5678",
+            current_stage=OrchestrationStage.COMPLEMENTARY_REVIEW,
+            current_candidate_sha="abc1234",
+            current_generation=1,
+            is_active=True,
+        )
+    )
+
     job = Job(
         job_id="job-crash-1",
         project_id="mini-me",
@@ -181,6 +195,8 @@ def test_restart_recovery_preserves_completed_checkpoint(in_memory_uow, tmp_path
         exit_code=0,
         duration_ms=10,
         output_snippet="ok",
+        candidate_sha="abc1234",
+        candidate_generation=1,
     )
     in_memory_uow.check_results.save(check)
 
@@ -1074,7 +1090,12 @@ def test_daemon_startup_reconciles_active_orchestration_runs(in_memory_uow, tmp_
     Verify that startup recovery reconciles active orchestration runs, restores resumable stage,
     emits ORCHESTRATION_RECOVERED event, and does not create spurious WAITING_CAPACITY.
     """
-    from minime.domain.enums import ExternalActionStatus, ExternalActionType, OrchestrationStage
+    from minime.domain.enums import (
+        ExternalActionStatus,
+        ExternalActionType,
+        OrchestrationStage,
+        RecoverySource,
+    )
     from minime.domain.models import (
         OrchestrationCandidate,
         OrchestrationExternalAction,
@@ -1090,10 +1111,61 @@ def test_daemon_startup_reconciles_active_orchestration_runs(in_memory_uow, tmp_
     )
     in_memory_uow.projects.save(project)
 
+    job = Job(
+        job_id="job-recover-1",
+        project_id="mini-me",
+        change_name="008-autonomous-change-orchestration",
+        implementer_role="codex",
+        status=JobStatus.COMPLETED,
+        candidate_sha="cand-gen2-sha",
+        base_sha="base-123",
+    )
+    in_memory_uow.jobs.save(job)
+
+    from minime.domain.enums import AuditStatus, ReviewStatus, ReviewVerdict
+    from minime.domain.models import AuditRecord, Review
+
+    in_memory_uow.reviews.save(
+        Review(
+            review_id="rev-1",
+            job_id="job-recover-1",
+            project_id="mini-me",
+            change_name="008-autonomous-change-orchestration",
+            base_sha="base-123",
+            orchestration_run_id="run-recover-1",
+            candidate_generation=2,
+            manifest_id="man-gen2",
+            manifest_hash="hash-gen2",
+            status=ReviewStatus.REVIEW_COMPLETED,
+            verdict=ReviewVerdict.READY_TO_MERGE,
+            reviewer_role="antigravity",
+            candidate_sha="cand-gen2-sha",
+        )
+    )
+    in_memory_uow.audits.save(
+        AuditRecord(
+            audit_id="aud-1",
+            job_id="job-recover-1",
+            project_id="mini-me",
+            change_name="008-autonomous-change-orchestration",
+            orchestration_run_id="run-recover-1",
+            candidate_generation=2,
+            manifest_id="man-gen2",
+            manifest_hash="hash-gen2",
+            status=AuditStatus.AUDIT_COMPLETED,
+            provider="deepseek_direct",
+            candidate_sha="cand-gen2-sha",
+            base_sha="base-123",
+            is_full_candidate=True,
+            findings=[],
+        )
+    )
+
     run = OrchestrationRun(
         run_id="run-recover-1",
         project_id="mini-me",
         change_name="008-autonomous-change-orchestration",
+        active_job_id="job-recover-1",
         base_sha="base-123",
         current_stage=OrchestrationStage.PREPARING_PR,
         resumable_stage=OrchestrationStage.PREPARING_PR,
@@ -1108,6 +1180,7 @@ def test_daemon_startup_reconciles_active_orchestration_runs(in_memory_uow, tmp_
         generation=2,
         base_sha="base-123",
         candidate_sha="cand-gen2-sha",
+        manifest_id="man-gen2",
         manifest_hash="hash-gen2",
         is_frozen=True,
     )
@@ -1143,8 +1216,9 @@ def test_daemon_startup_reconciles_active_orchestration_runs(in_memory_uow, tmp_
     assert rec.current_stage == OrchestrationStage.PREPARING_PR
     assert rec.resumable_stage == OrchestrationStage.PREPARING_PR
     assert rec.is_active is True
-    assert rec.stop_outcome is None  # Restart alone must NOT create WAITING_CAPACITY
-    assert coordinator.resumed == ["run-recover-1"]
+    decisions = in_memory_uow.recovery_decisions.list_by_claim_key("run:run-recover-1")
+    assert len(decisions) == 1
+    assert decisions[0].source == RecoverySource.STARTUP
 
     events = in_memory_uow.events.list_events()
     rec_events = [e for e in events if e.event_type == EventType.ORCHESTRATION_RECOVERED]

@@ -9,7 +9,7 @@ import json
 import shutil
 import subprocess
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -32,11 +32,31 @@ from minime.domain.models import (
     OpenRouterPricingSnapshot,
     Project,
     ProviderHealth,
+    RecoveryClaimContext,
+    utc_now,
 )
 from minime.services.deepseek_auditor_runner import MockAuditorRunner
 from minime.services.execution_pipeline import ExecutionPipelineService
 from minime.services.provider_health_service import ProviderHealthService
 from minime.services.worktree_manager import WorktreeInfo
+
+
+def _make_test_claim_context(uow=None):
+    if uow is not None and hasattr(uow, "claims") and uow.claims is not None:
+        c = uow.claims.acquire_or_reacquire("run:test-claim-key", owner_instance_id="test-owner-id")
+        if c:
+            return RecoveryClaimContext(
+                claim_key=c.claim_key,
+                owner_instance_id=c.owner_instance_id,
+                fence_token=c.fence_token,
+                lease_expires_at=c.lease_expires_at,
+            )
+    return RecoveryClaimContext(
+        claim_key="test-claim-key",
+        owner_instance_id="test-owner-id",
+        fence_token=1,
+        lease_expires_at=utc_now() + timedelta(hours=1),
+    )
 
 
 def _setup_openspec_change(root: Path, change_name: str) -> None:
@@ -285,7 +305,7 @@ async def test_openrouter_fallback_success_creates_no_fabricated_candidate(in_me
         ),
     )
 
-    result_job = await pipeline.execute_queued_job(job.job_id)
+    result_job = await pipeline.execute_queued_job(job.job_id, claim_context=_make_test_claim_context(in_memory_uow))
 
     # Confirm the OpenRouter fallback implementer path was actually exercised.
     assert len(mock_openrouter.calls) >= 1
@@ -372,7 +392,7 @@ async def test_openrouter_success_without_harness_returns_truthful_outcome(in_me
         auditor_runner=MockAuditorRunner(),
     )
 
-    result_job = await pipeline.execute_queued_job(job.job_id)
+    result_job = await pipeline.execute_queued_job(job.job_id, claim_context=_make_test_claim_context(in_memory_uow))
 
     # Leaf E: a missing repository-editing harness is NOT recoverable capacity.
     assert result_job.status != JobStatus.WAITING_CAPACITY

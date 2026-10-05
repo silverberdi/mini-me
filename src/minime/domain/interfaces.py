@@ -32,9 +32,11 @@ from minime.domain.models import (
     CapacityWindow,
     Change,
     CheckResult,
+    DispatchAuthorization,
     DurableSaga,
     Event,
     EvidenceDiagnostic,
+    ExternalActionAttempt,
     ExternalActionResult,
     GitOperation,
     IntegrityAudit,
@@ -57,6 +59,9 @@ from minime.domain.models import (
     ProjectManagedRepositoryBinding,
     ProviderEfficiencyMetrics,
     ProviderHealth,
+    RecoveryClaim,
+    RecoveryClaimContext,
+    RecoveryDecision,
     Review,
     ReviewFinding,
     SchedulerDecisionRecord,
@@ -219,7 +224,13 @@ class JobRepositoryInterface(ABC):
     def list_active_jobs(self) -> list[Job]: ...
 
     @abstractmethod
-    def transition(self, job_id: str, new_status: str, error_message: str | None = None) -> Job: ...
+    def transition(
+        self,
+        job_id: str,
+        new_status: str,
+        error_message: str | None = None,
+        claim_context: Any | None = None,
+    ) -> Job: ...
 
     @abstractmethod
     def set_waiting_capacity(
@@ -228,10 +239,24 @@ class JobRepositoryInterface(ABC):
         waiting_provider: str,
         reason: str,
         expected_reset_at: datetime | None = None,
+        claim_context: Any | None = None,
     ) -> Job: ...
 
     @abstractmethod
-    def set_recovery_blocked(self, job_id: str, reason: str) -> Job: ...
+    def set_recovery_blocked(
+        self,
+        job_id: str,
+        reason: str,
+        claim_context: Any | None = None,
+    ) -> Job: ...
+
+    @abstractmethod
+    def update_executor_fenced(
+        self,
+        job_id: str,
+        current_executor: str,
+        claim_context: Any | None = None,
+    ) -> Job: ...
 
 
 class JobLogRepositoryInterface(ABC):
@@ -524,6 +549,7 @@ class OrchestrationRunRepositoryInterface(ABC):
         run_id: str,
         current_stage: OrchestrationStage,
         resumable_stage: OrchestrationStage,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> OrchestrationRun: ...
 
     @abstractmethod
@@ -535,6 +561,7 @@ class OrchestrationRunRepositoryInterface(ABC):
         stop_reason: str | None = None,
         stop_details: dict[str, Any] | None = None,
         is_active: bool = False,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> OrchestrationRun: ...
 
     @abstractmethod
@@ -620,6 +647,7 @@ class DurableSagaRepositoryInterface(ABC):
         current_phase: str,
         evidence_references: dict[str, Any] | None = None,
         last_observed_outcome: ExternalOutcome | str | None = None,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> DurableSaga: ...
 
     @abstractmethod
@@ -629,6 +657,7 @@ class DurableSagaRepositoryInterface(ABC):
         status: SagaStatus | str,
         blocking_reason: str | None = None,
         last_observed_outcome: ExternalOutcome | str | None = None,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> DurableSaga: ...
 
 
@@ -784,6 +813,9 @@ class PersistenceUnitOfWork(ABC):
     classification_snapshots: TaskClassificationSnapshotRepositoryInterface
     project_managed_repository_bindings: ProjectManagedRepositoryBindingRepositoryInterface
     orchestration_worktree_ownerships: OrchestrationWorktreeOwnershipRepositoryInterface
+    claims: RecoveryClaimRepositoryInterface
+    recovery_decisions: RecoveryDecisionRepositoryInterface
+    external_action_attempts: ExternalActionAttemptRepositoryInterface
     durable_sagas: DurableSagaRepositoryInterface
 
     @abstractmethod
@@ -1009,6 +1041,16 @@ class GitHubAdapterInterface(ABC):
             reason_code=ExternalReasonCode.UNSUPPORTED,
         )
 
+    def get_issue(
+        self, repository: str, issue_number: int
+    ) -> ExternalActionResult[dict[str, Any]]:
+        return ExternalActionResult[dict[str, Any]](
+            outcome=ExternalOutcome.UNKNOWN,
+            value={},
+            source_adapter="interface",
+            reason_code=ExternalReasonCode.UNSUPPORTED,
+        )
+
     def close_issue(
         self, repository: str, issue_number: int, comment: str | None = None
     ) -> ExternalActionResult[bool]:
@@ -1115,3 +1157,81 @@ class TaskClassificationSnapshotRepositoryInterface(ABC):
 
     @abstractmethod
     def find_latest_by_job(self, job_id: str) -> TaskClassificationSnapshot | None: ...
+
+
+class RecoveryClaimRepositoryInterface(ABC):
+    @abstractmethod
+    def acquire_or_reacquire(
+        self, claim_key: str, owner_instance_id: str, lease_seconds: int = 60
+    ) -> RecoveryClaim | None: ...
+
+    @abstractmethod
+    def renew_heartbeat(
+        self, claim_key: str, owner_instance_id: str, fence_token: int, lease_seconds: int = 60
+    ) -> bool: ...
+
+    @abstractmethod
+    def release(self, claim_key: str, owner_instance_id: str, fence_token: int) -> bool: ...
+
+    @abstractmethod
+    def get_by_key(self, claim_key: str) -> RecoveryClaim | None: ...
+
+    @abstractmethod
+    def validate_cas(self, claim_key: str, owner_instance_id: str, fence_token: int) -> bool: ...
+
+    @abstractmethod
+    def commit_fenced_dispatch_intent(
+        self,
+        claim_key: str,
+        owner_instance_id: str,
+        fence_token: int,
+        action_key: str,
+        attempt_number: int = 1,
+        authorization: DispatchAuthorization | None = None,
+    ) -> ExternalActionAttempt: ...
+
+
+class RecoveryDecisionRepositoryInterface(ABC):
+    @abstractmethod
+    def create_decision(self, decision: RecoveryDecision) -> RecoveryDecision: ...
+
+    @abstractmethod
+    def get_by_id(self, decision_id: str) -> RecoveryDecision | None: ...
+
+    @abstractmethod
+    def get_by_cycle_and_claim(
+        self, cycle_id: str, claim_key: str
+    ) -> RecoveryDecision | None: ...
+
+    @abstractmethod
+    def list_by_cycle(self, cycle_id: str) -> list[RecoveryDecision]: ...
+
+    @abstractmethod
+    def list_by_claim_key(self, claim_key: str) -> list[RecoveryDecision]: ...
+
+    @abstractmethod
+    def update_decision(self, decision: RecoveryDecision) -> RecoveryDecision: ...
+
+
+class ExternalActionAttemptRepositoryInterface(ABC):
+    @abstractmethod
+    def create_attempt(self, attempt: ExternalActionAttempt) -> ExternalActionAttempt: ...
+
+    @abstractmethod
+    def get_by_dispatch_intent_key(
+        self, dispatch_intent_key: str
+    ) -> ExternalActionAttempt | None: ...
+
+    @abstractmethod
+    def list_by_action_key(self, action_key: str) -> list[ExternalActionAttempt]: ...
+
+    @abstractmethod
+    def update_status(
+        self,
+        attempt_id: str,
+        status: str,
+        result_payload: dict[str, Any] | None = None,
+        error_message: str | None = None,
+    ) -> ExternalActionAttempt: ...
+
+

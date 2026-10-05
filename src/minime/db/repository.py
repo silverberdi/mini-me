@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, exists, func, select, update
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from minime.db.models import (
@@ -28,6 +29,7 @@ from minime.db.models import (
     DurableSagaModel,
     EventModel,
     EvidenceDiagnosticModel,
+    ExternalActionAttemptModel,
     GitOperationModel,
     IntegrityFindingModel,
     JobAttemptModel,
@@ -49,6 +51,8 @@ from minime.db.models import (
     ProjectModel,
     ProviderEfficiencyMetricsModel,
     ProviderHealthModel,
+    RecoveryClaimModel,
+    RecoveryDecisionModel,
     ReviewFindingModel,
     ReviewModel,
     SchedulerDecisionRecordModel,
@@ -95,6 +99,9 @@ from minime.domain.enums import (
     ProviderResultClass,
     QueuePriority,
     ReadinessState,
+    RecoveryClassification,
+    RecoveryDecisionStatus,
+    RecoverySource,
     RemediationFailureCode,
     RemediationStatus,
     ReviewStatus,
@@ -107,7 +114,7 @@ from minime.domain.enums import (
     WorkItemStatus,
     WorktreeCreationState,
 )
-from minime.domain.exceptions import LifecycleBypassError
+from minime.domain.exceptions import LifecycleBypassError, StaleClaimError
 from minime.domain.interfaces import (
     AuditFindingRepositoryInterface,
     AuditRepositoryInterface,
@@ -126,6 +133,7 @@ from minime.domain.interfaces import (
     DurableSagaRepositoryInterface,
     EventRepositoryInterface,
     EvidenceDiagnosticRepositoryInterface,
+    ExternalActionAttemptRepositoryInterface,
     GitOperationRepositoryInterface,
     IntegrityFindingRepositoryInterface,
     JobAttemptRepositoryInterface,
@@ -148,6 +156,8 @@ from minime.domain.interfaces import (
     ProjectRepositoryInterface,
     ProviderEfficiencyMetricsRepositoryInterface,
     ProviderHealthRepositoryInterface,
+    RecoveryClaimRepositoryInterface,
+    RecoveryDecisionRepositoryInterface,
     ReviewFindingRepositoryInterface,
     ReviewRepositoryInterface,
     SchedulerDecisionRepositoryInterface,
@@ -172,9 +182,11 @@ from minime.domain.models import (
     CapacityWindow,
     Change,
     CheckResult,
+    DispatchAuthorization,
     DurableSaga,
     Event,
     EvidenceDiagnostic,
+    ExternalActionAttempt,
     GitOperation,
     HumanAnswerRecord,
     IntegrityAudit,
@@ -197,6 +209,9 @@ from minime.domain.models import (
     ProjectManagedRepositoryBinding,
     ProviderEfficiencyMetrics,
     ProviderHealth,
+    RecoveryClaim,
+    RecoveryClaimContext,
+    RecoveryDecision,
     Review,
     ReviewFinding,
     SchedulerDecisionRecord,
@@ -204,6 +219,7 @@ from minime.domain.models import (
     TaskRiskProfile,
     ValidationRun,
     WorkQueueItem,
+    generate_uuid,
     utc_now,
 )
 
@@ -870,8 +886,63 @@ def orchestration_external_action_model_to_domain(
         remote_identifier=model.remote_identifier,
         result_payload=model.result_payload or {},
         error_message=model.error_message,
+        last_claim_key=model.last_claim_key,
+        last_fence_token=model.last_fence_token,
+        last_dispatch_intent_id=model.last_dispatch_intent_id,
         reserved_at=model.reserved_at,
         reconciled_at=model.reconciled_at,
+        created_at=model.created_at,
+        updated_at=model.updated_at,
+    )
+
+
+def recovery_claim_model_to_domain(model: RecoveryClaimModel) -> RecoveryClaim:
+    return RecoveryClaim(
+        claim_key=model.claim_key,
+        fence_token=model.fence_token,
+        owner_instance_id=model.owner_instance_id,
+        claimed_at=model.claimed_at,
+        heartbeat_at=model.heartbeat_at,
+        lease_expires_at=model.lease_expires_at,
+        released_at=model.released_at,
+        last_decision_id=model.last_decision_id,
+    )
+
+
+def recovery_decision_model_to_domain(model: RecoveryDecisionModel) -> RecoveryDecision:
+    return RecoveryDecision(
+        decision_id=model.id,
+        cycle_id=model.cycle_id,
+        claim_key=model.claim_key,
+        identity_type=model.identity_type,
+        identity_id=model.identity_id,
+        project_id=model.project_id,
+        change_name=model.change_name,
+        source=RecoverySource(model.source),
+        prior_checkpoint=model.prior_checkpoint or {},
+        observation_refs=model.observation_refs or {},
+        classification=RecoveryClassification(model.classification),
+        planned_action=model.planned_action,
+        fence_token=model.fence_token,
+        status=RecoveryDecisionStatus(model.status),
+        result_payload=model.result_payload or {},
+        reason_code=model.reason_code,
+        created_at=model.created_at,
+        updated_at=model.updated_at,
+    )
+
+
+def external_action_attempt_model_to_domain(model: ExternalActionAttemptModel) -> ExternalActionAttempt:
+    return ExternalActionAttempt(
+        attempt_id=model.id,
+        action_key=model.action_key,
+        claim_key=model.claim_key,
+        fence_token=model.fence_token,
+        attempt_number=model.attempt_number,
+        dispatch_intent_key=model.dispatch_intent_key,
+        status=model.status,
+        result_payload=model.result_payload or {},
+        error_message=model.error_message,
         created_at=model.created_at,
         updated_at=model.updated_at,
     )
@@ -1026,6 +1097,7 @@ class PostgresChangeRepository(ChangeRepositoryInterface):
                 updated_at=change.updated_at,
             )
             self.session.add(model)
+        self.session.flush()
 
     def get_by_id(self, change_id: str) -> Change | None:
         model = self.session.get(ChangeModel, change_id)
@@ -1438,8 +1510,19 @@ class PostgresJobRepository(JobRepositoryInterface):
         models = self.session.scalars(stmt).all()
         return [job_model_to_domain(m) for m in models]
 
-    def transition(self, job_id: str, new_status: str, error_message: str | None = None) -> Job:
-        stmt = select(JobModel).where(JobModel.id == job_id).with_for_update()
+    def transition(
+        self,
+        job_id: str,
+        new_status: str,
+        error_message: str | None = None,
+        claim_context: RecoveryClaimContext | None = None,
+    ) -> Job:
+        stmt = select(JobModel).where(JobModel.id == job_id)
+        # Local lifecycle transitions retain the Stage F row lock.  Recovery
+        # transitions deliberately do not hold that lock: their short,
+        # claim-fenced SQL CAS below is the concurrency boundary.
+        if claim_context is None:
+            stmt = stmt.with_for_update()
         model = self.session.scalars(stmt).first()
         if not model:
             raise ValueError(f"Job '{job_id}' not found.")
@@ -1447,9 +1530,42 @@ class PostgresJobRepository(JobRepositoryInterface):
         target = JobStatus(new_status)
         if current != target and target not in self.VALID_TRANSITIONS[current]:
             raise ValueError(f"Invalid job status transition: {current.value} -> {target.value}.")
-        model.status = target.value
-        model.error_message = error_message
-        model.updated_at = utc_now()
+        if claim_context is not None:
+            now = utc_now()
+            claim_subquery = (
+                select(1)
+                .where(
+                    RecoveryClaimModel.claim_key == claim_context.claim_key,
+                    RecoveryClaimModel.owner_instance_id == claim_context.owner_instance_id,
+                    RecoveryClaimModel.fence_token == claim_context.fence_token,
+                    RecoveryClaimModel.released_at.is_(None),
+                    RecoveryClaimModel.lease_expires_at > now,
+                )
+                .scalar_subquery()
+            )
+            stmt_up = (
+                update(JobModel)
+                .where(
+                    JobModel.id == job_id,
+                    JobModel.status == current.value,
+                    exists(claim_subquery),
+                )
+                .values(
+                    status=target.value,
+                    error_message=error_message,
+                    updated_at=now,
+                )
+            )
+            res = self.session.execute(stmt_up)
+            if res.rowcount == 0:
+                raise StaleClaimError(
+                    f"Fenced transition for job '{job_id}' failed: recovery claim fence is stale, expired, or superseded."
+                )
+        else:
+            model.status = target.value
+            model.error_message = error_message
+            model.updated_at = utc_now()
+        model = self.session.get(JobModel, job_id)
         return job_model_to_domain(model)
 
     def set_waiting_capacity(
@@ -1458,34 +1574,152 @@ class PostgresJobRepository(JobRepositoryInterface):
         waiting_provider: str,
         reason: str,
         expected_reset_at: datetime | None = None,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> Job:
-        stmt = select(JobModel).where(JobModel.id == job_id).with_for_update()
+        now = utc_now()
+        target = JobStatus.WAITING_CAPACITY
+        stmt = select(JobModel).where(JobModel.id == job_id)
         model = self.session.scalars(stmt).first()
         if not model:
             raise ValueError(f"Job '{job_id}' not found.")
         current = JobStatus(model.status)
-        target = JobStatus.WAITING_CAPACITY
-        if target not in self.VALID_TRANSITIONS[current]:
+        if current != target and target not in self.VALID_TRANSITIONS[current]:
             raise ValueError(f"Invalid job status transition: {current.value} -> {target.value}.")
-        model.status = target.value
-        model.waiting_provider = waiting_provider
-        model.capacity_block_reason = reason
-        model.expected_reset_at = expected_reset_at
-        model.updated_at = utc_now()
+        if claim_context is not None:
+            claim_subquery = (
+                select(1)
+                .where(
+                    RecoveryClaimModel.claim_key == claim_context.claim_key,
+                    RecoveryClaimModel.owner_instance_id == claim_context.owner_instance_id,
+                    RecoveryClaimModel.fence_token == claim_context.fence_token,
+                    RecoveryClaimModel.released_at.is_(None),
+                    RecoveryClaimModel.lease_expires_at > now,
+                )
+                .scalar_subquery()
+            )
+            stmt_up = (
+                update(JobModel)
+                .where(
+                    JobModel.id == job_id,
+                    JobModel.status == current.value,
+                    exists(claim_subquery),
+                )
+                .values(
+                    status=target.value,
+                    waiting_provider=waiting_provider,
+                    capacity_block_reason=reason,
+                    expected_reset_at=expected_reset_at,
+                    updated_at=now,
+                )
+            )
+            res = self.session.execute(stmt_up)
+            if res.rowcount == 0:
+                raise StaleClaimError(
+                    f"Fenced set_waiting_capacity for job '{job_id}' failed: recovery claim fence is stale, expired, or superseded."
+                )
+        else:
+            model.status = target.value
+            model.waiting_provider = waiting_provider
+            model.capacity_block_reason = reason
+            model.expected_reset_at = expected_reset_at
+            model.updated_at = now
+        model = self.session.get(JobModel, job_id)
         return job_model_to_domain(model)
 
-    def set_recovery_blocked(self, job_id: str, reason: str) -> Job:
-        stmt = select(JobModel).where(JobModel.id == job_id).with_for_update()
+    def set_recovery_blocked(
+        self,
+        job_id: str,
+        reason: str,
+        claim_context: RecoveryClaimContext | None = None,
+    ) -> Job:
+        now = utc_now()
+        target = JobStatus.RECOVERY_BLOCKED
+        stmt = select(JobModel).where(JobModel.id == job_id)
         model = self.session.scalars(stmt).first()
         if not model:
             raise ValueError(f"Job '{job_id}' not found.")
         current = JobStatus(model.status)
-        target = JobStatus.RECOVERY_BLOCKED
-        if target not in self.VALID_TRANSITIONS[current]:
+        if current != target and target not in self.VALID_TRANSITIONS[current]:
             raise ValueError(f"Invalid job status transition: {current.value} -> {target.value}.")
-        model.status = target.value
-        model.recovery_blocked_reason = reason
-        model.updated_at = utc_now()
+        if claim_context is not None:
+            claim_subquery = (
+                select(1)
+                .where(
+                    RecoveryClaimModel.claim_key == claim_context.claim_key,
+                    RecoveryClaimModel.owner_instance_id == claim_context.owner_instance_id,
+                    RecoveryClaimModel.fence_token == claim_context.fence_token,
+                    RecoveryClaimModel.released_at.is_(None),
+                    RecoveryClaimModel.lease_expires_at > now,
+                )
+                .scalar_subquery()
+            )
+            stmt_up = (
+                update(JobModel)
+                .where(
+                    JobModel.id == job_id,
+                    JobModel.status == current.value,
+                    exists(claim_subquery),
+                )
+                .values(
+                    status=target.value,
+                    recovery_blocked_reason=reason,
+                    updated_at=now,
+                )
+            )
+            res = self.session.execute(stmt_up)
+            if res.rowcount == 0:
+                raise StaleClaimError(
+                    f"Fenced set_recovery_blocked for job '{job_id}' failed: recovery claim fence is stale, expired, or superseded."
+                )
+        else:
+            model.status = target.value
+            model.recovery_blocked_reason = reason
+            model.updated_at = now
+        model = self.session.get(JobModel, job_id)
+        return job_model_to_domain(model)
+
+    def update_executor_fenced(
+        self,
+        job_id: str,
+        current_executor: str,
+        claim_context: RecoveryClaimContext | None = None,
+    ) -> Job:
+        now = utc_now()
+        if claim_context is not None:
+            claim_subquery = (
+                select(1)
+                .where(
+                    RecoveryClaimModel.claim_key == claim_context.claim_key,
+                    RecoveryClaimModel.owner_instance_id == claim_context.owner_instance_id,
+                    RecoveryClaimModel.fence_token == claim_context.fence_token,
+                    RecoveryClaimModel.released_at.is_(None),
+                    RecoveryClaimModel.lease_expires_at > now,
+                )
+                .scalar_subquery()
+            )
+            stmt_up = (
+                update(JobModel)
+                .where(
+                    JobModel.id == job_id,
+                    exists(claim_subquery),
+                )
+                .values(
+                    current_executor=current_executor,
+                    updated_at=now,
+                )
+            )
+            res = self.session.execute(stmt_up)
+            if res.rowcount == 0:
+                raise StaleClaimError(
+                    f"Fenced update_executor for job '{job_id}' failed: recovery claim fence is stale, expired, or superseded."
+                )
+        else:
+            model = self.session.get(JobModel, job_id)
+            if not model:
+                raise ValueError(f"Job '{job_id}' not found.")
+            model.current_executor = current_executor
+            model.updated_at = now
+        model = self.session.get(JobModel, job_id)
         return job_model_to_domain(model)
 
 
@@ -1624,6 +1858,15 @@ class PostgresReviewRepository(ReviewRepositoryInterface):
         )
         model = self.session.scalars(stmt).first()
         return review_model_to_domain(model) if model else None
+
+    def list_by_job(self, job_id: str) -> list[Review]:
+        stmt = (
+            select(ReviewModel)
+            .where(ReviewModel.job_id == job_id)
+            .order_by(desc(ReviewModel.created_at))
+        )
+        models = self.session.scalars(stmt).all()
+        return [review_model_to_domain(m) for m in models]
 
     def list_by_project(self, project_id: str, limit: int = 100) -> list[Review]:
         stmt = (
@@ -1769,6 +2012,15 @@ class PostgresAuditRepository(AuditRepositoryInterface):
         )
         model = self.session.scalars(stmt).first()
         return audit_model_to_domain(model) if model else None
+
+    def list_by_job(self, job_id: str) -> list[AuditRecord]:
+        stmt = (
+            select(AuditModel)
+            .where(AuditModel.job_id == job_id)
+            .order_by(desc(AuditModel.created_at))
+        )
+        models = self.session.scalars(stmt).all()
+        return [audit_model_to_domain(m) for m in models]
 
     def list_by_project(self, project_id: str, limit: int = 100) -> list[AuditRecord]:
         stmt = (
@@ -2711,13 +2963,47 @@ class PostgresOrchestrationRunRepository(OrchestrationRunRepositoryInterface):
         run_id: str,
         current_stage: OrchestrationStage,
         resumable_stage: OrchestrationStage,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> OrchestrationRun:
+        now = utc_now()
+        if claim_context is not None:
+            claim_subquery = (
+                select(1)
+                .where(
+                    RecoveryClaimModel.claim_key == claim_context.claim_key,
+                    RecoveryClaimModel.owner_instance_id == claim_context.owner_instance_id,
+                    RecoveryClaimModel.fence_token == claim_context.fence_token,
+                    RecoveryClaimModel.released_at.is_(None),
+                    RecoveryClaimModel.lease_expires_at > now,
+                )
+                .scalar_subquery()
+            )
+            stmt = (
+                update(OrchestrationRunModel)
+                .where(
+                    OrchestrationRunModel.id == run_id,
+                    exists(claim_subquery),
+                )
+                .values(
+                    current_stage=current_stage.value,
+                    resumable_stage=resumable_stage.value,
+                    updated_at=now,
+                )
+            )
+            result = self.session.execute(stmt)
+            if result.rowcount == 0:
+                raise StaleClaimError(
+                    f"Fenced stage update for run '{run_id}' failed: recovery claim fence is stale, expired, or superseded."
+                )
+        else:
+            model = self.session.get(OrchestrationRunModel, run_id)
+            if not model:
+                raise ValueError(f"Orchestration run '{run_id}' not found")
+            model.current_stage = current_stage.value
+            model.resumable_stage = resumable_stage.value
+            model.updated_at = now
+
         model = self.session.get(OrchestrationRunModel, run_id)
-        if not model:
-            raise ValueError(f"Orchestration run '{run_id}' not found")
-        model.current_stage = current_stage.value
-        model.resumable_stage = resumable_stage.value
-        model.updated_at = utc_now()
         return orchestration_run_model_to_domain(model)
 
     def update_stop_outcome(
@@ -2728,16 +3014,59 @@ class PostgresOrchestrationRunRepository(OrchestrationRunRepositoryInterface):
         stop_reason: str | None = None,
         stop_details: dict[str, Any] | None = None,
         is_active: bool = False,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> OrchestrationRun:
+        now = utc_now()
+        if claim_context is not None:
+            current = self.session.get(OrchestrationRunModel, run_id)
+            if not current:
+                raise ValueError(f"Orchestration run '{run_id}' not found")
+            claim_subquery = (
+                select(1)
+                .where(
+                    RecoveryClaimModel.claim_key == claim_context.claim_key,
+                    RecoveryClaimModel.owner_instance_id == claim_context.owner_instance_id,
+                    RecoveryClaimModel.fence_token == claim_context.fence_token,
+                    RecoveryClaimModel.released_at.is_(None),
+                    RecoveryClaimModel.lease_expires_at > now,
+                )
+                .scalar_subquery()
+            )
+            stmt = (
+                update(OrchestrationRunModel)
+                .where(
+                    OrchestrationRunModel.id == run_id,
+                    OrchestrationRunModel.current_stage == current.current_stage,
+                    OrchestrationRunModel.stop_outcome == current.stop_outcome,
+                    OrchestrationRunModel.is_active == current.is_active,
+                    exists(claim_subquery),
+                )
+                .values(
+                    stop_outcome=stop_outcome.value if stop_outcome else None,
+                    human_gate=human_gate.value if human_gate else None,
+                    stop_reason=stop_reason,
+                    stop_details=stop_details or {},
+                    is_active=is_active,
+                    updated_at=now,
+                )
+            )
+            res = self.session.execute(stmt)
+            if res.rowcount == 0:
+                raise StaleClaimError(
+                    f"Fenced stop outcome update for run '{run_id}' failed: recovery claim fence is stale, expired, or superseded."
+                )
+        else:
+            model = self.session.get(OrchestrationRunModel, run_id)
+            if not model:
+                raise ValueError(f"Orchestration run '{run_id}' not found")
+            model.stop_outcome = stop_outcome.value if stop_outcome else None
+            model.human_gate = human_gate.value if human_gate else None
+            model.stop_reason = stop_reason
+            model.stop_details = stop_details or {}
+            model.is_active = is_active
+            model.updated_at = now
+
         model = self.session.get(OrchestrationRunModel, run_id)
-        if not model:
-            raise ValueError(f"Orchestration run '{run_id}' not found")
-        model.stop_outcome = stop_outcome.value if stop_outcome else None
-        model.human_gate = human_gate.value if human_gate else None
-        model.stop_reason = stop_reason
-        model.stop_details = stop_details or {}
-        model.is_active = is_active
-        model.updated_at = utc_now()
         return orchestration_run_model_to_domain(model)
 
     def update_candidate_binding(
@@ -3058,7 +3387,37 @@ class PostgresDurableSagaRepository(DurableSagaRepositoryInterface):
         current_phase: str,
         evidence_references: dict[str, Any] | None = None,
         last_observed_outcome: ExternalOutcome | str | None = None,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> DurableSaga:
+        now = utc_now()
+        if claim_context is not None:
+            claim_subquery = (
+                select(1)
+                .where(
+                    RecoveryClaimModel.claim_key == claim_context.claim_key,
+                    RecoveryClaimModel.owner_instance_id == claim_context.owner_instance_id,
+                    RecoveryClaimModel.fence_token == claim_context.fence_token,
+                    RecoveryClaimModel.released_at.is_(None),
+                    RecoveryClaimModel.lease_expires_at > now,
+                )
+                .scalar_subquery()
+            )
+            stmt = (
+                update(DurableSagaModel)
+                .where(
+                    DurableSagaModel.id == saga_id,
+                    exists(claim_subquery),
+                )
+                .values(
+                    current_phase=current_phase,
+                    updated_at=now,
+                )
+            )
+            result = self.session.execute(stmt)
+            if result.rowcount == 0:
+                raise StaleClaimError(
+                    f"Fenced phase update for saga '{saga_id}' failed: recovery claim fence is stale, expired, or superseded."
+                )
         model = self.session.get(DurableSagaModel, saga_id)
         if not model:
             raise ValueError(f"Durable saga '{saga_id}' not found")
@@ -3073,7 +3432,7 @@ class PostgresDurableSagaRepository(DurableSagaRepositoryInterface):
                 if isinstance(last_observed_outcome, ExternalOutcome)
                 else str(last_observed_outcome)
             )
-        model.updated_at = utc_now()
+        model.updated_at = now
         return durable_saga_model_to_domain(model)
 
     def update_status(
@@ -3082,21 +3441,62 @@ class PostgresDurableSagaRepository(DurableSagaRepositoryInterface):
         status: SagaStatus | str,
         blocking_reason: str | None = None,
         last_observed_outcome: ExternalOutcome | str | None = None,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> DurableSaga:
+        now = utc_now()
+        status_str = status.value if isinstance(status, SagaStatus) else str(status)
+        outcome_str = (
+            last_observed_outcome.value
+            if isinstance(last_observed_outcome, ExternalOutcome)
+            else (str(last_observed_outcome) if last_observed_outcome is not None else None)
+        )
+        if claim_context is not None:
+            claim_subquery = (
+                select(1)
+                .where(
+                    RecoveryClaimModel.claim_key == claim_context.claim_key,
+                    RecoveryClaimModel.owner_instance_id == claim_context.owner_instance_id,
+                    RecoveryClaimModel.fence_token == claim_context.fence_token,
+                    RecoveryClaimModel.released_at.is_(None),
+                    RecoveryClaimModel.lease_expires_at > now,
+                )
+                .scalar_subquery()
+            )
+            update_values: dict[str, Any] = {
+                "status": status_str,
+                "updated_at": now,
+            }
+            if blocking_reason is not None:
+                update_values["blocking_reason"] = blocking_reason
+            if outcome_str is not None:
+                update_values["last_observed_outcome"] = outcome_str
+            stmt = (
+                update(DurableSagaModel)
+                .where(
+                    DurableSagaModel.id == saga_id,
+                    exists(claim_subquery),
+                )
+                .values(**update_values)
+            )
+            result = self.session.execute(stmt)
+            if result.rowcount == 0:
+                raise StaleClaimError(
+                    f"Fenced status update for saga '{saga_id}' failed: recovery claim fence is stale, expired, or superseded."
+                )
+        else:
+            model = self.session.get(DurableSagaModel, saga_id)
+            if not model:
+                raise ValueError(f"Durable saga '{saga_id}' not found")
+            model.status = status_str
+            if blocking_reason is not None:
+                model.blocking_reason = blocking_reason
+            if outcome_str is not None:
+                model.last_observed_outcome = outcome_str
+            model.updated_at = now
+
         model = self.session.get(DurableSagaModel, saga_id)
         if not model:
             raise ValueError(f"Durable saga '{saga_id}' not found")
-        status_str = status.value if isinstance(status, SagaStatus) else str(status)
-        model.status = status_str
-        if blocking_reason is not None:
-            model.blocking_reason = blocking_reason
-        if last_observed_outcome is not None:
-            model.last_observed_outcome = (
-                last_observed_outcome.value
-                if isinstance(last_observed_outcome, ExternalOutcome)
-                else str(last_observed_outcome)
-            )
-        model.updated_at = utc_now()
         return durable_saga_model_to_domain(model)
 
 
@@ -3126,6 +3526,9 @@ class PostgresOrchestrationExternalActionRepository(OrchestrationExternalActionR
                     remote_identifier=action.remote_identifier,
                     result_payload=action.result_payload,
                     error_message=action.error_message,
+                    last_claim_key=action.last_claim_key,
+                    last_fence_token=action.last_fence_token,
+                    last_dispatch_intent_id=action.last_dispatch_intent_id,
                     reserved_at=action.reserved_at,
                     reconciled_at=action.reconciled_at,
                     created_at=action.created_at,
@@ -4641,6 +5044,371 @@ class PostgresOrchestrationWorktreeOwnershipRepository(
             self.session.delete(model)
 
 
+class PostgresRecoveryClaimRepository(RecoveryClaimRepositoryInterface):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def acquire_or_reacquire(
+        self, claim_key: str, owner_instance_id: str, lease_seconds: int = 60
+    ) -> RecoveryClaim | None:
+        try:
+            stmt = (
+                select(RecoveryClaimModel)
+                .where(RecoveryClaimModel.claim_key == claim_key)
+                .with_for_update(nowait=True)
+            )
+            model = self.session.scalars(stmt).first()
+        except (OperationalError, IntegrityError):
+            self.session.rollback()
+            return None
+        now = utc_now()
+        lease_expires = now + timedelta(seconds=lease_seconds)
+
+        try:
+            if model is None:
+                model = RecoveryClaimModel(
+                    claim_key=claim_key,
+                    fence_token=1,
+                    owner_instance_id=owner_instance_id,
+                    claimed_at=now,
+                    heartbeat_at=now,
+                    lease_expires_at=lease_expires,
+                    released_at=None,
+                    last_decision_id=None,
+                )
+                self.session.add(model)
+                self.session.flush()
+                return recovery_claim_model_to_domain(model)
+
+            if model.released_at is None and model.lease_expires_at > now and model.owner_instance_id != owner_instance_id:
+                return None
+
+            if model.released_at is None and model.lease_expires_at > now and model.owner_instance_id == owner_instance_id:
+                model.heartbeat_at = now
+                model.lease_expires_at = lease_expires
+                self.session.flush()
+                return recovery_claim_model_to_domain(model)
+
+            model.fence_token = model.fence_token + 1
+            model.owner_instance_id = owner_instance_id
+            model.claimed_at = now
+            model.heartbeat_at = now
+            model.lease_expires_at = lease_expires
+            model.released_at = None
+            self.session.flush()
+            return recovery_claim_model_to_domain(model)
+        except (OperationalError, IntegrityError):
+            self.session.rollback()
+            return None
+
+    def renew_heartbeat(
+        self, claim_key: str, owner_instance_id: str, fence_token: int, lease_seconds: int = 60
+    ) -> bool:
+        now = utc_now()
+        lease_expires = now + timedelta(seconds=lease_seconds)
+        stmt = (
+            update(RecoveryClaimModel)
+            .where(
+                RecoveryClaimModel.claim_key == claim_key,
+                RecoveryClaimModel.owner_instance_id == owner_instance_id,
+                RecoveryClaimModel.fence_token == fence_token,
+                RecoveryClaimModel.released_at.is_(None),
+                RecoveryClaimModel.lease_expires_at > now,
+            )
+            .values(heartbeat_at=now, lease_expires_at=lease_expires)
+        )
+        res = self.session.execute(stmt)
+        return res.rowcount > 0
+
+    def release(self, claim_key: str, owner_instance_id: str, fence_token: int) -> bool:
+        now = utc_now()
+        stmt = (
+            update(RecoveryClaimModel)
+            .where(
+                RecoveryClaimModel.claim_key == claim_key,
+                RecoveryClaimModel.owner_instance_id == owner_instance_id,
+                RecoveryClaimModel.fence_token == fence_token,
+                RecoveryClaimModel.released_at.is_(None),
+                RecoveryClaimModel.lease_expires_at > now,
+            )
+            .values(released_at=now)
+        )
+        res = self.session.execute(stmt)
+        return res.rowcount > 0
+
+    def get_by_key(self, claim_key: str) -> RecoveryClaim | None:
+        model = self.session.get(RecoveryClaimModel, claim_key)
+        return recovery_claim_model_to_domain(model) if model else None
+
+    def validate_cas(self, claim_key: str, owner_instance_id: str, fence_token: int) -> bool:
+        now = utc_now()
+        stmt = select(RecoveryClaimModel).where(
+            RecoveryClaimModel.claim_key == claim_key,
+            RecoveryClaimModel.owner_instance_id == owner_instance_id,
+            RecoveryClaimModel.fence_token == fence_token,
+            RecoveryClaimModel.released_at.is_(None),
+            RecoveryClaimModel.lease_expires_at > now,
+        )
+        model = self.session.scalars(stmt).first()
+        return model is not None
+
+    def commit_fenced_dispatch_intent(
+        self,
+        claim_key: str,
+        owner_instance_id: str,
+        fence_token: int,
+        action_key: str,
+        attempt_number: int = 1,
+        authorization: DispatchAuthorization | None = None,
+    ) -> ExternalActionAttempt:
+        now = utc_now()
+        stmt = (
+            select(RecoveryClaimModel)
+            .where(RecoveryClaimModel.claim_key == claim_key)
+            .with_for_update()
+        )
+        claim_model = self.session.scalars(stmt).first()
+        if (
+            not claim_model
+            or claim_model.owner_instance_id != owner_instance_id
+            or claim_model.fence_token != fence_token
+            or claim_model.released_at is not None
+            or claim_model.lease_expires_at <= now
+        ):
+            self.session.rollback()
+            raise StaleClaimError(
+                f"Claim '{claim_key}' with fence {fence_token} is stale or expired."
+            )
+
+        action_stmt = (
+            select(OrchestrationExternalActionModel)
+            .where(OrchestrationExternalActionModel.action_key == action_key)
+            .with_for_update()
+        )
+        action_model = self.session.scalars(action_stmt).first()
+        if not action_model:
+            self.session.rollback()
+            raise ValueError(f"Action '{action_key}' not found.")
+
+        # Cross-parent action ownership validation (ROOT CAUSE 4)
+        if claim_key.startswith("run:"):
+            expected_run_id = claim_key[len("run:"):]
+            if action_model.run_id != expected_run_id:
+                self.session.rollback()
+                raise ValueError(
+                    f"Cross-parent action dispatch rejected: action '{action_key}' is bound to run '{action_model.run_id}', but claim key is '{claim_key}'."
+                )
+            parent_run = self.session.get(OrchestrationRunModel, expected_run_id)
+            if not parent_run or not parent_run.is_active:
+                self.session.rollback()
+                raise StaleClaimError(
+                    f"Parent run '{expected_run_id}' for claim '{claim_key}' is inactive or missing."
+                )
+        elif claim_key.startswith("closure:"):
+            expected_saga_id = claim_key[len("closure:"):]
+            if action_model.saga_id != expected_saga_id:
+                self.session.rollback()
+                raise ValueError(
+                    f"Cross-parent action dispatch rejected: action '{action_key}' is bound to saga '{action_model.saga_id}', but claim key is '{claim_key}'."
+                )
+            parent_saga = self.session.get(DurableSagaModel, expected_saga_id)
+            if not parent_saga or parent_saga.status in (SagaStatus.COMPLETED.value, SagaStatus.FAILED.value):
+                self.session.rollback()
+                raise StaleClaimError(
+                    f"Parent closure saga '{expected_saga_id}' for claim '{claim_key}' is inactive or missing."
+                )
+        elif claim_key.startswith("intake:"):
+            if action_model.saga_id:
+                saga = self.session.get(DurableSagaModel, action_model.saga_id)
+                if not saga or saga.status in (SagaStatus.COMPLETED.value, SagaStatus.FAILED.value):
+                    self.session.rollback()
+                    raise StaleClaimError(
+                        f"Parent intake saga '{action_model.saga_id}' for claim '{claim_key}' is inactive or missing."
+                    )
+                expected_key = f"intake:{saga.project_id}:{saga.work_item_key}"
+                if expected_key != claim_key:
+                    self.session.rollback()
+                    raise ValueError(
+                        f"Cross-parent action dispatch rejected: action '{action_key}' is bound to intake saga '{saga.id}' ({expected_key}), but claim key is '{claim_key}'."
+                    )
+
+        attempts_stmt = select(ExternalActionAttemptModel).where(
+            ExternalActionAttemptModel.action_key == action_key
+        )
+        existing_attempts = self.session.scalars(attempts_stmt).all()
+
+        action_domain = orchestration_external_action_model_to_domain(action_model)
+        if authorization is not None:
+            if not authorization.is_authorized or authorization.action_key != action_key:
+                self.session.rollback()
+                raise ValueError(
+                    f"Dispatch intent creation rejected for '{action_key}': Stage B/D authorization not proven ({authorization.authorization_reason})."
+                )
+        else:
+            from minime.domain.models import evaluate_dispatch_authorization
+            auth_res = evaluate_dispatch_authorization(action_domain)
+            if not auth_res.is_authorized:
+                self.session.rollback()
+                raise ValueError(
+                    f"Dispatch intent creation rejected for '{action_key}': Stage B/D authorization not proven ({auth_res.authorization_reason})."
+                )
+
+        if action_model.status == ExternalActionStatus.RESERVED.value:
+            if action_model.last_dispatch_intent_id or action_model.remote_identifier or existing_attempts:
+                self.session.rollback()
+                raise ValueError(
+                    f"Action '{action_key}' is RESERVED but POSSIBLY_DISPATCHED; observation required before dispatch."
+                )
+
+        dispatch_intent_key = f"{action_key}:{claim_key}:{fence_token}:{attempt_number}"
+
+        attempt_model = ExternalActionAttemptModel(
+            id=generate_uuid(),
+            action_key=action_key,
+            claim_key=claim_key,
+            fence_token=fence_token,
+            attempt_number=attempt_number,
+            dispatch_intent_key=dispatch_intent_key,
+            status="EXECUTING",
+            created_at=now,
+            updated_at=now,
+        )
+        self.session.add(attempt_model)
+        action_model.status = ExternalActionStatus.EXECUTING.value
+        action_model.last_dispatch_intent_id = attempt_model.id
+        action_model.updated_at = now
+        self.session.commit()
+
+        return external_action_attempt_model_to_domain(attempt_model)
+
+
+class PostgresRecoveryDecisionRepository(RecoveryDecisionRepositoryInterface):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def create_decision(self, decision: RecoveryDecision) -> RecoveryDecision:
+        model = RecoveryDecisionModel(
+            id=decision.decision_id,
+            cycle_id=decision.cycle_id,
+            claim_key=decision.claim_key,
+            identity_type=decision.identity_type,
+            identity_id=decision.identity_id,
+            project_id=decision.project_id,
+            change_name=decision.change_name,
+            source=decision.source.value if isinstance(decision.source, RecoverySource) else str(decision.source),
+            prior_checkpoint=decision.prior_checkpoint,
+            observation_refs=decision.observation_refs,
+            classification=decision.classification.value if isinstance(decision.classification, RecoveryClassification) else str(decision.classification),
+            planned_action=decision.planned_action,
+            fence_token=decision.fence_token,
+            status=decision.status.value if isinstance(decision.status, RecoveryDecisionStatus) else str(decision.status),
+            result_payload=decision.result_payload,
+            reason_code=decision.reason_code,
+            created_at=decision.created_at,
+            updated_at=decision.updated_at,
+        )
+        self.session.add(model)
+        self.session.flush()
+        return recovery_decision_model_to_domain(model)
+
+    def get_by_id(self, decision_id: str) -> RecoveryDecision | None:
+        model = self.session.get(RecoveryDecisionModel, decision_id)
+        return recovery_decision_model_to_domain(model) if model else None
+
+    def get_by_cycle_and_claim(
+        self, cycle_id: str, claim_key: str
+    ) -> RecoveryDecision | None:
+        stmt = select(RecoveryDecisionModel).where(
+            RecoveryDecisionModel.cycle_id == cycle_id,
+            RecoveryDecisionModel.claim_key == claim_key,
+        )
+        model = self.session.scalars(stmt).first()
+        return recovery_decision_model_to_domain(model) if model else None
+
+    def list_by_cycle(self, cycle_id: str) -> list[RecoveryDecision]:
+        stmt = select(RecoveryDecisionModel).where(
+            RecoveryDecisionModel.cycle_id == cycle_id
+        )
+        models = self.session.scalars(stmt).all()
+        return [recovery_decision_model_to_domain(m) for m in models]
+
+    def list_by_claim_key(self, claim_key: str) -> list[RecoveryDecision]:
+        stmt = select(RecoveryDecisionModel).where(
+            RecoveryDecisionModel.claim_key == claim_key
+        ).order_by(desc(RecoveryDecisionModel.created_at))
+        models = self.session.scalars(stmt).all()
+        return [recovery_decision_model_to_domain(m) for m in models]
+
+    def update_decision(self, decision: RecoveryDecision) -> RecoveryDecision:
+        model = self.session.get(RecoveryDecisionModel, decision.decision_id)
+        if model:
+            model.status = decision.status.value if isinstance(decision.status, RecoveryDecisionStatus) else str(decision.status)
+            model.result_payload = decision.result_payload
+            model.reason_code = decision.reason_code
+            model.updated_at = utc_now()
+            self.session.flush()
+            return recovery_decision_model_to_domain(model)
+        return decision
+
+
+class PostgresExternalActionAttemptRepository(ExternalActionAttemptRepositoryInterface):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def create_attempt(self, attempt: ExternalActionAttempt) -> ExternalActionAttempt:
+        model = ExternalActionAttemptModel(
+            id=attempt.attempt_id,
+            action_key=attempt.action_key,
+            claim_key=attempt.claim_key,
+            fence_token=attempt.fence_token,
+            attempt_number=attempt.attempt_number,
+            dispatch_intent_key=attempt.dispatch_intent_key,
+            status=attempt.status,
+            result_payload=attempt.result_payload,
+            error_message=attempt.error_message,
+            created_at=attempt.created_at,
+            updated_at=attempt.updated_at,
+        )
+        self.session.add(model)
+        self.session.flush()
+        return external_action_attempt_model_to_domain(model)
+
+    def get_by_dispatch_intent_key(
+        self, dispatch_intent_key: str
+    ) -> ExternalActionAttempt | None:
+        stmt = select(ExternalActionAttemptModel).where(
+            ExternalActionAttemptModel.dispatch_intent_key == dispatch_intent_key
+        )
+        model = self.session.scalars(stmt).first()
+        return external_action_attempt_model_to_domain(model) if model else None
+
+    def list_by_action_key(self, action_key: str) -> list[ExternalActionAttempt]:
+        stmt = select(ExternalActionAttemptModel).where(
+            ExternalActionAttemptModel.action_key == action_key
+        ).order_by(ExternalActionAttemptModel.attempt_number)
+        models = self.session.scalars(stmt).all()
+        return [external_action_attempt_model_to_domain(m) for m in models]
+
+    def update_status(
+        self,
+        attempt_id: str,
+        status: str,
+        result_payload: dict[str, Any] | None = None,
+        error_message: str | None = None,
+    ) -> ExternalActionAttempt:
+        model = self.session.get(ExternalActionAttemptModel, attempt_id)
+        if model:
+            model.status = status
+            if result_payload is not None:
+                model.result_payload = result_payload
+            if error_message is not None:
+                model.error_message = error_message
+            model.updated_at = utc_now()
+            self.session.flush()
+            return external_action_attempt_model_to_domain(model)
+        raise ValueError(f"ExternalActionAttempt {attempt_id} not found")
+
+
 class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
     """Encapsulates a database session for atomic operations across repositories."""
 
@@ -4695,6 +5463,9 @@ class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
             session
         )
         self.durable_sagas = PostgresDurableSagaRepository(session)
+        self.claims = PostgresRecoveryClaimRepository(session)
+        self.recovery_decisions = PostgresRecoveryDecisionRepository(session)
+        self.external_action_attempts = PostgresExternalActionAttemptRepository(session)
 
     def commit(self) -> None:
         self.session.commit()
@@ -4705,6 +5476,31 @@ class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
     def rollback(self) -> None:
         self.session.rollback()
 
+    def renew_claim_heartbeat_isolated(
+        self,
+        context: RecoveryClaimContext,
+        lease_seconds: int,
+    ) -> bool:
+        """Renew a recovery lease using a session never shared with the worker thread."""
+        heartbeat_session = Session(bind=self.session.get_bind())
+        try:
+            renewed = PostgresRecoveryClaimRepository(heartbeat_session).renew_heartbeat(
+                claim_key=context.claim_key,
+                owner_instance_id=context.owner_instance_id,
+                fence_token=context.fence_token,
+                lease_seconds=lease_seconds,
+            )
+            if renewed:
+                heartbeat_session.commit()
+            else:
+                heartbeat_session.rollback()
+            return renewed
+        except Exception:
+            heartbeat_session.rollback()
+            return False
+        finally:
+            heartbeat_session.close()
+
     def acquire_advisory_lock(self, key: int, lock_timeout: str = "2s") -> None:
         """Acquire PostgreSQL transaction-scoped 64-bit advisory lock with a local lock timeout."""
         bind_name = getattr(getattr(self.session, "bind", None), "name", "")
@@ -4712,4 +5508,3 @@ class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
             from sqlalchemy import text
             self.session.execute(text(f"SET LOCAL lock_timeout = '{lock_timeout}'"))
             self.session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
-

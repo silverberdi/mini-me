@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from tests.conftest import InMemoryRecoveryClaimRepository
 
 from minime.domain.enums import (
     ChangeStatus,
@@ -26,12 +28,29 @@ from minime.domain.models import (
     Change,
     DurableSaga,
     OrchestrationExternalAction,
+    RecoveryClaimContext,
+    utc_now,
 )
 from minime.services.intake_service import IntakeService
 from minime.services.post_merge_service import PostMergeReconciliationService
 from minime.services.reconciliation_authority import ReconciliationAuthority
 from minime.services.restart_recovery_service import RestartRecoveryService
 from minime.services.saga_engine import SagaEngine
+
+
+def _test_ctx(claim_key: str = "test-claim") -> RecoveryClaimContext:
+    return RecoveryClaimContext(
+        claim_key=claim_key,
+        owner_instance_id="test-owner",
+        fence_token=1,
+        lease_expires_at=utc_now() + timedelta(seconds=3600),
+    )
+
+
+def _add_recovery_claim_authority(uow: "DummyUOW") -> None:
+    """Give recovery tests an explicit durable claim authority."""
+    uow.claims = InMemoryRecoveryClaimRepository()
+    uow.claims._uow = uow
 
 
 class InMemoryDurableSagaRepository:
@@ -93,6 +112,7 @@ class InMemoryDurableSagaRepository:
         current_phase: str,
         evidence_references: dict | None = None,
         last_observed_outcome: Any | None = None,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> DurableSaga:
         saga = self._sagas[saga_id]
         refs = dict(saga.evidence_references)
@@ -114,6 +134,7 @@ class InMemoryDurableSagaRepository:
         status: SagaStatus | str,
         blocking_reason: str | None = None,
         last_observed_outcome: Any | None = None,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> DurableSaga:
         saga = self._sagas[saga_id]
         st_enum = SagaStatus(status) if isinstance(status, str) else status
@@ -488,8 +509,11 @@ def test_intake_saga_restart_at_every_phase(tmp_path):
         )
         assert saga.current_phase == phase
 
-        # Resume saga
-        resumed = engine.resume_saga(saga.id)
+        from datetime import timedelta
+
+        from minime.domain.models import RecoveryClaimContext, utc_now
+        ctx = RecoveryClaimContext(claim_key=f"saga:{saga.id}", owner_instance_id="test-owner", fence_token=1, lease_expires_at=utc_now() + timedelta(seconds=3600))
+        resumed = engine.resume_saga(saga.id, claim_context=ctx)
         assert resumed.id == saga.id
 
 
@@ -523,7 +547,11 @@ def test_closure_saga_restart_at_every_phase():
         )
         assert saga.current_phase == phase
 
-        resumed = engine.resume_saga(saga.id)
+        from datetime import timedelta
+
+        from minime.domain.models import RecoveryClaimContext, utc_now
+        ctx = RecoveryClaimContext(claim_key=f"saga:{saga.id}", owner_instance_id="test-owner", fence_token=1, lease_expires_at=utc_now() + timedelta(seconds=3600))
+        resumed = engine.resume_saga(saga.id, claim_context=ctx)
         assert resumed.id == saga.id
 
 
@@ -572,6 +600,7 @@ def test_terminal_domain_reconciliation_mode():
 def test_terminal_identity_protection_intake():
     """Verify intake saga for terminal backlog item completes without re-opening work."""
     uow = DummyUOW()
+    _add_recovery_claim_authority(uow)
     engine = SagaEngine(uow)
 
     item = BacklogItem(
@@ -612,9 +641,13 @@ def test_repeated_resume_idempotency():
         change_name="k1",
     )
 
-    res1 = engine.resume_saga(saga.id)
-    res2 = engine.resume_saga(saga.id)
-    res3 = engine.resume_saga(saga.id)
+    from datetime import timedelta
+
+    from minime.domain.models import RecoveryClaimContext, utc_now
+    ctx = RecoveryClaimContext(claim_key=f"saga:{saga.id}", owner_instance_id="test-owner", fence_token=1, lease_expires_at=utc_now() + timedelta(seconds=3600))
+    res1 = engine.resume_saga(saga.id, claim_context=ctx)
+    res2 = engine.resume_saga(saga.id, claim_context=ctx)
+    res3 = engine.resume_saga(saga.id, claim_context=ctx)
 
     assert res1.id == res2.id == res3.id == saga.id
 
@@ -657,7 +690,8 @@ def test_intake_resume_from_persisted_phase_no_replay():
     service = IntakeService(
         uow=uow, project_root=".", openspec_generator=gen_mock, saga_engine=engine
     )
-    service.prepare_work_item("p1", "k1")
+    ctx = _test_ctx("intake:p1:k1")
+    service.prepare_work_item("p1", "k1", claim_context=ctx)
     gen_mock.generate_from_backlog_item.assert_not_called()
 
 
@@ -697,7 +731,8 @@ def test_openspec_generation_not_replayed_after_authored():
     service = IntakeService(
         uow=uow, project_root=".", openspec_generator=gen_mock, saga_engine=engine
     )
-    service.prepare_work_item("p1", "k1")
+    ctx = _test_ctx("intake:p1:k1")
+    service.prepare_work_item("p1", "k1", claim_context=ctx)
     gen_mock.generate_from_backlog_item.assert_not_called()
     gen_mock.write_change_to_disk.assert_not_called()
 
@@ -800,7 +835,8 @@ def test_ambiguous_action_without_safe_retry_blocks():
     service = IntakeService(
         uow=uow, project_root=".", github_adapter=mock_github, saga_engine=engine
     )
-    service.prepare_work_item("p1", "k1")
+    ctx = _test_ctx("intake:p1:k1")
+    service.prepare_work_item("p1", "k1", claim_context=ctx)
 
     updated_saga = engine.get_saga(saga.id)
     assert updated_saga.status == SagaStatus.BLOCKED
@@ -810,6 +846,7 @@ def test_ambiguous_action_without_safe_retry_blocks():
 def test_terminal_intake_recovery_cancels_saga():
     """Verify terminal intake saga transitions to CANCELLED instead of COMPLETED."""
     uow = DummyUOW()
+    _add_recovery_claim_authority(uow)
     engine = SagaEngine(uow)
 
     item = BacklogItem(
@@ -842,7 +879,6 @@ def test_terminal_intake_recovery_cancels_saga():
 def test_terminal_closure_reconciliation_missing_evidence_blocks():
     """Verify terminal closure reconciliation with missing evidence blocks saga."""
     uow = DummyUOW()
-    engine = SagaEngine(uow)
 
     run = MagicMock(
         run_id="run_1",
@@ -860,9 +896,10 @@ def test_terminal_closure_reconciliation_missing_evidence_blocks():
     uow.bindings.get_by_project_and_change.return_value = MagicMock(
         github_issue_number=123, github_project_item_id="item_1"
     )
+    service = PostMergeReconciliationService(uow=uow, project_root=".")
 
-    service = PostMergeReconciliationService(uow=uow, project_root=".", saga_engine=engine)
-    res = service.reconcile_post_merge("p1", "c1", run_id="run_1")
+    ctx = _test_ctx("run:run_1")
+    res = service.reconcile_post_merge("p1", "c1", run_id="run_1", claim_context=ctx)
     assert res.success is False
 
 
@@ -934,9 +971,10 @@ def test_terminal_closure_missing_one_phase_does_not_reach_final_closed():
     uow.bindings.get_by_project_and_change.return_value = MagicMock(
         github_issue_number=123, github_project_item_id="item_1"
     )
+    service = PostMergeReconciliationService(uow=uow, project_root=".")
 
-    service = PostMergeReconciliationService(uow=uow, project_root=".", saga_engine=engine)
-    res = service.reconcile_post_merge("p1", "c1", run_id="run_1")
+    ctx = _test_ctx("run:run_1")
+    res = service.reconcile_post_merge("p1", "c1", run_id="run_1", claim_context=ctx)
     assert res.success is False
     assert saga.current_phase != "FINAL_CLOSED"
 
@@ -1010,9 +1048,10 @@ def test_terminal_closure_all_13_proven_reaches_final_closed():
     uow.bindings.get_by_project_and_change.return_value = MagicMock(
         github_issue_number=123, github_project_item_id="item_1"
     )
+    service = PostMergeReconciliationService(uow=uow, project_root=".")
 
-    service = PostMergeReconciliationService(uow=uow, project_root=".", saga_engine=engine)
-    res = service.reconcile_post_merge("p1", "c1", run_id="run_1")
+    ctx = _test_ctx("run:run_1")
+    res = service.reconcile_post_merge("p1", "c1", run_id="run_1", claim_context=ctx)
     assert res.success is True
     assert res.already_closed is True
 
@@ -1141,7 +1180,8 @@ def test_terminal_change_check_prevents_saga_creation():
     )
     uow.changes.save(change)
     service = IntakeService(uow=uow, project_root=".", saga_engine=engine)
-    res = service.prepare_work_item("p1", "term1")
+    ctx = _test_ctx("intake:p1:term1")
+    res = service.prepare_work_item("p1", "term1", claim_context=ctx)
     assert res.item.item_key == "term1"
     engine.start_saga.assert_not_called()
     engine.cancel_saga.assert_not_called()

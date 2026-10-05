@@ -170,7 +170,10 @@ def test_t06_saga_resume_row_locking(pg_session_factory: sessionmaker[Session]):
         with pg_session_factory() as session_b:
             uow_b = PostgresPersistenceUnitOfWork(session_b)
             engine_b = SagaEngine(uow_b)
-            resumed = engine_b.resume_saga(saga_id)
+            from minime.services.recovery_convergence_service import RecoveryConvergenceService
+            conv_b = RecoveryConvergenceService(uow_b)
+            ctx_b = conv_b.acquire_claim(f"saga:{saga_id}")
+            resumed = engine_b.resume_saga(saga_id, claim_context=ctx_b)
             step_log.append(f"B: unblocked, observed phase '{resumed.current_phase}'")
             uow_b.commit()
 
@@ -686,7 +689,7 @@ def test_f18_resolve_preserved_candidate_concurrency(pg_session_factory: session
                 )
                 srv = OrchestrationService(uow_w, project_root=repo, pipeline=pipeline)
 
-                def _mock_drive(r_id, project_root=None):
+                def _mock_drive(r_id, project_root=None, claim_context=None):
                     r = srv.uow.orchestration_runs.get_by_id(r_id)
                     if r:
                         r.stop_outcome = None
@@ -696,9 +699,14 @@ def test_f18_resolve_preserved_candidate_concurrency(pg_session_factory: session
                     return r
 
                 srv.drive_coordinator = _mock_drive
-                srv.resolve_preserved_candidate(
-                    run_id, continue_preserved_candidate=True, project_root=repo
-                )
+                from minime.services.recovery_convergence_service import RecoveryConvergenceService
+
+                rec_svc = RecoveryConvergenceService(uow_w, project_root=repo)
+                claim_ctx = rec_svc.acquire_claim(f"run:{run_id}")
+                if claim_ctx is not None:
+                    srv.resolve_preserved_candidate(
+                        run_id, continue_preserved_candidate=True, project_root=repo, claim_context=claim_ctx
+                    )
         except Exception as e:
             exceptions.append(e)
 

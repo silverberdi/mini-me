@@ -4,7 +4,7 @@ import json
 import shutil
 import subprocess
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -31,6 +31,8 @@ from minime.domain.models import (
     OrchestrationRun,
     Project,
     ProviderHealth,
+    RecoveryClaimContext,
+    utc_now,
 )
 from minime.services.budget_service import BudgetHeadroom
 from minime.services.capacity_lifecycle_service import CapacityLifecycleService
@@ -39,6 +41,24 @@ from minime.services.execution_pipeline import ExecutionPipelineService
 from minime.services.openrouter_eligibility import OpenRouterEligibilityEvaluator
 from minime.services.orchestration_service import OrchestrationService
 from minime.services.worktree_manager import WorktreeInfo
+
+
+def _make_test_claim_context(uow=None):
+    if uow is not None and hasattr(uow, "claims") and uow.claims is not None:
+        c = uow.claims.acquire_or_reacquire("run:test-claim-key", owner_instance_id="test-owner-id")
+        if c:
+            return RecoveryClaimContext(
+                claim_key=c.claim_key,
+                owner_instance_id=c.owner_instance_id,
+                fence_token=c.fence_token,
+                lease_expires_at=c.lease_expires_at,
+            )
+    return RecoveryClaimContext(
+        claim_key="test-claim-key",
+        owner_instance_id="test-owner-id",
+        fence_token=1,
+        lease_expires_at=utc_now() + timedelta(hours=1),
+    )
 
 
 class GitFakeWorktreeManager:
@@ -418,7 +438,7 @@ async def test_fallback_implementer_execution_flow(in_memory_uow, tmp_path):
         ),
     )
 
-    result_job = await pipeline.execute_queued_job(job.job_id)
+    result_job = await pipeline.execute_queued_job(job.job_id, claim_context=_make_test_claim_context(in_memory_uow))
     # OpenRouter implementer fallback returns text but cannot materialize repository
     # changes; classified as insufficient evidence -> governed human escalation
     # (NOT a capacity wait, NOT a fabricated candidate).
@@ -527,7 +547,7 @@ async def test_fallback_reviewer_model_independence(in_memory_uow, tmp_path):
         ),
     )
 
-    result_job = await pipeline.execute_queued_job(job.job_id)
+    result_job = await pipeline.execute_queued_job(job.job_id, claim_context=_make_test_claim_context(in_memory_uow))
     # OpenRouter implementer fallback cannot materialize a candidate, so no review
     # is produced and the run escalates truthfully (EVIDENCE_INSUFFICIENT), NOT a
     # capacity wait.
@@ -589,7 +609,7 @@ async def test_fallback_reviewer_model_collision_fails_closed(in_memory_uow, tmp
         "anthropic/claude-3.5-sonnet:beta",
     ]
 
-    result_job = await pipeline.execute_queued_job(job.job_id)
+    result_job = await pipeline.execute_queued_job(job.job_id, claim_context=_make_test_claim_context(in_memory_uow))
 
     # OpenRouter implementer fallback cannot materialize a candidate; the run
     # escalates truthfully (EVIDENCE_INSUFFICIENT) before the reviewer-collision
@@ -630,7 +650,7 @@ async def test_atomic_reservation_denial_prevents_http_dispatch(in_memory_uow, t
         auditor_runner=MockAuditorRunner(),
     )
 
-    result_job = await pipeline.execute_queued_job(job.job_id)
+    result_job = await pipeline.execute_queued_job(job.job_id, claim_context=_make_test_claim_context(in_memory_uow))
 
     # Reservation denied -> ZERO HTTP requests must be dispatched!
     assert len(mock_adapter.calls) == 0
@@ -682,7 +702,7 @@ async def test_missing_verified_pricing_snapshot_denies_fallback_with_zero_http(
         auditor_runner=MockAuditorRunner(),
     )
 
-    result_job = await pipeline.execute_queued_job(job.job_id)
+    result_job = await pipeline.execute_queued_job(job.job_id, claim_context=_make_test_claim_context(in_memory_uow))
 
     # 1. Zero HTTP dispatched
     assert len(mock_adapter.calls) == 0
@@ -755,7 +775,7 @@ async def test_unverified_pinned_default_snapshot_in_db_denies_fallback_with_zer
         auditor_runner=MockAuditorRunner(),
     )
 
-    result_job = await pipeline.execute_queued_job(job.job_id)
+    result_job = await pipeline.execute_queued_job(job.job_id, claim_context=_make_test_claim_context(in_memory_uow))
 
     # 1. Zero HTTP dispatched
     assert len(mock_adapter.calls) == 0
@@ -852,7 +872,10 @@ def test_drain_resume_continues_inflight_job_through_real_runtime(in_memory_uow,
     )
     orch = OrchestrationService(in_memory_uow, project_root=tmp_path, pipeline=pipeline)
 
-    orch.resume(run.run_id, project_root=tmp_path, drain_mode=True)
+    from minime.services.recovery_convergence_service import RecoveryConvergenceService
+    rec_svc = RecoveryConvergenceService(in_memory_uow, project_root=tmp_path)
+    claim_ctx = rec_svc.acquire_claim(f"run:{run.run_id}")
+    orch.resume(run.run_id, project_root=tmp_path, drain_mode=True, claim_context=claim_ctx)
 
     # The real continuation advanced: OpenRouter fallback was actually invoked
     # through the pipeline (not a mocked resume()).

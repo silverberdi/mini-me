@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -20,6 +21,7 @@ from minime.domain.models import (
     Job,
     Project,
     ProviderHealth,
+    RecoveryClaimContext,
     utc_now,
 )
 from minime.services.candidate_manifest import CandidateManifestService
@@ -32,6 +34,15 @@ from minime.services.outcome_governance import (
 )
 from minime.services.restart_recovery_service import RestartRecoveryService
 from minime.services.reviewer_runner import ReviewerResult
+
+
+def _make_test_claim_context():
+    return RecoveryClaimContext(
+        claim_key="test-claim-key",
+        owner_instance_id="test-owner-id",
+        fence_token=1,
+        lease_expires_at=utc_now() + timedelta(hours=1),
+    )
 
 
 class InMemoryRepo:
@@ -349,7 +360,7 @@ async def test_continuation_pipeline_multi_attempt_success(tmp_path: Path):
         ),
     ):
         job = pipeline.queue_job("proj-1", "007-continuation")
-        res_job = await pipeline.execute_queued_job(job.job_id)
+        res_job = await pipeline.execute_queued_job(job.job_id, claim_context=_make_test_claim_context())
 
     # Verify that job completed with attempt_count == 2
     assert res_job.attempt_count == 2
@@ -467,7 +478,7 @@ async def test_reviewer_visibility_blindness_escalation(tmp_path: Path):
         return_value=(True, None),
     ):
         job = pipeline.queue_job("proj-1", "007-continuation")
-        res_job = await pipeline.execute_queued_job(job.job_id)
+        res_job = await pipeline.execute_queued_job(job.job_id, claim_context=_make_test_claim_context())
 
     assert res_job.status == JobStatus.NEEDS_HUMAN
     assert "Reviewer workspace snapshot missing candidate files" in (res_job.error_message or "")
@@ -654,7 +665,7 @@ async def test_reassignment_creates_handoff_and_tracks_mixed_authorship(tmp_path
         ),
     ):
         job = pipeline.queue_job("proj-1", "007-continuation")
-        res_job = await pipeline.execute_queued_job(job.job_id)
+        res_job = await pipeline.execute_queued_job(job.job_id, claim_context=_make_test_claim_context())
 
     assert res_job.reassignment_count == 1
     assert res_job.attempt_count == 4
@@ -817,7 +828,7 @@ async def test_continuation_counters_reconstructed_after_restart_prevent_fresh_b
             return_value=(True, None),
         ),
     ):
-        res_job = await pipeline.execute_queued_job("job-restart-1")
+        res_job = await pipeline.execute_queued_job("job-restart-1", claim_context=_make_test_claim_context())
 
     # Because codex exhausted retries, it immediately reassigned on attempt 3 without granting a 3rd corrective retry
     assert res_job.reassignment_count == 1
@@ -927,7 +938,7 @@ async def test_post_reassignment_capacity_check_uses_effective_executor(tmp_path
             return_value=(True, None),
         ),
     ):
-        res_job = await pipeline.execute_queued_job("job-cap-1")
+        res_job = await pipeline.execute_queued_job("job-cap-1", claim_context=_make_test_claim_context())
 
     # Confirms implementer stage proceeded without blocking on codex, and then review stage checked effective reviewer (codex)
     assert res_job.status == JobStatus.WAITING_CAPACITY
@@ -1104,7 +1115,7 @@ async def test_pipeline_rule_k_exhaustive_provider_health_status_on_reassignment
             return_value=(True, None),
         ),
     ):
-        res_job = await pipeline.execute_queued_job(job_id)
+        res_job = await pipeline.execute_queued_job(job_id, claim_context=_make_test_claim_context())
 
     if target_status == ProviderHealthStatus.AVAILABLE:
         # Reassignment succeeded and immediately executed next attempt
@@ -1282,7 +1293,7 @@ async def test_pipeline_reassignment_resumes_when_capacity_returns(tmp_path):
             return_value=(True, None),
         ),
     ):
-        res1 = await pipeline.execute_queued_job(job_id)
+        res1 = await pipeline.execute_queued_job(job_id, claim_context=_make_test_claim_context())
 
     assert res1.status == JobStatus.WAITING_CAPACITY
     assert res1.waiting_provider == "antigravity"
@@ -1308,7 +1319,7 @@ async def test_pipeline_reassignment_resumes_when_capacity_returns(tmp_path):
             return_value=(True, None),
         ),
     ):
-        res2 = await pipeline.execute_queued_job(job_id)
+        res2 = await pipeline.execute_queued_job(job_id, claim_context=_make_test_claim_context())
 
     assert res2.status == JobStatus.READY_TO_MERGE
     assert res2.reassignment_count == 1  # Not incremented again!
@@ -1447,7 +1458,7 @@ async def test_pipeline_rule_k_structurally_ineligible_escalates_to_needs_human(
             return_value=(True, None),
         ),
     ):
-        res = await pipeline.execute_queued_job(job_id)
+        res = await pipeline.execute_queued_job(job_id, claim_context=_make_test_claim_context())
 
     assert res.status == JobStatus.NEEDS_HUMAN
     assert "Alternative executor ineligible" in (res.escalation_reason or "")
@@ -1633,7 +1644,7 @@ async def test_pipeline_reassigns_to_antigravity_on_codex_non_convergence(tmp_pa
         mock_rev_runner.run = AsyncMock(
             return_value=MagicMock(stdout=["VERDICT: READY_TO_MERGE"], stderr=[], exit_code=0)
         )
-        await pipeline.execute_queued_job(job_id)
+        await pipeline.execute_queued_job(job_id, claim_context=_make_test_claim_context())
 
     # Verify that Antigravity was assigned under premium recovery
     saved_events = [call[0][0].event_type for call in uow.events.save.call_args_list]

@@ -28,6 +28,7 @@ from minime.domain.models import (
     Event,
     HumanAnswerRecord,
     ProjectBinding,
+    RecoveryClaimContext,
     WorkItemAnswerInput,
     WorkItemCreateInput,
     WorkItemPrepareResult,
@@ -158,8 +159,11 @@ class IntakeService:
         # Auto-prepare if project policy enables auto_prepare
         if getattr(project, "auto_prepare", True):
             logger.info("Auto-preparing backlog item '%s' for project '%s'", item_key, project_id)
+            from minime.services.recovery_convergence_service import RecoveryConvergenceService
+            rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
+            claim_ctx = rec_svc.acquire_claim(f"intake:{project_id}:{item_key}")
             prep_result = self.prepare_work_item(
-                project_id, item_key, operator_email=operator_email
+                project_id, item_key, operator_email=operator_email, claim_context=claim_ctx
             )
             auto_prep_event = Event(
                 event_type=EventType.WORK_ITEM_AUTO_PREPARED,
@@ -292,8 +296,10 @@ class IntakeService:
         self.uow.events.save(event)
         self.uow.commit()
 
-        # Re-prepare after answering
-        prep_result = self.prepare_work_item(project_id, item_key, operator_email=operator_email)
+        from minime.services.recovery_convergence_service import RecoveryConvergenceService
+        rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
+        claim_ctx = rec_svc.acquire_claim(f"intake:{project_id}:{item_key}")
+        prep_result = self.prepare_work_item(project_id, item_key, operator_email=operator_email, claim_context=claim_ctx)
         return prep_result.item
 
     def prepare_work_item(
@@ -301,8 +307,12 @@ class IntakeService:
         project_id: str,
         item_key: str,
         operator_email: str = "operator",
+        claim_context: RecoveryClaimContext | None = None,
     ) -> WorkItemPrepareResult:
-        """Prepare canonical execution artifacts (GitHub Issue, Project item, OpenSpec change)."""
+        from minime.domain.models import validate_claim_context_authoritative
+
+        validate_claim_context_authoritative(self.uow, claim_context)
+
         set_correlation_context(project_id=project_id, operation_id="prepare_work_item")
 
         project = self.uow.projects.get_by_id(project_id)
@@ -373,7 +383,7 @@ class IntakeService:
             )
 
         if not _has_passed_intake_phase(saga.current_phase, "CONTEXT_CHECKED"):
-            self.saga_engine.advance_phase(saga, "CONTEXT_CHECKED")
+            self.saga_engine.advance_phase(saga, "CONTEXT_CHECKED", claim_context=claim_context)
 
         # 1. OpenSpec Authored Phase
         author_action_key = f"openspec_author:{project_id}:{change_name}"
@@ -405,6 +415,7 @@ class IntakeService:
                 self.saga_engine.block_saga(
                     saga,
                     blocking_reason="OpenSpec generation incomplete; human clarification required.",
+                    claim_context=claim_context,
                 )
                 self.uow.commit()
 
@@ -423,25 +434,62 @@ class IntakeService:
                 not existing_author_action
                 or existing_author_action.status != ExternalActionStatus.COMPLETED
             ):
-                self.saga_engine.reserve_action(
+                def _observe_openspec():
+                    from minime.domain.models import ExternalActionResult
+
+                    change_dir = (
+                        self.project_root / project.openspec_path / "changes" / change_name
+                    )
+                    proposal_file = change_dir / "proposal.md"
+                    tasks_file = change_dir / "tasks.md"
+                    design_file = change_dir / "design.md"
+                    if proposal_file.exists() and tasks_file.exists() and design_file.exists():
+                        return ExternalActionResult(
+                            outcome=ExternalOutcome.SUCCESS,
+                            source_adapter="filesystem",
+                            reason_code="OBSERVED_ON_DISK",
+                            data={"change_name": change_name, "path": str(change_dir)},
+                            external_id=change_name,
+                        )
+                    return ExternalActionResult(
+                        outcome=ExternalOutcome.FAILURE,
+                        source_adapter="filesystem",
+                        reason_code="NOT_FOUND",
+                    )
+
+                def _mutate_openspec():
+                    from minime.domain.models import ExternalActionResult
+
+                    self.openspec_generator.write_change_to_disk(
+                        project.openspec_path,
+                        generated,
+                        overwrite=True,
+                        project_id=project_id,
+                        uow=self.uow,
+                    )
+                    return ExternalActionResult(
+                        outcome=ExternalOutcome.SUCCESS,
+                        source_adapter="filesystem",
+                        reason_code="EXECUTION_SUCCESS",
+                        data={"change_name": change_name},
+                        external_id=change_name,
+                    )
+
+                fenced_res = self.saga_engine.execute_fenced_external_action(
+                    claim_context=claim_context,
                     action_key=author_action_key,
                     action_type=ExternalActionType.OPENSPEC_SYNC,
                     target_identity=change_name,
                     request_fingerprint=item_key,
+                    mutation_fn=_mutate_openspec,
+                    observation_fn=_observe_openspec,
                     saga_id=saga.id,
                 )
-                self.openspec_generator.write_change_to_disk(
-                    project.openspec_path,
-                    generated,
-                    overwrite=True,
-                    project_id=project_id,
-                    uow=self.uow,
-                )
-                self.saga_engine.record_action_result(
-                    author_action_key, status=ExternalActionStatus.COMPLETED
-                )
 
-            self.saga_engine.advance_phase(saga, "OPENSPEC_AUTHORED")
+                if fenced_res and getattr(fenced_res, "result_application_authorized", False):
+                    self.saga_engine.advance_phase(saga, "OPENSPEC_AUTHORED", claim_context=claim_context)
+            else:
+                self.saga_engine.advance_phase(saga, "OPENSPEC_AUTHORED", claim_context=claim_context)
 
         # Save/update Change entity in DB if missing
         if not change_record:
@@ -514,6 +562,7 @@ class IntakeService:
                     self.saga_engine.block_saga(
                         saga,
                         blocking_reason=f"GitHub Issue creation action is in ambiguous status ({action.status.value}). Safe retry unproven.",
+                        claim_context=claim_context,
                     )
                     self.uow.commit()
                     return WorkItemPrepareResult(
@@ -525,50 +574,38 @@ class IntakeService:
                         ],
                     )
                 else:
-                    self.saga_engine.reserve_action(
-                        action_key=op_key,
-                        action_type=ExternalActionType.ISSUE_CREATE,
-                        target_identity=change_name,
-                        request_fingerprint=item_key,
-                        saga_id=saga.id,
-                    )
-                    try:
-                        issue_res = self.github_adapter.create_issue(
+                    def _mutate_issue():
+                        return self.github_adapter.create_issue(
                             repository=project.repository,
                             title=f"[{change_name}] {item.title}",
                             body=f"## Work Item: {item.title}\n\n{item.description}\n\n**OpenSpec Change:** `{change_name}`\n\n<!-- minime-opkey: {op_key} -->",
                             labels=[f"priority:{item.priority.value.lower()}"],
                             operation_key=op_key,
                         )
-                        if issue_res.outcome == ExternalOutcome.SUCCESS and issue_res.data:
-                            issue_number = issue_res.data.get("number")
-                            issue_url = issue_res.data.get("html_url")
-                            self.saga_engine.record_action_result(
-                                op_key,
-                                status=ExternalActionStatus.COMPLETED,
-                                remote_identifier=str(issue_number),
-                            )
-                        else:
-                            st = (
-                                ExternalActionStatus.FAILED
-                                if issue_res.outcome == ExternalOutcome.FAILURE
-                                else ExternalActionStatus.AMBIGUOUS
-                            )
-                            self.saga_engine.record_action_result(
-                                op_key, status=st, error_message=issue_res.error_message
-                            )
+
+                    try:
+                        issue_res = self.saga_engine.execute_fenced_external_action(
+                            claim_context=claim_context,
+                            action_key=op_key,
+                            action_type=ExternalActionType.ISSUE_CREATE,
+                            target_identity=change_name,
+                            request_fingerprint=item_key,
+                            mutation_fn=_mutate_issue,
+                            saga_id=saga.id,
+                        )
+                        if issue_res and getattr(issue_res, "outcome", None) == ExternalOutcome.SUCCESS and getattr(issue_res, "data", None):
+                            issue_number = getattr(issue_res, "data", {}).get("number")
+                            issue_url = getattr(issue_res, "data", {}).get("html_url")
                     except Exception as exc:
                         logger.warning(
                             "Could not create remote GitHub issue for '%s': %s", change_name, exc
-                        )
-                        self.saga_engine.record_action_result(
-                            op_key, status=ExternalActionStatus.FAILED, error_message=str(exc)
                         )
 
             if not issue_number:
                 self.saga_engine.block_saga(
                     saga,
                     blocking_reason=f"GitHub Issue creation for '{change_name}' failed or unverified.",
+                    claim_context=claim_context,
                 )
                 self.uow.commit()
                 return WorkItemPrepareResult(
@@ -582,6 +619,7 @@ class IntakeService:
                 saga,
                 "ISSUE_BOUND",
                 evidence_references={"issue_number": issue_number, "issue_url": issue_url},
+                claim_context=claim_context,
             )
 
         # 4. Sync GitHub Project v2 item with observe-before-repeat reconciliation
@@ -638,6 +676,7 @@ class IntakeService:
                         self.saga_engine.block_saga(
                             saga,
                             blocking_reason=f"Project item action is in ambiguous status ({action.status.value}). Safe retry unproven.",
+                            claim_context=claim_context,
                         )
                         self.uow.commit()
                         return WorkItemPrepareResult(
@@ -649,36 +688,26 @@ class IntakeService:
                             ],
                         )
                     else:
-                        self.saga_engine.reserve_action(
-                            action_key=op_key,
-                            action_type=ExternalActionType.PROJECT_ITEM_ADD,
-                            target_identity=change_name,
-                            request_fingerprint=item_key,
-                            saga_id=saga.id,
-                        )
-                        try:
-                            project_res = self.github_adapter.add_issue_to_project(
+                        def _mutate_project_item_add():
+                            return self.github_adapter.add_issue_to_project(
                                 project_number=project.github_project_number,
                                 owner=project.github_project_owner or "silverberdi",
                                 issue_url=issue_url,
                                 operation_key=op_key,
                             )
-                            if project_res.outcome == ExternalOutcome.SUCCESS and project_res.data:
-                                project_item_id = str(project_res.data)
-                                self.saga_engine.record_action_result(
-                                    op_key,
-                                    status=ExternalActionStatus.COMPLETED,
-                                    remote_identifier=project_item_id,
-                                )
-                            else:
-                                st = (
-                                    ExternalActionStatus.FAILED
-                                    if project_res.outcome == ExternalOutcome.FAILURE
-                                    else ExternalActionStatus.AMBIGUOUS
-                                )
-                                self.saga_engine.record_action_result(
-                                    op_key, status=st, error_message=project_res.error_message
-                                )
+
+                        try:
+                            project_res = self.saga_engine.execute_fenced_external_action(
+                                claim_context=claim_context,
+                                action_key=op_key,
+                                action_type=ExternalActionType.PROJECT_ITEM_ADD,
+                                target_identity=change_name,
+                                request_fingerprint=item_key,
+                                mutation_fn=_mutate_project_item_add,
+                                saga_id=saga.id,
+                            )
+                            if project_res and getattr(project_res, "outcome", None) == ExternalOutcome.SUCCESS and getattr(project_res, "data", None):
+                                project_item_id = str(getattr(project_res, "data", ""))
                         except Exception as exc:
                             logger.warning(
                                 "Could not sync issue '%s' to GitHub Project: %s", issue_url, exc
@@ -691,6 +720,7 @@ class IntakeService:
                 saga,
                 "PROJECT_ITEM_BOUND",
                 evidence_references={"github_project_item_id": project_item_id},
+                claim_context=claim_context,
             )
 
         # 5. Create or sync durable ProjectBinding
@@ -732,6 +762,7 @@ class IntakeService:
                 "is_ready": readiness_eval.is_ready,
                 "status": final_readiness.value,
             },
+            claim_context=claim_context,
         )
 
         # 7. Update BacklogItem state
@@ -771,11 +802,11 @@ class IntakeService:
                     reason_code="dor_ready",
                     actor=operator_email,
                 )
-            self.saga_engine.advance_phase(saga, "READY")
-            self.saga_engine.complete_saga(saga)
+            self.saga_engine.advance_phase(saga, "READY", claim_context=claim_context)
+            self.saga_engine.complete_saga(saga, claim_context=claim_context)
         else:
             self.saga_engine.block_saga(
-                saga, blocking_reason="; ".join(readiness_eval.unmet_reasons)
+                saga, blocking_reason="; ".join(readiness_eval.unmet_reasons), claim_context=claim_context
             )
 
         # 8. Update WorkQueueItem for scheduler discovery
@@ -854,8 +885,10 @@ class IntakeService:
 
         # 1. Verify DoR Readiness
         if item.readiness_state != ReadinessState.READY:
-            # Try re-preparing once in case DoR criteria became satisfied
-            prep_res = self.prepare_work_item(project_id, item_key, operator_email=operator_email)
+            from minime.services.recovery_convergence_service import RecoveryConvergenceService
+            rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
+            claim_ctx = rec_svc.acquire_claim(f"intake:{project_id}:{item_key}")
+            prep_res = self.prepare_work_item(project_id, item_key, operator_email=operator_email, claim_context=claim_ctx)
             item = prep_res.item
             if item.readiness_state != ReadinessState.READY:
                 reasons = (
@@ -1123,10 +1156,16 @@ class IntakeService:
                         item.item_key,
                         project.project_id,
                     )
+                    from minime.services.recovery_convergence_service import (
+                        RecoveryConvergenceService,
+                    )
+                    rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
+                    claim_ctx = rec_svc.acquire_claim(f"intake:{project.project_id}:{item.item_key}")
                     res = self.prepare_work_item(
                         project.project_id,
                         item.item_key,
                         operator_email="system-autonomous-intake",
+                        claim_context=claim_ctx,
                     )
                     prepared_items.append(res.item)
                 except Exception as exc:

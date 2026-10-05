@@ -257,7 +257,11 @@ def test_post_merge_completes_when_sync_and_archive_verified(tmp_path: Path):
     )
     service.verify_candidate_ancestry = MagicMock(return_value=True)
 
-    result = service.reconcile_post_merge("mini-me", "test-change", run_id="run-123")
+    from minime.services.recovery_convergence_service import RecoveryConvergenceService
+    rec_svc = RecoveryConvergenceService(uow)
+    claim_ctx = rec_svc.acquire_claim("post_merge:mini-me:run-123")
+
+    result = service.reconcile_post_merge("mini-me", "test-change", run_id="run-123", claim_context=claim_ctx)
 
     assert result.success is True
     assert result.terminal_stage == OrchestrationStage.COMPLETED
@@ -309,7 +313,11 @@ def test_post_merge_blocks_when_archive_fails(tmp_path: Path):
     )
     service.verify_candidate_ancestry = MagicMock(return_value=True)
 
-    result = service.reconcile_post_merge("mini-me", "test-change", run_id="run-123")
+    from minime.services.recovery_convergence_service import RecoveryConvergenceService
+    rec_svc = RecoveryConvergenceService(uow)
+    claim_ctx = rec_svc.acquire_claim("post_merge:mini-me:run-123")
+
+    result = service.reconcile_post_merge("mini-me", "test-change", run_id="run-123", claim_context=claim_ctx)
 
     assert result.success is False
     assert result.terminal_stage is not OrchestrationStage.COMPLETED
@@ -350,7 +358,11 @@ def test_post_merge_blocks_when_sync_evidence_missing(tmp_path: Path):
     )
     service.verify_candidate_ancestry = MagicMock(return_value=True)
 
-    result = service.reconcile_post_merge("mini-me", "test-change", run_id="run-123")
+    from minime.services.recovery_convergence_service import RecoveryConvergenceService
+    rec_svc = RecoveryConvergenceService(uow)
+    claim_ctx = rec_svc.acquire_claim("post_merge:mini-me:run-123")
+
+    result = service.reconcile_post_merge("mini-me", "test-change", run_id="run-123", claim_context=claim_ctx)
 
     assert result.success is False
     assert result.terminal_stage is not OrchestrationStage.COMPLETED
@@ -379,7 +391,11 @@ def test_post_merge_blocks_when_issue_close_unknown_or_ambiguous(tmp_path: Path)
     service = PostMergeReconciliationService(uow=uow, project_root=tmp_path, github_adapter=adapter)
     service.verify_candidate_ancestry = MagicMock(return_value=True)
 
-    result = service.reconcile_post_merge("mini-me", "test-change", run_id="run-123")
+    from minime.services.recovery_convergence_service import RecoveryConvergenceService
+    rec_svc = RecoveryConvergenceService(uow)
+    claim_ctx = rec_svc.acquire_claim("post_merge:mini-me:run-123")
+
+    result = service.reconcile_post_merge("mini-me", "test-change", run_id="run-123", claim_context=claim_ctx)
 
     assert result.success is False
     assert result.issue_closed is False
@@ -407,7 +423,11 @@ def test_post_merge_blocks_when_project_item_update_fails(tmp_path: Path):
     service = PostMergeReconciliationService(uow=uow, project_root=tmp_path, github_adapter=adapter)
     service.verify_candidate_ancestry = MagicMock(return_value=True)
 
-    result = service.reconcile_post_merge("mini-me", "test-change", run_id="run-123")
+    from minime.services.recovery_convergence_service import RecoveryConvergenceService
+    rec_svc = RecoveryConvergenceService(uow)
+    claim_ctx = rec_svc.acquire_claim("post_merge:mini-me:run-123")
+
+    result = service.reconcile_post_merge("mini-me", "test-change", run_id="run-123", claim_context=claim_ctx)
 
     assert result.success is False
     assert result.project_item_updated is False
@@ -439,7 +459,11 @@ def test_post_merge_blocks_when_worktree_cleanup_fails(tmp_path: Path):
         )
     )
 
-    result = service.reconcile_post_merge("mini-me", "test-change", run_id="run-123")
+    from minime.services.recovery_convergence_service import RecoveryConvergenceService
+    rec_svc = RecoveryConvergenceService(uow)
+    claim_ctx = rec_svc.acquire_claim("post_merge:mini-me:run-123")
+
+    result = service.reconcile_post_merge("mini-me", "test-change", run_id="run-123", claim_context=claim_ctx)
 
     assert result.success is False
     assert result.worktree_cleaned is False
@@ -466,7 +490,11 @@ def test_post_merge_blocks_when_remote_branch_cleanup_fails(tmp_path: Path):
     service = PostMergeReconciliationService(uow=uow, project_root=tmp_path, github_adapter=adapter)
     service.verify_candidate_ancestry = MagicMock(return_value=True)
 
-    result = service.reconcile_post_merge("mini-me", "test-change", run_id="run-123")
+    from minime.services.recovery_convergence_service import RecoveryConvergenceService
+    rec_svc = RecoveryConvergenceService(uow)
+    claim_ctx = rec_svc.acquire_claim("post_merge:mini-me:run-123")
+
+    result = service.reconcile_post_merge("mini-me", "test-change", run_id="run-123", claim_context=claim_ctx)
 
     assert result.success is False
     assert result.branch_cleaned is False
@@ -608,7 +636,11 @@ def test_worktree_scan_failure_returns_unknown_and_blocks_completion(tmp_path: P
         MagicMock(side_effect=RuntimeError("Disk I/O failure")),
     )
 
-    result = service.reconcile_post_merge("mini-me", "test-change", run_id="run-123")
+    from minime.services.recovery_convergence_service import RecoveryConvergenceService
+    rec_svc = RecoveryConvergenceService(uow)
+    claim_ctx = rec_svc.acquire_claim("post_merge:mini-me:run-123")
+
+    result = service.reconcile_post_merge("mini-me", "test-change", run_id="run-123", claim_context=claim_ctx)
 
     assert result.success is False
     assert result.worktree_cleaned is False

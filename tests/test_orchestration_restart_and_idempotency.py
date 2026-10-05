@@ -323,8 +323,10 @@ def test_idempotent_push_and_pr_pre_reservation(setup_env, in_memory_uow):
     assert ExternalActionType.BRANCH_PUSH in action_types
     assert ExternalActionType.PR_CREATE in action_types
 
-    # Calling resume on a run that is already ready for human merge does not duplicate push or PR
-    resumed = service.resume(run.run_id)
+    from minime.services.recovery_convergence_service import RecoveryConvergenceService
+    rec_svc = RecoveryConvergenceService(in_memory_uow, project_root=env["project_root"])
+    claim_ctx = rec_svc.acquire_claim(f"run:{run.run_id}")
+    resumed = service.resume(run.run_id, claim_context=claim_ctx)
     assert resumed.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
     assert fake_github.push_calls == 1
     assert fake_github.pr_calls == 1
@@ -365,8 +367,11 @@ def test_transient_github_pr_failure_and_resume_recovery(setup_env, in_memory_uo
     assert run.is_active is True
     assert fake_github.pr_calls == 1
 
-    # Resuming re-attempts PR preparation without restarting from scratch
-    resumed = service.resume(run.run_id)
+    from minime.services.recovery_convergence_service import RecoveryConvergenceService
+
+    rec_svc = RecoveryConvergenceService(in_memory_uow, project_root=env["project_root"])
+    claim_ctx2 = rec_svc.acquire_claim(f"run:{run.run_id}")
+    resumed = service.resume(run.run_id, force=True, claim_context=claim_ctx2)
     assert resumed.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
     assert resumed.human_gate == HumanGate.READY_FOR_HUMAN_MERGE
     assert fake_github.pr_calls == 2  # Total 2 attempts, second succeeded

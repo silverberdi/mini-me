@@ -799,3 +799,47 @@ class WorktreeCreationState(str, Enum):
     CREATED = "CREATED"
     DELETING = "DELETING"
     DELETED = "DELETED"
+
+
+class RecoveryClassification(str, Enum):
+    """Classification outcomes for recovery convergence analysis."""
+
+    NO_ACTION = "NO_ACTION"
+    CLAIMED_ELSEWHERE = "CLAIMED_ELSEWHERE"
+    RESUME_SAFE_CHECKPOINT = "RESUME_SAFE_CHECKPOINT"
+    ADOPT_OBSERVED_EFFECT = "ADOPT_OBSERVED_EFFECT"
+    WAITING_CAPACITY = "WAITING_CAPACITY"
+    WAITING_EXTERNAL = "WAITING_EXTERNAL"
+    NEEDS_HUMAN = "NEEDS_HUMAN"
+    TERMINAL_EXECUTION_BLOCKED = "TERMINAL_EXECUTION_BLOCKED"
+    CLOSURE_ONLY_CONTINUATION = "CLOSURE_ONLY_CONTINUATION"
+
+
+class RecoveryDecisionStatus(str, Enum):
+    """Execution lifecycle status for a recovery decision record."""
+
+    PLANNED = "PLANNED"
+    CLAIMED = "CLAIMED"
+    EXECUTING = "EXECUTING"
+    COMPLETED = "COMPLETED"
+    BLOCKED = "BLOCKED"
+    NO_ACTION = "NO_ACTION"
+
+
+class RecoverySource(str, Enum):
+    """Entry point or trigger source for recovery convergence."""
+
+    STARTUP = "STARTUP"
+    TICK = "TICK"
+    API = "API"
+    CLI = "CLI"
+    TUI = "TUI"
+    CONTROL_PLANE = "CONTROL_PLANE"
+
+
+class ExternalActionObservation(str, Enum):
+    """Reconciliation state for a non-terminal external action observation."""
+
+    PROVEN_NEVER_DISPATCHED = "PROVEN_NEVER_DISPATCHED"
+    POSSIBLY_DISPATCHED = "POSSIBLY_DISPATCHED"
+

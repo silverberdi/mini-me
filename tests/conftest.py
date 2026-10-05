@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +51,7 @@ from minime.domain.interfaces import (
     DurableSagaRepositoryInterface,
     EventRepositoryInterface,
     EvidenceDiagnosticRepositoryInterface,
+    ExternalActionAttemptRepositoryInterface,
     GitOperationRepositoryInterface,
     IntegrityFindingRepositoryInterface,
     JobAttemptRepositoryInterface,
@@ -69,6 +70,8 @@ from minime.domain.interfaces import (
     ProjectRepositoryInterface,
     ProviderEfficiencyMetricsRepositoryInterface,
     ProviderHealthRepositoryInterface,
+    RecoveryClaimRepositoryInterface,
+    RecoveryDecisionRepositoryInterface,
     ReviewFindingRepositoryInterface,
     ReviewRepositoryInterface,
     SchedulerDecisionRepositoryInterface,
@@ -95,6 +98,7 @@ from minime.domain.models import (
     DurableSaga,
     Event,
     EvidenceDiagnostic,
+    ExternalActionAttempt,
     ExternalActionResult,
     GitOperation,
     IntegrityAudit,
@@ -117,6 +121,8 @@ from minime.domain.models import (
     ProjectManagedRepositoryBinding,
     ProviderEfficiencyMetrics,
     ProviderHealth,
+    RecoveryClaim,
+    RecoveryDecision,
     Review,
     ReviewFinding,
     SchedulerDecisionRecord,
@@ -615,7 +621,13 @@ class InMemoryJobRepository(JobRepositoryInterface):
         jobs.sort(key=lambda j: j.created_at)
         return [j.model_copy(deep=True) for j in jobs]
 
-    def transition(self, job_id: str, new_status: str, error_message: str | None = None) -> Job:
+    def transition(
+        self,
+        job_id: str,
+        new_status: str,
+        error_message: str | None = None,
+        claim_context: Any | None = None,
+    ) -> Job:
         job = self._store.get(job_id)
         if not job:
             raise ValueError(f"Job '{job_id}' not found.")
@@ -634,6 +646,7 @@ class InMemoryJobRepository(JobRepositoryInterface):
         waiting_provider: str,
         reason: str,
         expected_reset_at: datetime | None = None,
+        claim_context: Any | None = None,
     ) -> Job:
         job = self._store.get(job_id)
         if not job:
@@ -654,7 +667,12 @@ class InMemoryJobRepository(JobRepositoryInterface):
         self._store[job_id] = updated
         return updated.model_copy(deep=True)
 
-    def set_recovery_blocked(self, job_id: str, reason: str) -> Job:
+    def set_recovery_blocked(
+        self,
+        job_id: str,
+        reason: str,
+        claim_context: Any | None = None,
+    ) -> Job:
         job = self._store.get(job_id)
         if not job:
             raise ValueError(f"Job '{job_id}' not found.")
@@ -669,6 +687,19 @@ class InMemoryJobRepository(JobRepositoryInterface):
                 "recovery_blocked_reason": reason,
             }
         )
+        self._store[job_id] = updated
+        return updated.model_copy(deep=True)
+
+    def update_executor_fenced(
+        self,
+        job_id: str,
+        current_executor: str,
+        claim_context: Any | None = None,
+    ) -> Job:
+        job = self._store.get(job_id)
+        if not job:
+            raise ValueError(f"Job '{job_id}' not found.")
+        updated = job.model_copy(update={"current_executor": current_executor})
         self._store[job_id] = updated
         return updated.model_copy(deep=True)
 
@@ -1299,6 +1330,7 @@ class InMemoryOrchestrationRunRepository(OrchestrationRunRepositoryInterface):
         run_id: str,
         current_stage: OrchestrationStage,
         resumable_stage: OrchestrationStage,
+        claim_context: Any | None = None,
     ) -> OrchestrationRun:
         r = self._store.get(run_id)
         if not r:
@@ -1316,6 +1348,7 @@ class InMemoryOrchestrationRunRepository(OrchestrationRunRepositoryInterface):
         stop_reason: str | None = None,
         stop_details: dict | None = None,
         is_active: bool = False,
+        claim_context: Any | None = None,
     ) -> OrchestrationRun:
         r = self._store.get(run_id)
         if not r:
@@ -2092,6 +2125,7 @@ class InMemoryDurableSagaRepository(DurableSagaRepositoryInterface):
         current_phase: str,
         evidence_references: dict | None = None,
         last_observed_outcome: Any | None = None,
+        claim_context: Any | None = None,
     ) -> DurableSaga:
         saga = self._store[saga_id]
         refs = dict(saga.evidence_references)
@@ -2110,6 +2144,7 @@ class InMemoryDurableSagaRepository(DurableSagaRepositoryInterface):
         status: SagaStatus | str,
         blocking_reason: str | None = None,
         last_observed_outcome: Any | None = None,
+        claim_context: Any | None = None,
     ) -> DurableSaga:
         saga = self._store[saga_id]
         st_enum = SagaStatus(status) if isinstance(status, str) else status
@@ -2120,6 +2155,238 @@ class InMemoryDurableSagaRepository(DurableSagaRepositoryInterface):
             saga.last_observed_outcome = last_observed_outcome
         saga.updated_at = utc_now()
         return saga.model_copy(deep=True)
+
+
+class InMemoryRecoveryClaimRepository(RecoveryClaimRepositoryInterface):
+    def __init__(self):
+        self._claims: dict[str, RecoveryClaim] = {}
+
+    def acquire_or_reacquire(
+        self,
+        claim_key: str,
+        owner_instance_id: str,
+        lease_seconds: int = 60,
+    ) -> RecoveryClaim | None:
+        now = utc_now()
+        existing = self._claims.get(claim_key)
+        if existing:
+            if existing.owner_instance_id == owner_instance_id and existing.lease_expires_at > now:
+                new_expires = now + timedelta(seconds=lease_seconds)
+                updated = RecoveryClaim(
+                    claim_key=claim_key,
+                    owner_instance_id=owner_instance_id,
+                    fence_token=existing.fence_token,
+                    claimed_at=existing.claimed_at,
+                    lease_expires_at=new_expires,
+                    heartbeat_at=now,
+                )
+                self._claims[claim_key] = updated
+                return updated
+            if existing.lease_expires_at <= now:
+                new_expires = now + timedelta(seconds=lease_seconds)
+                updated = RecoveryClaim(
+                    claim_key=claim_key,
+                    owner_instance_id=owner_instance_id,
+                    fence_token=existing.fence_token + 1,
+                    claimed_at=now,
+                    lease_expires_at=new_expires,
+                    heartbeat_at=now,
+                )
+                self._claims[claim_key] = updated
+                return updated
+            return None
+        expires = now + timedelta(seconds=lease_seconds)
+        claim = RecoveryClaim(
+            claim_key=claim_key,
+            owner_instance_id=owner_instance_id,
+            fence_token=1,
+            claimed_at=now,
+            lease_expires_at=expires,
+            heartbeat_at=now,
+        )
+        self._claims[claim_key] = claim
+        return claim
+
+    def renew_heartbeat(
+        self,
+        claim_key: str,
+        owner_instance_id: str,
+        fence_token: int,
+        lease_seconds: int = 60,
+    ) -> bool:
+        now = utc_now()
+        existing = self._claims.get(claim_key)
+        if (
+            existing
+            and existing.owner_instance_id == owner_instance_id
+            and existing.fence_token == fence_token
+            and existing.lease_expires_at > now
+        ):
+            new_expires = now + timedelta(seconds=lease_seconds)
+            updated = RecoveryClaim(
+                claim_key=claim_key,
+                owner_instance_id=owner_instance_id,
+                fence_token=fence_token,
+                acquired_at=existing.acquired_at,
+                lease_expires_at=new_expires,
+                last_heartbeat_at=now,
+                is_active=True,
+                version=existing.version + 1,
+            )
+            self._claims[claim_key] = updated
+            return True
+        return False
+
+    def release(
+        self,
+        claim_key: str,
+        owner_instance_id: str,
+        fence_token: int,
+    ) -> bool:
+        existing = self._claims.get(claim_key)
+        if (
+            existing
+            and existing.owner_instance_id == owner_instance_id
+            and existing.fence_token == fence_token
+        ):
+            self._claims.pop(claim_key, None)
+            return True
+        return False
+
+    def validate_cas(
+        self,
+        claim_key: str,
+        owner_instance_id: str,
+        fence_token: int,
+    ) -> bool:
+        now = utc_now()
+        existing = self._claims.get(claim_key)
+        return bool(
+            existing
+            and existing.owner_instance_id == owner_instance_id
+            and existing.fence_token == fence_token
+            and existing.lease_expires_at > now
+        )
+
+    def commit_fenced_dispatch_intent(
+        self,
+        claim_key: str,
+        owner_instance_id: str,
+        fence_token: int,
+        action_key: str,
+        attempt_number: int = 1,
+        authorization: Any | None = None,
+    ) -> ExternalActionAttempt:
+        from minime.domain.enums import ExternalActionStatus
+        from minime.domain.exceptions import StaleClaimError
+        from minime.domain.models import ExternalActionAttempt, evaluate_dispatch_authorization
+
+        if not self.validate_cas(claim_key, owner_instance_id, fence_token):
+            raise StaleClaimError(
+                f"Claim '{claim_key}' with fence {fence_token} is stale or expired."
+            )
+        uow = getattr(self, "_uow", None)
+        if uow and hasattr(uow, "orchestration_external_actions"):
+            action = uow.orchestration_external_actions.get_by_action_key(action_key)
+            if action:
+                if authorization is not None:
+                    if not getattr(authorization, "is_authorized", False) or getattr(authorization, "action_key", None) != action_key:
+                        raise ValueError(
+                            f"Dispatch intent creation rejected for '{action_key}': Stage B/D authorization not proven."
+                        )
+                else:
+                    auth_res = evaluate_dispatch_authorization(action)
+                    if not auth_res.is_authorized:
+                        raise ValueError(
+                            f"Dispatch intent creation rejected for '{action_key}': Stage B/D authorization not proven ({auth_res.authorization_reason})."
+                        )
+                if action.status == ExternalActionStatus.RESERVED:
+                    attempts = uow.external_action_attempts.list_by_action_key(action_key)
+                    if action.last_dispatch_intent_id or action.remote_identifier or attempts:
+                        raise ValueError(
+                            f"Action '{action_key}' is RESERVED but POSSIBLY_DISPATCHED; observation required before dispatch."
+                        )
+
+        dispatch_intent_key = f"{action_key}:{claim_key}:{fence_token}:{attempt_number}"
+        attempt = ExternalActionAttempt(
+            action_key=action_key,
+            claim_key=claim_key,
+            fence_token=fence_token,
+            attempt_number=attempt_number,
+            dispatch_intent_key=dispatch_intent_key,
+            status="EXECUTING",
+        )
+        if uow and hasattr(uow, "external_action_attempts"):
+            attempt = uow.external_action_attempts.create_attempt(attempt)
+            uow.orchestration_external_actions.update_status(
+                action_key=action_key,
+                status=ExternalActionStatus.EXECUTING,
+            )
+        return attempt
+
+    def get_by_key(self, claim_key: str) -> RecoveryClaim | None:
+        return self._claims.get(claim_key)
+
+
+class InMemoryRecoveryDecisionRepository(RecoveryDecisionRepositoryInterface):
+    def __init__(self):
+        self._store: dict[str, RecoveryDecision] = {}
+
+    def create_decision(self, decision: RecoveryDecision) -> RecoveryDecision:
+        self._store[decision.decision_id] = decision
+        return decision
+
+    def get_by_id(self, decision_id: str) -> RecoveryDecision | None:
+        return self._store.get(decision_id)
+
+    def get_by_cycle_and_claim(self, cycle_id: str, claim_key: str) -> RecoveryDecision | None:
+        for d in self._store.values():
+            if d.cycle_id == cycle_id and d.claim_key == claim_key:
+                return d
+        return None
+
+    def list_by_cycle(self, cycle_id: str) -> list[RecoveryDecision]:
+        return [d for d in self._store.values() if d.cycle_id == cycle_id]
+
+    def list_by_claim_key(self, claim_key: str) -> list[RecoveryDecision]:
+        return [d for d in self._store.values() if d.claim_key == claim_key]
+
+    def update_decision(self, decision: RecoveryDecision) -> RecoveryDecision:
+        self._store[decision.decision_id] = decision
+        return decision
+
+
+class InMemoryExternalActionAttemptRepository(ExternalActionAttemptRepositoryInterface):
+    def __init__(self):
+        self._store: dict[str, ExternalActionAttempt] = {}
+
+    def create_attempt(self, attempt: ExternalActionAttempt) -> ExternalActionAttempt:
+        self._store[attempt.id] = attempt
+        return attempt
+
+    def get_by_dispatch_intent_key(self, dispatch_intent_key: str) -> ExternalActionAttempt | None:
+        for a in self._store.values():
+            if a.dispatch_intent_key == dispatch_intent_key:
+                return a
+        return None
+
+    def list_by_action_key(self, action_key: str) -> list[ExternalActionAttempt]:
+        return [a for a in self._store.values() if a.action_key == action_key]
+
+    def update_status(
+        self,
+        attempt_id: str,
+        status: str,
+        result_payload: dict[str, Any] | None = None,
+        error_message: str | None = None,
+    ) -> ExternalActionAttempt:
+        attempt = self._store[attempt_id]
+        attempt.status = status
+        if result_payload is not None:
+            attempt.result_payload = result_payload
+        if error_message is not None:
+            attempt.error_message = error_message
+        return attempt
 
 
 class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
@@ -2155,6 +2422,12 @@ class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.orchestration_stage_events = InMemoryOrchestrationStageEventRepository()
         self.orchestration_candidates = InMemoryOrchestrationCandidateRepository()
         self.orchestration_external_actions = InMemoryOrchestrationExternalActionRepository()
+        self.claims = InMemoryRecoveryClaimRepository()
+        self.claims._uow = self
+        self.recovery_claims = self.claims
+        self.recovery_decisions = InMemoryRecoveryDecisionRepository()
+        self.decisions = self.recovery_decisions
+        self.external_action_attempts = InMemoryExternalActionAttemptRepository()
         self.preview_sessions = InMemoryPreviewSessionRepository()
         self.validation_runs = InMemoryValidationRunRepository()
         self.operator_actions = InMemoryOperatorActionRepository()

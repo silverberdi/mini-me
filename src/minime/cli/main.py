@@ -1124,9 +1124,13 @@ def orchestrate_resume_cmd(
     try:
         with db_manager.session() as session:
             uow = PostgresPersistenceUnitOfWork(session)
+            from minime.domain.enums import RecoverySource
+            from minime.services.recovery_convergence_service import RecoveryConvergenceService
+
+            rec_svc = RecoveryConvergenceService(uow, project_root=project_root)
+            rec_svc.request_run_continuation(run_id, source=RecoverySource.CLI, force=force)
             service = OrchestrationService(uow, project_root=project_root)
-            run = service.resume(run_id, project_root=project_root, force=force)
-            status_view = service.get_status(run.run_id)
+            status_view = service.get_status(run_id)
 
             if json_output:
                 typer.echo(json.dumps(status_view.model_dump(), indent=2, default=str))

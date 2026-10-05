@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,7 @@ from minime.domain.models import (
     Project,
     ProjectBinding,
     ProviderHealth,
+    RecoveryClaimContext,
     Review,
     utc_now,
 )
@@ -52,6 +54,20 @@ from minime.services.implementer_runner import ImplementerResult, MockImplemente
 from minime.services.orchestration_service import OrchestrationService
 from minime.services.reviewer_runner import MockReviewerRunner
 from minime.services.worktree_manager import WorktreeManager
+
+
+def _test_ctx(uow: Any, claim_key: str = "test-claim") -> RecoveryClaimContext:
+    from minime.services.recovery_convergence_service import RecoveryConvergenceService
+    rec_svc = RecoveryConvergenceService(uow)
+    claim = rec_svc.acquire_claim(claim_key)
+    if claim:
+        return claim
+    return RecoveryClaimContext(
+        claim_key=claim_key,
+        owner_instance_id="test-owner",
+        fence_token=1,
+        lease_expires_at=utc_now() + timedelta(seconds=3600),
+    )
 
 
 class FakeGitHubAdapter(GitHubAdapterInterface):
@@ -283,7 +299,7 @@ class StructuredLookupGitHubAdapter(FakeGitHubAdapter):
             return ExternalActionResult(
                 outcome=ExternalOutcome.AMBIGUOUS,
                 source_adapter="fake",
-                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                reason_code=ExternalReasonCode.CONFLICT,
                 retry_safety=RetrySafety.SAFE,
                 error_message="Pull request lookup ambiguous.",
             )
@@ -467,7 +483,8 @@ def test_pr_lookup_non_authoritative_state_never_creates_pr(
     assert github.create_calls == 0
 
     if state == PullRequestLookupState.UNOBSERVABLE:
-        resumed = service.resume(run.run_id)
+        ctx = _test_ctx(in_memory_uow, f"run:{run.run_id}")
+        resumed = service.resume(run.run_id, claim_context=ctx)
         assert resumed.stop_outcome == expected_outcome
         assert github.create_calls == 0
 
@@ -772,7 +789,8 @@ def test_same_run_resume_uses_attached_job_without_creating_duplicate(
         github_adapter=FakeGitHubAdapter(),
     )
 
-    resumed = service.resume(run.run_id)
+    ctx = _test_ctx(in_memory_uow, f"run:{run.run_id}")
+    resumed = service.resume(run.run_id, claim_context=ctx)
 
     assert resumed.active_job_id == job.job_id
     assert calls == [job.job_id]
@@ -864,7 +882,8 @@ def test_capacity_exhaustion_stops_at_waiting_capacity(
         )
     )
 
-    run = service.drive_coordinator(admission.run.run_id)
+    ctx = _test_ctx(in_memory_uow, f"run:{admission.run.run_id}")
+    run = service.drive_coordinator(admission.run.run_id, claim_context=ctx)
 
     assert run.stop_outcome == OrchestrationStopOutcome.WAITING_CAPACITY
     assert run.human_gate is None
@@ -892,7 +911,8 @@ def test_capacity_exhaustion_stops_at_waiting_capacity(
         output=['{"risk": "low", "summary": "Passed", "findings": []}']
     )
 
-    resumed_run = service.resume(run.run_id)
+    ctx2 = _test_ctx(in_memory_uow, f"run:{run.run_id}")
+    resumed_run = service.resume(run.run_id, claim_context=ctx2)
     assert resumed_run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
     assert resumed_run.human_gate == HumanGate.READY_FOR_HUMAN_MERGE
     assert resumed_run.current_stage == OrchestrationStage.PR_PREPARED
@@ -1155,7 +1175,8 @@ def test_transient_external_failure_stops_waiting_external_and_resumes(
 
     # Resolve network and resume
     fake_github.fail_push = False
-    resumed_run = service.resume(run.run_id)
+    ctx = _test_ctx(in_memory_uow, f"run:{run.run_id}")
+    resumed_run = service.resume(run.run_id, force=True, claim_context=ctx)
     assert resumed_run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
     assert resumed_run.human_gate == HumanGate.READY_FOR_HUMAN_MERGE
     assert resumed_run.current_stage == OrchestrationStage.PR_PREPARED
@@ -1711,7 +1732,8 @@ def test_push_reconciliation_zero_second_push_and_zero_force_push(
     )
     in_memory_uow.audits.save(audit)
 
-    service.drive_coordinator(run.run_id)
+    ctx = _test_ctx(in_memory_uow, f"run:{run.run_id}")
+    service.drive_coordinator(run.run_id, claim_context=ctx)
 
     # ZERO second push executed
     assert len(fake_github.pushed_branches) == initial_push_count
@@ -1850,7 +1872,8 @@ def test_coordinator_halts_on_failed_job_without_busy_loop(
 
     service.pipeline.execute_queued_job = mock_execute
 
-    final_run = service.drive_coordinator(run.run_id)
+    ctx = _test_ctx(in_memory_uow, f"run:{run.run_id}")
+    final_run = service.drive_coordinator(run.run_id, claim_context=ctx)
     assert final_run.is_active is False
     assert final_run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
     assert "Invalid job status transition" in (final_run.stop_reason or "")
@@ -1900,7 +1923,8 @@ def test_coordinator_halts_on_review_remediation_retry_budget_exhaustion(
     )
     in_memory_uow.orchestration_runs.save(run)
 
-    final_run = service.drive_coordinator(run.run_id)
+    ctx2 = _test_ctx(in_memory_uow, f"run:{run.run_id}")
+    final_run = service.drive_coordinator(run.run_id, claim_context=ctx2)
     assert final_run.is_active is False
     assert final_run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
     assert final_run.stop_details.get("code") == "REVIEW_REMEDIATION_EXHAUSTED"
@@ -1986,7 +2010,8 @@ def test_checks_failed_production_regression_falls_back_to_job_decision(
 
     service.pipeline.execute_queued_job = mock_execute
 
-    final_run = service.drive_coordinator(run.run_id)
+    ctx = _test_ctx(in_memory_uow, f"run:{run.run_id}")
+    final_run = service.drive_coordinator(run.run_id, claim_context=ctx)
     assert len(executed_jobs) == 1
     assert final_run.is_active is False
     assert final_run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
@@ -2053,7 +2078,8 @@ def test_checks_failed_retry_permitted_advances_to_implementing(
 
     service.pipeline.execute_queued_job = mock_execute
 
-    final_run = service.drive_coordinator(run.run_id)
+    ctx2 = _test_ctx(in_memory_uow, f"run:{run.run_id}")
+    final_run = service.drive_coordinator(run.run_id, claim_context=ctx2)
     assert len(executed_jobs) == 1
     assert final_run.stop_details.get("code") == "CHECKS_FAILED_RETRY_EXHAUSTED"
 
@@ -2109,7 +2135,8 @@ def test_checks_failed_retry_exhausted_terminates_with_needs_human(
     )
     in_memory_uow.orchestration_runs.save(run)
 
-    final_run = service.drive_coordinator(run.run_id)
+    ctx3 = _test_ctx(in_memory_uow, f"run:{run.run_id}")
+    final_run = service.drive_coordinator(run.run_id, claim_context=ctx3)
     assert final_run.is_active is False
     assert final_run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
     assert final_run.human_gate == HumanGate.NEEDS_HUMAN
@@ -2157,7 +2184,8 @@ def test_attempt_level_decision_wins_over_job_decision(
     )
     in_memory_uow.orchestration_runs.save(run)
 
-    final_run = service.drive_coordinator(run.run_id)
+    ctx4 = _test_ctx(in_memory_uow, f"run:{run.run_id}")
+    final_run = service.drive_coordinator(run.run_id, claim_context=ctx4)
     assert final_run.is_active is False
     assert final_run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
     assert final_run.stop_details.get("code") == "NEEDS_HUMAN"
@@ -2223,5 +2251,6 @@ def test_no_decisions_available_preserves_bounded_remediation(
 
     service.pipeline.execute_queued_job = mock_execute
 
-    _ = service.drive_coordinator(run.run_id)
+    ctx5 = _test_ctx(in_memory_uow, f"run:{run.run_id}")
+    _ = service.drive_coordinator(run.run_id, claim_context=ctx5)
     assert len(executed_jobs) == 1

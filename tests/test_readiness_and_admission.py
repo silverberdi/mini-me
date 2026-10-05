@@ -57,9 +57,13 @@ def test_needs_human_question_answering_flow(
         in_memory_uow, project_root=repo_dir, github_adapter=ReadinessGitHubStub()
     )
 
+    from minime.services.recovery_convergence_service import RecoveryConvergenceService
+    rec_svc = RecoveryConvergenceService(in_memory_uow)
+    claim_ctx = rec_svc.acquire_claim("intake:app-proj:024-vague-feature")
+
     # Preparing underspecified item sets NEEDS_HUMAN
     res = service.prepare_work_item(
-        "app-proj", "024-vague-feature", operator_email="operator@example.com"
+        "app-proj", "024-vague-feature", operator_email="operator@example.com", claim_context=claim_ctx
     )
     assert res.item.status == WorkItemStatus.NEEDS_HUMAN
     assert len(res.human_questions) > 0
@@ -121,7 +125,10 @@ def test_start_work_item_and_duplicate_suppression(
     )
 
     # Prepare to reach READY
-    service.prepare_work_item("app-proj", "025-ready-task", operator_email="operator@example.com")
+    from minime.services.recovery_convergence_service import RecoveryConvergenceService
+    rec_svc = RecoveryConvergenceService(in_memory_uow)
+    claim_ctx = rec_svc.acquire_claim("intake:app-proj:025-ready-task")
+    service.prepare_work_item("app-proj", "025-ready-task", operator_email="operator@example.com", claim_context=claim_ctx)
 
     # Start execution
     start1 = service.start_work_item(

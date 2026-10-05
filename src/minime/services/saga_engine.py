@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Callable
 
 from minime.db.savepoint import execute_with_savepoint_recovery
 from minime.domain.enums import (
@@ -15,7 +15,13 @@ from minime.domain.enums import (
     SagaType,
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
-from minime.domain.models import DurableSaga, Event, OrchestrationExternalAction
+from minime.domain.models import (
+    DurableSaga,
+    Event,
+    FencedDispatchResult,
+    OrchestrationExternalAction,
+    RecoveryClaimContext,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,8 +29,15 @@ logger = logging.getLogger(__name__)
 class SagaEngine:
     """Manages lifecycle phase transitions, checkpoints, and external action reservations for DurableSagas."""
 
-    def __init__(self, uow: PersistenceUnitOfWork):
+    def __init__(
+        self,
+        uow: PersistenceUnitOfWork,
+        heartbeat_interval_seconds: int = 15,
+        lease_seconds: int = 60,
+    ):
         self.uow = uow
+        self.heartbeat_interval_seconds = heartbeat_interval_seconds
+        self.lease_seconds = lease_seconds
 
     def get_saga(self, saga_id: str) -> DurableSaga | None:
         return self.uow.durable_sagas.get_by_id(saga_id)
@@ -125,6 +138,7 @@ class SagaEngine:
         next_phase: str,
         evidence_references: dict[str, Any] | None = None,
         last_observed_outcome: ExternalOutcome | str | None = None,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> DurableSaga:
         """Advance saga checkpoint to next phase with durable evidence persistence."""
         updated = self.uow.durable_sagas.update_phase(
@@ -132,6 +146,7 @@ class SagaEngine:
             current_phase=next_phase,
             evidence_references=evidence_references,
             last_observed_outcome=last_observed_outcome,
+            claim_context=claim_context,
         )
 
         event = Event(
@@ -163,6 +178,7 @@ class SagaEngine:
         saga: DurableSaga,
         blocking_reason: str,
         last_observed_outcome: ExternalOutcome | str | None = None,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> DurableSaga:
         """Transition saga to BLOCKED status with explicit blocking reason."""
         updated = self.uow.durable_sagas.update_status(
@@ -170,6 +186,7 @@ class SagaEngine:
             status=SagaStatus.BLOCKED,
             blocking_reason=blocking_reason,
             last_observed_outcome=last_observed_outcome,
+            claim_context=claim_context,
         )
 
         event = Event(
@@ -195,6 +212,7 @@ class SagaEngine:
         self,
         saga: DurableSaga,
         evidence_references: dict[str, Any] | None = None,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> DurableSaga:
         """Mark saga as COMPLETED after all phases are proven complete."""
         if evidence_references:
@@ -202,12 +220,14 @@ class SagaEngine:
                 saga_id=saga.id,
                 current_phase=saga.current_phase,
                 evidence_references=evidence_references,
+                claim_context=claim_context,
             )
 
         updated = self.uow.durable_sagas.update_status(
             saga_id=saga.id,
             status=SagaStatus.COMPLETED,
             last_observed_outcome=ExternalOutcome.SUCCESS,
+            claim_context=claim_context,
         )
 
         event = Event(
@@ -337,6 +357,293 @@ class SagaEngine:
         )
         return action
 
+    def execute_fenced_external_action(
+        self,
+        claim_context: RecoveryClaimContext,
+        action_key: str,
+        action_type: ExternalActionType | str,
+        target_identity: str,
+        request_fingerprint: str,
+        mutation_fn: Callable[[], Any],
+        saga_id: str | None = None,
+        run_id: str | None = None,
+        candidate_sha: str | None = None,
+        observation_fn: Callable[[], Any | None] | None = None,
+        is_original_request: bool = True,
+    ) -> FencedDispatchResult:
+        """Execute a recoverable external mutation under canonical Stage G atomic fenced dispatch intent."""
+        from minime.domain.enums import (
+            ExternalActionObservation,
+            ExternalActionStatus,
+            ExternalOutcome,
+        )
+        from minime.domain.models import (
+            FencedDispatchResult,
+            evaluate_dispatch_authorization,
+            validate_claim_context_authoritative,
+        )
+
+        validate_claim_context_authoritative(self.uow, claim_context)
+
+        def _check_fence_valid() -> bool:
+            if claim_context is None:
+                return True
+            if hasattr(self.uow, "claims") and self.uow.claims is not None:
+                return self.uow.claims.validate_cas(
+                    claim_key=claim_context.claim_key,
+                    owner_instance_id=claim_context.owner_instance_id,
+                    fence_token=claim_context.fence_token,
+                )
+            return claim_context.is_valid()
+
+        # 1. Reserve action identity
+        action = self.reserve_action(
+            action_key=action_key,
+            action_type=action_type,
+            target_identity=target_identity,
+            request_fingerprint=request_fingerprint,
+            run_id=run_id,
+            saga_id=saga_id,
+            candidate_sha=candidate_sha,
+        )
+
+        if action.status == ExternalActionStatus.COMPLETED:
+            logger.info("Action '%s' is already COMPLETED; skipping remote mutation.", action_key)
+            is_valid = _check_fence_valid()
+            return FencedDispatchResult(
+                action_key=action_key,
+                result=action.result_payload,
+                outcome=ExternalOutcome.SUCCESS,
+                result_application_authorized=is_valid,
+                fence_token=claim_context.fence_token if claim_context else 1,
+                is_stale=not is_valid,
+                remote_identifier=action.remote_identifier,
+                result_payload=action.result_payload,
+            )
+
+        # 2. Observation classification & remote check
+        attempts = (
+            self.uow.external_action_attempts.list_by_action_key(action_key)
+            if hasattr(self.uow, "external_action_attempts") and self.uow.external_action_attempts is not None
+            else []
+        )
+        if action.last_dispatch_intent_id or action.remote_identifier or attempts:
+            obs = ExternalActionObservation.POSSIBLY_DISPATCHED
+        else:
+            obs = ExternalActionObservation.PROVEN_NEVER_DISPATCHED
+
+        observation_proven_absent = False
+        if observation_fn is not None:
+            obs_res = observation_fn()
+            if obs_res is not None and getattr(obs_res, "outcome", None) == ExternalOutcome.SUCCESS:
+                remote_id = getattr(obs_res, "external_id", None) or str(getattr(obs_res, "data", ""))
+                self.record_action_result(
+                    action_key=action_key,
+                    status=ExternalActionStatus.COMPLETED,
+                    remote_identifier=remote_id,
+                    result_payload=getattr(obs_res, "data", None) if isinstance(getattr(obs_res, "data", None), dict) else None,
+                )
+                is_valid = _check_fence_valid()
+                return FencedDispatchResult(
+                    action_key=action_key,
+                    result=obs_res,
+                    outcome=ExternalOutcome.SUCCESS,
+                    result_application_authorized=is_valid,
+                    fence_token=claim_context.fence_token if claim_context else 1,
+                    is_stale=not is_valid,
+                    remote_identifier=remote_id,
+                    result_payload=getattr(obs_res, "data", None) if isinstance(getattr(obs_res, "data", None), dict) else None,
+                )
+            elif obs_res is not None and getattr(obs_res, "outcome", None) in (
+                ExternalOutcome.FAILURE,
+                ExternalOutcome.UNKNOWN,
+                ExternalOutcome.AMBIGUOUS,
+            ):
+                from minime.domain.enums import ExternalReasonCode
+
+                obs_outcome = getattr(obs_res, "outcome", ExternalOutcome.FAILURE)
+                if obs_outcome == ExternalOutcome.FAILURE and getattr(obs_res, "reason_code", None) == ExternalReasonCode.NOT_FOUND:
+                    observation_proven_absent = True
+                else:
+                    err_msg = getattr(obs_res, "error_message", None) or f"Observation outcome: {obs_outcome.value}"
+                    status_enum = (
+                        ExternalActionStatus.AMBIGUOUS
+                        if obs_outcome == ExternalOutcome.AMBIGUOUS
+                        else ExternalActionStatus.FAILED
+                    )
+                    payload = {"retry_safety": "SAFE"} if action.action_type in (
+                        ExternalActionType.BRANCH_PUSH,
+                        ExternalActionType.PR_CREATE,
+                        ExternalActionType.ISSUE_CREATE,
+                        ExternalActionType.ISSUE_CLOSE,
+                        ExternalActionType.PROJECT_ITEM_ADD,
+                        ExternalActionType.PROJECT_ITEM_EDIT,
+                        ExternalActionType.BRANCH_DELETE,
+                        ExternalActionType.WORKTREE_DELETE,
+                        ExternalActionType.OPENSPEC_SYNC,
+                        ExternalActionType.OPENSPEC_ARCHIVE,
+                    ) else None
+                    self.record_action_result(
+                        action_key=action_key,
+                        status=status_enum,
+                        error_message=err_msg,
+                        result_payload=payload,
+                    )
+                    is_valid = _check_fence_valid()
+                    return FencedDispatchResult(
+                        action_key=action_key,
+                        result=obs_res,
+                        outcome=obs_outcome,
+                        result_application_authorized=is_valid,
+                        fence_token=claim_context.fence_token if claim_context else 1,
+                        is_stale=not is_valid,
+                        error_message=err_msg,
+                    )
+            elif obs_res is None:
+                observation_proven_absent = True
+
+        # 3. Stage B/D Authorization evaluation
+        auth = evaluate_dispatch_authorization(
+            action=action,
+            observation=obs,
+            is_original_request=is_original_request,
+            observation_proven_absent=observation_proven_absent,
+        )
+        if not auth.is_authorized:
+            raise ValueError(
+                f"Stage B/D dispatch authorization denied for '{action_key}': {auth.authorization_reason}"
+            )
+
+        # 4. Atomic Commit Fenced Dispatch Intent (SHORT DB TRANSACTION BEFORE I/O)
+        if claim_context is not None and hasattr(self.uow, "claims") and self.uow.claims is not None:
+            attempt_number = len(attempts) + 1
+            self.uow.claims.commit_fenced_dispatch_intent(
+                claim_key=claim_context.claim_key,
+                owner_instance_id=claim_context.owner_instance_id,
+                fence_token=claim_context.fence_token,
+                action_key=action_key,
+                attempt_number=attempt_number,
+                authorization=auth,
+            )
+
+        # 5. Execute slow external mutation (NO DB LOCK HELD, WITH OPERATIONAL HEARTBEAT)
+        heartbeat_failed = False
+        if claim_context is not None and hasattr(self.uow, "claims") and self.uow.claims is not None:
+            from minime.services.recovery_convergence_service import OperationalHeartbeat
+
+            renew_claim = getattr(self.uow, "renew_claim_heartbeat_isolated", None)
+            if renew_claim is None:
+                # In-memory test UoWs have no SQLAlchemy session to isolate. They
+                # still provide an explicit claim repository; production UoWs use
+                # the isolated method above.
+                def renew_claim(context: RecoveryClaimContext, lease: int) -> bool:
+                    return self.uow.claims.renew_heartbeat(
+                        claim_key=context.claim_key,
+                        owner_instance_id=context.owner_instance_id,
+                        fence_token=context.fence_token,
+                        lease_seconds=lease,
+                    )
+            hb = OperationalHeartbeat(
+                claim_context=claim_context,
+                interval_seconds=self.heartbeat_interval_seconds,
+                lease_seconds=self.lease_seconds,
+                renew_claim=renew_claim,
+            )
+            with hb:
+                res = mutation_fn()
+            if hb.heartbeat_failed:
+                heartbeat_failed = True
+        else:
+            res = mutation_fn()
+
+        # 6. Record truthful remote action result (monotonically persisted in DB)
+        outcome = getattr(res, "outcome", None)
+        remote_id = getattr(res, "external_id", None)
+        res_data = getattr(res, "data", None)
+        err_msg = getattr(res, "error_message", None)
+
+        if outcome == ExternalOutcome.SUCCESS or res is True:
+            self.record_action_result(
+                action_key=action_key,
+                status=ExternalActionStatus.COMPLETED,
+                remote_identifier=remote_id,
+                result_payload=res_data if isinstance(res_data, dict) else None,
+            )
+        elif outcome == ExternalOutcome.FAILURE:
+            err_msg = err_msg or "Mutation failed."
+            payload = dict(res_data) if isinstance(res_data, dict) else {}
+            if action.action_type in (
+                ExternalActionType.BRANCH_PUSH,
+                ExternalActionType.PR_CREATE,
+                ExternalActionType.ISSUE_CREATE,
+                ExternalActionType.ISSUE_CLOSE,
+                ExternalActionType.PROJECT_ITEM_ADD,
+                ExternalActionType.PROJECT_ITEM_EDIT,
+                ExternalActionType.BRANCH_DELETE,
+                ExternalActionType.WORKTREE_DELETE,
+                ExternalActionType.OPENSPEC_SYNC,
+                ExternalActionType.OPENSPEC_ARCHIVE,
+            ):
+                payload.setdefault("retry_safety", "SAFE")
+            self.record_action_result(
+                action_key=action_key,
+                status=ExternalActionStatus.FAILED,
+                error_message=err_msg,
+                result_payload=payload if payload else None,
+            )
+        else:
+            err_msg = err_msg or "Mutation outcome ambiguous."
+            payload = dict(res_data) if isinstance(res_data, dict) else {}
+            if action.action_type in (
+                ExternalActionType.BRANCH_PUSH,
+                ExternalActionType.PR_CREATE,
+                ExternalActionType.ISSUE_CREATE,
+                ExternalActionType.ISSUE_CLOSE,
+                ExternalActionType.PROJECT_ITEM_ADD,
+                ExternalActionType.PROJECT_ITEM_EDIT,
+                ExternalActionType.BRANCH_DELETE,
+                ExternalActionType.WORKTREE_DELETE,
+                ExternalActionType.OPENSPEC_SYNC,
+                ExternalActionType.OPENSPEC_ARCHIVE,
+            ):
+                payload.setdefault("retry_safety", "SAFE")
+            self.record_action_result(
+                action_key=action_key,
+                status=ExternalActionStatus.AMBIGUOUS,
+                error_message=err_msg,
+                result_payload=payload if payload else None,
+            )
+
+        if heartbeat_failed or not _check_fence_valid():
+            logger.warning(
+                "Ownership lost or heartbeat failed during external mutation for '%s'; result application rejected.",
+                action_key,
+            )
+            return FencedDispatchResult(
+                action_key=action_key,
+                result=res,
+                outcome=getattr(res, "outcome", ExternalOutcome.FAILURE),
+                result_application_authorized=False,
+                fence_token=claim_context.fence_token if claim_context else 1,
+                is_stale=True,
+                error_message="Worker lost claim authority during slow external execution.",
+            )
+
+        # 7. Post-I/O Fence CAS check to authorize lifecycle application
+        is_valid = _check_fence_valid()
+        final_outcome = outcome or (ExternalOutcome.SUCCESS if res is True else ExternalOutcome.FAILURE)
+        return FencedDispatchResult(
+            action_key=action_key,
+            result=res,
+            outcome=final_outcome,
+            result_application_authorized=is_valid,
+            fence_token=claim_context.fence_token if claim_context else 1,
+            is_stale=not is_valid,
+            remote_identifier=remote_id,
+            result_payload=res_data if isinstance(res_data, dict) else None,
+            error_message=err_msg if final_outcome != ExternalOutcome.SUCCESS else None,
+        )
+
     def record_action_result(
         self,
         action_key: str,
@@ -388,6 +695,7 @@ class SagaEngine:
         self,
         saga: DurableSaga,
         cancellation_reason: str,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> DurableSaga:
         """Mark saga as CANCELLED."""
         updated = self.uow.durable_sagas.update_status(
@@ -395,6 +703,7 @@ class SagaEngine:
             status=SagaStatus.CANCELLED,
             blocking_reason=cancellation_reason,
             last_observed_outcome=ExternalOutcome.FAILURE,
+            claim_context=claim_context,
         )
 
         event = Event(
@@ -421,8 +730,12 @@ class SagaEngine:
         saga_id: str,
         intake_service: Any = None,
         post_merge_service: Any = None,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> DurableSaga:
-        """Resume an active or blocked saga from its persisted checkpoint with row-locking idempotency."""
+        from minime.domain.models import validate_claim_context_authoritative
+
+        validate_claim_context_authoritative(self.uow, claim_context)
+
         saga = self.get_for_update(saga_id) or self.get_saga(saga_id)
         if not saga:
             raise ValueError(f"Saga '{saga_id}' not found.")
@@ -443,18 +756,19 @@ class SagaEngine:
 
         if saga.status == SagaStatus.BLOCKED:
             saga = self.uow.durable_sagas.update_status(
-                saga.id, status=SagaStatus.IN_PROGRESS, blocking_reason=None
+                saga.id, status=SagaStatus.IN_PROGRESS, blocking_reason=None, claim_context=claim_context
             )
 
         if saga.saga_type == SagaType.INTAKE:
             if intake_service is not None:
-                intake_service.prepare_work_item(saga.project_id, saga.work_item_key)
+                intake_service.prepare_work_item(saga.project_id, saga.work_item_key, claim_context=claim_context)
         elif saga.saga_type == SagaType.CLOSURE:
             if post_merge_service is not None:
                 post_merge_service.reconcile_post_merge(
                     project_id=saga.project_id,
                     change_name=saga.change_name or saga.work_item_key,
                     run_id=saga.run_id,
+                    claim_context=claim_context,
                 )
 
         updated = self.get_saga(saga_id) or saga

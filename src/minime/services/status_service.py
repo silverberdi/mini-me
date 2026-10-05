@@ -91,6 +91,21 @@ class StatusService:
             "audit_risk": audit.risk.value if audit and audit.risk else None,
         }
 
+    def get_recovery_decisions(self, cycle_id: str | None = None, claim_key: str | None = None) -> list[dict[str, Any]]:
+        """Pure query/read model exposing recovery decision records."""
+        if cycle_id:
+            decisions = self.uow.recovery_decisions.list_by_cycle(cycle_id)
+        elif claim_key:
+            decisions = self.uow.recovery_decisions.list_by_claim_key(claim_key)
+        else:
+            decisions = []
+        return [d.model_dump() for d in decisions]
+
+    def get_recovery_claim(self, claim_key: str) -> dict[str, Any] | None:
+        """Pure query/read model exposing active recovery claim status."""
+        claim = self.uow.claims.get_by_key(claim_key)
+        return claim.model_dump() if claim else None
+
     def get_system_status(self) -> dict[str, Any]:
         """Aggregate operational system status."""
         db_healthy, db_message = db_manager.check_health()

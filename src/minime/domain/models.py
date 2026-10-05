@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Generic, TypeVar
@@ -32,6 +33,7 @@ from minime.domain.enums import (
     EventType,
     EvidenceDiagnosticStatus,
     ExecutionOutcome,
+    ExternalActionObservation,
     ExternalActionStatus,
     ExternalActionType,
     ExternalOutcome,
@@ -56,6 +58,9 @@ from minime.domain.enums import (
     PullRequestLookupState,
     QueuePriority,
     ReadinessState,
+    RecoveryClassification,
+    RecoveryDecisionStatus,
+    RecoverySource,
     RemediationFailureCode,
     RemediationStatus,
     RetrySafety,
@@ -155,7 +160,7 @@ class ExternalActionResult(BaseModel, Generic[T]):
 
     outcome: ExternalOutcome
     source_adapter: str
-    reason_code: ExternalReasonCode
+    reason_code: ExternalReasonCode = ExternalReasonCode.EXECUTION_SUCCESS
     retry_safety: RetrySafety = RetrySafety.UNKNOWN
     provider_detail: str | None = None
     data: T | None = None
@@ -900,6 +905,9 @@ class OrchestrationExternalAction(BaseModel):
     remote_identifier: str | None = None
     result_payload: dict[str, Any] = Field(default_factory=dict)
     error_message: str | None = None
+    last_claim_key: str | None = None
+    last_fence_token: int | None = None
+    last_dispatch_intent_id: str | None = None
     reserved_at: datetime = Field(default_factory=utc_now)
     reconciled_at: datetime | None = None
     created_at: datetime = Field(default_factory=utc_now)
@@ -1667,3 +1675,222 @@ class WorkspaceMutationDecision(BaseModel):
     workspace_role: WorkspaceRole
     resolved_path: str
     provider_detail: str | None = None
+
+
+class RecoveryClaim(BaseModel):
+    """Durable recovery claim lease/fence for slow continuation ownership."""
+
+    claim_key: str
+    fence_token: int = 1
+    owner_instance_id: str
+    claimed_at: datetime = Field(default_factory=utc_now)
+    heartbeat_at: datetime = Field(default_factory=utc_now)
+    lease_expires_at: datetime
+    released_at: datetime | None = None
+    last_decision_id: str | None = None
+
+    @property
+    def is_expired(self) -> bool:
+        return utc_now() >= self.lease_expires_at
+
+    @property
+    def is_released(self) -> bool:
+        return self.released_at is not None
+
+    @property
+    def is_active(self) -> bool:
+        return not self.is_released and not self.is_expired
+
+
+class RecoveryDecision(BaseModel):
+    """Durable recovery decision record with UNIQUE(cycle_id, claim_key)."""
+
+    decision_id: str = Field(default_factory=generate_uuid)
+    cycle_id: str
+    claim_key: str
+    identity_type: str
+    identity_id: str
+    project_id: str | None = None
+    change_name: str | None = None
+    source: RecoverySource
+    prior_checkpoint: dict[str, Any] = Field(default_factory=dict)
+    observation_refs: dict[str, Any] = Field(default_factory=dict)
+    classification: RecoveryClassification
+    planned_action: str
+    fence_token: int | None = None
+    status: RecoveryDecisionStatus = RecoveryDecisionStatus.PLANNED
+    result_payload: dict[str, Any] = Field(default_factory=dict)
+    reason_code: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class ExternalActionAttempt(BaseModel):
+    """Durable dispatch attempt record for external mutation idempotency."""
+
+    attempt_id: str = Field(default_factory=generate_uuid)
+    action_key: str
+    claim_key: str
+    fence_token: int
+    attempt_number: int = 1
+    dispatch_intent_key: str
+    status: str = "EXECUTING"
+    result_payload: dict[str, Any] = Field(default_factory=dict)
+    error_message: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+    @property
+    def id(self) -> str:
+        return self.attempt_id
+
+
+class RecoveryClaimContext(BaseModel):
+    """Validated context required for running slow continuation and provider/pipeline primitives."""
+
+    claim_key: str
+    owner_instance_id: str
+    fence_token: int
+    lease_expires_at: datetime
+
+    def is_valid(self) -> bool:
+        return utc_now() < self.lease_expires_at
+
+
+def validate_claim_context_authoritative(
+    uow: Any, claim_context: RecoveryClaimContext | None
+) -> None:
+    """Validate claim context against PostgreSQL / repository authoritative current ownership."""
+    from minime.domain.exceptions import MissingRecoveryClaimContextError, StaleClaimError
+
+    if claim_context is None:
+        raise MissingRecoveryClaimContextError(
+            "Recovery claim context is required for this operation."
+        )
+    if not claim_context.is_valid():
+        raise StaleClaimError("Recovery claim context is locally expired or invalid.")
+    if not hasattr(uow, "claims") or uow.claims is None:
+        return
+    if not uow.claims.validate_cas(
+        claim_key=claim_context.claim_key,
+        owner_instance_id=claim_context.owner_instance_id,
+        fence_token=claim_context.fence_token,
+    ):
+        raise StaleClaimError(
+            f"Recovery claim context for '{claim_context.claim_key}' (fence token {claim_context.fence_token}) is stale, expired, or superseded in database."
+        )
+
+
+@dataclass(frozen=True)
+class DispatchAuthorization:
+    """Stage B/D proof authorizing an external mutation attempt."""
+
+    action_key: str
+    is_authorized: bool
+    authorization_reason: str
+    is_retry: bool = False
+    observation_proven_absent: bool = False
+
+
+@dataclass(frozen=True)
+class FencedDispatchResult:
+    """Structured dispatch result representing fenced external action execution and lifecycle application authorization."""
+
+    action_key: str
+    result: Any = None
+    outcome: ExternalOutcome | str | None = None
+    result_application_authorized: bool = False
+    fence_token: int = 0
+    is_stale: bool = False
+    remote_identifier: str | None = None
+    result_payload: dict[str, Any] | None = None
+    error_message: str | None = None
+
+    @property
+    def data(self) -> Any:
+        if isinstance(self.result, dict):
+            return self.result.get("data", self.result)
+        return getattr(self.result, "data", self.result)
+
+    @property
+    def external_id(self) -> str | None:
+        return self.remote_identifier or getattr(self.result, "external_id", None)
+
+
+def evaluate_dispatch_authorization(
+    action: OrchestrationExternalAction,
+    observation: ExternalActionObservation | None = None,
+    is_original_request: bool = True,
+    observation_proven_absent: bool = False,
+) -> DispatchAuthorization:
+    """Evaluate Stage B/D authorization policy before dispatch-intent persistence."""
+    if action.status == ExternalActionStatus.COMPLETED:
+        return DispatchAuthorization(
+            action_key=action.action_key,
+            is_authorized=False,
+            authorization_reason="COMPLETED actions must never dispatch again.",
+        )
+
+    if action.status == ExternalActionStatus.RESERVED:
+        if observation is None:
+            if action.last_dispatch_intent_id or action.remote_identifier:
+                obs = ExternalActionObservation.POSSIBLY_DISPATCHED
+            else:
+                obs = ExternalActionObservation.PROVEN_NEVER_DISPATCHED
+        else:
+            obs = observation
+
+        if obs == ExternalActionObservation.PROVEN_NEVER_DISPATCHED and is_original_request:
+            return DispatchAuthorization(
+                action_key=action.action_key,
+                is_authorized=True,
+                authorization_reason="Authorized original mutation for RESERVED action.",
+                is_retry=False,
+            )
+        elif observation_proven_absent:
+            return DispatchAuthorization(
+                action_key=action.action_key,
+                is_authorized=True,
+                authorization_reason="Authorized retry following observation proving absence of remote effect.",
+                is_retry=True,
+                observation_proven_absent=True,
+            )
+        else:
+            return DispatchAuthorization(
+                action_key=action.action_key,
+                is_authorized=False,
+                authorization_reason="RESERVED action is POSSIBLY_DISPATCHED or lacks proof of absence; observation required before dispatch.",
+            )
+
+    if action.status in (
+        ExternalActionStatus.EXECUTING,
+        ExternalActionStatus.FAILED,
+        ExternalActionStatus.UNKNOWN,
+        ExternalActionStatus.AMBIGUOUS,
+    ):
+        is_retry_auth = (
+            action.result_payload.get("is_retry_authorized") is True
+            or action.result_payload.get("retry_safety") in ("SAFE", "RETRY_SAFE")
+            or getattr(action, "original_mutation_retry_authorized", False) is True
+        )
+        if observation_proven_absent and is_retry_auth:
+            return DispatchAuthorization(
+                action_key=action.action_key,
+                is_authorized=True,
+                authorization_reason=f"Authorized retry for {action.status.value} action following observation proving absence of remote effect and explicit retry authorization.",
+                is_retry=True,
+                observation_proven_absent=True,
+            )
+        return DispatchAuthorization(
+            action_key=action.action_key,
+            is_authorized=False,
+            authorization_reason=f"Action in {action.status.value} state requires both observation proving absence AND explicit retry authorization before repeat.",
+        )
+
+    return DispatchAuthorization(
+        action_key=action.action_key,
+        is_authorized=False,
+        authorization_reason=f"Unhandled action status '{action.status.value}'.",
+    )
+
+

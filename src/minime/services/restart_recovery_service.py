@@ -8,14 +8,11 @@ from pathlib import Path
 from typing import Any
 
 from minime.domain.enums import (
-    ChangeStatus,
     EventType,
-    ExternalActionStatus,
     GitOperationStatus,
-    HumanGate,
     JobStatus,
     LockSafetyStatus,
-    OrchestrationStopOutcome,
+    RecoverySource,
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
@@ -28,6 +25,7 @@ from minime.domain.models import (
     utc_now,
 )
 from minime.services.provider_health_service import ProviderHealthService
+from minime.services.recovery_convergence_service import RecoveryConvergenceService
 
 logger = logging.getLogger(__name__)
 
@@ -59,131 +57,29 @@ class RestartRecoveryService:
 
     def reconcile_on_startup(self, orchestration_service: Any = None) -> list[Job]:
         """Reconcile all in-flight / non-terminal jobs and active orchestration runs on daemon startup with full audit evidence."""
-        recovery_cycle_id = generate_uuid()
         active_jobs = self.uow.jobs.list_active_jobs()
-        active_runs = self.uow.orchestration_runs.list_runs(is_active=True)
+        recovery_cycle_id = generate_uuid()
 
-        interrupted_jobs = [
-            j
-            for j in active_jobs
-            if j.status
-            in {
-                JobStatus.RUNNING,
-                JobStatus.CHECKS_RUNNING,
-                JobStatus.REVIEW_RUNNING,
-                JobStatus.AUDIT_RUNNING,
-            }
-        ]
-        waiting_jobs = [j for j in active_jobs if j.status == JobStatus.WAITING_CAPACITY]
-        blocked_jobs = [j for j in active_jobs if j.status == JobStatus.RECOVERY_BLOCKED]
-        queued_jobs = [j for j in active_jobs if j.status == JobStatus.QUEUED]
-
-        # 1. Persist durable DAEMON_RESTARTED event for this startup recovery cycle
-        self.uow.events.save(
-            Event(
-                event_type=EventType.DAEMON_RESTARTED,
-                payload={
-                    "recovery_cycle_id": recovery_cycle_id,
-                    "active_jobs_count": len(active_jobs),
-                    "interrupted_jobs_count": len(interrupted_jobs),
-                    "waiting_jobs_count": len(waiting_jobs),
-                    "blocked_jobs_count": len(blocked_jobs),
-                    "queued_jobs_count": len(queued_jobs),
-                    "active_orchestration_runs_count": len(active_runs),
-                },
-                timestamp=utc_now(),
-            )
-        )
-
-        reconciled = []
         for job in active_jobs:
-            rec_job = self._reconcile_job(job, recovery_cycle_id)
-            reconciled.append(rec_job)
+            self._reconcile_job_evidence_and_locks(job, recovery_cycle_id)
 
-        self.reconcile_orchestration_runs(
-            orchestration_service=orchestration_service,
-            recovery_cycle_id=recovery_cycle_id,
-        )
-
-        self.reconcile_durable_sagas(recovery_cycle_id=recovery_cycle_id)
+        convergence_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
+        convergence_svc.reconcile_cycle(source=RecoverySource.STARTUP)
 
         self.uow.commit()
-        return reconciled
+        return self.uow.jobs.list_active_jobs()
 
     def reconcile_durable_sagas(self, recovery_cycle_id: str | None = None) -> list[DurableSaga]:
         """Reconcile active durable intake and closure sagas on daemon startup with terminal identity protection."""
-        from minime.domain.enums import ChangeStatus, SagaStatus, SagaType, WorkItemStatus
-        from minime.services.saga_engine import SagaEngine
-
-        saga_engine = SagaEngine(self.uow)
-        active_sagas = self.uow.durable_sagas.list_active()
-        reconciled = []
-
-        for saga in active_sagas:
-            if saga.status in {SagaStatus.COMPLETED, SagaStatus.FAILED}:
-                continue
-
-            item = self.uow.backlog_items.get_by_project_and_key(
-                saga.project_id, saga.work_item_key
-            )
-            change = self.uow.changes.get_by_name(
-                saga.project_id, saga.change_name or saga.work_item_key
-            )
-
-            is_terminal = (
-                item and item.status in {WorkItemStatus.COMPLETED, WorkItemStatus.CANCELLED}
-            ) or (change and change.status in {ChangeStatus.DONE, ChangeStatus.CANCELLED})
-
-            if is_terminal and saga.saga_type == SagaType.INTAKE:
-                logger.info(
-                    "Intake saga '%s' belongs to terminal item/change; cancelling saga to preserve terminal identity.",
-                    saga.id,
-                )
-                updated = saga_engine.cancel_saga(
-                    saga, cancellation_reason="Parent backlog item or change is terminal."
-                )
-                reconciled.append(updated)
-                continue
-
-            if is_terminal and saga.saga_type == SagaType.CLOSURE:
-                from minime.services.post_merge_service import PostMergeReconciliationService
-
-                post_merge_service = PostMergeReconciliationService(
-                    self.uow, project_root=self.project_root
-                )
-                post_merge_service.reconcile_post_merge(
-                    project_id=saga.project_id,
-                    change_name=saga.change_name or saga.work_item_key,
-                    run_id=saga.run_id,
-                )
-                updated = self.uow.durable_sagas.get_by_id(saga.id) or saga
-                reconciled.append(updated)
-                continue
-
-            try:
-                if saga.saga_type == SagaType.INTAKE:
-                    from minime.services.intake_service import IntakeService
-
-                    intake_svc = IntakeService(self.uow, project_root=self.project_root)
-                    intake_svc.prepare_work_item(saga.project_id, saga.work_item_key)
-                elif saga.saga_type == SagaType.CLOSURE:
-                    from minime.services.post_merge_service import PostMergeReconciliationService
-
-                    post_merge_svc = PostMergeReconciliationService(
-                        self.uow, project_root=self.project_root
-                    )
-                    post_merge_svc.reconcile_post_merge(
-                        project_id=saga.project_id,
-                        change_name=saga.change_name or saga.work_item_key,
-                        run_id=saga.run_id,
-                    )
-            except Exception as exc:
-                logger.warning("Failed to resume saga '%s' on startup: %s", saga.id, exc)
-
-            updated = self.uow.durable_sagas.get_by_id(saga.id) or saga
-            reconciled.append(updated)
-
+        active_before = self.uow.durable_sagas.list_active()
+        convergence_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
+        convergence_svc.reconcile_cycle(source=RecoverySource.STARTUP)
         self.uow.commit()
+        reconciled: list[DurableSaga] = []
+        for s in active_before:
+            updated = self.uow.durable_sagas.get_by_id(s.id)
+            if updated:
+                reconciled.append(updated)
         return reconciled
 
     def reconcile_orchestration_runs(
@@ -192,16 +88,16 @@ class RestartRecoveryService:
         recovery_cycle_id: str | None = None,
     ) -> list[OrchestrationRun]:
         """Reconcile active orchestration runs on daemon startup."""
-        cycle_id = recovery_cycle_id or generate_uuid()
-        active_runs = self.uow.orchestration_runs.list_runs(is_active=True)
-        reconciled_runs = []
-
-        for run in active_runs:
-            rec_run = self._reconcile_orchestration_run(run, orchestration_service, cycle_id)
-            reconciled_runs.append(rec_run)
-
+        active_before = self.uow.orchestration_runs.list_runs(is_active=True)
+        convergence_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
+        convergence_svc.reconcile_cycle(source=RecoverySource.STARTUP)
         self.uow.commit()
-        return reconciled_runs
+        reconciled: list[OrchestrationRun] = []
+        for r in active_before:
+            updated = self.uow.orchestration_runs.get_by_id(r.run_id)
+            if updated:
+                reconciled.append(updated)
+        return reconciled
 
     def _reconcile_orchestration_run(
         self,
@@ -209,145 +105,47 @@ class RestartRecoveryService:
         orchestration_service: Any = None,
         recovery_cycle_id: str | None = None,
     ) -> OrchestrationRun:
-        """Reconcile a single active orchestration run without duplicate actions."""
-        # 1. Check associated active job if any
-        if run.active_job_id:
-            job = self.uow.jobs.get_by_id(run.active_job_id)
-            if job and job.status in {JobStatus.RECOVERY_BLOCKED, JobStatus.NEEDS_HUMAN}:
-                run.is_active = False
-                run.stop_outcome = OrchestrationStopOutcome.NEEDS_HUMAN
-                run.human_gate = HumanGate.NEEDS_HUMAN
-                run.stop_reason = f"Active job '{job.job_id}' is in {job.status.value}."
-                self.uow.orchestration_runs.save(run)
-                return run
-
-        # 2. Inspect candidate and external actions
-        actions = self.uow.orchestration_external_actions.list_by_run(run.run_id)
-        current_cand = self.uow.orchestration_candidates.get_latest_for_run(run.run_id)
-
-        ambiguous_actions = [
-            action for action in actions if action.status == ExternalActionStatus.AMBIGUOUS
-        ]
-        if ambiguous_actions:
-            action_keys = [action.action_key for action in ambiguous_actions]
-            run.is_active = False
-            run.stop_outcome = OrchestrationStopOutcome.NEEDS_HUMAN
-            run.human_gate = HumanGate.NEEDS_HUMAN
-            run.stop_reason = "Restart found ambiguous external action state."
-            run.stop_details = {"action_keys": action_keys}
-            self.uow.orchestration_runs.save(run)
-            self.uow.events.save(
-                Event(
-                    event_type=EventType.RECOVERY_BLOCKED,
-                    project_id=run.project_id,
-                    change_id=run.change_name,
-                    operation_id=run.run_id,
-                    payload={"reason": run.stop_reason, "action_keys": action_keys},
-                    timestamp=utc_now(),
-                )
-            )
-            return run
-
-        # 3. Log recovery event
-        self.uow.events.save(
-            Event(
-                event_type="ORCHESTRATION_RECOVERED",
-                project_id=run.project_id,
-                change_id=run.change_name,
-                payload={
-                    "run_id": run.run_id,
-                    "stage": run.current_stage.value,
-                    "resumable_stage": run.resumable_stage.value,
-                    "candidate_generation": run.current_generation,
-                    "candidate_sha": current_cand.candidate_sha if current_cand else None,
-                    "actions_count": len(actions),
-                    "recovery_cycle_id": recovery_cycle_id,
-                },
-                timestamp=utc_now(),
-            )
-        )
-
-        # 4. If orchestration_service provided, resume the run safely
-        if orchestration_service is not None and run.is_active:
-            try:
-                orchestration_service.resume(run.run_id)
-            except Exception as exc:
-                logger.warning(
-                    f"Failed to auto-resume run '{run.run_id}' during restart recovery: {exc}"
-                )
-
-        return run
+        """Delegate single run recovery to canonical RecoveryConvergenceService without direct run state mutations."""
+        convergence_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
+        convergence_svc.request_run_continuation(run.run_id, source=RecoverySource.STARTUP)
+        return self.uow.orchestration_runs.get_by_id(run.run_id) or run
 
     def _reconcile_job(self, job: Job, recovery_cycle_id: str) -> Job:
-        """Reconcile a single non-terminal job."""
-        # 1. Check for unconsumed pending handoff to preserve executor continuity across restart
-        pending_handoff = next(
-            (h for h in self.uow.job_handoffs.list_by_job(job.job_id) if not h.is_consumed),
-            None,
-        )
-        if pending_handoff:
-            job.current_executor = pending_handoff.to_executor
-            self.uow.jobs.save(job)
+        """Observe job restart evidence and clean safe Git locks without direct Job state mutations."""
+        self._reconcile_job_evidence_and_locks(job, recovery_cycle_id)
+        return self.uow.jobs.get_by_id(job.job_id) or job
 
-        # 2. Check if parent change is already terminal (DONE or CANCELLED)
-        change = self.uow.changes.get_by_name(job.project_id, job.change_name)
-        if change and change.status in {ChangeStatus.DONE, ChangeStatus.CANCELLED}:
-            logger.info(
-                f"Job '{job.job_id}' belongs to {change.status.value} change '{job.change_name}'; cancelling leftover job."
-            )
-            job.status = JobStatus.CANCELLED
-            job.error_message = f"Change is already in terminal state {change.status.value}."
-            self.uow.jobs.save(job)
-            return job
-
-        if job.status == JobStatus.NEEDS_HUMAN:
-            logger.info(f"Job '{job.job_id}' is NEEDS_HUMAN; retaining state for human review.")
-            return job
-
-        if job.status == JobStatus.RECOVERY_BLOCKED:
-            logger.info(
-                f"Job '{job.job_id}' is RECOVERY_BLOCKED; retaining state for human inspection."
-            )
-            return job
-
-        if job.status == JobStatus.WAITING_CAPACITY:
-            logger.info(f"Job '{job.job_id}' is WAITING_CAPACITY; retaining state.")
-            return job
-
-        if job.status == JobStatus.QUEUED:
-            return job
-
-        # 2. For jobs in active execution phase, persist durable JOB_INTERRUPTED evidence BEFORE transition
+    def _reconcile_job_evidence_and_locks(self, job: Job, recovery_cycle_id: str) -> None:
+        """Inspect and recover Git locks and record JOB_INTERRUPTED evidence without direct state transitions."""
         stage_map = {
             JobStatus.RUNNING: "implementer",
             JobStatus.CHECKS_RUNNING: "checks",
             JobStatus.REVIEW_RUNNING: "reviewer",
             JobStatus.AUDIT_RUNNING: "auditor",
         }
-        interrupted_stage = stage_map.get(job.status, "unknown")
-
-        self.uow.events.save(
-            Event(
-                event_type=EventType.JOB_INTERRUPTED,
-                project_id=job.project_id,
-                change_id=job.change_name,
-                operation_id=job.job_id,
-                payload={
-                    "job_id": job.job_id,
-                    "project_id": job.project_id,
-                    "change_id": job.change_name,
-                    "previous_status": job.status.value,
-                    "interrupted_stage": interrupted_stage,
-                    "candidate_sha": job.candidate_sha,
-                    "base_sha": job.base_sha,
-                    "implementer_role": job.implementer_role,
-                    "recovery_cycle_id": recovery_cycle_id,
-                },
-                timestamp=utc_now(),
+        if job.status in stage_map:
+            interrupted_stage = stage_map[job.status]
+            self.uow.events.save(
+                Event(
+                    event_type=EventType.JOB_INTERRUPTED,
+                    project_id=job.project_id,
+                    change_id=job.change_name,
+                    operation_id=job.job_id,
+                    payload={
+                        "job_id": job.job_id,
+                        "project_id": job.project_id,
+                        "change_id": job.change_name,
+                        "previous_status": job.status.value,
+                        "interrupted_stage": interrupted_stage,
+                        "candidate_sha": job.candidate_sha,
+                        "base_sha": job.base_sha,
+                        "implementer_role": job.implementer_role,
+                        "recovery_cycle_id": recovery_cycle_id,
+                    },
+                    timestamp=utc_now(),
+                )
             )
-        )
 
-        # 3. Inspect and recover Git locks fail-closed with concrete ownership proof
         from minime.services.worktree_manager import WorktreeManager
 
         wt_manager = WorktreeManager(self.project_root, uow=self.uow)
@@ -363,11 +161,7 @@ class RestartRecoveryService:
         if unsafe_results:
             reasons = "; ".join([r.reason for r in unsafe_results])
             logger.warning(
-                f"Job '{job.job_id}' encountered unsafe Git lock condition: {reasons}. Marking RECOVERY_BLOCKED."
-            )
-            blocked_job = self.uow.jobs.set_recovery_blocked(
-                job_id=job.job_id,
-                reason=reasons,
+                f"Job '{job.job_id}' encountered unsafe Git lock condition: {reasons}. Recording RECOVERY_BLOCKED evidence."
             )
             self.uow.events.save(
                 Event(
@@ -379,14 +173,11 @@ class RestartRecoveryService:
                         "job_id": job.job_id,
                         "reason": reasons,
                         "recovery_cycle_id": recovery_cycle_id,
-                        "lock_inspections": [r.model_dump() for r in lock_results],
                     },
                     timestamp=utc_now(),
                 )
             )
-            return blocked_job
 
-        # Safely remove conclusively proven SAFE_ORPHANED locks and update ownership records
         from minime.domain.enums import WorkspaceOperation
         from minime.domain.models import WorkspaceMutationRequest
         from minime.services.workspace_guard import ManagedWorkspaceGuard
@@ -412,7 +203,6 @@ class RestartRecoveryService:
                 lock_file_path.unlink(missing_ok=True)
                 logger.info(f"Safely removed orphaned mini me Git lock: {safe_res.lock_path}")
 
-                # Update in-flight GitOperation records to RECOVERED
                 matching_ops = self.uow.git_operations.list_by_job(job.job_id)
                 for op in matching_ops:
                     if op.status in {GitOperationStatus.RUNNING, GitOperationStatus.INTERRUPTED}:
@@ -439,62 +229,6 @@ class RestartRecoveryService:
                         timestamp=utc_now(),
                     )
                 )
-
-        # 4. Checkpoint preservation & reconciliation
-        check_results = self.uow.check_results.list_by_job(job.job_id)
-        checks_passed = len(check_results) > 0 and all(c.exit_code == 0 for c in check_results)
-
-        if job.candidate_sha and (checks_passed or job.status == JobStatus.CHECKS_PASSED):
-            # Preserved checkpoint: candidate SHA produced and checks passed.
-            # Reset stage to CHECKS_PASSED so review stage can resume without re-running implementer/checks.
-            target_status = JobStatus.CHECKS_PASSED
-            updated = self.uow.jobs.transition(
-                job.job_id,
-                target_status.value,
-                error_message="Recovered on daemon restart; preserved completed implementation and checks.",
-            )
-            self.uow.events.save(
-                Event(
-                    event_type=EventType.JOB_RECOVERED,
-                    project_id=job.project_id,
-                    change_id=job.change_name,
-                    operation_id=job.job_id,
-                    payload={
-                        "job_id": job.job_id,
-                        "previous_status": job.status.value,
-                        "new_status": target_status.value,
-                        "candidate_sha": job.candidate_sha,
-                        "checks_passed": True,
-                        "recovery_cycle_id": recovery_cycle_id,
-                    },
-                    timestamp=utc_now(),
-                )
-            )
-            return updated
-        else:
-            # Did not complete candidate SHA or checks before restart; reset to QUEUED. Never infer success.
-            target_status = JobStatus.QUEUED
-            updated = self.uow.jobs.transition(
-                job.job_id,
-                target_status.value,
-                error_message="Recovered on daemon restart; re-queued for execution.",
-            )
-            self.uow.events.save(
-                Event(
-                    event_type=EventType.JOB_RECOVERED,
-                    project_id=job.project_id,
-                    change_id=job.change_name,
-                    operation_id=job.job_id,
-                    payload={
-                        "job_id": job.job_id,
-                        "previous_status": job.status.value,
-                        "new_status": target_status.value,
-                        "recovery_cycle_id": recovery_cycle_id,
-                    },
-                    timestamp=utc_now(),
-                )
-            )
-            return updated
 
     def inspect_git_locks(self, worktree_path: Path, job: Job) -> list[LockInspectionResult]:
         """Inspect all Git lock files in worktree context fail-closed with concrete ownership proof."""

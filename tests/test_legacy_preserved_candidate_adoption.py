@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from tests.test_human_resolution_real_git import git, make_repo, make_service
+from tests.test_human_resolution_real_git import git, make_claim, make_repo, make_service
 
 from minime.domain.enums import EventType, OrchestrationStage
 from minime.domain.models import (
@@ -117,12 +117,12 @@ def test_historical_record_adoption_remains_valid_after_current_generation_advan
     service, run_id, historical, current = two_generation_legacy_service(
         in_memory_uow, repo, base_a, candidate_sha, base_b
     )
-    service.drive_coordinator = lambda run_id, project_root=None: (
+    service.drive_coordinator = lambda run_id, project_root=None, claim_context=None: (
         in_memory_uow.orchestration_runs.get_by_id(run_id)
     )
 
     resolved = service.resolve_preserved_candidate(
-        run_id, continue_preserved_candidate=True, project_root=repo
+        run_id, continue_preserved_candidate=True, project_root=repo, claim_context=make_claim(in_memory_uow, run_id, repo)
     )
 
     assert resolved.current_generation == 2
@@ -141,7 +141,7 @@ def test_historical_record_adoption_rejects_contradictory_historical_sha(tmp_pat
 
     with pytest.raises(ValueError, match="conflicts with the candidate record"):
         service.resolve_preserved_candidate(
-            run_id, continue_preserved_candidate=True, project_root=repo
+            run_id, continue_preserved_candidate=True, project_root=repo, claim_context=make_claim(in_memory_uow, run_id, repo)
         )
 
 
@@ -149,7 +149,7 @@ def test_legacy_ref_adoption_validates_real_git_and_continues_resolution(tmp_pat
     repo, base_a, candidate_sha, base_b = make_repo(tmp_path, conflict=False)
     ref = prepare_legacy_branch(repo, candidate_sha)
     service, run_id = legacy_service(in_memory_uow, repo, base_a, candidate_sha)
-    service.drive_coordinator = lambda run_id, project_root=None: (
+    service.drive_coordinator = lambda run_id, project_root=None, claim_context=None: (
         in_memory_uow.orchestration_runs.get_by_id(run_id)
     )
 
@@ -158,6 +158,7 @@ def test_legacy_ref_adoption_validates_real_git_and_continues_resolution(tmp_pat
         continue_preserved_candidate=True,
         candidate_ref=ref,
         project_root=repo,
+        claim_context=make_claim(in_memory_uow, run_id, repo),
     )
 
     adopted = in_memory_uow.orchestration_candidates.get_by_generation(run_id, 1)
@@ -196,6 +197,7 @@ def test_legacy_ref_adoption_validates_real_git_and_continues_resolution(tmp_pat
         continue_preserved_candidate=True,
         candidate_ref=ref,
         project_root=repo,
+        claim_context=make_claim(in_memory_uow, run_id, repo),
     )
     assert again.current_generation == 2
     assert len(in_memory_uow.orchestration_candidates.list_by_run(run_id)) == 2
@@ -240,6 +242,7 @@ def test_legacy_ref_adoption_rejects_wrong_branch_identity(
             continue_preserved_candidate=True,
             candidate_ref=ref,
             project_root=repo,
+            claim_context=make_claim(in_memory_uow, run_id, repo),
         )
 
     assert in_memory_uow.orchestration_candidates.get_latest_for_run(run_id) is None
@@ -258,6 +261,7 @@ def test_legacy_ref_adoption_rejects_wrong_sha(tmp_path, in_memory_uow):
             continue_preserved_candidate=True,
             candidate_ref=ref,
             project_root=repo,
+            claim_context=make_claim(in_memory_uow, run_id, repo),
         )
 
 
@@ -265,7 +269,7 @@ def test_existing_candidate_ref_does_not_trigger_adoption(tmp_path, in_memory_uo
     repo, base_a, candidate_sha, base_b = make_repo(tmp_path, conflict=False)
     ref = "refs/heads/historical-candidate"
     service, run_id = make_service(in_memory_uow, repo, base_a, candidate_sha, ref)
-    service.drive_coordinator = lambda run_id, project_root=None: (
+    service.drive_coordinator = lambda run_id, project_root=None, claim_context=None: (
         in_memory_uow.orchestration_runs.get_by_id(run_id)
     )
 
@@ -273,6 +277,7 @@ def test_existing_candidate_ref_does_not_trigger_adoption(tmp_path, in_memory_uo
         run_id,
         continue_preserved_candidate=True,
         project_root=repo,
+        claim_context=make_claim(in_memory_uow, run_id, repo),
     )
 
     assert not [
@@ -295,6 +300,7 @@ def test_legacy_ref_adoption_rejects_contradictory_persisted_ref(tmp_path, in_me
             continue_preserved_candidate=True,
             candidate_ref=ref,
             project_root=repo,
+            claim_context=make_claim(in_memory_uow, run_id, repo),
         )
 
 
@@ -307,6 +313,7 @@ def test_legacy_ref_adoption_requires_explicit_input(tmp_path, in_memory_uow):
             run_id,
             continue_preserved_candidate=True,
             project_root=repo,
+            claim_context=make_claim(in_memory_uow, run_id, repo),
         )
 
 
@@ -319,7 +326,7 @@ def test_legacy_record_adoption_rejects_missing_manifest(tmp_path, in_memory_uow
 
     with pytest.raises(ValueError, match="canonical candidate manifest"):
         service.resolve_preserved_candidate(
-            run_id, continue_preserved_candidate=True, candidate_ref=ref, project_root=repo
+            run_id, continue_preserved_candidate=True, candidate_ref=ref, project_root=repo, claim_context=make_claim(in_memory_uow, run_id, repo)
         )
 
 
@@ -345,7 +352,7 @@ def test_legacy_record_adoption_rejects_invalid_manifest(
 
     with pytest.raises(ValueError, match=message):
         service.resolve_preserved_candidate(
-            run_id, continue_preserved_candidate=True, candidate_ref=ref, project_root=repo
+            run_id, continue_preserved_candidate=True, candidate_ref=ref, project_root=repo, claim_context=make_claim(in_memory_uow, run_id, repo)
         )
 
 
@@ -359,7 +366,7 @@ def test_legacy_record_adoption_rejects_run_job_base_mismatch(tmp_path, in_memor
 
     with pytest.raises(ValueError, match="run and job base SHA equality"):
         service.resolve_preserved_candidate(
-            run_id, continue_preserved_candidate=True, candidate_ref=ref, project_root=repo
+            run_id, continue_preserved_candidate=True, candidate_ref=ref, project_root=repo, claim_context=make_claim(in_memory_uow, run_id, repo)
         )
 
 
@@ -373,7 +380,7 @@ def test_legacy_record_adoption_rejects_missing_or_invalid_generation(tmp_path, 
 
     with pytest.raises(ValueError, match="positive run generation"):
         service.resolve_preserved_candidate(
-            run_id, continue_preserved_candidate=True, candidate_ref=ref, project_root=repo
+            run_id, continue_preserved_candidate=True, candidate_ref=ref, project_root=repo, claim_context=make_claim(in_memory_uow, run_id, repo)
         )
 
 
@@ -387,7 +394,7 @@ def test_legacy_record_adoption_rejects_missing_job_candidate_sha(tmp_path, in_m
 
     with pytest.raises(ValueError, match="authoritative job candidate SHA"):
         service.resolve_preserved_candidate(
-            run_id, continue_preserved_candidate=True, candidate_ref=ref, project_root=repo
+            run_id, continue_preserved_candidate=True, candidate_ref=ref, project_root=repo, claim_context=make_claim(in_memory_uow, run_id, repo)
         )
 
 
@@ -404,7 +411,7 @@ def test_legacy_record_adoption_rejects_non_ancestor_base(tmp_path, in_memory_uo
 
     with pytest.raises(ValueError, match="not an ancestor"):
         service.resolve_preserved_candidate(
-            run_id, continue_preserved_candidate=True, candidate_ref=ref, project_root=repo
+            run_id, continue_preserved_candidate=True, candidate_ref=ref, project_root=repo, claim_context=make_claim(in_memory_uow, run_id, repo)
         )
 
 
@@ -432,5 +439,5 @@ def test_record_adoption_evidence_without_candidate_fails_closed(tmp_path, in_me
 
     with pytest.raises(ValueError, match="record adoption evidence exists"):
         service.resolve_preserved_candidate(
-            run_id, continue_preserved_candidate=True, candidate_ref=ref, project_root=repo
+            run_id, continue_preserved_candidate=True, candidate_ref=ref, project_root=repo, claim_context=make_claim(in_memory_uow, run_id, repo)
         )

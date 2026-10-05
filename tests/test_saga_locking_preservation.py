@@ -30,8 +30,12 @@ def test_saga_resume_retains_get_for_update_command_locking(in_memory_uow):
     get_for_update_spy = MagicMock(side_effect=original_get_for_update)
     uow.durable_sagas.get_for_update = get_for_update_spy
 
+    from minime.services.recovery_convergence_service import RecoveryConvergenceService
+    conv_svc = RecoveryConvergenceService(uow)
+    ctx = conv_svc.acquire_claim("saga:saga-test-locking-1")
+    assert ctx is not None
     engine = SagaEngine(uow)
-    resumed = engine.resume_saga("saga-test-locking-1")
+    resumed = engine.resume_saga("saga-test-locking-1", claim_context=ctx)
 
     # Assert get_for_update was called by resume_saga
     assert get_for_update_spy.called
