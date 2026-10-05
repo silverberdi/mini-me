@@ -29,8 +29,15 @@ logger = logging.getLogger(__name__)
 class SagaEngine:
     """Manages lifecycle phase transitions, checkpoints, and external action reservations for DurableSagas."""
 
-    def __init__(self, uow: PersistenceUnitOfWork):
+    def __init__(
+        self,
+        uow: PersistenceUnitOfWork,
+        heartbeat_interval_seconds: int = 15,
+        lease_seconds: int = 60,
+    ):
         self.uow = uow
+        self.heartbeat_interval_seconds = heartbeat_interval_seconds
+        self.lease_seconds = lease_seconds
 
     def get_saga(self, saga_id: str) -> DurableSaga | None:
         return self.uow.durable_sagas.get_by_id(saga_id)
@@ -519,8 +526,35 @@ class SagaEngine:
                 authorization=auth,
             )
 
-        # 5. Execute slow external mutation (NO DB LOCK HELD)
-        res = mutation_fn()
+        # 5. Execute slow external mutation (NO DB LOCK HELD, WITH OPERATIONAL HEARTBEAT)
+        heartbeat_failed = False
+        if claim_context is not None and hasattr(self.uow, "claims") and self.uow.claims is not None:
+            from minime.services.recovery_convergence_service import OperationalHeartbeat
+
+            renew_claim = getattr(self.uow, "renew_claim_heartbeat_isolated", None)
+            if renew_claim is None:
+                # In-memory test UoWs have no SQLAlchemy session to isolate. They
+                # still provide an explicit claim repository; production UoWs use
+                # the isolated method above.
+                def renew_claim(context: RecoveryClaimContext, lease: int) -> bool:
+                    return self.uow.claims.renew_heartbeat(
+                        claim_key=context.claim_key,
+                        owner_instance_id=context.owner_instance_id,
+                        fence_token=context.fence_token,
+                        lease_seconds=lease,
+                    )
+            hb = OperationalHeartbeat(
+                claim_context=claim_context,
+                interval_seconds=self.heartbeat_interval_seconds,
+                lease_seconds=self.lease_seconds,
+                renew_claim=renew_claim,
+            )
+            with hb:
+                res = mutation_fn()
+            if hb.heartbeat_failed:
+                heartbeat_failed = True
+        else:
+            res = mutation_fn()
 
         # 6. Record truthful remote action result (monotonically persisted in DB)
         outcome = getattr(res, "outcome", None)
@@ -580,10 +614,24 @@ class SagaEngine:
                 result_payload=payload if payload else None,
             )
 
+        if heartbeat_failed or not _check_fence_valid():
+            logger.warning(
+                "Ownership lost or heartbeat failed during external mutation for '%s'; result application rejected.",
+                action_key,
+            )
+            return FencedDispatchResult(
+                action_key=action_key,
+                result=res,
+                outcome=getattr(res, "outcome", ExternalOutcome.FAILURE),
+                result_application_authorized=False,
+                fence_token=claim_context.fence_token if claim_context else 1,
+                is_stale=True,
+                error_message="Worker lost claim authority during slow external execution.",
+            )
+
         # 7. Post-I/O Fence CAS check to authorize lifecycle application
         is_valid = _check_fence_valid()
         final_outcome = outcome or (ExternalOutcome.SUCCESS if res is True else ExternalOutcome.FAILURE)
-
         return FencedDispatchResult(
             action_key=action_key,
             result=res,
@@ -708,7 +756,7 @@ class SagaEngine:
 
         if saga.status == SagaStatus.BLOCKED:
             saga = self.uow.durable_sagas.update_status(
-                saga.id, status=SagaStatus.IN_PROGRESS, blocking_reason=None
+                saga.id, status=SagaStatus.IN_PROGRESS, blocking_reason=None, claim_context=claim_context
             )
 
         if saga.saga_type == SagaType.INTAKE:

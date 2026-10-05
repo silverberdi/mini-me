@@ -439,7 +439,7 @@ class PostMergeReconciliationService:
             if missing_phases:
                 reason = f"Terminal closure reconciliation missing positive evidence for phase(s): {', '.join(missing_phases)}"
                 logger.warning(reason)
-                self.saga_engine.block_saga(saga, blocking_reason=reason)
+                self.saga_engine.block_saga(saga, blocking_reason=reason, claim_context=claim_context)
                 self.uow.commit()
                 return PostMergeReconciliationResult(
                     success=False,
@@ -452,39 +452,42 @@ class PostMergeReconciliationService:
                     error_message=reason,
                 )
 
-            self.saga_engine.advance_phase(saga, "MERGE_OBSERVED")
-            self.saga_engine.advance_phase(saga, "MERGED_DELIVERY_VERIFIED")
-            self.saga_engine.advance_phase(saga, "RUN_JOB_RECONCILED")
+            self.saga_engine.advance_phase(saga, "MERGE_OBSERVED", claim_context=claim_context)
+            self.saga_engine.advance_phase(saga, "MERGED_DELIVERY_VERIFIED", claim_context=claim_context)
+            self.saga_engine.advance_phase(saga, "RUN_JOB_RECONCILED", claim_context=claim_context)
             self.saga_engine.advance_phase(
-                saga, "ISSUE_CLOSED", evidence_references={"issue_closed": issue_closed_ev}
+                saga, "ISSUE_CLOSED", evidence_references={"issue_closed": issue_closed_ev}, claim_context=claim_context
             )
             self.saga_engine.advance_phase(
                 saga,
                 "PROJECT_ITEM_DONE",
                 evidence_references={"project_item_updated": project_done_ev},
+                claim_context=claim_context,
             )
-            self.saga_engine.advance_phase(saga, "SPEC_SYNCED")
+            self.saga_engine.advance_phase(saga, "SPEC_SYNCED", claim_context=claim_context)
             self.saga_engine.advance_phase(
-                saga, "SYNC_VERIFIED", evidence_references={"sync_verified": sync_verified_ev}
+                saga, "SYNC_VERIFIED", evidence_references={"sync_verified": sync_verified_ev}, claim_context=claim_context
             )
-            self.saga_engine.advance_phase(saga, "SPEC_ARCHIVED")
+            self.saga_engine.advance_phase(saga, "SPEC_ARCHIVED", claim_context=claim_context)
             self.saga_engine.advance_phase(
                 saga,
                 "ARCHIVE_VERIFIED",
                 evidence_references={"archive_verified": archive_verified_ev},
+                claim_context=claim_context,
             )
             self.saga_engine.advance_phase(
                 saga,
                 "WORKTREE_CLEANED",
                 evidence_references={"worktree_cleaned": worktree_clean_ev},
+                claim_context=claim_context,
             )
             self.saga_engine.advance_phase(
-                saga, "BRANCH_CLEANED", evidence_references={"branch_cleaned": branch_clean_ev}
+                saga, "BRANCH_CLEANED", evidence_references={"branch_cleaned": branch_clean_ev}, claim_context=claim_context
             )
-            self.saga_engine.advance_phase(saga, "LOCKS_RELEASED")
-            self.saga_engine.advance_phase(saga, "FINAL_CLOSED")
+            self.saga_engine.advance_phase(saga, "LOCKS_RELEASED", claim_context=claim_context)
+            self.saga_engine.advance_phase(saga, "FINAL_CLOSED", claim_context=claim_context)
 
-            self.saga_engine.complete_saga(saga)
+            self.saga_engine.complete_saga(saga, claim_context=claim_context)
             self._reconcile_change_and_backlog_item(project_id, change_name)
             self.uow.commit()
 
@@ -616,6 +619,7 @@ class PostMergeReconciliationService:
                 "merge_commit_sha": merge_commit_sha,
                 "candidate_sha": cand_sha,
             },
+            claim_context=claim_context,
         )
 
         # 3. Delivery verification (ancestry + squash merge support)
@@ -631,6 +635,7 @@ class PostMergeReconciliationService:
                 saga,
                 "MERGED_DELIVERY_VERIFIED",
                 evidence_references={"delivery_verified": delivery_ok},
+                claim_context=claim_context,
             )
 
         # Record merge detected event
@@ -733,7 +738,7 @@ class PostMergeReconciliationService:
 
         if issue_closed or not issue_required:
             self.saga_engine.advance_phase(
-                saga, "ISSUE_CLOSED", evidence_references={"issue_closed": issue_closed}
+                saga, "ISSUE_CLOSED", evidence_references={"issue_closed": issue_closed}, claim_context=claim_context
             )
 
         # 6. GitHub Project Item Done with fenced dispatch intent
@@ -789,6 +794,7 @@ class PostMergeReconciliationService:
                 saga,
                 "PROJECT_ITEM_DONE",
                 evidence_references={"project_item_updated": project_item_updated},
+                claim_context=claim_context,
             )
 
         # 7. OpenSpec Spec Sync + verification with fenced dispatch intent
@@ -852,9 +858,9 @@ class PostMergeReconciliationService:
             logger.warning("OpenSpec spec sync failed for '%s': %s", change_name, exc)
 
         if sync_verified:
-            self.saga_engine.advance_phase(saga, "SPEC_SYNCED")
+            self.saga_engine.advance_phase(saga, "SPEC_SYNCED", claim_context=claim_context)
             self.saga_engine.advance_phase(
-                saga, "SYNC_VERIFIED", evidence_references={"sync_verified": sync_verified}
+                saga, "SYNC_VERIFIED", evidence_references={"sync_verified": sync_verified}, claim_context=claim_context
             )
 
         # 8. OpenSpec Archive + verification with fenced dispatch intent
@@ -922,9 +928,9 @@ class PostMergeReconciliationService:
                 logger.warning("OpenSpec archive failed for '%s': %s", change_name, exc)
 
         if archive_verified:
-            self.saga_engine.advance_phase(saga, "SPEC_ARCHIVED")
+            self.saga_engine.advance_phase(saga, "SPEC_ARCHIVED", claim_context=claim_context)
             self.saga_engine.advance_phase(
-                saga, "ARCHIVE_VERIFIED", evidence_references={"archive_verified": archive_verified}
+                saga, "ARCHIVE_VERIFIED", evidence_references={"archive_verified": archive_verified}, claim_context=claim_context
             )
 
         # 9. Worktree Cleanup with fenced dispatch intent
@@ -964,7 +970,7 @@ class PostMergeReconciliationService:
 
         if worktree_cleaned:
             self.saga_engine.advance_phase(
-                saga, "WORKTREE_CLEANED", evidence_references={"worktree_cleaned": worktree_cleaned}
+                saga, "WORKTREE_CLEANED", evidence_references={"worktree_cleaned": worktree_cleaned}, claim_context=claim_context
             )
 
         # 10. Local and Remote Branch Cleanup with fenced dispatch intent
@@ -1037,7 +1043,7 @@ class PostMergeReconciliationService:
                 )
             )
             self.saga_engine.advance_phase(
-                saga, "BRANCH_CLEANED", evidence_references={"branch_cleaned": branch_cleaned}
+                saga, "BRANCH_CLEANED", evidence_references={"branch_cleaned": branch_cleaned}, claim_context=claim_context
             )
 
         # 11. Locks and Preview Cleanup
@@ -1051,7 +1057,7 @@ class PostMergeReconciliationService:
                 timestamp=utc_now(),
             )
         )
-        self.saga_engine.advance_phase(saga, "LOCKS_RELEASED")
+        self.saga_engine.advance_phase(saga, "LOCKS_RELEASED", claim_context=claim_context)
 
         # 12. Check all unverified phases before terminal gate
         unverified_phases: list[str] = []

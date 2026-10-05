@@ -224,7 +224,13 @@ class JobRepositoryInterface(ABC):
     def list_active_jobs(self) -> list[Job]: ...
 
     @abstractmethod
-    def transition(self, job_id: str, new_status: str, error_message: str | None = None) -> Job: ...
+    def transition(
+        self,
+        job_id: str,
+        new_status: str,
+        error_message: str | None = None,
+        claim_context: Any | None = None,
+    ) -> Job: ...
 
     @abstractmethod
     def set_waiting_capacity(
@@ -233,10 +239,24 @@ class JobRepositoryInterface(ABC):
         waiting_provider: str,
         reason: str,
         expected_reset_at: datetime | None = None,
+        claim_context: Any | None = None,
     ) -> Job: ...
 
     @abstractmethod
-    def set_recovery_blocked(self, job_id: str, reason: str) -> Job: ...
+    def set_recovery_blocked(
+        self,
+        job_id: str,
+        reason: str,
+        claim_context: Any | None = None,
+    ) -> Job: ...
+
+    @abstractmethod
+    def update_executor_fenced(
+        self,
+        job_id: str,
+        current_executor: str,
+        claim_context: Any | None = None,
+    ) -> Job: ...
 
 
 class JobLogRepositoryInterface(ABC):

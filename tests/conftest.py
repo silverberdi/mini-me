@@ -621,7 +621,13 @@ class InMemoryJobRepository(JobRepositoryInterface):
         jobs.sort(key=lambda j: j.created_at)
         return [j.model_copy(deep=True) for j in jobs]
 
-    def transition(self, job_id: str, new_status: str, error_message: str | None = None) -> Job:
+    def transition(
+        self,
+        job_id: str,
+        new_status: str,
+        error_message: str | None = None,
+        claim_context: Any | None = None,
+    ) -> Job:
         job = self._store.get(job_id)
         if not job:
             raise ValueError(f"Job '{job_id}' not found.")
@@ -640,6 +646,7 @@ class InMemoryJobRepository(JobRepositoryInterface):
         waiting_provider: str,
         reason: str,
         expected_reset_at: datetime | None = None,
+        claim_context: Any | None = None,
     ) -> Job:
         job = self._store.get(job_id)
         if not job:
@@ -660,7 +667,12 @@ class InMemoryJobRepository(JobRepositoryInterface):
         self._store[job_id] = updated
         return updated.model_copy(deep=True)
 
-    def set_recovery_blocked(self, job_id: str, reason: str) -> Job:
+    def set_recovery_blocked(
+        self,
+        job_id: str,
+        reason: str,
+        claim_context: Any | None = None,
+    ) -> Job:
         job = self._store.get(job_id)
         if not job:
             raise ValueError(f"Job '{job_id}' not found.")
@@ -675,6 +687,19 @@ class InMemoryJobRepository(JobRepositoryInterface):
                 "recovery_blocked_reason": reason,
             }
         )
+        self._store[job_id] = updated
+        return updated.model_copy(deep=True)
+
+    def update_executor_fenced(
+        self,
+        job_id: str,
+        current_executor: str,
+        claim_context: Any | None = None,
+    ) -> Job:
+        job = self._store.get(job_id)
+        if not job:
+            raise ValueError(f"Job '{job_id}' not found.")
+        updated = job.model_copy(update={"current_executor": current_executor})
         self._store[job_id] = updated
         return updated.model_copy(deep=True)
 

@@ -1517,7 +1517,9 @@ class PostgresJobRepository(JobRepositoryInterface):
         error_message: str | None = None,
         claim_context: RecoveryClaimContext | None = None,
     ) -> Job:
-        stmt = select(JobModel).where(JobModel.id == job_id).with_for_update()
+        # The read establishes the expected lifecycle state; the fenced UPDATE
+        # below repeats it in SQL so a concurrent transition cannot be overwritten.
+        stmt = select(JobModel).where(JobModel.id == job_id)
         model = self.session.scalars(stmt).first()
         if not model:
             raise ValueError(f"Job '{job_id}' not found.")
@@ -1542,6 +1544,7 @@ class PostgresJobRepository(JobRepositoryInterface):
                 update(JobModel)
                 .where(
                     JobModel.id == job_id,
+                    JobModel.status == current.value,
                     exists(claim_subquery),
                 )
                 .values(
@@ -1568,34 +1571,152 @@ class PostgresJobRepository(JobRepositoryInterface):
         waiting_provider: str,
         reason: str,
         expected_reset_at: datetime | None = None,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> Job:
-        stmt = select(JobModel).where(JobModel.id == job_id).with_for_update()
+        now = utc_now()
+        target = JobStatus.WAITING_CAPACITY
+        stmt = select(JobModel).where(JobModel.id == job_id)
         model = self.session.scalars(stmt).first()
         if not model:
             raise ValueError(f"Job '{job_id}' not found.")
         current = JobStatus(model.status)
-        target = JobStatus.WAITING_CAPACITY
-        if target not in self.VALID_TRANSITIONS[current]:
+        if current != target and target not in self.VALID_TRANSITIONS[current]:
             raise ValueError(f"Invalid job status transition: {current.value} -> {target.value}.")
-        model.status = target.value
-        model.waiting_provider = waiting_provider
-        model.capacity_block_reason = reason
-        model.expected_reset_at = expected_reset_at
-        model.updated_at = utc_now()
+        if claim_context is not None:
+            claim_subquery = (
+                select(1)
+                .where(
+                    RecoveryClaimModel.claim_key == claim_context.claim_key,
+                    RecoveryClaimModel.owner_instance_id == claim_context.owner_instance_id,
+                    RecoveryClaimModel.fence_token == claim_context.fence_token,
+                    RecoveryClaimModel.released_at.is_(None),
+                    RecoveryClaimModel.lease_expires_at > now,
+                )
+                .scalar_subquery()
+            )
+            stmt_up = (
+                update(JobModel)
+                .where(
+                    JobModel.id == job_id,
+                    JobModel.status == current.value,
+                    exists(claim_subquery),
+                )
+                .values(
+                    status=target.value,
+                    waiting_provider=waiting_provider,
+                    capacity_block_reason=reason,
+                    expected_reset_at=expected_reset_at,
+                    updated_at=now,
+                )
+            )
+            res = self.session.execute(stmt_up)
+            if res.rowcount == 0:
+                raise StaleClaimError(
+                    f"Fenced set_waiting_capacity for job '{job_id}' failed: recovery claim fence is stale, expired, or superseded."
+                )
+        else:
+            model.status = target.value
+            model.waiting_provider = waiting_provider
+            model.capacity_block_reason = reason
+            model.expected_reset_at = expected_reset_at
+            model.updated_at = now
+        model = self.session.get(JobModel, job_id)
         return job_model_to_domain(model)
 
-    def set_recovery_blocked(self, job_id: str, reason: str) -> Job:
-        stmt = select(JobModel).where(JobModel.id == job_id).with_for_update()
+    def set_recovery_blocked(
+        self,
+        job_id: str,
+        reason: str,
+        claim_context: RecoveryClaimContext | None = None,
+    ) -> Job:
+        now = utc_now()
+        target = JobStatus.RECOVERY_BLOCKED
+        stmt = select(JobModel).where(JobModel.id == job_id)
         model = self.session.scalars(stmt).first()
         if not model:
             raise ValueError(f"Job '{job_id}' not found.")
         current = JobStatus(model.status)
-        target = JobStatus.RECOVERY_BLOCKED
-        if target not in self.VALID_TRANSITIONS[current]:
+        if current != target and target not in self.VALID_TRANSITIONS[current]:
             raise ValueError(f"Invalid job status transition: {current.value} -> {target.value}.")
-        model.status = target.value
-        model.recovery_blocked_reason = reason
-        model.updated_at = utc_now()
+        if claim_context is not None:
+            claim_subquery = (
+                select(1)
+                .where(
+                    RecoveryClaimModel.claim_key == claim_context.claim_key,
+                    RecoveryClaimModel.owner_instance_id == claim_context.owner_instance_id,
+                    RecoveryClaimModel.fence_token == claim_context.fence_token,
+                    RecoveryClaimModel.released_at.is_(None),
+                    RecoveryClaimModel.lease_expires_at > now,
+                )
+                .scalar_subquery()
+            )
+            stmt_up = (
+                update(JobModel)
+                .where(
+                    JobModel.id == job_id,
+                    JobModel.status == current.value,
+                    exists(claim_subquery),
+                )
+                .values(
+                    status=target.value,
+                    recovery_blocked_reason=reason,
+                    updated_at=now,
+                )
+            )
+            res = self.session.execute(stmt_up)
+            if res.rowcount == 0:
+                raise StaleClaimError(
+                    f"Fenced set_recovery_blocked for job '{job_id}' failed: recovery claim fence is stale, expired, or superseded."
+                )
+        else:
+            model.status = target.value
+            model.recovery_blocked_reason = reason
+            model.updated_at = now
+        model = self.session.get(JobModel, job_id)
+        return job_model_to_domain(model)
+
+    def update_executor_fenced(
+        self,
+        job_id: str,
+        current_executor: str,
+        claim_context: RecoveryClaimContext | None = None,
+    ) -> Job:
+        now = utc_now()
+        if claim_context is not None:
+            claim_subquery = (
+                select(1)
+                .where(
+                    RecoveryClaimModel.claim_key == claim_context.claim_key,
+                    RecoveryClaimModel.owner_instance_id == claim_context.owner_instance_id,
+                    RecoveryClaimModel.fence_token == claim_context.fence_token,
+                    RecoveryClaimModel.released_at.is_(None),
+                    RecoveryClaimModel.lease_expires_at > now,
+                )
+                .scalar_subquery()
+            )
+            stmt_up = (
+                update(JobModel)
+                .where(
+                    JobModel.id == job_id,
+                    exists(claim_subquery),
+                )
+                .values(
+                    current_executor=current_executor,
+                    updated_at=now,
+                )
+            )
+            res = self.session.execute(stmt_up)
+            if res.rowcount == 0:
+                raise StaleClaimError(
+                    f"Fenced update_executor for job '{job_id}' failed: recovery claim fence is stale, expired, or superseded."
+                )
+        else:
+            model = self.session.get(JobModel, job_id)
+            if not model:
+                raise ValueError(f"Job '{job_id}' not found.")
+            model.current_executor = current_executor
+            model.updated_at = now
+        model = self.session.get(JobModel, job_id)
         return job_model_to_domain(model)
 
 
@@ -2894,6 +3015,9 @@ class PostgresOrchestrationRunRepository(OrchestrationRunRepositoryInterface):
     ) -> OrchestrationRun:
         now = utc_now()
         if claim_context is not None:
+            current = self.session.get(OrchestrationRunModel, run_id)
+            if not current:
+                raise ValueError(f"Orchestration run '{run_id}' not found")
             claim_subquery = (
                 select(1)
                 .where(
@@ -2909,6 +3033,9 @@ class PostgresOrchestrationRunRepository(OrchestrationRunRepositoryInterface):
                 update(OrchestrationRunModel)
                 .where(
                     OrchestrationRunModel.id == run_id,
+                    OrchestrationRunModel.current_stage == current.current_stage,
+                    OrchestrationRunModel.stop_outcome == current.stop_outcome,
+                    OrchestrationRunModel.is_active == current.is_active,
                     exists(claim_subquery),
                 )
                 .values(
@@ -5346,6 +5473,31 @@ class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
     def rollback(self) -> None:
         self.session.rollback()
 
+    def renew_claim_heartbeat_isolated(
+        self,
+        context: RecoveryClaimContext,
+        lease_seconds: int,
+    ) -> bool:
+        """Renew a recovery lease using a session never shared with the worker thread."""
+        heartbeat_session = Session(bind=self.session.get_bind())
+        try:
+            renewed = PostgresRecoveryClaimRepository(heartbeat_session).renew_heartbeat(
+                claim_key=context.claim_key,
+                owner_instance_id=context.owner_instance_id,
+                fence_token=context.fence_token,
+                lease_seconds=lease_seconds,
+            )
+            if renewed:
+                heartbeat_session.commit()
+            else:
+                heartbeat_session.rollback()
+            return renewed
+        except Exception:
+            heartbeat_session.rollback()
+            return False
+        finally:
+            heartbeat_session.close()
+
     def acquire_advisory_lock(self, key: int, lock_timeout: str = "2s") -> None:
         """Acquire PostgreSQL transaction-scoped 64-bit advisory lock with a local lock timeout."""
         bind_name = getattr(getattr(self.session, "bind", None), "name", "")
@@ -5353,4 +5505,3 @@ class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
             from sqlalchemy import text
             self.session.execute(text(f"SET LOCAL lock_timeout = '{lock_timeout}'"))
             self.session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
-

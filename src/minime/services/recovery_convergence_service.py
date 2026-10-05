@@ -19,6 +19,7 @@ from minime.domain.enums import (
     ExternalActionObservation,
     ExternalActionStatus,
     ExternalActionType,
+    ExternalOutcome,
     HumanGate,
     JobStatus,
     OrchestrationStage,
@@ -66,13 +67,19 @@ class OperationalHeartbeat:
 
     def __init__(
         self,
-        recovery_service: RecoveryConvergenceService,
-        claim_context: RecoveryClaimContext,
+        recovery_service: RecoveryConvergenceService | Any = None,
+        claim_context: RecoveryClaimContext | None = None,
         interval_seconds: int = 15,
+        uow: Any = None,
+        lease_seconds: int = DEFAULT_LEASE_SECONDS,
+        renew_claim: Any | None = None,
     ):
         self.recovery_service = recovery_service
+        self.uow = uow
         self.claim_context = claim_context
         self.interval_seconds = interval_seconds
+        self.lease_seconds = lease_seconds
+        self.renew_claim = renew_claim
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self.heartbeat_failed = False
@@ -81,7 +88,21 @@ class OperationalHeartbeat:
         def _run():
             while not self._stop_event.wait(self.interval_seconds):
                 try:
-                    success = self.recovery_service.heartbeat(self.claim_context)
+                    if not self.claim_context:
+                        break
+                    if self.renew_claim is not None:
+                        success = self.renew_claim(self.claim_context, self.lease_seconds)
+                    elif self.recovery_service is not None:
+                        success = self.recovery_service.heartbeat(self.claim_context)
+                    elif self.uow is not None and hasattr(self.uow, "claims") and self.uow.claims is not None:
+                        success = self.uow.claims.renew_heartbeat(
+                            claim_key=self.claim_context.claim_key,
+                            owner_instance_id=self.claim_context.owner_instance_id,
+                            fence_token=self.claim_context.fence_token,
+                            lease_seconds=self.lease_seconds,
+                        )
+                    else:
+                        success = True
                     if not success:
                         self.heartbeat_failed = True
                         logger.warning(
@@ -90,7 +111,7 @@ class OperationalHeartbeat:
                         )
                         break
                 except Exception as exc:
-                    logger.warning("Heartbeat error for claim '%s': %s", self.claim_context.claim_key, exc)
+                    logger.warning("Heartbeat error for claim '%s': %s", getattr(self.claim_context, "claim_key", "unknown"), exc)
 
         self._thread = threading.Thread(target=_run, daemon=True)
         self._thread.start()
@@ -192,19 +213,22 @@ class RecoveryConvergenceService:
                 decisions.append(decision)
             except Exception as exc:
                 logger.error("Run convergence failed for '%s': %s", run.run_id, exc)
-                decisions.append(
-                    RecoveryDecision(
-                        cycle_id=cycle_id,
-                        claim_key=f"run:{run.run_id}",
-                        identity_type="RUN",
-                        identity_id=run.run_id,
-                        source=source,
-                        classification=RecoveryClassification.TERMINAL_EXECUTION_BLOCKED,
-                        planned_action="NO_ACTION",
-                        status=RecoveryDecisionStatus.BLOCKED,
-                        reason_code=str(exc),
-                    )
+                decision = RecoveryDecision(
+                    cycle_id=cycle_id,
+                    claim_key=f"run:{run.run_id}",
+                    identity_type="RUN",
+                    identity_id=run.run_id,
+                    project_id=run.project_id,
+                    change_name=run.change_name,
+                    source=source,
+                    classification=RecoveryClassification.TERMINAL_EXECUTION_BLOCKED,
+                    planned_action="NO_ACTION",
+                    status=RecoveryDecisionStatus.BLOCKED,
+                    reason_code=str(exc),
                 )
+                self._create_decision(decision)
+                self.uow.commit()
+                decisions.append(decision)
 
         # 4. Converge Active Sagas
         for saga in active_sagas:
@@ -223,16 +247,113 @@ class RecoveryConvergenceService:
                 decisions.append(decision)
             except Exception as exc:
                 logger.error("Saga convergence failed for '%s': %s", saga.id, exc)
+                decision = RecoveryDecision(
+                    cycle_id=cycle_id,
+                    claim_key=(
+                        f"intake:{saga.project_id}:{saga.work_item_key}"
+                        if saga.saga_type == SagaType.INTAKE
+                        else (f"run:{saga.run_id}" if saga.run_id else f"closure:{saga.id}")
+                    ),
+                    identity_type="SAGA",
+                    identity_id=saga.id,
+                    project_id=saga.project_id,
+                    change_name=saga.change_name,
+                    source=source,
+                    classification=RecoveryClassification.TERMINAL_EXECUTION_BLOCKED,
+                    planned_action="NO_ACTION",
+                    status=RecoveryDecisionStatus.BLOCKED,
+                    reason_code=str(exc),
+                )
+                self._create_decision(decision)
+                self.uow.commit()
+                decisions.append(decision)
 
         # 5. Converge Active Jobs
         active_jobs = self.uow.jobs.list_active_jobs()
         if project_id:
             active_jobs = [j for j in active_jobs if j.project_id == project_id]
         for job in active_jobs:
+            run = self.uow.orchestration_runs.get_active_run(job.project_id, job.change_name) if hasattr(self.uow.orchestration_runs, "get_active_run") else None
+            # A run owns its active Job's lifecycle. It was already converged above
+            # under run:<run_id>; never compete with a second job claim.
+            if run:
+                continue
+            context: RecoveryClaimContext | None = None
+            decision: RecoveryDecision | None = None
             try:
-                self._converge_job_state(job, cycle_id)
+                claim_key = f"job:{job.job_id}"
+                claim = self.acquire_claim(claim_key, lease_seconds=self.lease_seconds)
+                if not claim:
+                    decision = RecoveryDecision(
+                        cycle_id=cycle_id,
+                        claim_key=claim_key,
+                        identity_type="JOB",
+                        identity_id=job.job_id,
+                        project_id=job.project_id,
+                        change_name=job.change_name,
+                        source=source,
+                        classification=RecoveryClassification.CLAIMED_ELSEWHERE,
+                        planned_action="NO_ACTION",
+                        status=RecoveryDecisionStatus.NO_ACTION,
+                        reason_code="CLAIM_UNAVAILABLE",
+                    )
+                    self._create_decision(decision)
+                    self.uow.commit()
+                    decisions.append(decision)
+                    continue
+                context = RecoveryClaimContext(
+                    claim_key=claim.claim_key,
+                    owner_instance_id=claim.owner_instance_id,
+                    fence_token=claim.fence_token,
+                    lease_expires_at=claim.lease_expires_at,
+                )
+                self.uow.commit()
+                decision = RecoveryDecision(
+                    cycle_id=cycle_id,
+                    claim_key=claim_key,
+                    identity_type="JOB",
+                    identity_id=job.job_id,
+                    project_id=job.project_id,
+                    change_name=job.change_name,
+                    source=source,
+                    fence_token=context.fence_token,
+                    classification=RecoveryClassification.RESUME_SAFE_CHECKPOINT,
+                    planned_action="CONVERGE_JOB",
+                    status=RecoveryDecisionStatus.EXECUTING,
+                )
+                self._create_decision(decision)
+                self.uow.commit()
+                self._converge_job_state(job, cycle_id, claim_context=context)
+                decision.status = RecoveryDecisionStatus.COMPLETED
+                self._update_decision(decision)
+                self.uow.commit()
+                decisions.append(decision)
             except Exception as exc:
                 logger.error("Job state convergence failed for '%s': %s", job.job_id, exc)
+                if decision is None:
+                    decision = RecoveryDecision(
+                        cycle_id=cycle_id,
+                        claim_key=f"job:{job.job_id}",
+                        identity_type="JOB",
+                        identity_id=job.job_id,
+                        project_id=job.project_id,
+                        change_name=job.change_name,
+                        source=source,
+                        classification=RecoveryClassification.TERMINAL_EXECUTION_BLOCKED,
+                        planned_action="NO_ACTION",
+                        status=RecoveryDecisionStatus.BLOCKED,
+                        reason_code=str(exc),
+                    )
+                    self._create_decision(decision)
+                else:
+                    decision.status = RecoveryDecisionStatus.BLOCKED
+                    decision.reason_code = str(exc)
+                    self._update_decision(decision)
+                self.uow.commit()
+                decisions.append(decision)
+            finally:
+                if context is not None:
+                    self.release_claim(context)
 
         return decisions
 
@@ -240,6 +361,27 @@ class RecoveryConvergenceService:
         """Evaluate durable candidate-bound evidence to select the highest proven checkpoint stage."""
         if not job.candidate_sha:
             return JobStatus.QUEUED
+
+        # A positive checkpoint must bind to the current durable candidate identity.
+        # A Job does not carry a generation itself, so recovery cannot safely adopt
+        # evidence when its owning run (and therefore generation/base identity) is
+        # unavailable.
+        run = (
+            self.uow.orchestration_runs.get_active_run(job.project_id, job.change_name)
+            if hasattr(self.uow.orchestration_runs, "get_active_run")
+            else None
+        )
+        if (
+            run is None
+            or not run.base_sha
+            or not run.current_candidate_sha
+            or run.current_candidate_sha != job.candidate_sha
+            or not job.base_sha
+            or job.base_sha != run.base_sha
+        ):
+            return JobStatus.QUEUED
+        candidate_generation = run.current_generation
+        candidate_base_sha = run.base_sha
 
         # 1. Checks: candidate-bound passing checks evidence
         check_results = (
@@ -249,13 +391,14 @@ class RecoveryConvergenceService:
         )
         checks_passed = len(check_results) > 0 and all(
             getattr(c, "candidate_sha", None) == job.candidate_sha
+            and getattr(c, "candidate_generation", None) == candidate_generation
             and c.exit_code == 0
             for c in check_results
         )
         if not checks_passed:
             return JobStatus.QUEUED
 
-        # 2. Review: candidate-bound completed review evidence with READY_TO_MERGE verdict
+        # 2. Review: candidate-bound completed review evidence matching candidate_sha & base_sha with READY_TO_MERGE verdict
         if hasattr(self.uow, "reviews") and self.uow.reviews is not None:
             if hasattr(self.uow.reviews, "list_by_job"):
                 reviews = self.uow.reviews.list_by_job(job.job_id)
@@ -269,12 +412,14 @@ class RecoveryConvergenceService:
 
         review_passed = any(
             getattr(r, "candidate_sha", None) == job.candidate_sha
+            and getattr(r, "base_sha", None) == candidate_base_sha
+            and getattr(r, "candidate_generation", None) == candidate_generation
             and r.status == ReviewStatus.REVIEW_COMPLETED
             and r.verdict == ReviewVerdict.READY_TO_MERGE
             for r in reviews
         )
 
-        # 3. Audit: candidate-bound completed audit evidence with no critical/high/blocker findings
+        # 3. Audit: candidate-bound completed audit evidence matching candidate_sha & base_sha with no critical/high/blocker findings
         if hasattr(self.uow, "audits") and self.uow.audits is not None:
             if hasattr(self.uow.audits, "list_by_job"):
                 audits = self.uow.audits.list_by_job(job.job_id)
@@ -287,6 +432,8 @@ class RecoveryConvergenceService:
             audits = []
         audit_passed = review_passed and any(
             getattr(a, "candidate_sha", None) == job.candidate_sha
+            and getattr(a, "base_sha", None) == candidate_base_sha
+            and getattr(a, "candidate_generation", None) == candidate_generation
             and a.status == AuditStatus.AUDIT_COMPLETED
             and not any(
                 f.severity in (AuditFindingSeverity.CRITICAL, AuditFindingSeverity.HIGH, AuditFindingSeverity.BLOCKER)
@@ -301,14 +448,22 @@ class RecoveryConvergenceService:
             return JobStatus.AUDIT_RUNNING
         return JobStatus.CHECKS_PASSED
 
-    def _converge_job_state(self, job: Job, cycle_id: str) -> None:
+    def _converge_job_state(
+        self,
+        job: Job,
+        cycle_id: str,
+        claim_context: RecoveryClaimContext | None = None,
+    ) -> None:
         """Converge active job lifecycle state and emit JOB_RECOVERED event if transitioned."""
         change = self.uow.changes.get_by_name(job.project_id, job.change_name)
         if change and change.status in {ChangeStatus.DONE, ChangeStatus.CANCELLED}:
             if job.status not in {JobStatus.CANCELLED, JobStatus.COMPLETED}:
-                job.status = JobStatus.CANCELLED
-                job.error_message = f"Change is already in terminal state {change.status.value}."
-                self.uow.jobs.save(job)
+                self.uow.jobs.transition(
+                    job.job_id,
+                    JobStatus.CANCELLED.value,
+                    error_message=f"Change is already in terminal state {change.status.value}.",
+                    claim_context=claim_context,
+                )
             return
 
         if job.status in {
@@ -328,8 +483,11 @@ class RecoveryConvergenceService:
                 None,
             )
             if pending_handoff:
-                job.current_executor = pending_handoff.to_executor
-                self.uow.jobs.save(job)
+                self.uow.jobs.update_executor_fenced(
+                    job.job_id,
+                    pending_handoff.to_executor,
+                    claim_context=claim_context,
+                )
 
         # Handle RECOVERY_BLOCKED evidence recorded during lock inspection
         if hasattr(self.uow, "events") and self.uow.events is not None:
@@ -349,7 +507,11 @@ class RecoveryConvergenceService:
             )
             if blocked_event:
                 reason = blocked_event.payload.get("reason", "Unsafe Git lock condition")
-                self.uow.jobs.set_recovery_blocked(job_id=job.job_id, reason=reason)
+                self.uow.jobs.set_recovery_blocked(
+                    job_id=job.job_id,
+                    reason=reason,
+                    claim_context=claim_context,
+                )
                 return
 
         if job.status in {
@@ -371,12 +533,14 @@ class RecoveryConvergenceService:
                     job.job_id,
                     JobStatus.QUEUED.value,
                     error_message="Recovered on daemon restart; re-queued for execution.",
+                    claim_context=claim_context,
                 )
             else:
                 updated = self.uow.jobs.transition(
                     job.job_id,
                     target_status.value,
                     error_message=f"Recovered on daemon restart; preserved completed checkpoint ({target_status.value}).",
+                    claim_context=claim_context,
                 )
             self.uow.events.save(
                 Event(
@@ -471,12 +635,8 @@ class RecoveryConvergenceService:
     def acquire_claim(self, claim_key: str, lease_seconds: int = 60) -> RecoveryClaimContext | None:
         """Acquire or re-acquire a claim for this owner instance."""
         if not hasattr(self.uow, "claims") or self.uow.claims is None:
-            return RecoveryClaimContext(
-                claim_key=claim_key,
-                owner_instance_id=self.owner_instance_id,
-                fence_token=1,
-                lease_expires_at=utc_now() + timedelta(seconds=lease_seconds),
-            )
+            logger.error("Durable recovery claims are unavailable; refusing continuation for '%s'.", claim_key)
+            return None
         try:
             claim = self.uow.claims.acquire_or_reacquire(
                 claim_key=claim_key,
@@ -697,15 +857,22 @@ class RecoveryConvergenceService:
                 binding = self.uow.bindings.get_by_project_and_change(project_id, change_name)
                 if binding and binding.github_issue_number:
                     project = self.uow.projects.get_by_id(project_id)
-                    if project and project.repository and getattr(self, "github_adapter", None):
+                    if project and project.repository and getattr(self, "github_adapter", None) and hasattr(self.github_adapter, "get_issue"):
                         try:
-                            issue = self.github_adapter.get_issue(project.repository, binding.github_issue_number)
-                            if issue:
+                            issue_result = self.github_adapter.get_issue(project.repository, binding.github_issue_number)
+                            issue = getattr(issue_result, "data", None)
+                            if (
+                                getattr(issue_result, "outcome", None) == ExternalOutcome.SUCCESS
+                                and isinstance(issue, dict)
+                                and issue.get("number") == binding.github_issue_number
+                            ):
                                 return ActionObservationOutcome.OBSERVED_PRESENT
-                            return ActionObservationOutcome.OBSERVED_ABSENT
+                            if getattr(issue_result, "outcome", None) == ExternalOutcome.FAILURE:
+                                return ActionObservationOutcome.OBSERVED_ABSENT
+                            return ActionObservationOutcome.UNOBSERVABLE
                         except Exception:
                             return ActionObservationOutcome.UNOBSERVABLE
-                    return ActionObservationOutcome.OBSERVED_PRESENT
+                    return ActionObservationOutcome.UNOBSERVABLE
                 elif binding and not binding.github_issue_number:
                     return ActionObservationOutcome.OBSERVED_ABSENT
             return ActionObservationOutcome.UNOBSERVABLE
@@ -729,11 +896,22 @@ class RecoveryConvergenceService:
                 if binding and binding.github_issue_number:
                     try:
                         project = self.uow.projects.get_by_id(project_id)
-                        if project and project.repository and getattr(self, "github_adapter", None):
-                            issue = self.github_adapter.get_issue(project.repository, binding.github_issue_number)
-                            if issue and issue.get("state") == "closed":
+                        if project and project.repository and getattr(self, "github_adapter", None) and hasattr(self.github_adapter, "get_issue"):
+                            issue_result = self.github_adapter.get_issue(project.repository, binding.github_issue_number)
+                            issue = getattr(issue_result, "data", None)
+                            if (
+                                getattr(issue_result, "outcome", None) == ExternalOutcome.SUCCESS
+                                and isinstance(issue, dict)
+                                and issue.get("number") == binding.github_issue_number
+                                and issue.get("state") == "closed"
+                            ):
                                 return ActionObservationOutcome.OBSERVED_PRESENT
-                            elif issue and issue.get("state") == "open":
+                            elif (
+                                getattr(issue_result, "outcome", None) == ExternalOutcome.SUCCESS
+                                and isinstance(issue, dict)
+                                and issue.get("number") == binding.github_issue_number
+                                and issue.get("state") == "open"
+                            ):
                                 return ActionObservationOutcome.OBSERVED_ABSENT
                     except Exception:
                         return ActionObservationOutcome.UNOBSERVABLE
@@ -758,7 +936,7 @@ class RecoveryConvergenceService:
             if project_id and change_name:
                 binding = self.uow.bindings.get_by_project_and_change(project_id, change_name)
                 if binding and binding.github_project_item_id:
-                    return ActionObservationOutcome.OBSERVED_PRESENT
+                    return ActionObservationOutcome.UNOBSERVABLE
                 elif binding and not binding.github_project_item_id:
                     return ActionObservationOutcome.OBSERVED_ABSENT
             return ActionObservationOutcome.UNOBSERVABLE
@@ -780,15 +958,7 @@ class RecoveryConvergenceService:
             if project_id and change_name:
                 binding = self.uow.bindings.get_by_project_and_change(project_id, change_name)
                 if binding and binding.github_project_item_id:
-                    if getattr(self, "github_adapter", None) and hasattr(self.github_adapter, "get_project_item_status"):
-                        try:
-                            status = self.github_adapter.get_project_item_status(binding.github_project_item_id)
-                            if status == action.target_identity:
-                                return ActionObservationOutcome.OBSERVED_PRESENT
-                            return ActionObservationOutcome.OBSERVED_ABSENT
-                        except Exception:
-                            return ActionObservationOutcome.UNOBSERVABLE
-                    return ActionObservationOutcome.OBSERVED_PRESENT
+                    return ActionObservationOutcome.UNOBSERVABLE
                 elif binding and not binding.github_project_item_id:
                     return ActionObservationOutcome.OBSERVED_ABSENT
             return ActionObservationOutcome.UNOBSERVABLE
@@ -926,9 +1096,12 @@ class RecoveryConvergenceService:
                 )
                 if change and change.status in {ChangeStatus.DONE, ChangeStatus.CANCELLED}:
                     if job.status not in {JobStatus.CANCELLED, JobStatus.COMPLETED}:
-                        job.status = JobStatus.CANCELLED
-                        job.error_message = f"Change is already in terminal state {change.status.value}."
-                        self.uow.jobs.save(job)
+                        self.uow.jobs.transition(
+                            job.job_id,
+                            JobStatus.CANCELLED.value,
+                            error_message=f"Change is already in terminal state {change.status.value}.",
+                            claim_context=context,
+                        )
                 elif job.status in {
                     JobStatus.RUNNING,
                     JobStatus.CHECKS_RUNNING,
@@ -941,12 +1114,14 @@ class RecoveryConvergenceService:
                             job.job_id,
                             JobStatus.QUEUED.value,
                             error_message="Recovered on daemon restart; re-queued for execution.",
+                            claim_context=context,
                         )
                     else:
                         self.uow.jobs.transition(
                             job.job_id,
                             target_status.value,
                             error_message=f"Recovered on daemon restart; preserved completed checkpoint ({target_status.value}).",
+                            claim_context=context,
                         )
 
         if (
@@ -980,13 +1155,28 @@ class RecoveryConvergenceService:
                 self.uow.commit()
 
                 try:
+                    post_merge_svc = self.post_merge_service or PostMergeReconciliationService(
+                        self.uow,
+                        project_root=self.project_root,
+                        github_adapter=self.github_adapter,
+                        saga_engine=SagaEngine(
+                            self.uow,
+                            heartbeat_interval_seconds=self.heartbeat_seconds,
+                            lease_seconds=self.lease_seconds,
+                        ),
+                    )
                     if closure_sagas:
-                        engine = SagaEngine(self.uow)
-                        engine.resume_saga(closure_sagas[0].id, claim_context=context)
-                    else:
-                        post_merge_svc = self.post_merge_service or PostMergeReconciliationService(
-                            self.uow, project_root=self.project_root, github_adapter=self.github_adapter
+                        engine = SagaEngine(
+                            self.uow,
+                            heartbeat_interval_seconds=self.heartbeat_seconds,
+                            lease_seconds=self.lease_seconds,
                         )
+                        engine.resume_saga(
+                            closure_sagas[0].id,
+                            post_merge_service=post_merge_svc,
+                            claim_context=context,
+                        )
+                    else:
                         post_merge_svc.reconcile_post_merge(
                             project_id=run.project_id,
                             change_name=run.change_name,
@@ -1030,17 +1220,21 @@ class RecoveryConvergenceService:
                     elapsed_hours = (utc_now() - ws).total_seconds() / 3600.0
                     if elapsed_hours >= timeout_hours:
                         reason = f"Waiting capacity timeout exceeded ({elapsed_hours:.1f}h > {timeout_hours:.1f}h)"
-                        run.stop_outcome = OrchestrationStopOutcome.NEEDS_HUMAN
-                        run.human_gate = HumanGate.NEEDS_HUMAN
-                        run.is_active = False
-                        run.stop_reason = reason
+                        self.uow.orchestration_runs.update_stop_outcome(
+                            run_id=run.run_id,
+                            stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+                            human_gate=HumanGate.NEEDS_HUMAN,
+                            stop_reason=reason,
+                            is_active=False,
+                            claim_context=context,
+                        )
                         if run.active_job_id:
-                            job = self.uow.jobs.get_by_id(run.active_job_id)
-                            if job:
-                                job.status = JobStatus.NEEDS_HUMAN
-                                job.escalation_reason = reason
-                                self.uow.jobs.save(job)
-                        self.uow.orchestration_runs.save(run)
+                            self.uow.jobs.transition(
+                                job_id=run.active_job_id,
+                                new_status=JobStatus.NEEDS_HUMAN.value,
+                                error_message=reason,
+                                claim_context=context,
+                            )
                         self.uow.commit()
 
                         decision = RecoveryDecision(
@@ -1094,9 +1288,13 @@ class RecoveryConvergenceService:
                 self.release_claim(context)
                 return decision
             else:
-                run.stop_outcome = None
-                run.stop_reason = None
-                self.uow.orchestration_runs.save(run)
+                self.uow.orchestration_runs.update_stop_outcome(
+                    run_id=run.run_id,
+                    stop_outcome=None,
+                    stop_reason=None,
+                    is_active=True,
+                    claim_context=context,
+                )
                 self.uow.commit()
 
                 if not drive_admitted:
@@ -1332,9 +1530,26 @@ class RecoveryConvergenceService:
             item and item.status in (WorkItemStatus.COMPLETED, WorkItemStatus.CANCELLED)
         ) or (change and change.status in (ChangeStatus.DONE, ChangeStatus.CANCELLED))
 
+        from minime.services.intake_service import IntakeService
+        from minime.services.post_merge_service import PostMergeReconciliationService
         from minime.services.saga_engine import SagaEngine
 
-        saga_engine = SagaEngine(self.uow)
+        saga_engine = SagaEngine(
+            self.uow,
+            heartbeat_interval_seconds=self.heartbeat_seconds,
+            lease_seconds=self.lease_seconds,
+        )
+        intake_svc = IntakeService(self.uow, project_root=self.project_root, github_adapter=self.github_adapter)
+        post_merge_svc = self.post_merge_service or PostMergeReconciliationService(
+            self.uow,
+            project_root=self.project_root,
+            github_adapter=self.github_adapter,
+            saga_engine=SagaEngine(
+                self.uow,
+                heartbeat_interval_seconds=self.heartbeat_seconds,
+                lease_seconds=self.lease_seconds,
+            ),
+        )
 
         if is_terminal and saga.saga_type == SagaType.INTAKE:
             saga_engine.cancel_saga(
@@ -1374,7 +1589,12 @@ class RecoveryConvergenceService:
         self.uow.commit()
 
         try:
-            saga_engine.resume_saga(saga.id, claim_context=context)
+            saga_engine.resume_saga(
+                saga.id,
+                intake_service=intake_svc,
+                post_merge_service=post_merge_svc,
+                claim_context=context,
+            )
             decision.status = RecoveryDecisionStatus.COMPLETED
         except Exception as exc:
             decision.status = RecoveryDecisionStatus.BLOCKED

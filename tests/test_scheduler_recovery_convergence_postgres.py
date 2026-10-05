@@ -2562,7 +2562,7 @@ def test_contract_closure_closure_recovery_advances_from_non_zero_checkpoint(pg_
 
 
 def test_contract_closure_saga_bound_issue_create_observer(pg_session_factory: sessionmaker[Session]):
-    """Mandatory Test: Prove saga-bound ISSUE_CREATE observer observes remote/binding state."""
+    """ISSUE_CREATE requires authoritative remote evidence, never a local binding alone."""
     session = pg_session_factory()
     project_id, change_name = _seed_base_project_and_change(session, "saga-issue-obs")
     uow = PostgresPersistenceUnitOfWork(session)
@@ -2586,11 +2586,22 @@ def test_contract_closure_saga_bound_issue_create_observer(pg_session_factory: s
     )
     session.commit()
 
+    from minime.domain.enums import ExternalOutcome
+    from minime.domain.models import ExternalActionResult
     from minime.services.recovery_convergence_service import (
         ActionObservationOutcome,
         RecoveryConvergenceService,
     )
-    rec_svc = RecoveryConvergenceService(uow)
+
+    class RemoteIssueAdapter:
+        def get_issue(self, repository, issue_number):
+            return ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="test",
+                data={"number": issue_number, "state": "open"},
+            )
+
+    rec_svc = RecoveryConvergenceService(uow, github_adapter=RemoteIssueAdapter())
     outcome1 = rec_svc._observe_by_action_type(action)
     assert outcome1 == ActionObservationOutcome.OBSERVED_ABSENT
 
@@ -2641,7 +2652,7 @@ def test_contract_closure_remote_branch_push_observer(pg_session_factory: sessio
 
 
 def test_contract_closure_remote_project_item_edit_status_observer(pg_session_factory: sessionmaker[Session]):
-    """Mandatory Test: Prove remote PROJECT_ITEM_EDIT observer verifies exact target status."""
+    """PROJECT_ITEM_EDIT fails closed until the adapter supports remote observation."""
     from unittest.mock import MagicMock
 
     from minime.services.recovery_convergence_service import ActionObservationOutcome
@@ -2681,11 +2692,11 @@ def test_contract_closure_remote_project_item_edit_status_observer(pg_session_fa
 
     rec_svc = RecoveryConvergenceService(uow, github_adapter=mock_gh)
     outcome = rec_svc._observe_by_action_type(action)
-    assert outcome == ActionObservationOutcome.OBSERVED_ABSENT  # Status is "In Progress", not "Done"
+    assert outcome == ActionObservationOutcome.UNOBSERVABLE
 
     mock_gh.get_project_item_status = MagicMock(return_value="Done")
     outcome2 = rec_svc._observe_by_action_type(action)
-    assert outcome2 == ActionObservationOutcome.OBSERVED_PRESENT
+    assert outcome2 == ActionObservationOutcome.UNOBSERVABLE
     session.close()
 
 

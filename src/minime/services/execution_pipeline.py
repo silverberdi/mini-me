@@ -294,6 +294,9 @@ class ExecutionPipelineService:
         change_name: str,
         claim_context: RecoveryClaimContext | None = None,
     ) -> Job:
+        from minime.domain.models import validate_claim_context_authoritative
+
+        validate_claim_context_authoritative(self.uow, claim_context)
         job = self.queue_job(project_id, change_name)
         return await self.execute_queued_job(job.job_id, claim_context=claim_context)
 
