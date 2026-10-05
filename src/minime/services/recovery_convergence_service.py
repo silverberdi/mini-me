@@ -20,6 +20,7 @@ from minime.domain.enums import (
     ExternalActionStatus,
     ExternalActionType,
     ExternalOutcome,
+    ExternalReasonCode,
     HumanGate,
     JobStatus,
     OrchestrationStage,
@@ -111,7 +112,9 @@ class OperationalHeartbeat:
                         )
                         break
                 except Exception as exc:
+                    self.heartbeat_failed = True
                     logger.warning("Heartbeat error for claim '%s': %s", getattr(self.claim_context, "claim_key", "unknown"), exc)
+                    break
 
         self._thread = threading.Thread(target=_run, daemon=True)
         self._thread.start()
@@ -867,14 +870,17 @@ class RecoveryConvergenceService:
                                 and issue.get("number") == binding.github_issue_number
                             ):
                                 return ActionObservationOutcome.OBSERVED_PRESENT
-                            if getattr(issue_result, "outcome", None) == ExternalOutcome.FAILURE:
+                            if (
+                                getattr(issue_result, "outcome", None) == ExternalOutcome.FAILURE
+                                and getattr(issue_result, "reason_code", None) == ExternalReasonCode.NOT_FOUND
+                            ):
                                 return ActionObservationOutcome.OBSERVED_ABSENT
                             return ActionObservationOutcome.UNOBSERVABLE
                         except Exception:
                             return ActionObservationOutcome.UNOBSERVABLE
                     return ActionObservationOutcome.UNOBSERVABLE
                 elif binding and not binding.github_issue_number:
-                    return ActionObservationOutcome.OBSERVED_ABSENT
+                    return ActionObservationOutcome.UNOBSERVABLE
             return ActionObservationOutcome.UNOBSERVABLE
 
         elif atype == ExternalActionType.ISSUE_CLOSE:
@@ -916,7 +922,7 @@ class RecoveryConvergenceService:
                     except Exception:
                         return ActionObservationOutcome.UNOBSERVABLE
                 elif binding and not binding.github_issue_number:
-                    return ActionObservationOutcome.OBSERVED_PRESENT
+                    return ActionObservationOutcome.UNOBSERVABLE
             return ActionObservationOutcome.UNOBSERVABLE
 
         elif atype == ExternalActionType.PROJECT_ITEM_ADD:
