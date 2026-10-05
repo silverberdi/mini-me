@@ -1980,8 +1980,19 @@ def test_rc01_restart_matrix_implementation_and_checks(pg_session_factory: sessi
         status=JobStatus.CHECKS_RUNNING,
         implementer_role="implementer",
         candidate_sha="sha01_imp_checks",
+        base_sha="base_sha",
     )
     uow.jobs.save(job)
+    uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id="run-rc01-checks",
+            project_id=project_id,
+            change_name=change_name,
+            base_sha="base_sha",
+            current_candidate_sha="sha01_imp_checks",
+            current_generation=1,
+        )
+    )
 
     from minime.domain.models import CheckResult
     uow.check_results.save(
@@ -1993,6 +2004,7 @@ def test_rc01_restart_matrix_implementation_and_checks(pg_session_factory: sessi
             duration_ms=100,
             output_snippet="PASSED",
             candidate_sha="sha01_imp_checks",
+            candidate_generation=1,
         )
     )
     session.commit()
@@ -2018,8 +2030,19 @@ def test_rc01_restart_matrix_implementation_checks_review(pg_session_factory: se
         status=JobStatus.REVIEW_RUNNING,
         implementer_role="implementer",
         candidate_sha="sha01_imp_review",
+        base_sha="base_sha",
     )
     uow.jobs.save(job)
+    uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id="run-rc01-review",
+            project_id=project_id,
+            change_name=change_name,
+            base_sha="base_sha",
+            current_candidate_sha="sha01_imp_review",
+            current_generation=1,
+        )
+    )
 
     from minime.domain.enums import ReviewStatus, ReviewVerdict
     from minime.domain.models import CheckResult, Review
@@ -2032,6 +2055,7 @@ def test_rc01_restart_matrix_implementation_checks_review(pg_session_factory: se
             duration_ms=100,
             output_snippet="PASSED",
             candidate_sha="sha01_imp_review",
+            candidate_generation=1,
         )
     )
     uow.reviews.save(
@@ -2042,6 +2066,7 @@ def test_rc01_restart_matrix_implementation_checks_review(pg_session_factory: se
             reviewer_role="reviewer",
             candidate_sha="sha01_imp_review",
             base_sha="base_sha",
+            candidate_generation=1,
             status=ReviewStatus.REVIEW_COMPLETED,
             verdict=ReviewVerdict.READY_TO_MERGE,
         )
@@ -2069,8 +2094,19 @@ def test_rc01_restart_matrix_implementation_checks_review_audit(pg_session_facto
         status=JobStatus.AUDIT_RUNNING,
         implementer_role="implementer",
         candidate_sha="sha01_imp_audit",
+        base_sha="base_sha",
     )
     uow.jobs.save(job)
+    uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id="run-rc01-audit",
+            project_id=project_id,
+            change_name=change_name,
+            base_sha="base_sha",
+            current_candidate_sha="sha01_imp_audit",
+            current_generation=1,
+        )
+    )
 
     from minime.domain.enums import AuditStatus, ReviewStatus, ReviewVerdict
     from minime.domain.models import AuditRecord, CheckResult, Review
@@ -2083,6 +2119,7 @@ def test_rc01_restart_matrix_implementation_checks_review_audit(pg_session_facto
             duration_ms=100,
             output_snippet="PASSED",
             candidate_sha="sha01_imp_audit",
+            candidate_generation=1,
         )
     )
     uow.reviews.save(
@@ -2093,6 +2130,7 @@ def test_rc01_restart_matrix_implementation_checks_review_audit(pg_session_facto
             reviewer_role="reviewer",
             candidate_sha="sha01_imp_audit",
             base_sha="base_sha",
+            candidate_generation=1,
             status=ReviewStatus.REVIEW_COMPLETED,
             verdict=ReviewVerdict.READY_TO_MERGE,
         )
@@ -2104,6 +2142,7 @@ def test_rc01_restart_matrix_implementation_checks_review_audit(pg_session_facto
             change_name=change_name,
             candidate_sha="sha01_imp_audit",
             base_sha="base_sha",
+            candidate_generation=1,
             status=AuditStatus.AUDIT_COMPLETED,
         )
     )
@@ -2603,7 +2642,7 @@ def test_contract_closure_saga_bound_issue_create_observer(pg_session_factory: s
 
     rec_svc = RecoveryConvergenceService(uow, github_adapter=RemoteIssueAdapter())
     outcome1 = rec_svc._observe_by_action_type(action)
-    assert outcome1 == ActionObservationOutcome.OBSERVED_ABSENT
+    assert outcome1 == ActionObservationOutcome.UNOBSERVABLE
 
     binding = uow.bindings.get_by_project_and_change(project_id, change_name)
     binding.github_issue_number = 42
