@@ -125,7 +125,7 @@ def pg_engine() -> Generator[Engine, None, None]:
     with engine.connect() as conn:
         conn.execute(text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(64) PRIMARY KEY);"))
         conn.execute(text("DELETE FROM alembic_version;"))
-        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('024_task_classification_snapshots');"))
+        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('g01_recovery_convergence');"))
         conn.commit()
     yield engine
     with engine.connect() as conn:
@@ -149,7 +149,7 @@ def _clean_db(pg_engine: Engine):
     with pg_engine.connect() as conn:
         conn.execute(text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(64) PRIMARY KEY);"))
         conn.execute(text("DELETE FROM alembic_version;"))
-        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('024_task_classification_snapshots');"))
+        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('g01_recovery_convergence');"))
         conn.commit()
 
 
@@ -621,4 +621,3 @@ def test_t05b_locks_not_held_during_external_observations(
             e for e in post_lock_events if e in ("evaluate_change_readiness_pure", "ApplyAttributionGate.evaluate", "resolve_base_sha")
         ]
         assert len(invalid_post_lock) == 0, f"External/subprocess observations occurred post-lock: {invalid_post_lock}"
-
