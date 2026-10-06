@@ -89,16 +89,45 @@ class ProjectOnboardingService:
         except ValueError as exc:
             raise ValueError(f"Invalid repository identity '{raw_repo}': {exc}") from exc
 
-        # 2. Duplicate detection
+        # 2. Existing-project recovery or duplicate detection.  A project id and
+        # its durable identity are immutable, but an interrupted Stage C
+        # workspace bootstrap may be resumed when that identity matches exactly.
         existing_project = self.uow.projects.get_by_id(project_id)
+        resuming_existing_project = existing_project is not None
         if existing_project:
-            raise ValueError(
-                f"Project with ID '{project_id}' is already registered. Identifiers are immutable."
-            )
+            identity_mismatches: list[str] = []
+            existing_repo = normalize_repository_identity(existing_project.repository)
+            if existing_repo != norm_repo:
+                identity_mismatches.append(
+                    f"repository is '{existing_repo}', not '{norm_repo}'"
+                )
+            if existing_project.base_branch != input_data.base_branch:
+                identity_mismatches.append(
+                    f"base_branch is '{existing_project.base_branch}', not '{input_data.base_branch}'"
+                )
+            if existing_project.openspec_path != input_data.openspec_path:
+                identity_mismatches.append(
+                    f"openspec_path is '{existing_project.openspec_path}', not '{input_data.openspec_path}'"
+                )
+            if existing_project.implementer != input_data.implementer:
+                identity_mismatches.append(
+                    f"implementer is '{existing_project.implementer}', not '{input_data.implementer}'"
+                )
+            if existing_project.reviewer != input_data.reviewer:
+                identity_mismatches.append(
+                    f"reviewer is '{existing_project.reviewer}', not '{input_data.reviewer}'"
+                )
+            if identity_mismatches:
+                raise ValueError(
+                    "Existing project immutable identity mismatch: "
+                    + "; ".join(identity_mismatches)
+                )
 
         # Check for existing repository binding conflict
         all_projects = self.uow.projects.list_all()
         for p in all_projects:
+            if p.project_id == project_id:
+                continue
             if p.repository.lower() == norm_repo.lower():
                 raise ValueError(
                     f"Repository '{norm_repo}' is already bound to project '{p.project_id}'."
@@ -194,6 +223,34 @@ class ProjectOnboardingService:
             worktree_parent_dir=worktree_parent_dir,
             is_valid=True,
         )
+
+        existing_managed_binding = self.uow.project_managed_repository_bindings.get_by_project_id(
+            project_id
+        )
+        if existing_managed_binding:
+            binding_mismatches: list[str] = []
+            if (
+                normalize_repository_identity(
+                    existing_managed_binding.canonical_repository_identity
+                )
+                != norm_repo
+            ):
+                binding_mismatches.append("canonical repository identity differs")
+            if os.path.realpath(existing_managed_binding.managed_repository_root) != managed_root:
+                binding_mismatches.append("managed repository root differs")
+            if os.path.realpath(existing_managed_binding.worktree_parent_dir) != worktree_parent_dir:
+                binding_mismatches.append("worktree parent directory differs")
+            if existing_managed_binding.remote_name != "origin":
+                binding_mismatches.append("remote name is not 'origin'")
+            if not existing_managed_binding.is_valid:
+                binding_mismatches.append("existing managed repository binding is invalid")
+            if existing_managed_binding.mismatch_reasons:
+                binding_mismatches.append("existing managed repository binding has mismatch reasons")
+            if binding_mismatches:
+                raise ValueError(
+                    "Existing managed repository binding mismatch: "
+                    + "; ".join(binding_mismatches)
+                )
 
         # 6a. Helper pre-checks (topology & trusted root containment)
         if guard._paths_overlap(managed_root, runtime_root):
@@ -471,40 +528,56 @@ class ProjectOnboardingService:
                 f"Project onboarding failed closed on worktree parent directory creation: {exc}"
             ) from exc
 
+        managed_binding_kwargs = {
+            "project_id": project_id,
+            "canonical_repository_identity": norm_repo,
+            "remote_name": "origin",
+            "managed_repository_root": managed_root,
+            "worktree_parent_dir": worktree_parent_dir,
+            "is_valid": True,
+            "mismatch_reasons": [],
+            "validated_at": now,
+            "created_at": now,
+            "updated_at": now,
+        }
+        if existing_managed_binding:
+            managed_binding_kwargs["binding_id"] = existing_managed_binding.binding_id
+            managed_binding_kwargs["created_at"] = existing_managed_binding.created_at
         managed_binding = ProjectManagedRepositoryBinding(
-            project_id=project_id,
-            canonical_repository_identity=norm_repo,
-            remote_name="origin",
-            managed_repository_root=managed_root,
-            worktree_parent_dir=worktree_parent_dir,
-            is_valid=True,
-            mismatch_reasons=[],
-            validated_at=now,
-            created_at=now,
-            updated_at=now,
+            **managed_binding_kwargs
         )
         self.uow.project_managed_repository_bindings.save(managed_binding)
 
-        project = Project(
-            project_id=project_id,
-            display_name=display_name,
-            repository=norm_repo,
-            base_branch=input_data.base_branch,
-            openspec_path=input_data.openspec_path,
-            implementer=input_data.implementer,
-            reviewer=input_data.reviewer,
-            checks=input_data.checks,
-            context_sources=input_data.context_sources,
-            roadmap_path=input_data.roadmap_path,
-            backlog_path=input_data.backlog_path,
-            github_project_number=input_data.github_project_number,
-            github_project_owner=input_data.github_project_owner,
-            onboarding_status=onboarding_status,
-            onboarding_reasons=reasons,
-            status=ProjectStatus.ACTIVE,
-            created_at=now,
-            updated_at=now,
-        )
+        if resuming_existing_project:
+            assert existing_project is not None
+            project = existing_project.model_copy(
+                update={
+                    "onboarding_status": onboarding_status,
+                    "onboarding_reasons": reasons,
+                    "updated_at": now,
+                }
+            )
+        else:
+            project = Project(
+                project_id=project_id,
+                display_name=display_name,
+                repository=norm_repo,
+                base_branch=input_data.base_branch,
+                openspec_path=input_data.openspec_path,
+                implementer=input_data.implementer,
+                reviewer=input_data.reviewer,
+                checks=input_data.checks,
+                context_sources=input_data.context_sources,
+                roadmap_path=input_data.roadmap_path,
+                backlog_path=input_data.backlog_path,
+                github_project_number=input_data.github_project_number,
+                github_project_owner=input_data.github_project_owner,
+                onboarding_status=onboarding_status,
+                onboarding_reasons=reasons,
+                status=ProjectStatus.ACTIVE,
+                created_at=now,
+                updated_at=now,
+            )
 
         # 6. Save project entity and audit event
         self.uow.projects.save(project)
