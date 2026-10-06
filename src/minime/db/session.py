@@ -24,7 +24,7 @@ class SchemaInvariantResult:
     reason: str | None = None
 
 
-EXPECTED_ALEMBIC_HEAD = "024_task_classification_snapshots"
+EXPECTED_ALEMBIC_HEAD = "g01_recovery_convergence"
 
 
 def verify_physical_schema_invariants(engine: Engine) -> SchemaInvariantResult:

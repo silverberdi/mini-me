@@ -57,6 +57,9 @@ def session_factory() -> sessionmaker[Session]:
             "022_strict_openspec_lifecycle_governance",
             "023_integrity_findings",
             "024_task_classification_snapshots",
+            "c03_managed_repo_isolation",
+            "d04_durable_sagas_and_generalize_external_actions",
+            "g01_recovery_convergence",
         )
     factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     yield factory

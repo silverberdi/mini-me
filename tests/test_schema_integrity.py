@@ -52,13 +52,13 @@ def _engine_at_revision(revision):
     return engine, inspector
 
 
-def test_expected_alembic_head_is_canonical_024():
-    assert EXPECTED_ALEMBIC_HEAD == "024_task_classification_snapshots"
+def test_expected_alembic_head_is_canonical_g01():
+    assert EXPECTED_ALEMBIC_HEAD == "g01_recovery_convergence"
     engine, inspector = _engine_with_schema()
     with patch("minime.db.session.inspect", return_value=inspector):
         result = verify_physical_schema_invariants(engine)
     assert result.valid is True
-    assert result.revision == "024_task_classification_snapshots"
+    assert result.revision == "g01_recovery_convergence"
 
 
 def test_023_head_is_behind_current_schema():
@@ -67,7 +67,7 @@ def test_023_head_is_behind_current_schema():
         result = verify_physical_schema_invariants(engine)
     assert result.valid is False
     assert result.revision == "023_integrity_findings"
-    assert "024_task_classification_snapshots" in result.reason
+    assert "g01_recovery_convergence" in result.reason
 
 
 def test_021_head_is_behind_current_schema():
@@ -76,7 +76,7 @@ def test_021_head_is_behind_current_schema():
         result = verify_physical_schema_invariants(engine)
     assert result.valid is False
     assert result.revision == "021_provider_probe_cooldown_state"
-    assert "024_task_classification_snapshots" in result.reason
+    assert "g01_recovery_convergence" in result.reason
 
 
 def test_stale_020_head_remains_invalid():
@@ -104,7 +104,7 @@ def test_wrong_head_emits_schema_invariant_violation():
     uow.projects.get_by_id.return_value = None
     failed = SchemaInvariantResult(
         valid=False,
-        reason="Expected Alembic head 024_task_classification_snapshots, found 999_unknown_head.",
+        reason="Expected Alembic head g01_recovery_convergence, found 999_unknown_head.",
     )
     with patch(
         "minime.services.readiness_service.verify_physical_schema_invariants",
@@ -113,3 +113,20 @@ def test_wrong_head_emits_schema_invariant_violation():
         service = ReadinessService(uow, openspec_adapter=MagicMock(), github_adapter=MagicMock())
         evaluation = service.evaluate_change_readiness("proj", "change", "/tmp")
     assert any("SCHEMA_INVARIANT_VIOLATION" in reason for reason in evaluation.unmet_reasons)
+
+
+def test_g01_head_does_not_emit_schema_invariant_violation_in_readiness():
+    from minime.services.readiness_service import ReadinessService
+
+    engine, inspector = _engine_at_revision("g01_recovery_convergence")
+    uow = MagicMock()
+    uow.session.bind = engine
+    uow.projects.get_by_id.return_value = None
+
+    with patch("minime.db.session.inspect", return_value=inspector):
+        service = ReadinessService(uow, openspec_adapter=MagicMock(), github_adapter=MagicMock())
+        evaluation = service.evaluate_change_readiness_pure("proj", "change", "/tmp")
+
+    assert not any("SCHEMA_INVARIANT_VIOLATION" in reason for reason in evaluation.unmet_reasons)
+    physical_schema = next(check for check in evaluation.checks if check.name == "physical_schema")
+    assert physical_schema.passed is True
