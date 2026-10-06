@@ -7,8 +7,12 @@ from pathlib import Path
 import pytest
 from tests.conftest import InMemoryPersistenceUnitOfWork
 
-from minime.domain.enums import ProjectOnboardingStatus
-from minime.domain.models import Project, ProjectOnboardingInput
+from minime.domain.enums import EventType, ProjectOnboardingStatus
+from minime.domain.models import (
+    Project,
+    ProjectManagedRepositoryBinding,
+    ProjectOnboardingInput,
+)
 from minime.services.project_onboarding_service import ProjectOnboardingService
 
 
@@ -88,8 +92,9 @@ def test_onboard_project_conflict_detection(
         github_adapter=ReadinessGitHubStub(),
     )
 
-    # Attempt duplicate project_id
-    with pytest.raises(ValueError, match="already registered"):
+    # An existing project id may only resume bootstrap when its immutable
+    # identity matches exactly.
+    with pytest.raises(ValueError, match="immutable identity mismatch"):
         service.onboard_project(
             ProjectOnboardingInput(
                 project_id="existing-project",
@@ -107,6 +112,223 @@ def test_onboard_project_conflict_detection(
                 repository="test-owner/existing-repo",
             )
         )
+
+
+def test_existing_matching_project_resumes_managed_workspace_bootstrap_idempotently(
+    in_memory_uow: InMemoryPersistenceUnitOfWork, tmp_path: Path, monkeypatch
+) -> None:
+    """A matching registered project may establish its missing Stage C workspace once."""
+    import json
+    import subprocess
+
+    from tests.conftest import ReadinessGitHubStub
+
+    source_repo = tmp_path / "source"
+    source_repo.mkdir()
+    (source_repo / "openspec").mkdir()
+    (source_repo / "README.md").write_text("# Source\n")
+    subprocess.run(["git", "init"], cwd=source_repo, check=True)
+    subprocess.run(["git", "checkout", "-b", "main"], cwd=source_repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=source_repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=source_repo, check=True)
+    subprocess.run(["git", "add", "."], cwd=source_repo, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=source_repo, check=True)
+
+    runtime_root = tmp_path / "runtime"
+    (runtime_root / "openspec").mkdir(parents=True)
+    trusted_root = tmp_path / "trusted"
+    trusted_root.mkdir()
+    monkeypatch.setenv("MINIME_RUNTIME_ROOT", str(runtime_root))
+
+    project = Project(
+        project_id="existing-project",
+        display_name="Existing Project",
+        repository=str(source_repo),
+        base_branch="main",
+        openspec_path="openspec",
+        implementer="codex",
+        reviewer="antigravity",
+    )
+    in_memory_uow.projects.save(project)
+    service = ProjectOnboardingService(
+        in_memory_uow,
+        project_root=runtime_root,
+        github_adapter=ReadinessGitHubStub(),
+        trusted_managed_root=trusted_root,
+    )
+    request = ProjectOnboardingInput(
+        project_id="existing-project",
+        display_name="Attempted Rename",
+        repository=str(source_repo),
+        base_branch="main",
+        openspec_path="openspec",
+        implementer="codex",
+        reviewer="antigravity",
+    )
+
+    first = service.onboard_project(request)
+    binding = in_memory_uow.project_managed_repository_bindings.get_by_project_id(
+        "existing-project"
+    )
+    assert first.project.display_name == "Existing Project"
+    assert binding is not None
+    assert binding.is_valid is True
+    assert Path(binding.managed_repository_root).is_dir()
+    assert Path(binding.worktree_parent_dir).is_dir()
+    marker = Path(binding.managed_repository_root) / ".minime-managed-project.json"
+    assert json.loads(marker.read_text()) == {
+        "project_id": "existing-project",
+        "canonical_repository_identity": str(source_repo),
+    }
+    assert subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=binding.managed_repository_root, check=True, capture_output=True, text=True
+    ).stdout.strip() == subprocess.run(
+        ["git", "rev-parse", "origin/main"], cwd=binding.managed_repository_root, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+    second = service.onboard_project(request)
+    repeated_binding = in_memory_uow.project_managed_repository_bindings.get_by_project_id(
+        "existing-project"
+    )
+    assert second.project.project_id == "existing-project"
+    assert repeated_binding is not None
+    assert repeated_binding.binding_id == binding.binding_id
+    events = in_memory_uow.events.list_events(project_id="existing-project")
+    onboarding_event = next(
+        event for event in events if event.event_type == EventType.PROJECT_ONBOARDED
+    )
+    assert onboarding_event.payload["display_name"] == "Existing Project"
+    assert in_memory_uow.jobs.list_active_jobs() == []
+    assert in_memory_uow.orchestration_runs.list_runs(is_active=True) == []
+
+
+def test_existing_project_refuses_invalid_managed_binding_before_bootstrap(
+    in_memory_uow: InMemoryPersistenceUnitOfWork, tmp_path: Path, monkeypatch
+) -> None:
+    from tests.conftest import ReadinessGitHubStub
+
+    runtime_root = tmp_path / "runtime"
+    (runtime_root / "openspec").mkdir(parents=True)
+    trusted_root = tmp_path / "trusted"
+    trusted_root.mkdir()
+    managed_root = trusted_root / "existing-project"
+    monkeypatch.setenv("MINIME_RUNTIME_ROOT", str(runtime_root))
+
+    in_memory_uow.projects.save(
+        Project(
+            project_id="existing-project",
+            display_name="Existing Project",
+            repository="owner/repo",
+            base_branch="main",
+            openspec_path="openspec",
+            implementer="codex",
+            reviewer="antigravity",
+        )
+    )
+    in_memory_uow.project_managed_repository_bindings.save(
+        ProjectManagedRepositoryBinding(
+            project_id="existing-project",
+            canonical_repository_identity="owner/repo",
+            managed_repository_root=str(managed_root),
+            worktree_parent_dir=str(managed_root / ".minime" / "worktrees"),
+            is_valid=False,
+            mismatch_reasons=["prior identity mismatch"],
+        )
+    )
+
+    service = ProjectOnboardingService(
+        in_memory_uow,
+        project_root=runtime_root,
+        github_adapter=ReadinessGitHubStub(),
+        trusted_managed_root=trusted_root,
+    )
+    with pytest.raises(ValueError, match="Existing managed repository binding mismatch"):
+        service.onboard_project(
+            ProjectOnboardingInput(
+                project_id="existing-project",
+                display_name="Existing Project",
+                repository="owner/repo",
+                base_branch="main",
+                openspec_path="openspec",
+                implementer="codex",
+                reviewer="antigravity",
+            )
+        )
+
+    assert not managed_root.exists()
+    assert in_memory_uow.jobs.list_active_jobs() == []
+    assert in_memory_uow.orchestration_runs.list_runs(is_active=True) == []
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value", "mismatch"),
+    [
+        ("default_base_branch", "release", "default base branch differs"),
+        ("ownership_marker_filename", ".other-marker.json", "ownership marker filename differs"),
+    ],
+)
+def test_existing_project_refuses_binding_configuration_mismatch_before_bootstrap(
+    in_memory_uow: InMemoryPersistenceUnitOfWork,
+    tmp_path: Path,
+    monkeypatch,
+    field_name: str,
+    field_value: str,
+    mismatch: str,
+) -> None:
+    """Resumption may not rewrite immutable binding configuration."""
+    from tests.conftest import ReadinessGitHubStub
+
+    runtime_root = tmp_path / "runtime"
+    (runtime_root / "openspec").mkdir(parents=True)
+    trusted_root = tmp_path / "trusted"
+    trusted_root.mkdir()
+    managed_root = trusted_root / "existing-project"
+    monkeypatch.setenv("MINIME_RUNTIME_ROOT", str(runtime_root))
+
+    in_memory_uow.projects.save(
+        Project(
+            project_id="existing-project",
+            display_name="Existing Project",
+            repository="owner/repo",
+            base_branch="main",
+            openspec_path="openspec",
+            implementer="codex",
+            reviewer="antigravity",
+        )
+    )
+    binding_values = {
+        "project_id": "existing-project",
+        "canonical_repository_identity": "owner/repo",
+        "managed_repository_root": str(managed_root),
+        "worktree_parent_dir": str(managed_root / ".minime" / "worktrees"),
+        field_name: field_value,
+    }
+    in_memory_uow.project_managed_repository_bindings.save(
+        ProjectManagedRepositoryBinding(**binding_values)
+    )
+
+    service = ProjectOnboardingService(
+        in_memory_uow,
+        project_root=runtime_root,
+        github_adapter=ReadinessGitHubStub(),
+        trusted_managed_root=trusted_root,
+    )
+    with pytest.raises(ValueError, match=mismatch):
+        service.onboard_project(
+            ProjectOnboardingInput(
+                project_id="existing-project",
+                display_name="Existing Project",
+                repository="owner/repo",
+                base_branch="main",
+                openspec_path="openspec",
+                implementer="codex",
+                reviewer="antigravity",
+            )
+        )
+
+    assert not managed_root.exists()
+    assert in_memory_uow.jobs.list_active_jobs() == []
+    assert in_memory_uow.orchestration_runs.list_runs(is_active=True) == []
 
 
 def test_onboard_project_invalid_repository_fails_closed(
