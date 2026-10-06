@@ -88,6 +88,8 @@ class ProjectOnboardingService:
             norm_repo = normalize_repository_identity(raw_repo)
         except ValueError as exc:
             raise ValueError(f"Invalid repository identity '{raw_repo}': {exc}") from exc
+        base_br = input_data.base_branch or "main"
+        marker_filename = ".minime-managed-project.json"
 
         # 2. Existing-project recovery or duplicate detection.  A project id and
         # its durable identity are immutable, but an interrupted Stage C
@@ -221,6 +223,8 @@ class ProjectOnboardingService:
             canonical_repository_identity=norm_repo,
             managed_repository_root=managed_root,
             worktree_parent_dir=worktree_parent_dir,
+            default_base_branch=base_br,
+            ownership_marker_filename=marker_filename,
             is_valid=True,
         )
 
@@ -242,6 +246,10 @@ class ProjectOnboardingService:
                 binding_mismatches.append("worktree parent directory differs")
             if existing_managed_binding.remote_name != "origin":
                 binding_mismatches.append("remote name is not 'origin'")
+            if existing_managed_binding.default_base_branch != base_br:
+                binding_mismatches.append("default base branch differs")
+            if existing_managed_binding.ownership_marker_filename != marker_filename:
+                binding_mismatches.append("ownership marker filename differs")
             if not existing_managed_binding.is_valid:
                 binding_mismatches.append("existing managed repository binding is invalid")
             if existing_managed_binding.mismatch_reasons:
@@ -306,7 +314,6 @@ class ProjectOnboardingService:
 
         # 6c. Real Canonical Remote Repository Establishment (Clone / Fetch)
         remote_source = self._resolve_remote_source(raw_repo, norm_repo)
-        base_br = input_data.base_branch or "main"
 
         try:
             if not os.path.exists(os.path.join(managed_root, ".git")):
@@ -452,7 +459,7 @@ class ProjectOnboardingService:
             )
 
         # 6f. Establish Ownership Marker ONLY AFTER successful remote checkout verification
-        marker_file = os.path.join(managed_root, ".minime-managed-project.json")
+        marker_file = os.path.join(managed_root, marker_filename)
         req_marker = WorkspaceMutationRequest(
             project_id=project_id,
             target_path=marker_file,
@@ -487,7 +494,7 @@ class ProjectOnboardingService:
             ) from exc
 
         valid_marker, marker_msg, _, _ = guard.verify_managed_repository_ownership_marker(
-            managed_root, project_id, norm_repo
+            managed_root, project_id, norm_repo, marker_filename
         )
         if not valid_marker:
             mismatch_reasons.append(
@@ -534,6 +541,8 @@ class ProjectOnboardingService:
             "remote_name": "origin",
             "managed_repository_root": managed_root,
             "worktree_parent_dir": worktree_parent_dir,
+            "default_base_branch": base_br,
+            "ownership_marker_filename": marker_filename,
             "is_valid": True,
             "mismatch_reasons": [],
             "validated_at": now,
@@ -587,7 +596,7 @@ class ProjectOnboardingService:
             project_id=project_id,
             payload={
                 "project_id": project_id,
-                "display_name": display_name,
+                "display_name": project.display_name,
                 "repository": norm_repo,
                 "onboarding_status": onboarding_status.value,
                 "operator_email": operator_email,
