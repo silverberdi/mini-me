@@ -207,10 +207,11 @@ def test_reconcile_active_archived_and_missing_changes(
     assert len(items) == 1
     assert items[0].change_name == "001-active-change"
 
-    # Archived change in DB should be marked DONE
+    # Discovery does not mutate canonical lifecycle state. Archive presence only
+    # removes the item from the active queue projection.
     archived_change = in_memory_uow.changes.get_by_name("mini-me", "002-archived-change")
     assert archived_change is not None
-    assert archived_change.status == ChangeStatus.DONE
+    assert archived_change.status == ChangeStatus.IN_PROGRESS
 
     # Archived queue item removed
     assert in_memory_uow.work_queue.get_by_project_and_change("mini-me", "002-archived-change") is None
@@ -257,4 +258,84 @@ def test_stale_queue_cleanup_multi_project_isolation(
     assert (
         in_memory_uow.work_queue.get_by_project_and_change("other-project", "001-stale-p2")
         is not None
+    )
+
+
+def test_terminal_change_on_disk_is_not_requeued(
+    tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork
+):
+    project = Project(
+        project_id="mini-me",
+        display_name="mini me",
+        repository="silverberdi/mini-me",
+        base_branch="main",
+    )
+    in_memory_uow.projects.save(project)
+
+    create_isolated_openspec_change(tmp_path, change_name="001-terminal-change")
+    in_memory_uow.changes.save(
+        Change(project_id="mini-me", name="001-terminal-change", status=ChangeStatus.DONE)
+    )
+    in_memory_uow.work_queue.save(
+        WorkQueueItem(project_id="mini-me", change_name="001-terminal-change")
+    )
+
+    discovery_service = WorkDiscoveryService(
+        uow=in_memory_uow,
+        project_root=tmp_path,
+    )
+
+    items = discovery_service.discover_work("mini-me")
+
+    assert items == []
+    terminal_change = in_memory_uow.changes.get_by_name("mini-me", "001-terminal-change")
+    assert terminal_change is not None
+    assert terminal_change.status == ChangeStatus.DONE
+
+
+def test_discovery_uses_managed_repository_root_for_readiness(
+    tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork
+):
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir()
+    managed_root = tmp_path / "managed"
+    managed_root.mkdir()
+    create_isolated_openspec_change(managed_root, change_name="001-managed-change")
+
+    project = Project(
+        project_id="mini-me",
+        display_name="mini me",
+        repository="silverberdi/mini-me",
+        base_branch="main",
+    )
+    in_memory_uow.projects.save(project)
+
+    from tests.conftest import setup_managed_repository_fixture
+
+    setup_managed_repository_fixture(
+        in_memory_uow,
+        "mini-me",
+        managed_root,
+        managed_root / ".minime" / "worktrees",
+        canonical_repository_identity="silverberdi/mini-me",
+    )
+
+    readiness = MagicMock()
+    readiness.evaluate_and_persist_change_readiness.return_value = MagicMock(
+        is_ready=False,
+        status="NOT_READY",
+        unmet_reasons=["test blocker"],
+    )
+
+    discovery_service = WorkDiscoveryService(
+        uow=in_memory_uow,
+        project_root=runtime_root,
+        readiness_service=readiness,
+    )
+    discovery_service.discover_work("mini-me")
+
+    readiness.evaluate_and_persist_change_readiness.assert_called_once()
+    assert (
+        readiness.evaluate_and_persist_change_readiness.call_args.kwargs["project_root"]
+        == str(managed_root)
     )
