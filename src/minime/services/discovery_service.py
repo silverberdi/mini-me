@@ -22,7 +22,6 @@ from minime.domain.models import (
     WorkQueueItem,
     utc_now,
 )
-from minime.services.lifecycle_transition_authority import LifecycleTransitionAuthority
 from minime.services.readiness_service import ReadinessService
 
 logger = logging.getLogger(__name__)
@@ -104,8 +103,6 @@ class WorkDiscoveryService:
             # 1. Discover local OpenSpec changes on disk
             try:
                 changes = self.openspec_adapter.discover_changes(project, str(eff_root))
-                if not isinstance(changes, list):
-                    changes = OpenSpecAdapter().discover_changes(project, str(eff_root))
             except Exception as exc:
                 logger.warning(
                     f"Failed discovering OpenSpec changes for project '{project.project_id}': {exc}"
@@ -117,42 +114,20 @@ class WorkDiscoveryService:
                 if not existing_change:
                     self.uow.changes.save(change)
 
-            # Reconcile archived changes in DB to ChangeStatus.DONE
-            archive_dir = eff_root / project.openspec_path / "changes" / "archive"
-            archived_names: set[str] = set()
-            if archive_dir.exists() and archive_dir.is_dir():
-                archived_names = {d.name for d in archive_dir.iterdir() if d.is_dir()}
-
+            # Reconcile the active queue projection without mutating canonical Change lifecycle.
+            # Discovery is a pure observer of lifecycle state: missing/archived changes and terminal
+            # DONE/CANCELLED changes must not remain schedulable queue entries.
             active_change_names = {c.name for c in changes}
-            all_db_changes = self.uow.changes.list_by_project(project.project_id)
-            for db_change in all_db_changes:
-                if (
-                    db_change.name not in active_change_names
-                    and db_change.status != ChangeStatus.DONE
-                ):
-                    is_archived = db_change.name in archived_names or any(
-                        a == db_change.name or a.endswith(f"-{db_change.name}")
-                        for a in archived_names
-                    )
-                    if is_archived:
-                        authority = LifecycleTransitionAuthority(self.uow)
-                        try:
-                            authority.transition_change(
-                                project_id=project.project_id,
-                                name=db_change.name,
-                                expected_from_state=db_change.status,
-                                to_state=ChangeStatus.DONE,
-                                reason_code="archived_on_disk",
-                            )
-                        except Exception as exc:
-                            logger.warning(
-                                f"Failed transitioning archived change '{db_change.name}' to DONE: {exc}"
-                            )
-
-            # Reconcile stale work queue items: remove any queue item whose change is no longer active on disk
             existing_queue_items = self.uow.work_queue.list_all(project.project_id)
             for queue_item in existing_queue_items:
-                if queue_item.change_name not in active_change_names:
+                durable_change = self.uow.changes.get_by_name(
+                    project.project_id, queue_item.change_name
+                )
+                is_terminal = (
+                    durable_change is not None
+                    and durable_change.status in (ChangeStatus.DONE, ChangeStatus.CANCELLED)
+                )
+                if queue_item.change_name not in active_change_names or is_terminal:
                     self.uow.work_queue.delete(queue_item.queue_item_id)
 
             # 2. Fetch remote issues from repository
@@ -166,9 +141,22 @@ class WorkDiscoveryService:
                     f"Remote issue discovery unavailable for '{project.repository}': {exc}"
                 )
 
-            # 3. For each active OpenSpec change, reconcile binding and queue status
+            # 3. For each active, non-terminal OpenSpec change, reconcile binding and queue status.
+            # A terminal DB Change remains terminal even if its planning directory is still present.
             for change in changes:
                 change_name = change.name
+                durable_change = self.uow.changes.get_by_name(project.project_id, change_name)
+                if durable_change and durable_change.status in (
+                    ChangeStatus.DONE,
+                    ChangeStatus.CANCELLED,
+                ):
+                    terminal_queue_item = self.uow.work_queue.get_by_project_and_change(
+                        project.project_id, change_name
+                    )
+                    if terminal_queue_item:
+                        self.uow.work_queue.delete(terminal_queue_item.queue_item_id)
+                    continue
+
                 stage_num = extract_roadmap_stage(change_name)
 
                 # Reconcile binding
@@ -218,7 +206,7 @@ class WorkDiscoveryService:
                 readiness_eval = self.readiness_service.evaluate_and_persist_change_readiness(
                     project_id=project.project_id,
                     change_name=change_name,
-                    project_root=str(self.project_root),
+                    project_root=str(eff_root),
                     github_repo=project.repository,
                     github_issue=matched_issue_number,
                 )
