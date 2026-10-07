@@ -61,7 +61,7 @@ class ProjectOnboardingService:
             or cleaned.startswith("git@")
         ):
             return cleaned
-        return f"https://{norm_repo}"
+        return f"https://github.com/{norm_repo}.git"
 
     def onboard_project(
         self,

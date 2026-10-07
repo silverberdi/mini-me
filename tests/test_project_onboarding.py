@@ -16,6 +16,115 @@ from minime.domain.models import (
 from minime.services.project_onboarding_service import ProjectOnboardingService
 
 
+@pytest.mark.parametrize(
+    ("raw_repo", "norm_repo", "expected"),
+    [
+        (
+            "silverberdi/mini-me",
+            "silverberdi/mini-me",
+            "https://github.com/silverberdi/mini-me.git",
+        ),
+        (
+            "https://github.com/silverberdi/mini-me.git",
+            "silverberdi/mini-me",
+            "https://github.com/silverberdi/mini-me.git",
+        ),
+        (
+            "git@github.com:silverberdi/mini-me.git",
+            "silverberdi/mini-me",
+            "git@github.com:silverberdi/mini-me.git",
+        ),
+        ("/tmp/local-repository", "owner/repo", "/tmp/local-repository"),
+        ("file:///tmp/local-repository", "owner/repo", "file:///tmp/local-repository"),
+    ],
+)
+def test_resolve_remote_source_preserves_explicit_sources_and_canonicalizes_github_identity(
+    in_memory_uow: InMemoryPersistenceUnitOfWork,
+    tmp_path: Path,
+    raw_repo: str,
+    norm_repo: str,
+    expected: str,
+) -> None:
+    service = ProjectOnboardingService(in_memory_uow, project_root=tmp_path)
+
+    assert service._resolve_remote_source(raw_repo, norm_repo) == expected
+
+
+def test_registered_canonical_repository_identity_clones_from_github_com(
+    in_memory_uow: InMemoryPersistenceUnitOfWork, tmp_path: Path, monkeypatch
+) -> None:
+    """A durable owner/repo identity must never become a Git hostname."""
+    import subprocess
+
+    from tests.conftest import ReadinessGitHubStub
+
+    runtime_root = tmp_path / "runtime"
+    (runtime_root / "openspec").mkdir(parents=True)
+    trusted_root = tmp_path / "trusted"
+    trusted_root.mkdir()
+    monkeypatch.setenv("MINIME_RUNTIME_ROOT", str(runtime_root))
+    in_memory_uow.projects.save(
+        Project(
+            project_id="mini-me",
+            display_name="mini me",
+            repository="silverberdi/mini-me",
+            base_branch="main",
+            openspec_path="openspec",
+            implementer="codex",
+            reviewer="antigravity",
+        )
+    )
+
+    clone_commands: list[list[str]] = []
+
+    def failed_clone(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        if command[:2] == ["git", "clone"]:
+            clone_commands.append(command)
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="offline test")
+        raise AssertionError(f"Unexpected subprocess command: {command}")
+
+    monkeypatch.setattr(subprocess, "run", failed_clone)
+    service = ProjectOnboardingService(
+        in_memory_uow,
+        project_root=runtime_root,
+        github_adapter=ReadinessGitHubStub(),
+        trusted_managed_root=trusted_root,
+    )
+
+    with pytest.raises(ValueError, match="https://github.com/silverberdi/mini-me.git"):
+        service.onboard_project(
+            ProjectOnboardingInput(
+                project_id="mini-me",
+                display_name="mini me",
+                repository="silverberdi/mini-me",
+                base_branch="main",
+                openspec_path="openspec",
+                implementer="codex",
+                reviewer="antigravity",
+            )
+        )
+
+    assert clone_commands == [
+        [
+            "git",
+            "clone",
+            "--branch",
+            "main",
+            "https://github.com/silverberdi/mini-me.git",
+            str(trusted_root / "mini-me"),
+        ],
+        [
+            "git",
+            "clone",
+            "https://github.com/silverberdi/mini-me.git",
+            str(trusted_root / "mini-me"),
+        ],
+    ]
+    assert in_memory_uow.project_managed_repository_bindings.get_by_project_id("mini-me") is None
+    assert in_memory_uow.jobs.list_active_jobs() == []
+    assert in_memory_uow.orchestration_runs.list_runs(is_active=True) == []
+
+
 def test_onboard_new_project_success(
     in_memory_uow: InMemoryPersistenceUnitOfWork, tmp_path: Path
 ) -> None:
