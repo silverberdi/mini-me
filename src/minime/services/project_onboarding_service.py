@@ -369,6 +369,37 @@ class ProjectOnboardingService:
                             f"Remote repository does not contain requested base branch '{base_br}': {co_cp.stderr.strip()}"
                         )
             else:
+                # 1. Verify remote identity BEFORE any fetch or mutation
+                valid_git, git_reason = guard.verify_git_repository_identity(
+                    managed_root, norm_repo, remote_name="origin"
+                )
+                if not valid_git:
+                    raise ValueError(
+                        f"Git repository identity verification failed pre-fetch: {git_reason}"
+                    )
+
+                # 2. Verify working tree safety BEFORE any fetch or mutation
+                cp_status = subprocess.run(
+                    ["git", "status", "--porcelain"],
+                    cwd=managed_root,
+                    capture_output=True,
+                    text=True,
+                )
+                if cp_status.returncode != 0:
+                    raise ValueError(
+                        f"Managed repository working tree status is unobservable: {cp_status.stderr.strip()}"
+                    )
+                dirty_lines = [
+                    line
+                    for line in cp_status.stdout.splitlines()
+                    if line.strip() and line[3:] != marker_filename
+                ]
+                if dirty_lines:
+                    raise ValueError(
+                        f"Managed repository working tree is dirty: {'; '.join(dirty_lines)}"
+                    )
+
+                # 3. Fetch remote base branch under Guard authorization
                 req_fetch = WorkspaceMutationRequest(
                     project_id=project_id,
                     target_path=managed_root,
@@ -401,6 +432,105 @@ class ProjectOnboardingService:
                         raise ValueError(
                             f"Remote repository '{remote_source}' is unobservable or unreachable during fetch: {fetch_err}"
                         )
+
+                # 4. Analyze relationship between local HEAD and origin/<base_branch>
+                cp_head = subprocess.run(
+                    ["git", "rev-parse", "HEAD"], cwd=managed_root, capture_output=True, text=True
+                )
+                cp_origin_head = subprocess.run(
+                    ["git", "rev-parse", f"origin/{base_br}"],
+                    cwd=managed_root,
+                    capture_output=True,
+                    text=True,
+                )
+
+                head_sha = cp_head.stdout.strip()
+                origin_head_sha = cp_origin_head.stdout.strip()
+
+                if cp_head.returncode != 0 or not head_sha:
+                    raise ValueError(
+                        f"Local HEAD commit in managed repository '{managed_root}' is unobservable: {cp_head.stderr.strip()}"
+                    )
+                if cp_origin_head.returncode != 0 or not origin_head_sha:
+                    raise ValueError(
+                        f"Remote base branch tracking ref 'origin/{base_br}' in managed repository is unobservable: {cp_origin_head.stderr.strip()}"
+                    )
+
+                # Allowed Outcomes:
+                # A. HEAD == origin/base -> already converged; continue.
+                if head_sha == origin_head_sha:
+                    pass
+                else:
+                    # Check if local HEAD is an ancestor of origin/base
+                    cp_ancestor = subprocess.run(
+                        ["git", "merge-base", "--is-ancestor", "HEAD", f"origin/{base_br}"],
+                        cwd=managed_root,
+                        capture_output=True,
+                        text=True,
+                    )
+                    if cp_ancestor.returncode == 0:
+                        # B. local HEAD is an ancestor of origin/base -> safe fast-forward.
+                        req_ff = WorkspaceMutationRequest(
+                            project_id=project_id,
+                            target_path=managed_root,
+                            requested_operation=WorkspaceOperation.GIT_BRANCH,
+                        )
+                        dec_ff = guard.evaluate_onboarding_bootstrap(
+                            req_ff, provisional_binding=provisional_binding
+                        )
+                        if not dec_ff.allowed:
+                            raise ValueError(
+                                f"Guard denied Git fast-forward mutation for '{managed_root}': {dec_ff.provider_detail}"
+                            )
+
+                        cp_branch = subprocess.run(
+                            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                            cwd=managed_root,
+                            capture_output=True,
+                            text=True,
+                        )
+                        current_branch = cp_branch.stdout.strip() if cp_branch.returncode == 0 else ""
+
+                        if current_branch != base_br:
+                            cp_co = subprocess.run(
+                                ["git", "checkout", base_br],
+                                cwd=managed_root,
+                                capture_output=True,
+                                text=True,
+                            )
+                            if cp_co.returncode != 0:
+                                raise ValueError(
+                                    f"Failed to checkout base branch '{base_br}' during fast-forward convergence: {cp_co.stderr.strip()}"
+                                )
+
+                        cp_ff = subprocess.run(
+                            ["git", "merge", "--ff-only", f"origin/{base_br}"],
+                            cwd=managed_root,
+                            capture_output=True,
+                            text=True,
+                        )
+                        if cp_ff.returncode != 0:
+                            raise ValueError(
+                                f"Fast-forward convergence failed for '{managed_root}': {cp_ff.stderr.strip()}"
+                            )
+                    else:
+                        # Check if origin/base is an ancestor of local HEAD (local checkout is ahead)
+                        cp_descendant = subprocess.run(
+                            ["git", "merge-base", "--is-ancestor", f"origin/{base_br}", "HEAD"],
+                            cwd=managed_root,
+                            capture_output=True,
+                            text=True,
+                        )
+                        if cp_descendant.returncode == 0:
+                            # C. local checkout is ahead -> FAIL CLOSED
+                            raise ValueError(
+                                f"Local HEAD commit '{head_sha[:8]}' is ahead of remote base branch tracking ref 'origin/{base_br}' SHA '{origin_head_sha[:8]}'. Safe convergence cannot discard local commits."
+                            )
+                        else:
+                            # D. histories diverged -> FAIL CLOSED
+                            raise ValueError(
+                                f"Local HEAD commit '{head_sha[:8]}' and remote base branch tracking ref 'origin/{base_br}' SHA '{origin_head_sha[:8]}' have diverged. Safe convergence cannot auto-merge or rebase."
+                            )
         except Exception as exc:
             mismatch_reasons.append(f"Failed to establish canonical remote checkout: {exc}")
             reasons.extend(mismatch_reasons)

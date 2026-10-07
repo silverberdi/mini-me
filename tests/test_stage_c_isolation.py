@@ -4882,7 +4882,7 @@ def test_onboard_project_diff_head_and_origin_ref_refused(tmp_path):
 
     with pytest.raises(
         ValueError,
-        match="Local HEAD SHA '.*' does not match remote base branch tracking ref 'origin/main' SHA",
+        match="is ahead of remote base branch tracking ref|Local HEAD SHA '.*' does not match remote base branch tracking ref",
     ):
         service.onboard_project(onboard_input)
 
@@ -5187,3 +5187,331 @@ def test_onboard_project_unobservable_fetch_rejects_stale_tracking_ref(tmp_path)
         service.onboard_project(onboard_input)
 
     assert uow.project_managed_repository_bindings.get_by_project_id("proj-stale-ref") is None
+
+
+# ---------------------------------------------------------------------------
+# STAGE C SAFE EXISTING MANAGED CHECKOUT CONVERGENCE REGRESSION TESTS
+# ---------------------------------------------------------------------------
+
+
+def _setup_remote_and_managed(tmp_path, project_id="proj-conv"):
+    """Helper to set up a bare remote repository, seed repo, and managed checkout."""
+    trusted_root = tmp_path / "trusted_managed"
+    trusted_root.mkdir(parents=True, exist_ok=True)
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    (runtime_root / "openspec").mkdir(parents=True, exist_ok=True)
+
+    remote_bare = tmp_path / f"remote_{project_id}.git"
+    subprocess.run(
+        ["git", "init", "--bare", "-b", "main", str(remote_bare)], check=True, capture_output=True
+    )
+
+    seed_dir = tmp_path / f"seed_{project_id}"
+    subprocess.run(["git", "clone", str(remote_bare), str(seed_dir)], check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Remote Dev"], cwd=seed_dir, check=True)
+    subprocess.run(["git", "config", "user.email", "dev@remote.local"], cwd=seed_dir, check=True)
+    (seed_dir / "README.md").write_text("# Initial Base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=seed_dir, check=True)
+    subprocess.run(["git", "commit", "-m", "C1"], cwd=seed_dir, check=True, capture_output=True)
+    subprocess.run(["git", "push", "origin", "main"], cwd=seed_dir, check=True, capture_output=True)
+
+    c1_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=seed_dir, text=True).strip()
+
+    managed_target = trusted_root / project_id
+    subprocess.run(
+        ["git", "clone", str(remote_bare), str(managed_target)], check=True, capture_output=True
+    )
+    subprocess.run(["git", "config", "user.name", "Managed Dev"], cwd=managed_target, check=True)
+    subprocess.run(["git", "config", "user.email", "dev@managed.local"], cwd=managed_target, check=True)
+
+    return {
+        "trusted_root": trusted_root,
+        "runtime_root": runtime_root,
+        "remote_bare": remote_bare,
+        "seed_dir": seed_dir,
+        "managed_target": managed_target,
+        "c1_sha": c1_sha,
+    }
+
+
+def test_safe_convergence_already_aligned(tmp_path):
+    """1. Existing managed repo already aligned (HEAD == origin/main) passes without mutation."""
+    from minime.domain.enums import ProjectOnboardingStatus
+    from minime.domain.models import ProjectOnboardingInput
+    from minime.services.project_onboarding_service import ProjectOnboardingService
+
+    env = _setup_remote_and_managed(tmp_path, "proj-aligned")
+    uow = MockUOW()
+    service = ProjectOnboardingService(
+        uow=uow, project_root=env["runtime_root"], trusted_managed_root=env["trusted_root"]
+    )
+    worktrees_target = env["trusted_root"] / "worktrees" / "proj-aligned"
+
+    inp = ProjectOnboardingInput(
+        project_id="proj-aligned",
+        display_name="Aligned Project",
+        repository=str(env["remote_bare"]),
+        base_branch="main",
+        managed_repository_root=str(env["managed_target"]),
+        worktree_parent_dir=str(worktrees_target),
+    )
+
+    res = service.onboard_project(inp)
+    assert res.status == ProjectOnboardingStatus.READY_FOR_WORK
+
+    head_sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=env["managed_target"], text=True
+    ).strip()
+    assert head_sha == env["c1_sha"]
+
+
+def test_safe_convergence_behind_fast_forwards(tmp_path):
+    """2. Existing managed repo behind remote with clean history fast-forwards to origin/main."""
+    from minime.domain.enums import ProjectOnboardingStatus
+    from minime.domain.models import ProjectOnboardingInput
+    from minime.services.project_onboarding_service import ProjectOnboardingService
+
+    env = _setup_remote_and_managed(tmp_path, "proj-behind")
+
+    # Advance remote
+    seed = env["seed_dir"]
+    (seed / "file2.txt").write_text("C2 content\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=seed, check=True)
+    subprocess.run(["git", "commit", "-m", "C2"], cwd=seed, check=True, capture_output=True)
+    subprocess.run(["git", "push", "origin", "main"], cwd=seed, check=True, capture_output=True)
+    c2_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=seed, text=True).strip()
+
+    uow = MockUOW()
+    service = ProjectOnboardingService(
+        uow=uow, project_root=env["runtime_root"], trusted_managed_root=env["trusted_root"]
+    )
+    worktrees_target = env["trusted_root"] / "worktrees" / "proj-behind"
+
+    inp = ProjectOnboardingInput(
+        project_id="proj-behind",
+        display_name="Behind Project",
+        repository=str(env["remote_bare"]),
+        base_branch="main",
+        managed_repository_root=str(env["managed_target"]),
+        worktree_parent_dir=str(worktrees_target),
+    )
+
+    res = service.onboard_project(inp)
+    assert res.status == ProjectOnboardingStatus.READY_FOR_WORK
+
+    head_sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=env["managed_target"], text=True
+    ).strip()
+    assert head_sha == c2_sha
+
+
+def test_safe_convergence_ahead_fails_closed(tmp_path):
+    """3. Existing managed repo ahead of remote fails closed leaving HEAD unchanged."""
+    from minime.domain.models import ProjectOnboardingInput
+    from minime.services.project_onboarding_service import ProjectOnboardingService
+
+    env = _setup_remote_and_managed(tmp_path, "proj-ahead")
+
+    managed = env["managed_target"]
+    (managed / "local_ahead.txt").write_text("Local ahead\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=managed, check=True)
+    subprocess.run(["git", "commit", "-m", "C_ahead"], cwd=managed, check=True, capture_output=True)
+    ahead_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=managed, text=True).strip()
+
+    uow = MockUOW()
+    service = ProjectOnboardingService(
+        uow=uow, project_root=env["runtime_root"], trusted_managed_root=env["trusted_root"]
+    )
+    worktrees_target = env["trusted_root"] / "worktrees" / "proj-ahead"
+
+    inp = ProjectOnboardingInput(
+        project_id="proj-ahead",
+        display_name="Ahead Project",
+        repository=str(env["remote_bare"]),
+        base_branch="main",
+        managed_repository_root=str(managed),
+        worktree_parent_dir=str(worktrees_target),
+    )
+
+    with pytest.raises(ValueError, match="is ahead of remote base branch tracking ref"):
+        service.onboard_project(inp)
+
+    head_sha_after = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=managed, text=True
+    ).strip()
+    assert head_sha_after == ahead_sha
+
+
+def test_safe_convergence_diverged_fails_closed(tmp_path):
+    """4. Existing managed repo with diverged history fails closed leaving HEAD unchanged."""
+    from minime.domain.models import ProjectOnboardingInput
+    from minime.services.project_onboarding_service import ProjectOnboardingService
+
+    env = _setup_remote_and_managed(tmp_path, "proj-diverged")
+
+    # Advance remote
+    seed = env["seed_dir"]
+    (seed / "remote_change.txt").write_text("Remote C2\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=seed, check=True)
+    subprocess.run(["git", "commit", "-m", "C2_remote"], cwd=seed, check=True, capture_output=True)
+    subprocess.run(["git", "push", "origin", "main"], cwd=seed, check=True, capture_output=True)
+
+    # Local commit on managed
+    managed = env["managed_target"]
+    (managed / "local_change.txt").write_text("Local C2\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=managed, check=True)
+    subprocess.run(["git", "commit", "-m", "C2_local"], cwd=managed, check=True, capture_output=True)
+    local_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=managed, text=True).strip()
+
+    uow = MockUOW()
+    service = ProjectOnboardingService(
+        uow=uow, project_root=env["runtime_root"], trusted_managed_root=env["trusted_root"]
+    )
+    worktrees_target = env["trusted_root"] / "worktrees" / "proj-diverged"
+
+    inp = ProjectOnboardingInput(
+        project_id="proj-diverged",
+        display_name="Diverged Project",
+        repository=str(env["remote_bare"]),
+        base_branch="main",
+        managed_repository_root=str(managed),
+        worktree_parent_dir=str(worktrees_target),
+    )
+
+    with pytest.raises(ValueError, match="have diverged"):
+        service.onboard_project(inp)
+
+    head_sha_after = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=managed, text=True
+    ).strip()
+    assert head_sha_after == local_sha
+
+
+def test_safe_convergence_dirty_tree_fails_closed(tmp_path):
+    """5. Existing managed repo with dirty working tree fails closed leaving HEAD unchanged."""
+    from minime.domain.models import ProjectOnboardingInput
+    from minime.services.project_onboarding_service import ProjectOnboardingService
+
+    env = _setup_remote_and_managed(tmp_path, "proj-dirty")
+
+    # Advance remote
+    seed = env["seed_dir"]
+    (seed / "remote_change.txt").write_text("Remote C2\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=seed, check=True)
+    subprocess.run(["git", "commit", "-m", "C2_remote"], cwd=seed, check=True, capture_output=True)
+    subprocess.run(["git", "push", "origin", "main"], cwd=seed, check=True, capture_output=True)
+
+    # Dirty working tree in managed
+    managed = env["managed_target"]
+    (managed / "uncommitted_code.py").write_text("# dirty code\n", encoding="utf-8")
+
+    uow = MockUOW()
+    service = ProjectOnboardingService(
+        uow=uow, project_root=env["runtime_root"], trusted_managed_root=env["trusted_root"]
+    )
+    worktrees_target = env["trusted_root"] / "worktrees" / "proj-dirty"
+
+    inp = ProjectOnboardingInput(
+        project_id="proj-dirty",
+        display_name="Dirty Project",
+        repository=str(env["remote_bare"]),
+        base_branch="main",
+        managed_repository_root=str(managed),
+        worktree_parent_dir=str(worktrees_target),
+    )
+
+    with pytest.raises(ValueError, match="working tree is dirty"):
+        service.onboard_project(inp)
+
+    head_sha_after = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=managed, text=True
+    ).strip()
+    assert head_sha_after == env["c1_sha"]
+
+
+def test_safe_convergence_wrong_remote_identity_fails_closed_before_mutation(tmp_path):
+    """6. Existing managed repo with wrong remote origin fails closed before any convergence mutation."""
+    from minime.domain.models import ProjectOnboardingInput
+    from minime.services.project_onboarding_service import ProjectOnboardingService
+
+    env = _setup_remote_and_managed(tmp_path, "proj-wrong-remote")
+
+    managed = env["managed_target"]
+    # Point origin URL to wrong repo
+    wrong_remote = tmp_path / "wrong_remote.git"
+    subprocess.run(["git", "remote", "set-url", "origin", str(wrong_remote)], cwd=managed, check=True)
+
+    uow = MockUOW()
+    service = ProjectOnboardingService(
+        uow=uow, project_root=env["runtime_root"], trusted_managed_root=env["trusted_root"]
+    )
+    worktrees_target = env["trusted_root"] / "worktrees" / "proj-wrong-remote"
+
+    inp = ProjectOnboardingInput(
+        project_id="proj-wrong-remote",
+        display_name="Wrong Remote Project",
+        repository=str(env["remote_bare"]),
+        base_branch="main",
+        managed_repository_root=str(managed),
+        worktree_parent_dir=str(worktrees_target),
+    )
+
+    with pytest.raises(ValueError, match="remote identity verification|remote mismatch"):
+        service.onboard_project(inp)
+
+    head_sha_after = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=managed, text=True
+    ).strip()
+    assert head_sha_after == env["c1_sha"]
+
+
+def test_safe_convergence_successful_resumed_bootstrap(tmp_path):
+    """7. Resumed bootstrap fast-forwards, verifies ownership marker, creates worktree parent, and saves binding."""
+    from minime.domain.enums import ProjectOnboardingStatus
+    from minime.domain.models import ProjectOnboardingInput
+    from minime.services.project_onboarding_service import ProjectOnboardingService
+
+    env = _setup_remote_and_managed(tmp_path, "owner-repo")
+
+    # Advance remote
+    seed = env["seed_dir"]
+    (seed / "feature.txt").write_text("New feature\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=seed, check=True)
+    subprocess.run(["git", "commit", "-m", "C2"], cwd=seed, check=True, capture_output=True)
+    subprocess.run(["git", "push", "origin", "main"], cwd=seed, check=True, capture_output=True)
+    c2_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=seed, text=True).strip()
+
+    uow = MockUOW()
+    service = ProjectOnboardingService(
+        uow=uow, project_root=env["runtime_root"], trusted_managed_root=env["trusted_root"]
+    )
+    managed = env["managed_target"]
+    worktrees_target = env["trusted_root"] / "worktrees" / "owner-repo"
+
+    inp = ProjectOnboardingInput(
+        project_id="owner-repo",
+        display_name="Resumed Project",
+        repository=str(env["remote_bare"]),
+        base_branch="main",
+        managed_repository_root=str(managed),
+        worktree_parent_dir=str(worktrees_target),
+    )
+
+    res = service.onboard_project(inp)
+    assert res.status == ProjectOnboardingStatus.READY_FOR_WORK
+
+    # 1. HEAD == origin/main == C2
+    head_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=managed, text=True).strip()
+    assert head_sha == c2_sha
+
+    # 2. Ownership marker verified
+    assert (managed / ".minime-managed-project.json").exists()
+
+    # 3. Worktree parent created
+    assert worktrees_target.exists()
+
+    # 4. Binding persisted
+    binding = uow.project_managed_repository_bindings.get_by_project_id("owner-repo")
+    assert binding is not None
+    assert binding.is_valid is True
