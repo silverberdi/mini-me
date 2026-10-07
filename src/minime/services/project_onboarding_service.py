@@ -392,7 +392,7 @@ class ProjectOnboardingService:
                 dirty_lines = [
                     line
                     for line in cp_status.stdout.splitlines()
-                    if line.strip() and not line.strip().endswith(marker_filename)
+                    if line.strip() and line[3:] != marker_filename
                 ]
                 if dirty_lines:
                     raise ValueError(
