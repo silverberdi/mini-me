@@ -11,6 +11,7 @@ from minime.domain.enums import (
     ExternalOutcome,
     ExternalReasonCode,
     QueuePriority,
+    ReadinessState,
     RetrySafety,
 )
 from minime.domain.models import (
@@ -323,7 +324,7 @@ def test_discovery_uses_managed_repository_root_for_readiness(
     readiness = MagicMock()
     readiness.evaluate_and_persist_change_readiness.return_value = MagicMock(
         is_ready=False,
-        status="NOT_READY",
+        status=ReadinessState.NOT_READY,
         unmet_reasons=["test blocker"],
     )
 
