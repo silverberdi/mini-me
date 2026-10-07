@@ -21,10 +21,10 @@ logger = logging.getLogger(__name__)
 
 # Canonical ChangeStatus transition matrix
 ALLOWED_CHANGE_TRANSITIONS: dict[ChangeStatus, set[ChangeStatus]] = {
-    ChangeStatus.DISCOVERED: {ChangeStatus.READY, ChangeStatus.BLOCKED, ChangeStatus.CANCELLED},
-    ChangeStatus.READY: {ChangeStatus.IN_PROGRESS, ChangeStatus.BLOCKED, ChangeStatus.CANCELLED},
+    ChangeStatus.DISCOVERED: {ChangeStatus.READY, ChangeStatus.BLOCKED, ChangeStatus.DONE, ChangeStatus.CANCELLED},
+    ChangeStatus.READY: {ChangeStatus.IN_PROGRESS, ChangeStatus.BLOCKED, ChangeStatus.DONE, ChangeStatus.CANCELLED},
     ChangeStatus.IN_PROGRESS: {ChangeStatus.BLOCKED, ChangeStatus.DONE, ChangeStatus.CANCELLED},
-    ChangeStatus.BLOCKED: {ChangeStatus.READY, ChangeStatus.IN_PROGRESS, ChangeStatus.CANCELLED},
+    ChangeStatus.BLOCKED: {ChangeStatus.READY, ChangeStatus.IN_PROGRESS, ChangeStatus.DONE, ChangeStatus.CANCELLED},
     ChangeStatus.DONE: set(),
     ChangeStatus.CANCELLED: set(),
 }

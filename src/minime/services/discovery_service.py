@@ -17,10 +17,12 @@ from minime.domain.enums import (
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
+    Project,
     ProjectBinding,
     WorkQueueItem,
     utc_now,
 )
+from minime.services.lifecycle_transition_authority import LifecycleTransitionAuthority
 from minime.services.readiness_service import ReadinessService
 
 logger = logging.getLogger(__name__)
@@ -78,6 +80,16 @@ class WorkDiscoveryService:
             github_adapter=self.github_adapter,
         )
 
+    def _resolve_project_root(self, project: Project) -> Path:
+        binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
+        if binding_repo:
+            binding = binding_repo.get_by_project_id(project.project_id)
+            if binding and binding.managed_repository_root:
+                b_root = Path(binding.managed_repository_root)
+                if b_root.exists() and b_root.is_dir():
+                    return b_root
+        return Path(self.project_root)
+
     def discover_work(self, project_id: str | None = None) -> list[WorkQueueItem]:
         """Discover, reconcile, and persist candidate work items across registered projects."""
         projects = self.uow.projects.list_all()
@@ -88,9 +100,12 @@ class WorkDiscoveryService:
         now = utc_now()
 
         for project in projects:
+            eff_root = self._resolve_project_root(project)
             # 1. Discover local OpenSpec changes on disk
             try:
-                changes = self.openspec_adapter.discover_changes(project, str(self.project_root))
+                changes = self.openspec_adapter.discover_changes(project, str(eff_root))
+                if not isinstance(changes, list):
+                    changes = OpenSpecAdapter().discover_changes(project, str(eff_root))
             except Exception as exc:
                 logger.warning(
                     f"Failed discovering OpenSpec changes for project '{project.project_id}': {exc}"
@@ -103,7 +118,7 @@ class WorkDiscoveryService:
                     self.uow.changes.save(change)
 
             # Reconcile archived changes in DB to ChangeStatus.DONE
-            archive_dir = Path(self.project_root) / project.openspec_path / "changes" / "archive"
+            archive_dir = eff_root / project.openspec_path / "changes" / "archive"
             archived_names: set[str] = set()
             if archive_dir.exists() and archive_dir.is_dir():
                 archived_names = {d.name for d in archive_dir.iterdir() if d.is_dir()}
@@ -120,15 +135,25 @@ class WorkDiscoveryService:
                         for a in archived_names
                     )
                     if is_archived:
-                        updated_change = db_change.model_copy(
-                            update={"status": ChangeStatus.DONE, "updated_at": now}
-                        )
-                        self.uow.changes.save(updated_change)
-                        old_queue_item = self.uow.work_queue.get_by_project_and_change(
-                            project.project_id, db_change.name
-                        )
-                        if old_queue_item:
-                            self.uow.work_queue.delete(old_queue_item.queue_item_id)
+                        authority = LifecycleTransitionAuthority(self.uow)
+                        try:
+                            authority.transition_change(
+                                project_id=project.project_id,
+                                name=db_change.name,
+                                expected_from_state=db_change.status,
+                                to_state=ChangeStatus.DONE,
+                                reason_code="archived_on_disk",
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                f"Failed transitioning archived change '{db_change.name}' to DONE: {exc}"
+                            )
+
+            # Reconcile stale work queue items: remove any queue item whose change is no longer active on disk
+            existing_queue_items = self.uow.work_queue.list_all(project.project_id)
+            for queue_item in existing_queue_items:
+                if queue_item.change_name not in active_change_names:
+                    self.uow.work_queue.delete(queue_item.queue_item_id)
 
             # 2. Fetch remote issues from repository
             remote_issues: list[dict[str, Any]] = []

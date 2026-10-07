@@ -7,14 +7,17 @@ from tests.conftest import InMemoryPersistenceUnitOfWork, create_isolated_opensp
 
 from minime.adapters.github import GitHubAdapter
 from minime.domain.enums import (
+    ChangeStatus,
     ExternalOutcome,
     ExternalReasonCode,
     QueuePriority,
     RetrySafety,
 )
 from minime.domain.models import (
+    Change,
     ExternalActionResult,
     Project,
+    WorkQueueItem,
 )
 from minime.services.discovery_service import (
     WorkDiscoveryService,
@@ -156,3 +159,102 @@ def test_discover_work_is_idempotent(tmp_path: Path, in_memory_uow: InMemoryPers
     assert len(items2) == 1
     assert items2[0].queue_item_id == items1[0].queue_item_id
     assert items2[0].discovered_at == discovered_at1
+
+
+def test_reconcile_active_archived_and_missing_changes(
+    tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork
+):
+    project = Project(
+        project_id="mini-me",
+        display_name="mini me",
+        repository="silverberdi/mini-me",
+        base_branch="main",
+    )
+    in_memory_uow.projects.save(project)
+
+    # 1. ACTIVE ON DISK change
+    create_isolated_openspec_change(tmp_path, change_name="001-active-change")
+    in_memory_uow.changes.save(
+        Change(project_id="mini-me", name="001-active-change", status=ChangeStatus.IN_PROGRESS)
+    )
+
+    # 2. ARCHIVED ON DISK change
+    archive_dir = tmp_path / "openspec" / "changes" / "archive" / "002-archived-change"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    in_memory_uow.changes.save(
+        Change(project_id="mini-me", name="002-archived-change", status=ChangeStatus.IN_PROGRESS)
+    )
+    in_memory_uow.work_queue.save(
+        WorkQueueItem(project_id="mini-me", change_name="002-archived-change")
+    )
+
+    # 3. MISSING FROM DISK change
+    in_memory_uow.changes.save(
+        Change(project_id="mini-me", name="003-missing-change", status=ChangeStatus.DISCOVERED)
+    )
+    in_memory_uow.work_queue.save(
+        WorkQueueItem(project_id="mini-me", change_name="003-missing-change")
+    )
+
+    discovery_service = WorkDiscoveryService(
+        uow=in_memory_uow,
+        project_root=tmp_path,
+    )
+
+    items = discovery_service.discover_work("mini-me")
+
+    # Queue should contain ONLY the active change item
+    assert len(items) == 1
+    assert items[0].change_name == "001-active-change"
+
+    # Archived change in DB should be marked DONE
+    archived_change = in_memory_uow.changes.get_by_name("mini-me", "002-archived-change")
+    assert archived_change is not None
+    assert archived_change.status == ChangeStatus.DONE
+
+    # Archived queue item removed
+    assert in_memory_uow.work_queue.get_by_project_and_change("mini-me", "002-archived-change") is None
+
+    # Missing change in DB retains its historical status (NOT DONE)
+    missing_change = in_memory_uow.changes.get_by_name("mini-me", "003-missing-change")
+    assert missing_change is not None
+    assert missing_change.status == ChangeStatus.DISCOVERED
+
+    # Missing queue item removed from active work queue
+    assert in_memory_uow.work_queue.get_by_project_and_change("mini-me", "003-missing-change") is None
+
+
+def test_stale_queue_cleanup_multi_project_isolation(
+    tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork
+):
+    project1 = Project(
+        project_id="mini-me", display_name="mini me", repository="repo1", base_branch="main"
+    )
+    project2 = Project(
+        project_id="other-project", display_name="other", repository="repo2", base_branch="main"
+    )
+    in_memory_uow.projects.save(project1)
+    in_memory_uow.projects.save(project2)
+
+    # Missing queue items for both projects
+    in_memory_uow.work_queue.save(
+        WorkQueueItem(project_id="mini-me", change_name="001-stale-p1")
+    )
+    in_memory_uow.work_queue.save(
+        WorkQueueItem(project_id="other-project", change_name="001-stale-p2")
+    )
+
+    discovery_service = WorkDiscoveryService(uow=in_memory_uow, project_root=tmp_path)
+
+    # Run discovery only for project1 ("mini-me")
+    items_p1 = discovery_service.discover_work("mini-me")
+    assert len(items_p1) == 0
+
+    # project1 stale queue item was removed
+    assert in_memory_uow.work_queue.get_by_project_and_change("mini-me", "001-stale-p1") is None
+
+    # project2 stale queue item remains untouched
+    assert (
+        in_memory_uow.work_queue.get_by_project_and_change("other-project", "001-stale-p2")
+        is not None
+    )
