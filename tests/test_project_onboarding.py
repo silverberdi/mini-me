@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -121,6 +122,83 @@ def test_registered_canonical_repository_identity_clones_from_github_com(
         ],
     ]
     assert in_memory_uow.project_managed_repository_bindings.get_by_project_id("mini-me") is None
+    assert in_memory_uow.jobs.list_active_jobs() == []
+    assert in_memory_uow.orchestration_runs.list_runs(is_active=True) == []
+
+
+def test_registered_canonical_identity_completes_onboarding_with_github_transport(
+    in_memory_uow: InMemoryPersistenceUnitOfWork, tmp_path: Path, monkeypatch
+) -> None:
+    """A GitHub transport must verify against the durable owner/repo identity."""
+    import subprocess
+
+    from tests.conftest import ReadinessGitHubStub
+
+    runtime_root = tmp_path / "runtime"
+    (runtime_root / "openspec").mkdir(parents=True)
+    trusted_root = tmp_path / "trusted"
+    trusted_root.mkdir()
+    managed_root = trusted_root / "mini-me"
+    monkeypatch.setenv("MINIME_RUNTIME_ROOT", str(runtime_root))
+    in_memory_uow.projects.save(
+        Project(
+            project_id="mini-me",
+            display_name="mini me",
+            repository="silverberdi/mini-me",
+            base_branch="main",
+            openspec_path="openspec",
+            implementer="codex",
+            reviewer="antigravity",
+        )
+    )
+
+    clone_commands: list[list[str]] = []
+
+    def simulated_git(command: list[str], cwd=None, **kwargs) -> subprocess.CompletedProcess[str]:
+        if command[:2] == ["git", "clone"]:
+            clone_commands.append(command)
+            Path(command[-1], ".git").mkdir(parents=True)
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command == ["git", "rev-parse", "HEAD"]:
+            return subprocess.CompletedProcess(command, 0, stdout="candidate-sha\n", stderr="")
+        if command == ["git", "rev-parse", "origin/main"]:
+            return subprocess.CompletedProcess(command, 0, stdout="candidate-sha\n", stderr="")
+        if command == ["git", "rev-parse", "--show-toplevel"]:
+            return subprocess.CompletedProcess(command, 0, stdout=f"{managed_root}\n", stderr="")
+        if command == ["git", "remote", "get-url", "origin"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout="https://github.com/silverberdi/mini-me.git\n",
+                stderr="",
+            )
+        raise AssertionError(f"Unexpected subprocess command: {command}")
+
+    monkeypatch.setattr(subprocess, "run", simulated_git)
+    result = ProjectOnboardingService(
+        in_memory_uow,
+        project_root=runtime_root,
+        github_adapter=ReadinessGitHubStub(),
+        trusted_managed_root=trusted_root,
+    ).onboard_project(
+        ProjectOnboardingInput(
+            project_id="mini-me",
+            display_name="mini me",
+            repository="silverberdi/mini-me",
+            base_branch="main",
+            openspec_path="openspec",
+            implementer="codex",
+            reviewer="antigravity",
+        )
+    )
+
+    binding = in_memory_uow.project_managed_repository_bindings.get_by_project_id("mini-me")
+    assert result.status == ProjectOnboardingStatus.READY_FOR_WORK
+    assert clone_commands[0][4] == "https://github.com/silverberdi/mini-me.git"
+    assert binding is not None
+    assert binding.canonical_repository_identity == "silverberdi/mini-me"
+    marker = managed_root / ".minime-managed-project.json"
+    assert json.loads(marker.read_text())["canonical_repository_identity"] == "silverberdi/mini-me"
     assert in_memory_uow.jobs.list_active_jobs() == []
     assert in_memory_uow.orchestration_runs.list_runs(is_active=True) == []
 
