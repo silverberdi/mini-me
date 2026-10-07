@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import subprocess
 from typing import Any
 
@@ -20,6 +19,7 @@ from minime.domain.models import (
     WorkspaceMutationDecision,
     WorkspaceMutationRequest,
 )
+from minime.services.repository_identity import normalize_repository_identity
 
 logger = logging.getLogger(__name__)
 
@@ -41,28 +41,6 @@ def is_binding_fully_valid(binding: Any) -> bool:
     if not str(getattr(binding, "remote_name", "") or "").strip():
         return False
     return True
-
-
-def normalize_repository_identity(repo: str) -> str:
-    """Normalize repository URLs/names into canonical 'host/owner/repo' or 'owner/repo' representation preserving host."""
-    cleaned = repo.strip()
-    if not cleaned:
-        return ""
-
-    if cleaned.endswith(".git"):
-        cleaned = cleaned[:-4]
-
-    ssh_match = re.match(r"^git@([^:]+):([^/]+)/(.+)$", cleaned)
-    if ssh_match:
-        host, owner, repository = ssh_match.group(1), ssh_match.group(2), ssh_match.group(3)
-        return f"{host}/{owner}/{repository}".lower()
-
-    url_match = re.match(r"^(?:https?|ssh)://(?:[^@]+@)?([^:/]+)(?::\d+)?/([^/]+)/(.+)$", cleaned)
-    if url_match:
-        host, owner, repository = url_match.group(1), url_match.group(2), url_match.group(3)
-        return f"{host}/{owner}/{repository}".lower()
-
-    return cleaned.lower()
 
 
 class ManagedWorkspaceGuard:

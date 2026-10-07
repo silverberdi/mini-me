@@ -299,15 +299,12 @@ def tmp_dirs():
 
 
 def test_repository_identity_normalization():
-    assert normalize_repository_identity("https://github.com/org/repo.git") in (
-        "org/repo",
-        "github.com/org/repo",
-    )
-    assert normalize_repository_identity("git@github.com:org/repo.git") in (
-        "org/repo",
-        "github.com/org/repo",
-    )
+    assert normalize_repository_identity("https://github.com/org/repo.git") == "org/repo"
+    assert normalize_repository_identity("git@github.com:org/repo.git") == "org/repo"
     assert normalize_repository_identity("org/repo") == "org/repo"
+    assert normalize_repository_identity("https://gitlab.example.com/org/repo.git") == (
+        "gitlab.example.com/org/repo"
+    )
 
 
 def test_guard_runtime_protection(tmp_dirs):
@@ -2085,16 +2082,43 @@ def test_supplied_false_run_id_and_change_name_rejected(tmp_dirs):
 
 
 def test_remote_identity_host_sensitive():
-    assert normalize_repository_identity("git@github.com:org/repo.git") == "github.com/org/repo"
-    assert normalize_repository_identity("https://github.com/org/repo.git") == "github.com/org/repo"
-    assert (
-        normalize_repository_identity("ssh://git@github.com/org/repo.git") == "github.com/org/repo"
-    )
+    assert normalize_repository_identity("git@github.com:org/repo.git") == "org/repo"
+    assert normalize_repository_identity("https://github.com/org/repo.git") == "org/repo"
+    assert normalize_repository_identity("ssh://git@github.com/org/repo.git") == "org/repo"
     assert normalize_repository_identity("git@evil.example:org/repo.git") == "evil.example/org/repo"
 
     assert normalize_repository_identity(
         "git@github.com:org/repo.git"
     ) != normalize_repository_identity("git@evil.example:org/repo.git")
+
+
+def test_github_remote_and_marker_accept_durable_owner_repository_identity(tmp_dirs):
+    guard = ManagedWorkspaceGuard(MockUOW())
+
+    valid, reason = guard.verify_git_repository_identity(
+        tmp_dirs["repo_root"], "org/repo", remote_name="origin"
+    )
+    assert valid is True, reason
+
+    valid_marker, marker_reason, _, _ = guard.verify_managed_repository_ownership_marker(
+        tmp_dirs["repo_root"], "test-proj", "org/repo"
+    )
+    assert valid_marker is True, marker_reason
+
+
+def test_non_github_remote_does_not_match_durable_owner_repository_identity(tmp_dirs):
+    subprocess.run(
+        ["git", "remote", "set-url", "origin", "https://gitlab.example.com/org/repo.git"],
+        cwd=tmp_dirs["repo_root"],
+        check=True,
+    )
+    guard = ManagedWorkspaceGuard(MockUOW())
+
+    valid, reason = guard.verify_git_repository_identity(
+        tmp_dirs["repo_root"], "org/repo", remote_name="origin"
+    )
+    assert valid is False
+    assert "remote mismatch" in reason
 
 
 def test_synthetic_run_id_fallback_rejected_when_job_run_id_empty(tmp_dirs):
@@ -4553,6 +4577,8 @@ def test_onboard_project_establishes_real_remote_checkout_and_uses_guard_authori
 
 def test_onboard_project_guard_denial_prevents_mutation(tmp_path):
     """Verify ManagedWorkspaceGuard denial prevents disk creation, marker creation, and binding persistence."""
+    from tests.conftest import ReadinessGitHubStub
+
     from minime.domain.models import ProjectOnboardingInput
     from minime.services.project_onboarding_service import ProjectOnboardingService
 
@@ -4562,7 +4588,10 @@ def test_onboard_project_guard_denial_prevents_mutation(tmp_path):
     trusted_root = tmp_path / "trusted"
 
     service = ProjectOnboardingService(
-        uow=uow, project_root=runtime_root, trusted_managed_root=trusted_root
+        uow=uow,
+        project_root=runtime_root,
+        trusted_managed_root=trusted_root,
+        github_adapter=ReadinessGitHubStub(),
     )
 
     escaped_target = tmp_path / "unauthorized_escape_dir"
@@ -4570,7 +4599,7 @@ def test_onboard_project_guard_denial_prevents_mutation(tmp_path):
     onboard_input = ProjectOnboardingInput(
         project_id="proj-denied",
         display_name="Denied Project",
-        repository="github.com/org/repo",
+        repository="org/repo",
         base_branch="main",
         managed_repository_root=str(escaped_target),
         worktree_parent_dir=str(trusted_root / "worktrees"),
@@ -4619,6 +4648,8 @@ def test_onboard_project_unobservable_remote_fails_closed(tmp_path):
 
 def test_onboard_project_rejects_runtime_collision(tmp_path):
     """Verify onboarding fails closed when target repository overlaps runtime root."""
+    from tests.conftest import ReadinessGitHubStub
+
     from minime.domain.models import ProjectOnboardingInput
     from minime.services.project_onboarding_service import ProjectOnboardingService
 
@@ -4628,13 +4659,16 @@ def test_onboard_project_rejects_runtime_collision(tmp_path):
     trusted_root = tmp_path / "trusted"
 
     service = ProjectOnboardingService(
-        uow=uow, project_root=runtime_root, trusted_managed_root=trusted_root
+        uow=uow,
+        project_root=runtime_root,
+        trusted_managed_root=trusted_root,
+        github_adapter=ReadinessGitHubStub(),
     )
 
     onboard_input = ProjectOnboardingInput(
         project_id="proj-collision",
         display_name="Collision Project",
-        repository="github.com/test-org/collision-repo",
+        repository="test-org/collision-repo",
         base_branch="main",
         managed_repository_root=str(runtime_root / "nested"),
         worktree_parent_dir=str(trusted_root / "worktrees"),

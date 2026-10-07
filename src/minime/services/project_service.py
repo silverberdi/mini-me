@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import re
 from typing import Any
 
 from minime.domain.enums import EventType, ProjectStatus
@@ -12,41 +11,19 @@ from minime.domain.interfaces import (
 )
 from minime.domain.models import Event, Project, utc_now
 from minime.logging import get_logger, set_correlation_context
+from minime.services.repository_identity import (
+    normalize_repository_identity as _normalize_repository_identity,
+)
 
 logger = get_logger("services.project")
 
 
 def normalize_repository_identity(repo_input: str) -> str:
-    """Normalize repository URLs/names into canonical 'owner/repo' or trimmed local path.
-
-    Supports:
-    - https://github.com/owner/repo(.git) -> owner/repo
-    - git@github.com:owner/repo(.git) -> owner/repo
-    - ssh://git@github.com/owner/repo(.git) -> owner/repo
-    - owner/repo -> owner/repo
-    - /path/to/repo -> /path/to/repo
-    """
-    cleaned = repo_input.strip()
-    if not cleaned:
+    """Normalize repository input using the shared host-sensitive identity rule."""
+    normalized = _normalize_repository_identity(repo_input)
+    if not normalized:
         raise ValueError("Repository identifier cannot be empty.")
-
-    # Match git@github.com:owner/repo(.git)
-    ssh_match = re.match(r"^git@[^:]+:([^/]+)/(.+?)(?:\.git)?$", cleaned)
-    if ssh_match:
-        return f"{ssh_match.group(1)}/{ssh_match.group(2)}"
-
-    # Match https://... or ssh://...
-    url_match = re.match(r"^(?:https?|ssh)://[^/]+/([^/]+)/(.+?)(?:\.git)?$", cleaned)
-    if url_match:
-        return f"{url_match.group(1)}/{url_match.group(2)}"
-
-    # Match simple owner/repo
-    simple_match = re.match(r"^([a-zA-Z0-9_\-\.]+)/([a-zA-Z0-9_\-\.]+)$", cleaned)
-    if simple_match:
-        return cleaned
-
-    # Fallback to absolute or relative path for local repositories
-    return cleaned
+    return normalized
 
 
 def validate_complementary_roles(implementer: str, reviewer: str) -> None:
