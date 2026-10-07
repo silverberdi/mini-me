@@ -17,6 +17,7 @@ from minime.domain.enums import (
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
+    Project,
     ProjectBinding,
     WorkQueueItem,
     utc_now,
@@ -78,6 +79,16 @@ class WorkDiscoveryService:
             github_adapter=self.github_adapter,
         )
 
+    def _resolve_project_root(self, project: Project) -> Path:
+        binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
+        if binding_repo:
+            binding = binding_repo.get_by_project_id(project.project_id)
+            if binding and binding.managed_repository_root:
+                b_root = Path(binding.managed_repository_root)
+                if b_root.exists() and b_root.is_dir():
+                    return b_root
+        return Path(self.project_root)
+
     def discover_work(self, project_id: str | None = None) -> list[WorkQueueItem]:
         """Discover, reconcile, and persist candidate work items across registered projects."""
         projects = self.uow.projects.list_all()
@@ -88,9 +99,10 @@ class WorkDiscoveryService:
         now = utc_now()
 
         for project in projects:
+            eff_root = self._resolve_project_root(project)
             # 1. Discover local OpenSpec changes on disk
             try:
-                changes = self.openspec_adapter.discover_changes(project, str(self.project_root))
+                changes = self.openspec_adapter.discover_changes(project, str(eff_root))
             except Exception as exc:
                 logger.warning(
                     f"Failed discovering OpenSpec changes for project '{project.project_id}': {exc}"
@@ -102,33 +114,21 @@ class WorkDiscoveryService:
                 if not existing_change:
                     self.uow.changes.save(change)
 
-            # Reconcile archived changes in DB to ChangeStatus.DONE
-            archive_dir = Path(self.project_root) / project.openspec_path / "changes" / "archive"
-            archived_names: set[str] = set()
-            if archive_dir.exists() and archive_dir.is_dir():
-                archived_names = {d.name for d in archive_dir.iterdir() if d.is_dir()}
-
+            # Reconcile the active queue projection without mutating canonical Change lifecycle.
+            # Discovery is a pure observer of lifecycle state: missing/archived changes and terminal
+            # DONE/CANCELLED changes must not remain schedulable queue entries.
             active_change_names = {c.name for c in changes}
-            all_db_changes = self.uow.changes.list_by_project(project.project_id)
-            for db_change in all_db_changes:
-                if (
-                    db_change.name not in active_change_names
-                    and db_change.status != ChangeStatus.DONE
-                ):
-                    is_archived = db_change.name in archived_names or any(
-                        a == db_change.name or a.endswith(f"-{db_change.name}")
-                        for a in archived_names
-                    )
-                    if is_archived:
-                        updated_change = db_change.model_copy(
-                            update={"status": ChangeStatus.DONE, "updated_at": now}
-                        )
-                        self.uow.changes.save(updated_change)
-                        old_queue_item = self.uow.work_queue.get_by_project_and_change(
-                            project.project_id, db_change.name
-                        )
-                        if old_queue_item:
-                            self.uow.work_queue.delete(old_queue_item.queue_item_id)
+            existing_queue_items = self.uow.work_queue.list_all(project.project_id)
+            for queue_item in existing_queue_items:
+                durable_change = self.uow.changes.get_by_name(
+                    project.project_id, queue_item.change_name
+                )
+                is_terminal = (
+                    durable_change is not None
+                    and durable_change.status in (ChangeStatus.DONE, ChangeStatus.CANCELLED)
+                )
+                if queue_item.change_name not in active_change_names or is_terminal:
+                    self.uow.work_queue.delete(queue_item.queue_item_id)
 
             # 2. Fetch remote issues from repository
             remote_issues: list[dict[str, Any]] = []
@@ -141,9 +141,22 @@ class WorkDiscoveryService:
                     f"Remote issue discovery unavailable for '{project.repository}': {exc}"
                 )
 
-            # 3. For each active OpenSpec change, reconcile binding and queue status
+            # 3. For each active, non-terminal OpenSpec change, reconcile binding and queue status.
+            # A terminal DB Change remains terminal even if its planning directory is still present.
             for change in changes:
                 change_name = change.name
+                durable_change = self.uow.changes.get_by_name(project.project_id, change_name)
+                if durable_change and durable_change.status in (
+                    ChangeStatus.DONE,
+                    ChangeStatus.CANCELLED,
+                ):
+                    terminal_queue_item = self.uow.work_queue.get_by_project_and_change(
+                        project.project_id, change_name
+                    )
+                    if terminal_queue_item:
+                        self.uow.work_queue.delete(terminal_queue_item.queue_item_id)
+                    continue
+
                 stage_num = extract_roadmap_stage(change_name)
 
                 # Reconcile binding
@@ -193,7 +206,7 @@ class WorkDiscoveryService:
                 readiness_eval = self.readiness_service.evaluate_and_persist_change_readiness(
                     project_id=project.project_id,
                     change_name=change_name,
-                    project_root=str(self.project_root),
+                    project_root=str(eff_root),
                     github_repo=project.repository,
                     github_issue=matched_issue_number,
                 )
