@@ -15,6 +15,8 @@ from pydantic import BaseModel, Field
 
 from minime.local_worker.model_identity import OLLAMA_PROVIDER
 
+DEFAULT_CONTEXT_BUDGET_CHARS: int = 12000
+
 
 class LocalTaskClass(str, Enum):
     """Canonical LOW-risk task classes for the local worker."""

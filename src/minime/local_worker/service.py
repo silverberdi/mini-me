@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 
 from minime.domain.enums import ProviderResultClass
+from minime.local_worker.context_packager import package_task_context
 from minime.local_worker.harness import LocalWorkerHarness
 from minime.local_worker.model_identity import (
     LOCAL_WORKER_ROLE,
@@ -21,6 +22,7 @@ from minime.local_worker.model_identity import (
     local_qwen_model_identity,
 )
 from minime.local_worker.models import (
+    DEFAULT_CONTEXT_BUDGET_CHARS,
     LOCAL_WORKER_RESPONSE_SCHEMA,
     EscalationDecision,
     EscalationTarget,
@@ -93,6 +95,34 @@ class LocalWorkerService:
         if preflight.status is not PreflightStatus.READY:
             return ServiceOutcome(eligibility, preflight, _preflight_failed_evidence(preflight))
 
+        effective_task = task
+        if worktree_path:
+            pkg_res = package_task_context(
+                instruction=task.instruction,
+                task_class=task.task_class,
+                allowed_files=task.allowed_files,
+                worktree_path=worktree_path,
+                max_budget_chars=DEFAULT_CONTEXT_BUDGET_CHARS,
+            )
+            if pkg_res.success and pkg_res.context:
+                effective_task = task.model_copy(update={"context": pkg_res.context})
+            elif task.context and len(task.context) <= DEFAULT_CONTEXT_BUDGET_CHARS:
+                effective_task = task
+            else:
+                # FAIL CLOSED: Do NOT call adapter.generate(); escalate with CONTEXT_NOT_READY evidence
+                return ServiceOutcome(
+                    eligibility,
+                    preflight,
+                    _context_not_ready_evidence(task, pkg_res.status, self.model),
+                )
+        elif task.context and len(task.context) > DEFAULT_CONTEXT_BUDGET_CHARS:
+            # FAIL CLOSED: Oversized caller context exceeds canonical hard budget
+            return ServiceOutcome(
+                eligibility,
+                preflight,
+                _context_not_ready_evidence(task, "CALLER_CONTEXT_EXCEEDS_BUDGET", self.model),
+            )
+
         async def bounded_dispatch(
             envelope: LocalTaskEnvelope, attempt: int, corrective_reason: str | None = None
         ) -> str:
@@ -130,7 +160,7 @@ class LocalWorkerService:
         self.harness._cleanup = None
         try:
             evidence = await self.harness.run(
-                task,
+                effective_task,
                 validator=validator,
                 worktree_path=worktree_path,
                 uow=uow,
@@ -209,4 +239,24 @@ def _unexpected_failure_evidence(task_class: str) -> LocalExecutionEvidence:
         result_class="UNEXPECTED_FAILURE",
         validation_result=LocalValidationVerdict.FAIL,
         escalation=_escalate("Unexpected local worker failure; escalate"),
+    )
+
+
+def _context_not_ready_evidence(
+    task: LocalTaskEnvelope,
+    status: str,
+    model: str,
+) -> LocalExecutionEvidence:
+    task_cls_str = task.task_class.value if hasattr(task.task_class, "value") else str(task.task_class)
+    return LocalExecutionEvidence(
+        provider=OLLAMA_PROVIDER,
+        model=model,
+        task_class=task_cls_str,
+        attempt=0,
+        result=LocalResultKind.UNCERTAIN,
+        result_class="CONTEXT_NOT_READY",
+        validation_result=LocalValidationVerdict.NOT_APPLICABLE,
+        escalation=_escalate(f"Context packaging for local worker failed: {status}"),
+        summary=f"Context packaging failed: {status}",
+        model_output_failure_reason=f"Context packaging status: {status}",
     )
