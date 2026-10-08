@@ -25,7 +25,9 @@ from minime.domain.models import (
     OrchestrationCandidate,
     OrchestrationRun,
     Project,
+    ProjectManagedRepositoryBinding,
 )
+from minime.services.dashboard_service import OperationsDashboardService
 from minime.services.saga_engine import SagaEngine
 
 
@@ -127,6 +129,74 @@ def pg_engine() -> Generator[Engine, None, None]:
 @pytest.fixture
 def pg_session_factory(pg_engine: Engine) -> sessionmaker[Session]:
     return sessionmaker(bind=pg_engine, autoflush=False, expire_on_commit=False)
+
+
+def test_project_managed_repository_binding_list_all_contract(
+    pg_session_factory: sessionmaker[Session],
+):
+    """PostgreSQL managed-binding repository matches the dashboard read contract."""
+    with pg_session_factory() as session:
+        uow = PostgresPersistenceUnitOfWork(session)
+        assert uow.project_managed_repository_bindings.list_all() == []
+
+        for project_id in ("project-b", "project-a"):
+            uow.projects.save(
+                Project(
+                    project_id=project_id,
+                    display_name=project_id,
+                    repository=f"owner/{project_id}",
+                    base_branch="main",
+                )
+            )
+            uow.project_managed_repository_bindings.save(
+                ProjectManagedRepositoryBinding(
+                    project_id=project_id,
+                    canonical_repository_identity=f"github.com/owner/{project_id}",
+                    managed_repository_root=f"/managed/{project_id}",
+                    worktree_parent_dir=f"/managed/{project_id}/.minime/worktrees",
+                    is_valid=True,
+                )
+            )
+        uow.commit()
+
+        bindings = uow.project_managed_repository_bindings.list_all()
+
+    assert [binding.project_id for binding in bindings] == ["project-a", "project-b"]
+    assert all(isinstance(binding, ProjectManagedRepositoryBinding) for binding in bindings)
+    assert bindings[0].canonical_repository_identity == "github.com/owner/project-a"
+
+
+def test_dashboard_overview_with_postgres_managed_bindings(
+    pg_session_factory: sessionmaker[Session],
+):
+    """Production-style dashboard UoW can project managed bindings without AttributeError."""
+    with pg_session_factory() as session:
+        uow = PostgresPersistenceUnitOfWork(session)
+        project_id = "dashboard-binding-project"
+        uow.projects.save(
+            Project(
+                project_id=project_id,
+                display_name="Dashboard Binding Project",
+                repository="owner/dashboard-binding-project",
+                base_branch="main",
+            )
+        )
+        uow.project_managed_repository_bindings.save(
+            ProjectManagedRepositoryBinding(
+                project_id=project_id,
+                canonical_repository_identity="github.com/owner/dashboard-binding-project",
+                managed_repository_root="/managed/dashboard-binding-project",
+                worktree_parent_dir="/managed/dashboard-binding-project/.minime/worktrees",
+                is_valid=True,
+            )
+        )
+        uow.commit()
+
+        overview = OperationsDashboardService(uow).get_overview()
+
+    assert project_id in {
+        project.project_id for project in overview.system_status.managed_projects
+    }
 
 
 def test_t06_saga_resume_row_locking(pg_session_factory: sessionmaker[Session]):
@@ -739,4 +809,3 @@ def test_f18_resolve_preserved_candidate_concurrency(pg_session_factory: session
             assert final_job.candidate_sha == latest_cand.candidate_sha, "Job candidate_sha must match latest integrated candidate"
     finally:
         shutil.rmtree(repo, ignore_errors=True)
-

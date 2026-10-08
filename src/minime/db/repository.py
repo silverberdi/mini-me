@@ -4949,6 +4949,13 @@ class PostgresProjectManagedRepositoryBindingRepository(
             )
             self.session.add(model)
 
+    def list_all(self) -> list[ProjectManagedRepositoryBinding]:
+        stmt = select(ProjectManagedRepositoryBindingModel).order_by(
+            ProjectManagedRepositoryBindingModel.project_id
+        )
+        models = self.session.scalars(stmt).all()
+        return [project_managed_repository_binding_model_to_domain(model) for model in models]
+
     def get_by_project_id(self, project_id: str) -> ProjectManagedRepositoryBinding | None:
         stmt = select(ProjectManagedRepositoryBindingModel).where(
             ProjectManagedRepositoryBindingModel.project_id == project_id
