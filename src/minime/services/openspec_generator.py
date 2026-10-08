@@ -32,7 +32,34 @@ class GeneratedOpenSpec:
     human_questions: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class OpenSpecArtifactManifest:
+    change_name: str
+    files: tuple[str, ...]
+
+
 class OpenSpecGenerator:
+    def build_artifact_manifest(self, generated: GeneratedOpenSpec) -> OpenSpecArtifactManifest:
+        files = ["proposal.md", "tasks.md"]
+        if generated.design_content:
+            files.append("design.md")
+        files.extend(generated.specs)
+        normalized: list[str] = []
+        for value in files:
+            path = Path(value)
+            if not value or path.is_absolute() or ".." in path.parts or path.name in {"", "."}:
+                raise ValueError(f"Unsafe OpenSpec artifact path: {value!r}")
+            posix = path.as_posix()
+            if posix in normalized:
+                raise ValueError(f"Duplicate OpenSpec artifact path: {posix}")
+            normalized.append(posix)
+        return OpenSpecArtifactManifest(generated.change_name, tuple(normalized))
+
+    def _build_artifact_contents(self, generated: GeneratedOpenSpec) -> dict[str, str]:
+        contents = {"proposal.md": generated.proposal_content, "tasks.md": generated.tasks_content, **generated.specs}
+        if generated.design_content:
+            contents["design.md"] = generated.design_content
+        return contents
     """Generates standard canonical OpenSpec artifacts from normalized backlog items."""
 
     def __init__(
@@ -238,8 +265,12 @@ class OpenSpecGenerator:
                 f"OpenSpec write denied: change directory '{target_dir}' escapes OpenSpec root '{openspec_root}'."
             )
 
-        # Validate spec relative paths
-        for rel_spec_path in generated.specs.keys():
+        manifest = self.build_artifact_manifest(generated)
+        contents = self._build_artifact_contents(generated)
+        if set(contents) != set(manifest.files):
+            raise RuntimeError("OpenSpec manifest/writer content mismatch")
+        # Validate canonical relative artifact paths
+        for rel_spec_path in manifest.files:
             if Path(rel_spec_path).is_absolute() or ".." in Path(rel_spec_path).parts:
                 raise RuntimeError(
                     f"OpenSpec write denied: spec relative path '{rel_spec_path}' fails path confinement check."
@@ -259,22 +290,8 @@ class OpenSpecGenerator:
         guard = ManagedWorkspaceGuard(eff_uow)
 
         # 1. Precompute ALL intended mutation target destinations BEFORE any filesystem mutation
-        proposal_file = target_dir / "proposal.md"
-        tasks_file = target_dir / "tasks.md"
-        design_file = target_dir / "design.md"
-
         intended_targets: list[Path] = [target_dir]
-
-        if overwrite or not proposal_file.exists():
-            intended_targets.append(proposal_file)
-
-        if overwrite or not tasks_file.exists():
-            intended_targets.append(tasks_file)
-
-        if generated.design_content and (overwrite or not design_file.exists()):
-            intended_targets.append(design_file)
-
-        for rel_spec_path in generated.specs.keys():
+        for rel_spec_path in manifest.files:
             spec_file = target_dir / rel_spec_path
             if overwrite or not spec_file.exists():
                 intended_targets.append(spec_file.parent)
@@ -332,16 +349,7 @@ class OpenSpecGenerator:
         # 3. ONLY THEN perform actual filesystem writes
         target_dir.mkdir(parents=True, exist_ok=True)
 
-        if overwrite or not proposal_file.exists():
-            proposal_file.write_text(generated.proposal_content, encoding="utf-8")
-
-        if overwrite or not tasks_file.exists():
-            tasks_file.write_text(generated.tasks_content, encoding="utf-8")
-
-        if generated.design_content and (overwrite or not design_file.exists()):
-            design_file.write_text(generated.design_content, encoding="utf-8")
-
-        for rel_spec_path, spec_text in generated.specs.items():
+        for rel_spec_path, spec_text in contents.items():
             spec_file = target_dir / rel_spec_path
             spec_file.parent.mkdir(parents=True, exist_ok=True)
             if overwrite or not spec_file.exists():

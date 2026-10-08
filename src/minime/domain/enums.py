@@ -512,8 +512,16 @@ class ExternalActionType(str, Enum):
     WORKTREE_DELETE = "WORKTREE_DELETE"
     OPENSPEC_SYNC = "OPENSPEC_SYNC"
     OPENSPEC_ARCHIVE = "OPENSPEC_ARCHIVE"
+    OPENSPEC_ROLLBACK = "OPENSPEC_ROLLBACK"
     DEPLOY_EXECUTE = "DEPLOY_EXECUTE"
     SERVICE_RESTART = "SERVICE_RESTART"
+
+
+class IntakeReconciliationDisposition(str, Enum):
+    """The only safe dispositions for a previously prepared intake item."""
+
+    INVALID_DISCOVERY = "INVALID_DISCOVERY"
+    DEFERRED_ROADMAP = "DEFERRED_ROADMAP"
 
 
 class PullRequestLookupState(str, Enum):
@@ -842,4 +850,3 @@ class ExternalActionObservation(str, Enum):
 
     PROVEN_NEVER_DISPATCHED = "PROVEN_NEVER_DISPATCHED"
     POSSIBLY_DISPATCHED = "POSSIBLY_DISPATCHED"
-
