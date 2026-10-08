@@ -305,23 +305,71 @@ class LocalPatchApplier:
                 error=f"Workspace mutation denied: {decision.provider_detail or 'Not an EXECUTION_WORKTREE'}",
             )
 
-        # 2. Durable OrchestrationWorktreeOwnership verification in UoW
+        # 2. Binding and topology boundary verification
+        binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
+        binding = binding_repo.get_by_project_id(project_id) if binding_repo else None
+        if (
+            not binding
+            or not getattr(binding, "managed_repository_root", None)
+            or not getattr(binding, "worktree_parent_dir", None)
+        ):
+            return PatchApplicationResult(
+                success=False,
+                error=f"Valid ProjectManagedRepositoryBinding missing for project_id '{project_id}'.",
+            )
+
+        runtime_root = os.path.realpath(guard.runtime_root)
+        managed_root = os.path.realpath(binding.managed_repository_root)
+        worktree_parent = os.path.realpath(binding.worktree_parent_dir)
+        resolved_target = str(target_dir)
+
+        # 2a. Runtime checkout protection (equality, containment, or overlap)
+        if (
+            resolved_target == runtime_root
+            or guard._is_path_inside(resolved_target, runtime_root)
+            or guard._paths_overlap(resolved_target, runtime_root)
+        ):
+            return PatchApplicationResult(
+                success=False, error="Refusing to mutate runtime checkout directly."
+            )
+
+        # 2b. Managed repository root itself is strictly immutable
+        if resolved_target == managed_root:
+            return PatchApplicationResult(
+                success=False, error="Refusing to mutate managed repository directly."
+            )
+
+        # 2c. Target path must be inside (or equal to) the configured worktree_parent_dir
+        if not (
+            guard._is_path_inside(resolved_target, worktree_parent)
+            or resolved_target == worktree_parent
+        ):
+            if guard._is_path_inside(resolved_target, managed_root):
+                return PatchApplicationResult(
+                    success=False, error="Refusing to mutate managed repository directly."
+                )
+            return PatchApplicationResult(
+                success=False,
+                error=f"Target worktree path '{resolved_target}' is outside configured worktree parent directory '{worktree_parent}'.",
+            )
+
+        # 3. Durable OrchestrationWorktreeOwnership verification in UoW
         ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None)
         if not ownership_repo:
             return PatchApplicationResult(
                 success=False, error="orchestration_worktree_ownerships repository missing in uow."
             )
 
-        ownership = ownership_repo.get_by_canonical_path(str(target_dir))
+        ownership = ownership_repo.get_by_canonical_path(resolved_target)
         if not ownership and hasattr(ownership_repo, "get_by_job_id"):
             cand = ownership_repo.get_by_job_id(job_id)
-            if cand and str(Path(cand.canonical_worktree_path).resolve()) == str(target_dir):
+            if cand and os.path.realpath(cand.canonical_worktree_path) == resolved_target:
                 ownership = cand
 
         if not ownership:
             return PatchApplicationResult(
                 success=False,
-                error=f"Durable OrchestrationWorktreeOwnership missing for '{target_dir}'.",
+                error=f"Durable OrchestrationWorktreeOwnership missing for '{resolved_target}'.",
             )
 
         if ownership.project_id != project_id:
@@ -336,21 +384,20 @@ class LocalPatchApplier:
                 error=f"Ownership job_id mismatch: observed '{ownership.job_id}', expected '{job_id}'.",
             )
 
-        if getattr(ownership, "has_synthetic_placeholder", False):
-            return PatchApplicationResult(
-                success=False, error=f"Ownership at '{target_dir}' has synthetic placeholder."
-            )
-
-        # 3. On-disk .minime_worktree_ownership.json verification via WorktreeManager
-        from minime.services.worktree_manager import WorktreeManager
-
-        binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
-        binding = binding_repo.get_by_project_id(project_id) if binding_repo else None
-        if not binding or not getattr(binding, "managed_repository_root", None):
+        ownership_canonical = os.path.realpath(ownership.canonical_worktree_path)
+        if ownership_canonical != resolved_target:
             return PatchApplicationResult(
                 success=False,
-                error=f"Valid ProjectManagedRepositoryBinding missing for project_id '{project_id}'.",
+                error=f"Ownership canonical path mismatch: observed '{ownership_canonical}', expected '{resolved_target}'.",
             )
+
+        if getattr(ownership, "has_synthetic_placeholder", False):
+            return PatchApplicationResult(
+                success=False, error=f"Ownership at '{resolved_target}' has synthetic placeholder."
+            )
+
+        # 4. On-disk .minime_worktree_ownership.json verification via WorktreeManager
+        from minime.services.worktree_manager import WorktreeManager
 
         worktree_mgr = self.worktree_manager or WorktreeManager(
             project_root=binding.managed_repository_root, uow=self.uow, workspace_guard=guard
@@ -362,21 +409,6 @@ class LocalPatchApplier:
         except Exception as exc:
             return PatchApplicationResult(
                 success=False, error=f"Worktree ownership marker verification failed: {exc}"
-            )
-
-        # 4. Re-verify runtime checkout & managed repo immutability
-        runtime_root = guard.runtime_root
-        managed_root = os.path.realpath(binding.managed_repository_root)
-        resolved_target = str(target_dir)
-
-        if resolved_target == runtime_root or resolved_target.startswith(runtime_root + "/"):
-            return PatchApplicationResult(
-                success=False, error="Refusing to mutate runtime checkout directly."
-            )
-
-        if resolved_target == managed_root or resolved_target.startswith(managed_root + "/"):
-            return PatchApplicationResult(
-                success=False, error="Refusing to mutate managed repository directly."
             )
 
         # 5. Check worktree is clean before application

@@ -922,3 +922,198 @@ async def test_c1_direct_applier_forbidden_surface_refused(stage_c_environment):
         ["git", "diff"], cwd=wt_info.path, capture_output=True, text=True, check=True
     )
     assert diff_res.stdout.strip() == ""
+
+
+@pytest.mark.asyncio
+async def test_topology_canonical_nested_execution_worktree_succeeds(tmp_path):
+    """Prove canonical nested worktree (repo_dir/.minime/worktrees/job-123) can reach git apply."""
+    repo_dir = tmp_path / "managed_repo"
+    repo_dir.mkdir()
+    nested_worktrees_dir = repo_dir / ".minime" / "worktrees"
+    nested_worktrees_dir.mkdir(parents=True)
+    runtime_dir = tmp_path / "runtime_app"
+    runtime_dir.mkdir()
+
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Test User"], cwd=repo_dir, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/silverberdi/mini-me"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+    )
+
+    foo_path = repo_dir / "foo.py"
+    foo_path.write_text("def foo():\n    return 42\n")
+
+    marker_path = repo_dir / ".minime-managed-project.json"
+    marker_path.write_text(
+        json.dumps(
+            {
+                "project_id": "mini-me",
+                "canonical_repository_identity": "github.com/silverberdi/mini-me",
+                "repository": "github.com/silverberdi/mini-me",
+            }
+        )
+    )
+
+    subprocess.run(["git", "add", "."], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "Initial commit"], cwd=repo_dir, check=True, capture_output=True
+    )
+
+    res_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo_dir, capture_output=True, text=True, check=True
+    )
+    base_sha = res_sha.stdout.strip()
+
+    from tests.test_stage_c_isolation import MockUOW
+
+    uow = MockUOW()
+    binding = ProjectManagedRepositoryBinding(
+        project_id="mini-me",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+        managed_repository_root=str(repo_dir),
+        worktree_parent_dir=str(nested_worktrees_dir),
+        remote_name="origin",
+        is_valid=True,
+    )
+    uow.project_managed_repository_bindings.save(binding)
+
+    env_dict = {
+        "uow": uow,
+        "repo_dir": repo_dir,
+        "worktrees_dir": nested_worktrees_dir,
+        "runtime_dir": runtime_dir,
+        "base_sha": base_sha,
+    }
+
+    job_id = "job-nested-101"
+    run_id = "run-nested-101"
+    wt_info = await create_authorized_worktree(env_dict, job_id=job_id, run_id=run_id)
+
+    # Confirm the worktree is created nested inside repo_dir
+    assert str(wt_info.path).startswith(str(repo_dir))
+
+    envelope = LocalTaskEnvelope(
+        role="local_worker",
+        task_class=LocalTaskClass.SMALL_CODE_FIX,
+        allowed_files=["foo.py"],
+        instruction="Fix foo",
+    )
+    patch_str = "--- a/foo.py\n+++ b/foo.py\n@@ -1,2 +1,2 @@\n def foo():\n-    return 42\n+    return 100\n"
+
+    applier = LocalPatchApplier(uow=uow)
+    res = applier.apply_patch(
+        worktree_path=wt_info.path,
+        envelope=envelope,
+        patch=patch_str,
+        project_id="mini-me",
+        job_id=job_id,
+    )
+    assert res.success is True
+    assert res.applied is True
+    assert "foo.py" in res.authoritative_changed_files
+    assert (wt_info.path / "foo.py").read_text() == "def foo():\n    return 100\n"
+
+
+@pytest.mark.asyncio
+async def test_topology_arbitrary_managed_repo_descendant_refused(stage_c_environment):
+    """Prove arbitrary descendant inside managed repo (e.g. repo_dir/random-dir) is refused."""
+    repo_dir = stage_c_environment["repo_dir"]
+    random_dir = repo_dir / "random-dir"
+    random_dir.mkdir(exist_ok=True)
+
+    envelope = LocalTaskEnvelope(
+        role="local_worker",
+        task_class=LocalTaskClass.SMALL_CODE_FIX,
+        allowed_files=["foo.py"],
+        instruction="Fix foo",
+    )
+    patch_str = "--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-old\n+new\n"
+
+    applier = LocalPatchApplier(uow=stage_c_environment["uow"])
+    res = applier.apply_patch(
+        worktree_path=random_dir,
+        envelope=envelope,
+        patch=patch_str,
+        project_id="mini-me",
+        job_id="job-random",
+    )
+    assert res.success is False
+    assert res.applied is False
+    assert "managed repository" in res.error.lower() or "Workspace mutation denied" in res.error
+
+
+@pytest.mark.asyncio
+async def test_topology_synthetic_ownership_refused(stage_c_environment):
+    """Prove durable ownership with has_synthetic_placeholder=True is refused."""
+    uow = stage_c_environment["uow"]
+    wt_info = await create_authorized_worktree(
+        stage_c_environment, job_id="job-synth", run_id="run-synth"
+    )
+
+    # Mutate ownership in UoW to set synthetic placeholder field
+    canonical_wt_path = os.path.realpath(wt_info.path)
+    ownership = uow.orchestration_worktree_ownerships.get_by_canonical_path(canonical_wt_path)
+    assert ownership is not None
+    updated_ownership = ownership.model_copy(update={"run_id": "run-default"})
+    assert updated_ownership.has_synthetic_placeholder is True
+    uow.orchestration_worktree_ownerships.save(updated_ownership)
+
+    envelope = LocalTaskEnvelope(
+        role="local_worker",
+        task_class=LocalTaskClass.SMALL_CODE_FIX,
+        allowed_files=["foo.py"],
+        instruction="Fix foo",
+    )
+    patch_str = "--- a/foo.py\n+++ b/foo.py\n@@ -1,2 +1,2 @@\n def foo():\n-    return 42\n+    return 100\n"
+
+    applier = LocalPatchApplier(uow=uow)
+    res = applier.apply_patch(
+        worktree_path=wt_info.path,
+        envelope=envelope,
+        patch=patch_str,
+        project_id="mini-me",
+        job_id="job-synth",
+    )
+    assert res.success is False
+    assert res.applied is False
+    assert "synthetic" in res.error.lower() or "Workspace mutation denied" in res.error
+
+
+@pytest.mark.asyncio
+async def test_topology_outside_worktree_parent_dir_refused(stage_c_environment, tmp_path):
+    """Prove target outside worktree parent directory and outside managed repo is refused."""
+    outside_dir = tmp_path / "outside_worktree"
+    outside_dir.mkdir(exist_ok=True)
+    subprocess.run(["git", "init"], cwd=outside_dir, check=True, capture_output=True)
+
+    envelope = LocalTaskEnvelope(
+        role="local_worker",
+        task_class=LocalTaskClass.SMALL_CODE_FIX,
+        allowed_files=["foo.py"],
+        instruction="Fix foo",
+    )
+    patch_str = "--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-old\n+new\n"
+
+    applier = LocalPatchApplier(uow=stage_c_environment["uow"])
+    res = applier.apply_patch(
+        worktree_path=outside_dir,
+        envelope=envelope,
+        patch=patch_str,
+        project_id="mini-me",
+        job_id="job-outside",
+    )
+    assert res.success is False
+    assert res.applied is False
+    assert "outside" in res.error.lower() or "Workspace mutation denied" in res.error
+
