@@ -142,6 +142,9 @@ class ProjectManagedRepositoryBindingRepositoryInterface(ABC):
     def save(self, binding: ProjectManagedRepositoryBinding) -> None: ...
 
     @abstractmethod
+    def list_all(self) -> list[ProjectManagedRepositoryBinding]: ...
+
+    @abstractmethod
     def get_by_project_id(self, project_id: str) -> ProjectManagedRepositoryBinding | None: ...
 
     @abstractmethod
@@ -1233,5 +1236,4 @@ class ExternalActionAttemptRepositoryInterface(ABC):
         result_payload: dict[str, Any] | None = None,
         error_message: str | None = None,
     ) -> ExternalActionAttempt: ...
-
 
