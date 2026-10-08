@@ -516,10 +516,9 @@ async def test_cause_specific_corrective_reasons_patch_policy():
 
     evidence = await harness.run(task, validator=validator)
 
-    assert len(dispatches) == 2
-    assert dispatches[0][1] is None
-    assert dispatches[1][1] is not None
-    assert "Previous patch violated the allowed patch policy" in dispatches[1][1]
+    assert "Previous patch targeted an unauthorized file" in dispatches[1][1]
+    assert "forbidden.py" in dispatches[1][1]
+    assert "allowed.py" in dispatches[1][1]
     assert evidence.result_class == "SUCCESS"
 
 

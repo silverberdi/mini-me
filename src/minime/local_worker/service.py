@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 
 from minime.domain.enums import ProviderResultClass
+from minime.local_worker.context_packager import package_task_context
 from minime.local_worker.harness import LocalWorkerHarness
 from minime.local_worker.model_identity import (
     LOCAL_WORKER_ROLE,
@@ -93,6 +94,17 @@ class LocalWorkerService:
         if preflight.status is not PreflightStatus.READY:
             return ServiceOutcome(eligibility, preflight, _preflight_failed_evidence(preflight))
 
+        effective_task = task
+        if worktree_path:
+            packaged_context = package_task_context(
+                instruction=task.instruction,
+                task_class=task.task_class,
+                allowed_files=task.allowed_files,
+                worktree_path=worktree_path,
+            )
+            if packaged_context:
+                effective_task = task.model_copy(update={"context": packaged_context})
+
         async def bounded_dispatch(
             envelope: LocalTaskEnvelope, attempt: int, corrective_reason: str | None = None
         ) -> str:
@@ -130,7 +142,7 @@ class LocalWorkerService:
         self.harness._cleanup = None
         try:
             evidence = await self.harness.run(
-                task,
+                effective_task,
                 validator=validator,
                 worktree_path=worktree_path,
                 uow=uow,

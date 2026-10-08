@@ -10,6 +10,7 @@ import asyncio
 import inspect
 import json
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,7 @@ from minime.local_worker.models import (
 )
 from minime.local_worker.patch_applier import (
     LocalPatchApplier,
+    PatchPolicyDecision,
     validate_patch_policy,
 )
 from minime.logging import redact_secrets
@@ -121,6 +123,54 @@ def parse_structured_result(raw: str) -> LocalWorkerResult:
         escalation_required=esc_req,
         escalation_reason=esc_reason,
         next_action=next_action,
+    )
+
+
+def format_patch_policy_corrective_reason(
+    decision: PatchPolicyDecision, task: LocalTaskEnvelope
+) -> str:
+    """Format precise, cause-specific corrective instruction for patch policy failures."""
+    sanitized_reason = redact_secrets(decision.reason)
+    allowed_str = ", ".join(task.allowed_files) if task.allowed_files else "none"
+
+    if "is not in allowed_files" in decision.reason or "is in forbidden_files" in decision.reason:
+        offending_str = ", ".join(decision.touched_files) if decision.touched_files else "unauthorized file"
+        if not decision.touched_files and "Touched file '" in decision.reason:
+            m = re.search(r"Touched file '([^']+)'", decision.reason)
+            if m:
+                offending_str = m.group(1)
+        return (
+            f"Previous patch targeted an unauthorized file:\n"
+            f"{offending_str}\n\n"
+            f"Authorized files:\n"
+            f"{allowed_str}\n\n"
+            f"Return a valid unified diff modifying only authorized files."
+        )
+
+    if (
+        "no valid touched files" in decision.reason
+        or "Malformed patch diff headers" in decision.reason
+        or "requires a non-empty patch" in decision.reason
+        or "missing or empty" in decision.reason
+        or "prohibited" in decision.reason
+    ):
+        return (
+            f"Previous patch violated patch policy formatting: {sanitized_reason}\n\n"
+            f"Authorized files:\n"
+            f"{allowed_str}\n\n"
+            f"Return a valid non-empty unified diff using standard diff format:\n"
+            f"--- a/<allowed-relative-path>\n"
+            f"+++ b/<allowed-relative-path>\n"
+            f"@@ ... @@\n"
+            f"<actual changed lines>\n"
+            f"Modifying only authorized files."
+        )
+
+    return (
+        f"Previous patch violated the allowed patch policy: {sanitized_reason}\n\n"
+        f"Authorized files:\n"
+        f"{allowed_str}\n\n"
+        f"Return a valid unified diff modifying only authorized files."
     )
 
 
@@ -240,9 +290,8 @@ class LocalWorkerHarness:
                 if corrections < self.max_corrective_attempts:
                     corrections += 1
                     attempt += 1
-                    corrective_reason = (
-                        "Previous patch violated the allowed patch policy. "
-                        "Return a smaller patch touching only authorized files."
+                    corrective_reason = format_patch_policy_corrective_reason(
+                        policy_decision, task
                     )
                     continue
                 outcome_kind = result.kind
