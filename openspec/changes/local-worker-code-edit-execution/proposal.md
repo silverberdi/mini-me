@@ -7,5 +7,5 @@ The minimal local worker (`minime.local_worker`) can evaluate task eligibility a
 - Add patch contract fields to `LocalWorkerResult` (`patch: str | None`, `next_action: str | None`).
 - Add deterministic patch policy validation (`validate_patch_policy`) ensuring patches touch only `allowed_files`, contain no path traversal or absolute paths, and do not target runtime checkout or managed repository directly.
 - Add `LocalPatchApplier` to safely apply validated diffs inside authorized `EXECUTION_WORKTREE` instances via `git apply` after verifying `ManagedWorkspaceGuard` authorization and `WorktreeManager` ownership.
-- Extend `LocalWorkerService` flow to handle patch validation, authorized application, post-apply changed-file verification, clean re-baselining prior to a single corrective attempt, and enriched `LocalExecutionEvidence`.
+- Extend `LocalWorkerService` flow to handle patch validation, authorized application, post-apply changed-file verification, single pre-mutation corrective attempt (no local rollback after filesystem mutation), and enriched `LocalExecutionEvidence`.
 - Keep local Qwen strictly implement-only (zero review, audit, approve, or merge authority).

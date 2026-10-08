@@ -312,7 +312,7 @@ async def test_service_success_run_yields_minimal_structured_evidence():
     async def fake_generate(*, system_prompt=None, prompt=None, client=None):
         return OllamaGenerateResponse(
             result_class=ProviderResultClass.SUCCESS,
-            text='{"kind":"CHANGES_PROPOSED","summary":"bumped the index check","patch":"--- a/foo.py\\n+++ b/foo.py\\n@@ -1 +1 @@\\n-a\\n+b\\n"}',
+            text='{"kind":"NO_CHANGE_JUSTIFIED","summary":"no change needed","patch":null}',
         )
 
     service = LocalWorkerService()
@@ -330,4 +330,4 @@ async def test_service_success_run_yields_minimal_structured_evidence():
     assert evidence.result_class == "SUCCESS"
     assert evidence.validation_result is LocalValidationVerdict.PASS
     assert evidence.escalation.required is False
-    assert evidence.result is LocalResultKind.CHANGES_PROPOSED
+    assert evidence.result is LocalResultKind.NO_CHANGE_JUSTIFIED

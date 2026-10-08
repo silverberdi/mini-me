@@ -597,3 +597,201 @@ def test_local_qwen_no_review_audit_merge_authority():
     assert "merge" not in auths
     assert "approve" not in auths
     assert "lifecycle" not in auths
+
+
+# F1-F8 FAIL-CLOSED REMEDIATION TESTS
+@pytest.mark.asyncio
+async def test_f1_changes_proposed_without_worktree_cannot_succeed():
+    from minime.local_worker.harness import LocalWorkerHarness
+
+    patch_str = "--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-old\n+new\n"
+    raw_response = json.dumps({
+        "kind": "CHANGES_PROPOSED",
+        "summary": "edit foo",
+        "files_changed": ["foo.py"],
+        "patch": patch_str,
+        "confidence": 0.9,
+    })
+
+    async def mock_dispatch(task, attempt):
+        return raw_response
+
+    async def mock_validator(task, result, attempt):
+        return ValidationResult(verdict=LocalValidationVerdict.PASS)
+
+    harness = LocalWorkerHarness(dispatch=mock_dispatch)
+    envelope = LocalTaskEnvelope(
+        role="local_worker",
+        task_class=LocalTaskClass.SMALL_CODE_FIX,
+        allowed_files=["foo.py"],
+        instruction="Fix foo",
+    )
+
+    evidence = await harness.run(
+        envelope,
+        validator=mock_validator,
+        worktree_path=None,  # No worktree provided!
+    )
+
+    assert evidence.result_class == "PATCH_APPLY_FAILED"
+    assert evidence.patch_applied is False
+    assert evidence.escalation.required is True
+
+
+def test_f2_empty_allowed_files_fails_closed():
+    envelope = LocalTaskEnvelope(
+        role="local_worker",
+        task_class=LocalTaskClass.SMALL_CODE_FIX,
+        allowed_files=[],  # Empty allowlist!
+        instruction="Fix foo",
+    )
+    patch_str = "--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-old\n+new\n"
+    decision = validate_patch_policy(patch_str, envelope, kind=LocalResultKind.CHANGES_PROPOSED)
+    assert decision.valid is False
+    assert "allowed_files cannot be empty" in decision.reason
+
+
+@pytest.mark.asyncio
+async def test_f3_no_retry_after_filesystem_mutation(stage_c_environment):
+    from minime.local_worker.harness import LocalWorkerHarness
+
+    uow = stage_c_environment["uow"]
+    wt_info = await create_authorized_worktree(stage_c_environment, job_id="job-f3", run_id="run-f3")
+
+    valid_patch = "--- a/foo.py\n+++ b/foo.py\n@@ -1,2 +1,2 @@\n def foo():\n-    return 42\n+    return 100\n"
+    raw_response = json.dumps({
+        "kind": "CHANGES_PROPOSED",
+        "summary": "edit foo",
+        "files_changed": ["foo.py"],
+        "patch": valid_patch,
+        "confidence": 0.9,
+    })
+
+    dispatch_calls = 0
+
+    async def mock_dispatch(task, attempt):
+        nonlocal dispatch_calls
+        dispatch_calls += 1
+        return raw_response
+
+    # Validator fails after patch application
+    async def mock_validator(task, result, attempt):
+        return ValidationResult(verdict=LocalValidationVerdict.FAIL, reason="Test validator failed after apply")
+
+    harness = LocalWorkerHarness(dispatch=mock_dispatch, max_corrective_attempts=2)
+    envelope = LocalTaskEnvelope(
+        role="local_worker",
+        task_class=LocalTaskClass.SMALL_CODE_FIX,
+        allowed_files=["foo.py"],
+        instruction="Fix foo",
+    )
+
+    evidence = await harness.run(
+        envelope,
+        validator=mock_validator,
+        worktree_path=wt_info.path,
+        uow=uow,
+        project_id="mini-me",
+        job_id="job-f3",
+    )
+
+    assert evidence.patch_applied is True
+    assert evidence.result_class == "VALIDATION_FAILED"
+    assert evidence.escalation.required is True
+    assert dispatch_calls == 1  # No second dispatch after filesystem mutation!
+
+
+def test_f5_prohibited_patch_operations():
+    envelope = LocalTaskEnvelope(
+        role="local_worker",
+        task_class=LocalTaskClass.SMALL_CODE_FIX,
+        allowed_files=["foo.py"],
+        instruction="Fix foo",
+    )
+
+    # Creation
+    create_patch = "--- /dev/null\n+++ b/newfile.py\n@@ -0,0 +1 @@\n+print(1)\n"
+    d1 = validate_patch_policy(create_patch, envelope)
+    assert d1.valid is False
+    assert "prohibited" in d1.reason.lower() or "creation" in d1.reason.lower()
+
+    # Deletion
+    delete_patch = "--- a/foo.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n"
+    d2 = validate_patch_policy(delete_patch, envelope)
+    assert d2.valid is False
+    assert "prohibited" in d2.reason.lower() or "deletion" in d2.reason.lower()
+
+    # Rename
+    rename_patch = "rename from foo.py\nrename to bar.py\n"
+    d3 = validate_patch_policy(rename_patch, envelope)
+    assert d3.valid is False
+    assert "prohibited" in d3.reason.lower() or "rename" in d3.reason.lower()
+
+    # Binary
+    binary_patch = "Binary files a/image.png and b/image.png differ\n"
+    d4 = validate_patch_policy(binary_patch, envelope)
+    assert d4.valid is False
+    assert "prohibited" in d4.reason.lower() or "binary" in d4.reason.lower()
+
+
+def test_f6_pattern_matching_fnmatch():
+    envelope = LocalTaskEnvelope(
+        role="local_worker",
+        task_class=LocalTaskClass.SMALL_CODE_FIX,
+        allowed_files=["src/minime/*"],
+        forbidden_files=["src/minime/services/*"],
+        instruction="Fix foo",
+    )
+
+    # Allowed pattern match
+    patch_ok = "--- a/src/minime/foo.py\n+++ b/src/minime/foo.py\n@@ -1 +1 @@\n-old\n+new\n"
+    d_ok = validate_patch_policy(patch_ok, envelope)
+    assert d_ok.valid is True
+
+    # Forbidden pattern overrides allowed
+    patch_forbidden = "--- a/src/minime/services/scheduler.py\n+++ b/src/minime/services/scheduler.py\n@@ -1 +1 @@\n-old\n+new\n"
+    d_forb = validate_patch_policy(patch_forbidden, envelope)
+    assert d_forb.valid is False
+    assert "forbidden_files" in d_forb.reason
+
+
+def test_f7_offending_forbidden_surface_integration():
+    envelope = LocalTaskEnvelope(
+        role="local_worker",
+        task_class=LocalTaskClass.SMALL_CODE_FIX,
+        allowed_files=["alembic/versions/123_migration.py"],
+        instruction="Edit migration",
+    )
+    patch_str = "--- a/alembic/versions/123_migration.py\n+++ b/alembic/versions/123_migration.py\n@@ -1 +1 @@\n-old\n+new\n"
+    decision = validate_patch_policy(patch_str, envelope)
+    assert decision.valid is False
+    assert "forbidden surface" in decision.reason.lower() or "migration" in decision.reason.lower()
+
+
+def test_f8_containment_and_symlink_check(tmp_path):
+    from minime.local_worker.patch_applier import check_path_containment_and_symlinks
+
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    (worktree / "real_dir").mkdir()
+
+    symlink_dir = worktree / "sym_dir"
+    try:
+        os.symlink(worktree / "real_dir", symlink_dir)
+    except OSError:
+        pytest.skip("Symlinks not supported")
+
+    # Path traversal
+    err1 = check_path_containment_and_symlinks(worktree, {"../outside.py"})
+    assert err1 is not None
+    assert "Path traversal" in err1
+
+    # Absolute path
+    err2 = check_path_containment_and_symlinks(worktree, {"/etc/passwd"})
+    assert err2 is not None
+    assert "Absolute path" in err2
+
+    # Symlink segment
+    err3 = check_path_containment_and_symlinks(worktree, {"sym_dir/file.py"})
+    assert err3 is not None
+    assert "Symlink detected" in err3

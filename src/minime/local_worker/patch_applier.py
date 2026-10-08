@@ -6,6 +6,7 @@ prohibited from targeting runtime checkout (/opt/minime/app) or managed reposito
 
 from __future__ import annotations
 
+import fnmatch
 import logging
 import os
 import re
@@ -17,6 +18,7 @@ from typing import Any
 from minime.domain.enums import WorkspaceOperation, WorkspaceRole
 from minime.domain.models import WorkspaceMutationRequest
 from minime.local_worker.models import LocalResultKind, LocalTaskEnvelope
+from minime.local_worker.task_classes import offending_forbidden_surface
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +44,7 @@ def parse_patch_touched_files(patch: str) -> tuple[bool, set[str], str]:
     """Parse unified diff to derive authoritative touched file paths (relative).
 
     Returns (valid: bool, files: set[str], error_reason: str).
+    Rejects file creation, deletion, renames, and binary diffs.
     """
     if not patch or not patch.strip():
         return True, set(), ""
@@ -50,6 +53,20 @@ def parse_patch_touched_files(patch: str) -> tuple[bool, set[str], str]:
     touched_files: set[str] = set()
 
     for line in lines:
+        lstrip = line.strip()
+        if lstrip.startswith("--- /dev/null") or lstrip.startswith("new file mode"):
+            return False, set(), "File creation is prohibited in patch policy"
+        if lstrip.startswith("+++ /dev/null") or lstrip.startswith("deleted file mode"):
+            return False, set(), "File deletion is prohibited in patch policy"
+        if (
+            lstrip.startswith("rename from")
+            or lstrip.startswith("rename to")
+            or lstrip.startswith("similarity index")
+        ):
+            return False, set(), "File rename is prohibited in patch policy"
+        if lstrip.startswith("Binary files") or lstrip.startswith("GIT binary patch"):
+            return False, set(), "Binary patch is prohibited in patch policy"
+
         if line.startswith("--- ") or line.startswith("+++ "):
             match = _HEADER_LINE_RE.match(line)
             if not match:
@@ -80,6 +97,46 @@ def parse_patch_touched_files(patch: str) -> tuple[bool, set[str], str]:
         return False, set(), "Malformed patch diff headers"
 
     return True, touched_files, ""
+
+
+def _is_path_matching_patterns(path: str, patterns: list[str] | tuple[str, ...]) -> bool:
+    """Check if a path matches any pattern using fnmatch glob semantics."""
+    for pattern in patterns:
+        if not pattern or not pattern.strip():
+            continue
+        pat = pattern.strip()
+        if fnmatch.fnmatch(path, pat) or path == pat:
+            return True
+        if pat.endswith("/") and path.startswith(pat):
+            return True
+    return False
+
+
+def check_path_containment_and_symlinks(
+    target_dir: Path, touched_files: set[str] | tuple[str, ...]
+) -> str | None:
+    """Ensure touched paths stay strictly within target_dir and contain no symlink segments."""
+    resolved_target = target_dir.resolve()
+    for touched in touched_files:
+        p = Path(touched)
+        if p.is_absolute():
+            return f"Absolute path detected: '{touched}'"
+
+        prospective = (resolved_target / p).resolve()
+        try:
+            prospective.relative_to(resolved_target)
+        except ValueError:
+            return (
+                f"Path traversal detected: '{touched}' escapes target worktree '{resolved_target}'"
+            )
+
+        curr = resolved_target
+        for part in p.parts:
+            curr = curr / part
+            if curr.is_symlink() or os.path.islink(str(curr)):
+                return f"Symlink detected in path segment '{curr}' for touched file '{touched}'"
+
+    return None
 
 
 def _build_git_env() -> dict[str, str]:
@@ -127,6 +184,14 @@ def validate_patch_policy(
             valid=False, touched_files=(), reason="Patch is missing or empty"
         )
 
+    allowed_patterns = [p.strip() for p in envelope.allowed_files if p and p.strip()]
+    if not allowed_patterns:
+        return PatchPolicyDecision(
+            valid=False,
+            touched_files=(),
+            reason="allowed_files cannot be empty for CHANGES_PROPOSED patch policy",
+        )
+
     valid_diff, touched_files_set, parse_err = parse_patch_touched_files(patch)
     if not valid_diff:
         return PatchPolicyDecision(valid=False, touched_files=(), reason=parse_err)
@@ -136,22 +201,38 @@ def validate_patch_policy(
             valid=False, touched_files=(), reason="Patch contained no valid touched files"
         )
 
-    allowed_set = set(envelope.allowed_files)
-    forbidden_set = set(envelope.forbidden_files)
+    forbidden_patterns = [p.strip() for p in envelope.forbidden_files if p and p.strip()]
 
     for touched in touched_files_set:
-        if touched in forbidden_set:
+        if _is_path_matching_patterns(touched, forbidden_patterns):
             return PatchPolicyDecision(
                 valid=False,
                 touched_files=tuple(sorted(touched_files_set)),
                 reason=f"Touched file '{touched}' is in forbidden_files",
             )
-        if allowed_set and touched not in allowed_set:
+        if not _is_path_matching_patterns(touched, allowed_patterns):
             return PatchPolicyDecision(
                 valid=False,
                 touched_files=tuple(sorted(touched_files_set)),
                 reason=f"Touched file '{touched}' is not in allowed_files",
             )
+
+    task_cls = (
+        envelope.task_class.value
+        if hasattr(envelope.task_class, "value")
+        else str(envelope.task_class)
+    )
+    offending = offending_forbidden_surface(
+        task_description=envelope.instruction,
+        touched_surfaces=list(touched_files_set),
+        task_class=task_cls,
+    )
+    if offending is not None:
+        return PatchPolicyDecision(
+            valid=False,
+            touched_files=tuple(sorted(touched_files_set)),
+            reason=f"Touched file surface matches forbidden surface family '{offending.value}'",
+        )
 
     return PatchPolicyDecision(
         valid=True,
@@ -324,6 +405,15 @@ class LocalPatchApplier:
                 error=f"Worktree '{target_dir}' is dirty before patch application.",
             )
 
+        # Pre-apply containment and symlink check
+        valid_diff, touched_files_set, parse_err = parse_patch_touched_files(patch)
+        if not valid_diff:
+            return PatchApplicationResult(success=False, error=parse_err)
+
+        containment_err = check_path_containment_and_symlinks(target_dir, touched_files_set)
+        if containment_err:
+            return PatchApplicationResult(success=False, error=containment_err)
+
         # 6. Programmatic git apply with sanitized env
         apply_res = subprocess.run(
             ["git", "apply", "-"],
@@ -337,8 +427,12 @@ class LocalPatchApplier:
         if apply_res.returncode != 0:
             return PatchApplicationResult(
                 success=False,
+                applied=False,
                 error=f"git apply failed (code {apply_res.returncode}): {apply_res.stderr.strip() or apply_res.stdout.strip()}",
             )
+
+        # Filesystem mutation has occurred
+        applied_flag = True
 
         # 7. Postcondition verification: git diff --name-only / status
         post_diff = subprocess.run(
@@ -358,33 +452,72 @@ class LocalPatchApplier:
             env=git_env,
         )
 
-        changed_set: set[str] = set()
-        if post_diff.returncode == 0:
-            for line in post_diff.stdout.splitlines():
-                if line.strip():
-                    changed_set.add(line.strip())
+        if post_diff.returncode != 0:
+            return PatchApplicationResult(
+                success=False,
+                applied=applied_flag,
+                error=f"Post-apply git diff check failed with returncode {post_diff.returncode}: {post_diff.stderr.strip()}",
+            )
 
-        if post_untracked.returncode == 0:
-            for line in post_untracked.stdout.splitlines():
-                if len(line) >= 4:
-                    fname = line[3:].strip()
-                    if fname and ".minime_worktree_ownership.json" not in fname:
-                        changed_set.add(fname)
+        if post_untracked.returncode != 0:
+            return PatchApplicationResult(
+                success=False,
+                applied=applied_flag,
+                error=f"Post-apply git status check failed with returncode {post_untracked.returncode}: {post_untracked.stderr.strip()}",
+            )
+
+        changed_set: set[str] = set()
+        for line in post_diff.stdout.splitlines():
+            if line.strip():
+                changed_set.add(line.strip())
+
+        for line in post_untracked.stdout.splitlines():
+            if len(line) >= 4:
+                fname = line[3:].strip()
+                if fname and ".minime_worktree_ownership.json" not in fname:
+                    changed_set.add(fname)
 
         actual_changed = tuple(sorted(changed_set))
-        allowed_set = set(envelope.allowed_files)
+        allowed_patterns = [p.strip() for p in envelope.allowed_files if p and p.strip()]
+        forbidden_patterns = [p.strip() for p in envelope.forbidden_files if p and p.strip()]
 
-        # Postcondition check: actual_changed <= allowed_files
+        if not allowed_patterns:
+            return PatchApplicationResult(
+                success=False,
+                applied=applied_flag,
+                authoritative_changed_files=actual_changed,
+                error="Postcondition failed: allowed_files cannot be empty.",
+            )
+
+        # Postcondition check: actual_changed files match allowed_files and not forbidden_files
         for ch in actual_changed:
-            if allowed_set and ch not in allowed_set:
+            if _is_path_matching_patterns(ch, forbidden_patterns):
                 return PatchApplicationResult(
                     success=False,
+                    applied=applied_flag,
+                    authoritative_changed_files=actual_changed,
+                    error=f"Postcondition failed: Actual changed file '{ch}' matches forbidden_files.",
+                )
+            if not _is_path_matching_patterns(ch, allowed_patterns):
+                return PatchApplicationResult(
+                    success=False,
+                    applied=applied_flag,
+                    authoritative_changed_files=actual_changed,
                     error=f"Postcondition failed: Actual changed file '{ch}' is not in allowed_files.",
                 )
 
+        post_containment_err = check_path_containment_and_symlinks(target_dir, actual_changed)
+        if post_containment_err:
+            return PatchApplicationResult(
+                success=False,
+                applied=applied_flag,
+                authoritative_changed_files=actual_changed,
+                error=f"Postcondition failed: {post_containment_err}",
+            )
+
         return PatchApplicationResult(
             success=True,
-            applied=True,
+            applied=applied_flag,
             authoritative_changed_files=actual_changed,
             error="",
         )

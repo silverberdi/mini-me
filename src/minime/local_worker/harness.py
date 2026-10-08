@@ -203,37 +203,64 @@ class LocalWorkerHarness:
                 )
                 break
 
-            # 2. Patch Application (if worktree_path provided & patch proposed)
+            # 2. Patch Application (if CHANGES_PROPOSED)
             patch_applied = False
             authoritative_changed = ()
 
-            if worktree_path and result.kind is LocalResultKind.CHANGES_PROPOSED and result.patch:
-                if not patch_applier:
+            if result.kind is LocalResultKind.CHANGES_PROPOSED:
+                if (
+                    not worktree_path
+                    or not uow
+                    or not project_id
+                    or not str(project_id).strip()
+                    or not job_id
+                    or not str(job_id).strip()
+                    or not patch_applier
+                ):
                     outcome_kind = result.kind
                     outcome_class = "PATCH_APPLY_FAILED"
                     last_validation = ValidationResult(
                         verdict=LocalValidationVerdict.FAIL,
-                        reason="No authorized LocalPatchApplier context (uow missing)",
+                        reason="CHANGES_PROPOSED requires worktree_path, uow, project_id, and job_id",
                     )
                     escalation = EscalationDecision(
                         required=True,
                         target=EscalationTarget.EXISTING_PROVIDER_POLICY,
-                        reason="PersistenceUnitOfWork (uow) missing for patch applier",
+                        reason="Execution context (worktree_path, uow, project_id, job_id) missing for CHANGES_PROPOSED",
                     )
                     break
 
                 app_res = patch_applier.apply_patch(
                     worktree_path=worktree_path,
                     envelope=task,
-                    patch=result.patch,
+                    patch=result.patch or "",
                     project_id=project_id,
-                    job_id=job_id or "",
+                    job_id=job_id,
                 )
+                patch_applied = app_res.applied
+                authoritative_changed = app_res.authoritative_changed_files
+
                 if not app_res.success:
-                    if corrections < self.max_corrective_attempts and not app_res.applied:
+                    if app_res.applied:
+                        # Filesystem mutated: NO retry allowed!
+                        outcome_kind = result.kind
+                        outcome_class = "PATCH_APPLY_FAILED"
+                        last_validation = ValidationResult(
+                            verdict=LocalValidationVerdict.FAIL,
+                            reason=f"Patch application failed post-apply: {app_res.error}",
+                        )
+                        escalation = EscalationDecision(
+                            required=True,
+                            target=EscalationTarget.EXISTING_PROVIDER_POLICY,
+                            reason=f"Patch application failed post-apply: {app_res.error}",
+                        )
+                        break
+
+                    if corrections < self.max_corrective_attempts:
                         corrections += 1
                         attempt += 1
                         continue
+
                     outcome_kind = result.kind
                     outcome_class = "PATCH_APPLY_FAILED"
                     last_validation = ValidationResult(
@@ -247,12 +274,23 @@ class LocalWorkerHarness:
                     )
                     break
 
-                patch_applied = app_res.applied
-                authoritative_changed = app_res.authoritative_changed_files
-
             # 3. Deterministic Validation Authority Callback
             last_validation = await validator(task, result, attempt)
             if last_validation.passed:
+                if result.kind is LocalResultKind.CHANGES_PROPOSED and not patch_applied:
+                    outcome_kind = result.kind
+                    outcome_class = "PATCH_APPLY_FAILED"
+                    last_validation = ValidationResult(
+                        verdict=LocalValidationVerdict.FAIL,
+                        reason="CHANGES_PROPOSED result cannot be marked SUCCESS without patch application",
+                    )
+                    escalation = EscalationDecision(
+                        required=True,
+                        target=EscalationTarget.EXISTING_PROVIDER_POLICY,
+                        reason="CHANGES_PROPOSED result cannot be marked SUCCESS without patch application",
+                    )
+                    break
+
                 validated = True
                 outcome_kind = result.kind
                 outcome_class = "SUCCESS"
@@ -261,7 +299,7 @@ class LocalWorkerHarness:
             # Validation failed.
             if patch_applied:
                 # A patch was applied to disk and validation failed.
-                # B3: Stop local correction on dirty worktree, preserve evidence, escalate.
+                # Stop local correction on dirty worktree, preserve evidence, escalate.
                 outcome_kind = result.kind
                 outcome_class = "VALIDATION_FAILED"
                 escalation = EscalationDecision(

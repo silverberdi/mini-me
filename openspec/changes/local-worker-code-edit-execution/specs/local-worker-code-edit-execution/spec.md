@@ -29,7 +29,7 @@ Patch application MUST execute strictly inside an authorized `EXECUTION_WORKTREE
 ### Requirement: Bounded Corrective Flow and Implement-Only Authority
 Local worker execution MUST remain strictly implement-only with bounded retries.
 
-#### Scenario: Clean baseline restoration on corrective attempt
-- **Given** a patch application or deterministic validation failure on attempt 1
-- **When** a single corrective model attempt is permitted
-- **Then** the execution worktree MUST be restored to a clean baseline before applying the corrective patch, and local worker MUST NOT possess review, audit, or merge authority.
+#### Scenario: Corrective attempt restriction prior to filesystem mutation
+- **Given** a malformed output or pre-mutation patch policy failure on attempt 1
+- **When** a single corrective model attempt is permitted prior to filesystem mutation
+- **Then** a single corrective attempt MAY occur before any filesystem mutation; once a patch is applied to disk, no local rollback or second corrective attempt is permitted, and local worker MUST NOT possess review, audit, or merge authority.

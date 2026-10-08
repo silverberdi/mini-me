@@ -18,8 +18,9 @@ Patch application leverages existing Stage C SDLC isolation primitives:
 - Invoke `git apply` via `subprocess.run` with `cwd=execution_worktree_path`, `check=False`, `capture_output=True`, `text=True`, and `timeout=30`.
 - Verify `git diff --name-only` after application to ensure actual modified files $\subseteq$ `allowed_files`.
 
-### 4. Single Corrective Attempt & Baseline Restoration
-- If patch application or deterministic validation fails on attempt 1, the worktree is restored to a clean baseline (`git checkout .` / `git clean -fd` within the worktree) before attempting a second (and final) corrective model invocation.
+### 4. Single Corrective Attempt Prior to Filesystem Mutation
+- Corrective model attempts occur ONLY prior to filesystem mutation (e.g. for malformed output or pre-mutation patch policy rejection).
+- Once a patch is applied to the filesystem (`git apply` succeeded), no local rollback or second model corrective attempt is performed; the harness stops execution immediately, preserves the mutated worktree state as evidence, and escalates to `EXISTING_PROVIDER_POLICY`.
 
 ### 5. Evidence Enrichment
 - Extend `LocalExecutionEvidence` dataclass / model with fields for patch status (`patch_proposed`, `patch_applied`), authoritative changed files, and worktree identity.
