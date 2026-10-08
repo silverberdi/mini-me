@@ -1,13 +1,14 @@
 """Deterministic bounded context packager for LocalWorker tasks.
 
 Extracts symbol-aware context from authorized allowed_files inside the execution worktree,
-preventing arbitrary tail truncation of target functions and enforcing security boundaries.
+enforcing hard character budgets, preventing symbol truncation, and handling task-class scoping.
 """
 
 from __future__ import annotations
 
 import ast
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from minime.local_worker.models import LocalTaskClass
@@ -23,6 +24,15 @@ _COMMON_KEYWORDS = {
     "only", "current", "matches", "behavior", "modify", "preserve", "source",
     "files", "forbidden", "repair", "update", "change", "task", "instruction",
 }
+
+
+@dataclass(frozen=True)
+class ContextPackagingResult:
+    """Structured result of local worker context packaging."""
+
+    success: bool
+    context: str = ""
+    status: str = "OK"  # "OK", "TARGET_SYMBOL_EXCEEDS_BUDGET", "NO_SYMBOL_FOUND", "FALLBACK_EXCERPT", "NO_AUTHORIZED_FILES"
 
 
 def extract_candidate_symbols(instruction: str) -> list[str]:
@@ -124,22 +134,21 @@ def package_task_context(
     allowed_files: list[str] | tuple[str, ...],
     worktree_path: str | Path | None,
     max_budget_chars: int = 12000,
-) -> str:
+) -> ContextPackagingResult:
     """Deterministically package symbol-aware context from authorized allowed_files inside worktree_path.
 
-    Guarantees:
-    1. Only authorized allowed_files are read.
-    2. Candidate symbols are located via AST/line parsing.
-    3. Target function definitions are complete and never cut midway.
-    4. Deterministic output given identical inputs and repository state.
-    5. Safe fallback to bounded excerpt when no symbol is found.
+    Contracts:
+    1. Only authorized allowed_files inside worktree_path are read.
+    2. Symbol-aware Python function extraction applies specifically to TEST_AUTHORING tasks.
+    3. Complete target function definitions are retained; indivisible symbols exceeding hard budget fail closed.
+    4. len(result.context) <= max_budget_chars is strictly guaranteed whenever success is True.
     """
     if not worktree_path:
-        return ""
+        return ContextPackagingResult(success=False, context="", status="WORKTREE_MISSING")
 
     wt_root = Path(worktree_path).resolve()
     if not wt_root.is_dir():
-        return ""
+        return ContextPackagingResult(success=False, context="", status="WORKTREE_INVALID")
 
     normalized_allowed: list[str] = []
     for f in allowed_files:
@@ -152,77 +161,88 @@ def package_task_context(
             normalized_allowed.append(clean_f)
 
     if not normalized_allowed:
-        return ""
+        return ContextPackagingResult(success=False, context="", status="NO_AUTHORIZED_FILES")
 
-    # Sort allowed files for strict determinism
     sorted_allowed = sorted(normalized_allowed)
-    candidate_symbols = extract_candidate_symbols(instruction)
+    task_cls_str = task_class.value if hasattr(task_class, "value") else str(task_class)
 
-    # Strategy 1: Symbol-aware packaging for TEST_AUTHORING / code tasks
-    if candidate_symbols:
-        for rel_file in sorted_allowed:
-            target_path = (wt_root / rel_file).resolve()
-            try:
-                target_path.relative_to(wt_root)
-            except ValueError:
-                continue
+    # Strategy 1: Symbol-aware packaging for TEST_AUTHORING
+    if task_cls_str == LocalTaskClass.TEST_AUTHORING.value:
+        candidate_symbols = extract_candidate_symbols(instruction)
+        if candidate_symbols:
+            for rel_file in sorted_allowed:
+                target_path = (wt_root / rel_file).resolve()
+                try:
+                    target_path.relative_to(wt_root)
+                except ValueError:
+                    continue
 
-            if not target_path.is_file():
-                continue
+                if not target_path.is_file():
+                    continue
 
-            try:
-                content = target_path.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
-                continue
+                try:
+                    content = target_path.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    continue
 
-            lines = content.splitlines()
+                lines = content.splitlines()
 
-            for symbol in candidate_symbols:
-                loc = _find_symbol_in_ast(content, symbol)
-                if loc is not None:
-                    start_line, end_line = loc
-                    header_lines = _extract_file_header(lines)
+                for symbol in candidate_symbols:
+                    loc = _find_symbol_in_ast(content, symbol)
+                    if loc is not None:
+                        start_line, end_line = loc
+                        meta_header = f"FILE: {rel_file}\nSYMBOL: {symbol}"
+                        symbol_lines = lines[start_line - 1 : end_line]
+                        symbol_block = "\n".join(symbol_lines)
+                        symbol_section = f"--- TARGET SYMBOL ({symbol}) ---\n{symbol_block}"
 
-                    header_block = "\n".join(header_lines)
-                    symbol_lines = lines[start_line - 1 : end_line]
-                    symbol_block = "\n".join(symbol_lines)
+                        mandatory_minimal = f"{meta_header}\n\n{symbol_section}".strip()
 
-                    header_section = f"--- FILE HEADER & IMPORTS ---\n{header_block}" if header_block.strip() else ""
-                    symbol_section = f"--- TARGET SYMBOL ({symbol}) ---\n{symbol_block}"
+                        # FAIL CLOSED if the complete target symbol + meta header exceeds max_budget_chars
+                        if len(mandatory_minimal) > max_budget_chars:
+                            return ContextPackagingResult(
+                                success=False,
+                                context="",
+                                status="TARGET_SYMBOL_EXCEEDS_BUDGET",
+                            )
 
-                    meta_header = f"FILE: {rel_file}\nSYMBOL: {symbol}"
+                        header_lines = _extract_file_header(lines)
+                        header_block = "\n".join(header_lines)
+                        header_section = f"--- FILE HEADER & IMPORTS ---\n{header_block}" if header_block.strip() else ""
 
-                    # Calculate remaining budget for adjacent context
-                    base_context = f"{meta_header}\n\n{header_section}\n\n{symbol_section}".strip()
-                    remaining_budget = max_budget_chars - len(base_context)
+                        base_context = f"{meta_header}\n\n{header_section}\n\n{symbol_section}".strip() if header_section else mandatory_minimal
 
-                    adjacent_block = ""
-                    if remaining_budget > 200:
-                        # Append adjacent context after function up to budget
-                        adjacent_lines = lines[end_line : end_line + 60]
-                        adj_text = "\n".join(adjacent_lines)
-                        if len(adj_text) > remaining_budget:
-                            # Line-bounded trimming of adjacent context
+                        if len(base_context) > max_budget_chars:
+                            base_context = mandatory_minimal
+
+                        remaining_budget = max_budget_chars - len(base_context)
+                        adjacent_block = ""
+                        if remaining_budget > 200:
+                            adjacent_lines = lines[end_line : end_line + 60]
                             trimmed_adj = []
                             cur_len = 0
                             for line in adjacent_lines:
-                                if cur_len + len(line) + 1 > remaining_budget:
+                                line_cost = len(line) + 1
+                                if cur_len + line_cost > remaining_budget:
                                     break
                                 trimmed_adj.append(line)
-                                cur_len += len(line) + 1
-                            adj_text = "\n".join(trimmed_adj)
-                        if adj_text.strip():
-                            adjacent_block = f"\n\n--- ADJACENT CONTEXT ---\n{adj_text}"
+                                cur_len += line_cost
+                            if trimmed_adj:
+                                adj_text = "\n".join(trimmed_adj)
+                                if adj_text.strip():
+                                    adjacent_block = f"\n\n--- ADJACENT CONTEXT ---\n{adj_text}"
 
-                    final_package = f"{base_context}{adjacent_block}"
+                        final_package = f"{base_context}{adjacent_block}".strip()
+                        if len(final_package) > max_budget_chars:
+                            final_package = base_context
 
-                    # Guarantee complete function body is retained even if budget is tight
-                    if len(final_package) > max_budget_chars:
-                        final_package = f"{meta_header}\n\n{symbol_section}"
+                        return ContextPackagingResult(
+                            success=True,
+                            context=final_package,
+                            status="OK",
+                        )
 
-                    return final_package
-
-    # Strategy 2: Bounded file excerpt fallback (no symbol found or non-AST file)
+    # Strategy 2: Bounded file excerpt fallback (for non-TEST_AUTHORING or when no symbol was found)
     fallback_parts: list[str] = []
     current_chars = 0
 
@@ -260,4 +280,12 @@ def package_task_context(
 
         fallback_parts.append("\n".join(excerpt_lines))
 
-    return "\n\n".join(fallback_parts).strip()
+    if not fallback_parts or current_chars == 0:
+        return ContextPackagingResult(success=False, context="", status="NO_AUTHORIZED_FILES")
+
+    final_fallback = "\n\n".join(fallback_parts).strip()
+    return ContextPackagingResult(
+        success=True,
+        context=final_fallback,
+        status="FALLBACK_EXCERPT",
+    )

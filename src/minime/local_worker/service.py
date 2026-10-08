@@ -96,14 +96,16 @@ class LocalWorkerService:
 
         effective_task = task
         if worktree_path:
-            packaged_context = package_task_context(
+            pkg_res = package_task_context(
                 instruction=task.instruction,
                 task_class=task.task_class,
                 allowed_files=task.allowed_files,
                 worktree_path=worktree_path,
             )
-            if packaged_context:
-                effective_task = task.model_copy(update={"context": packaged_context})
+            if pkg_res.success and pkg_res.context:
+                effective_task = task.model_copy(update={"context": pkg_res.context})
+            elif task.context:
+                effective_task = task
 
         async def bounded_dispatch(
             envelope: LocalTaskEnvelope, attempt: int, corrective_reason: str | None = None
