@@ -20,6 +20,7 @@ from minime.local_worker.models import (
 )
 from minime.local_worker.ollama_adapter import LocalOllamaAdapter
 from minime.local_worker.service import LocalWorkerService
+from minime.logging import redact_secrets
 
 
 def test_schema_cannot_select_uncertain():
@@ -28,6 +29,7 @@ def test_schema_cannot_select_uncertain():
     assert "CHANGES_PROPOSED" in enum_values
     assert "NO_CHANGE_JUSTIFIED" in enum_values
     assert "UNCERTAIN" not in enum_values
+    assert LOCAL_WORKER_RESPONSE_SCHEMA.get("additionalProperties") is False
 
 
 def test_parse_valid_changes_proposed():
@@ -93,6 +95,116 @@ def test_unified_diff_with_newlines_survives_json():
     assert parsed.patch == diff_text
 
 
+# R2 Strict Parsing Rejection Tests
+def test_strict_parser_missing_required_field():
+    raw = json.dumps(
+        {
+            "kind": "CHANGES_PROPOSED",
+            "summary": "Missing confidence",
+            "files_changed": [],
+            "patch": None,
+            "escalation_required": False,
+            "escalation_reason": "",
+            "next_action": "none",
+        }
+    )
+    with pytest.raises(ValueError, match="missing required fields"):
+        parse_structured_result(raw)
+
+
+def test_strict_parser_rejects_uncertain_and_unknown_kind():
+    raw_uncertain = json.dumps(
+        {
+            "kind": "UNCERTAIN",
+            "summary": "s",
+            "files_changed": [],
+            "patch": None,
+            "confidence": 0.5,
+            "escalation_required": False,
+            "escalation_reason": "",
+            "next_action": "a",
+        }
+    )
+    with pytest.raises(ValueError, match="kind 'UNCERTAIN' is invalid"):
+        parse_structured_result(raw_uncertain)
+
+
+def test_strict_parser_rejects_extra_properties():
+    raw = json.dumps(
+        {
+            "kind": "CHANGES_PROPOSED",
+            "summary": "Extra prop",
+            "files_changed": [],
+            "patch": None,
+            "confidence": 0.5,
+            "escalation_required": False,
+            "escalation_reason": "",
+            "next_action": "a",
+            "unexpected_field": True,
+        }
+    )
+    with pytest.raises(ValueError, match="unexpected additional properties"):
+        parse_structured_result(raw)
+
+
+def test_strict_parser_rejects_invalid_field_types():
+    # files_changed not list
+    raw1 = json.dumps(
+        {
+            "kind": "CHANGES_PROPOSED",
+            "summary": "s",
+            "files_changed": "foo.py",
+            "patch": None,
+            "confidence": 0.5,
+            "escalation_required": False,
+            "escalation_reason": "",
+            "next_action": "a",
+        }
+    )
+    with pytest.raises(ValueError, match="files_changed"):
+        parse_structured_result(raw1)
+
+    # confidence is boolean
+    raw2 = json.dumps(
+        {
+            "kind": "CHANGES_PROPOSED",
+            "summary": "s",
+            "files_changed": [],
+            "patch": None,
+            "confidence": True,
+            "escalation_required": False,
+            "escalation_reason": "",
+            "next_action": "a",
+        }
+    )
+    with pytest.raises(ValueError, match="confidence"):
+        parse_structured_result(raw2)
+
+    # confidence out of bounds
+    raw3 = json.dumps(
+        {
+            "kind": "CHANGES_PROPOSED",
+            "summary": "s",
+            "files_changed": [],
+            "patch": None,
+            "confidence": 1.5,
+            "escalation_required": False,
+            "escalation_reason": "",
+            "next_action": "a",
+        }
+    )
+    with pytest.raises(ValueError, match="confidence"):
+        parse_structured_result(raw3)
+
+
+# R3 Redaction Tests
+def test_diagnostic_excerpt_secret_redaction():
+    secret_text = '{"kind": "MALFORMED", "secret": "api_key=sk-1234567890abcdef"}'
+    redacted = redact_secrets(secret_text[:300])
+    assert "sk-1234567890abcdef" not in redacted
+    assert "api_key=[REDACTED]" in redacted
+
+
 @pytest.mark.asyncio
 async def test_adapter_sends_format_field():
     """Requirement 2: Adapter sends supported Ollama structured-output field ('format') in /api/chat request."""
@@ -143,11 +255,9 @@ async def test_adapter_sends_format_field():
 
 @pytest.mark.asyncio
 async def test_service_passes_schema_and_differentiates_attempt_2():
-    """Requirements 1, 7, 8, 9:
-    1. LocalWorkerService passes the structured schema to LocalOllamaAdapter.
-    7. Initial pre-mutation protocol failure receives one corrective attempt.
-    8. Attempt 2 prompt is actually different and explicitly corrective.
-    9. Maximum generation attempts remains 2 total.
+    """Requirements R1 & R4:
+    R1: LocalWorkerService passes structured schema mandatory to LocalOllamaAdapter.
+    R4: Attempt 2 prompt receives cause-specific corrective instruction.
     """
     adapter = MagicMock(spec=LocalOllamaAdapter)
     adapter.model = "qwen2.5-coder:7b-instruct-q4_K_M"
@@ -170,7 +280,6 @@ async def test_service_passes_schema_and_differentiates_attempt_2():
     async def mock_generate(*args, **kwargs):
         calls.append(kwargs)
         if len(calls) == 1:
-            # Attempt 1 returns malformed output
             from minime.local_worker.ollama_adapter import OllamaGenerateResponse
 
             return OllamaGenerateResponse(
@@ -178,7 +287,6 @@ async def test_service_passes_schema_and_differentiates_attempt_2():
                 text="Not JSON at all",
             )
         else:
-            # Attempt 2 returns valid NO_CHANGE_JUSTIFIED
             from minime.local_worker.ollama_adapter import OllamaGenerateResponse
 
             valid_json = json.dumps(
@@ -212,17 +320,113 @@ async def test_service_passes_schema_and_differentiates_attempt_2():
 
     outcome = await service.run(task, validator=validator)
 
-    assert len(calls) == 2  # Max 2 attempts total
-    # Check attempt 1
+    assert len(calls) == 2
     assert calls[0]["response_format"] == LOCAL_WORKER_RESPONSE_SCHEMA
     assert "IMPORTANT CORRECTIVE INSTRUCTION" not in calls[0]["prompt"]
 
-    # Check attempt 2
     assert calls[1]["response_format"] == LOCAL_WORKER_RESPONSE_SCHEMA
-    assert "IMPORTANT CORRECTIVE INSTRUCTION" in calls[1]["prompt"]
-    assert calls[1]["prompt"] != calls[0]["prompt"]
+    assert (
+        "Previous response did not satisfy the required structured response contract"
+        in calls[1]["prompt"]
+    )
     assert outcome.evidence.result_class == "SUCCESS"
     assert outcome.evidence.attempt == 2
+
+
+@pytest.mark.asyncio
+async def test_cause_specific_corrective_reasons_patch_policy():
+    """R4: Attempt 2 receives patch policy corrective instruction when policy fails."""
+    from minime.local_worker.harness import LocalWorkerHarness
+
+    harness = LocalWorkerHarness(max_corrective_attempts=1)
+    dispatches = []
+
+    async def mock_dispatch(envelope, attempt, corrective_reason=None):
+        dispatches.append((attempt, corrective_reason))
+        if attempt == 1:
+            return json.dumps(
+                {
+                    "kind": "CHANGES_PROPOSED",
+                    "summary": "Unauthorized file patch",
+                    "files_changed": ["forbidden.py"],
+                    "patch": "--- a/forbidden.py\n+++ b/forbidden.py\n@@ -1 +1 @@\n-old\n+new\n",
+                    "confidence": 0.8,
+                    "escalation_required": False,
+                    "escalation_reason": "",
+                    "next_action": "apply",
+                }
+            )
+        else:
+            return json.dumps(
+                {
+                    "kind": "NO_CHANGE_JUSTIFIED",
+                    "summary": "Fixed after policy warning",
+                    "files_changed": [],
+                    "patch": None,
+                    "confidence": 1.0,
+                    "escalation_required": False,
+                    "escalation_reason": "",
+                    "next_action": "none",
+                }
+            )
+
+    harness._dispatch = mock_dispatch
+
+    task = LocalTaskEnvelope(
+        role="LOCAL_WORKER",
+        task_class=LocalTaskClass.TEST_AUTHORING,
+        allowed_files=["allowed.py"],
+        instruction="Fix allowed",
+    )
+
+    validator = AsyncMock(return_value=ValidationResult(verdict=LocalValidationVerdict.PASS))
+
+    evidence = await harness.run(task, validator=validator)
+
+    assert len(dispatches) == 2
+    assert dispatches[0][1] is None
+    assert dispatches[1][1] is not None
+    assert "Previous patch violated the allowed patch policy" in dispatches[1][1]
+    assert evidence.result_class == "SUCCESS"
+
+
+@pytest.mark.asyncio
+async def test_incompatible_adapter_fails_closed():
+    """R1: Incompatible adapter that fails response_format causes LocalWorkerService.run to fail/escalate fail-closed."""
+
+    class IncompatibleAdapter:
+        model = "qwen2.5-coder:7b-instruct-q4_K_M"
+        provider = "ollama"
+
+        async def preflight(self, client=None):
+            from minime.local_worker.models import PreflightResult, PreflightStatus
+
+            return PreflightResult(
+                provider="ollama",
+                model=self.model,
+                status=PreflightStatus.READY,
+                reachable=True,
+                model_present=True,
+            )
+
+        async def generate(self, system_prompt, prompt, client=None):
+            # Does not accept response_format parameter!
+            raise TypeError("generate() got an unexpected keyword argument 'response_format'")
+
+    service = LocalWorkerService(adapter=IncompatibleAdapter(), max_corrective_attempts=1)
+    task = LocalTaskEnvelope(
+        role="LOCAL_WORKER",
+        task_class=LocalTaskClass.TEST_AUTHORING,
+        allowed_files=["foo.py"],
+        instruction="Fix foo",
+    )
+
+    validator = AsyncMock(return_value=ValidationResult(verdict=LocalValidationVerdict.PASS))
+
+    outcome = await service.run(task, validator=validator)
+
+    assert outcome.evidence.result_class == "UNEXPECTED_FAILURE"
+    assert outcome.evidence.escalation.required is True
 
 
 @pytest.mark.asyncio
@@ -234,7 +438,7 @@ async def test_no_retry_after_filesystem_mutation(tmp_path):
 
     dispatch_calls = 0
 
-    async def mock_dispatch(envelope, attempt):
+    async def mock_dispatch(envelope, attempt, corrective_reason=None):
         nonlocal dispatch_calls
         dispatch_calls += 1
         return json.dumps(
@@ -268,7 +472,6 @@ async def test_no_retry_after_filesystem_mutation(tmp_path):
     patch_applier = MagicMock()
     from minime.local_worker.patch_applier import PatchApplicationResult
 
-    # Patch was applied to disk (mutated), but application/post-check failed
     patch_applier.apply_patch.return_value = PatchApplicationResult(
         applied=True,
         success=False,
@@ -286,7 +489,6 @@ async def test_no_retry_after_filesystem_mutation(tmp_path):
         job_id="job-123",
     )
 
-    # Exactly 1 dispatch call because filesystem mutated: retry MUST BE NO!
     assert dispatch_calls == 1
     assert evidence.patch_applied is True
     assert evidence.result_class == "PATCH_APPLY_FAILED"

@@ -177,6 +177,7 @@ LOCAL_WORKER_RESPONSE_SCHEMA: dict[str, Any] = {
         "escalation_reason",
         "next_action",
     ],
+    "additionalProperties": False,
 }
 
 

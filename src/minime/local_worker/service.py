@@ -6,7 +6,6 @@ candidate result and never approves its own work.
 
 from __future__ import annotations
 
-import inspect
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -94,7 +93,9 @@ class LocalWorkerService:
         if preflight.status is not PreflightStatus.READY:
             return ServiceOutcome(eligibility, preflight, _preflight_failed_evidence(preflight))
 
-        async def bounded_dispatch(envelope: LocalTaskEnvelope, attempt: int) -> str:
+        async def bounded_dispatch(
+            envelope: LocalTaskEnvelope, attempt: int, corrective_reason: str | None = None
+        ) -> str:
             body = (
                 envelope.instruction
                 + "\nAllowed: "
@@ -104,7 +105,9 @@ class LocalWorkerService:
                 + "\nContext:\n"
                 + envelope.context
             )
-            if attempt > 1:
+            if attempt > 1 and corrective_reason:
+                body += f"\n\nIMPORTANT CORRECTIVE INSTRUCTION:\n{corrective_reason}"
+            elif attempt > 1:
                 body += (
                     "\n\nIMPORTANT CORRECTIVE INSTRUCTION:\n"
                     "Your previous response did not satisfy the required structured output contract.\n"
@@ -112,21 +115,13 @@ class LocalWorkerService:
                     "Do not use Markdown or code fences.\n"
                     "The patch value must be a JSON string containing the unified diff with escaped newlines."
                 )
-            gen_kwargs: dict[str, Any] = {
-                "system_prompt": SYSTEM_PROMPT,
-                "prompt": f"{LOCAL_WORKER_ROLE}\n{body}",
-                "client": client,
-            }
-            try:
-                sig = inspect.signature(self.adapter.generate)
-                if "response_format" in sig.parameters or any(
-                    p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
-                ):
-                    gen_kwargs["response_format"] = LOCAL_WORKER_RESPONSE_SCHEMA
-            except Exception:  # noqa: BLE001
-                pass
 
-            response = await self.adapter.generate(**gen_kwargs)
+            response = await self.adapter.generate(
+                system_prompt=SYSTEM_PROMPT,
+                prompt=f"{LOCAL_WORKER_ROLE}\n{body}",
+                client=client,
+                response_format=LOCAL_WORKER_RESPONSE_SCHEMA,
+            )
             if response.result_class is not ProviderResultClass.SUCCESS:
                 return ""
             return response.text

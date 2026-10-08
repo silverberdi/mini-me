@@ -188,15 +188,20 @@ async def _always_fail(_task, _result, _attempt) -> ValidationResult:
 async def test_parse_accepts_no_change_justified_as_valid():
     result = parse_structured_result(
         '{```json\n{"kind":"NO_CHANGE_JUSTIFIED","summary":"no change needed",'
-        '"files_changed":[],"confidence":0.9}\n```}'
+        '"files_changed":[],"patch":null,"confidence":0.9,"escalation_required":false,'
+        '"escalation_reason":"","next_action":"none"}\n```}'
     )
     assert result.kind is LocalResultKind.NO_CHANGE_JUSTIFIED
     assert result.is_no_change_justified
 
 
 async def test_harness_accepts_no_change_justified_outcome_when_validated():
-    async def dispatch(_t, _n):
-        return '{"kind":"NO_CHANGE_JUSTIFIED","summary":"ok"}'
+    async def dispatch(_t, _n, _r=None):
+        return (
+            '{"kind":"NO_CHANGE_JUSTIFIED","summary":"ok","files_changed":[],'
+            '"patch":null,"confidence":1.0,"escalation_required":false,'
+            '"escalation_reason":"","next_action":"none"}'
+        )
 
     harness = LocalWorkerHarness(dispatch=dispatch)
     envelope = _envelope(LocalTaskClass.SMALL_CODE_FIX, "look and decide no change needed")
@@ -213,7 +218,7 @@ async def test_harness_timeout_cancels_in_flight_and_cleanup_called():
     async def cleanup(attempt: int):
         cleanup_calls.append(attempt)
 
-    async def slow_dispatch(_t, _n):
+    async def slow_dispatch(_t, _n, _r=None):
         await asyncio.sleep(30)  # far beyond the envelope deadline
 
     harness = LocalWorkerHarness(dispatch=slow_dispatch, cleanup=cleanup, max_corrective_attempts=0)
@@ -231,9 +236,13 @@ async def test_harness_allows_exactly_one_corrective_then_escalates():
     dispatch_calls = []
     fail_then_pass = {"already_used": False}
 
-    async def dispatch(_t, _n):
+    async def dispatch(_t, _n, _r=None):
         dispatch_calls.append(_n)
-        return '{"kind":"NO_CHANGE_JUSTIFIED","summary":"fix"}'
+        return (
+            '{"kind":"NO_CHANGE_JUSTIFIED","summary":"fix","files_changed":[],'
+            '"patch":null,"confidence":1.0,"escalation_required":false,'
+            '"escalation_reason":"","next_action":"none"}'
+        )
 
     async def validator(_t, _result, _attempt):
         if not fail_then_pass["already_used"]:
@@ -256,9 +265,13 @@ async def test_harness_allows_exactly_one_corrective_then_escalates():
 async def test_harness_stops_with_escalation_when_corrective_still_fails():
     dispatch_calls = []
 
-    async def dispatch(_t, _n):
+    async def dispatch(_t, _n, _r=None):
         dispatch_calls.append(_n)
-        return '{"kind":"NO_CHANGE_JUSTIFIED","summary":"still bad"}'
+        return (
+            '{"kind":"NO_CHANGE_JUSTIFIED","summary":"still bad","files_changed":[],'
+            '"patch":null,"confidence":1.0,"escalation_required":false,'
+            '"escalation_reason":"","next_action":"none"}'
+        )
 
     harness = LocalWorkerHarness(dispatch=dispatch, max_corrective_attempts=1)
     envelope = _envelope(LocalTaskClass.SMALL_REFACTOR, "rename a local var")
@@ -309,10 +322,14 @@ async def test_service_success_run_yields_minimal_structured_evidence():
         model_present=True,
     )
 
-    async def fake_generate(*, system_prompt=None, prompt=None, client=None):
+    async def fake_generate(*, system_prompt=None, prompt=None, client=None, response_format=None):
         return OllamaGenerateResponse(
             result_class=ProviderResultClass.SUCCESS,
-            text='{"kind":"NO_CHANGE_JUSTIFIED","summary":"no change needed","patch":null}',
+            text=(
+                '{"kind":"NO_CHANGE_JUSTIFIED","summary":"no change needed","files_changed":[],'
+                '"patch":null,"confidence":1.0,"escalation_required":false,'
+                '"escalation_reason":"","next_action":"none"}'
+            ),
         )
 
     service = LocalWorkerService()
