@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 import httpx
 
@@ -71,6 +72,10 @@ class LocalWorkerService:
         validator: Validator,
         client: httpx.AsyncClient | None = None,
         preflight: PreflightResult | None = None,
+        worktree_path: Any | None = None,
+        uow: Any | None = None,
+        project_id: str = "mini-me",
+        job_id: str | None = None,
     ):
         """Eligibility gate -> preflight -> bounded dispatch -> validation -> evidence."""
         eligibility = evaluate_eligibility(
@@ -108,7 +113,14 @@ class LocalWorkerService:
         self.harness._dispatch = bounded_dispatch
         self.harness._cleanup = None
         try:
-            evidence = await self.harness.run(task, validator=validator)
+            evidence = await self.harness.run(
+                task,
+                validator=validator,
+                worktree_path=worktree_path,
+                uow=uow,
+                project_id=project_id,
+                job_id=job_id,
+            )
         except Exception:  # noqa: BLE001 - escalate, never crash the caller
             logger.exception("Local worker execution failed unexpectedly")
             evidence = _unexpected_failure_evidence(eligibility.task_class)
