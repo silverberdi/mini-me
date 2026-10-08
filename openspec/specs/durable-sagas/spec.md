@@ -135,3 +135,10 @@ GIVEN two concurrent resume requests targeting the same saga ID S
 WHEN both requests reach the saga engine
 THEN the saga engine SHALL use atomic row locking (`SELECT ... FOR UPDATE`) to serialize execution
 AND the second request SHALL observe the updated saga state idempotently without executing duplicate actions.
+
+### Requirement: Claimed reconciliation cancellation
+The system SHALL acquire a fresh recovery claim before cancelling a reconciled intake saga and SHALL preserve saga/action/audit history. Expired historical claims SHALL be observational evidence only.
+
+#### Scenario: Expired claim is not reused
+- **WHEN** a prior intake claim has expired
+- **THEN** reconciliation acquires a new authoritative claim before mutation
