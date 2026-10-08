@@ -405,14 +405,23 @@ class LocalPatchApplier:
                 error=f"Worktree '{target_dir}' is dirty before patch application.",
             )
 
-        # Pre-apply containment and symlink check
-        valid_diff, touched_files_set, parse_err = parse_patch_touched_files(patch)
-        if not valid_diff:
-            return PatchApplicationResult(success=False, error=parse_err)
+        # 5b. Complete canonical deterministic patch policy enforcement prior to mutation
+        policy_decision = validate_patch_policy(
+            patch, envelope, kind=LocalResultKind.CHANGES_PROPOSED
+        )
+        if not policy_decision.valid:
+            return PatchApplicationResult(
+                success=False,
+                applied=False,
+                error=f"Patch policy validation failed: {policy_decision.reason}",
+            )
 
-        containment_err = check_path_containment_and_symlinks(target_dir, touched_files_set)
+        # Pre-apply containment and symlink check on authoritative touched files
+        containment_err = check_path_containment_and_symlinks(
+            target_dir, policy_decision.touched_files
+        )
         if containment_err:
-            return PatchApplicationResult(success=False, error=containment_err)
+            return PatchApplicationResult(success=False, applied=False, error=containment_err)
 
         # 6. Programmatic git apply with sanitized env
         apply_res = subprocess.run(

@@ -18,6 +18,11 @@ Before any filesystem mutation, mini me MUST validate the proposed patch against
 - **When** mini me parses the authoritative touched files from the diff
 - **Then** all touched files MUST be a subset of `LocalTaskEnvelope.allowed_files` and MUST NOT contain path traversal, absolute paths, or targets outside the authorized execution worktree.
 
+#### Scenario: Fail-closed patch safety restrictions
+- **Given** a proposed patch or direct `LocalPatchApplier` invocation
+- **When** mini me evaluates patch content, target paths, or envelope constraints
+- **Then** patch policy validation and `LocalPatchApplier` MUST fail closed without filesystem mutation if `allowed_files` is empty, if touched files match forbidden globs or forbidden surface families, if patch contains file creation, deletion, rename, or binary diffs, or if touched paths contain symlinks or path traversal escapes.
+
 ### Requirement: Authorized Patch Application
 Patch application MUST execute strictly inside an authorized `EXECUTION_WORKTREE`.
 

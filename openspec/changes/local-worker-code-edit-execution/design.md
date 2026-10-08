@@ -3,10 +3,11 @@
 ## Architecture Decisions
 
 ### 1. Patch Parsing & Pre-Mutation Validation
-Introduce patch validation functions in `minime.local_worker.patch_applier` (or `patch_policy` module):
+Introduce patch validation functions in `minime.local_worker.patch_applier` (and enforced directly within `LocalPatchApplier` prior to mutation):
 - Parse unified diff headers (`--- a/path`, `+++ b/path`) to extract authoritative target files.
-- Reject patches with absolute paths, directory traversal (`..`), symlinks, or forbidden file targets.
-- Cross-check authoritative touched files $\subseteq$ `allowed_files`.
+- Reject patches with absolute paths, directory traversal (`..`), symlinks, file creation (`--- /dev/null`), deletion (`+++ /dev/null`), renames, or binary diffs.
+- Fail closed if `allowed_files` is empty, if touched files match forbidden globs or forbidden surface families, or if paths escape worktree bounds.
+- Cross-check authoritative touched files $\subseteq$ `allowed_files` using `fnmatch` glob pattern semantics.
 
 ### 2. Isolation & SDLC Authority Integration
 Patch application leverages existing Stage C SDLC isolation primitives:

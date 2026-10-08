@@ -795,3 +795,83 @@ def test_f8_containment_and_symlink_check(tmp_path):
     err3 = check_path_containment_and_symlinks(worktree, {"sym_dir/file.py"})
     assert err3 is not None
     assert "Symlink detected" in err3
+
+
+# C1 DIRECT-APPLIER SAFETY TESTS
+@pytest.mark.asyncio
+async def test_c1_direct_applier_unauthorized_patch_refused(stage_c_environment):
+    uow = stage_c_environment["uow"]
+    wt_info = await create_authorized_worktree(stage_c_environment, job_id="job-c1", run_id="run-c1")
+
+    original_content = (wt_info.path / "foo.py").read_text()
+
+    unauthorized_patch = (
+        "--- a/foo.py\n"
+        "+++ b/foo.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " def foo():\n"
+        "-    return 42\n"
+        "+    return 999\n"
+    )
+
+    unauthorized_envelope = LocalTaskEnvelope(
+        role="local_worker",
+        task_class=LocalTaskClass.SMALL_CODE_FIX,
+        allowed_files=["tests/test_foo.py"],  # foo.py is NOT allowed!
+        instruction="Fix test only",
+    )
+
+    applier = LocalPatchApplier(uow=uow)
+    res = applier.apply_patch(
+        worktree_path=wt_info.path,
+        envelope=unauthorized_envelope,
+        patch=unauthorized_patch,
+        project_id="mini-me",
+        job_id="job-c1",
+    )
+
+    assert res.success is False
+    assert res.applied is False
+    assert "not in allowed_files" in res.error
+
+    # Verify zero filesystem mutation
+    diff_res = subprocess.run(["git", "diff"], cwd=wt_info.path, capture_output=True, text=True, check=True)
+    assert diff_res.stdout.strip() == ""
+    assert (wt_info.path / "foo.py").read_text() == original_content
+
+
+@pytest.mark.asyncio
+async def test_c1_direct_applier_forbidden_surface_refused(stage_c_environment):
+    uow = stage_c_environment["uow"]
+    wt_info = await create_authorized_worktree(stage_c_environment, job_id="job-c1-forb", run_id="run-c1-forb")
+
+    forbidden_patch = (
+        "--- a/alembic/env.py\n"
+        "+++ b/alembic/env.py\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+
+    envelope = LocalTaskEnvelope(
+        role="local_worker",
+        task_class=LocalTaskClass.SMALL_CODE_FIX,
+        allowed_files=["alembic/env.py"],
+        instruction="Modify alembic env",
+    )
+
+    applier = LocalPatchApplier(uow=uow)
+    res = applier.apply_patch(
+        worktree_path=wt_info.path,
+        envelope=envelope,
+        patch=forbidden_patch,
+        project_id="mini-me",
+        job_id="job-c1-forb",
+    )
+
+    assert res.success is False
+    assert res.applied is False
+    assert "forbidden surface" in res.error.lower() or "migration" in res.error.lower()
+
+    diff_res = subprocess.run(["git", "diff"], cwd=wt_info.path, capture_output=True, text=True, check=True)
+    assert diff_res.stdout.strip() == ""
