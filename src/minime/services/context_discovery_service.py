@@ -27,6 +27,48 @@ from minime.services.openspec_generator import slugify
 logger = logging.getLogger(__name__)
 
 
+_STATUS_PRECEDENCE: dict[WorkItemStatus, int] = {
+    WorkItemStatus.COMPLETED: 6,
+    WorkItemStatus.CANCELLED: 5,
+    WorkItemStatus.RUNNING: 4,
+    WorkItemStatus.ADMITTED: 4,
+    WorkItemStatus.READY: 3,
+    WorkItemStatus.BLOCKED: 2,
+    WorkItemStatus.PREPARING: 1,
+    WorkItemStatus.CONTEXT_CHECK: 1,
+    WorkItemStatus.NEEDS_HUMAN: 1,
+    WorkItemStatus.BACKLOG: 0,
+}
+
+
+def deduplicate_discovered_backlog_items(items: list[BacklogItem]) -> list[BacklogItem]:
+    """Deduplicate discovered backlog items by item_key using status precedence."""
+    accumulated: dict[str, BacklogItem] = {}
+
+    for item in items:
+        key = item.item_key
+        if key not in accumulated:
+            accumulated[key] = item
+        else:
+            existing = accumulated[key]
+            existing_rank = _STATUS_PRECEDENCE.get(existing.status, 0)
+            new_rank = _STATUS_PRECEDENCE.get(item.status, 0)
+            if new_rank > existing_rank:
+                merged = item.model_copy(
+                    update={
+                        "title": item.title
+                        if item.title and item.title.strip()
+                        else existing.title,
+                        "description": item.description
+                        if item.description and item.description.strip()
+                        else existing.description,
+                    }
+                )
+                accumulated[key] = merged
+
+    return list(accumulated.values())
+
+
 def parse_priority_text(text: str) -> QueuePriority:
     """Infer queue priority from label or description text."""
     lower = text.lower()
@@ -291,6 +333,8 @@ class ContextDiscoveryService:
                     detail=f"{len(project.checks)} check command(s) registered.",
                 )
             )
+
+        discovered_items = deduplicate_discovered_backlog_items(discovered_items)
 
         report = ContextDiscoveryReport(
             project_id=project_id,
