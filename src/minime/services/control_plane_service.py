@@ -513,6 +513,12 @@ class ControlPlaneService:
                 f"Error executing action {request.action_type} for run {run.run_id}: {exc}",
                 exc_info=True,
             )
+            # Every action handler shares this failure boundary.  In particular,
+            # cancellation mutates a linked Job and its run in one transaction;
+            # roll that work back before the durable FAILED audit record is
+            # written in a clean transaction.
+            self.uow.rollback()
+            persisted_run = self.uow.orchestration_runs.get_by_id(run.run_id) or run
             err_msg = redact_secrets(str(exc))
             record = OperatorActionRecord(
                 action_request_id=request.action_request_id,
@@ -522,8 +528,10 @@ class ControlPlaneService:
                 action_type=request.action_type,
                 actor_identity=request.actor_identity,
                 source_interface=request.source_interface,
-                precondition_stage=run.current_stage.value,
-                precondition_gate=run.human_gate.value if run.human_gate else None,
+                precondition_stage=persisted_run.current_stage.value,
+                precondition_gate=(
+                    persisted_run.human_gate.value if persisted_run.human_gate else None
+                ),
                 status=OperatorActionStatus.FAILED,
                 error_code=OperatorActionErrorCode.ACTION_EXECUTION_FAILED,
                 summary=f"Internal execution failure: {err_msg}",
@@ -539,9 +547,9 @@ class ControlPlaneService:
                 status=OperatorActionStatus.FAILED,
                 error_code=OperatorActionErrorCode.ACTION_EXECUTION_FAILED,
                 summary=f"Internal execution failure: {err_msg}",
-                resulting_stage=run.current_stage,
-                resulting_outcome=run.stop_outcome,
-                resulting_gate=run.human_gate,
+                resulting_stage=persisted_run.current_stage,
+                resulting_outcome=persisted_run.stop_outcome,
+                resulting_gate=persisted_run.human_gate,
             )
 
     def _check_optimistic_concurrency(
@@ -1169,14 +1177,18 @@ class ControlPlaneService:
                 sanitized_params=sanitized_params,
             )
 
-        # 1. Update run state cleanly
+        # 1. Converge the linked execution job before changing the run. Both
+        # mutations share the UoW and commit together below.
+        self._cancel_linked_job(run)
+
+        # 2. Update run state cleanly
         run.is_active = False
         run.stop_outcome = OrchestrationStopOutcome.CANCELLED
         run.stop_reason = f"Cancelled by {request.actor_identity} via {request.source_interface}"
         run.updated_at = utc_now()
         self.uow.orchestration_runs.save(run)
 
-        # 2. Teardown owned container preview if active
+        # 3. Teardown owned container preview if active
         try:
             active_preview = self.uow.preview_sessions.get_active_for_change(
                 run.project_id, run.change_name
@@ -1188,7 +1200,7 @@ class ControlPlaneService:
         except Exception as exc:
             logger.warning(f"Error tearing down preview on cancellation: {exc}")
 
-        # 3. Emit durable event
+        # 4. Emit durable event
         self.uow.events.save(
             Event(
                 event_type=EventType.ORCHESTRATION_STOPPED,
@@ -1238,6 +1250,49 @@ class ControlPlaneService:
             resulting_outcome=OrchestrationStopOutcome.CANCELLED,
             resulting_gate=None,
             payload={"cancelled": True},
+        )
+
+    def reconcile_cancelled_run_linked_job(self, run_id: str) -> OrchestrationRun:
+        """Idempotently converge a cancelled run's non-terminal linked Job.
+
+        This deliberately does not replay cancellation side effects or mutate the
+        run. It is the narrow historical repair path for a prior version of
+        CANCEL that left ``active_job_id`` in the scheduler's active-job set.
+        """
+        run = self.uow.orchestration_runs.get_by_id(run_id)
+        if not run:
+            raise ValueError(f"Orchestration run '{run_id}' not found.")
+        if run.is_active or run.stop_outcome != OrchestrationStopOutcome.CANCELLED:
+            raise ValueError(
+                f"Run '{run_id}' is not an inactive cancelled run and cannot be reconciled."
+            )
+
+        try:
+            self._cancel_linked_job(run)
+            self.uow.commit()
+        except Exception:
+            self.uow.rollback()
+            raise
+
+        return self.uow.orchestration_runs.get_by_id(run_id) or run
+
+    def _cancel_linked_job(self, run: OrchestrationRun) -> None:
+        """Transition a run's non-terminal linked Job through the Job authority."""
+        if not run.active_job_id:
+            return
+
+        job = self.uow.jobs.get_by_id(run.active_job_id)
+        if not job:
+            raise ValueError(
+                f"Run '{run.run_id}' references missing active job '{run.active_job_id}'."
+            )
+        if job.status in {JobStatus.COMPLETED, JobStatus.CANCELLED}:
+            return
+
+        self.uow.jobs.transition(
+            job.job_id,
+            JobStatus.CANCELLED.value,
+            error_message=f"Cancelled with orchestration run '{run.run_id}'.",
         )
 
     def _execute_start_preview(

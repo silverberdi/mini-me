@@ -19,6 +19,10 @@ from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.domain.enums import (
     AdmissionDecision,
     ChangeStatus,
+    JobStatus,
+    OperatorActionStatus,
+    OperatorActionType,
+    OrchestrationStage,
     QueuePriority,
     ReadinessState,
     WorkItemStatus,
@@ -26,11 +30,15 @@ from minime.domain.enums import (
 from minime.domain.models import (
     BacklogItem,
     Change,
+    Job,
+    OperatorActionRequest,
+    OrchestrationRun,
     Project,
     ProjectBinding,
     WorkQueueItem,
     utc_now,
 )
+from minime.services.control_plane_service import ControlPlaneService
 from minime.services.orchestration_service import OrchestrationService
 
 
@@ -264,6 +272,83 @@ def test_t05_admission_bundle_failure_injection_rollback(
         b_item = verify_uow.backlog_items.get_by_openspec_change_name(project_id, change_name)
         assert b_item is not None
         assert b_item.status == WorkItemStatus.READY, "Backlog item status must remain READY."
+
+
+@pytest.mark.parametrize("job_status", [JobStatus.QUEUED, JobStatus.READY_TO_MERGE])
+def test_control_plane_cancel_rolls_back_linked_job_before_failed_action_record(
+    pg_session_factory: sessionmaker[Session], monkeypatch, job_status: JobStatus
+):
+    """A failed linked-job transition cannot leave either half of CANCEL durable."""
+    project_id = "cancel-atomic-proj"
+    change_name = "cancel-atomic-change"
+    run_id = "cancel-atomic-run"
+    job_id = "cancel-atomic-job"
+
+    with pg_session_factory() as session:
+        uow = PostgresPersistenceUnitOfWork(session)
+        uow.projects.save(
+            Project(
+                project_id=project_id,
+                display_name="Cancel Atomic Project",
+                repository="owner/cancel-atomic",
+            )
+        )
+        uow.changes.save(
+            Change(project_id=project_id, name=change_name, status=ChangeStatus.READY)
+        )
+        uow.jobs.save(
+            Job(
+                job_id=job_id,
+                project_id=project_id,
+                change_name=change_name,
+                status=job_status,
+                implementer_role="codex",
+            )
+        )
+        uow.orchestration_runs.save(
+            OrchestrationRun(
+                run_id=run_id,
+                project_id=project_id,
+                change_name=change_name,
+                current_stage=OrchestrationStage.IMPLEMENTING,
+                current_generation=1,
+                base_sha="base-cancel-atomic",
+                active_job_id=job_id,
+                is_active=True,
+            )
+        )
+        uow.commit()
+
+        original_transition = uow.jobs.transition
+
+        def transition_then_fail(*args, **kwargs):
+            original_transition(*args, **kwargs)
+            raise RuntimeError("injected transition failure after mutation")
+
+        monkeypatch.setattr(uow.jobs, "transition", transition_then_fail)
+        result = ControlPlaneService(uow).execute_action(
+            OperatorActionRequest(
+                action_request_id="cancel-atomic-request",
+                project_id=project_id,
+                change_name=change_name,
+                run_id=run_id,
+                action_type=OperatorActionType.CANCEL,
+                expected_stage=OrchestrationStage.IMPLEMENTING,
+                expected_generation=1,
+                actor_identity="test-operator",
+                source_interface="cli",
+            )
+        )
+        assert result.status == OperatorActionStatus.FAILED
+
+    with pg_session_factory() as verify_session:
+        verify_uow = PostgresPersistenceUnitOfWork(verify_session)
+        run = verify_uow.orchestration_runs.get_by_id(run_id)
+        job = verify_uow.jobs.get_by_id(job_id)
+        record = verify_uow.operator_actions.get_by_request_id("cancel-atomic-request")
+        assert run is not None and run.is_active is True and run.stop_outcome is None
+        assert job is not None and job.status == job_status
+        assert record is not None and record.status == OperatorActionStatus.FAILED
 
 
 def test_t05a_no_intermediate_admission_commit(

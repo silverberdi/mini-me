@@ -1390,6 +1390,7 @@ class PostgresJobRepository(JobRepositoryInterface):
             JobStatus.AUDIT_BLOCKED,
             JobStatus.POST_MERGE_RECONCILING,
             JobStatus.COMPLETED,
+            JobStatus.CANCELLED,
         },
         JobStatus.POST_MERGE_RECONCILING: {
             JobStatus.COMPLETED,

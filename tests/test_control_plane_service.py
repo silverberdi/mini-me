@@ -7,6 +7,7 @@ import pytest
 from minime.domain.enums import (
     ChangeStatus,
     HumanGate,
+    JobStatus,
     OperatorActionErrorCode,
     OperatorActionStatus,
     OperatorActionType,
@@ -16,8 +17,10 @@ from minime.domain.enums import (
 )
 from minime.domain.models import (
     Change,
+    Job,
     OperatorActionRequest,
     OrchestrationRun,
+    OrchestrationWorktreeOwnership,
     Project,
     generate_uuid,
 )
@@ -180,6 +183,149 @@ def test_cancel_active_run_safety(in_memory_uow, seeded_project_and_run):
     # Verify candidate SHA and lineage are preserved!
     assert updated_run.candidate_sha == "abc1234567890"
     assert updated_run.current_generation == 1
+
+
+def _link_active_job(in_memory_uow, run, status: JobStatus = JobStatus.QUEUED) -> Job:
+    job = Job(
+        job_id="job-101",
+        project_id=run.project_id,
+        change_name=run.change_name,
+        status=status,
+        implementer_role="codex",
+        candidate_sha=run.candidate_sha,
+        base_sha=run.base_sha,
+    )
+    in_memory_uow.jobs.save(job)
+    run.active_job_id = job.job_id
+    run.is_active = True
+    run.stop_outcome = None
+    in_memory_uow.orchestration_runs.save(run)
+    in_memory_uow.commit()
+    return job
+
+
+def _cancel_request(run: OrchestrationRun) -> OperatorActionRequest:
+    return OperatorActionRequest(
+        project_id=run.project_id,
+        change_name=run.change_name,
+        run_id=run.run_id,
+        action_type=OperatorActionType.CANCEL,
+        expected_stage=run.current_stage,
+        expected_generation=run.current_generation,
+        expected_candidate_sha=run.candidate_sha,
+        actor_identity="test-operator",
+        source_interface="cli",
+    )
+
+
+@pytest.mark.parametrize(
+    "job_status", [JobStatus.QUEUED, JobStatus.RUNNING]
+)
+def test_cancel_active_run_converges_nonterminal_linked_job(
+    in_memory_uow, seeded_project_and_run, job_status
+):
+    _, _, run = seeded_project_and_run
+    job = _link_active_job(in_memory_uow, run, job_status)
+
+    result = ControlPlaneService(in_memory_uow).execute_action(_cancel_request(run))
+
+    assert result.status == OperatorActionStatus.COMPLETED
+    assert in_memory_uow.orchestration_runs.get_by_id(run.run_id).is_active is False
+    assert (
+        in_memory_uow.orchestration_runs.get_by_id(run.run_id).stop_outcome
+        == OrchestrationStopOutcome.CANCELLED
+    )
+    assert in_memory_uow.jobs.get_by_id(job.job_id).status == JobStatus.CANCELLED
+    assert in_memory_uow.jobs.get_by_id(job.job_id).candidate_sha == run.candidate_sha
+    assert job.job_id not in {item.job_id for item in in_memory_uow.jobs.list_active_jobs()}
+
+
+@pytest.mark.parametrize("job_status", [JobStatus.CANCELLED, JobStatus.COMPLETED])
+def test_cancel_active_run_preserves_terminal_linked_job(
+    in_memory_uow, seeded_project_and_run, job_status
+):
+    _, _, run = seeded_project_and_run
+    job = _link_active_job(in_memory_uow, run, job_status)
+
+    result = ControlPlaneService(in_memory_uow).execute_action(_cancel_request(run))
+
+    assert result.status == OperatorActionStatus.COMPLETED
+    assert in_memory_uow.jobs.get_by_id(job.job_id).status == job_status
+    assert (
+        in_memory_uow.orchestration_runs.get_by_id(run.run_id).stop_outcome
+        == OrchestrationStopOutcome.CANCELLED
+    )
+
+
+def test_cancel_active_run_fails_closed_for_missing_linked_job(
+    in_memory_uow, seeded_project_and_run
+):
+    _, _, run = seeded_project_and_run
+    run.active_job_id = "missing-job"
+    run.is_active = True
+    run.stop_outcome = None
+    in_memory_uow.orchestration_runs.save(run)
+
+    result = ControlPlaneService(in_memory_uow).execute_action(_cancel_request(run))
+
+    assert result.status == OperatorActionStatus.FAILED
+    persisted = in_memory_uow.orchestration_runs.get_by_id(run.run_id)
+    assert persisted.is_active is True
+    assert persisted.stop_outcome is None
+
+
+def test_cancel_rolls_back_before_recording_transition_failure(
+    in_memory_uow, seeded_project_and_run, monkeypatch
+):
+    _, _, run = seeded_project_and_run
+    job = _link_active_job(in_memory_uow, run)
+
+    def fail_transition(*_args, **_kwargs):
+        raise RuntimeError("injected job transition failure")
+
+    monkeypatch.setattr(in_memory_uow.jobs, "transition", fail_transition)
+    result = ControlPlaneService(in_memory_uow).execute_action(_cancel_request(run))
+
+    assert result.status == OperatorActionStatus.FAILED
+    assert in_memory_uow.rolled_back is True
+    assert in_memory_uow.orchestration_runs.get_by_id(run.run_id).is_active is True
+    assert in_memory_uow.jobs.get_by_id(job.job_id).status == JobStatus.QUEUED
+    assert (
+        in_memory_uow.operator_actions.get_by_request_id(result.action_request_id).status
+        == OperatorActionStatus.FAILED
+    )
+
+
+def test_reconcile_cancelled_run_linked_job_is_idempotent_and_preserves_ownership(
+    in_memory_uow, seeded_project_and_run
+):
+    _, _, run = seeded_project_and_run
+    job = _link_active_job(in_memory_uow, run)
+    run.is_active = False
+    run.stop_outcome = OrchestrationStopOutcome.CANCELLED
+    in_memory_uow.orchestration_runs.save(run)
+    ownership = OrchestrationWorktreeOwnership(
+        project_id=run.project_id,
+        job_id=job.job_id,
+        run_id=run.run_id,
+        change_name=run.change_name,
+        canonical_worktree_path="/worktrees/job-101",
+        source_repository_identity="owner/repo",
+        source_base_sha=run.base_sha,
+        branch="minime/test-job-101",
+    )
+    in_memory_uow.orchestration_worktree_ownerships.save(ownership)
+
+    service = ControlPlaneService(in_memory_uow)
+    events_before = list(in_memory_uow.events.list_events())
+    reconciled = service.reconcile_cancelled_run_linked_job(run.run_id)
+    repeated = service.reconcile_cancelled_run_linked_job(run.run_id)
+
+    assert reconciled.is_active is False
+    assert repeated.stop_outcome == OrchestrationStopOutcome.CANCELLED
+    assert in_memory_uow.jobs.get_by_id(job.job_id).status == JobStatus.CANCELLED
+    assert in_memory_uow.orchestration_worktree_ownerships.get_by_job_id(job.job_id) == ownership
+    assert in_memory_uow.events.list_events() == events_before
 
 
 def test_resolve_gate_ui_validation(in_memory_uow, seeded_project_and_run):
