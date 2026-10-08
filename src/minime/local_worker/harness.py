@@ -199,14 +199,15 @@ class LocalWorkerHarness:
             try:
                 result = parse_structured_result(raw)
             except ValueError as exc:
-                last_raw_excerpt = redact_secrets(raw[:300]) if raw else ""
-                last_failure_reason = str(exc)
+                sanitized_raw = redact_secrets(raw) if raw else ""
+                last_raw_excerpt = sanitized_raw[:300]
+                last_failure_reason = redact_secrets(str(exc))
                 last_raw_length = len(raw) if raw else 0
                 logger.warning(
                     "Local worker malformed structured output (attempt %d, length=%d): %s | Excerpt: %r",
                     attempt,
                     last_raw_length,
-                    exc,
+                    last_failure_reason,
                     last_raw_excerpt[:200],
                 )
                 if corrections >= self.max_corrective_attempts:
@@ -214,7 +215,7 @@ class LocalWorkerHarness:
                     last = None
                     last_validation = ValidationResult(
                         verdict=LocalValidationVerdict.FAIL,
-                        reason=f"Malformed structured output; corrective budget exhausted: {exc}",
+                        reason=f"Malformed structured output; corrective budget exhausted: {last_failure_reason}",
                     )
                     escalation = escalation or EscalationDecision(
                         required=True,

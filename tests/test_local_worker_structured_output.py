@@ -269,9 +269,73 @@ def test_strict_envelope_rejects_extra_wrapper_text_or_braces():
 # R3 Redaction Tests
 def test_diagnostic_excerpt_secret_redaction():
     secret_text = '{"kind": "MALFORMED", "secret": "api_key=sk-1234567890abcdef"}'
-    redacted = redact_secrets(secret_text[:300])
+    redacted = redact_secrets(secret_text)
     assert "sk-1234567890abcdef" not in redacted
     assert "api_key=[REDACTED]" in redacted
+
+
+@pytest.mark.asyncio
+async def test_boundary_spanning_secret_redacted_before_truncation():
+    """ISSUE A: Secret spanning across the 300-char truncation boundary must be redacted, not leaked by premature slicing."""
+    from minime.local_worker.harness import LocalWorkerHarness
+
+    padding = " " * 270 + '{"k": "'
+    raw_with_spanning_secret = f"{padding}sk-1234567890abcdef_extra_secret_data"
+
+    async def mock_dispatch(task, attempt, corrective_reason=None):
+        return raw_with_spanning_secret
+
+    harness = LocalWorkerHarness(dispatch=mock_dispatch, max_corrective_attempts=0)
+    task = LocalTaskEnvelope(
+        role="LOCAL_WORKER",
+        task_class=LocalTaskClass.TEST_AUTHORING,
+        allowed_files=["foo.py"],
+        instruction="Fix foo",
+    )
+    validator = AsyncMock(return_value=ValidationResult(verdict=LocalValidationVerdict.PASS))
+
+    evidence = await harness.run(task, validator=validator)
+
+    assert evidence.raw_output_excerpt is not None
+    assert "sk-1234567890abcdef" not in evidence.raw_output_excerpt
+    assert "[REDACTED_KEY]" in evidence.raw_output_excerpt
+
+
+@pytest.mark.asyncio
+async def test_model_controlled_failure_reason_redacted():
+    """ISSUE B: Secret-like values placed in model-controlled fields (e.g. kind) are redacted in failure reason and logs."""
+    from minime.local_worker.harness import LocalWorkerHarness
+
+    raw_with_secret_kind = json.dumps(
+        {
+            "kind": "sk-1234567890abcdef_invalid_kind",
+            "summary": "s",
+            "files_changed": [],
+            "patch": None,
+            "confidence": 1.0,
+            "escalation_required": False,
+            "escalation_reason": "",
+            "next_action": "none",
+        }
+    )
+
+    async def mock_dispatch(task, attempt, corrective_reason=None):
+        return raw_with_secret_kind
+
+    harness = LocalWorkerHarness(dispatch=mock_dispatch, max_corrective_attempts=0)
+    task = LocalTaskEnvelope(
+        role="LOCAL_WORKER",
+        task_class=LocalTaskClass.TEST_AUTHORING,
+        allowed_files=["foo.py"],
+        instruction="Fix foo",
+    )
+    validator = AsyncMock(return_value=ValidationResult(verdict=LocalValidationVerdict.PASS))
+
+    evidence = await harness.run(task, validator=validator)
+
+    assert evidence.model_output_failure_reason is not None
+    assert "sk-1234567890abcdef" not in evidence.model_output_failure_reason
+    assert "[REDACTED_KEY]" in evidence.model_output_failure_reason
 
 
 @pytest.mark.asyncio
