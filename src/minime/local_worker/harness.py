@@ -143,6 +143,9 @@ class LocalWorkerHarness:
         patch_proposed = False
         patch_applied = False
         authoritative_changed: tuple[str, ...] = ()
+        last_raw_excerpt: str | None = None
+        last_failure_reason: str | None = None
+        last_raw_length: int | None = None
 
         while True:
             raw = await self._bounded(task, attempt, dispatch, cleanup)
@@ -163,6 +166,16 @@ class LocalWorkerHarness:
             try:
                 result = parse_structured_result(raw)
             except ValueError as exc:
+                last_raw_excerpt = raw[:300] if raw else ""
+                last_failure_reason = str(exc)
+                last_raw_length = len(raw) if raw else 0
+                logger.warning(
+                    "Local worker malformed structured output (attempt %d, length=%d): %s | Excerpt: %r",
+                    attempt,
+                    last_raw_length,
+                    exc,
+                    last_raw_excerpt[:200],
+                )
                 if corrections >= self.max_corrective_attempts:
                     outcome_class = "MALFORMED_OUTPUT"
                     last = None
@@ -186,6 +199,7 @@ class LocalWorkerHarness:
             # 1. Patch Policy Validation
             policy_decision = validate_patch_policy(result.patch, task, kind=result.kind)
             if not policy_decision.valid:
+                last_failure_reason = f"Patch policy validation failed: {policy_decision.reason}"
                 if corrections < self.max_corrective_attempts:
                     corrections += 1
                     attempt += 1
@@ -241,6 +255,7 @@ class LocalWorkerHarness:
                 authoritative_changed = app_res.authoritative_changed_files
 
                 if not app_res.success:
+                    last_failure_reason = f"Patch application failed: {app_res.error}"
                     if app_res.applied:
                         # Filesystem mutated: NO retry allowed!
                         outcome_kind = result.kind
@@ -353,6 +368,9 @@ class LocalWorkerHarness:
             patch_applied=patch_applied,
             authoritative_changed_files=list(authoritative_changed),
             worktree_path=str(worktree_path) if worktree_path else None,
+            raw_output_excerpt=last_raw_excerpt,
+            model_output_failure_reason=last_failure_reason,
+            raw_output_length=last_raw_length,
         )
 
     async def _bounded(

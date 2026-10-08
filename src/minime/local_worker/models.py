@@ -143,6 +143,43 @@ class EscalationDecision(BaseModel):
     reason: str = ""
 
 
+LOCAL_WORKER_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "kind": {
+            "type": "string",
+            "enum": ["CHANGES_PROPOSED", "NO_CHANGE_JUSTIFIED"],
+        },
+        "summary": {"type": "string"},
+        "files_changed": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+        "patch": {
+            "type": ["string", "null"],
+        },
+        "confidence": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 1.0,
+        },
+        "escalation_required": {"type": "boolean"},
+        "escalation_reason": {"type": "string"},
+        "next_action": {"type": "string"},
+    },
+    "required": [
+        "kind",
+        "summary",
+        "files_changed",
+        "patch",
+        "confidence",
+        "escalation_required",
+        "escalation_reason",
+        "next_action",
+    ],
+}
+
+
 class LocalExecutionEvidence(BaseModel):
     """Minimal structured evidence: provider, model, task class, attempt, result,
     validation result, escalation."""
@@ -161,6 +198,9 @@ class LocalExecutionEvidence(BaseModel):
     patch_applied: bool = False
     authoritative_changed_files: list[str] = Field(default_factory=list)
     worktree_path: str | None = None
+    raw_output_excerpt: str | None = None
+    model_output_failure_reason: str | None = None
+    raw_output_length: int | None = None
 
     @property
     def fully_validated(self) -> bool:
