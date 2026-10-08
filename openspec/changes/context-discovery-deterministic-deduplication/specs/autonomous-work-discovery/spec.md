@@ -17,4 +17,5 @@
 - **WHEN** `discover_context("mini-me")` is executed multiple times in succession
 - **THEN** it SHALL succeed without raising `IntegrityError`
 - **AND** exactly one `BacklogItem` row per `(project_id, item_key)` SHALL exist in persistence
-- **AND** existing persisted terminal state SHALL not be resurrected or mutated.
+- **AND** existing persisted terminal state SHALL not be resurrected or mutated
+- **AND** context discovery SHALL NOT directly advance existing persisted non-terminal lifecycle status.

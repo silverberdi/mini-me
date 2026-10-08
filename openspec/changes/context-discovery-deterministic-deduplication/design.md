@@ -25,4 +25,4 @@ Items are stored in an ordered dictionary/accumulation map keyed by `item_key`. 
 - Database schema constraint `uq_backlog_items_project_key` remains unchanged.
 - `discover_context()` receives the unique projections from `discover_context_pure()`. For each item:
   - If a DB record already exists in terminal status (`COMPLETED` or `CANCELLED`), the existing terminal DB state is preserved and warnings logged if source evidence contradicts terminal status.
-  - Otherwise, `discover_context()` updates or inserts the record cleanly without triggering `IntegrityError`.
+  - Otherwise, `discover_context()` updates non-lifecycle record metadata (such as timestamp) for existing items or inserts new records cleanly without triggering `IntegrityError` or mutating existing persisted lifecycle status. Discovery is NOT a lifecycle writer and does NOT advance persisted item status via generic save operations.

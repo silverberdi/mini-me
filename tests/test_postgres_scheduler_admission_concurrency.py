@@ -138,7 +138,6 @@ def pg_session_factory(pg_engine: Engine) -> sessionmaker[Session]:
 @pytest.fixture(autouse=True)
 def _clean_db(pg_engine: Engine):
     from sqlalchemy import text
-
     with pg_engine.connect() as conn:
         conn.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public;"))
         conn.commit()
@@ -162,40 +161,13 @@ def _seed_project_and_change(
         (cdir / "specs").mkdir(exist_ok=True)
         (cdir / "specs" / "test.md").write_text("# Spec")
         import subprocess
-
         if not (project_root / ".git").exists():
             subprocess.run(["git", "init", str(project_root)], check=False, capture_output=True)
-            subprocess.run(
-                ["git", "-C", str(project_root), "checkout", "-b", "main"],
-                check=False,
-                capture_output=True,
-            )
-            subprocess.run(
-                ["git", "-C", str(project_root), "config", "user.name", "Test"],
-                check=False,
-                capture_output=True,
-            )
-            subprocess.run(
-                ["git", "-C", str(project_root), "config", "user.email", "test@example.com"],
-                check=False,
-                capture_output=True,
-            )
-        subprocess.run(
-            ["git", "-C", str(project_root), "add", "."], check=False, capture_output=True
-        )
-        subprocess.run(
-            [
-                "git",
-                "-C",
-                str(project_root),
-                "commit",
-                "--allow-empty",
-                "-m",
-                f"seed {change_name}",
-            ],
-            check=False,
-            capture_output=True,
-        )
+            subprocess.run(["git", "-C", str(project_root), "checkout", "-b", "main"], check=False, capture_output=True)
+            subprocess.run(["git", "-C", str(project_root), "config", "user.name", "Test"], check=False, capture_output=True)
+            subprocess.run(["git", "-C", str(project_root), "config", "user.email", "test@example.com"], check=False, capture_output=True)
+        subprocess.run(["git", "-C", str(project_root), "add", "."], check=False, capture_output=True)
+        subprocess.run(["git", "-C", str(project_root), "commit", "--allow-empty", "-m", f"seed {change_name}"], check=False, capture_output=True)
     with session_factory() as session:
         uow = PostgresPersistenceUnitOfWork(session)
         proj = Project(
@@ -269,7 +241,6 @@ def _make_scheduler(
     from unittest.mock import MagicMock
 
     from minime.domain.models import ReadinessEvaluation
-
     mock_readiness = MagicMock()
     eval_res = ReadinessEvaluation(
         project_id="proj",
@@ -290,9 +261,7 @@ def _make_scheduler(
     )
 
 
-def test_t01_same_change_savepoint_recovery(
-    pg_session_factory: sessionmaker[Session], tmp_path: Path
-):
+def test_t01_same_change_savepoint_recovery(pg_session_factory: sessionmaker[Session], tmp_path: Path):
     """T01: Prove same-change Savepoint conflict recovery on uq_active_orchestration_run.
 
     Two concurrent threads attempt to admit the exact same change.
@@ -335,22 +304,8 @@ def test_t02_project_concurrency_limit(pg_session_factory: sessionmaker[Session]
     The first change gets admitted; the second change is refused with PROJECT_CONCURRENCY_LIMIT.
     """
     project_id = "t02-proj"
-    _seed_project_and_change(
-        pg_session_factory,
-        project_id,
-        "c1",
-        issue_number=1,
-        max_concurrent_jobs=1,
-        project_root=tmp_path,
-    )
-    _seed_project_and_change(
-        pg_session_factory,
-        project_id,
-        "c2",
-        issue_number=2,
-        max_concurrent_jobs=1,
-        project_root=tmp_path,
-    )
+    _seed_project_and_change(pg_session_factory, project_id, "c1", issue_number=1, max_concurrent_jobs=1, project_root=tmp_path)
+    _seed_project_and_change(pg_session_factory, project_id, "c2", issue_number=2, max_concurrent_jobs=1, project_root=tmp_path)
 
     results: list[tuple[AdmissionDecision, Any, Any]] = [None, None]  # type: ignore
 
@@ -383,22 +338,8 @@ def test_t03_global_concurrency_limit(pg_session_factory: sessionmaker[Session],
     Two changes in different projects are admitted concurrently under normal production construction.
     The first caller succeeds; the second receives GLOBAL_CONCURRENCY_LIMIT.
     """
-    _seed_project_and_change(
-        pg_session_factory,
-        "t03-p1",
-        "c1",
-        issue_number=1,
-        max_concurrent_jobs=5,
-        project_root=tmp_path,
-    )
-    _seed_project_and_change(
-        pg_session_factory,
-        "t03-p2",
-        "c2",
-        issue_number=2,
-        max_concurrent_jobs=5,
-        project_root=tmp_path,
-    )
+    _seed_project_and_change(pg_session_factory, "t03-p1", "c1", issue_number=1, max_concurrent_jobs=5, project_root=tmp_path)
+    _seed_project_and_change(pg_session_factory, "t03-p2", "c2", issue_number=2, max_concurrent_jobs=5, project_root=tmp_path)
 
     results: list[tuple[AdmissionDecision, Any, Any]] = [None, None]  # type: ignore
 
@@ -434,22 +375,8 @@ def test_t04_project_limit_multi_slot(pg_session_factory: sessionmaker[Session],
     Both changes are successfully admitted.
     """
     project_id = "t04-proj"
-    _seed_project_and_change(
-        pg_session_factory,
-        project_id,
-        "c1",
-        issue_number=1,
-        max_concurrent_jobs=2,
-        project_root=tmp_path,
-    )
-    _seed_project_and_change(
-        pg_session_factory,
-        project_id,
-        "c2",
-        issue_number=2,
-        max_concurrent_jobs=2,
-        project_root=tmp_path,
-    )
+    _seed_project_and_change(pg_session_factory, project_id, "c1", issue_number=1, max_concurrent_jobs=2, project_root=tmp_path)
+    _seed_project_and_change(pg_session_factory, project_id, "c2", issue_number=2, max_concurrent_jobs=2, project_root=tmp_path)
 
     results: list[tuple[AdmissionDecision, Any, Any]] = [None, None]  # type: ignore
 
@@ -472,9 +399,7 @@ def test_t04_project_limit_multi_slot(pg_session_factory: sessionmaker[Session],
     assert results[1][0] == AdmissionDecision.ADMITTED
 
 
-def test_f04_scheduler_global_concurrency_immutability_regression(
-    pg_session_factory: sessionmaker[Session], tmp_path: Path
-):
+def test_f04_scheduler_global_concurrency_immutability_regression(pg_session_factory: sessionmaker[Session], tmp_path: Path):
     """F04: Prove max_global_jobs parameter is ignored in production construction and only _test_global_max_jobs_override can set >1."""
     with pg_session_factory() as session:
         uow = PostgresPersistenceUnitOfWork(session)
@@ -503,7 +428,6 @@ def test_f01_a_stale_phase_a_cancelled_change_rejection(
     with pg_session_factory() as s_cancel:
         uow_cancel = PostgresPersistenceUnitOfWork(s_cancel)
         from minime.services.lifecycle_transition_authority import LifecycleTransitionAuthority
-
         auth = LifecycleTransitionAuthority(uow_cancel)
         auth.transition_change(
             project_id=project_id,
@@ -526,29 +450,15 @@ def test_f01_a_stale_phase_a_cancelled_change_rejection(
 
         assert dec == AdmissionDecision.REFUSED
         assert run is None
-        assert (
-            rec.reason_code
-            in (
-                AdmissionRefusalCode.NOT_READY,
-                AdmissionRefusalCode.INVALID_BINDING,
-                AdmissionRefusalCode.EVALUATION_ERROR,
-            )
-            or rec.block_condition == WorkItemStatus.CANCELLED
-            or rec.refusal_details.get("code") == "LIFECYCLE_BLOCKED"
-        )
+        assert rec.reason_code in (
+            AdmissionRefusalCode.NOT_READY,
+            AdmissionRefusalCode.INVALID_BINDING,
+            AdmissionRefusalCode.EVALUATION_ERROR,
+        ) or rec.block_condition == WorkItemStatus.CANCELLED or rec.refusal_details.get("code") == "LIFECYCLE_BLOCKED"
 
         # Assert no active OrchestrationRun exists in DB
         active_runs = uow_admit.orchestration_runs.list_runs(is_active=True)
-        assert (
-            len(
-                [
-                    r
-                    for r in active_runs
-                    if r.project_id == project_id and r.change_name == change_name
-                ]
-            )
-            == 0
-        )
+        assert len([r for r in active_runs if r.project_id == project_id and r.change_name == change_name]) == 0
 
         # Assert no ORCHESTRATION_STARTED stage event was saved
         events = uow_admit.orchestration_stage_events.list_by_run("f01a-run")
@@ -573,7 +483,6 @@ def test_f01_b_stale_phase_a_backlog_status_rejection(
     with pg_session_factory() as s_mutate:
         uow_mutate = PostgresPersistenceUnitOfWork(s_mutate)
         from minime.services.lifecycle_transition_authority import LifecycleTransitionAuthority
-
         auth = LifecycleTransitionAuthority(uow_mutate)
         item = uow_mutate.backlog_items.get_by_openspec_change_name(project_id, change_name)
         assert item is not None
@@ -603,9 +512,7 @@ def test_f01_b_stale_phase_a_backlog_status_rejection(
         assert item_final.status == WorkItemStatus.CANCELLED
 
 
-def test_f20_drain_retry_boundary_isolation(
-    pg_session_factory: sessionmaker[Session], tmp_path: Path
-):
+def test_f20_drain_retry_boundary_isolation(pg_session_factory: sessionmaker[Session], tmp_path: Path):
     """F20: Prove SchedulerService.admit_work_item retry closure performs ONLY DB-safe decision work, and DRAIN resume/coordinator runs OUTSIDE retry wrapper exactly once."""
     from minime.domain.enums import (
         AdmissionDecisionKind,
@@ -620,9 +527,7 @@ def test_f20_drain_retry_boundary_isolation(
     issue_number = 2020
     run_id = "run-f20"
 
-    _seed_project_and_change(
-        pg_session_factory, project_id, change_name, issue_number, project_root=tmp_path
-    )
+    _seed_project_and_change(pg_session_factory, project_id, change_name, issue_number, project_root=tmp_path)
 
     with pg_session_factory() as session:
         uow = PostgresPersistenceUnitOfWork(session)
@@ -630,7 +535,6 @@ def test_f20_drain_retry_boundary_isolation(
 
         from minime.domain.enums import JobStatus
         from minime.domain.models import Job, OpenRouterBudgetPolicy
-
         proj = uow.projects.get_by_id(project_id)
         assert proj is not None
         proj.openrouter_drain_allowed = True
@@ -685,9 +589,7 @@ def test_f20_drain_retry_boundary_isolation(
         scheduler = _make_scheduler(uow_admit, tmp_path)
         scheduler.mode = SchedulerMode.DRAIN
 
-        def _mock_continuation(
-            run_id, source=None, requested_action=None, drain_mode=False, force=False
-        ):
+        def _mock_continuation(run_id, source=None, requested_action=None, drain_mode=False, force=False):
             nonlocal resume_execution_count
             resume_execution_count += 1
             return MagicMock()
@@ -702,10 +604,8 @@ def test_f20_drain_retry_boundary_isolation(
             nonlocal attempts
             attempts += 1
             if attempts == 1:
-
                 class Synthetic40001(Exception):
                     pass
-
                 err = Synthetic40001("Synthetic DB serialization failure")
                 err.pgcode = "40001"  # type: ignore
                 raise err
@@ -718,9 +618,7 @@ def test_f20_drain_retry_boundary_isolation(
         assert dec == AdmissionDecision.ADMITTED
         assert record.operational_decision == AdmissionDecisionKind.DRAIN
         assert attempts == 2, "DB admission decision block must retry exactly once on 40001"
-        assert resume_execution_count == 1, (
-            "External resume/coordinator must execute EXACTLY ONCE AFTER retry wrapper succeeds"
-        )
+        assert resume_execution_count == 1, "External resume/coordinator must execute EXACTLY ONCE AFTER retry wrapper succeeds"
 
     # Part B: Prove a retryable DB exception raised inside downstream coordinator/resume is NOT caught/replayed by admission retry
     with pg_session_factory() as session_fail:
@@ -731,9 +629,7 @@ def test_f20_drain_retry_boundary_isolation(
         class Downstream40001(Exception):
             pass
 
-        def _failing_continuation(
-            run_id, source=None, requested_action=None, drain_mode=False, force=False
-        ):
+        def _failing_continuation(run_id, source=None, requested_action=None, drain_mode=False, force=False):
             err = Downstream40001("Downstream coordinator 40001 error")
             err.pgcode = "40001"  # type: ignore
             raise err
@@ -753,9 +649,7 @@ def test_f20_drain_retry_boundary_isolation(
         with pytest.raises(Downstream40001):
             scheduler_fail.admit_work_item(project_id, change_name)
 
-        assert adm_attempts == 1, (
-            "Admission retry wrapper must NOT catch or replay exceptions from downstream coordinator/resume"
-        )
+        assert adm_attempts == 1, "Admission retry wrapper must NOT catch or replay exceptions from downstream coordinator/resume"
 
 
 def test_postgres_context_discovery_deduplication_and_idempotency(
