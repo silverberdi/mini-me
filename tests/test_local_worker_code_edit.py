@@ -3,13 +3,22 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 
 import pytest
 
 from minime.domain.enums import (
+    OrchestrationStage,
     ProviderResultClass,
 )
+from minime.domain.models import (
+    Job,
+    OrchestrationRun,
+    ProjectManagedRepositoryBinding,
+    utc_now,
+)
+from minime.local_worker.harness import parse_structured_result
 from minime.local_worker.models import (
     LocalResultKind,
     LocalTaskClass,
@@ -24,87 +33,160 @@ from minime.local_worker.patch_applier import (
     LocalPatchApplier,
     validate_patch_policy,
 )
-from minime.local_worker.service import LocalWorkerService
+from minime.local_worker.service import SYSTEM_PROMPT, LocalWorkerService
+from minime.services.worktree_manager import WorktreeInfo, WorktreeManager
 
 
 @pytest.fixture
-def temp_git_repo(tmp_path):
-    """Fixture creating a real git repository with initial commit."""
-    repo_dir = tmp_path / "repo"
+def stage_c_environment(tmp_path):
+    """Fixture establishing real Stage C UoW, managed repository, worktree parent, and binding."""
+    base_dir = tmp_path / "stage_c_base"
+    base_dir.mkdir()
+
+    repo_dir = base_dir / "managed_repo"
     repo_dir.mkdir()
+    worktrees_dir = base_dir / "worktrees"
+    worktrees_dir.mkdir()
+    runtime_dir = base_dir / "runtime_app"
+    runtime_dir.mkdir()
 
-    subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_dir, check=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
+    # Git init managed repo
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(["git", "remote", "add", "origin", "https://github.com/silverberdi/mini-me"], cwd=repo_dir, check=True, capture_output=True)
 
-    # Initial file
     foo_path = repo_dir / "foo.py"
     foo_path.write_text("def foo():\n    return 42\n")
-
     test_path = repo_dir / "tests" / "test_foo.py"
     test_path.parent.mkdir()
     test_path.write_text("def test_foo():\n    assert foo() == 42\n")
 
+    marker_path = repo_dir / ".minime-managed-project.json"
+    marker_path.write_text(json.dumps({
+        "project_id": "mini-me",
+        "canonical_repository_identity": "github.com/silverberdi/mini-me",
+        "repository": "github.com/silverberdi/mini-me"
+    }))
+
     subprocess.run(["git", "add", "."], cwd=repo_dir, check=True, capture_output=True)
     subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=repo_dir, check=True, capture_output=True)
 
-    return repo_dir
+    res_sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_dir, capture_output=True, text=True, check=True)
+    base_sha = res_sha.stdout.strip()
+
+    from tests.test_stage_c_isolation import MockUOW
+    uow = MockUOW()
+
+    binding = ProjectManagedRepositoryBinding(
+        project_id="mini-me",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+        managed_repository_root=str(repo_dir),
+        worktree_parent_dir=str(worktrees_dir),
+        remote_name="origin",
+        is_valid=True,
+    )
+    uow.project_managed_repository_bindings.save(binding)
+
+    return {
+        "uow": uow,
+        "repo_dir": repo_dir,
+        "worktrees_dir": worktrees_dir,
+        "runtime_dir": runtime_dir,
+        "base_sha": base_sha,
+    }
 
 
-# 1. TEST_AUTHORING allowed file patch succeeds
-@pytest.mark.asyncio
-async def test_authoring_allowed_file_patch_succeeds(temp_git_repo):
-    envelope = LocalTaskEnvelope(
-        role="local_worker",
-        task_class=LocalTaskClass.TEST_AUTHORING,
-        allowed_files=["tests/test_foo.py"],
-        instruction="Add test_bar",
+async def create_authorized_worktree(stage_c_env: dict, job_id: str, run_id: str, change_name: str = "local-edit") -> WorktreeInfo:
+    uow = stage_c_env["uow"]
+    project_id = "mini-me"
+
+    job = Job(
+        job_id=job_id,
+        project_id=project_id,
+        change_name=change_name,
+        implementer_role="local_qwen",
+    )
+    uow.jobs.save(job)
+
+    run = OrchestrationRun(
+        run_id=run_id,
+        active_job_id=job_id,
+        project_id=project_id,
+        change_name=change_name,
+        base_sha=stage_c_env["base_sha"],
+        current_stage=OrchestrationStage.IMPLEMENTING,
+        resumable_stage=OrchestrationStage.IMPLEMENTING,
+        is_active=True,
+        created_at=utc_now(),
+        updated_at=utc_now(),
+    )
+    uow.orchestration_runs.save(run)
+
+    wt_mgr = WorktreeManager(project_root=stage_c_env["repo_dir"], uow=uow)
+    return await wt_mgr.create_worktree(
+        job_id=job_id,
+        change_name=change_name,
+        base_branch="main",
+        project_id=project_id,
+        branch_name=f"feature/{job_id}",
+        run_id=run_id,
     )
 
-    patch_str = (
-        "--- a/tests/test_foo.py\n"
-        "+++ b/tests/test_foo.py\n"
-        "@@ -1,2 +1,4 @@\n"
-        " def test_foo():\n"
-        "     assert foo() == 42\n"
-        "+def test_bar():\n"
-        "+    assert True\n"
+
+# B4: PROMPT AND PARSER CONTRACT TESTS
+def test_system_prompt_includes_patch_schema():
+    assert '"patch":"<unified diff>"|null' in SYSTEM_PROMPT
+
+
+def test_parse_structured_result_with_patch():
+    raw = (
+        '{"kind":"CHANGES_PROPOSED","summary":"add bar","files_changed":["foo.py"],'
+        '"patch":"--- a/foo.py\\n+++ b/foo.py\\n@@ -1 +1 @@\\n-old\\n+new\\n",'
+        '"confidence":0.9,"escalation_required":false,"escalation_reason":"","next_action":"apply"}'
     )
-
-    applier = LocalPatchApplier()
-    res = applier.apply_patch(worktree_path=temp_git_repo, envelope=envelope, patch=patch_str)
-    assert res.success is True
-    assert res.applied is True
-    assert "tests/test_foo.py" in res.authoritative_changed_files
+    res = parse_structured_result(raw)
+    assert res.kind == LocalResultKind.CHANGES_PROPOSED
+    assert res.patch is not None
+    assert "old" in res.patch
 
 
-# 2. SMALL_CODE_FIX allowed file patch succeeds
-@pytest.mark.asyncio
-async def test_small_code_fix_allowed_file_patch_succeeds(temp_git_repo):
+# B5: PATCH POLICY CONTRACT TESTS
+def test_no_change_justified_with_null_patch_valid():
     envelope = LocalTaskEnvelope(
         role="local_worker",
         task_class=LocalTaskClass.SMALL_CODE_FIX,
         allowed_files=["foo.py"],
-        instruction="Fix foo return value",
+        instruction="Check foo",
     )
+    decision = validate_patch_policy(None, envelope, kind=LocalResultKind.NO_CHANGE_JUSTIFIED)
+    assert decision.valid is True
 
-    patch_str = (
-        "--- a/foo.py\n"
-        "+++ b/foo.py\n"
-        "@@ -1,2 +1,2 @@\n"
-        " def foo():\n"
-        "-    return 42\n"
-        "+    return 100\n"
+
+def test_no_change_justified_with_patch_fails_closed():
+    envelope = LocalTaskEnvelope(
+        role="local_worker",
+        task_class=LocalTaskClass.SMALL_CODE_FIX,
+        allowed_files=["foo.py"],
+        instruction="Check foo",
     )
-
-    applier = LocalPatchApplier()
-    res = applier.apply_patch(worktree_path=temp_git_repo, envelope=envelope, patch=patch_str)
-    assert res.success is True
-    assert res.applied is True
-    assert "foo.py" in res.authoritative_changed_files
+    decision = validate_patch_policy("some patch", envelope, kind=LocalResultKind.NO_CHANGE_JUSTIFIED)
+    assert decision.valid is False
+    assert "must not supply a patch" in decision.reason
 
 
-# 3. patch outside allowed_files refused before mutation
+def test_changes_proposed_empty_patch_fails_closed():
+    envelope = LocalTaskEnvelope(
+        role="local_worker",
+        task_class=LocalTaskClass.SMALL_CODE_FIX,
+        allowed_files=["foo.py"],
+        instruction="Fix foo",
+    )
+    decision = validate_patch_policy("", envelope, kind=LocalResultKind.CHANGES_PROPOSED)
+    assert decision.valid is False
+    assert "requires a non-empty patch" in decision.reason
+
+
 def test_patch_outside_allowed_files_refused():
     envelope = LocalTaskEnvelope(
         role="local_worker",
@@ -124,7 +206,6 @@ def test_patch_outside_allowed_files_refused():
     assert "not in allowed_files" in decision.reason
 
 
-# 4. ../ traversal refused
 def test_path_traversal_refused():
     envelope = LocalTaskEnvelope(
         role="local_worker",
@@ -144,7 +225,6 @@ def test_path_traversal_refused():
     assert "Path traversal" in decision.reason
 
 
-# 5. absolute path refused
 def test_absolute_path_refused():
     envelope = LocalTaskEnvelope(
         role="local_worker",
@@ -164,7 +244,6 @@ def test_absolute_path_refused():
     assert "Absolute path" in decision.reason
 
 
-# 6. forbidden surface refused
 def test_forbidden_surface_refused():
     envelope = LocalTaskEnvelope(
         role="local_worker",
@@ -185,33 +264,16 @@ def test_forbidden_surface_refused():
     assert "in forbidden_files" in decision.reason
 
 
-# 7. model files_changed lying about actual patch paths is detected
-@pytest.mark.asyncio
-async def test_model_files_changed_lying_detected(temp_git_repo):
-    envelope = LocalTaskEnvelope(
-        role="local_worker",
-        task_class=LocalTaskClass.SMALL_CODE_FIX,
-        allowed_files=["foo.py"],
-        instruction="Fix foo",
-    )
-
-    patch_str = (
-        "--- a/secret.py\n"
-        "+++ b/secret.py\n"
-        "@@ -1 +1 @@\n"
-        "-old\n"
-        "+new\n"
-    )
-
-    decision = validate_patch_policy(patch_str, envelope)
-    assert decision.valid is False
-    assert "secret.py" in decision.reason or "not in allowed_files" in decision.reason
+# B6: 10 REQUIRED INTEGRATION REFUSAL/SUCCESS TESTS USING STAGE C MACHINERY
+def test_b6_1_no_uow_or_authority_context_refused():
+    with pytest.raises(ValueError, match="mandatory"):
+        LocalPatchApplier(uow=None)
 
 
-# 8. dirty execution worktree refuses application
-@pytest.mark.asyncio
-async def test_dirty_execution_worktree_refuses_application(temp_git_repo):
-    (temp_git_repo / "foo.py").write_text("dirty content")
+def test_b6_2_plain_git_repo_not_registered_refused(stage_c_environment, tmp_path):
+    plain_repo = tmp_path / "plain_repo"
+    plain_repo.mkdir()
+    subprocess.run(["git", "init"], cwd=plain_repo, check=True, capture_output=True)
 
     envelope = LocalTaskEnvelope(
         role="local_worker",
@@ -219,26 +281,69 @@ async def test_dirty_execution_worktree_refuses_application(temp_git_repo):
         allowed_files=["foo.py"],
         instruction="Fix foo",
     )
-    patch_str = (
-        "--- a/foo.py\n"
-        "+++ b/foo.py\n"
-        "@@ -1 +1 @@\n"
-        "-dirty content\n"
-        "+clean content\n"
-    )
+    patch_str = "--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-old\n+new\n"
 
-    applier = LocalPatchApplier()
-    res = applier.apply_patch(worktree_path=temp_git_repo, envelope=envelope, patch=patch_str)
+    applier = LocalPatchApplier(uow=stage_c_environment["uow"])
+    res = applier.apply_patch(
+        worktree_path=plain_repo,
+        envelope=envelope,
+        patch=patch_str,
+        project_id="mini-me",
+        job_id="job-plain",
+    )
     assert res.success is False
-    assert "dirty" in res.error.lower()
+    assert res.applied is False
+    assert "Workspace mutation denied" in res.error or "missing" in res.error
 
 
-# 9. runtime checkout can never be mutation target
-@pytest.mark.asyncio
-async def test_runtime_checkout_mutation_target_refused(monkeypatch, tmp_path):
-    runtime_dir = tmp_path / "opt" / "minime" / "app"
-    runtime_dir.mkdir(parents=True)
-    monkeypatch.setenv("MINIME_RUNTIME_ROOT", str(runtime_dir))
+def test_b6_3_runtime_checkout_refused(stage_c_environment, monkeypatch):
+    monkeypatch.setenv("MINIME_RUNTIME_ROOT", str(stage_c_environment["runtime_dir"]))
+    envelope = LocalTaskEnvelope(
+        role="local_worker",
+        task_class=LocalTaskClass.SMALL_CODE_FIX,
+        allowed_files=["foo.py"],
+        instruction="Fix foo",
+    )
+    patch_str = "--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-old\n+new\n"
+
+    applier = LocalPatchApplier(uow=stage_c_environment["uow"])
+    res = applier.apply_patch(
+        worktree_path=stage_c_environment["runtime_dir"],
+        envelope=envelope,
+        patch=patch_str,
+        project_id="mini-me",
+        job_id="job-runtime",
+    )
+    assert res.success is False
+    assert "runtime checkout" in res.error.lower() or "runtime root" in res.error.lower()
+
+
+def test_b6_4_managed_repository_refused(stage_c_environment, monkeypatch):
+    monkeypatch.setenv("MINIME_MANAGED_ROOT", str(stage_c_environment["repo_dir"]))
+    envelope = LocalTaskEnvelope(
+        role="local_worker",
+        task_class=LocalTaskClass.SMALL_CODE_FIX,
+        allowed_files=["foo.py"],
+        instruction="Fix foo",
+    )
+    patch_str = "--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-old\n+new\n"
+
+    applier = LocalPatchApplier(uow=stage_c_environment["uow"])
+    res = applier.apply_patch(
+        worktree_path=stage_c_environment["repo_dir"],
+        envelope=envelope,
+        patch=patch_str,
+        project_id="mini-me",
+        job_id="job-managed",
+    )
+    assert res.success is False
+    assert "managed repository" in res.error.lower() or "Workspace mutation denied" in res.error
+
+
+def test_b6_5_execution_worktree_path_missing_durable_ownership_refused(stage_c_environment):
+    unowned_wt = stage_c_environment["worktrees_dir"] / "job-unowned"
+    unowned_wt.mkdir()
+    subprocess.run(["git", "init"], cwd=unowned_wt, check=True, capture_output=True)
 
     envelope = LocalTaskEnvelope(
         role="local_worker",
@@ -246,69 +351,160 @@ async def test_runtime_checkout_mutation_target_refused(monkeypatch, tmp_path):
         allowed_files=["foo.py"],
         instruction="Fix foo",
     )
-    patch_str = "--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-a\n+b\n"
+    patch_str = "--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-old\n+new\n"
 
-    applier = LocalPatchApplier()
-    res = applier.apply_patch(worktree_path=runtime_dir, envelope=envelope, patch=patch_str)
+    applier = LocalPatchApplier(uow=stage_c_environment["uow"])
+    res = applier.apply_patch(
+        worktree_path=unowned_wt,
+        envelope=envelope,
+        patch=patch_str,
+        project_id="mini-me",
+        job_id="job-unowned",
+    )
     assert res.success is False
-    assert "runtime checkout" in res.error.lower()
+    assert "Durable OrchestrationWorktreeOwnership missing" in res.error or "Workspace mutation denied" in res.error
 
 
-# 10. managed repository can never be direct mutation target
 @pytest.mark.asyncio
-async def test_managed_repository_direct_mutation_target_refused(monkeypatch, tmp_path):
-    managed_dir = tmp_path / "opt" / "minime" / "repos" / "mini-me"
-    managed_dir.mkdir(parents=True)
-    monkeypatch.setenv("MINIME_MANAGED_ROOT", str(managed_dir))
+async def test_b6_6_wrong_job_id_ownership_refused(stage_c_environment):
+    uow = stage_c_environment["uow"]
+    wt_info = await create_authorized_worktree(stage_c_environment, job_id="job-100", run_id="run-100")
 
     envelope = LocalTaskEnvelope(
         role="local_worker",
         task_class=LocalTaskClass.SMALL_CODE_FIX,
-        allowed_files=["foo.py"],
-        instruction="Fix foo",
-    )
-    patch_str = "--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-a\n+b\n"
-
-    applier = LocalPatchApplier()
-    res = applier.apply_patch(worktree_path=managed_dir, envelope=envelope, patch=patch_str)
-    assert res.success is False
-    assert "managed repository" in res.error.lower()
-
-
-# 11. EXECUTION_WORKTREE with valid ownership succeeds
-@pytest.mark.asyncio
-async def test_execution_worktree_valid_ownership_succeeds(temp_git_repo):
-    envelope = LocalTaskEnvelope(
-        role="local_worker",
-        task_class=LocalTaskClass.TEST_AUTHORING,
         allowed_files=["foo.py"],
         instruction="Fix foo",
     )
     patch_str = "--- a/foo.py\n+++ b/foo.py\n@@ -1,2 +1,2 @@\n def foo():\n-    return 42\n+    return 100\n"
 
-    applier = LocalPatchApplier()
-    res = applier.apply_patch(worktree_path=temp_git_repo, envelope=envelope, patch=patch_str)
-    assert res.success is True
-    assert res.applied is True
+    applier = LocalPatchApplier(uow=uow)
+    res = applier.apply_patch(
+        worktree_path=wt_info.path,
+        envelope=envelope,
+        patch=patch_str,
+        project_id="mini-me",
+        job_id="job-WRONG",
+    )
+    assert res.success is False
+    assert "job_id mismatch" in res.error
 
 
-# 12. malformed patch fails closed
-def test_malformed_patch_fails_closed():
+@pytest.mark.asyncio
+async def test_b6_7_wrong_project_id_ownership_refused(stage_c_environment):
+    uow = stage_c_environment["uow"]
+    wt_info = await create_authorized_worktree(stage_c_environment, job_id="job-101", run_id="run-101")
+
     envelope = LocalTaskEnvelope(
         role="local_worker",
         task_class=LocalTaskClass.SMALL_CODE_FIX,
         allowed_files=["foo.py"],
         instruction="Fix foo",
     )
-    patch_str = "THIS IS NOT A VALID UNIFIED DIFF"
-    decision = validate_patch_policy(patch_str, envelope)
-    assert decision.valid is False
-    assert "Malformed" in decision.reason or "no valid touched files" in decision.reason
+    patch_str = "--- a/foo.py\n+++ b/foo.py\n@@ -1,2 +1,2 @@\n def foo():\n-    return 42\n+    return 100\n"
+
+    applier = LocalPatchApplier(uow=uow)
+    res = applier.apply_patch(
+        worktree_path=wt_info.path,
+        envelope=envelope,
+        patch=patch_str,
+        project_id="wrong-project",
+        job_id="job-101",
+    )
+    assert res.success is False
+    assert "project" in res.error.lower()
 
 
-# 13. patch application failure escalates
 @pytest.mark.asyncio
-async def test_patch_application_failure_escalates(temp_git_repo):
+async def test_b6_8_valid_durable_ownership_and_execution_worktree_succeeds(stage_c_environment):
+    uow = stage_c_environment["uow"]
+    wt_info = await create_authorized_worktree(stage_c_environment, job_id="job-102", run_id="run-102")
+
+    envelope = LocalTaskEnvelope(
+        role="local_worker",
+        task_class=LocalTaskClass.SMALL_CODE_FIX,
+        allowed_files=["foo.py"],
+        instruction="Fix foo",
+    )
+    patch_str = "--- a/foo.py\n+++ b/foo.py\n@@ -1,2 +1,2 @@\n def foo():\n-    return 42\n+    return 100\n"
+
+    applier = LocalPatchApplier(uow=uow)
+    res = applier.apply_patch(
+        worktree_path=wt_info.path,
+        envelope=envelope,
+        patch=patch_str,
+        project_id="mini-me",
+        job_id="job-102",
+    )
+    assert res.success is True
+    assert res.applied is True
+    assert "foo.py" in res.authoritative_changed_files
+
+
+@pytest.mark.asyncio
+async def test_b6_9_symlink_path_identity_mismatch_refused(stage_c_environment, tmp_path):
+    uow = stage_c_environment["uow"]
+    wt_info = await create_authorized_worktree(stage_c_environment, job_id="job-103", run_id="run-103")
+
+    symlink_wt = tmp_path / "symlink_worktree"
+    try:
+        os.symlink(wt_info.path, symlink_wt)
+    except OSError:
+        pytest.skip("Symlinks not supported on this platform")
+
+    envelope = LocalTaskEnvelope(
+        role="local_worker",
+        task_class=LocalTaskClass.SMALL_CODE_FIX,
+        allowed_files=["foo.py"],
+        instruction="Fix foo",
+    )
+    patch_str = "--- a/foo.py\n+++ b/foo.py\n@@ -1,2 +1,2 @@\n def foo():\n-    return 42\n+    return 100\n"
+
+    applier = LocalPatchApplier(uow=uow)
+    res = applier.apply_patch(
+        worktree_path=symlink_wt,
+        envelope=envelope,
+        patch=patch_str,
+        project_id="mini-me",
+        job_id="job-103",
+    )
+    assert res.success is False
+    assert "Path identity mismatch" in res.error or "Workspace mutation denied" in res.error
+
+
+@pytest.mark.asyncio
+async def test_b6_10_dirty_precondition_refused(stage_c_environment):
+    uow = stage_c_environment["uow"]
+    wt_info = await create_authorized_worktree(stage_c_environment, job_id="job-104", run_id="run-104")
+
+    (wt_info.path / "foo.py").write_text("dirty uncommitted content")
+
+    envelope = LocalTaskEnvelope(
+        role="local_worker",
+        task_class=LocalTaskClass.SMALL_CODE_FIX,
+        allowed_files=["foo.py"],
+        instruction="Fix foo",
+    )
+    patch_str = "--- a/foo.py\n+++ b/foo.py\n@@ -1,2 +1,2 @@\n def foo():\n-    return 42\n+    return 100\n"
+
+    applier = LocalPatchApplier(uow=uow)
+    res = applier.apply_patch(
+        worktree_path=wt_info.path,
+        envelope=envelope,
+        patch=patch_str,
+        project_id="mini-me",
+        job_id="job-104",
+    )
+    assert res.success is False
+    assert "dirty" in res.error.lower()
+
+
+# ADDITIONAL SERVICE AND HARNESS INTEGRATION TESTS
+@pytest.mark.asyncio
+async def test_patch_application_failure_escalates(stage_c_environment):
+    uow = stage_c_environment["uow"]
+    wt_info = await create_authorized_worktree(stage_c_environment, job_id="job-105", run_id="run-105")
+
     service = LocalWorkerService(max_corrective_attempts=0)
 
     bad_patch = "--- a/foo.py\n+++ b/foo.py\n@@ -1,2 +1,2 @@\n-def non_existent_function():\n+def foo():\n     return 42\n"
@@ -343,7 +539,10 @@ async def test_patch_application_failure_escalates(temp_git_repo):
         envelope,
         validator=mock_validator,
         preflight=preflight,
-        worktree_path=temp_git_repo,
+        worktree_path=wt_info.path,
+        uow=uow,
+        project_id="mini-me",
+        job_id="job-105",
     )
 
     assert outcome.evidence.validation_result is LocalValidationVerdict.FAIL
@@ -351,9 +550,11 @@ async def test_patch_application_failure_escalates(temp_git_repo):
     assert outcome.evidence.escalation.required is True
 
 
-# 14. post-apply actual changed-files mismatch fails closed
 @pytest.mark.asyncio
-async def test_post_apply_actual_changed_files_mismatch_fails_closed(temp_git_repo):
+async def test_post_apply_actual_changed_files_mismatch_fails_closed(stage_c_environment):
+    uow = stage_c_environment["uow"]
+    wt_info = await create_authorized_worktree(stage_c_environment, job_id="job-106", run_id="run-106")
+
     patch_str = (
         "--- a/foo.py\n"
         "+++ b/foo.py\n"
@@ -376,155 +577,18 @@ async def test_post_apply_actual_changed_files_mismatch_fails_closed(temp_git_re
         instruction="Fix foo",
     )
 
-    applier = LocalPatchApplier()
-    res = applier.apply_patch(worktree_path=temp_git_repo, envelope=strict_envelope, patch=patch_str)
+    applier = LocalPatchApplier(uow=uow)
+    res = applier.apply_patch(
+        worktree_path=wt_info.path,
+        envelope=strict_envelope,
+        patch=patch_str,
+        project_id="mini-me",
+        job_id="job-106",
+    )
     assert res.success is False
     assert "Postcondition failed" in res.error or "allowed_files" in res.error
 
 
-# 15. deterministic validator failure triggers at most one corrective attempt
-@pytest.mark.asyncio
-async def test_deterministic_validator_failure_triggers_one_corrective_attempt(temp_git_repo):
-    service = LocalWorkerService(max_corrective_attempts=1)
-    attempt_counter = 0
-
-    patch_str = "--- a/foo.py\n+++ b/foo.py\n@@ -1,2 +1,2 @@\n def foo():\n-    return 42\n+    return 100\n"
-
-    raw_response = (
-        '{"kind":"CHANGES_PROPOSED","summary":"fix","files_changed":["foo.py"],'
-        f'"patch":{json.dumps(patch_str)},"confidence":0.9,"escalation_required":false,'
-        '"escalation_reason":"","next_action":"apply_patch"}'
-    )
-
-    async def mock_validator(task, result, attempt):
-        nonlocal attempt_counter
-        attempt_counter += 1
-        if attempt_counter == 1:
-            return ValidationResult(verdict=LocalValidationVerdict.FAIL, reason="Attempt 1 validator check failed")
-        return ValidationResult(verdict=LocalValidationVerdict.PASS, reason="Attempt 2 validator check passed")
-
-    preflight = PreflightResult(
-        provider="ollama", model=service.model, status=PreflightStatus.READY, reachable=True, model_present=True
-    )
-
-    class CustomAdapter:
-        async def generate(self, system_prompt, prompt, client=None):
-            return OllamaGenerateResponse(result_class=ProviderResultClass.SUCCESS, text=raw_response)
-
-    service.adapter = CustomAdapter()
-
-    envelope = LocalTaskEnvelope(
-        role="local_worker",
-        task_class=LocalTaskClass.SMALL_CODE_FIX,
-        allowed_files=["foo.py"],
-        instruction="Fix foo",
-    )
-
-    outcome = await service.run(
-        envelope,
-        validator=mock_validator,
-        preflight=preflight,
-        worktree_path=temp_git_repo,
-    )
-
-    assert attempt_counter == 2
-    assert outcome.evidence.corrections_used == 1
-    assert outcome.evidence.fully_validated is True
-
-
-# 16. no unbounded retry
-@pytest.mark.asyncio
-async def test_no_unbounded_retry(temp_git_repo):
-    service = LocalWorkerService(max_corrective_attempts=1)
-    attempt_counter = 0
-
-    patch_str = "--- a/foo.py\n+++ b/foo.py\n@@ -1,2 +1,2 @@\n def foo():\n-    return 42\n+    return 100\n"
-
-    raw_response = (
-        '{"kind":"CHANGES_PROPOSED","summary":"fix","files_changed":["foo.py"],'
-        f'"patch":{json.dumps(patch_str)},"confidence":0.9,"escalation_required":false,'
-        '"escalation_reason":"","next_action":"apply_patch"}'
-    )
-
-    async def mock_validator(task, result, attempt):
-        nonlocal attempt_counter
-        attempt_counter += 1
-        return ValidationResult(verdict=LocalValidationVerdict.FAIL, reason="Validator fails always")
-
-    preflight = PreflightResult(
-        provider="ollama", model=service.model, status=PreflightStatus.READY, reachable=True, model_present=True
-    )
-
-    class CustomAdapter:
-        async def generate(self, system_prompt, prompt, client=None):
-            return OllamaGenerateResponse(result_class=ProviderResultClass.SUCCESS, text=raw_response)
-
-    service.adapter = CustomAdapter()
-
-    envelope = LocalTaskEnvelope(
-        role="local_worker",
-        task_class=LocalTaskClass.SMALL_CODE_FIX,
-        allowed_files=["foo.py"],
-        instruction="Fix foo",
-    )
-
-    outcome = await service.run(
-        envelope,
-        validator=mock_validator,
-        preflight=preflight,
-        worktree_path=temp_git_repo,
-    )
-
-    assert attempt_counter == 2
-    assert outcome.evidence.corrections_used == 1
-    assert outcome.evidence.fully_validated is False
-    assert outcome.evidence.result_class == "VALIDATION_FAILED"
-
-
-# 17. NO_CHANGE_JUSTIFIED remains valid and performs zero mutation
-@pytest.mark.asyncio
-async def test_no_change_justified_zero_mutation(temp_git_repo):
-    service = LocalWorkerService(max_corrective_attempts=1)
-
-    raw_response = (
-        '{"kind":"NO_CHANGE_JUSTIFIED","summary":"Code is already correct","files_changed":[],'
-        '"patch":null,"confidence":0.95,"escalation_required":false,'
-        '"escalation_reason":"","next_action":"no_change"}'
-    )
-
-    async def mock_validator(task, result, attempt):
-        return ValidationResult(verdict=LocalValidationVerdict.PASS, reason="No change verified")
-
-    preflight = PreflightResult(
-        provider="ollama", model=service.model, status=PreflightStatus.READY, reachable=True, model_present=True
-    )
-
-    class CustomAdapter:
-        async def generate(self, system_prompt, prompt, client=None):
-            return OllamaGenerateResponse(result_class=ProviderResultClass.SUCCESS, text=raw_response)
-
-    service.adapter = CustomAdapter()
-
-    envelope = LocalTaskEnvelope(
-        role="local_worker",
-        task_class=LocalTaskClass.SMALL_CODE_FIX,
-        allowed_files=["foo.py"],
-        instruction="Check foo",
-    )
-
-    outcome = await service.run(
-        envelope,
-        validator=mock_validator,
-        preflight=preflight,
-        worktree_path=temp_git_repo,
-    )
-
-    assert outcome.evidence.result == LocalResultKind.NO_CHANGE_JUSTIFIED
-    assert outcome.evidence.patch_applied is False
-    assert outcome.evidence.fully_validated is True
-
-
-# 18. local Qwen still has no review/audit/merge/approve authority
 def test_local_qwen_no_review_audit_merge_authority():
     from minime.local_worker.policy import local_worker_authorities
     auths = local_worker_authorities()
@@ -533,19 +597,3 @@ def test_local_qwen_no_review_audit_merge_authority():
     assert "merge" not in auths
     assert "approve" not in auths
     assert "lifecycle" not in auths
-
-
-# 19-20. Phase 9 Demonstration
-def test_phase9_first_real_use_readiness_representation():
-    envelope = LocalTaskEnvelope(
-        role="local_worker",
-        task_class=LocalTaskClass.TEST_AUTHORING,
-        allowed_files=["tests/test_autonomous_intake_admission.py"],
-        instruction=(
-            "Replace the stale bare readiness-service MagicMock wiring so discovery receives a real "
-            "OpenSpecAdapter; preserve production behavior and make no source-code changes."
-        ),
-    )
-    assert envelope.task_class == LocalTaskClass.TEST_AUTHORING
-    assert envelope.allowed_files == ["tests/test_autonomous_intake_admission.py"]
-

@@ -10,7 +10,6 @@ import asyncio
 import json
 import logging
 import re
-import subprocess
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -113,15 +112,6 @@ class LocalWorkerHarness:
         self.timeout_cleanup_calls = 0
         self.patch_applier = patch_applier
 
-    def _revert_worktree(self, worktree_path: str | Path) -> None:
-        """Revert local worker changes in worktree to clean baseline."""
-        try:
-            p = str(worktree_path)
-            subprocess.run(["git", "checkout", "."], cwd=p, capture_output=True, timeout=10)
-            subprocess.run(["git", "clean", "-fd"], cwd=p, capture_output=True, timeout=10)
-        except Exception as exc:
-            logger.warning("Failed to revert worktree baseline at '%s': %s", worktree_path, exc)
-
     async def run(
         self,
         task: LocalTaskEnvelope,
@@ -137,7 +127,7 @@ class LocalWorkerHarness:
         if dispatch is None:
             raise ValueError("No dispatch callable configured")
         cleanup = self._cleanup
-        patch_applier = self.patch_applier or LocalPatchApplier(uow=uow)
+        patch_applier = self.patch_applier or (LocalPatchApplier(uow=uow) if uow else None)
 
         corrections = 0
         validated = False
@@ -218,16 +208,29 @@ class LocalWorkerHarness:
             authoritative_changed = ()
 
             if worktree_path and result.kind is LocalResultKind.CHANGES_PROPOSED and result.patch:
+                if not patch_applier:
+                    outcome_kind = result.kind
+                    outcome_class = "PATCH_APPLY_FAILED"
+                    last_validation = ValidationResult(
+                        verdict=LocalValidationVerdict.FAIL,
+                        reason="No authorized LocalPatchApplier context (uow missing)",
+                    )
+                    escalation = EscalationDecision(
+                        required=True,
+                        target=EscalationTarget.EXISTING_PROVIDER_POLICY,
+                        reason="PersistenceUnitOfWork (uow) missing for patch applier",
+                    )
+                    break
+
                 app_res = patch_applier.apply_patch(
                     worktree_path=worktree_path,
                     envelope=task,
                     patch=result.patch,
                     project_id=project_id,
-                    job_id=job_id,
+                    job_id=job_id or "",
                 )
                 if not app_res.success:
-                    if corrections < self.max_corrective_attempts:
-                        self._revert_worktree(worktree_path)
+                    if corrections < self.max_corrective_attempts and not app_res.applied:
                         corrections += 1
                         attempt += 1
                         continue
@@ -255,6 +258,19 @@ class LocalWorkerHarness:
                 outcome_class = "SUCCESS"
                 break
 
+            # Validation failed.
+            if patch_applied:
+                # A patch was applied to disk and validation failed.
+                # B3: Stop local correction on dirty worktree, preserve evidence, escalate.
+                outcome_kind = result.kind
+                outcome_class = "VALIDATION_FAILED"
+                escalation = EscalationDecision(
+                    required=True,
+                    target=EscalationTarget.EXISTING_PROVIDER_POLICY,
+                    reason=f"Deterministic validation failed after patch application: {last_validation.reason}",
+                )
+                break
+
             if corrections >= self.max_corrective_attempts:
                 outcome_kind = result.kind
                 outcome_class = "VALIDATION_FAILED"
@@ -264,10 +280,6 @@ class LocalWorkerHarness:
                     reason="Deterministic validation failed after the single corrective budget; escalate",
                 )
                 break
-
-            # Revert worktree before corrective attempt
-            if worktree_path and patch_applied:
-                self._revert_worktree(worktree_path)
 
             corrections += 1
             attempt += 1

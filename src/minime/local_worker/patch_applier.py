@@ -82,14 +82,50 @@ def parse_patch_touched_files(patch: str) -> tuple[bool, set[str], str]:
     return True, touched_files, ""
 
 
+def _build_git_env() -> dict[str, str]:
+    """Sanitize environment variables for Git subprocess operations."""
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    for variable in (
+        "GIT_TRACE",
+        "GIT_TRACE_PACKET",
+        "GIT_TRACE_CURL",
+        "GIT_CURL_VERBOSE",
+        "GIT_TRANSPORT_TRACE",
+    ):
+        env.pop(variable, None)
+    return env
+
+
 def validate_patch_policy(
     patch: str | None,
     envelope: LocalTaskEnvelope,
     kind: LocalResultKind = LocalResultKind.CHANGES_PROPOSED,
 ) -> PatchPolicyDecision:
     """Validate patch against envelope security bounds before filesystem mutation."""
-    if kind is LocalResultKind.NO_CHANGE_JUSTIFIED or not patch or not patch.strip():
-        return PatchPolicyDecision(valid=True, touched_files=(), reason="No patch to apply")
+    if kind is LocalResultKind.NO_CHANGE_JUSTIFIED:
+        if patch and patch.strip():
+            return PatchPolicyDecision(
+                valid=False,
+                touched_files=(),
+                reason="NO_CHANGE_JUSTIFIED result must not supply a patch",
+            )
+        return PatchPolicyDecision(
+            valid=True, touched_files=(), reason="NO_CHANGE_JUSTIFIED with null patch"
+        )
+
+    if kind is LocalResultKind.CHANGES_PROPOSED:
+        if not patch or not patch.strip():
+            return PatchPolicyDecision(
+                valid=False,
+                touched_files=(),
+                reason="CHANGES_PROPOSED result requires a non-empty patch",
+            )
+
+    if not patch or not patch.strip():
+        return PatchPolicyDecision(
+            valid=False, touched_files=(), reason="Patch is missing or empty"
+        )
 
     valid_diff, touched_files_set, parse_err = parse_patch_touched_files(patch)
     if not valid_diff:
@@ -127,8 +163,11 @@ def validate_patch_policy(
 class LocalPatchApplier:
     """Applies validated patches ONLY inside authorized EXECUTION_WORKTREE targets."""
 
-    def __init__(self, uow: Any = None):
+    def __init__(self, uow: Any, worktree_manager: Any | None = None):
+        if uow is None:
+            raise ValueError("PersistenceUnitOfWork (uow) is mandatory for LocalPatchApplier.")
         self.uow = uow
+        self.worktree_manager = worktree_manager
 
     def apply_patch(
         self,
@@ -136,10 +175,19 @@ class LocalPatchApplier:
         worktree_path: str | Path,
         envelope: LocalTaskEnvelope,
         patch: str,
-        project_id: str = "mini-me",
-        job_id: str | None = None,
+        project_id: str,
+        job_id: str,
     ) -> PatchApplicationResult:
         """Apply patch programmatically inside authorized EXECUTION_WORKTREE only."""
+        if not project_id or not str(project_id).strip():
+            return PatchApplicationResult(
+                success=False, error="project_id is mandatory for authorized patch application."
+            )
+        if not job_id or not str(job_id).strip():
+            return PatchApplicationResult(
+                success=False, error="job_id is mandatory for authorized patch application."
+            )
+
         if not patch or not patch.strip():
             return PatchApplicationResult(
                 success=True, applied=False, authoritative_changed_files=()
@@ -151,29 +199,93 @@ class LocalPatchApplier:
                 success=False, error=f"Target worktree path '{target_dir}' does not exist on disk."
             )
 
-        # 1. SDLC Isolation Check via ManagedWorkspaceGuard if uow is provided
-        if self.uow is not None:
-            from minime.services.workspace_guard import ManagedWorkspaceGuard
-
-            guard = ManagedWorkspaceGuard(self.uow)
-            req = WorkspaceMutationRequest(
-                project_id=project_id,
-                target_path=str(target_dir),
-                requested_operation=WorkspaceOperation.EDIT,
-                actor="local_worker",
+        # 0. Path identity / symlink resolution check
+        abs_target = Path(os.path.abspath(str(worktree_path)))
+        if abs_target != target_dir or os.path.islink(str(worktree_path)):
+            return PatchApplicationResult(
+                success=False,
+                error=f"Path identity mismatch / symlink detected: abspath '{abs_target}' != realpath '{target_dir}'.",
             )
-            decision = guard.evaluate_mutation(req)
-            if not decision.allowed or decision.workspace_role != WorkspaceRole.EXECUTION_WORKTREE:
-                return PatchApplicationResult(
-                    success=False,
-                    error=f"Workspace mutation denied: {decision.provider_detail or 'Not an EXECUTION_WORKTREE'}",
-                )
 
-        # 2. Re-verify runtime checkout & managed repo immutability
-        runtime_root = os.path.realpath(os.environ.get("MINIME_RUNTIME_ROOT", "/opt/minime/app"))
-        managed_root = os.path.realpath(
-            os.environ.get("MINIME_MANAGED_ROOT", "/opt/minime/repos/mini-me")
+        # 1. SDLC Isolation Check via ManagedWorkspaceGuard (FAIL CLOSED)
+        from minime.services.workspace_guard import ManagedWorkspaceGuard
+
+        guard = ManagedWorkspaceGuard(self.uow)
+        req = WorkspaceMutationRequest(
+            project_id=project_id,
+            target_path=str(target_dir),
+            requested_operation=WorkspaceOperation.EDIT,
+            actor="local_worker",
         )
+        decision = guard.evaluate_mutation(req)
+        if not decision.allowed or decision.workspace_role != WorkspaceRole.EXECUTION_WORKTREE:
+            return PatchApplicationResult(
+                success=False,
+                error=f"Workspace mutation denied: {decision.provider_detail or 'Not an EXECUTION_WORKTREE'}",
+            )
+
+        # 2. Durable OrchestrationWorktreeOwnership verification in UoW
+        ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None)
+        if not ownership_repo:
+            return PatchApplicationResult(
+                success=False, error="orchestration_worktree_ownerships repository missing in uow."
+            )
+
+        ownership = ownership_repo.get_by_canonical_path(str(target_dir))
+        if not ownership and hasattr(ownership_repo, "get_by_job_id"):
+            cand = ownership_repo.get_by_job_id(job_id)
+            if cand and str(Path(cand.canonical_worktree_path).resolve()) == str(target_dir):
+                ownership = cand
+
+        if not ownership:
+            return PatchApplicationResult(
+                success=False,
+                error=f"Durable OrchestrationWorktreeOwnership missing for '{target_dir}'.",
+            )
+
+        if ownership.project_id != project_id:
+            return PatchApplicationResult(
+                success=False,
+                error=f"Ownership project_id mismatch: observed '{ownership.project_id}', expected '{project_id}'.",
+            )
+
+        if ownership.job_id != job_id:
+            return PatchApplicationResult(
+                success=False,
+                error=f"Ownership job_id mismatch: observed '{ownership.job_id}', expected '{job_id}'.",
+            )
+
+        if getattr(ownership, "has_synthetic_placeholder", False):
+            return PatchApplicationResult(
+                success=False, error=f"Ownership at '{target_dir}' has synthetic placeholder."
+            )
+
+        # 3. On-disk .minime_worktree_ownership.json verification via WorktreeManager
+        from minime.services.worktree_manager import WorktreeManager
+
+        binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
+        binding = binding_repo.get_by_project_id(project_id) if binding_repo else None
+        if not binding or not getattr(binding, "managed_repository_root", None):
+            return PatchApplicationResult(
+                success=False,
+                error=f"Valid ProjectManagedRepositoryBinding missing for project_id '{project_id}'.",
+            )
+
+        worktree_mgr = self.worktree_manager or WorktreeManager(
+            project_root=binding.managed_repository_root, uow=self.uow, workspace_guard=guard
+        )
+        try:
+            worktree_mgr._verify_ownership_marker(
+                target_dir, ownership, worktree_kind="execution worktree"
+            )
+        except Exception as exc:
+            return PatchApplicationResult(
+                success=False, error=f"Worktree ownership marker verification failed: {exc}"
+            )
+
+        # 4. Re-verify runtime checkout & managed repo immutability
+        runtime_root = guard.runtime_root
+        managed_root = os.path.realpath(binding.managed_repository_root)
         resolved_target = str(target_dir)
 
         if resolved_target == runtime_root or resolved_target.startswith(runtime_root + "/"):
@@ -186,13 +298,15 @@ class LocalPatchApplier:
                 success=False, error="Refusing to mutate managed repository directly."
             )
 
-        # 3. Check worktree is clean before application
+        # 5. Check worktree is clean before application
+        git_env = _build_git_env()
         status_res = subprocess.run(
             ["git", "status", "--porcelain=v1"],
             cwd=str(target_dir),
             capture_output=True,
             text=True,
             timeout=10,
+            env=git_env,
         )
         if status_res.returncode != 0:
             return PatchApplicationResult(
@@ -202,7 +316,7 @@ class LocalPatchApplier:
         status_lines = [
             line
             for line in status_res.stdout.splitlines()
-            if line.strip() and "minime_worktree_ownership.json" not in line
+            if line.strip() and ".minime_worktree_ownership.json" not in line
         ]
         if status_lines:
             return PatchApplicationResult(
@@ -210,8 +324,7 @@ class LocalPatchApplier:
                 error=f"Worktree '{target_dir}' is dirty before patch application.",
             )
 
-        # 4. Programmatic git apply
-        env = os.environ.copy()
+        # 6. Programmatic git apply with sanitized env
         apply_res = subprocess.run(
             ["git", "apply", "-"],
             input=patch,
@@ -219,7 +332,7 @@ class LocalPatchApplier:
             capture_output=True,
             text=True,
             timeout=30,
-            env=env,
+            env=git_env,
         )
         if apply_res.returncode != 0:
             return PatchApplicationResult(
@@ -227,13 +340,14 @@ class LocalPatchApplier:
                 error=f"git apply failed (code {apply_res.returncode}): {apply_res.stderr.strip() or apply_res.stdout.strip()}",
             )
 
-        # 5. Postcondition verification: git diff --name-only / status
+        # 7. Postcondition verification: git diff --name-only / status
         post_diff = subprocess.run(
             ["git", "diff", "--name-only"],
             cwd=str(target_dir),
             capture_output=True,
             text=True,
             timeout=10,
+            env=git_env,
         )
         post_untracked = subprocess.run(
             ["git", "status", "--porcelain=v1"],
@@ -241,6 +355,7 @@ class LocalPatchApplier:
             capture_output=True,
             text=True,
             timeout=10,
+            env=git_env,
         )
 
         changed_set: set[str] = set()
@@ -253,7 +368,7 @@ class LocalPatchApplier:
             for line in post_untracked.stdout.splitlines():
                 if len(line) >= 4:
                     fname = line[3:].strip()
-                    if fname and "minime_worktree_ownership.json" not in fname:
+                    if fname and ".minime_worktree_ownership.json" not in fname:
                         changed_set.add(fname)
 
         actual_changed = tuple(sorted(changed_set))
@@ -262,16 +377,9 @@ class LocalPatchApplier:
         # Postcondition check: actual_changed <= allowed_files
         for ch in actual_changed:
             if allowed_set and ch not in allowed_set:
-                # Revert changes in worktree
-                subprocess.run(
-                    ["git", "checkout", "."], cwd=str(target_dir), capture_output=True
-                )
-                subprocess.run(
-                    ["git", "clean", "-fd"], cwd=str(target_dir), capture_output=True
-                )
                 return PatchApplicationResult(
                     success=False,
-                    error=f"Postcondition failed: Actual changed file '{ch}' is not in allowed_files. Worktree reverted.",
+                    error=f"Postcondition failed: Actual changed file '{ch}' is not in allowed_files.",
                 )
 
         return PatchApplicationResult(
