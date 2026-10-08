@@ -519,7 +519,7 @@ async def test_cause_specific_corrective_reasons_patch_policy():
     assert len(dispatches) == 2
     assert dispatches[0][1] is None
     assert dispatches[1][1] is not None
-    assert "Previous patch violated the allowed patch policy" in dispatches[1][1]
+    assert "Previous patch failed policy validation:" in dispatches[1][1]
     assert evidence.result_class == "SUCCESS"
 
 
@@ -626,3 +626,153 @@ async def test_no_retry_after_filesystem_mutation(tmp_path):
     assert evidence.patch_applied is True
     assert evidence.result_class == "PATCH_APPLY_FAILED"
     assert evidence.escalation.required is True
+
+
+@pytest.mark.asyncio
+async def test_format_policy_failure_receives_format_specific_corrective_reason():
+    """Format-policy failure receives unified diff grammar instruction."""
+    from minime.local_worker.harness import LocalWorkerHarness
+
+    harness = LocalWorkerHarness(max_corrective_attempts=1)
+
+    captured_corrective_reasons = []
+
+    async def mock_dispatch(envelope, attempt, corrective_reason=None):
+        captured_corrective_reasons.append(corrective_reason)
+        if attempt == 1:
+            return json.dumps(
+                {
+                    "kind": "CHANGES_PROPOSED",
+                    "summary": "Attempt 1 without valid patch",
+                    "files_changed": ["tests/test_foo.py"],
+                    "patch": "No diff headers here",
+                    "confidence": 0.8,
+                    "escalation_required": False,
+                    "escalation_reason": "",
+                    "next_action": "apply",
+                }
+            )
+        return json.dumps(
+            {
+                "kind": "CHANGES_PROPOSED",
+                "summary": "Attempt 2 failure",
+                "files_changed": ["tests/test_foo.py"],
+                "patch": "Still bad",
+                "confidence": 0.8,
+                "escalation_required": False,
+                "escalation_reason": "",
+                "next_action": "apply",
+            }
+        )
+
+    harness._dispatch = mock_dispatch
+
+    task = LocalTaskEnvelope(
+        role="LOCAL_WORKER",
+        task_class=LocalTaskClass.TEST_AUTHORING,
+        allowed_files=["tests/test_foo.py"],
+        instruction="Repair test fixture",
+    )
+
+    validator = AsyncMock(return_value=ValidationResult(verdict=LocalValidationVerdict.PASS))
+
+    evidence = await harness.run(task, validator=validator)
+
+    assert evidence.corrections_used == 1
+    assert evidence.result_class == "PATCH_POLICY_FAILED"
+    assert len(captured_corrective_reasons) == 2
+    assert captured_corrective_reasons[0] is None
+
+    corr2 = captured_corrective_reasons[1]
+    assert corr2 is not None
+    assert "Previous patch failed policy validation: Patch contained no valid touched files" in corr2
+    assert "--- a/<allowed-relative-path>" in corr2
+    assert "+++ b/<allowed-relative-path>" in corr2
+    assert "@@ ... @@" in corr2
+    assert "and actual changed lines" in corr2
+
+
+@pytest.mark.asyncio
+async def test_forbidden_file_failure_receives_authorization_failure_not_format_advice():
+    """Forbidden-file failure receives actual authorization failure, not format advice."""
+    from minime.local_worker.harness import LocalWorkerHarness
+
+    harness = LocalWorkerHarness(max_corrective_attempts=1)
+
+    captured_corrective_reasons = []
+
+    bad_patch = (
+        "--- a/src/minime/services/scheduler_service.py\n"
+        "+++ b/src/minime/services/scheduler_service.py\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+
+    async def mock_dispatch(envelope, attempt, corrective_reason=None):
+        captured_corrective_reasons.append(corrective_reason)
+        return json.dumps(
+            {
+                "kind": "CHANGES_PROPOSED",
+                "summary": "Attempting forbidden modification",
+                "files_changed": ["src/minime/services/scheduler_service.py"],
+                "patch": bad_patch,
+                "confidence": 0.8,
+                "escalation_required": False,
+                "escalation_reason": "",
+                "next_action": "apply",
+            }
+        )
+
+    harness._dispatch = mock_dispatch
+
+    task = LocalTaskEnvelope(
+        role="LOCAL_WORKER",
+        task_class=LocalTaskClass.TEST_AUTHORING,
+        allowed_files=["tests/test_foo.py"],
+        forbidden_files=["src/**"],
+        instruction="Repair test fixture",
+    )
+
+    validator = AsyncMock(return_value=ValidationResult(verdict=LocalValidationVerdict.PASS))
+
+    evidence = await harness.run(task, validator=validator)
+
+    assert evidence.corrections_used == 1
+    assert evidence.result_class == "PATCH_POLICY_FAILED"
+
+    corr2 = captured_corrective_reasons[1]
+    assert corr2 is not None
+    assert "Touched file 'src/minime/services/scheduler_service.py' is in forbidden_files" in corr2
+    # Ensure format advice is NOT present for authorization failures
+    assert "--- a/<allowed-relative-path>" not in corr2
+
+
+def test_no_task_solution_inserted_in_corrective_prompt():
+    """Ensure no task-specific solutions or hints are present in formatted reasons."""
+    from minime.local_worker.harness import format_patch_policy_corrective_reason
+
+    reason_format = format_patch_policy_corrective_reason("Patch contained no valid touched files")
+    reason_auth = format_patch_policy_corrective_reason(
+        "Touched file 'src/foo.py' is in forbidden_files"
+    )
+
+    for r in (reason_format, reason_auth):
+        assert "MagicMock" not in r
+        assert "readiness" not in r
+        assert "OpenSpecAdapter" not in r
+        assert "assert" not in r
+        assert "def " not in r
+
+
+def test_sanitized_diagnostics_in_corrective_reason():
+    """Ensure secrets are redacted from policy decision reason in corrective instruction."""
+    from minime.local_worker.harness import format_patch_policy_corrective_reason
+
+    secret_reason = (
+        "Touched file 'sk-ant-api03-1234567890abcdef1234567890abcdef12345678' is not in allowed_files"
+    )
+    formatted = format_patch_policy_corrective_reason(secret_reason)
+
+    assert "sk-ant-api03-1234567890abcdef1234567890abcdef12345678" not in formatted
+    assert "[REDACTED_KEY]" in formatted

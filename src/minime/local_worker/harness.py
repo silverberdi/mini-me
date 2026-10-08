@@ -124,6 +124,35 @@ def parse_structured_result(raw: str) -> LocalWorkerResult:
     )
 
 
+FORMAT_FAILURE_SUBSTRINGS = (
+    "no valid touched files",
+    "malformed patch",
+    "requires a non-empty patch",
+    "missing or empty",
+)
+
+
+def format_patch_policy_corrective_reason(reason: str) -> str:
+    """Format sanitized corrective instruction for patch policy failures."""
+    sanitized = redact_secrets(reason)
+    r_lower = sanitized.lower()
+
+    if any(sub in r_lower for sub in FORMAT_FAILURE_SUBSTRINGS):
+        return (
+            f"Previous patch failed policy validation: {sanitized}\n"
+            "When kind is CHANGES_PROPOSED, the patch field must be a valid unified diff string containing:\n"
+            "--- a/<allowed-relative-path>\n"
+            "+++ b/<allowed-relative-path>\n"
+            "@@ ... @@\n"
+            "and actual changed lines."
+        )
+
+    return (
+        f"Previous patch failed policy validation: {sanitized}\n"
+        "Return a valid patch touching only authorized files."
+    )
+
+
 class LocalWorkerHarness:
     """Deterministic-boundedness harness: deadline per attempt, one corrective, no self-ok."""
 
@@ -240,9 +269,8 @@ class LocalWorkerHarness:
                 if corrections < self.max_corrective_attempts:
                     corrections += 1
                     attempt += 1
-                    corrective_reason = (
-                        "Previous patch violated the allowed patch policy. "
-                        "Return a smaller patch touching only authorized files."
+                    corrective_reason = format_patch_policy_corrective_reason(
+                        policy_decision.reason
                     )
                     continue
                 outcome_kind = result.kind
