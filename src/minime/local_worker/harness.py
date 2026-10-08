@@ -7,9 +7,9 @@ invokes ``cleanup``. Deterministic validation (mini me, never the model) decides
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
-import re
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -29,66 +29,98 @@ from minime.local_worker.patch_applier import (
     LocalPatchApplier,
     validate_patch_policy,
 )
+from minime.logging import redact_secrets
 
 logger = logging.getLogger(__name__)
 
-_FENCE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
+REQUIRED_MODEL_FIELDS = {
+    "kind",
+    "summary",
+    "files_changed",
+    "patch",
+    "confidence",
+    "escalation_required",
+    "escalation_reason",
+    "next_action",
+}
 
-# Dispatch returns the model's raw bounded text answer for a given attempt number.
-Dispatch = Callable[[LocalTaskEnvelope, int], Awaitable[str]]
+# Dispatch returns the model's raw bounded text answer for a given attempt number and optional corrective reason.
+Dispatch = Callable[[LocalTaskEnvelope, int, str | None], Awaitable[str]]
 # Deterministic validation authority.
 Validator = Callable[[LocalTaskEnvelope, LocalWorkerResult, int], Awaitable[ValidationResult]]
 Cleanup = Callable[[int], Awaitable[None] | None]
 
 
-def _first_json(text: str) -> str:
-    text = (_FENCE.search(text) or [None, text])[1]
-    start = text.find("{")
-    if start < 0:
-        return text
-    depth = 0
-    for i in range(start, len(text)):
-        if text[i] == "{":
-            depth += 1
-        elif text[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start : i + 1]
-    return text
-
-
 def parse_structured_result(raw: str) -> LocalWorkerResult:
-    """Parse constrained bounded JSON into a structured result."""
-    payload_raw = _first_json(raw)
+    """Strictly parse constrained bounded JSON into a structured result."""
     try:
-        payload = json.loads(payload_raw)
+        payload = json.loads(raw)
     except ValueError as exc:
         raise ValueError(f"Model output is not valid JSON: {exc}") from exc
+
     if not isinstance(payload, dict):
         raise ValueError("Model output is not a JSON object")
 
-    kind_val = str(payload.get("kind", "")).upper()
-    if kind_val == "NO_CHANGE_JUSTIFIED":
-        kind = LocalResultKind.NO_CHANGE_JUSTIFIED
-    elif kind_val in {"CHANGES_PROPOSED", ""}:
-        kind = LocalResultKind.CHANGES_PROPOSED
-    else:
-        kind = LocalResultKind.UNCERTAIN
-    try:
-        confidence = float(payload.get("confidence", 0.0) or 0.0)
-    except (TypeError, ValueError):
-        confidence = 0.0
-    patch_val = payload.get("patch")
-    patch = str(patch_val) if patch_val is not None else None
+    keys = set(payload.keys())
+    missing = REQUIRED_MODEL_FIELDS - keys
+    if missing:
+        raise ValueError(f"Model output missing required fields: {sorted(missing)}")
+    extra = keys - REQUIRED_MODEL_FIELDS
+    if extra:
+        raise ValueError(f"Model output contains unexpected additional properties: {sorted(extra)}")
+
+    kind_val = payload["kind"]
+    if not isinstance(kind_val, str) or kind_val not in ("CHANGES_PROPOSED", "NO_CHANGE_JUSTIFIED"):
+        raise ValueError(
+            f"Model output kind '{kind_val}' is invalid; must be CHANGES_PROPOSED or NO_CHANGE_JUSTIFIED"
+        )
+
+    summary_val = payload["summary"]
+    if not isinstance(summary_val, str):
+        raise ValueError("Model output field 'summary' must be a string")
+
+    fc_val = payload["files_changed"]
+    if not isinstance(fc_val, list) or not all(isinstance(x, str) for x in fc_val):
+        raise ValueError("Model output field 'files_changed' must be an array of strings")
+
+    patch_val = payload["patch"]
+    if patch_val is not None and not isinstance(patch_val, str):
+        raise ValueError("Model output field 'patch' must be a string or null")
+
+    conf_val = payload["confidence"]
+    if isinstance(conf_val, bool) or not isinstance(conf_val, (int, float)):
+        raise ValueError("Model output field 'confidence' must be a number between 0.0 and 1.0")
+    conf_float = float(conf_val)
+    if not (0.0 <= conf_float <= 1.0):
+        raise ValueError(f"Model output field 'confidence' {conf_float} out of bounds [0.0, 1.0]")
+
+    esc_req = payload["escalation_required"]
+    if not isinstance(esc_req, bool):
+        raise ValueError("Model output field 'escalation_required' must be a boolean")
+
+    esc_reason = payload["escalation_reason"]
+    if not isinstance(esc_reason, str):
+        raise ValueError("Model output field 'escalation_reason' must be a string")
+
+    next_action = payload["next_action"]
+    if not isinstance(next_action, str):
+        raise ValueError("Model output field 'next_action' must be a string")
+
+    kind = (
+        LocalResultKind.CHANGES_PROPOSED
+        if kind_val == "CHANGES_PROPOSED"
+        else LocalResultKind.NO_CHANGE_JUSTIFIED
+    )
+
     return LocalWorkerResult(
         kind=kind,
-        summary=str(payload.get("summary", "")),
-        files_changed=[str(item) for item in payload.get("files_changed", [])],
-        patch=patch,
-        confidence=confidence,
-        escalation_required=bool(payload.get("escalation_required", False)),
-        escalation_reason=str(payload.get("escalation_reason", "")),
-        next_action=str(payload.get("next_action", "")),
+        summary=summary_val,
+        files_changed=fc_val,
+        patch=patch_val,
+        confidence=conf_float,
+        escalation_required=esc_req,
+        escalation_reason=esc_reason,
+        next_action=next_action,
     )
 
 
@@ -139,13 +171,17 @@ class LocalWorkerHarness:
         outcome_kind = LocalResultKind.UNCERTAIN
         escalation: EscalationDecision | None = None
         attempt = 1
+        corrective_reason: str | None = None
 
         patch_proposed = False
         patch_applied = False
         authoritative_changed: tuple[str, ...] = ()
+        last_raw_excerpt: str | None = None
+        last_failure_reason: str | None = None
+        last_raw_length: int | None = None
 
         while True:
-            raw = await self._bounded(task, attempt, dispatch, cleanup)
+            raw = await self._bounded(task, attempt, corrective_reason, dispatch, cleanup)
             if raw is None:
                 outcome_class = "TIMEOUT"
                 last = None
@@ -163,12 +199,23 @@ class LocalWorkerHarness:
             try:
                 result = parse_structured_result(raw)
             except ValueError as exc:
+                sanitized_raw = redact_secrets(raw) if raw else ""
+                last_raw_excerpt = sanitized_raw[:300]
+                last_failure_reason = redact_secrets(str(exc))
+                last_raw_length = len(raw) if raw else 0
+                logger.warning(
+                    "Local worker malformed structured output (attempt %d, length=%d): %s | Excerpt: %r",
+                    attempt,
+                    last_raw_length,
+                    last_failure_reason,
+                    last_raw_excerpt[:200],
+                )
                 if corrections >= self.max_corrective_attempts:
                     outcome_class = "MALFORMED_OUTPUT"
                     last = None
                     last_validation = ValidationResult(
                         verdict=LocalValidationVerdict.FAIL,
-                        reason=f"Malformed structured output; corrective budget exhausted: {exc}",
+                        reason=f"Malformed structured output; corrective budget exhausted: {last_failure_reason}",
                     )
                     escalation = escalation or EscalationDecision(
                         required=True,
@@ -178,6 +225,9 @@ class LocalWorkerHarness:
                     break
                 corrections += 1
                 attempt += 1
+                corrective_reason = (
+                    "Previous response did not satisfy the required structured response contract."
+                )
                 continue
 
             last = result
@@ -186,9 +236,14 @@ class LocalWorkerHarness:
             # 1. Patch Policy Validation
             policy_decision = validate_patch_policy(result.patch, task, kind=result.kind)
             if not policy_decision.valid:
+                last_failure_reason = f"Patch policy validation failed: {policy_decision.reason}"
                 if corrections < self.max_corrective_attempts:
                     corrections += 1
                     attempt += 1
+                    corrective_reason = (
+                        "Previous patch violated the allowed patch policy. "
+                        "Return a smaller patch touching only authorized files."
+                    )
                     continue
                 outcome_kind = result.kind
                 outcome_class = "PATCH_POLICY_FAILED"
@@ -241,6 +296,7 @@ class LocalWorkerHarness:
                 authoritative_changed = app_res.authoritative_changed_files
 
                 if not app_res.success:
+                    last_failure_reason = f"Patch application failed: {app_res.error}"
                     if app_res.applied:
                         # Filesystem mutated: NO retry allowed!
                         outcome_kind = result.kind
@@ -259,6 +315,10 @@ class LocalWorkerHarness:
                     if corrections < self.max_corrective_attempts:
                         corrections += 1
                         attempt += 1
+                        corrective_reason = (
+                            "Previous patch could not be applied before any filesystem mutation. "
+                            "Return a valid unified diff against the supplied context."
+                        )
                         continue
 
                     outcome_kind = result.kind
@@ -353,18 +413,36 @@ class LocalWorkerHarness:
             patch_applied=patch_applied,
             authoritative_changed_files=list(authoritative_changed),
             worktree_path=str(worktree_path) if worktree_path else None,
+            raw_output_excerpt=last_raw_excerpt,
+            model_output_failure_reason=last_failure_reason,
+            raw_output_length=last_raw_length,
         )
 
     async def _bounded(
         self,
         task: LocalTaskEnvelope,
         attempt: int,
+        corrective_reason: str | None,
         dispatch: Dispatch,
         cleanup: Cleanup | None,
     ) -> str | None:
         """Dispatch under task.timeout_seconds, cancelling and cleaning up on timeout."""
+        accepts_corrective_reason = False
         try:
-            return await asyncio.wait_for(dispatch(task, attempt), timeout=task.timeout_seconds)
+            sig = inspect.signature(dispatch)
+            params = list(sig.parameters.values())
+            accepts_corrective_reason = len(params) >= 3 or any(
+                p.kind == inspect.Parameter.VAR_POSITIONAL for p in params
+            )
+        except Exception:  # noqa: BLE001
+            accepts_corrective_reason = False
+
+        try:
+            if accepts_corrective_reason:
+                coro = dispatch(task, attempt, corrective_reason)
+            else:
+                coro = dispatch(task, attempt)
+            return await asyncio.wait_for(coro, timeout=task.timeout_seconds)
         except asyncio.TimeoutError:
             logger.warning("Local worker dispatch attempt %s exceeded its deadline", attempt)
             if cleanup is not None:

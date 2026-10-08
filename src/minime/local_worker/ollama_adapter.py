@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
 
@@ -74,30 +75,35 @@ class LocalOllamaAdapter:
         Reachability: GET /api/tags returns 200 -> reachable.
         Model presence: response model names exactly contain the canonical identity.
         """
-        async with await self._client(client) as active:
-            try:
+        try:
+            if client is not None:
                 res = await asyncio.wait_for(
-                    active.get("/api/tags"),
+                    client.get("/api/tags"),
                     timeout=self.request_timeout_seconds,
                 )
-            except asyncio.TimeoutError:
-                return PreflightResult(
-                    provider=self.provider,
-                    model=self.model,
-                    status=PreflightStatus.UNREACHABLE,
-                    reason="Ollama unreachable: /api/tags timed out",
-                    reachable=False,
-                    model_present=False,
-                )
-            except httpx.HTTPError:
-                return PreflightResult(
-                    provider=self.provider,
-                    model=self.model,
-                    status=PreflightStatus.UNREACHABLE,
-                    reason="Ollama unreachable: /api/tags request error",
-                    reachable=False,
-                    model_present=False,
-                )
+            else:
+                async with httpx.AsyncClient(
+                    base_url=self.base_url, timeout=self.request_timeout_seconds
+                ) as active:
+                    res = await active.get("/api/tags")
+        except asyncio.TimeoutError:
+            return PreflightResult(
+                provider=self.provider,
+                model=self.model,
+                status=PreflightStatus.UNREACHABLE,
+                reason="Ollama unreachable: /api/tags timed out",
+                reachable=False,
+                model_present=False,
+            )
+        except httpx.HTTPError:
+            return PreflightResult(
+                provider=self.provider,
+                model=self.model,
+                status=PreflightStatus.UNREACHABLE,
+                reason="Ollama unreachable: /api/tags request error",
+                reachable=False,
+                model_present=False,
+            )
 
         if res.status_code != 200:
             return PreflightResult(
@@ -137,6 +143,7 @@ class LocalOllamaAdapter:
         prompt: str,
         client: httpx.AsyncClient | None = None,
         timeout_seconds: float | None = None,
+        response_format: str | dict[str, Any] | None = None,
     ) -> OllamaGenerateResponse:
         """Send one bounded chat/generate request and return the normalized result.
 
@@ -145,7 +152,7 @@ class LocalOllamaAdapter:
         supplies overall process/cancellation cleanup semantics.
         """
         deadline_s = timeout_seconds or max(1.0, self.request_timeout_seconds)
-        body = {
+        body: dict[str, Any] = {
             "model": self.model,
             "messages": [
                 {"role": "system", "content": system_prompt},
@@ -154,22 +161,28 @@ class LocalOllamaAdapter:
             "stream": False,
             "options": {"temperature": 0.0},
         }
-        async with await self._client(client) as active:
-            try:
+        if response_format is not None:
+            body["format"] = response_format
+
+        try:
+            if client is not None:
                 res = await asyncio.wait_for(
-                    active.post("/api/chat", json=body),
+                    client.post("/api/chat", json=body),
                     timeout=deadline_s,
                 )
-            except asyncio.TimeoutError:
-                return OllamaGenerateResponse(
-                    result_class=ProviderResultClass.TIMEOUT,
-                    error="Ollama generate timed out and was cancelled",
-                )
-            except httpx.HTTPError as exc:
-                return OllamaGenerateResponse(
-                    result_class=ProviderResultClass.UNKNOWN_ERROR,
-                    error=f"Ollama generate HTTP error: {exc.__class__.__name__}",
-                )
+            else:
+                async with httpx.AsyncClient(base_url=self.base_url, timeout=deadline_s) as active:
+                    res = await active.post("/api/chat", json=body)
+        except asyncio.TimeoutError:
+            return OllamaGenerateResponse(
+                result_class=ProviderResultClass.TIMEOUT,
+                error="Ollama generate timed out and was cancelled",
+            )
+        except httpx.HTTPError as exc:
+            return OllamaGenerateResponse(
+                result_class=ProviderResultClass.UNKNOWN_ERROR,
+                error=f"Ollama generate HTTP error: {exc.__class__.__name__}",
+            )
 
         if res.status_code != 200:
             response_class = (

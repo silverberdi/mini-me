@@ -21,6 +21,7 @@ from minime.local_worker.model_identity import (
     local_qwen_model_identity,
 )
 from minime.local_worker.models import (
+    LOCAL_WORKER_RESPONSE_SCHEMA,
     EscalationDecision,
     EscalationTarget,
     LocalExecutionEvidence,
@@ -40,11 +41,12 @@ logger = logging.getLogger(__name__)
 Validator = Callable[[LocalTaskEnvelope, LocalWorkerResult, int], Awaitable[ValidationResult]]
 
 SYSTEM_PROMPT = (
-    "You are the mini me local worker. Take only the smallest possible patch within the "
-    "strict allowed files; never redesign architecture. Reply ONLY with a flat JSON object "
-    '{"kind":"CHANGES_PROPOSED"|"NO_CHANGE_JUSTIFIED","summary":"...","files_changed":[],'
-    '"patch":"<unified diff>"|null,"confidence":0.0,"escalation_required":false,"escalation_reason":"",'
-    '"next_action":"..."}. You do not decide success; mini me does, deterministically.'
+    "You are the mini me local worker. Implement only the requested change using the "
+    "smallest possible patch within the strict allowed files; never redesign architecture. "
+    'Reply ONLY with a flat JSON object {"kind":"CHANGES_PROPOSED"|"NO_CHANGE_JUSTIFIED","summary":"...","files_changed":[],'
+    '"patch":"<unified diff>"|null,"confidence":0.0,"escalation_required":false,"escalation_reason":"","next_action":"..."}. '
+    "Do not use Markdown or code block fences. The patch field must be a unified diff string with escaped newlines, or null if no change. "
+    "You do not decide success; mini me does deterministically."
 )
 
 
@@ -91,7 +93,9 @@ class LocalWorkerService:
         if preflight.status is not PreflightStatus.READY:
             return ServiceOutcome(eligibility, preflight, _preflight_failed_evidence(preflight))
 
-        async def bounded_dispatch(envelope: LocalTaskEnvelope, attempt: int) -> str:
+        async def bounded_dispatch(
+            envelope: LocalTaskEnvelope, attempt: int, corrective_reason: str | None = None
+        ) -> str:
             body = (
                 envelope.instruction
                 + "\nAllowed: "
@@ -101,10 +105,22 @@ class LocalWorkerService:
                 + "\nContext:\n"
                 + envelope.context
             )
+            if attempt > 1 and corrective_reason:
+                body += f"\n\nIMPORTANT CORRECTIVE INSTRUCTION:\n{corrective_reason}"
+            elif attempt > 1:
+                body += (
+                    "\n\nIMPORTANT CORRECTIVE INSTRUCTION:\n"
+                    "Your previous response did not satisfy the required structured output contract.\n"
+                    "Return only an object matching the supplied schema.\n"
+                    "Do not use Markdown or code fences.\n"
+                    "The patch value must be a JSON string containing the unified diff with escaped newlines."
+                )
+
             response = await self.adapter.generate(
                 system_prompt=SYSTEM_PROMPT,
                 prompt=f"{LOCAL_WORKER_ROLE}\n{body}",
                 client=client,
+                response_format=LOCAL_WORKER_RESPONSE_SCHEMA,
             )
             if response.result_class is not ProviderResultClass.SUCCESS:
                 return ""

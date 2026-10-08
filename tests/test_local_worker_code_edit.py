@@ -52,9 +52,21 @@ def stage_c_environment(tmp_path):
 
     # Git init managed repo
     subprocess.run(["git", "init", "-b", "main"], cwd=repo_dir, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_dir, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True, capture_output=True)
-    subprocess.run(["git", "remote", "add", "origin", "https://github.com/silverberdi/mini-me"], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Test User"], cwd=repo_dir, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/silverberdi/mini-me"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+    )
 
     foo_path = repo_dir / "foo.py"
     foo_path.write_text("def foo():\n    return 42\n")
@@ -63,19 +75,28 @@ def stage_c_environment(tmp_path):
     test_path.write_text("def test_foo():\n    assert foo() == 42\n")
 
     marker_path = repo_dir / ".minime-managed-project.json"
-    marker_path.write_text(json.dumps({
-        "project_id": "mini-me",
-        "canonical_repository_identity": "github.com/silverberdi/mini-me",
-        "repository": "github.com/silverberdi/mini-me"
-    }))
+    marker_path.write_text(
+        json.dumps(
+            {
+                "project_id": "mini-me",
+                "canonical_repository_identity": "github.com/silverberdi/mini-me",
+                "repository": "github.com/silverberdi/mini-me",
+            }
+        )
+    )
 
     subprocess.run(["git", "add", "."], cwd=repo_dir, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "Initial commit"], cwd=repo_dir, check=True, capture_output=True
+    )
 
-    res_sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_dir, capture_output=True, text=True, check=True)
+    res_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo_dir, capture_output=True, text=True, check=True
+    )
     base_sha = res_sha.stdout.strip()
 
     from tests.test_stage_c_isolation import MockUOW
+
     uow = MockUOW()
 
     binding = ProjectManagedRepositoryBinding(
@@ -97,7 +118,9 @@ def stage_c_environment(tmp_path):
     }
 
 
-async def create_authorized_worktree(stage_c_env: dict, job_id: str, run_id: str, change_name: str = "local-edit") -> WorktreeInfo:
+async def create_authorized_worktree(
+    stage_c_env: dict, job_id: str, run_id: str, change_name: str = "local-edit"
+) -> WorktreeInfo:
     uow = stage_c_env["uow"]
     project_id = "mini-me"
 
@@ -170,7 +193,9 @@ def test_no_change_justified_with_patch_fails_closed():
         allowed_files=["foo.py"],
         instruction="Check foo",
     )
-    decision = validate_patch_policy("some patch", envelope, kind=LocalResultKind.NO_CHANGE_JUSTIFIED)
+    decision = validate_patch_policy(
+        "some patch", envelope, kind=LocalResultKind.NO_CHANGE_JUSTIFIED
+    )
     assert decision.valid is False
     assert "must not supply a patch" in decision.reason
 
@@ -194,13 +219,7 @@ def test_patch_outside_allowed_files_refused():
         allowed_files=["foo.py"],
         instruction="Fix foo",
     )
-    patch_str = (
-        "--- a/bar.py\n"
-        "+++ b/bar.py\n"
-        "@@ -1 +1 @@\n"
-        "-old\n"
-        "+new\n"
-    )
+    patch_str = "--- a/bar.py\n+++ b/bar.py\n@@ -1 +1 @@\n-old\n+new\n"
     decision = validate_patch_policy(patch_str, envelope)
     assert decision.valid is False
     assert "not in allowed_files" in decision.reason
@@ -213,13 +232,7 @@ def test_path_traversal_refused():
         allowed_files=["foo.py"],
         instruction="Fix foo",
     )
-    patch_str = (
-        "--- a/../etc/passwd\n"
-        "+++ b/../etc/passwd\n"
-        "@@ -1 +1 @@\n"
-        "-old\n"
-        "+new\n"
-    )
+    patch_str = "--- a/../etc/passwd\n+++ b/../etc/passwd\n@@ -1 +1 @@\n-old\n+new\n"
     decision = validate_patch_policy(patch_str, envelope)
     assert decision.valid is False
     assert "Path traversal" in decision.reason
@@ -232,13 +245,7 @@ def test_absolute_path_refused():
         allowed_files=["foo.py"],
         instruction="Fix foo",
     )
-    patch_str = (
-        "--- a//etc/shadow\n"
-        "+++ b//etc/shadow\n"
-        "@@ -1 +1 @@\n"
-        "-old\n"
-        "+new\n"
-    )
+    patch_str = "--- a//etc/shadow\n+++ b//etc/shadow\n@@ -1 +1 @@\n-old\n+new\n"
     decision = validate_patch_policy(patch_str, envelope)
     assert decision.valid is False
     assert "Absolute path" in decision.reason
@@ -362,13 +369,18 @@ def test_b6_5_execution_worktree_path_missing_durable_ownership_refused(stage_c_
         job_id="job-unowned",
     )
     assert res.success is False
-    assert "Durable OrchestrationWorktreeOwnership missing" in res.error or "Workspace mutation denied" in res.error
+    assert (
+        "Durable OrchestrationWorktreeOwnership missing" in res.error
+        or "Workspace mutation denied" in res.error
+    )
 
 
 @pytest.mark.asyncio
 async def test_b6_6_wrong_job_id_ownership_refused(stage_c_environment):
     uow = stage_c_environment["uow"]
-    wt_info = await create_authorized_worktree(stage_c_environment, job_id="job-100", run_id="run-100")
+    wt_info = await create_authorized_worktree(
+        stage_c_environment, job_id="job-100", run_id="run-100"
+    )
 
     envelope = LocalTaskEnvelope(
         role="local_worker",
@@ -393,7 +405,9 @@ async def test_b6_6_wrong_job_id_ownership_refused(stage_c_environment):
 @pytest.mark.asyncio
 async def test_b6_7_wrong_project_id_ownership_refused(stage_c_environment):
     uow = stage_c_environment["uow"]
-    wt_info = await create_authorized_worktree(stage_c_environment, job_id="job-101", run_id="run-101")
+    wt_info = await create_authorized_worktree(
+        stage_c_environment, job_id="job-101", run_id="run-101"
+    )
 
     envelope = LocalTaskEnvelope(
         role="local_worker",
@@ -418,7 +432,9 @@ async def test_b6_7_wrong_project_id_ownership_refused(stage_c_environment):
 @pytest.mark.asyncio
 async def test_b6_8_valid_durable_ownership_and_execution_worktree_succeeds(stage_c_environment):
     uow = stage_c_environment["uow"]
-    wt_info = await create_authorized_worktree(stage_c_environment, job_id="job-102", run_id="run-102")
+    wt_info = await create_authorized_worktree(
+        stage_c_environment, job_id="job-102", run_id="run-102"
+    )
 
     envelope = LocalTaskEnvelope(
         role="local_worker",
@@ -444,7 +460,9 @@ async def test_b6_8_valid_durable_ownership_and_execution_worktree_succeeds(stag
 @pytest.mark.asyncio
 async def test_b6_9_symlink_path_identity_mismatch_refused(stage_c_environment, tmp_path):
     uow = stage_c_environment["uow"]
-    wt_info = await create_authorized_worktree(stage_c_environment, job_id="job-103", run_id="run-103")
+    wt_info = await create_authorized_worktree(
+        stage_c_environment, job_id="job-103", run_id="run-103"
+    )
 
     symlink_wt = tmp_path / "symlink_worktree"
     try:
@@ -475,7 +493,9 @@ async def test_b6_9_symlink_path_identity_mismatch_refused(stage_c_environment, 
 @pytest.mark.asyncio
 async def test_b6_10_dirty_precondition_refused(stage_c_environment):
     uow = stage_c_environment["uow"]
-    wt_info = await create_authorized_worktree(stage_c_environment, job_id="job-104", run_id="run-104")
+    wt_info = await create_authorized_worktree(
+        stage_c_environment, job_id="job-104", run_id="run-104"
+    )
 
     (wt_info.path / "foo.py").write_text("dirty uncommitted content")
 
@@ -503,7 +523,9 @@ async def test_b6_10_dirty_precondition_refused(stage_c_environment):
 @pytest.mark.asyncio
 async def test_patch_application_failure_escalates(stage_c_environment):
     uow = stage_c_environment["uow"]
-    wt_info = await create_authorized_worktree(stage_c_environment, job_id="job-105", run_id="run-105")
+    wt_info = await create_authorized_worktree(
+        stage_c_environment, job_id="job-105", run_id="run-105"
+    )
 
     service = LocalWorkerService(max_corrective_attempts=0)
 
@@ -519,12 +541,18 @@ async def test_patch_application_failure_escalates(stage_c_environment):
         return ValidationResult(verdict=LocalValidationVerdict.PASS)
 
     preflight = PreflightResult(
-        provider="ollama", model=service.model, status=PreflightStatus.READY, reachable=True, model_present=True
+        provider="ollama",
+        model=service.model,
+        status=PreflightStatus.READY,
+        reachable=True,
+        model_present=True,
     )
 
     class CustomAdapter:
-        async def generate(self, system_prompt, prompt, client=None):
-            return OllamaGenerateResponse(result_class=ProviderResultClass.SUCCESS, text=raw_response)
+        async def generate(self, system_prompt, prompt, client=None, **kwargs):
+            return OllamaGenerateResponse(
+                result_class=ProviderResultClass.SUCCESS, text=raw_response
+            )
 
     service.adapter = CustomAdapter()
 
@@ -553,7 +581,9 @@ async def test_patch_application_failure_escalates(stage_c_environment):
 @pytest.mark.asyncio
 async def test_post_apply_actual_changed_files_mismatch_fails_closed(stage_c_environment):
     uow = stage_c_environment["uow"]
-    wt_info = await create_authorized_worktree(stage_c_environment, job_id="job-106", run_id="run-106")
+    wt_info = await create_authorized_worktree(
+        stage_c_environment, job_id="job-106", run_id="run-106"
+    )
 
     patch_str = (
         "--- a/foo.py\n"
@@ -591,6 +621,7 @@ async def test_post_apply_actual_changed_files_mismatch_fails_closed(stage_c_env
 
 def test_local_qwen_no_review_audit_merge_authority():
     from minime.local_worker.policy import local_worker_authorities
+
     auths = local_worker_authorities()
     assert "review" not in auths
     assert "audit" not in auths
@@ -605,13 +636,18 @@ async def test_f1_changes_proposed_without_worktree_cannot_succeed():
     from minime.local_worker.harness import LocalWorkerHarness
 
     patch_str = "--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-old\n+new\n"
-    raw_response = json.dumps({
-        "kind": "CHANGES_PROPOSED",
-        "summary": "edit foo",
-        "files_changed": ["foo.py"],
-        "patch": patch_str,
-        "confidence": 0.9,
-    })
+    raw_response = json.dumps(
+        {
+            "kind": "CHANGES_PROPOSED",
+            "summary": "edit foo",
+            "files_changed": ["foo.py"],
+            "patch": patch_str,
+            "confidence": 0.9,
+            "escalation_required": False,
+            "escalation_reason": "",
+            "next_action": "apply",
+        }
+    )
 
     async def mock_dispatch(task, attempt):
         return raw_response
@@ -656,16 +692,23 @@ async def test_f3_no_retry_after_filesystem_mutation(stage_c_environment):
     from minime.local_worker.harness import LocalWorkerHarness
 
     uow = stage_c_environment["uow"]
-    wt_info = await create_authorized_worktree(stage_c_environment, job_id="job-f3", run_id="run-f3")
+    wt_info = await create_authorized_worktree(
+        stage_c_environment, job_id="job-f3", run_id="run-f3"
+    )
 
     valid_patch = "--- a/foo.py\n+++ b/foo.py\n@@ -1,2 +1,2 @@\n def foo():\n-    return 42\n+    return 100\n"
-    raw_response = json.dumps({
-        "kind": "CHANGES_PROPOSED",
-        "summary": "edit foo",
-        "files_changed": ["foo.py"],
-        "patch": valid_patch,
-        "confidence": 0.9,
-    })
+    raw_response = json.dumps(
+        {
+            "kind": "CHANGES_PROPOSED",
+            "summary": "edit foo",
+            "files_changed": ["foo.py"],
+            "patch": valid_patch,
+            "confidence": 0.9,
+            "escalation_required": False,
+            "escalation_reason": "",
+            "next_action": "apply",
+        }
+    )
 
     dispatch_calls = 0
 
@@ -676,7 +719,9 @@ async def test_f3_no_retry_after_filesystem_mutation(stage_c_environment):
 
     # Validator fails after patch application
     async def mock_validator(task, result, attempt):
-        return ValidationResult(verdict=LocalValidationVerdict.FAIL, reason="Test validator failed after apply")
+        return ValidationResult(
+            verdict=LocalValidationVerdict.FAIL, reason="Test validator failed after apply"
+        )
 
     harness = LocalWorkerHarness(dispatch=mock_dispatch, max_corrective_attempts=2)
     envelope = LocalTaskEnvelope(
@@ -801,7 +846,9 @@ def test_f8_containment_and_symlink_check(tmp_path):
 @pytest.mark.asyncio
 async def test_c1_direct_applier_unauthorized_patch_refused(stage_c_environment):
     uow = stage_c_environment["uow"]
-    wt_info = await create_authorized_worktree(stage_c_environment, job_id="job-c1", run_id="run-c1")
+    wt_info = await create_authorized_worktree(
+        stage_c_environment, job_id="job-c1", run_id="run-c1"
+    )
 
     original_content = (wt_info.path / "foo.py").read_text()
 
@@ -835,7 +882,9 @@ async def test_c1_direct_applier_unauthorized_patch_refused(stage_c_environment)
     assert "not in allowed_files" in res.error
 
     # Verify zero filesystem mutation
-    diff_res = subprocess.run(["git", "diff"], cwd=wt_info.path, capture_output=True, text=True, check=True)
+    diff_res = subprocess.run(
+        ["git", "diff"], cwd=wt_info.path, capture_output=True, text=True, check=True
+    )
     assert diff_res.stdout.strip() == ""
     assert (wt_info.path / "foo.py").read_text() == original_content
 
@@ -843,15 +892,11 @@ async def test_c1_direct_applier_unauthorized_patch_refused(stage_c_environment)
 @pytest.mark.asyncio
 async def test_c1_direct_applier_forbidden_surface_refused(stage_c_environment):
     uow = stage_c_environment["uow"]
-    wt_info = await create_authorized_worktree(stage_c_environment, job_id="job-c1-forb", run_id="run-c1-forb")
-
-    forbidden_patch = (
-        "--- a/alembic/env.py\n"
-        "+++ b/alembic/env.py\n"
-        "@@ -1 +1 @@\n"
-        "-old\n"
-        "+new\n"
+    wt_info = await create_authorized_worktree(
+        stage_c_environment, job_id="job-c1-forb", run_id="run-c1-forb"
     )
+
+    forbidden_patch = "--- a/alembic/env.py\n+++ b/alembic/env.py\n@@ -1 +1 @@\n-old\n+new\n"
 
     envelope = LocalTaskEnvelope(
         role="local_worker",
@@ -873,5 +918,7 @@ async def test_c1_direct_applier_forbidden_surface_refused(stage_c_environment):
     assert res.applied is False
     assert "forbidden surface" in res.error.lower() or "migration" in res.error.lower()
 
-    diff_res = subprocess.run(["git", "diff"], cwd=wt_info.path, capture_output=True, text=True, check=True)
+    diff_res = subprocess.run(
+        ["git", "diff"], cwd=wt_info.path, capture_output=True, text=True, check=True
+    )
     assert diff_res.stdout.strip() == ""
