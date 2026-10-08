@@ -1,4 +1,4 @@
-"""Unit tests for LocalWorkerContextPackager, strict budget contract, task-class scoping, and caller context precedence."""
+"""Unit tests for LocalWorkerContextPackager, strict budget contract, multi-file fallback, task-class scoping, and caller context precedence."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import pytest
 from minime.local_worker.context_packager import extract_candidate_symbols, package_task_context
 from minime.local_worker.harness import format_patch_policy_corrective_reason
 from minime.local_worker.models import (
+    DEFAULT_CONTEXT_BUDGET_CHARS,
     LocalTaskClass,
     LocalTaskEnvelope,
     LocalValidationVerdict,
@@ -68,7 +69,6 @@ def test_oversized_target_symbol_fails_closed(tmp_path):
     target_file = tmp_path / rel_path
     target_file.parent.mkdir(parents=True, exist_ok=True)
 
-    # Build a function that is 1000 characters long
     lines = ["    x = 1"] * 50
     big_fn = "def test_oversized():\n" + "\n".join(lines) + "\n    assert True\n"
     target_file.write_text(big_fn, encoding="utf-8")
@@ -85,6 +85,30 @@ def test_oversized_target_symbol_fails_closed(tmp_path):
     assert pkg_res.success is False
     assert pkg_res.context == ""
     assert pkg_res.status == "TARGET_SYMBOL_EXCEEDS_BUDGET"
+
+
+def test_multi_file_fallback_budget_accounting_exact(tmp_path):
+    """Requirement A: Multi-file fallback correctly accounts for inter-part separators and stays strictly <= max_budget_chars."""
+    file1_rel = "tests/test_a.py"
+    file2_rel = "tests/test_b.py"
+
+    (tmp_path / file1_rel).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / file1_rel).write_text("line1\nline2\nline3\n", encoding="utf-8")
+    (tmp_path / file2_rel).write_text("lineA\nlineB\nlineC\n", encoding="utf-8")
+
+    tight_budget = 45
+
+    pkg_res = package_task_context(
+        instruction="no symbol match",
+        task_class=LocalTaskClass.SMALL_CODE_FIX,
+        allowed_files=[file1_rel, file2_rel],
+        worktree_path=tmp_path,
+        max_budget_chars=tight_budget,
+    )
+
+    assert pkg_res.success is True
+    assert pkg_res.status == "FALLBACK_EXCERPT"
+    assert len(pkg_res.context) <= tight_budget
 
 
 def test_adjacent_and_header_content_trimmed_first(tmp_path):
@@ -104,7 +128,7 @@ def test_adjacent_and_header_content_trimmed_first(tmp_path):
         task_class=LocalTaskClass.TEST_AUTHORING,
         allowed_files=[rel_path],
         worktree_path=tmp_path,
-        max_budget_chars=300,  # Fits symbol + metadata, but not full header/adjacent
+        max_budget_chars=300,
     )
 
     assert pkg_res.success is True
@@ -147,8 +171,8 @@ def test_task_class_governs_symbol_packaging(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_explicit_caller_context_preserved_when_packaging_fails(tmp_path):
-    """Requirement C: Service preserves caller context if packaging fails or exceeds budget."""
+async def test_bounded_caller_context_preserved(tmp_path):
+    """Requirement B: Caller context <= DEFAULT_CONTEXT_BUDGET_CHARS is preserved when packaging fails."""
     adapter = AsyncMock()
     adapter.model = "qwen2.5-coder:7b-instruct-q4_K_M"
     adapter.provider = "ollama"
@@ -185,23 +209,76 @@ async def test_explicit_caller_context_preserved_when_packaging_fails(tmp_path):
     service = LocalWorkerService(adapter=adapter)
     service.harness.run = mock_harness_run
 
-    # Envelope with explicit caller context
     caller_ctx = "EXPLICIT_CALLER_PROVIDED_CONTEXT"
     task = LocalTaskEnvelope(
         role="LOCAL_WORKER",
         task_class=LocalTaskClass.TEST_AUTHORING,
-        allowed_files=["nonexistent_file.py"],  # Nonexistent file causes packaging to fail
+        allowed_files=["nonexistent_file.py"],  # Packaging fails
         instruction="Fix test_nonexistent",
         context=caller_ctx,
     )
 
     validator = AsyncMock(return_value=ValidationResult(verdict=LocalValidationVerdict.PASS))
-
     outcome = await service.run(task, validator=validator, worktree_path=tmp_path)
 
     assert outcome.evidence.result_class == "SUCCESS"
     assert captured_task is not None
     assert captured_task.context == caller_ctx
+
+
+@pytest.mark.asyncio
+async def test_oversized_caller_context_fails_closed(tmp_path):
+    """Requirement B: Caller context exceeding budget fails closed (context cleared, not sliced)."""
+    adapter = AsyncMock()
+    adapter.model = "qwen2.5-coder:7b-instruct-q4_K_M"
+    adapter.provider = "ollama"
+
+    from minime.local_worker.models import PreflightResult, PreflightStatus
+    adapter.preflight.return_value = PreflightResult(
+        provider="ollama",
+        model=adapter.model,
+        status=PreflightStatus.READY,
+        reachable=True,
+        model_present=True,
+    )
+
+    captured_task = None
+
+    async def mock_harness_run(task, **kwargs):
+        nonlocal captured_task
+        captured_task = task
+        from minime.local_worker.models import (
+            LocalExecutionEvidence,
+            LocalResultKind,
+            LocalValidationVerdict,
+        )
+        return LocalExecutionEvidence(
+            provider="ollama",
+            model=adapter.model,
+            task_class="TEST_AUTHORING",
+            attempt=1,
+            result=LocalResultKind.NO_CHANGE_JUSTIFIED,
+            result_class="SUCCESS",
+            validation_result=LocalValidationVerdict.PASS,
+        )
+
+    service = LocalWorkerService(adapter=adapter)
+    service.harness.run = mock_harness_run
+
+    oversized_ctx = "x" * (DEFAULT_CONTEXT_BUDGET_CHARS + 500)
+    task = LocalTaskEnvelope(
+        role="LOCAL_WORKER",
+        task_class=LocalTaskClass.TEST_AUTHORING,
+        allowed_files=["nonexistent_file.py"],
+        instruction="Fix test_nonexistent",
+        context=oversized_ctx,
+    )
+
+    validator = AsyncMock(return_value=ValidationResult(verdict=LocalValidationVerdict.PASS))
+    await service.run(task, validator=validator, worktree_path=tmp_path)
+
+    assert captured_task is not None
+    assert captured_task.context == ""  # Cleared to empty, not sliced or dispatched oversized
 
 
 def test_context_never_pulls_from_unauthorized_files(tmp_path):

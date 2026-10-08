@@ -22,6 +22,7 @@ from minime.local_worker.model_identity import (
     local_qwen_model_identity,
 )
 from minime.local_worker.models import (
+    DEFAULT_CONTEXT_BUDGET_CHARS,
     LOCAL_WORKER_RESPONSE_SCHEMA,
     EscalationDecision,
     EscalationTarget,
@@ -101,11 +102,22 @@ class LocalWorkerService:
                 task_class=task.task_class,
                 allowed_files=task.allowed_files,
                 worktree_path=worktree_path,
+                max_budget_chars=DEFAULT_CONTEXT_BUDGET_CHARS,
             )
             if pkg_res.success and pkg_res.context:
                 effective_task = task.model_copy(update={"context": pkg_res.context})
             elif task.context:
+                if len(task.context) <= DEFAULT_CONTEXT_BUDGET_CHARS:
+                    effective_task = task
+                else:
+                    # Oversized caller context fails closed (cleared to empty)
+                    effective_task = task.model_copy(update={"context": ""})
+        elif task.context:
+            if len(task.context) <= DEFAULT_CONTEXT_BUDGET_CHARS:
                 effective_task = task
+            else:
+                # Oversized caller context fails closed (cleared to empty)
+                effective_task = task.model_copy(update={"context": ""})
 
         async def bounded_dispatch(
             envelope: LocalTaskEnvelope, attempt: int, corrective_reason: str | None = None

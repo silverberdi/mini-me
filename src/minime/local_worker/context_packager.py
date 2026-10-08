@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from minime.local_worker.models import LocalTaskClass
+from minime.local_worker.models import DEFAULT_CONTEXT_BUDGET_CHARS, LocalTaskClass
 
 _TEST_SYMBOL_RE = re.compile(r"\b(test_[a-zA-Z0-9_]+)\b")
 _PY_IDENTIFIER_RE = re.compile(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\b")
@@ -32,7 +32,7 @@ class ContextPackagingResult:
 
     success: bool
     context: str = ""
-    status: str = "OK"  # "OK", "TARGET_SYMBOL_EXCEEDS_BUDGET", "NO_SYMBOL_FOUND", "FALLBACK_EXCERPT", "NO_AUTHORIZED_FILES"
+    status: str = "OK"  # "OK", "TARGET_SYMBOL_EXCEEDS_BUDGET", "NO_SYMBOL_FOUND", "FALLBACK_EXCERPT", "NO_AUTHORIZED_FILES", "FALLBACK_EXCEEDS_BUDGET"
 
 
 def extract_candidate_symbols(instruction: str) -> list[str]:
@@ -133,7 +133,7 @@ def package_task_context(
     task_class: LocalTaskClass | str,
     allowed_files: list[str] | tuple[str, ...],
     worktree_path: str | Path | None,
-    max_budget_chars: int = 12000,
+    max_budget_chars: int = DEFAULT_CONTEXT_BUDGET_CHARS,
 ) -> ContextPackagingResult:
     """Deterministically package symbol-aware context from authorized allowed_files inside worktree_path.
 
@@ -236,6 +236,13 @@ def package_task_context(
                         if len(final_package) > max_budget_chars:
                             final_package = base_context
 
+                        if len(final_package) > max_budget_chars:
+                            return ContextPackagingResult(
+                                success=False,
+                                context="",
+                                status="TARGET_SYMBOL_EXCEEDS_BUDGET",
+                            )
+
                         return ContextPackagingResult(
                             success=True,
                             context=final_package,
@@ -264,12 +271,17 @@ def package_task_context(
         lines = content.splitlines()
         excerpt_lines: list[str] = []
 
-        file_hdr = f"FILE: {rel_file}\n"
-        if current_chars + len(file_hdr) > max_budget_chars:
+        # Accurately account for inter-part separator ("\n\n") cost
+        sep_cost = 2 if fallback_parts else 0
+        if current_chars + sep_cost > max_budget_chars:
             break
 
+        file_hdr = f"FILE: {rel_file}\n"
+        if current_chars + sep_cost + len(file_hdr) > max_budget_chars:
+            break
+
+        current_chars += (sep_cost + len(file_hdr))
         excerpt_lines.append(file_hdr)
-        current_chars += len(file_hdr)
 
         for line in lines:
             line_cost = len(line) + 1
@@ -278,12 +290,24 @@ def package_task_context(
             excerpt_lines.append(line)
             current_chars += line_cost
 
-        fallback_parts.append("\n".join(excerpt_lines))
+        if len(excerpt_lines) > 1:
+            fallback_parts.append("\n".join(excerpt_lines))
+        else:
+            # Revert if no content lines could fit
+            current_chars -= (sep_cost + len(file_hdr))
 
-    if not fallback_parts or current_chars == 0:
+    if not fallback_parts:
         return ContextPackagingResult(success=False, context="", status="NO_AUTHORIZED_FILES")
 
     final_fallback = "\n\n".join(fallback_parts).strip()
+
+    if len(final_fallback) > max_budget_chars:
+        return ContextPackagingResult(
+            success=False,
+            context="",
+            status="FALLBACK_EXCEEDS_BUDGET",
+        )
+
     return ContextPackagingResult(
         success=True,
         context=final_fallback,
