@@ -419,6 +419,127 @@ def test_cancelled_saga_cannot_resume(tmp_path: Path):
     assert resumed.status == SagaStatus.CANCELLED
 
 
+def test_wrong_openspec_sync_saga_rejected(tmp_path: Path):
+    uow, repo_dir, claim, gh_fake = _setup_harness(tmp_path)
+    author_act = uow.orchestration_external_actions.get_by_action_key("openspec_author:p1:c1")
+    uow.orchestration_external_actions._store[author_act.action_id] = author_act.model_copy(update={"saga_id": "other-saga"})
+
+    discovery = FakeContextDiscoveryService(projections=[])
+    service = IntakeReconciliationService(uow, project_root=repo_dir, github_adapter=gh_fake, context_discovery_service=discovery)
+
+    with pytest.raises(ValueError, match="wrong OPENSPEC_SYNC saga"):
+        service.reconcile_abandoned_intake("p1", "key1", IntakeReconciliationDisposition.INVALID_DISCOVERY, claim)
+
+
+def test_wrong_openspec_sync_target_rejected(tmp_path: Path):
+    uow, repo_dir, claim, gh_fake = _setup_harness(tmp_path)
+    author_act = uow.orchestration_external_actions.get_by_action_key("openspec_author:p1:c1")
+    uow.orchestration_external_actions._store[author_act.action_id] = author_act.model_copy(update={"target_identity": "other-target"})
+
+    discovery = FakeContextDiscoveryService(projections=[])
+    service = IntakeReconciliationService(uow, project_root=repo_dir, github_adapter=gh_fake, context_discovery_service=discovery)
+
+    with pytest.raises(ValueError, match="wrong OPENSPEC_SYNC target"):
+        service.reconcile_abandoned_intake("p1", "key1", IntakeReconciliationDisposition.INVALID_DISCOVERY, claim)
+
+
+def test_wrong_openspec_sync_fingerprint_rejected(tmp_path: Path):
+    uow, repo_dir, claim, gh_fake = _setup_harness(tmp_path)
+    author_act = uow.orchestration_external_actions.get_by_action_key("openspec_author:p1:c1")
+    uow.orchestration_external_actions._store[author_act.action_id] = author_act.model_copy(update={"request_fingerprint": "other-fingerprint"})
+
+    discovery = FakeContextDiscoveryService(projections=[])
+    service = IntakeReconciliationService(uow, project_root=repo_dir, github_adapter=gh_fake, context_discovery_service=discovery)
+
+    with pytest.raises(ValueError, match="wrong OPENSPEC_SYNC fingerprint"):
+        service.reconcile_abandoned_intake("p1", "key1", IntakeReconciliationDisposition.INVALID_DISCOVERY, claim)
+
+
+def test_wrong_issue_create_target_rejected(tmp_path: Path):
+    uow, repo_dir, claim, gh_fake = _setup_harness(tmp_path)
+    issue_act = uow.orchestration_external_actions.get_by_action_key("issue_create:p1:c1")
+    uow.orchestration_external_actions._store[issue_act.action_id] = issue_act.model_copy(update={"target_identity": "other-target"})
+
+    discovery = FakeContextDiscoveryService(projections=[])
+    service = IntakeReconciliationService(uow, project_root=repo_dir, github_adapter=gh_fake, context_discovery_service=discovery)
+
+    with pytest.raises(ValueError, match="wrong ISSUE_CREATE target"):
+        service.reconcile_abandoned_intake("p1", "key1", IntakeReconciliationDisposition.INVALID_DISCOVERY, claim)
+
+
+def test_wrong_issue_create_fingerprint_rejected(tmp_path: Path):
+    uow, repo_dir, claim, gh_fake = _setup_harness(tmp_path)
+    issue_act = uow.orchestration_external_actions.get_by_action_key("issue_create:p1:c1")
+    uow.orchestration_external_actions._store[issue_act.action_id] = issue_act.model_copy(update={"request_fingerprint": "other-fingerprint"})
+
+    discovery = FakeContextDiscoveryService(projections=[])
+    service = IntakeReconciliationService(uow, project_root=repo_dir, github_adapter=gh_fake, context_discovery_service=discovery)
+
+    with pytest.raises(ValueError, match="wrong ISSUE_CREATE fingerprint"):
+        service.reconcile_abandoned_intake("p1", "key1", IntakeReconciliationDisposition.INVALID_DISCOVERY, claim)
+
+
+def test_terminal_state_missing_rollback_checkpoint_rejected(tmp_path: Path):
+    uow, repo_dir, claim, gh_fake = _setup_harness(tmp_path)
+    saga = uow.durable_sagas.get_by_id("saga-1")
+    saga.status = SagaStatus.CANCELLED
+    uow.durable_sagas.save(saga)
+
+    item = uow.backlog_items.get_by_project_and_key("p1", "key1")
+    item_updated = item.model_copy(update={"status": WorkItemStatus.CANCELLED})
+    uow.backlog_items._store[item.item_id] = item_updated
+
+    change = uow.changes.get_by_name("p1", "c1")
+    change_updated = change.model_copy(update={"status": ChangeStatus.CANCELLED})
+    uow.changes._store[change.change_id] = change_updated
+
+    discovery = FakeContextDiscoveryService(projections=[])
+    service = IntakeReconciliationService(uow, project_root=repo_dir, github_adapter=gh_fake, context_discovery_service=discovery)
+
+    with pytest.raises(ValueError, match="terminal state missing required reconciliation checkpoints"):
+        service.reconcile_abandoned_intake("p1", "key1", IntakeReconciliationDisposition.INVALID_DISCOVERY, claim)
+
+
+def test_ignored_file_rejects_rollback(tmp_path: Path):
+    uow, repo_dir, claim, gh_fake = _setup_harness(tmp_path)
+    target = repo_dir / "openspec" / "changes" / "c1"
+    gitignore = repo_dir / ".gitignore"
+    gitignore.write_text("*.ignored\n")
+    (target / "extra.ignored").write_text("ignored content")
+
+    discovery = FakeContextDiscoveryService(projections=[])
+    service = IntakeReconciliationService(uow, project_root=repo_dir, github_adapter=gh_fake, context_discovery_service=discovery)
+
+    with pytest.raises(ValueError, match="unexpected untracked file rejects rollback"):
+        service.reconcile_abandoned_intake("p1", "key1", IntakeReconciliationDisposition.INVALID_DISCOVERY, claim)
+
+
+def test_ready_backlog_refused_for_reconciliation(tmp_path: Path):
+    uow, repo_dir, claim, gh_fake = _setup_harness(tmp_path)
+    item = uow.backlog_items.get_by_project_and_key("p1", "key1")
+    item_updated = item.model_copy(update={"status": WorkItemStatus.READY})
+    uow.backlog_items._store[item.item_id] = item_updated
+
+    discovery = FakeContextDiscoveryService(projections=[])
+    service = IntakeReconciliationService(uow, project_root=repo_dir, github_adapter=gh_fake, context_discovery_service=discovery)
+
+    with pytest.raises(ValueError, match="invalid backlog source state for INVALID_DISCOVERY reconciliation"):
+        service.reconcile_abandoned_intake("p1", "key1", IntakeReconciliationDisposition.INVALID_DISCOVERY, claim)
+
+
+def test_ready_change_refused_for_reconciliation(tmp_path: Path):
+    uow, repo_dir, claim, gh_fake = _setup_harness(tmp_path)
+    change = uow.changes.get_by_name("p1", "c1")
+    change_updated = change.model_copy(update={"status": ChangeStatus.READY})
+    uow.changes._store[change.change_id] = change_updated
+
+    discovery = FakeContextDiscoveryService(projections=[])
+    service = IntakeReconciliationService(uow, project_root=repo_dir, github_adapter=gh_fake, context_discovery_service=discovery)
+
+    with pytest.raises(ValueError, match="invalid change source state for INVALID_DISCOVERY reconciliation"):
+        service.reconcile_abandoned_intake("p1", "key1", IntakeReconciliationDisposition.INVALID_DISCOVERY, claim)
+
+
 # ==============================================================================
 # PostgreSQL Integration Test
 # ==============================================================================

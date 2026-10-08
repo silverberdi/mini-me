@@ -103,17 +103,43 @@ class IntakeReconciliationService:
         if disposition == IntakeReconciliationDisposition.INVALID_DISCOVERY:
             if projection is not None:
                 raise ValueError("INVALID_DISCOVERY requires item absence from pure discovery")
+            if item.status not in (WorkItemStatus.PREPARING, WorkItemStatus.CANCELLED):
+                raise ValueError("invalid backlog source state for INVALID_DISCOVERY reconciliation")
+            if change.status not in (ChangeStatus.DISCOVERED, ChangeStatus.CANCELLED):
+                raise ValueError("invalid change source state for INVALID_DISCOVERY reconciliation")
             target_item, target_change, reason = WorkItemStatus.CANCELLED, ChangeStatus.CANCELLED, "INVALID_DISCOVERY"
         elif disposition == IntakeReconciliationDisposition.DEFERRED_ROADMAP:
             if item.source != WorkItemSource.ROADMAP:
                 raise ValueError("DEFERRED_ROADMAP requires a ROADMAP source item")
             if projection is None or projection.status == WorkItemStatus.READY:
                 raise ValueError("DEFERRED_ROADMAP requires a non-ready ROADMAP projection")
+            if item.status not in (WorkItemStatus.PREPARING, WorkItemStatus.BLOCKED):
+                raise ValueError("invalid backlog source state for DEFERRED_ROADMAP reconciliation")
+            if change.status not in (ChangeStatus.DISCOVERED, ChangeStatus.BLOCKED):
+                raise ValueError("invalid change source state for DEFERRED_ROADMAP reconciliation")
             target_item, target_change, reason = WorkItemStatus.BLOCKED, ChangeStatus.BLOCKED, "ROADMAP_NOT_PREPARATION_ELIGIBLE"
         else:
             raise ValueError("unsupported reconciliation disposition")
 
         if saga.status == SagaStatus.CANCELLED and item.status == target_item and change.status == target_change:
+            ic_action = self.uow.orchestration_external_actions.get_by_action_key(
+                f"intake_reconcile_issue_close:{project_id}:{change_name}"
+            )
+            rb_action = self.uow.orchestration_external_actions.get_by_action_key(
+                f"intake_openspec_rollback:{project_id}:{change_name}"
+            )
+            if (
+                not ic_action
+                or ic_action.action_type != ExternalActionType.ISSUE_CLOSE
+                or ic_action.status != ExternalActionStatus.COMPLETED
+                or ic_action.saga_id != saga.id
+                or not rb_action
+                or rb_action.action_type != ExternalActionType.OPENSPEC_ROLLBACK
+                or rb_action.status != ExternalActionStatus.COMPLETED
+                or rb_action.saga_id != saga.id
+            ):
+                raise ValueError("terminal state missing required reconciliation checkpoints")
+
             return IntakeReconciliationResult(
                 project_id=project_id,
                 item_key=item_key,
@@ -132,12 +158,32 @@ class IntakeReconciliationService:
         issue_action = self.uow.orchestration_external_actions.get_by_action_key(issue_key)
         author_action = self.uow.orchestration_external_actions.get_by_action_key(author_key)
 
-        if not issue_action or issue_action.action_type != ExternalActionType.ISSUE_CREATE or issue_action.status != ExternalActionStatus.COMPLETED or not issue_action.remote_identifier:
+        if (
+            not issue_action
+            or issue_action.action_type != ExternalActionType.ISSUE_CREATE
+            or issue_action.status != ExternalActionStatus.COMPLETED
+            or not issue_action.remote_identifier
+        ):
             raise ValueError("missing exact completed intake ISSUE_CREATE evidence")
         if issue_action.saga_id != saga.id:
             raise ValueError("wrong ISSUE_CREATE saga")
-        if not author_action or author_action.action_type != ExternalActionType.OPENSPEC_SYNC or author_action.status != ExternalActionStatus.COMPLETED:
+        if issue_action.target_identity != change_name:
+            raise ValueError("wrong ISSUE_CREATE target")
+        if issue_action.request_fingerprint != item_key:
+            raise ValueError("wrong ISSUE_CREATE fingerprint")
+
+        if (
+            not author_action
+            or author_action.action_type != ExternalActionType.OPENSPEC_SYNC
+            or author_action.status != ExternalActionStatus.COMPLETED
+        ):
             raise ValueError("missing exact completed intake OPENSPEC_SYNC evidence")
+        if author_action.saga_id != saga.id:
+            raise ValueError("wrong OPENSPEC_SYNC saga")
+        if author_action.target_identity != change_name:
+            raise ValueError("wrong OPENSPEC_SYNC target")
+        if author_action.request_fingerprint != item_key:
+            raise ValueError("wrong OPENSPEC_SYNC fingerprint")
 
         number = int(issue_action.remote_identifier)
         if item.github_issue_number and item.github_issue_number != number:
@@ -240,6 +286,11 @@ class IntakeReconciliationService:
                 except ValueError:
                     raise ValueError("symlink escape rejects rollback")
 
+            generator = OpenSpecGenerator(self.project_root, self.uow)
+            generated = generator.generate_from_backlog_item(item, project.display_name)
+            manifest = generator.build_artifact_manifest(generated)
+            allowed = set(manifest.files)
+
             tracked = subprocess.run(
                 ["git", "-C", str(binding.managed_repository_root), "ls-files", "--", str(target)],
                 capture_output=True,
@@ -249,14 +300,52 @@ class IntakeReconciliationService:
             if tracked:
                 raise ValueError("tracked file rejects rollback")
 
-            generator = OpenSpecGenerator(self.project_root, self.uow)
-            generated = generator.generate_from_backlog_item(item, project.display_name)
-            manifest = generator.build_artifact_manifest(generated)
-            allowed = set(manifest.files)
+            status_res = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(binding.managed_repository_root),
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=all",
+                    "--",
+                    str(target),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if status_res.returncode != 0:
+                raise ValueError("git status failed")
 
-            actual = {str(p.relative_to(target)) for p in target.rglob("*") if p.is_file()}
+            status_lines = [line for line in status_res.stdout.splitlines() if line.strip()]
 
-            if actual != allowed:
+            untracked_rel_files = set()
+            repo_root = Path(binding.managed_repository_root).resolve()
+            target_resolved = target.resolve()
+
+            for line in status_lines:
+                if not line.startswith("?? "):
+                    raise ValueError("non-untracked git status rejects rollback")
+                rel_repo_path = line[3:].strip()
+                if rel_repo_path.startswith('"') and rel_repo_path.endswith('"'):
+                    rel_repo_path = rel_repo_path[1:-1]
+                abs_path = (repo_root / rel_repo_path).resolve()
+                try:
+                    rel_target = abs_path.relative_to(target_resolved)
+                    untracked_rel_files.add(str(rel_target))
+                except ValueError:
+                    raise ValueError("status path outside target")
+
+            actual_files = {
+                str(p.relative_to(target_resolved))
+                for p in target_resolved.rglob("*")
+                if p.is_file() and not p.is_symlink()
+            }
+
+            if actual_files != untracked_rel_files:
+                raise ValueError("unexpected untracked file rejects rollback")
+
+            if allowed != untracked_rel_files:
                 raise ValueError("unexpected untracked file rejects rollback")
 
             for p in sorted((p for p in target.rglob("*") if p.is_file()), reverse=True):
