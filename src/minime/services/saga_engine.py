@@ -740,7 +740,7 @@ class SagaEngine:
         if not saga:
             raise ValueError(f"Saga '{saga_id}' not found.")
 
-        if saga.status in {SagaStatus.COMPLETED, SagaStatus.FAILED}:
+        if saga.status in {SagaStatus.COMPLETED, SagaStatus.FAILED, SagaStatus.CANCELLED}:
             logger.info(
                 "Saga '%s' is in terminal state '%s'; resume skipped.", saga.id, saga.status.value
             )

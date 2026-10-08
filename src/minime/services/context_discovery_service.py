@@ -176,7 +176,10 @@ class ContextDiscoveryService:
                     re.MULTILINE,
                 )
                 milestone_list_pattern = re.compile(
-                    r"^[*-]\s+(?:\[[ x]\]\s*)?(\d{3}[a-zA-Z0-9_-]*|[0-9]+[a-zA-Z0-9_-]*|[a-zA-Z0-9_-]+)\s*[:—–-]\s*(.+?)(?:\s*\((DELIVERED|CURRENT|NEXT|BLOCKED|DONE|READY|BACKLOG)\))?$",
+                    # A list item is executable only when it starts with an explicit
+                    # numeric/stage identity.  Do not interpret prose such as
+                    # "Multi-repository ..." as an item named "Multi".
+                    r"^[*-]\s+(?:\[[ x]\]\s*)?(\d[a-zA-Z0-9_.-]*)\s*[:—–-]\s*(.+?)(?:\s*\((DELIVERED|CURRENT|NEXT|BLOCKED|DONE|READY|BACKLOG)\))?$",
                     re.MULTILINE,
                 )
 

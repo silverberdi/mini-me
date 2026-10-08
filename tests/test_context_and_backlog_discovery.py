@@ -131,6 +131,27 @@ def test_duplicate_roadmap_headings_same_slug(
     assert item.status == WorkItemStatus.COMPLETED
 
 
+def test_roadmap_prose_sub_bullet_is_not_discovered_as_work_item(
+    in_memory_uow: InMemoryPersistenceUnitOfWork, tmp_path: Path
+) -> None:
+    repo_dir = tmp_path / "app-repo"
+    repo_dir.mkdir()
+    (repo_dir / "docs").mkdir()
+    (repo_dir / "docs" / "ROADMAP.md").write_text(
+        "### 022 — Operational Greenfield (`022-operational-greenfield`) — NEXT\n"
+        "- Multi-repository project binding & fleet validation.\n"
+        "- 022.1-proving: Explicit follow-up (BACKLOG)\n"
+    )
+    in_memory_uow.projects.save(
+        Project(project_id="p1", display_name="P1", repository="owner/repo", roadmap_path="docs/ROADMAP.md")
+    )
+
+    _, items = ContextDiscoveryService(in_memory_uow, project_root=repo_dir).discover_context_pure("p1")
+
+    assert "Multi" not in {item.item_key for item in items}
+    assert "022.1-proving" in {item.item_key for item in items}
+
+
 def test_status_precedence_order_independence(
     in_memory_uow: InMemoryPersistenceUnitOfWork, tmp_path: Path
 ) -> None:

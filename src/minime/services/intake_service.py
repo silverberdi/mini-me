@@ -1120,6 +1120,31 @@ class IntakeService:
             if not getattr(project, "auto_prepare", True):
                 continue
 
+            # ROADMAP state is a pure projection.  Preserve the persisted lifecycle
+            # record, but use current source evidence to decide whether autonomous
+            # preparation is authorized.
+            roadmap_ready_keys: set[str] = set()
+            try:
+                from minime.services.context_discovery_service import ContextDiscoveryService
+
+                _, projections = ContextDiscoveryService(
+                    self.uow, project_root=self.project_root
+                ).discover_context_pure(project.project_id)
+                roadmap_ready_keys = {
+                    projection.item_key
+                    for projection in projections
+                    if projection.source.value == "ROADMAP"
+                    and projection.status == WorkItemStatus.READY
+                }
+            except Exception as exc:
+                # Fail closed for ROADMAP-derived work if present evidence cannot be
+                # observed. Local/manual backlog behavior remains unaffected.
+                logger.warning(
+                    "Unable to observe roadmap eligibility for project '%s': %s",
+                    project.project_id,
+                    exc,
+                )
+
             items = self.uow.backlog_items.list_by_project(project.project_id)
             unprepared = [
                 it
@@ -1138,6 +1163,10 @@ class IntakeService:
                     WorkItemStatus.COMPLETED,
                     WorkItemStatus.RUNNING,
                     WorkItemStatus.ADMITTED,
+                )
+                and (
+                    it.source.value != "ROADMAP"
+                    or it.item_key in roadmap_ready_keys
                 )
             ]
 
