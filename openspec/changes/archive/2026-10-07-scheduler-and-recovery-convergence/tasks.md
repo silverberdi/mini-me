@@ -99,7 +99,7 @@
 - [x] 11.1 openspec validate scheduler-and-recovery-convergence.
 - [ ] 11.2 Independent contract review before implementation.
 - [ ] 11.3 Independent final implementation review against frozen candidate.
-- [ ] 11.4 Human PR merge only.
-- [ ] 11.5 Post-merge sync/archive Stage G.
-- [ ] 11.6 Archive/resolve stale active scheduler-capacity-policy-convergence contract without changing delivered behavior.
+- [x] 11.4 Human PR merge only.
+- [x] 11.5 Post-merge sync/archive Stage G.
+- [x] 11.6 Archive/resolve stale active scheduler-capacity-policy-convergence contract without changing delivered behavior.
 - [ ] 11.7 Keep minime-scheduler.service disabled; no deployment in Stage G.
