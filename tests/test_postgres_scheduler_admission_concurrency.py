@@ -651,3 +651,52 @@ def test_f20_drain_retry_boundary_isolation(pg_session_factory: sessionmaker[Ses
 
         assert adm_attempts == 1, "Admission retry wrapper must NOT catch or replay exceptions from downstream coordinator/resume"
 
+
+def test_postgres_context_discovery_deduplication_and_idempotency(
+    pg_engine: Engine, pg_session_factory: sessionmaker, tmp_path: Path
+) -> None:
+    """Prove real PostgreSQL unique constraint uq_backlog_items_project_key is not violated by duplicate ROADMAP headings."""
+    from minime.services.context_discovery_service import ContextDiscoveryService
+
+    repo_dir = tmp_path / "pg-app-repo"
+    repo_dir.mkdir()
+    (repo_dir / "docs").mkdir()
+    (repo_dir / "docs" / "ROADMAP.md").write_text(
+        "# Roadmap\n\n"
+        "### 019 — Server Runtime & Production Deployment (`019-server-runtime-deployment`)\n\n"
+        "### 019 — Server Runtime & Production Deployment (`019-server-runtime-deployment`) — DELIVERED\n"
+    )
+
+    session = pg_session_factory()
+    try:
+        uow = PostgresPersistenceUnitOfWork(session)
+
+        project = Project(
+            project_id="pg-project",
+            display_name="PG Project",
+            repository="owner/pg-app-repo",
+            roadmap_path="docs/ROADMAP.md",
+        )
+        uow.projects.save(project)
+        uow.commit()
+
+        service = ContextDiscoveryService(uow, project_root=repo_dir)
+
+        # First discovery against real Postgres DB
+        report1 = service.discover_context("pg-project")
+        assert report1.discovered_items_count == 1
+
+        items1 = uow.backlog_items.list_by_project("pg-project")
+        assert len(items1) == 1
+        assert items1[0].item_key == "019-server-runtime-deployment"
+        assert items1[0].status == WorkItemStatus.COMPLETED
+
+        # Second discovery (idempotency check) against real Postgres DB
+        report2 = service.discover_context("pg-project")
+        assert report2.discovered_items_count == 1
+
+        items2 = uow.backlog_items.list_by_project("pg-project")
+        assert len(items2) == 1
+        assert items2[0].status == WorkItemStatus.COMPLETED
+    finally:
+        session.close()
