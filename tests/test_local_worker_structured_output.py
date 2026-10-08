@@ -197,6 +197,75 @@ def test_strict_parser_rejects_invalid_field_types():
         parse_structured_result(raw3)
 
 
+# Strict Envelope Rejection Tests (Cases A-D)
+def test_strict_envelope_rejects_markdown_fences():
+    """Case A: Markdown fenced JSON response fails parsing."""
+    valid_obj = {
+        "kind": "NO_CHANGE_JUSTIFIED",
+        "summary": "s",
+        "files_changed": [],
+        "patch": None,
+        "confidence": 1.0,
+        "escalation_required": False,
+        "escalation_reason": "",
+        "next_action": "none",
+    }
+    raw = f"```json\n{json.dumps(valid_obj)}\n```"
+    with pytest.raises(ValueError, match="Model output is not valid JSON"):
+        parse_structured_result(raw)
+
+
+def test_strict_envelope_rejects_prose_prefix():
+    """Case B: Prose prefix followed by valid JSON fails parsing."""
+    valid_obj = {
+        "kind": "NO_CHANGE_JUSTIFIED",
+        "summary": "s",
+        "files_changed": [],
+        "patch": None,
+        "confidence": 1.0,
+        "escalation_required": False,
+        "escalation_reason": "",
+        "next_action": "none",
+    }
+    raw = f"Here is the response:\n{json.dumps(valid_obj)}"
+    with pytest.raises(ValueError, match="Model output is not valid JSON"):
+        parse_structured_result(raw)
+
+
+def test_strict_envelope_rejects_prose_suffix():
+    """Case C: Valid JSON followed by prose suffix fails parsing."""
+    valid_obj = {
+        "kind": "NO_CHANGE_JUSTIFIED",
+        "summary": "s",
+        "files_changed": [],
+        "patch": None,
+        "confidence": 1.0,
+        "escalation_required": False,
+        "escalation_reason": "",
+        "next_action": "none",
+    }
+    raw = f"{json.dumps(valid_obj)}\nHope this helps!"
+    with pytest.raises(ValueError, match="Model output is not valid JSON"):
+        parse_structured_result(raw)
+
+
+def test_strict_envelope_rejects_extra_wrapper_text_or_braces():
+    """Case D: Extra wrapper text or braces around otherwise valid JSON fails parsing."""
+    valid_obj = {
+        "kind": "NO_CHANGE_JUSTIFIED",
+        "summary": "s",
+        "files_changed": [],
+        "patch": None,
+        "confidence": 1.0,
+        "escalation_required": False,
+        "escalation_reason": "",
+        "next_action": "none",
+    }
+    raw = f"{{ wrapper: {json.dumps(valid_obj)} }}"
+    with pytest.raises(ValueError, match="Model output is not valid JSON"):
+        parse_structured_result(raw)
+
+
 # R3 Redaction Tests
 def test_diagnostic_excerpt_secret_redaction():
     secret_text = '{"kind": "MALFORMED", "secret": "api_key=sk-1234567890abcdef"}'

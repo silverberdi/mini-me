@@ -187,9 +187,9 @@ async def _always_fail(_task, _result, _attempt) -> ValidationResult:
 
 async def test_parse_accepts_no_change_justified_as_valid():
     result = parse_structured_result(
-        '{```json\n{"kind":"NO_CHANGE_JUSTIFIED","summary":"no change needed",'
+        '{"kind":"NO_CHANGE_JUSTIFIED","summary":"no change needed",'
         '"files_changed":[],"patch":null,"confidence":0.9,"escalation_required":false,'
-        '"escalation_reason":"","next_action":"none"}\n```}'
+        '"escalation_reason":"","next_action":"none"}'
     )
     assert result.kind is LocalResultKind.NO_CHANGE_JUSTIFIED
     assert result.is_no_change_justified

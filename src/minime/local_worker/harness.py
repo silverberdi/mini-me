@@ -10,7 +10,6 @@ import asyncio
 import inspect
 import json
 import logging
-import re
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -34,8 +33,6 @@ from minime.logging import redact_secrets
 
 logger = logging.getLogger(__name__)
 
-_FENCE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
-
 REQUIRED_MODEL_FIELDS = {
     "kind",
     "summary",
@@ -54,27 +51,10 @@ Validator = Callable[[LocalTaskEnvelope, LocalWorkerResult, int], Awaitable[Vali
 Cleanup = Callable[[int], Awaitable[None] | None]
 
 
-def _first_json(text: str) -> str:
-    text = (_FENCE.search(text) or [None, text])[1]
-    start = text.find("{")
-    if start < 0:
-        return text
-    depth = 0
-    for i in range(start, len(text)):
-        if text[i] == "{":
-            depth += 1
-        elif text[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start : i + 1]
-    return text
-
-
 def parse_structured_result(raw: str) -> LocalWorkerResult:
     """Strictly parse constrained bounded JSON into a structured result."""
-    payload_raw = _first_json(raw)
     try:
-        payload = json.loads(payload_raw)
+        payload = json.loads(raw)
     except ValueError as exc:
         raise ValueError(f"Model output is not valid JSON: {exc}") from exc
 
