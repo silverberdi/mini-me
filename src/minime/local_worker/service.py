@@ -106,18 +106,22 @@ class LocalWorkerService:
             )
             if pkg_res.success and pkg_res.context:
                 effective_task = task.model_copy(update={"context": pkg_res.context})
-            elif task.context:
-                if len(task.context) <= DEFAULT_CONTEXT_BUDGET_CHARS:
-                    effective_task = task
-                else:
-                    # Oversized caller context fails closed (cleared to empty)
-                    effective_task = task.model_copy(update={"context": ""})
-        elif task.context:
-            if len(task.context) <= DEFAULT_CONTEXT_BUDGET_CHARS:
+            elif task.context and len(task.context) <= DEFAULT_CONTEXT_BUDGET_CHARS:
                 effective_task = task
             else:
-                # Oversized caller context fails closed (cleared to empty)
-                effective_task = task.model_copy(update={"context": ""})
+                # FAIL CLOSED: Do NOT call adapter.generate(); escalate with CONTEXT_NOT_READY evidence
+                return ServiceOutcome(
+                    eligibility,
+                    preflight,
+                    _context_not_ready_evidence(task, pkg_res.status, self.model),
+                )
+        elif task.context and len(task.context) > DEFAULT_CONTEXT_BUDGET_CHARS:
+            # FAIL CLOSED: Oversized caller context exceeds canonical hard budget
+            return ServiceOutcome(
+                eligibility,
+                preflight,
+                _context_not_ready_evidence(task, "CALLER_CONTEXT_EXCEEDS_BUDGET", self.model),
+            )
 
         async def bounded_dispatch(
             envelope: LocalTaskEnvelope, attempt: int, corrective_reason: str | None = None
@@ -235,4 +239,24 @@ def _unexpected_failure_evidence(task_class: str) -> LocalExecutionEvidence:
         result_class="UNEXPECTED_FAILURE",
         validation_result=LocalValidationVerdict.FAIL,
         escalation=_escalate("Unexpected local worker failure; escalate"),
+    )
+
+
+def _context_not_ready_evidence(
+    task: LocalTaskEnvelope,
+    status: str,
+    model: str,
+) -> LocalExecutionEvidence:
+    task_cls_str = task.task_class.value if hasattr(task.task_class, "value") else str(task.task_class)
+    return LocalExecutionEvidence(
+        provider=OLLAMA_PROVIDER,
+        model=model,
+        task_class=task_cls_str,
+        attempt=0,
+        result=LocalResultKind.UNCERTAIN,
+        result_class="CONTEXT_NOT_READY",
+        validation_result=LocalValidationVerdict.NOT_APPLICABLE,
+        escalation=_escalate(f"Context packaging for local worker failed: {status}"),
+        summary=f"Context packaging failed: {status}",
+        model_output_failure_reason=f"Context packaging status: {status}",
     )

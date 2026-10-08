@@ -1,4 +1,4 @@
-"""Unit tests for LocalWorkerContextPackager, strict budget contract, multi-file fallback, task-class scoping, and caller context precedence."""
+"""Unit tests for LocalWorkerContextPackager, strict budget contract, multi-file fallback, task-class scoping, and fail-closed CONTEXT_NOT_READY execution semantics."""
 
 from __future__ import annotations
 
@@ -171,101 +171,123 @@ def test_task_class_governs_symbol_packaging(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_bounded_caller_context_preserved(tmp_path):
-    """Requirement B: Caller context <= DEFAULT_CONTEXT_BUDGET_CHARS is preserved when packaging fails."""
+async def test_successful_packaged_context_dispatches_inference(tmp_path):
+    """Requirement C1: Successful packaged context proceeds to inference."""
+    rel_path = "tests/test_ok.py"
+    (tmp_path / rel_path).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / rel_path).write_text("def test_ok_symbol(): pass\n", encoding="utf-8")
+
     adapter = AsyncMock()
     adapter.model = "qwen2.5-coder:7b-instruct-q4_K_M"
     adapter.provider = "ollama"
 
+    from minime.domain.enums import ProviderResultClass
     from minime.local_worker.models import PreflightResult, PreflightStatus
+    from minime.local_worker.ollama_adapter import OllamaGenerateResponse
+
     adapter.preflight.return_value = PreflightResult(
-        provider="ollama",
-        model=adapter.model,
-        status=PreflightStatus.READY,
-        reachable=True,
-        model_present=True,
+        provider="ollama", model=adapter.model, status=PreflightStatus.READY, reachable=True, model_present=True
+    )
+    adapter.generate.return_value = OllamaGenerateResponse(
+        result_class=ProviderResultClass.SUCCESS,
+        text='{"kind":"NO_CHANGE_JUSTIFIED","summary":"ok","files_changed":[],"patch":null,"confidence":1.0,"escalation_required":false,"escalation_reason":"","next_action":"none"}',
     )
 
-    captured_task = None
+    service = LocalWorkerService(adapter=adapter)
+    task = LocalTaskEnvelope(
+        role="LOCAL_WORKER",
+        task_class=LocalTaskClass.TEST_AUTHORING,
+        allowed_files=[rel_path],
+        instruction="Fix test_ok_symbol",
+    )
+    validator = AsyncMock(return_value=ValidationResult(verdict=LocalValidationVerdict.PASS))
 
-    async def mock_harness_run(task, **kwargs):
-        nonlocal captured_task
-        captured_task = task
-        from minime.local_worker.models import (
-            LocalExecutionEvidence,
-            LocalResultKind,
-            LocalValidationVerdict,
-        )
-        return LocalExecutionEvidence(
-            provider="ollama",
-            model=adapter.model,
-            task_class="TEST_AUTHORING",
-            attempt=1,
-            result=LocalResultKind.NO_CHANGE_JUSTIFIED,
-            result_class="SUCCESS",
-            validation_result=LocalValidationVerdict.PASS,
-        )
+    outcome = await service.run(task, validator=validator, worktree_path=tmp_path)
+
+    assert outcome.evidence.result_class == "SUCCESS"
+    assert adapter.generate.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_packaging_failure_with_bounded_caller_context_dispatches(tmp_path):
+    """Requirement C2: Packaging failure + valid bounded caller context proceeds to inference."""
+    adapter = AsyncMock()
+    adapter.model = "qwen2.5-coder:7b-instruct-q4_K_M"
+    adapter.provider = "ollama"
+
+    from minime.domain.enums import ProviderResultClass
+    from minime.local_worker.models import PreflightResult, PreflightStatus
+    from minime.local_worker.ollama_adapter import OllamaGenerateResponse
+
+    adapter.preflight.return_value = PreflightResult(
+        provider="ollama", model=adapter.model, status=PreflightStatus.READY, reachable=True, model_present=True
+    )
+    adapter.generate.return_value = OllamaGenerateResponse(
+        result_class=ProviderResultClass.SUCCESS,
+        text='{"kind":"NO_CHANGE_JUSTIFIED","summary":"ok","files_changed":[],"patch":null,"confidence":1.0,"escalation_required":false,"escalation_reason":"","next_action":"none"}',
+    )
 
     service = LocalWorkerService(adapter=adapter)
-    service.harness.run = mock_harness_run
-
-    caller_ctx = "EXPLICIT_CALLER_PROVIDED_CONTEXT"
     task = LocalTaskEnvelope(
         role="LOCAL_WORKER",
         task_class=LocalTaskClass.TEST_AUTHORING,
         allowed_files=["nonexistent_file.py"],  # Packaging fails
         instruction="Fix test_nonexistent",
-        context=caller_ctx,
+        context="BOUNDED_CALLER_CONTEXT",
     )
-
     validator = AsyncMock(return_value=ValidationResult(verdict=LocalValidationVerdict.PASS))
+
     outcome = await service.run(task, validator=validator, worktree_path=tmp_path)
 
     assert outcome.evidence.result_class == "SUCCESS"
-    assert captured_task is not None
-    assert captured_task.context == caller_ctx
+    assert adapter.generate.call_count == 1
 
 
 @pytest.mark.asyncio
-async def test_oversized_caller_context_fails_closed(tmp_path):
-    """Requirement B: Caller context exceeding budget fails closed (context cleared, not sliced)."""
+async def test_packaging_failure_no_caller_context_fails_closed_zero_inference(tmp_path):
+    """Requirement C3: Packaging failure + no caller context -> ZERO adapter.generate calls, CONTEXT_NOT_READY evidence."""
     adapter = AsyncMock()
     adapter.model = "qwen2.5-coder:7b-instruct-q4_K_M"
     adapter.provider = "ollama"
 
     from minime.local_worker.models import PreflightResult, PreflightStatus
     adapter.preflight.return_value = PreflightResult(
-        provider="ollama",
-        model=adapter.model,
-        status=PreflightStatus.READY,
-        reachable=True,
-        model_present=True,
+        provider="ollama", model=adapter.model, status=PreflightStatus.READY, reachable=True, model_present=True
     )
 
-    captured_task = None
+    service = LocalWorkerService(adapter=adapter)
+    task = LocalTaskEnvelope(
+        role="LOCAL_WORKER",
+        task_class=LocalTaskClass.TEST_AUTHORING,
+        allowed_files=["nonexistent_file.py"],  # Packaging fails
+        instruction="Fix test_nonexistent",
+        context="",  # No caller context
+    )
+    validator = AsyncMock(return_value=ValidationResult(verdict=LocalValidationVerdict.PASS))
 
-    async def mock_harness_run(task, **kwargs):
-        nonlocal captured_task
-        captured_task = task
-        from minime.local_worker.models import (
-            LocalExecutionEvidence,
-            LocalResultKind,
-            LocalValidationVerdict,
-        )
-        return LocalExecutionEvidence(
-            provider="ollama",
-            model=adapter.model,
-            task_class="TEST_AUTHORING",
-            attempt=1,
-            result=LocalResultKind.NO_CHANGE_JUSTIFIED,
-            result_class="SUCCESS",
-            validation_result=LocalValidationVerdict.PASS,
-        )
+    outcome = await service.run(task, validator=validator, worktree_path=tmp_path)
+
+    assert outcome.evidence.result_class == "CONTEXT_NOT_READY"
+    assert outcome.evidence.escalation.required is True
+    assert outcome.evidence.corrections_used == 0
+    assert outcome.evidence.attempt == 0
+    assert adapter.generate.call_count == 0  # ZERO LLM calls!
+
+
+@pytest.mark.asyncio
+async def test_packaging_failure_oversized_caller_context_fails_closed_zero_inference(tmp_path):
+    """Requirement C4: Packaging failure + oversized caller context -> ZERO adapter.generate calls."""
+    adapter = AsyncMock()
+    adapter.model = "qwen2.5-coder:7b-instruct-q4_K_M"
+    adapter.provider = "ollama"
+
+    from minime.local_worker.models import PreflightResult, PreflightStatus
+    adapter.preflight.return_value = PreflightResult(
+        provider="ollama", model=adapter.model, status=PreflightStatus.READY, reachable=True, model_present=True
+    )
 
     service = LocalWorkerService(adapter=adapter)
-    service.harness.run = mock_harness_run
-
-    oversized_ctx = "x" * (DEFAULT_CONTEXT_BUDGET_CHARS + 500)
+    oversized_ctx = "x" * (DEFAULT_CONTEXT_BUDGET_CHARS + 100)
     task = LocalTaskEnvelope(
         role="LOCAL_WORKER",
         task_class=LocalTaskClass.TEST_AUTHORING,
@@ -273,12 +295,50 @@ async def test_oversized_caller_context_fails_closed(tmp_path):
         instruction="Fix test_nonexistent",
         context=oversized_ctx,
     )
-
     validator = AsyncMock(return_value=ValidationResult(verdict=LocalValidationVerdict.PASS))
-    await service.run(task, validator=validator, worktree_path=tmp_path)
 
-    assert captured_task is not None
-    assert captured_task.context == ""  # Cleared to empty, not sliced or dispatched oversized
+    outcome = await service.run(task, validator=validator, worktree_path=tmp_path)
+
+    assert outcome.evidence.result_class == "CONTEXT_NOT_READY"
+    assert outcome.evidence.escalation.required is True
+    assert adapter.generate.call_count == 0  # ZERO LLM calls!
+
+
+@pytest.mark.asyncio
+async def test_target_symbol_exceeds_budget_fails_closed_zero_inference(tmp_path):
+    """Requirement C5: TARGET_SYMBOL_EXCEEDS_BUDGET -> ZERO inference calls when no valid fallback context exists."""
+    rel_path = "tests/test_oversized.py"
+    (tmp_path / rel_path).parent.mkdir(parents=True, exist_ok=True)
+    big_fn = "def test_oversized_symbol():\n" + "\n".join(["    x = 1"] * 2000) + "\n"
+    (tmp_path / rel_path).write_text(big_fn, encoding="utf-8")
+
+    adapter = AsyncMock()
+    adapter.model = "qwen2.5-coder:7b-instruct-q4_K_M"
+    adapter.provider = "ollama"
+
+    from minime.local_worker.models import PreflightResult, PreflightStatus
+    adapter.preflight.return_value = PreflightResult(
+        provider="ollama", model=adapter.model, status=PreflightStatus.READY, reachable=True, model_present=True
+    )
+
+    service = LocalWorkerService(adapter=adapter)
+    task = LocalTaskEnvelope(
+        role="LOCAL_WORKER",
+        task_class=LocalTaskClass.TEST_AUTHORING,
+        allowed_files=[rel_path],
+        instruction="Fix test_oversized_symbol",
+        context="",
+    )
+    validator = AsyncMock(return_value=ValidationResult(verdict=LocalValidationVerdict.PASS))
+
+    outcome = await service.run(task, validator=validator, worktree_path=tmp_path)
+
+    assert outcome.evidence.result_class == "CONTEXT_NOT_READY"
+    assert "TARGET_SYMBOL_EXCEEDS_BUDGET" in outcome.evidence.summary
+    assert outcome.evidence.escalation.required is True
+    assert outcome.evidence.corrections_used == 0
+    assert outcome.evidence.attempt == 0
+    assert adapter.generate.call_count == 0  # ZERO LLM calls!
 
 
 def test_context_never_pulls_from_unauthorized_files(tmp_path):
