@@ -233,7 +233,7 @@ async def test_harness_allows_exactly_one_corrective_then_escalates():
 
     async def dispatch(_t, _n):
         dispatch_calls.append(_n)
-        return '{"kind":"CHANGES_PROPOSED","summary":"fix"}'
+        return '{"kind":"NO_CHANGE_JUSTIFIED","summary":"fix"}'
 
     async def validator(_t, _result, _attempt):
         if not fail_then_pass["already_used"]:
@@ -258,7 +258,7 @@ async def test_harness_stops_with_escalation_when_corrective_still_fails():
 
     async def dispatch(_t, _n):
         dispatch_calls.append(_n)
-        return '{"kind":"CHANGES_PROPOSED","summary":"still bad"}'
+        return '{"kind":"NO_CHANGE_JUSTIFIED","summary":"still bad"}'
 
     harness = LocalWorkerHarness(dispatch=dispatch, max_corrective_attempts=1)
     envelope = _envelope(LocalTaskClass.SMALL_REFACTOR, "rename a local var")
@@ -312,12 +312,13 @@ async def test_service_success_run_yields_minimal_structured_evidence():
     async def fake_generate(*, system_prompt=None, prompt=None, client=None):
         return OllamaGenerateResponse(
             result_class=ProviderResultClass.SUCCESS,
-            text='{"kind":"CHANGES_PROPOSED","summary":"bumped the index check"}',
+            text='{"kind":"NO_CHANGE_JUSTIFIED","summary":"no change needed","patch":null}',
         )
 
     service = LocalWorkerService()
     service.adapter.generate = fake_generate  # type: ignore[method-assign]
     envelope = _envelope(LocalTaskClass.SMALL_CODE_FIX, "fix off-by-one in helper")
+    envelope.allowed_files = ["foo.py"]
     envelope.timeout_seconds = 10.0
     outcome = await service.run(envelope, validator=lambda *a: _always_pass(*a), preflight=ready)
     assert isinstance(outcome.evidence, LocalExecutionEvidence)
@@ -329,4 +330,4 @@ async def test_service_success_run_yields_minimal_structured_evidence():
     assert evidence.result_class == "SUCCESS"
     assert evidence.validation_result is LocalValidationVerdict.PASS
     assert evidence.escalation.required is False
-    assert evidence.result is LocalResultKind.CHANGES_PROPOSED
+    assert evidence.result is LocalResultKind.NO_CHANGE_JUSTIFIED

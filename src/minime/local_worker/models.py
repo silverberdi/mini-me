@@ -90,6 +90,7 @@ class LocalWorkerResult(BaseModel):
     kind: LocalResultKind = LocalResultKind.CHANGES_PROPOSED
     summary: str = ""
     files_changed: list[str] = Field(default_factory=list)
+    patch: str | None = None
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     escalation_required: bool = False
     escalation_reason: str = Field(default="", description="Required when escalation_required.")
@@ -156,6 +157,10 @@ class LocalExecutionEvidence(BaseModel):
     escalation: EscalationDecision = Field(default_factory=EscalationDecision)
     summary: str = ""
     corrections_used: int = 0
+    patch_proposed: bool = False
+    patch_applied: bool = False
+    authoritative_changed_files: list[str] = Field(default_factory=list)
+    worktree_path: str | None = None
 
     @property
     def fully_validated(self) -> bool:
