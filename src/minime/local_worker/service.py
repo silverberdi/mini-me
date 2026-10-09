@@ -13,7 +13,10 @@ from typing import Any
 import httpx
 
 from minime.domain.enums import ProviderResultClass
+from minime.domain.models import TaskClassificationSnapshot
+from minime.local_worker.capability_router import LocalWorkerCapabilityRouter
 from minime.local_worker.context_packager import package_task_context
+from minime.local_worker.evidence_authority import LocalRoutingEvidenceAuthority
 from minime.local_worker.harness import LocalWorkerHarness
 from minime.local_worker.model_identity import (
     LOCAL_WORKER_ROLE,
@@ -24,10 +27,14 @@ from minime.local_worker.model_identity import (
 from minime.local_worker.models import (
     DEFAULT_CONTEXT_BUDGET_CHARS,
     LOCAL_WORKER_RESPONSE_SCHEMA,
+    EligibilityDecision,
+    EligibilityVerdict,
     EscalationDecision,
     EscalationTarget,
     LocalExecutionEvidence,
     LocalResultKind,
+    LocalRoutingDecision,
+    LocalRoutingVerdict,
     LocalTaskEnvelope,
     LocalValidationVerdict,
     LocalWorkerResult,
@@ -61,6 +68,7 @@ class LocalWorkerService:
         model: str | None = None,
         adapter: LocalOllamaAdapter | None = None,
         max_corrective_attempts: int = 1,
+        capability_router: LocalWorkerCapabilityRouter | None = None,
     ) -> None:
         self.model = model or local_qwen_model_identity()
         assert_local_qwen_model(self.model)
@@ -68,6 +76,7 @@ class LocalWorkerService:
         self.harness = LocalWorkerHarness(
             model=self.model, max_corrective_attempts=max_corrective_attempts
         )
+        self.capability_router = capability_router or LocalWorkerCapabilityRouter()
 
     async def run(
         self,
@@ -80,7 +89,66 @@ class LocalWorkerService:
         uow: Any | None = None,
         project_id: str = "mini-me",
         job_id: str | None = None,
+        routing_source: Any | None = None,
+        classification_snapshot: TaskClassificationSnapshot | None = None,
     ):
+        """Source-backed evidence authority -> capability routing gate -> preflight -> bounded dispatch -> validation -> evidence."""
+        auth_res = LocalRoutingEvidenceAuthority.construct_evidence(routing_source)
+        if not auth_res.success:
+            task_cls_str = (
+                task.task_class.value
+                if hasattr(task.task_class, "value")
+                else str(task.task_class)
+            )
+            refusal_decision = LocalRoutingDecision(
+                verdict=LocalRoutingVerdict.ESCALATE_PROVIDER_POLICY,
+                reason_code=auth_res.reason_code,
+                reason_summary=auth_res.reason,
+                classification_snapshot_id=classification_snapshot.id
+                if classification_snapshot
+                else None,
+                task_class=task_cls_str,
+                complexity=str(
+                    classification_snapshot.complexity.value
+                    if classification_snapshot and hasattr(classification_snapshot.complexity, "value")
+                    else (classification_snapshot.complexity if classification_snapshot else "UNKNOWN")
+                ),
+                classification_stage=str(
+                    classification_snapshot.stage.value
+                    if classification_snapshot and hasattr(classification_snapshot.stage, "value")
+                    else (classification_snapshot.stage if classification_snapshot else "UNKNOWN")
+                ),
+                classification_completeness=str(
+                    classification_snapshot.classification_completeness.value
+                    if classification_snapshot
+                    and hasattr(classification_snapshot.classification_completeness, "value")
+                    else (
+                        classification_snapshot.classification_completeness
+                        if classification_snapshot
+                        else "UNKNOWN"
+                    )
+                ),
+                surface_kind=str(
+                    classification_snapshot.surface_kind.value
+                    if classification_snapshot and hasattr(classification_snapshot.surface_kind, "value")
+                    else (classification_snapshot.surface_kind if classification_snapshot else "UNKNOWN")
+                ),
+                allowed_files_evidence=list(task.allowed_files or []),
+                routing_evidence=None,
+                selected_local_model=None,
+                escalation_target=EscalationTarget.EXISTING_PROVIDER_POLICY,
+                policy_version="1.0.0",
+            )
+            return _routing_refusal(refusal_decision, self.model)
+
+        routing_decision = self.capability_router.evaluate_capability_routing(
+            task=task,
+            snapshot=classification_snapshot,
+            evidence=auth_res.evidence,
+            worktree_path=worktree_path,
+        )
+        if routing_decision.verdict is not LocalRoutingVerdict.LOCAL_ELIGIBLE:
+            return _routing_refusal(routing_decision, self.model)
         """Eligibility gate -> preflight -> bounded dispatch -> validation -> evidence."""
         eligibility = evaluate_eligibility(
             task_class=task.task_class.value,
@@ -187,6 +255,37 @@ def _escalate(reason: str) -> EscalationDecision:
     return EscalationDecision(
         required=True, target=EscalationTarget.EXISTING_PROVIDER_POLICY, reason=reason
     )
+
+
+def _routing_refusal(decision: LocalRoutingDecision, model: str) -> ServiceOutcome:
+    """Deterministic refusal outcome produced when capability routing or authority verification fails."""
+    eligibility = EligibilityDecision(
+        verdict=EligibilityVerdict.REFUSE,
+        task_class=decision.task_class,
+        model=model,
+        reason=decision.reason_summary,
+        escalation_target=decision.escalation_target,
+    )
+    preflight = PreflightResult(
+        provider=OLLAMA_PROVIDER,
+        model=model,
+        status=PreflightStatus.NOT_QUALIFIED,
+        reason=decision.reason_summary,
+        reachable=False,
+        model_present=False,
+    )
+    evidence = LocalExecutionEvidence(
+        provider=OLLAMA_PROVIDER,
+        model=model,
+        task_class=decision.task_class,
+        attempt=0,
+        result=LocalResultKind.UNCERTAIN,
+        result_class="REFUSED",
+        validation_result=LocalValidationVerdict.NOT_APPLICABLE,
+        escalation=_escalate(decision.reason_summary),
+        summary=decision.reason_summary,
+    )
+    return ServiceOutcome(eligibility, preflight, evidence)
 
 
 def _refusal(eligibility) -> ServiceOutcome:

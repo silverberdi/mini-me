@@ -332,12 +332,59 @@ async def test_service_success_run_yields_minimal_structured_evidence():
             ),
         )
 
+    from minime.domain.enums import (
+        ClassificationCompleteness,
+        ClassificationStage,
+        TaskComplexity,
+        TaskSurfaceKind,
+    )
+    from minime.domain.models import TaskClassificationSnapshot, TaskRiskProfile
+    from minime.local_worker.models import (
+        LocalMechanicalOperation,
+        LocalMutationMode,
+        OperatorMechanicalCommand,
+    )
+
+    cmd = OperatorMechanicalCommand(
+        operation_type=LocalMechanicalOperation.TEXT_REPLACEMENT,
+        mutation_mode=LocalMutationMode.MUTATING,
+        target_file="foo.py",
+        authoritative_change={"replacement": "..."},
+        deterministic_acceptance={"test_target": "tests/test_foo.py"},
+    )
+    snapshot = TaskClassificationSnapshot(
+        id="snap-test-bootstrap",
+        stage=ClassificationStage.PRE_EXECUTION,
+        classifier_version="1.0.0",
+        evidence_source="test_fixture",
+        classification_completeness=ClassificationCompleteness.PARTIAL,
+        missing_signals=[],
+        complexity=TaskComplexity.LOW,
+        surface_kind=TaskSurfaceKind.BACKEND_SERVICE,
+        risk_profile=TaskRiskProfile(
+            architectural_impact="NONE",
+            persistence_impact="NONE",
+            security_auth_impact="NONE",
+            production_runtime="NONE",
+            provider_orchestration="NONE",
+            destructive_operations="NONE",
+            deployment_config="NONE",
+            code_change_breadth="LOW",
+        ),
+    )
+
     service = LocalWorkerService()
     service.adapter.generate = fake_generate  # type: ignore[method-assign]
     envelope = _envelope(LocalTaskClass.SMALL_CODE_FIX, "fix off-by-one in helper")
     envelope.allowed_files = ["foo.py"]
     envelope.timeout_seconds = 10.0
-    outcome = await service.run(envelope, validator=lambda *a: _always_pass(*a), preflight=ready)
+    outcome = await service.run(
+        envelope,
+        validator=lambda *a: _always_pass(*a),
+        preflight=ready,
+        routing_source=cmd,
+        classification_snapshot=snapshot,
+    )
     assert isinstance(outcome.evidence, LocalExecutionEvidence)
     evidence = outcome.evidence
     assert evidence.provider == "ollama"
