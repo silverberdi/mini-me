@@ -549,6 +549,8 @@ async def test_patch_application_failure_escalates(stage_c_environment):
     )
 
     class CustomAdapter:
+        model = service.model
+
         async def generate(self, system_prompt, prompt, client=None, **kwargs):
             return OllamaGenerateResponse(
                 result_class=ProviderResultClass.SUCCESS, text=raw_response
@@ -563,6 +565,47 @@ async def test_patch_application_failure_escalates(stage_c_environment):
         instruction="Fix foo",
     )
 
+    from minime.domain.enums import (
+        ClassificationCompleteness,
+        ClassificationStage,
+        TaskComplexity,
+        TaskSurfaceKind,
+    )
+    from minime.domain.models import TaskClassificationSnapshot, TaskRiskProfile
+    from minime.local_worker.models import (
+        LocalMechanicalOperation,
+        LocalMutationMode,
+        OperatorMechanicalCommand,
+    )
+
+    cmd = OperatorMechanicalCommand(
+        operation_type=LocalMechanicalOperation.TEXT_REPLACEMENT,
+        mutation_mode=LocalMutationMode.MUTATING,
+        target_file="foo.py",
+        authoritative_change={"replacement": "..."},
+        deterministic_acceptance={"test_target": "tests/test_foo.py"},
+    )
+    snapshot = TaskClassificationSnapshot(
+        id="snap-test-code-edit",
+        stage=ClassificationStage.PRE_EXECUTION,
+        classifier_version="1.0.0",
+        evidence_source="test_fixture",
+        classification_completeness=ClassificationCompleteness.PARTIAL,
+        missing_signals=[],
+        complexity=TaskComplexity.LOW,
+        surface_kind=TaskSurfaceKind.BACKEND_SERVICE,
+        risk_profile=TaskRiskProfile(
+            architectural_impact="NONE",
+            persistence_impact="NONE",
+            security_auth_impact="NONE",
+            production_runtime="NONE",
+            provider_orchestration="NONE",
+            destructive_operations="NONE",
+            deployment_config="NONE",
+            code_change_breadth="LOW",
+        ),
+    )
+
     outcome = await service.run(
         envelope,
         validator=mock_validator,
@@ -571,6 +614,8 @@ async def test_patch_application_failure_escalates(stage_c_environment):
         uow=uow,
         project_id="mini-me",
         job_id="job-105",
+        routing_source=cmd,
+        classification_snapshot=snapshot,
     )
 
     assert outcome.evidence.validation_result is LocalValidationVerdict.FAIL

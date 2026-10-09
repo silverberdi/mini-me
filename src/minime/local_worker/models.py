@@ -11,8 +11,14 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
+from minime.domain.enums import (
+    ClassificationCompleteness,
+    ClassificationStage,
+    TaskComplexity,
+    TaskSurfaceKind,
+)
 from minime.local_worker.model_identity import OLLAMA_PROVIDER
 
 DEFAULT_CONTEXT_BUDGET_CHARS: int = 12000
@@ -57,6 +63,108 @@ class LocalValidationVerdict(str, Enum):
     PASS = "PASS"
     FAIL = "FAIL"
     NOT_APPLICABLE = "NOT_APPLICABLE"
+
+
+class LocalRoutingVerdict(str, Enum):
+    LOCAL_ELIGIBLE = "LOCAL_ELIGIBLE"
+    ESCALATE_PROVIDER_POLICY = "ESCALATE_PROVIDER_POLICY"
+
+
+class LocalMechanicalOperation(str, Enum):
+    TEXT_REPLACEMENT = "TEXT_REPLACEMENT"
+    LITERAL_UPDATE = "LITERAL_UPDATE"
+    FIXTURE_UPDATE = "FIXTURE_UPDATE"
+    LOG_DIAGNOSTIC = "LOG_DIAGNOSTIC"
+
+
+class LocalMutationMode(str, Enum):
+    MUTATING = "MUTATING"
+    READ_ONLY = "READ_ONLY"
+
+
+class LocalRoutingEvidenceProvenance(str, Enum):
+    OPERATOR_EXPLICIT_MECHANICAL_COMMAND = "OPERATOR_EXPLICIT_MECHANICAL_COMMAND"
+    STRUCTURED_OPENSPEC_TASK_METADATA = "STRUCTURED_OPENSPEC_TASK_METADATA"
+    DETERMINISTIC_INTAKE_METADATA = "DETERMINISTIC_INTAKE_METADATA"
+
+
+class OperatorMechanicalCommand(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    operation_type: LocalMechanicalOperation
+    mutation_mode: LocalMutationMode
+    target_file: str | None = None
+    target_symbol: str | None = None
+    authoritative_change: dict[str, Any] | str | None = None
+    deterministic_acceptance: dict[str, Any] | str | None = None
+    read_sources: list[str] = Field(default_factory=list)
+    requires_discovery: bool = False
+    unresolved_ambiguity: bool = False
+    command_id: str | None = None
+
+
+class LocalRoutingEvidence(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    operation_type: LocalMechanicalOperation
+    mutation_mode: LocalMutationMode
+    target_file: str | None = None
+    target_symbol: str | None = None
+    authoritative_change_supplied: bool = False
+    deterministic_acceptance_supplied: bool = False
+    requires_discovery: bool = False
+    unresolved_ambiguity: bool = False
+    read_sources: list[str] = Field(default_factory=list)
+    provenance: LocalRoutingEvidenceProvenance
+
+
+class LocalRoutingReasonCode(str, Enum):
+    LOCAL_ELIGIBLE_EXPLICIT_LOW_COMPLEXITY = "LOCAL_ELIGIBLE_EXPLICIT_LOW_COMPLEXITY"
+    COMPLEXITY_NOT_LOW = "COMPLEXITY_NOT_LOW"
+    CLASSIFICATION_UNKNOWN = "CLASSIFICATION_UNKNOWN"
+    CLASSIFICATION_INCOMPLETE = "CLASSIFICATION_INCOMPLETE"
+    HIGH_RISK_SURFACE = "HIGH_RISK_SURFACE"
+    FORBIDDEN_SURFACE = "FORBIDDEN_SURFACE"
+    SCOPE_TOO_BROAD = "SCOPE_TOO_BROAD"
+    MULTI_MODULE_SCOPE = "MULTI_MODULE_SCOPE"
+    TASK_NOT_MECHANICALLY_EXPLICIT = "TASK_NOT_MECHANICALLY_EXPLICIT"
+    TASK_CLASS_NOT_LOCAL = "TASK_CLASS_NOT_LOCAL"
+    LOCAL_MODEL_NOT_CAPABLE_FOR_TASK = "LOCAL_MODEL_NOT_CAPABLE_FOR_TASK"
+    MISSING_ALLOWED_FILE_BOUNDARY = "MISSING_ALLOWED_FILE_BOUNDARY"
+    MISSING_ROUTING_SOURCE = "MISSING_ROUTING_SOURCE"
+    UNSUPPORTED_EVIDENCE_SOURCE = "UNSUPPORTED_EVIDENCE_SOURCE"
+    AUTHORITY_CONSTRUCTION_FAILED = "AUTHORITY_CONSTRUCTION_FAILED"
+    READ_SOURCE_LOADING_UNAVAILABLE = "READ_SOURCE_LOADING_UNAVAILABLE"
+
+
+class LocalEvidenceAuthorityResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    success: bool
+    evidence: LocalRoutingEvidence | None = None
+    reason: str = ""
+    reason_code: LocalRoutingReasonCode = LocalRoutingReasonCode.AUTHORITY_CONSTRUCTION_FAILED
+
+
+class LocalRoutingDecision(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    verdict: LocalRoutingVerdict
+    reason_code: LocalRoutingReasonCode
+    reason_summary: str
+    classification_snapshot_id: str | None = None
+    task_class: str
+    complexity: TaskComplexity | str | None = None
+    classification_stage: ClassificationStage | str | None = None
+    classification_completeness: ClassificationCompleteness | str | None = None
+    surface_kind: TaskSurfaceKind | str | None = None
+    risk_evidence: dict[str, str] = Field(default_factory=dict)
+    allowed_files_evidence: list[str] = Field(default_factory=list)
+    routing_evidence: LocalRoutingEvidence | None = None
+    selected_local_model: str | None = None
+    escalation_target: EscalationTarget = EscalationTarget.EXISTING_PROVIDER_POLICY
+    policy_version: str = "1.0.0"
+
 
 
 class LocalTaskEnvelope(BaseModel):

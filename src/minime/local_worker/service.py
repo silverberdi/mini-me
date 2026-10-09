@@ -13,7 +13,10 @@ from typing import Any
 import httpx
 
 from minime.domain.enums import ProviderResultClass
+from minime.domain.models import TaskClassificationSnapshot
+from minime.local_worker.capability_router import LocalWorkerCapabilityRouter
 from minime.local_worker.context_packager import package_task_context
+from minime.local_worker.evidence_authority import LocalRoutingEvidenceAuthority
 from minime.local_worker.harness import LocalWorkerHarness
 from minime.local_worker.model_identity import (
     LOCAL_WORKER_ROLE,
@@ -24,10 +27,14 @@ from minime.local_worker.model_identity import (
 from minime.local_worker.models import (
     DEFAULT_CONTEXT_BUDGET_CHARS,
     LOCAL_WORKER_RESPONSE_SCHEMA,
+    EligibilityDecision,
+    EligibilityVerdict,
     EscalationDecision,
     EscalationTarget,
     LocalExecutionEvidence,
     LocalResultKind,
+    LocalRoutingDecision,
+    LocalRoutingVerdict,
     LocalTaskEnvelope,
     LocalValidationVerdict,
     LocalWorkerResult,
@@ -61,13 +68,24 @@ class LocalWorkerService:
         model: str | None = None,
         adapter: LocalOllamaAdapter | None = None,
         max_corrective_attempts: int = 1,
+        capability_router: LocalWorkerCapabilityRouter | None = None,
     ) -> None:
         self.model = model or local_qwen_model_identity()
         assert_local_qwen_model(self.model)
         self.adapter = adapter or LocalOllamaAdapter(model=self.model)
+        adapter_model = getattr(self.adapter, "model", None)
+        if adapter_model is not None and isinstance(adapter_model, str):
+            if adapter_model != self.model:
+                raise ValueError(
+                    f"LocalWorkerService model mismatch: service model '{self.model}' "
+                    f"does not match adapter model '{adapter_model}'"
+                )
+            assert_local_qwen_model(adapter_model)
+
         self.harness = LocalWorkerHarness(
             model=self.model, max_corrective_attempts=max_corrective_attempts
         )
+        self.capability_router = capability_router or LocalWorkerCapabilityRouter()
 
     async def run(
         self,
@@ -80,8 +98,51 @@ class LocalWorkerService:
         uow: Any | None = None,
         project_id: str = "mini-me",
         job_id: str | None = None,
+        routing_source: Any | None = None,
+        classification_snapshot: TaskClassificationSnapshot | None = None,
     ):
-        """Eligibility gate -> preflight -> bounded dispatch -> validation -> evidence."""
+        """Source-backed evidence authority -> capability routing gate -> preflight -> bounded dispatch -> validation -> evidence."""
+        auth_res = LocalRoutingEvidenceAuthority.construct_evidence(routing_source)
+        effective_adapter_model = getattr(self.adapter, "model", None)
+        if not isinstance(effective_adapter_model, str):
+            effective_adapter_model = None
+
+        if not auth_res.success:
+            task_cls_str = (
+                task.task_class.value
+                if hasattr(task.task_class, "value")
+                else str(task.task_class)
+            )
+            refusal_decision = LocalRoutingDecision(
+                verdict=LocalRoutingVerdict.ESCALATE_PROVIDER_POLICY,
+                reason_code=auth_res.reason_code,
+                reason_summary=auth_res.reason,
+                classification_snapshot_id=classification_snapshot.id
+                if classification_snapshot
+                else None,
+                task_class=task_cls_str,
+                complexity=classification_snapshot.complexity if classification_snapshot else None,
+                classification_stage=classification_snapshot.stage if classification_snapshot else None,
+                classification_completeness=classification_snapshot.classification_completeness if classification_snapshot else None,
+                surface_kind=classification_snapshot.surface_kind if classification_snapshot else None,
+                allowed_files_evidence=list(task.allowed_files or []),
+                routing_evidence=None,
+                selected_local_model=None,
+                escalation_target=EscalationTarget.EXISTING_PROVIDER_POLICY,
+                policy_version="1.0.0",
+            )
+            return _routing_refusal(refusal_decision, effective_adapter_model or self.model)
+
+        routing_decision = self.capability_router.evaluate_capability_routing(
+            task=task,
+            snapshot=classification_snapshot,
+            evidence=auth_res.evidence,
+            effective_model_identity=effective_adapter_model,
+            worktree_path=worktree_path,
+        )
+        if routing_decision.verdict is not LocalRoutingVerdict.LOCAL_ELIGIBLE:
+            return _routing_refusal(routing_decision, effective_adapter_model or self.model)
+
         eligibility = evaluate_eligibility(
             task_class=task.task_class.value,
             instruction=task.instruction,
@@ -89,11 +150,16 @@ class LocalWorkerService:
             forbidden_files=task.forbidden_files,
         )
         if not eligibility.admitted:
-            return _refusal(eligibility)
+            return _refusal(eligibility, routing_decision=routing_decision)
 
         preflight = preflight or await self.adapter.preflight(client=client)
         if preflight.status is not PreflightStatus.READY:
-            return ServiceOutcome(eligibility, preflight, _preflight_failed_evidence(preflight))
+            return ServiceOutcome(
+                eligibility,
+                preflight,
+                _preflight_failed_evidence(preflight),
+                routing_decision=routing_decision,
+            )
 
         effective_task = task
         if worktree_path:
@@ -114,6 +180,7 @@ class LocalWorkerService:
                     eligibility,
                     preflight,
                     _context_not_ready_evidence(task, pkg_res.status, self.model),
+                    routing_decision=routing_decision,
                 )
         elif task.context and len(task.context) > DEFAULT_CONTEXT_BUDGET_CHARS:
             # FAIL CLOSED: Oversized caller context exceeds canonical hard budget
@@ -121,6 +188,7 @@ class LocalWorkerService:
                 eligibility,
                 preflight,
                 _context_not_ready_evidence(task, "CALLER_CONTEXT_EXCEEDS_BUDGET", self.model),
+                routing_decision=routing_decision,
             )
 
         async def bounded_dispatch(
@@ -170,16 +238,28 @@ class LocalWorkerService:
         except Exception:  # noqa: BLE001 - escalate, never crash the caller
             logger.exception("Local worker execution failed unexpectedly")
             evidence = _unexpected_failure_evidence(eligibility.task_class)
-        return ServiceOutcome(eligibility, preflight, evidence)
+        return ServiceOutcome(
+            eligibility,
+            preflight,
+            evidence,
+            routing_decision=routing_decision,
+        )
 
 
 class ServiceOutcome:
-    """Structured eligibility + preflight + evidence for one local run."""
+    """Structured eligibility + preflight + evidence + routing decision for one local run."""
 
-    def __init__(self, eligibility, preflight, evidence) -> None:
+    def __init__(
+        self,
+        eligibility,
+        preflight,
+        evidence,
+        routing_decision: LocalRoutingDecision | None = None,
+    ) -> None:
         self.eligibility = eligibility
         self.preflight = preflight
         self.evidence = evidence
+        self.routing_decision = routing_decision
 
 
 def _escalate(reason: str) -> EscalationDecision:
@@ -189,7 +269,38 @@ def _escalate(reason: str) -> EscalationDecision:
     )
 
 
-def _refusal(eligibility) -> ServiceOutcome:
+def _routing_refusal(decision: LocalRoutingDecision, model: str) -> ServiceOutcome:
+    """Deterministic refusal outcome produced when capability routing or authority verification fails."""
+    eligibility = EligibilityDecision(
+        verdict=EligibilityVerdict.REFUSE,
+        task_class=decision.task_class,
+        model=model,
+        reason=decision.reason_summary,
+        escalation_target=decision.escalation_target,
+    )
+    preflight = PreflightResult(
+        provider=OLLAMA_PROVIDER,
+        model=model,
+        status=PreflightStatus.NOT_QUALIFIED,
+        reason=decision.reason_summary,
+        reachable=False,
+        model_present=False,
+    )
+    evidence = LocalExecutionEvidence(
+        provider=OLLAMA_PROVIDER,
+        model=model,
+        task_class=decision.task_class,
+        attempt=0,
+        result=LocalResultKind.UNCERTAIN,
+        result_class="REFUSED",
+        validation_result=LocalValidationVerdict.NOT_APPLICABLE,
+        escalation=_escalate(decision.reason_summary),
+        summary=decision.reason_summary,
+    )
+    return ServiceOutcome(eligibility, preflight, evidence, routing_decision=decision)
+
+
+def _refusal(eligibility, routing_decision: LocalRoutingDecision | None = None) -> ServiceOutcome:
     """Deterministic refusal outcome: never execute forbidden/uncertain local work."""
     from minime.local_worker.models import PreflightResult
 
@@ -212,7 +323,7 @@ def _refusal(eligibility) -> ServiceOutcome:
         escalation=_escalate(eligibility.reason),
         summary=eligibility.reason,
     )
-    return ServiceOutcome(eligibility, preflight, evidence)
+    return ServiceOutcome(eligibility, preflight, evidence, routing_decision=routing_decision)
 
 
 def _preflight_failed_evidence(preflight: PreflightResult) -> LocalExecutionEvidence:

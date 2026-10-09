@@ -1,0 +1,28 @@
+# Proposal: Local Worker Capability Routing Policy
+
+## Why
+Empirical server A/B benchmarking on the mini-me Ubuntu host (`silverman@192.168.0.194`) established two critical operational facts:
+1. **Model Capacity & Hardware Boundary:** Qwen 14B (`qwen2.5-coder:14b-instruct-q4_K_M`) is non-viable on current server hardware (GTX 1050 2GB VRAM + 87% CPU offload), timing out twice at 180-second HTTP adapter deadlines. Qwen 14B MUST NOT be introduced into local worker routing.
+2. **Task Class Insufficiency & Diagnosis Deficit:** For Qwen 7B (`qwen2.5-coder:7b-instruct-q4_K_M`), Attempt 1 timed out at 180s; Attempt 2 returned `NO_CHANGE_JUSTIFIED` in ~26s ("The test already matches the current discovery/readiness contract"), but the deterministic validator failed (`assert 0 == 1`). This proves Qwen 7B is hardware-executable for small warm turns, but a task class label alone (`TEST_AUTHORING`, `SMALL_CODE_FIX`) is insufficient evidence of local model suitability when unknown diagnosis or discovery is required.
+
+Local worker execution MUST be governed by a deterministic, pre-inference **Capability Routing Policy**. This policy evaluates structural complexity, risk profiles, task surfaces, file allowlist boundaries, and source-backed `LocalRoutingEvidence` BEFORE invoking Ollama or model inference.
+
+## What Changes
+- **Source-Backed Evidence Authority (`LocalRoutingEvidenceAuthority`):** Callers MUST NOT directly instantiate trusted evidence or supply self-asserted provenance. Instead, `LocalWorkerService` consumes a typed input source (`LocalRoutingEvidenceSource`). The canonical `LocalRoutingEvidenceAuthority` is the ONLY component authorized to evaluate the source and construct `LocalRoutingEvidence`. Provenance is assigned strictly by the authority based on source type.
+- **Minimal V1 Supported Source (`OperatorMechanicalCommand`):** V1 supports a single truthful, typed control-plane source: `OperatorMechanicalCommand`. Other potential sources (`STRUCTURED_OPENSPEC_TASK_METADATA`, `DETERMINISTIC_INTAKE_METADATA`) are marked DEFERRED/UNSUPPORTED for V1 because current tasks.md prose and intake structures do not carry structured mechanical fields. Free-form text (`task.instruction`, `task.context`, or tasks.md prose) CANNOT be used to infer mechanical eligibility.
+- **Derived Evidence Booleans:** `authoritative_change_supplied` and `deterministic_acceptance_supplied` are DERIVED by `LocalRoutingEvidenceAuthority` from actual non-None payload presence in `OperatorMechanicalCommand` (`authoritative_change is not None` and `deterministic_acceptance is not None`), never asserted directly by callers.
+- **Read-Only `LOG_ANALYSIS` Read Source Boundary:** Read-only tasks require an explicit, bounded `read_sources` list (`len(read_sources) > 0`). Unbounded read scopes or paths touching secrets/security/auth escalate immediately.
+- **Operational Verdict Model:** Simplify `LocalRoutingVerdict` to two operational outcomes: `LOCAL_ELIGIBLE` and `ESCALATE_PROVIDER_POLICY`. Redundant intermediate states are replaced by specific, observable reason codes (`MISSING_ROUTING_SOURCE`, `UNSUPPORTED_EVIDENCE_SOURCE`, `AUTHORITY_CONSTRUCTION_FAILED`, `TASK_NOT_MECHANICALLY_EXPLICIT`).
+- **Reuse Task Complexity & Risk Classification:** Consume the existing provider-agnostic `TaskClassificationSnapshot` produced by `TaskComplexityRiskClassifier`. For `PRE_EXECUTION` stage, require `complexity == TaskComplexity.LOW` and `completeness == ClassificationCompleteness.PARTIAL` with direct field check `snapshot.missing_signals == []`. Snapshots with `MINIMAL` completeness or non-empty `missing_signals` MUST escalate.
+- **Zero-Tolerance Sensitive Risk Gate:** Require string `"NONE"` for all sensitive risk dimensions in `TaskRiskProfile` (`architectural_impact`, `persistence_impact`, `security_auth_impact`, `production_runtime`, `provider_orchestration`, `destructive_operations`, `deployment_config`). Only `code_change_breadth` may be `"NONE"` or `"LOW"`. Any non-`"NONE"` value in sensitive dimensions escalates. `destructive_operations == "PRESENT"` MUST escalate.
+- **Pre-Inference Gate Integration & Canonical Refusal:** Integration inside `LocalWorkerService.run()` evaluates authority construction and capability routing prior to Ollama preflight, context packaging, or model dispatch. Refused tasks return canonical `PreflightStatus.NOT_QUALIFIED` and emit `escalation.required = True` with `escalation.target = EscalationTarget.EXISTING_PROVIDER_POLICY`, incurring zero Ollama API calls and zero inference tokens. Caller consumes the escalation signal per existing provider orchestration authority (cloud provider dispatch selection remains OUT OF SCOPE).
+- **Defense-in-Depth & Implement-Only Authority:** Admitted tasks MUST still pass all Stage C SDLC safety gates (`ManagedWorkspaceGuard` role `EXECUTION_WORKTREE`, `WorktreeManager` ownership, patch policy, deterministic validator). Local Qwen authority remains strictly `implement` (zero review, audit, merge, or approve authority).
+
+## Non-Goals
+- Modifying canonical Qwen 7B model identity or introducing Qwen 14B.
+- Modifying `TaskComplexityRiskClassifier` or embedding provider/routing logic inside it.
+- Modifying existing primary provider policies (Codex / Antigravity), OpenRouter drain policy, or reviewer independence rules.
+- Implementing automatic cloud provider dispatch within this change (provider selection remains OUT OF SCOPE; caller consumes escalation signal).
+- Parsing tasks.md prose or natural-language prompts to fabricate mechanical evidence.
+- Implementing adaptive or learned routing.
+- LLM self-classification of eligibility.

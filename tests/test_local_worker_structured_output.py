@@ -449,9 +449,52 @@ async def test_service_passes_schema_and_differentiates_attempt_2():
         instruction="Fix foo",
     )
 
+    from minime.domain.enums import (
+        ClassificationCompleteness,
+        ClassificationStage,
+        TaskComplexity,
+        TaskSurfaceKind,
+    )
+    from minime.domain.models import TaskClassificationSnapshot, TaskRiskProfile
+    from minime.local_worker.models import (
+        LocalMechanicalOperation,
+        LocalMutationMode,
+        OperatorMechanicalCommand,
+    )
+
+    cmd = OperatorMechanicalCommand(
+        operation_type=LocalMechanicalOperation.TEXT_REPLACEMENT,
+        mutation_mode=LocalMutationMode.MUTATING,
+        target_file="foo.py",
+        authoritative_change={"replacement": "..."},
+        deterministic_acceptance={"test_target": "tests/test_foo.py"},
+    )
+    snapshot = TaskClassificationSnapshot(
+        id="snap-test-struct-1",
+        stage=ClassificationStage.PRE_EXECUTION,
+        classifier_version="1.0.0",
+        evidence_source="test_fixture",
+        classification_completeness=ClassificationCompleteness.PARTIAL,
+        missing_signals=[],
+        complexity=TaskComplexity.LOW,
+        surface_kind=TaskSurfaceKind.BACKEND_SERVICE,
+        risk_profile=TaskRiskProfile(
+            architectural_impact="NONE",
+            persistence_impact="NONE",
+            security_auth_impact="NONE",
+            production_runtime="NONE",
+            provider_orchestration="NONE",
+            destructive_operations="NONE",
+        ),
+    )
     validator = AsyncMock(return_value=ValidationResult(verdict=LocalValidationVerdict.PASS))
 
-    outcome = await service.run(task, validator=validator)
+    outcome = await service.run(
+        task,
+        validator=validator,
+        routing_source=cmd,
+        classification_snapshot=snapshot,
+    )
 
     assert len(calls) == 2
     assert calls[0]["response_format"] == LOCAL_WORKER_RESPONSE_SCHEMA
@@ -553,9 +596,55 @@ async def test_incompatible_adapter_fails_closed():
         instruction="Fix foo",
     )
 
+    from minime.domain.enums import (
+        ClassificationCompleteness,
+        ClassificationStage,
+        TaskComplexity,
+        TaskSurfaceKind,
+    )
+    from minime.domain.models import TaskClassificationSnapshot, TaskRiskProfile
+    from minime.local_worker.models import (
+        LocalMechanicalOperation,
+        LocalMutationMode,
+        OperatorMechanicalCommand,
+    )
+
+    cmd = OperatorMechanicalCommand(
+        operation_type=LocalMechanicalOperation.TEXT_REPLACEMENT,
+        mutation_mode=LocalMutationMode.MUTATING,
+        target_file="foo.py",
+        authoritative_change={"replacement": "..."},
+        deterministic_acceptance={"test_target": "tests/test_foo.py"},
+    )
+    snapshot = TaskClassificationSnapshot(
+        id="snap-test-struct-2",
+        stage=ClassificationStage.PRE_EXECUTION,
+        classifier_version="1.0.0",
+        evidence_source="test_fixture",
+        classification_completeness=ClassificationCompleteness.PARTIAL,
+        missing_signals=[],
+        complexity=TaskComplexity.LOW,
+        surface_kind=TaskSurfaceKind.BACKEND_SERVICE,
+        risk_profile=TaskRiskProfile(
+            architectural_impact="NONE",
+            persistence_impact="NONE",
+            security_auth_impact="NONE",
+            production_runtime="NONE",
+            provider_orchestration="NONE",
+            destructive_operations="NONE",
+            deployment_config="NONE",
+            code_change_breadth="LOW",
+        ),
+    )
+
     validator = AsyncMock(return_value=ValidationResult(verdict=LocalValidationVerdict.PASS))
 
-    outcome = await service.run(task, validator=validator)
+    outcome = await service.run(
+        task,
+        validator=validator,
+        routing_source=cmd,
+        classification_snapshot=snapshot,
+    )
 
     assert outcome.evidence.result_class == "UNEXPECTED_FAILURE"
     assert outcome.evidence.escalation.required is True

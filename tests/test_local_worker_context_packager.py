@@ -170,6 +170,50 @@ def test_task_class_governs_symbol_packaging(tmp_path):
     assert "FILE: tests/test_governance.py" in res_code.context
 
 
+def _routing_fixtures(allowed_file: str):
+    from minime.domain.enums import (
+        ClassificationCompleteness,
+        ClassificationStage,
+        TaskComplexity,
+        TaskSurfaceKind,
+    )
+    from minime.domain.models import TaskClassificationSnapshot, TaskRiskProfile
+    from minime.local_worker.models import (
+        LocalMechanicalOperation,
+        LocalMutationMode,
+        OperatorMechanicalCommand,
+    )
+
+    cmd = OperatorMechanicalCommand(
+        operation_type=LocalMechanicalOperation.TEXT_REPLACEMENT,
+        mutation_mode=LocalMutationMode.MUTATING,
+        target_file=allowed_file,
+        authoritative_change={"replacement": "..."},
+        deterministic_acceptance={"test_target": "tests/test_foo.py"},
+    )
+    snapshot = TaskClassificationSnapshot(
+        id="snap-test-packager",
+        stage=ClassificationStage.PRE_EXECUTION,
+        classifier_version="1.0.0",
+        evidence_source="test_fixture",
+        classification_completeness=ClassificationCompleteness.PARTIAL,
+        missing_signals=[],
+        complexity=TaskComplexity.LOW,
+        surface_kind=TaskSurfaceKind.BACKEND_SERVICE,
+        risk_profile=TaskRiskProfile(
+            architectural_impact="NONE",
+            persistence_impact="NONE",
+            security_auth_impact="NONE",
+            production_runtime="NONE",
+            provider_orchestration="NONE",
+            destructive_operations="NONE",
+            deployment_config="NONE",
+            code_change_breadth="LOW",
+        ),
+    )
+    return cmd, snapshot
+
+
 @pytest.mark.asyncio
 async def test_successful_packaged_context_dispatches_inference(tmp_path):
     """Requirement C1: Successful packaged context proceeds to inference."""
@@ -202,7 +246,14 @@ async def test_successful_packaged_context_dispatches_inference(tmp_path):
     )
     validator = AsyncMock(return_value=ValidationResult(verdict=LocalValidationVerdict.PASS))
 
-    outcome = await service.run(task, validator=validator, worktree_path=tmp_path)
+    cmd, snap = _routing_fixtures(rel_path)
+    outcome = await service.run(
+        task,
+        validator=validator,
+        worktree_path=tmp_path,
+        routing_source=cmd,
+        classification_snapshot=snap,
+    )
 
     assert outcome.evidence.result_class == "SUCCESS"
     assert adapter.generate.call_count == 1
@@ -237,7 +288,14 @@ async def test_packaging_failure_with_bounded_caller_context_dispatches(tmp_path
     )
     validator = AsyncMock(return_value=ValidationResult(verdict=LocalValidationVerdict.PASS))
 
-    outcome = await service.run(task, validator=validator, worktree_path=tmp_path)
+    cmd, snap = _routing_fixtures("nonexistent_file.py")
+    outcome = await service.run(
+        task,
+        validator=validator,
+        worktree_path=tmp_path,
+        routing_source=cmd,
+        classification_snapshot=snap,
+    )
 
     assert outcome.evidence.result_class == "SUCCESS"
     assert adapter.generate.call_count == 1
@@ -265,7 +323,14 @@ async def test_packaging_failure_no_caller_context_fails_closed_zero_inference(t
     )
     validator = AsyncMock(return_value=ValidationResult(verdict=LocalValidationVerdict.PASS))
 
-    outcome = await service.run(task, validator=validator, worktree_path=tmp_path)
+    cmd, snap = _routing_fixtures("nonexistent_file.py")
+    outcome = await service.run(
+        task,
+        validator=validator,
+        worktree_path=tmp_path,
+        routing_source=cmd,
+        classification_snapshot=snap,
+    )
 
     assert outcome.evidence.result_class == "CONTEXT_NOT_READY"
     assert outcome.evidence.escalation.required is True
@@ -297,7 +362,14 @@ async def test_packaging_failure_oversized_caller_context_fails_closed_zero_infe
     )
     validator = AsyncMock(return_value=ValidationResult(verdict=LocalValidationVerdict.PASS))
 
-    outcome = await service.run(task, validator=validator, worktree_path=tmp_path)
+    cmd, snap = _routing_fixtures("nonexistent_file.py")
+    outcome = await service.run(
+        task,
+        validator=validator,
+        worktree_path=tmp_path,
+        routing_source=cmd,
+        classification_snapshot=snap,
+    )
 
     assert outcome.evidence.result_class == "CONTEXT_NOT_READY"
     assert outcome.evidence.escalation.required is True
@@ -331,7 +403,14 @@ async def test_target_symbol_exceeds_budget_fails_closed_zero_inference(tmp_path
     )
     validator = AsyncMock(return_value=ValidationResult(verdict=LocalValidationVerdict.PASS))
 
-    outcome = await service.run(task, validator=validator, worktree_path=tmp_path)
+    cmd, snap = _routing_fixtures(rel_path)
+    outcome = await service.run(
+        task,
+        validator=validator,
+        worktree_path=tmp_path,
+        routing_source=cmd,
+        classification_snapshot=snap,
+    )
 
     assert outcome.evidence.result_class == "CONTEXT_NOT_READY"
     assert "TARGET_SYMBOL_EXCEEDS_BUDGET" in outcome.evidence.summary
