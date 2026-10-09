@@ -212,7 +212,10 @@ class TestLocalWorkerCapabilityRouter:
 
         router = LocalWorkerCapabilityRouter()
         decision = router.evaluate_capability_routing(
-            task=task, snapshot=snapshot, evidence=auth_res.evidence
+            task=task,
+            snapshot=snapshot,
+            evidence=auth_res.evidence,
+            effective_model_identity=local_qwen_model_identity(),
         )
 
         assert decision.verdict == LocalRoutingVerdict.LOCAL_ELIGIBLE
@@ -227,8 +230,18 @@ class TestLocalWorkerCapabilityRouter:
         task = _make_task()
 
         router = LocalWorkerCapabilityRouter()
-        d1 = router.evaluate_capability_routing(task=task, snapshot=snapshot, evidence=auth_res.evidence)
-        d2 = router.evaluate_capability_routing(task=task, snapshot=snapshot, evidence=auth_res.evidence)
+        d1 = router.evaluate_capability_routing(
+            task=task,
+            snapshot=snapshot,
+            evidence=auth_res.evidence,
+            effective_model_identity=local_qwen_model_identity(),
+        )
+        d2 = router.evaluate_capability_routing(
+            task=task,
+            snapshot=snapshot,
+            evidence=auth_res.evidence,
+            effective_model_identity=local_qwen_model_identity(),
+        )
         assert d1.model_dump() == d2.model_dump()
 
     def test_classification_stage_gates(self):
@@ -238,13 +251,23 @@ class TestLocalWorkerCapabilityRouter:
         router = LocalWorkerCapabilityRouter()
 
         # Missing snapshot
-        d_none = router.evaluate_capability_routing(task=task, snapshot=None, evidence=auth_res.evidence)
+        d_none = router.evaluate_capability_routing(
+            task=task,
+            snapshot=None,
+            evidence=auth_res.evidence,
+            effective_model_identity=local_qwen_model_identity(),
+        )
         assert d_none.verdict == LocalRoutingVerdict.ESCALATE_PROVIDER_POLICY
         assert d_none.reason_code == LocalRoutingReasonCode.CLASSIFICATION_UNKNOWN
 
         # POST_MATERIALIZATION stage
         snap_post = _make_snapshot(stage=ClassificationStage.POST_MATERIALIZATION)
-        d_post = router.evaluate_capability_routing(task=task, snapshot=snap_post, evidence=auth_res.evidence)
+        d_post = router.evaluate_capability_routing(
+            task=task,
+            snapshot=snap_post,
+            evidence=auth_res.evidence,
+            effective_model_identity=local_qwen_model_identity(),
+        )
         assert d_post.verdict == LocalRoutingVerdict.ESCALATE_PROVIDER_POLICY
         assert d_post.reason_code == LocalRoutingReasonCode.CLASSIFICATION_UNKNOWN
 
@@ -256,13 +279,23 @@ class TestLocalWorkerCapabilityRouter:
 
         # MINIMAL completeness -> refusal
         snap_min = _make_snapshot(completeness=ClassificationCompleteness.MINIMAL)
-        d_min = router.evaluate_capability_routing(task=task, snapshot=snap_min, evidence=auth_res.evidence)
+        d_min = router.evaluate_capability_routing(
+            task=task,
+            snapshot=snap_min,
+            evidence=auth_res.evidence,
+            effective_model_identity=local_qwen_model_identity(),
+        )
         assert d_min.verdict == LocalRoutingVerdict.ESCALATE_PROVIDER_POLICY
         assert d_min.reason_code == LocalRoutingReasonCode.CLASSIFICATION_INCOMPLETE
 
         # PARTIAL + missing_signals -> refusal
         snap_missing = _make_snapshot(completeness=ClassificationCompleteness.PARTIAL, missing_signals=["no proposal"])
-        d_missing = router.evaluate_capability_routing(task=task, snapshot=snap_missing, evidence=auth_res.evidence)
+        d_missing = router.evaluate_capability_routing(
+            task=task,
+            snapshot=snap_missing,
+            evidence=auth_res.evidence,
+            effective_model_identity=local_qwen_model_identity(),
+        )
         assert d_missing.verdict == LocalRoutingVerdict.ESCALATE_PROVIDER_POLICY
         assert d_missing.reason_code == LocalRoutingReasonCode.CLASSIFICATION_INCOMPLETE
 
@@ -274,7 +307,12 @@ class TestLocalWorkerCapabilityRouter:
 
         for comp in [TaskComplexity.MEDIUM, TaskComplexity.HIGH, TaskComplexity.UNKNOWN]:
             snap = _make_snapshot(complexity=comp)
-            d = router.evaluate_capability_routing(task=task, snapshot=snap, evidence=auth_res.evidence)
+            d = router.evaluate_capability_routing(
+                task=task,
+                snapshot=snap,
+                evidence=auth_res.evidence,
+                effective_model_identity=local_qwen_model_identity(),
+            )
             assert d.verdict == LocalRoutingVerdict.ESCALATE_PROVIDER_POLICY
             assert d.reason_code == LocalRoutingReasonCode.COMPLEXITY_NOT_LOW
 
@@ -297,7 +335,12 @@ class TestLocalWorkerCapabilityRouter:
             snap = _make_snapshot(risk_overrides={dimension: val})
             task = _make_task()
 
-            d = router.evaluate_capability_routing(task=task, snapshot=snap, evidence=auth_res.evidence)
+            d = router.evaluate_capability_routing(
+                task=task,
+                snapshot=snap,
+                evidence=auth_res.evidence,
+                effective_model_identity=local_qwen_model_identity(),
+            )
             assert d.verdict == LocalRoutingVerdict.ESCALATE_PROVIDER_POLICY
             assert d.reason_code == LocalRoutingReasonCode.HIGH_RISK_SURFACE
 
@@ -307,7 +350,12 @@ class TestLocalWorkerCapabilityRouter:
         snap_low = _make_snapshot(risk_overrides={"code_change_breadth": "LOW"})
         task_low = _make_task()
 
-        d_low = router.evaluate_capability_routing(task=task_low, snapshot=snap_low, evidence=auth_low.evidence)
+        d_low = router.evaluate_capability_routing(
+            task=task_low,
+            snapshot=snap_low,
+            evidence=auth_low.evidence,
+            effective_model_identity=local_qwen_model_identity(),
+        )
         assert d_low.verdict == LocalRoutingVerdict.LOCAL_ELIGIBLE
 
     def test_surface_kind_gates(self):
@@ -327,7 +375,12 @@ class TestLocalWorkerCapabilityRouter:
             snap = _make_snapshot(surface=surface)
             task = _make_task()
 
-            d = router.evaluate_capability_routing(task=task, snapshot=snap, evidence=auth_res.evidence)
+            d = router.evaluate_capability_routing(
+                task=task,
+                snapshot=snap,
+                evidence=auth_res.evidence,
+                effective_model_identity=local_qwen_model_identity(),
+            )
             assert d.verdict == LocalRoutingVerdict.ESCALATE_PROVIDER_POLICY
             assert d.reason_code == LocalRoutingReasonCode.FORBIDDEN_SURFACE
 
@@ -339,25 +392,45 @@ class TestLocalWorkerCapabilityRouter:
 
         # No allowed file
         task_no_files = _make_task(allowed_files=[])
-        d_no_files = router.evaluate_capability_routing(task=task_no_files, snapshot=snap, evidence=auth_res.evidence)
+        d_no_files = router.evaluate_capability_routing(
+            task=task_no_files,
+            snapshot=snap,
+            evidence=auth_res.evidence,
+            effective_model_identity=local_qwen_model_identity(),
+        )
         assert d_no_files.verdict == LocalRoutingVerdict.ESCALATE_PROVIDER_POLICY
         assert d_no_files.reason_code == LocalRoutingReasonCode.MISSING_ALLOWED_FILE_BOUNDARY
 
         # Two allowed files
         task_two_files = _make_task(allowed_files=["src/minime/utils.py", "src/minime/service.py"])
-        d_two_files = router.evaluate_capability_routing(task=task_two_files, snapshot=snap, evidence=auth_res.evidence)
+        d_two_files = router.evaluate_capability_routing(
+            task=task_two_files,
+            snapshot=snap,
+            evidence=auth_res.evidence,
+            effective_model_identity=local_qwen_model_identity(),
+        )
         assert d_two_files.verdict == LocalRoutingVerdict.ESCALATE_PROVIDER_POLICY
         assert d_two_files.reason_code == LocalRoutingReasonCode.SCOPE_TOO_BROAD
 
         # Wildcard allowed file
         task_wildcard = _make_task(allowed_files=["src/minime/*.py"])
-        d_wildcard = router.evaluate_capability_routing(task=task_wildcard, snapshot=snap, evidence=auth_res.evidence)
+        d_wildcard = router.evaluate_capability_routing(
+            task=task_wildcard,
+            snapshot=snap,
+            evidence=auth_res.evidence,
+            effective_model_identity=local_qwen_model_identity(),
+        )
         assert d_wildcard.verdict == LocalRoutingVerdict.ESCALATE_PROVIDER_POLICY
         assert d_wildcard.reason_code == LocalRoutingReasonCode.MISSING_ALLOWED_FILE_BOUNDARY
 
         # Target file != allowed file
         task_mismatch = _make_task(allowed_files=["src/minime/other.py"])
-        d_mismatch = router.evaluate_capability_routing(task=task_mismatch, snapshot=snap, evidence=auth_res.evidence)
+        d_mismatch = router.evaluate_capability_routing(
+            task=task_mismatch,
+            snapshot=snap,
+            evidence=auth_res.evidence,
+            effective_model_identity=local_qwen_model_identity(),
+        )
         assert d_mismatch.verdict == LocalRoutingVerdict.ESCALATE_PROVIDER_POLICY
         assert d_mismatch.reason_code == LocalRoutingReasonCode.MISSING_ALLOWED_FILE_BOUNDARY
 
@@ -368,7 +441,18 @@ class TestLocalWorkerCapabilityRouter:
         task = _make_task()
         router = LocalWorkerCapabilityRouter()
 
-        # Canonical 7B -> passes model gate
+        # 1. None model identity -> refused by model gate (Test 5)
+        d_none = router.evaluate_capability_routing(
+            task=task,
+            snapshot=snap,
+            evidence=auth_res.evidence,
+            effective_model_identity=None,
+        )
+        assert d_none.verdict == LocalRoutingVerdict.ESCALATE_PROVIDER_POLICY
+        assert d_none.reason_code == LocalRoutingReasonCode.LOCAL_MODEL_NOT_CAPABLE_FOR_TASK
+        assert d_none.selected_local_model is None
+
+        # 2. Canonical 7B -> passes model gate (Test 7)
         d_7b = router.evaluate_capability_routing(
             task=task,
             snapshot=snap,
@@ -378,7 +462,7 @@ class TestLocalWorkerCapabilityRouter:
         assert d_7b.verdict == LocalRoutingVerdict.LOCAL_ELIGIBLE
         assert d_7b.selected_local_model == "qwen2.5-coder:7b-instruct-q4_K_M"
 
-        # Qwen 14B -> refused by model gate
+        # 3. Qwen 14B -> refused by model gate (Test 6)
         d_14b = router.evaluate_capability_routing(
             task=task,
             snapshot=snap,
@@ -389,7 +473,7 @@ class TestLocalWorkerCapabilityRouter:
         assert d_14b.reason_code == LocalRoutingReasonCode.LOCAL_MODEL_NOT_CAPABLE_FOR_TASK
         assert d_14b.selected_local_model is None
 
-        # Unknown model -> refused by model gate
+        # 4. Unknown model -> refused by model gate
         d_unknown = router.evaluate_capability_routing(
             task=task,
             snapshot=snap,
@@ -411,7 +495,10 @@ class TestLocalWorkerCapabilityRouter:
 
         router = LocalWorkerCapabilityRouter()
         decision = router.evaluate_capability_routing(
-            task=task, snapshot=snap, evidence=auth_res.evidence
+            task=task,
+            snapshot=snap,
+            evidence=auth_res.evidence,
+            effective_model_identity=local_qwen_model_identity(),
         )
 
         assert decision.verdict == LocalRoutingVerdict.ESCALATE_PROVIDER_POLICY
@@ -434,6 +521,11 @@ class TestLocalWorkerCapabilityRouter:
         snapshot = _make_snapshot()
         task = _make_task()
         router = LocalWorkerCapabilityRouter()
-        decision = router.evaluate_capability_routing(task=task, snapshot=snapshot, evidence=evidence)
+        decision = router.evaluate_capability_routing(
+            task=task,
+            snapshot=snapshot,
+            evidence=evidence,
+            effective_model_identity=local_qwen_model_identity(),
+        )
         with pytest.raises((ValidationError, TypeError)):
             decision.verdict = LocalRoutingVerdict.LOCAL_ELIGIBLE  # type: ignore[misc]

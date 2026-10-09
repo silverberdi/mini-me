@@ -73,6 +73,15 @@ class LocalWorkerService:
         self.model = model or local_qwen_model_identity()
         assert_local_qwen_model(self.model)
         self.adapter = adapter or LocalOllamaAdapter(model=self.model)
+        adapter_model = getattr(self.adapter, "model", None)
+        if adapter_model is not None and isinstance(adapter_model, str):
+            if adapter_model != self.model:
+                raise ValueError(
+                    f"LocalWorkerService model mismatch: service model '{self.model}' "
+                    f"does not match adapter model '{adapter_model}'"
+                )
+            assert_local_qwen_model(adapter_model)
+
         self.harness = LocalWorkerHarness(
             model=self.model, max_corrective_attempts=max_corrective_attempts
         )
@@ -94,6 +103,10 @@ class LocalWorkerService:
     ):
         """Source-backed evidence authority -> capability routing gate -> preflight -> bounded dispatch -> validation -> evidence."""
         auth_res = LocalRoutingEvidenceAuthority.construct_evidence(routing_source)
+        effective_adapter_model = getattr(self.adapter, "model", None)
+        if not isinstance(effective_adapter_model, str):
+            effective_adapter_model = None
+
         if not auth_res.success:
             task_cls_str = (
                 task.task_class.value
@@ -118,17 +131,17 @@ class LocalWorkerService:
                 escalation_target=EscalationTarget.EXISTING_PROVIDER_POLICY,
                 policy_version="1.0.0",
             )
-            return _routing_refusal(refusal_decision, self.model)
+            return _routing_refusal(refusal_decision, effective_adapter_model or self.model)
 
         routing_decision = self.capability_router.evaluate_capability_routing(
             task=task,
             snapshot=classification_snapshot,
             evidence=auth_res.evidence,
-            effective_model_identity=self.model,
+            effective_model_identity=effective_adapter_model,
             worktree_path=worktree_path,
         )
         if routing_decision.verdict is not LocalRoutingVerdict.LOCAL_ELIGIBLE:
-            return _routing_refusal(routing_decision, self.model)
+            return _routing_refusal(routing_decision, effective_adapter_model or self.model)
 
         eligibility = evaluate_eligibility(
             task_class=task.task_class.value,

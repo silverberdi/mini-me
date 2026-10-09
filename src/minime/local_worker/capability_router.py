@@ -56,18 +56,29 @@ class LocalWorkerCapabilityRouter:
     ) -> LocalRoutingDecision:
         """Evaluate task, snapshot, and evidence for local Qwen 7B admittance."""
         task_class_val = task.task_class.value if hasattr(task.task_class, "value") else str(task.task_class)
-        target_model = effective_model_identity or local_qwen_model_identity()
 
         # 0. Model capability gate
-        if target_model != local_qwen_model_identity():
+        if effective_model_identity is None:
             return self._refuse(
                 reason_code=LocalRoutingReasonCode.LOCAL_MODEL_NOT_CAPABLE_FOR_TASK,
-                summary=f"Effective local model '{target_model}' does not match canonical identity '{local_qwen_model_identity()}'",
+                summary="Effective model identity is None",
                 task_class=task_class_val,
                 snapshot=snapshot,
                 evidence=evidence,
                 allowed_files=task.allowed_files or [],
             )
+
+        if effective_model_identity != local_qwen_model_identity():
+            return self._refuse(
+                reason_code=LocalRoutingReasonCode.LOCAL_MODEL_NOT_CAPABLE_FOR_TASK,
+                summary=f"Effective local model '{effective_model_identity}' does not match canonical identity '{local_qwen_model_identity()}'",
+                task_class=task_class_val,
+                snapshot=snapshot,
+                evidence=evidence,
+                allowed_files=task.allowed_files or [],
+            )
+
+        target_model = effective_model_identity
 
         # 1. Snapshot presence
         if snapshot is None:

@@ -549,6 +549,8 @@ async def test_patch_application_failure_escalates(stage_c_environment):
     )
 
     class CustomAdapter:
+        model = service.model
+
         async def generate(self, system_prompt, prompt, client=None, **kwargs):
             return OllamaGenerateResponse(
                 result_class=ProviderResultClass.SUCCESS, text=raw_response

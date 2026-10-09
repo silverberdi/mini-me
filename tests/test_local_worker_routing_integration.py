@@ -266,3 +266,65 @@ async def test_service_outcome_preserves_routing_decision_for_eligible_execution
     assert outcome.routing_decision is not None
     assert outcome.routing_decision.verdict == LocalRoutingVerdict.LOCAL_ELIGIBLE
     assert outcome.routing_decision.reason_code == LocalRoutingReasonCode.LOCAL_ELIGIBLE_EXPLICIT_LOW_COMPLEXITY
+
+
+def test_effective_execution_model_binding_constructor():
+    """Proves constructor enforcement of effective execution model identity (Required Tests 1-4)."""
+    from minime.local_worker.ollama_adapter import LocalOllamaAdapter
+
+    # 1. Canonical service model + canonical adapter model: accepted
+    adapter_7b = LocalOllamaAdapter(model="qwen2.5-coder:7b-instruct-q4_K_M")
+    service_ok = LocalWorkerService(adapter=adapter_7b)
+    assert service_ok.model == "qwen2.5-coder:7b-instruct-q4_K_M"
+    assert service_ok.adapter.model == "qwen2.5-coder:7b-instruct-q4_K_M"
+
+    # 2. Canonical self.model + injected 14B adapter: FAILS CLOSED in __init__
+    adapter_14b = LocalOllamaAdapter(model="qwen2.5-coder:14b-instruct-q4_K_M")
+    with pytest.raises(ValueError, match="model mismatch"):
+        LocalWorkerService(adapter=adapter_14b)
+
+    # 3. Canonical self.model + injected unknown-model adapter: FAILS CLOSED in __init__
+    adapter_unknown = LocalOllamaAdapter(model="unknown-model")
+    with pytest.raises(ValueError, match="model mismatch"):
+        LocalWorkerService(adapter=adapter_unknown)
+
+    # 4. Explicit 14B service model: rejected by assert_local_qwen_model
+    with pytest.raises(ValueError, match="canonical local Qwen model"):
+        LocalWorkerService(model="qwen2.5-coder:14b-instruct-q4_K_M")
+
+
+@pytest.mark.asyncio
+async def test_mismatched_or_missing_model_adapter_zero_preflight_and_generate():
+    """Proves adapter with missing/None model identity fails closed with 0 preflight and 0 generate calls (Required Tests 5, 8)."""
+    cmd, snapshot = _valid_fixtures("src/minime/utils.py")
+
+    class AdapterWithoutModel:
+        model = None
+        preflight = AsyncMock()
+        generate = AsyncMock()
+
+    adapter_no_model = AdapterWithoutModel()
+    service = LocalWorkerService(adapter=adapter_no_model)
+
+    task = LocalTaskEnvelope(
+        role="LOCAL_WORKER",
+        task_class=LocalTaskClass.SMALL_CODE_FIX,
+        allowed_files=["src/minime/utils.py"],
+        instruction="Fix helper",
+    )
+    validator = AsyncMock(return_value=ValidationResult(verdict=LocalValidationVerdict.PASS))
+
+    outcome = await service.run(
+        task,
+        validator=validator,
+        routing_source=cmd,
+        classification_snapshot=snapshot,
+    )
+
+    assert outcome.preflight.status == PreflightStatus.NOT_QUALIFIED
+    assert outcome.routing_decision is not None
+    assert outcome.routing_decision.verdict == LocalRoutingVerdict.ESCALATE_PROVIDER_POLICY
+    assert outcome.routing_decision.reason_code == LocalRoutingReasonCode.LOCAL_MODEL_NOT_CAPABLE_FOR_TASK
+    assert adapter_no_model.preflight.call_count == 0
+    assert adapter_no_model.generate.call_count == 0
+
