@@ -64,16 +64,35 @@ class LocalRoutingEvidenceAuthority:
         deterministic_supplied = cmd.deterministic_acceptance is not None
 
         if cmd.mutation_mode == LocalMutationMode.MUTATING:
-            if not cmd.target_file or not isinstance(cmd.target_file, str):
+            if not cmd.target_file or not isinstance(cmd.target_file, str) or not cmd.target_file.strip():
                 return LocalEvidenceAuthorityResult(
                     success=False,
-                    reason="Mutating command missing explicit target file",
+                    reason="Mutating command missing or empty target file",
                     reason_code=LocalRoutingReasonCode.AUTHORITY_CONSTRUCTION_FAILED,
                 )
-            if "*" in cmd.target_file or "?" in cmd.target_file:
+            target = cmd.target_file.strip()
+            if target.startswith("/") or target.startswith("\\"):
+                return LocalEvidenceAuthorityResult(
+                    success=False,
+                    reason="Mutating command target file is an absolute path",
+                    reason_code=LocalRoutingReasonCode.AUTHORITY_CONSTRUCTION_FAILED,
+                )
+            if ".." in target.split("/") or ".." in target.split("\\"):
+                return LocalEvidenceAuthorityResult(
+                    success=False,
+                    reason="Mutating command target file contains directory traversal",
+                    reason_code=LocalRoutingReasonCode.AUTHORITY_CONSTRUCTION_FAILED,
+                )
+            if "*" in target or "?" in target:
                 return LocalEvidenceAuthorityResult(
                     success=False,
                     reason="Mutating command target file contains forbidden wildcards",
+                    reason_code=LocalRoutingReasonCode.AUTHORITY_CONSTRUCTION_FAILED,
+                )
+            if target.endswith("/") or target.endswith("\\"):
+                return LocalEvidenceAuthorityResult(
+                    success=False,
+                    reason="Mutating command target file appears to be a directory",
                     reason_code=LocalRoutingReasonCode.AUTHORITY_CONSTRUCTION_FAILED,
                 )
             if not authoritative_supplied:

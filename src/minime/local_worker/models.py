@@ -11,8 +11,14 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
+from minime.domain.enums import (
+    ClassificationCompleteness,
+    ClassificationStage,
+    TaskComplexity,
+    TaskSurfaceKind,
+)
 from minime.local_worker.model_identity import OLLAMA_PROVIDER
 
 DEFAULT_CONTEXT_BUDGET_CHARS: int = 12000
@@ -83,6 +89,8 @@ class LocalRoutingEvidenceProvenance(str, Enum):
 
 
 class OperatorMechanicalCommand(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     operation_type: LocalMechanicalOperation
     mutation_mode: LocalMutationMode
     target_file: str | None = None
@@ -96,6 +104,8 @@ class OperatorMechanicalCommand(BaseModel):
 
 
 class LocalRoutingEvidence(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     operation_type: LocalMechanicalOperation
     mutation_mode: LocalMutationMode
     target_file: str | None = None
@@ -124,9 +134,12 @@ class LocalRoutingReasonCode(str, Enum):
     MISSING_ROUTING_SOURCE = "MISSING_ROUTING_SOURCE"
     UNSUPPORTED_EVIDENCE_SOURCE = "UNSUPPORTED_EVIDENCE_SOURCE"
     AUTHORITY_CONSTRUCTION_FAILED = "AUTHORITY_CONSTRUCTION_FAILED"
+    READ_SOURCE_LOADING_UNAVAILABLE = "READ_SOURCE_LOADING_UNAVAILABLE"
 
 
 class LocalEvidenceAuthorityResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     success: bool
     evidence: LocalRoutingEvidence | None = None
     reason: str = ""
@@ -134,15 +147,17 @@ class LocalEvidenceAuthorityResult(BaseModel):
 
 
 class LocalRoutingDecision(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     verdict: LocalRoutingVerdict
     reason_code: LocalRoutingReasonCode
     reason_summary: str
     classification_snapshot_id: str | None = None
     task_class: str
-    complexity: str
-    classification_stage: str
-    classification_completeness: str
-    surface_kind: str
+    complexity: TaskComplexity | str | None = None
+    classification_stage: ClassificationStage | str | None = None
+    classification_completeness: ClassificationCompleteness | str | None = None
+    surface_kind: TaskSurfaceKind | str | None = None
     risk_evidence: dict[str, str] = Field(default_factory=dict)
     allowed_files_evidence: list[str] = Field(default_factory=list)
     routing_evidence: LocalRoutingEvidence | None = None

@@ -51,11 +51,23 @@ class LocalWorkerCapabilityRouter:
         task: LocalTaskEnvelope,
         snapshot: TaskClassificationSnapshot | None,
         evidence: LocalRoutingEvidence | None,
+        effective_model_identity: str | None = None,
         worktree_path: Any | None = None,
     ) -> LocalRoutingDecision:
         """Evaluate task, snapshot, and evidence for local Qwen 7B admittance."""
         task_class_val = task.task_class.value if hasattr(task.task_class, "value") else str(task.task_class)
-        model_name = local_qwen_model_identity()
+        target_model = effective_model_identity or local_qwen_model_identity()
+
+        # 0. Model capability gate
+        if target_model != local_qwen_model_identity():
+            return self._refuse(
+                reason_code=LocalRoutingReasonCode.LOCAL_MODEL_NOT_CAPABLE_FOR_TASK,
+                summary=f"Effective local model '{target_model}' does not match canonical identity '{local_qwen_model_identity()}'",
+                task_class=task_class_val,
+                snapshot=snapshot,
+                evidence=evidence,
+                allowed_files=task.allowed_files or [],
+            )
 
         # 1. Snapshot presence
         if snapshot is None:
@@ -244,47 +256,82 @@ class LocalWorkerCapabilityRouter:
                     allowed_files=task.allowed_files or [],
                 )
             target_f = task.allowed_files[0]
-            if "*" in target_f or "?" in target_f:
+            if not target_f or not isinstance(target_f, str) or not target_f.strip():
                 return self._refuse(
                     reason_code=LocalRoutingReasonCode.MISSING_ALLOWED_FILE_BOUNDARY,
-                    summary=f"Allowed file boundary '{target_f}' contains wildcards",
+                    summary="Allowed file boundary is empty or invalid",
                     task_class=task_class_val,
                     snapshot=snapshot,
                     evidence=evidence,
                     allowed_files=task.allowed_files or [],
                 )
-            if evidence.target_file and target_f != evidence.target_file:
+            clean_target = target_f.strip()
+            if clean_target.startswith("/") or clean_target.startswith("\\"):
                 return self._refuse(
                     reason_code=LocalRoutingReasonCode.MISSING_ALLOWED_FILE_BOUNDARY,
-                    summary=f"Allowed file '{target_f}' does not match evidence target file '{evidence.target_file}'",
+                    summary=f"Allowed file boundary '{clean_target}' is an absolute path",
+                    task_class=task_class_val,
+                    snapshot=snapshot,
+                    evidence=evidence,
+                    allowed_files=task.allowed_files or [],
+                )
+            if ".." in clean_target.split("/") or ".." in clean_target.split("\\"):
+                return self._refuse(
+                    reason_code=LocalRoutingReasonCode.MISSING_ALLOWED_FILE_BOUNDARY,
+                    summary=f"Allowed file boundary '{clean_target}' contains directory traversal",
+                    task_class=task_class_val,
+                    snapshot=snapshot,
+                    evidence=evidence,
+                    allowed_files=task.allowed_files or [],
+                )
+            if "*" in clean_target or "?" in clean_target:
+                return self._refuse(
+                    reason_code=LocalRoutingReasonCode.MISSING_ALLOWED_FILE_BOUNDARY,
+                    summary=f"Allowed file boundary '{clean_target}' contains wildcards",
+                    task_class=task_class_val,
+                    snapshot=snapshot,
+                    evidence=evidence,
+                    allowed_files=task.allowed_files or [],
+                )
+            if clean_target.endswith("/") or clean_target.endswith("\\"):
+                return self._refuse(
+                    reason_code=LocalRoutingReasonCode.MISSING_ALLOWED_FILE_BOUNDARY,
+                    summary=f"Allowed file boundary '{clean_target}' appears to be a directory",
+                    task_class=task_class_val,
+                    snapshot=snapshot,
+                    evidence=evidence,
+                    allowed_files=task.allowed_files or [],
+                )
+            if evidence.target_file and clean_target != evidence.target_file:
+                return self._refuse(
+                    reason_code=LocalRoutingReasonCode.MISSING_ALLOWED_FILE_BOUNDARY,
+                    summary=f"Allowed file '{clean_target}' does not match evidence target file '{evidence.target_file}'",
                     task_class=task_class_val,
                     snapshot=snapshot,
                     evidence=evidence,
                     allowed_files=task.allowed_files or [],
                 )
         elif evidence.mutation_mode == LocalMutationMode.READ_ONLY:
-            if not evidence.read_sources:
-                return self._refuse(
-                    reason_code=LocalRoutingReasonCode.AUTHORITY_CONSTRUCTION_FAILED,
-                    summary="Read-only task missing explicit read sources",
-                    task_class=task_class_val,
-                    snapshot=snapshot,
-                    evidence=evidence,
-                    allowed_files=task.allowed_files or [],
-                )
+            return self._refuse(
+                reason_code=LocalRoutingReasonCode.READ_SOURCE_LOADING_UNAVAILABLE,
+                summary="Source content binding unavailable for read-only tasks",
+                task_class=task_class_val,
+                snapshot=snapshot,
+                evidence=evidence,
+                allowed_files=task.allowed_files or [],
+            )
 
         # 10. Model identity check
-        # Local model identity is strictly canonical qwen2.5-coder:7b-instruct-q4_K_M
         return LocalRoutingDecision(
             verdict=LocalRoutingVerdict.LOCAL_ELIGIBLE,
             reason_code=LocalRoutingReasonCode.LOCAL_ELIGIBLE_EXPLICIT_LOW_COMPLEXITY,
             reason_summary=f"Task '{task_class_val}' admitted for local Qwen 7B execution",
             classification_snapshot_id=snapshot.id,
             task_class=task_class_val,
-            complexity=complexity_val,
-            classification_stage=stage_val,
-            classification_completeness=completeness_val,
-            surface_kind=surface_val,
+            complexity=snapshot.complexity,
+            classification_stage=snapshot.stage,
+            classification_completeness=snapshot.classification_completeness,
+            surface_kind=snapshot.surface_kind,
             risk_evidence={
                 "code_change_breadth": risk.code_change_breadth,
                 "architectural_impact": risk.architectural_impact,
@@ -293,7 +340,7 @@ class LocalWorkerCapabilityRouter:
             },
             allowed_files_evidence=list(task.allowed_files or []),
             routing_evidence=evidence,
-            selected_local_model=model_name,
+            selected_local_model=target_model,
             escalation_target=EscalationTarget.NONE,
             policy_version="1.0.0",
         )
@@ -308,35 +355,16 @@ class LocalWorkerCapabilityRouter:
         evidence: LocalRoutingEvidence | None,
         allowed_files: list[str],
     ) -> LocalRoutingDecision:
-        stage_val = (
-            snapshot.stage.value if snapshot and hasattr(snapshot.stage, "value") else (snapshot.stage if snapshot else "UNKNOWN")
-        )
-        completeness_val = (
-            snapshot.classification_completeness.value
-            if snapshot and hasattr(snapshot.classification_completeness, "value")
-            else (snapshot.classification_completeness if snapshot else "UNKNOWN")
-        )
-        complexity_val = (
-            snapshot.complexity.value
-            if snapshot and hasattr(snapshot.complexity, "value")
-            else (snapshot.complexity if snapshot else "UNKNOWN")
-        )
-        surface_val = (
-            snapshot.surface_kind.value
-            if snapshot and hasattr(snapshot.surface_kind, "value")
-            else (snapshot.surface_kind if snapshot else "UNKNOWN")
-        )
-
         return LocalRoutingDecision(
             verdict=LocalRoutingVerdict.ESCALATE_PROVIDER_POLICY,
             reason_code=reason_code,
             reason_summary=summary,
             classification_snapshot_id=snapshot.id if snapshot else None,
             task_class=task_class,
-            complexity=str(complexity_val),
-            classification_stage=str(stage_val),
-            classification_completeness=str(completeness_val),
-            surface_kind=str(surface_val),
+            complexity=snapshot.complexity if snapshot else None,
+            classification_stage=snapshot.stage if snapshot else None,
+            classification_completeness=snapshot.classification_completeness if snapshot else None,
+            surface_kind=snapshot.surface_kind if snapshot else None,
             allowed_files_evidence=list(allowed_files),
             routing_evidence=evidence,
             selected_local_model=None,

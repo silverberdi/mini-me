@@ -108,31 +108,10 @@ class LocalWorkerService:
                 if classification_snapshot
                 else None,
                 task_class=task_cls_str,
-                complexity=str(
-                    classification_snapshot.complexity.value
-                    if classification_snapshot and hasattr(classification_snapshot.complexity, "value")
-                    else (classification_snapshot.complexity if classification_snapshot else "UNKNOWN")
-                ),
-                classification_stage=str(
-                    classification_snapshot.stage.value
-                    if classification_snapshot and hasattr(classification_snapshot.stage, "value")
-                    else (classification_snapshot.stage if classification_snapshot else "UNKNOWN")
-                ),
-                classification_completeness=str(
-                    classification_snapshot.classification_completeness.value
-                    if classification_snapshot
-                    and hasattr(classification_snapshot.classification_completeness, "value")
-                    else (
-                        classification_snapshot.classification_completeness
-                        if classification_snapshot
-                        else "UNKNOWN"
-                    )
-                ),
-                surface_kind=str(
-                    classification_snapshot.surface_kind.value
-                    if classification_snapshot and hasattr(classification_snapshot.surface_kind, "value")
-                    else (classification_snapshot.surface_kind if classification_snapshot else "UNKNOWN")
-                ),
+                complexity=classification_snapshot.complexity if classification_snapshot else None,
+                classification_stage=classification_snapshot.stage if classification_snapshot else None,
+                classification_completeness=classification_snapshot.classification_completeness if classification_snapshot else None,
+                surface_kind=classification_snapshot.surface_kind if classification_snapshot else None,
                 allowed_files_evidence=list(task.allowed_files or []),
                 routing_evidence=None,
                 selected_local_model=None,
@@ -145,11 +124,12 @@ class LocalWorkerService:
             task=task,
             snapshot=classification_snapshot,
             evidence=auth_res.evidence,
+            effective_model_identity=self.model,
             worktree_path=worktree_path,
         )
         if routing_decision.verdict is not LocalRoutingVerdict.LOCAL_ELIGIBLE:
             return _routing_refusal(routing_decision, self.model)
-        """Eligibility gate -> preflight -> bounded dispatch -> validation -> evidence."""
+
         eligibility = evaluate_eligibility(
             task_class=task.task_class.value,
             instruction=task.instruction,
@@ -157,11 +137,16 @@ class LocalWorkerService:
             forbidden_files=task.forbidden_files,
         )
         if not eligibility.admitted:
-            return _refusal(eligibility)
+            return _refusal(eligibility, routing_decision=routing_decision)
 
         preflight = preflight or await self.adapter.preflight(client=client)
         if preflight.status is not PreflightStatus.READY:
-            return ServiceOutcome(eligibility, preflight, _preflight_failed_evidence(preflight))
+            return ServiceOutcome(
+                eligibility,
+                preflight,
+                _preflight_failed_evidence(preflight),
+                routing_decision=routing_decision,
+            )
 
         effective_task = task
         if worktree_path:
@@ -182,6 +167,7 @@ class LocalWorkerService:
                     eligibility,
                     preflight,
                     _context_not_ready_evidence(task, pkg_res.status, self.model),
+                    routing_decision=routing_decision,
                 )
         elif task.context and len(task.context) > DEFAULT_CONTEXT_BUDGET_CHARS:
             # FAIL CLOSED: Oversized caller context exceeds canonical hard budget
@@ -189,6 +175,7 @@ class LocalWorkerService:
                 eligibility,
                 preflight,
                 _context_not_ready_evidence(task, "CALLER_CONTEXT_EXCEEDS_BUDGET", self.model),
+                routing_decision=routing_decision,
             )
 
         async def bounded_dispatch(
@@ -238,16 +225,28 @@ class LocalWorkerService:
         except Exception:  # noqa: BLE001 - escalate, never crash the caller
             logger.exception("Local worker execution failed unexpectedly")
             evidence = _unexpected_failure_evidence(eligibility.task_class)
-        return ServiceOutcome(eligibility, preflight, evidence)
+        return ServiceOutcome(
+            eligibility,
+            preflight,
+            evidence,
+            routing_decision=routing_decision,
+        )
 
 
 class ServiceOutcome:
-    """Structured eligibility + preflight + evidence for one local run."""
+    """Structured eligibility + preflight + evidence + routing decision for one local run."""
 
-    def __init__(self, eligibility, preflight, evidence) -> None:
+    def __init__(
+        self,
+        eligibility,
+        preflight,
+        evidence,
+        routing_decision: LocalRoutingDecision | None = None,
+    ) -> None:
         self.eligibility = eligibility
         self.preflight = preflight
         self.evidence = evidence
+        self.routing_decision = routing_decision
 
 
 def _escalate(reason: str) -> EscalationDecision:
@@ -285,10 +284,10 @@ def _routing_refusal(decision: LocalRoutingDecision, model: str) -> ServiceOutco
         escalation=_escalate(decision.reason_summary),
         summary=decision.reason_summary,
     )
-    return ServiceOutcome(eligibility, preflight, evidence)
+    return ServiceOutcome(eligibility, preflight, evidence, routing_decision=decision)
 
 
-def _refusal(eligibility) -> ServiceOutcome:
+def _refusal(eligibility, routing_decision: LocalRoutingDecision | None = None) -> ServiceOutcome:
     """Deterministic refusal outcome: never execute forbidden/uncertain local work."""
     from minime.local_worker.models import PreflightResult
 
@@ -311,7 +310,7 @@ def _refusal(eligibility) -> ServiceOutcome:
         escalation=_escalate(eligibility.reason),
         summary=eligibility.reason,
     )
-    return ServiceOutcome(eligibility, preflight, evidence)
+    return ServiceOutcome(eligibility, preflight, evidence, routing_decision=routing_decision)
 
 
 def _preflight_failed_evidence(preflight: PreflightResult) -> LocalExecutionEvidence:
