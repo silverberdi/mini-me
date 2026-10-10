@@ -58,6 +58,7 @@ ALLOWED_WORK_ITEM_TRANSITIONS: dict[WorkItemStatus, set[WorkItemStatus]] = {
         WorkItemStatus.NEEDS_HUMAN,
         WorkItemStatus.BLOCKED,
         WorkItemStatus.CANCELLED,
+        WorkItemStatus.COMPLETED,
     },
     WorkItemStatus.ADMITTED: {
         WorkItemStatus.RUNNING,
@@ -76,6 +77,7 @@ ALLOWED_WORK_ITEM_TRANSITIONS: dict[WorkItemStatus, set[WorkItemStatus]] = {
         WorkItemStatus.READY,
         WorkItemStatus.NEEDS_HUMAN,
         WorkItemStatus.CANCELLED,
+        WorkItemStatus.COMPLETED,
     },
     WorkItemStatus.COMPLETED: set(),
     WorkItemStatus.CANCELLED: set(),

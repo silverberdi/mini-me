@@ -12,6 +12,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from minime.adapters.github_adapter import GitHubAdapter
+from minime.adapters.openspec_adapter import OpenSpecAdapter
 from minime.domain.enums import (
     PRIMARY_PROVIDERS,
     AdmissionBlockCondition,
@@ -121,7 +123,11 @@ class SchedulerService:
         else:
             self.readiness_service = ReadinessService(uow)
         gh_adapter = getattr(self.readiness_service, "github_adapter", None)
+        if not isinstance(gh_adapter, GitHubAdapter):
+            gh_adapter = None
         os_adapter = getattr(self.readiness_service, "openspec_adapter", None)
+        if not isinstance(os_adapter, OpenSpecAdapter):
+            os_adapter = None
         self.openspec_adapter = os_adapter
         self.discovery_service = discovery_service or WorkDiscoveryService(
             uow,
@@ -1407,6 +1413,12 @@ class SchedulerService:
             )
         except Exception as exc:
             logger.warning("Recovery convergence cycle during tick encountered error: %s", exc)
+
+        # 0.05 Backlog lifecycle convergence
+        try:
+            self.intake_service.reconcile_and_persist_backlog_items(project_id=project_id)
+        except Exception as exc:
+            logger.warning(f"Backlog lifecycle convergence error during scheduler tick: {exc}")
 
         # 0.1 Autonomous intake sweep for unprepared backlog items when auto_prepare is enabled
         try:
