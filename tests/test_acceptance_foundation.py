@@ -280,8 +280,12 @@ def test_acceptance_runtime_state_outside_openspec(in_memory_uow, tmp_path):
         remote_name="origin",
     )
 
+    from conftest import attach_local_bare_origin, publish_local_intake_ref
     from minime.domain.enums import IntakeWorkspaceCreationState, IntakeWorkspacePublicationState
     from minime.domain.models import IntakeWorkspaceOwnership
+
+    bare = attach_local_bare_origin(tmp_path, uow=in_memory_uow, project_id="mini-me")
+    real_sha = publish_local_intake_ref(tmp_path, "synthetic-change")
 
     ow = IntakeWorkspaceOwnership(
         workspace_id="ws-synthetic-change",
@@ -290,12 +294,12 @@ def test_acceptance_runtime_state_outside_openspec(in_memory_uow, tmp_path):
         saga_id="saga-synthetic-change",
         change_name="synthetic-change",
         canonical_workspace_path=str(tmp_path),
-        canonical_repository_identity="github.com/silverberdi/mini-me",
+        canonical_repository_identity=bare,
         base_sha="base123",
         creation_state=IntakeWorkspaceCreationState.ACTIVE,
         publication_state=IntakeWorkspacePublicationState.PUBLISHED,
         published_ref="refs/minime/intake/synthetic-change",
-        published_sha="sha123",
+        published_sha=real_sha,
     )
     in_memory_uow.intake_workspace_ownerships.save(ow)
 

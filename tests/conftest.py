@@ -22,6 +22,8 @@ from minime.domain.enums import (
     ExternalReasonCode,
     GitOperationStatus,
     HumanGate,
+    IntakeWorkspaceCreationState,
+    IntakeWorkspacePublicationState,
     JobStatus,
     OrchestrationStage,
     OrchestrationStopOutcome,
@@ -32,8 +34,6 @@ from minime.domain.enums import (
     ReviewVerdict,
     SagaStatus,
     SagaType,
-    IntakeWorkspaceCreationState,
-    IntakeWorkspacePublicationState,
     WorktreeCreationState,
 )
 from minime.domain.exceptions import LifecycleBypassError
@@ -387,6 +387,70 @@ class InMemoryChangeRepository(ChangeRepositoryInterface):
         return [c.model_copy(deep=True) for c in self._store.values() if c.project_id == project_id]
 
 
+def _make_verifiable_intake_ownership(
+    uow: Any, project_id: str, cname: str, repository: str | None
+) -> IntakeWorkspaceOwnership:
+    """Build a PUBLISHED ownership backed by a real local ref (never a fabricated sha).
+
+    The authoritative remote-observation checks in readiness require ``published_sha``
+    to be a real commit observable on the managed repo's ``origin`` remote. This helper
+    publishes the current HEAD as ``refs/minime/intake/<cname>`` when a managed git
+    repository is available, and falls back to the legacy sentinel only when no repo
+    exists (in which case readiness correctly refuses admission).
+    """
+    import subprocess
+
+    real_identity = repository or "silverberdi/mini-me"
+    real_sha = "sha123"
+    mb_repo = getattr(uow, "project_managed_repository_bindings", None)
+    mb = (
+        mb_repo.get_by_project_id(project_id)
+        if mb_repo and hasattr(mb_repo, "get_by_project_id")
+        else None
+    )
+    managed_root = mb.managed_repository_root if mb and getattr(mb, "managed_repository_root", None) else None
+    if (
+        managed_root
+        and os.path.isdir(managed_root)
+        and os.path.isdir(os.path.join(managed_root, ".git"))
+    ):
+        try:
+            bare = attach_local_bare_origin(Path(managed_root), uow=uow, project_id=project_id)
+            real_identity = bare
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=managed_root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if head.returncode == 0 and head.stdout.strip():
+                real_sha = head.stdout.strip()
+                subprocess.run(
+                    ["git", "push", "origin", f"{real_sha}:refs/minime/intake/{cname}"],
+                    cwd=managed_root,
+                    check=False,
+                    capture_output=True,
+                )
+        except Exception:
+            real_sha = "sha123"
+
+    return IntakeWorkspaceOwnership(
+        workspace_id=f"ws-{cname}",
+        project_id=project_id,
+        item_key=cname,
+        saga_id=f"saga-{cname}",
+        change_name=cname,
+        canonical_workspace_path=f"/tmp/{cname}",
+        canonical_repository_identity=real_identity,
+        base_sha="base123",
+        creation_state=IntakeWorkspaceCreationState.ACTIVE,
+        publication_state=IntakeWorkspacePublicationState.PUBLISHED,
+        published_ref=f"refs/minime/intake/{cname}",
+        published_sha=real_sha,
+    )
+
+
 class InMemoryProjectBindingRepository(ProjectBindingRepositoryInterface):
     def __init__(self, uow=None):
         self._store: dict[str, ProjectBinding] = {}
@@ -416,21 +480,11 @@ class InMemoryProjectBindingRepository(ProjectBindingRepositoryInterface):
                     binding.project_id, cname
                 )
                 if not existing_ow:
-                    ow = IntakeWorkspaceOwnership(
-                        workspace_id=f"ws-{cname}",
-                        project_id=binding.project_id,
-                        item_key=cname,
-                        saga_id=f"saga-{cname}",
-                        change_name=cname,
-                        canonical_workspace_path=f"/tmp/{cname}",
-                        canonical_repository_identity=binding.repository or "silverberdi/mini-me",
-                        base_sha="base123",
-                        creation_state=IntakeWorkspaceCreationState.ACTIVE,
-                        publication_state=IntakeWorkspacePublicationState.PUBLISHED,
-                        published_ref=f"refs/minime/intake/{cname}",
-                        published_sha="sha123",
+                    self._uow.intake_workspace_ownerships.save(
+                        _make_verifiable_intake_ownership(
+                            self._uow, binding.project_id, cname, binding.repository
+                        )
                     )
-                    self._uow.intake_workspace_ownerships.save(ow)
 
     def get_by_id(self, binding_id: str) -> ProjectBinding | None:
         b = self._store.get(binding_id)
@@ -2643,6 +2697,7 @@ def setup_managed_repository_fixture(
     canonical_repository_identity: str = "github.com/org/repo",
     remote_name: str = "origin",
     remote_url: str | None = None,
+    local_remote: bool = True,
 ) -> ProjectManagedRepositoryBinding:
     """Canonical test helper to initialize git repo, managed project marker, and durable ProjectManagedRepositoryBinding."""
     import json
@@ -2711,7 +2766,124 @@ def setup_managed_repository_fixture(
     ):
         uow.project_managed_repository_bindings.save(binding)
 
+    # Publish a real local ref so the fail-closed readiness remote-observation checks
+    # can be exercised offline, and refresh any intake ownerships auto-created earlier.
+    # Tests that mock git subprocesses (e.g. worktree path recording) opt out.
+    if local_remote:
+        try:
+            attach_local_bare_origin(repo_root, uow=uow, project_id=project_id)
+        except Exception:
+            pass
+
     return binding
+
+
+def attach_local_bare_origin(
+    repo_root: Path,
+    bare_path: Path | None = None,
+    uow: Any | None = None,
+    project_id: str | None = None,
+) -> str:
+    """Point a managed repo's ``origin`` remote at a local bare repo for offline git tests.
+
+    The fail-closed publication/readiness paths require an authoritative remote that
+    ``git ls-remote``/``git push`` can actually observe. This helper replaces the
+    synthetic HTTPS remote with a real local bare repository and rewrites the durable
+    canonical identity (marker + managed binding) so the Stage C identity fence remains
+    consistent, all without network access.
+    """
+    import json
+    import subprocess
+
+    bare = bare_path or (repo_root.parent / f"{repo_root.name}.origin.git")
+    subprocess.run(
+        ["git", "init", "--bare", "-b", "main", str(bare)], check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "remote", "set-url", "origin", str(bare)],
+        cwd=repo_root, capture_output=True, text=True, check=False,
+    )
+    # Only proceed with the identity rewrite + ownership refresh when the remote URL
+    # actually changed. When a test mocks git subprocesses, set-url is a no-op and we
+    # must not corrupt the durable identity.
+    get_url = subprocess.run(
+        ["git", "remote", "get-url", "origin"],
+        cwd=repo_root, capture_output=True, text=True, check=False,
+    )
+    remote_actually_changed = get_url.returncode == 0 and get_url.stdout.strip() == str(bare)
+    if not remote_actually_changed:
+        return str(bare)
+
+    # Rewrite the ownership marker to the local identity so the Stage C marker fence
+    # verifies against the same authoritative identity as the remote URL.
+    marker_path = repo_root / ".minime-managed-project.json"
+    if marker_path.exists():
+        try:
+            marker_data = json.loads(marker_path.read_text(encoding="utf-8"))
+            marker_data["canonical_repository_identity"] = str(bare)
+            marker_path.write_text(json.dumps(marker_data, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    if uow is not None and project_id is not None:
+        binding_repo = getattr(uow, "project_managed_repository_bindings", None)
+        if binding_repo is not None and hasattr(binding_repo, "get_by_project_id"):
+            binding = binding_repo.get_by_project_id(project_id)
+            if binding is not None:
+                binding.canonical_repository_identity = str(bare)
+                binding_repo.save(binding) if hasattr(binding_repo, "save") else None
+
+    # Publish the current HEAD as a real local intake ref and refresh any intake
+    # ownerships that were auto-created with the fabricated "sha123" sentinel.
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo_root, capture_output=True, text=True, check=False
+    )
+    real_sha = head.stdout.strip() if head.returncode == 0 else None
+    if real_sha and uow is not None and project_id is not None and hasattr(uow, "intake_workspace_ownerships"):
+        for ow in list(uow.intake_workspace_ownerships.list_by_project(project_id)):
+            if getattr(ow, "published_sha", None) == "sha123" or getattr(ow, "published_sha", None) is None:
+                subprocess.run(
+                    ["git", "push", "origin", f"{real_sha}:refs/minime/intake/{ow.change_name}"],
+                    cwd=repo_root, check=False, capture_output=True,
+                )
+                ow.published_sha = real_sha
+                ow.canonical_repository_identity = str(bare)
+                uow.intake_workspace_ownerships.save(ow)
+
+    return str(bare)
+
+
+def publish_local_intake_ref(root: Path, change_name: str) -> str:
+    """Commit the on-disk change (if present) and publish HEAD as a local intake ref.
+
+    Returns the published commit SHA so tests can record a real (non-fabricated)
+    ``published_sha`` on the IntakeWorkspaceOwnership, satisfying the authoritative
+    remote-observation checks without network access.
+    """
+    import subprocess
+
+    change_dir = Path(root) / "openspec" / "changes" / change_name
+    if change_dir.exists():
+        subprocess.run(
+            ["git", "add", str(change_dir)], cwd=root, check=True, capture_output=True
+        )
+        # "nothing to commit" (exit 1) is tolerated: some tests commit separately.
+        subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "publish intake"],
+            cwd=root,
+            check=False,
+            capture_output=True,
+        )
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "push", "origin", f"{sha}:refs/minime/intake/{change_name}"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+    )
+    return sha
 
 
 def create_test_worktree_ownership(

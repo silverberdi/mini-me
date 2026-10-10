@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 from tests.conftest import (
     InMemoryPersistenceUnitOfWork,
+    attach_local_bare_origin,
     create_isolated_openspec_change,
     init_git_repo,
 )
@@ -101,6 +102,7 @@ def test_autonomous_admission_and_run_creation(
     )
     (tmp_path / ".minime" / "worktrees").mkdir(parents=True, exist_ok=True)
     in_memory_uow.project_managed_repository_bindings.save(mb)
+    attach_local_bare_origin(tmp_path, uow=in_memory_uow, project_id="mini-me")
     create_isolated_openspec_change(tmp_path, change_name="016-autonomous-queue-work-selection")
 
     mock_gh = MagicMock(spec=GitHubAdapter)

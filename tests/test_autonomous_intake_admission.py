@@ -6,7 +6,11 @@ from datetime import timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from tests.conftest import InMemoryPersistenceUnitOfWork, setup_managed_repository_fixture
+from tests.conftest import (
+    InMemoryPersistenceUnitOfWork,
+    attach_local_bare_origin,
+    setup_managed_repository_fixture,
+)
 
 from minime.domain.enums import (
     AdmissionDecision,
@@ -92,6 +96,7 @@ def test_auto_prepare_on_backlog_creation_happy_path(
         repo_dir / ".minime" / "worktrees",
         canonical_repository_identity="github.com/silverberdi/auto-repo",
     )
+    attach_local_bare_origin(repo_dir, uow=in_memory_uow, project_id="auto-project")
     openspec_dir = repo_dir / "openspec"
     openspec_dir.mkdir(exist_ok=True)
 
@@ -193,6 +198,7 @@ def test_auto_prepare_needs_human_on_ambiguity_and_resume(
         repo_dir / ".minime" / "worktrees",
         canonical_repository_identity="github.com/silverberdi/ambiguous-repo",
     )
+    attach_local_bare_origin(repo_dir, uow=in_memory_uow, project_id="ambiguous-project")
     openspec_dir = repo_dir / "openspec"
     openspec_dir.mkdir(exist_ok=True)
 

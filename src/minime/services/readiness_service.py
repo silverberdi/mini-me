@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 
 from minime.adapters.github import GitHubAdapter, GitHubAuthorizationError, GitHubRemoteError
 from minime.adapters.openspec import OpenSpecAdapter
@@ -53,6 +54,36 @@ class ReadinessService:
             project_root=workspace_path,
             require_published_ref=False,
         )
+
+    def _observe_published_ref(
+        self, managed_root: str, remote: str, published_ref: str
+    ) -> tuple[str | None, bool]:
+        """Authoritatively observe a published remote ref.
+
+        Returns ``(sha_or_none, ok)``. ``ok=False`` means the remote could not be
+        observed (transport failure / ambiguity); ``ok=True`` with ``None`` means absent.
+        """
+        try:
+            res = subprocess.run(
+                ["git", "ls-remote", remote, published_ref],
+                cwd=managed_root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except Exception as exc:
+            logger.warning("git ls-remote raised for '%s': %s", published_ref, exc)
+            return None, False
+        if res.returncode != 0:
+            return None, False
+        lines = res.stdout.splitlines()
+        if not lines:
+            return None, True
+        for line in lines:
+            parts = line.split()
+            if len(parts) >= 2 and parts[1] == published_ref:
+                return parts[0], True
+        return None, False
 
     def evaluate_change_readiness_pure(
         self,
@@ -435,6 +466,12 @@ class ReadinessService:
                     intake_ow = ow
                     break
 
+        eff_root = (
+            intake_ow.canonical_workspace_path
+            if (intake_ow and os.path.exists(intake_ow.canonical_workspace_path))
+            else project_root
+        )
+
         if require_published_ref:
             if (
                 not intake_ow
@@ -451,26 +488,65 @@ class ReadinessService:
                 )
                 unmet_reasons.append(reason)
             else:
-                checks.append(
-                    ReadinessCheck(
-                        name="published_artifact_identity",
-                        passed=True,
-                        details={
-                            "published_ref": intake_ow.published_ref,
-                            "published_sha": intake_ow.published_sha,
-                            "canonical_repository_identity": intake_ow.canonical_repository_identity,
-                        },
-                    )
+                # Verify the authoritative publication against the remote and the
+                # published Git tree; cached metadata alone must never authorize admission.
+                from minime.services.repository_identity import normalize_repository_identity
+
+                managed_binding = (
+                    self.uow.project_managed_repository_bindings.get_by_project_id(project_id)
+                    if getattr(self.uow, "project_managed_repository_bindings", None)
+                    else None
+                )
+                managed_root = (
+                    managed_binding.managed_repository_root
+                    if managed_binding and managed_binding.managed_repository_root
+                    else project_root
+                )
+                remote = managed_binding.remote_name if managed_binding else "origin"
+                expected_ref = f"refs/minime/intake/{change_name}"
+
+                identity_mismatch = intake_ow.published_ref != expected_ref
+                repo_mismatch = bool(
+                    managed_binding
+                    and managed_binding.canonical_repository_identity
+                    and intake_ow.canonical_repository_identity
+                    and normalize_repository_identity(intake_ow.canonical_repository_identity)
+                    != normalize_repository_identity(managed_binding.canonical_repository_identity)
                 )
 
-        eff_root = (
-            intake_ow.canonical_workspace_path
-            if (intake_ow and os.path.exists(intake_ow.canonical_workspace_path))
-            else project_root
-        )
+                observed_sha, observe_ok = self._observe_published_ref(
+                    managed_root, remote, intake_ow.published_ref
+                )
+                drift = not observe_ok or observed_sha != intake_ow.published_sha
+
+                if identity_mismatch or repo_mismatch or drift:
+                    reason = (
+                        f"Published ref drift or identity mismatch for '{change_name}': "
+                        f"identity_mismatch={identity_mismatch}, repo_mismatch={repo_mismatch}, "
+                        f"observed_sha={observed_sha}, expected_sha={intake_ow.published_sha}."
+                    )
+                    checks.append(
+                        ReadinessCheck(name="published_artifact_identity", passed=False, reason=reason)
+                    )
+                    unmet_reasons.append(reason)
+                else:
+                    checks.append(
+                        ReadinessCheck(
+                            name="published_artifact_identity",
+                            passed=True,
+                            details={
+                                "published_ref": intake_ow.published_ref,
+                                "published_sha": intake_ow.published_sha,
+                                "canonical_repository_identity": intake_ow.canonical_repository_identity,
+                                "remote_verified": True,
+                            },
+                        )
+                    )
+
         artifacts_eval = self.openspec_adapter.evaluate_artifacts(
             project, change_name, eff_root
         )
+
         if not artifacts_eval["exists"]:
             reason = f"OpenSpec change directory for '{change_name}' does not exist on disk."
             checks.append(ReadinessCheck(name="openspec_artifacts", passed=False, reason=reason))
