@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tempfile
+from pathlib import Path, PurePosixPath
 
 from minime.adapters.github import GitHubAdapter, GitHubAuthorizationError, GitHubRemoteError
 from minime.adapters.openspec import OpenSpecAdapter
@@ -84,6 +86,162 @@ class ReadinessService:
             if len(parts) >= 2 and parts[1] == published_ref:
                 return parts[0], True
         return None, False
+
+    def _evaluate_verified_published_tree(
+        self,
+        *,
+        project: object,
+        change_name: str,
+        managed_root: str,
+        remote: str,
+        published_ref: str,
+        published_sha: str,
+    ) -> tuple[dict[str, object] | None, object | None, str | None]:
+        """Evaluate artifacts from the exact remotely published commit tree.
+
+        The managed checkout is deliberately never consulted for artifact
+        contents: it may be on another branch or otherwise mutable while an
+        intake ref is being admitted.  A temporary bare repository gives us a
+        read-only object view fetched from the remote ref without changing the
+        managed checkout or any of its refs.
+        """
+        try:
+            remote_url_result = subprocess.run(
+                ["git", "remote", "get-url", remote],
+                cwd=managed_root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if remote_url_result.returncode != 0 or not remote_url_result.stdout.strip():
+                return None, None, "Published repository remote could not be resolved."
+            remote_url = remote_url_result.stdout.strip()
+
+            with tempfile.TemporaryDirectory(prefix="minime-published-readiness-") as temp_dir:
+                temp_root = Path(temp_dir)
+                object_repo = temp_root / "objects.git"
+                tree_root = temp_root / "tree"
+                init = subprocess.run(
+                    ["git", "init", "--bare", str(object_repo)],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if init.returncode != 0:
+                    return None, None, "Temporary published-tree object store could not be initialized."
+
+                fetch = subprocess.run(
+                    [
+                        "git",
+                        f"--git-dir={object_repo}",
+                        "fetch",
+                        "--no-tags",
+                        remote_url,
+                        published_ref,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if fetch.returncode != 0:
+                    return None, None, "Published ref could not be fetched for authoritative inspection."
+
+                fetched = subprocess.run(
+                    ["git", f"--git-dir={object_repo}", "rev-parse", "FETCH_HEAD"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                fetched_sha = fetched.stdout.strip() if fetched.returncode == 0 else None
+                if fetched_sha != published_sha:
+                    return (
+                        None,
+                        None,
+                        "Published ref changed while its tree was being inspected "
+                        f"(fetched_sha={fetched_sha}, expected_sha={published_sha}).",
+                    )
+
+                change_prefix = f"{project.openspec_path}/changes/{change_name}/"
+                tree_result = subprocess.run(
+                    [
+                        "git",
+                        f"--git-dir={object_repo}",
+                        "ls-tree",
+                        "-r",
+                        "--name-only",
+                        published_sha,
+                        "--",
+                        change_prefix,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if tree_result.returncode != 0:
+                    return None, None, "Published artifact tree could not be enumerated."
+
+                relative_paths: list[str] = []
+                for full_path in filter(None, tree_result.stdout.splitlines()):
+                    if not full_path.startswith(change_prefix):
+                        return None, None, "Published artifact path escaped the expected change root."
+                    relative_path = full_path[len(change_prefix):]
+                    pure_path = PurePosixPath(relative_path)
+                    if (
+                        not relative_path
+                        or pure_path.is_absolute()
+                        or ".." in pure_path.parts
+                        or any(not part for part in pure_path.parts)
+                    ):
+                        return None, None, "Published artifact tree contains an unsafe path."
+                    relative_paths.append(relative_path)
+
+                required = {"proposal.md", "tasks.md", "design.md"}
+                actual = set(relative_paths)
+                if not required.issubset(actual):
+                    missing = ", ".join(sorted(required - actual))
+                    return None, None, f"Published artifact tree is missing required files: {missing}."
+                if not any(path.startswith("specs/") and path.endswith(".md") for path in actual):
+                    return None, None, "Published artifact tree is missing specs/**/*.md."
+                unexpected = {
+                    path
+                    for path in actual
+                    if path not in required
+                    and not (path.startswith("specs/") and path.endswith(".md"))
+                }
+                if unexpected:
+                    return (
+                        None,
+                        None,
+                        "Published artifact tree contains unexpected paths: "
+                        + ", ".join(sorted(unexpected)),
+                    )
+
+                for relative_path in relative_paths:
+                    blob = subprocess.run(
+                        ["git", f"--git-dir={object_repo}", "show", f"{published_sha}:{change_prefix}{relative_path}"],
+                        capture_output=True,
+                        check=False,
+                    )
+                    if blob.returncode != 0:
+                        return None, None, f"Published artifact '{relative_path}' could not be read."
+                    destination = tree_root / change_prefix / relative_path
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.write_bytes(blob.stdout)
+
+                artifacts = self.openspec_adapter.evaluate_artifacts(
+                    project, change_name, str(tree_root)
+                )
+                strict_result = (
+                    StrictValidationGate(self.openspec_adapter).evaluate(
+                        change_name=change_name, project_root=tree_root
+                    )
+                    if project.strict_validation_required
+                    else None
+                )
+                return artifacts, strict_result, None
+        except OSError as exc:
+            logger.warning("Published artifact tree inspection failed: %s", exc)
+            return None, None, "Published artifact tree inspection could not be completed."
 
     def evaluate_change_readiness_pure(
         self,
@@ -466,11 +624,17 @@ class ReadinessService:
                     intake_ow = ow
                     break
 
+        # Pre-publication feedback may inspect the intake workspace.  Scheduler
+        # admission, however, is authorized only by the verified published
+        # commit tree below.
         eff_root = (
             intake_ow.canonical_workspace_path
             if (intake_ow and os.path.exists(intake_ow.canonical_workspace_path))
             else project_root
         )
+        artifacts_eval: dict[str, object] | None = None
+        strict_result: object | None = None
+        published_tree_error: str | None = None
 
         if require_published_ref:
             if (
@@ -530,29 +694,55 @@ class ReadinessService:
                     )
                     unmet_reasons.append(reason)
                 else:
-                    checks.append(
-                        ReadinessCheck(
-                            name="published_artifact_identity",
-                            passed=True,
-                            details={
-                                "published_ref": intake_ow.published_ref,
-                                "published_sha": intake_ow.published_sha,
-                                "canonical_repository_identity": intake_ow.canonical_repository_identity,
-                                "remote_verified": True,
-                            },
+                    artifacts_eval, strict_result, published_tree_error = (
+                        self._evaluate_verified_published_tree(
+                            project=project,
+                            change_name=change_name,
+                            managed_root=managed_root,
+                            remote=remote,
+                            published_ref=intake_ow.published_ref,
+                            published_sha=intake_ow.published_sha,
                         )
                     )
+                    if published_tree_error:
+                        checks.append(
+                            ReadinessCheck(
+                                name="published_artifact_identity",
+                                passed=False,
+                                reason=published_tree_error,
+                            )
+                        )
+                        unmet_reasons.append(published_tree_error)
+                    else:
+                        checks.append(
+                            ReadinessCheck(
+                                name="published_artifact_identity",
+                                passed=True,
+                                details={
+                                    "published_ref": intake_ow.published_ref,
+                                    "published_sha": intake_ow.published_sha,
+                                    "canonical_repository_identity": intake_ow.canonical_repository_identity,
+                                    "remote_verified": True,
+                                    "tree_verified": True,
+                                },
+                            )
+                        )
 
-        artifacts_eval = self.openspec_adapter.evaluate_artifacts(
-            project, change_name, eff_root
-        )
+        if artifacts_eval is None and not require_published_ref:
+            artifacts_eval = self.openspec_adapter.evaluate_artifacts(
+                project, change_name, eff_root
+            )
 
-        if not artifacts_eval["exists"]:
-            reason = f"OpenSpec change directory for '{change_name}' does not exist on disk."
+        if artifacts_eval is None:
+            reason = (
+                f"Published OpenSpec artifact tree for '{change_name}' could not be authoritatively evaluated."
+            )
             checks.append(ReadinessCheck(name="openspec_artifacts", passed=False, reason=reason))
             unmet_reasons.append(reason)
         else:
             missing_artifacts: list[str] = []
+            if not artifacts_eval["exists"]:
+                missing_artifacts.append("change directory")
             if not artifacts_eval["proposal_present"]:
                 missing_artifacts.append("proposal.md")
             if not artifacts_eval["tasks_present"]:
@@ -584,10 +774,21 @@ class ReadinessService:
         # Canonical CLI validation is distinct from artifact presence. UNKNOWN is
         # deliberately blocking because readiness cannot truthfully be proven.
         if project.strict_validation_required:
-            strict_result = StrictValidationGate(self.openspec_adapter).evaluate(
-                change_name=change_name, project_root=eff_root
-            )
-            if strict_result.is_blocking:
+            if strict_result is None and not require_published_ref:
+                strict_result = StrictValidationGate(self.openspec_adapter).evaluate(
+                    change_name=change_name, project_root=eff_root
+                )
+            if strict_result is None:
+                reason = "Published OpenSpec artifact tree could not be strictly validated."
+                checks.append(
+                    ReadinessCheck(
+                        name="openspec_strict_validation",
+                        passed=False,
+                        reason=reason,
+                    )
+                )
+                unmet_reasons.append(reason)
+            elif strict_result.is_blocking:
                 reason = f"{strict_result.reason.code}: {strict_result.reason.message}"
                 checks.append(
                     ReadinessCheck(

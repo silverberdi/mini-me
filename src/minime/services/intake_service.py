@@ -1930,7 +1930,17 @@ class IntakeService:
                 push_needed = False
             else:
                 push_needed = True
-                push_cmd = ["git", "push", remote, f"{head_sha}:{published_ref}"]
+                # The initial create must be a compare-and-swap too.  The
+                # preceding ls-remote observation is advisory only: another
+                # publisher may create the ref after it completes.  An empty
+                # expected-old value makes git reject that race atomically.
+                push_cmd = [
+                    "git",
+                    "push",
+                    f"--force-with-lease={published_ref}:",
+                    remote,
+                    f"{head_sha}:{published_ref}",
+                ]
         else:
             # Subsequent publication uses an atomic exact-SHA CAS lease.
             if observed_old_sha != ownership.published_sha:
@@ -1965,10 +1975,28 @@ class IntakeService:
                 check=False,
             )
             if push_res.returncode != 0:
-                err_msg = push_res.stderr or ""
+                err_msg = (push_res.stderr or "").strip()
+                normalized_error = err_msg.lower()
                 is_unreachable_remote = any(
-                    term in err_msg.lower()
-                    for term in ["repository not found", "could not resolve host", "connection refused", "does not appear to be a git repository", "cannot access"]
+                    term in normalized_error
+                    for term in [
+                        "repository not found",
+                        "could not resolve host",
+                        "connection refused",
+                        "does not appear to be a git repository",
+                        "cannot access",
+                        "network is unreachable",
+                        "timed out",
+                    ]
+                )
+                is_cas_conflict = any(
+                    term in normalized_error
+                    for term in [
+                        "stale info",
+                        "fetch first",
+                        "expected old value",
+                        "failed to update ref",
+                    ]
                 )
                 if is_unreachable_remote and remote == "local":
                     # Local-only binding fallback: record a local ref for test/offline
@@ -1985,10 +2013,22 @@ class IntakeService:
                         text=True,
                         check=False,
                     )
-                else:
+                elif is_unreachable_remote:
+                    self._mark_publication_failed(ownership)
+                    raise RuntimeError(
+                        f"PUBLICATION_TRANSPORT_FAILURE: Git push could not reach remote for "
+                        f"'{published_ref}': {err_msg}"
+                    )
+                elif is_cas_conflict:
                     self._mark_publication_failed(ownership)
                     raise RuntimeError(
                         f"REF_CAS_MISMATCH: Git push failed for '{published_ref}': {err_msg}"
+                    )
+                else:
+                    self._mark_publication_failed(ownership)
+                    raise RuntimeError(
+                        f"PUBLICATION_AMBIGUOUS: Git push failed for '{published_ref}' with an "
+                        f"unclassified result: {err_msg}"
                     )
 
         # Authoritative post-publication observation MUST return exactly head_sha.

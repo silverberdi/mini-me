@@ -18,6 +18,7 @@ from tests.conftest import (
     setup_managed_repository_fixture,
 )
 
+import minime.services.intake_service as intake_service_module
 from minime.domain.enums import (
     IntakeWorkspaceCreationState,
     IntakeWorkspacePublicationState,
@@ -191,6 +192,145 @@ def test_concurrent_publication_triggers_atomic_cas_rejection(env):
     assert updated.publication_state == IntakeWorkspacePublicationState.PUBLICATION_FAILED
 
 
+def test_initial_publication_uses_expected_absent_lease(env, monkeypatch):
+    """The first remote ref creation carries Git's atomic expected-absent lease."""
+    svc = env["svc"]
+    ow = _activated_workspace(env, "initial-cas-change")
+    generated = _generated("initial-cas-change")
+    _write_artifacts(ow.canonical_workspace_path, "initial-cas-change", generated)
+    svc._commit_intake_artifacts(ow, generated, env["project"])
+
+    real_run = intake_service_module.subprocess.run
+    push_commands: list[list[str]] = []
+
+    def capture_push(command, *args, **kwargs):
+        if command[:2] == ["git", "push"]:
+            push_commands.append(command)
+        return real_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(intake_service_module.subprocess, "run", capture_push)
+
+    svc._publish_intake_artifacts_cas(ow, env["project"])
+
+    published_ref = "refs/minime/intake/initial-cas-change"
+    assert any(
+        f"--force-with-lease={published_ref}:" in command for command in push_commands
+    )
+
+
+def test_initial_publication_cas_rejects_race_after_absence_observation(env, monkeypatch):
+    """A writer creating the ref after ls-remote still loses the initial CAS."""
+    svc = env["svc"]
+    ow = _activated_workspace(env, "initial-cas-race")
+    generated = _generated("initial-cas-race")
+    _write_artifacts(ow.canonical_workspace_path, "initial-cas-race", generated)
+    candidate_sha = svc._commit_intake_artifacts(ow, generated, env["project"])
+    competing_sha = subprocess.run(
+        ["git", "rev-parse", f"{candidate_sha}^"],
+        cwd=env["repo_dir"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    real_run = intake_service_module.subprocess.run
+    raced = False
+    published_ref = "refs/minime/intake/initial-cas-race"
+
+    def race_before_push(command, *args, **kwargs):
+        nonlocal raced
+        if (
+            not raced
+            and command[:2] == ["git", "push"]
+            and f"--force-with-lease={published_ref}:" in command
+        ):
+            raced = True
+            real_run(
+                ["git", "push", "origin", f"{competing_sha}:refs/minime/race-source"],
+                cwd=env["repo_dir"],
+                check=True,
+                capture_output=True,
+            )
+            real_run(
+                ["git", f"--git-dir={env['bare']}", "update-ref", published_ref, competing_sha],
+                check=True,
+                capture_output=True,
+            )
+        return real_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(intake_service_module.subprocess, "run", race_before_push)
+
+    with pytest.raises(RuntimeError, match="REF_CAS_MISMATCH"):
+        svc._publish_intake_artifacts_cas(ow, env["project"])
+
+    assert (
+        env["uow"].intake_workspace_ownerships.get_by_id(ow.workspace_id).publication_state
+        == IntakeWorkspacePublicationState.PUBLICATION_FAILED
+    )
+
+
+def test_subsequent_publication_uses_exact_previous_sha_lease(env, monkeypatch):
+    """P -> P2 may advance only from the persisted exact P SHA."""
+    svc = env["svc"]
+    ow = _activated_workspace(env, "subsequent-cas-change")
+    generated = _generated("subsequent-cas-change")
+    _write_artifacts(ow.canonical_workspace_path, "subsequent-cas-change", generated)
+    candidate_sha = svc._commit_intake_artifacts(ow, generated, env["project"])
+    previous_sha = subprocess.run(
+        ["git", "rev-parse", f"{candidate_sha}^"],
+        cwd=env["repo_dir"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    published_ref = "refs/minime/intake/subsequent-cas-change"
+    subprocess.run(
+        ["git", "push", "origin", f"{previous_sha}:{published_ref}"],
+        cwd=env["repo_dir"],
+        check=True,
+        capture_output=True,
+    )
+    ow.publication_state = IntakeWorkspacePublicationState.PUBLISHED
+    ow.published_sha = previous_sha
+    ow.published_ref = published_ref
+    env["uow"].intake_workspace_ownerships.save(ow)
+
+    real_run = intake_service_module.subprocess.run
+    push_commands: list[list[str]] = []
+
+    def capture_push(command, *args, **kwargs):
+        if command[:2] == ["git", "push"]:
+            push_commands.append(command)
+        return real_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(intake_service_module.subprocess, "run", capture_push)
+    assert svc._publish_intake_artifacts_cas(ow, env["project"]) == candidate_sha
+    assert any(
+        f"--force-with-lease={published_ref}:{previous_sha}" in command
+        for command in push_commands
+    )
+
+
+def test_post_push_observation_failure_never_marks_published(env, monkeypatch):
+    """PUBLISHED is impossible until an authoritative post-push read succeeds."""
+    svc = env["svc"]
+    ow = _activated_workspace(env, "post-push-observation")
+    generated = _generated("post-push-observation")
+    _write_artifacts(ow.canonical_workspace_path, "post-push-observation", generated)
+    svc._commit_intake_artifacts(ow, generated, env["project"])
+
+    observations = iter([(None, True), (None, False)])
+    monkeypatch.setattr(svc, "_observe_remote_ref", lambda *_: next(observations))
+
+    with pytest.raises(RuntimeError, match="PUBLICATION_AMBIGUOUS"):
+        svc._publish_intake_artifacts_cas(ow, env["project"])
+
+    assert (
+        env["uow"].intake_workspace_ownerships.get_by_id(ow.workspace_id).publication_state
+        == IntakeWorkspacePublicationState.PUBLICATION_FAILED
+    )
+
+
 def test_ambiguous_post_publish_observation_fails_closed(env):
     """Post-publication observation must return exactly the candidate SHA or fail."""
     uow = env["uow"]
@@ -331,6 +471,115 @@ def test_modified_local_workspace_cannot_authorize_admission(env):
     )
     assert not eval_result.is_ready
     assert any("published" in r for r in eval_result.unmet_reasons)
+
+
+def test_verified_published_tree_ignores_tampered_intake_workspace(env):
+    """A mutable workspace cannot make or break the artifact readiness proof."""
+    uow = env["uow"]
+    change_name = "published-tree-authority"
+    create_isolated_openspec_change(env["repo_dir"], change_name)
+    published_sha = publish_local_intake_ref(env["repo_dir"], change_name)
+
+    tampered_workspace = env["repo_dir"] / "tampered-workspace"
+    (tampered_workspace / "openspec" / "changes" / change_name).mkdir(parents=True)
+    (tampered_workspace / "openspec" / "changes" / change_name / "proposal.md").write_text(
+        "not the published proposal", encoding="utf-8"
+    )
+    identity = uow.project_managed_repository_bindings.get_by_project_id("proj")
+    ow = _ownership(
+        change_name,
+        str(tampered_workspace),
+        published_sha=published_sha,
+        identity=identity.canonical_repository_identity,
+    )
+    uow.intake_workspace_ownerships.save(ow)
+
+    result = ReadinessService(uow).evaluate_change_readiness_pure(
+        project_id="proj",
+        change_name=change_name,
+        project_root=str(tampered_workspace),
+        github_repo="github.com/org/repo",
+        github_issue=1,
+        require_published_ref=True,
+    )
+
+    artifacts_check = next(check for check in result.checks if check.name == "openspec_artifacts")
+    assert artifacts_check.passed
+    published_check = next(
+        check for check in result.checks if check.name == "published_artifact_identity"
+    )
+    assert published_check.passed
+    assert published_check.details["tree_verified"] is True
+
+
+def test_missing_published_artifact_prevents_ready(env):
+    """Required files are checked in the remote commit, not only on local disk."""
+    uow = env["uow"]
+    change_name = "missing-published-design"
+    change_dir = env["repo_dir"] / "openspec" / "changes" / change_name
+    change_dir.mkdir(parents=True)
+    (change_dir / "proposal.md").write_text("# proposal\n", encoding="utf-8")
+    (change_dir / "tasks.md").write_text("# tasks\n", encoding="utf-8")
+    specs = change_dir / "specs" / "feature"
+    specs.mkdir(parents=True)
+    (specs / "spec.md").write_text("## ADDED Requirements\n", encoding="utf-8")
+    published_sha = publish_local_intake_ref(env["repo_dir"], change_name)
+    identity = uow.project_managed_repository_bindings.get_by_project_id("proj")
+    uow.intake_workspace_ownerships.save(
+        _ownership(
+            change_name,
+            str(env["repo_dir"] / "unused-workspace"),
+            published_sha=published_sha,
+            identity=identity.canonical_repository_identity,
+        )
+    )
+
+    result = ReadinessService(uow).evaluate_change_readiness_pure(
+        project_id="proj",
+        change_name=change_name,
+        project_root=str(env["repo_dir"]),
+        github_repo="github.com/org/repo",
+        github_issue=1,
+        require_published_ref=True,
+    )
+
+    assert not result.is_ready
+    assert any("missing required files: design.md" in reason for reason in result.unmet_reasons)
+
+
+def test_invalid_published_artifact_prevents_ready(env):
+    """Strict validation is also performed against the verified published tree."""
+    uow = env["uow"]
+    change_name = "invalid-published-spec"
+    change_dir = create_isolated_openspec_change(env["repo_dir"], change_name)
+    (change_dir / "specs" / "feature" / "spec.md").write_text(
+        "not an OpenSpec delta", encoding="utf-8"
+    )
+    published_sha = publish_local_intake_ref(env["repo_dir"], change_name)
+    identity = uow.project_managed_repository_bindings.get_by_project_id("proj")
+    uow.intake_workspace_ownerships.save(
+        _ownership(
+            change_name,
+            str(env["repo_dir"] / "unused-workspace"),
+            published_sha=published_sha,
+            identity=identity.canonical_repository_identity,
+        )
+    )
+
+    result = ReadinessService(uow).evaluate_change_readiness_pure(
+        project_id="proj",
+        change_name=change_name,
+        project_root=str(env["repo_dir"]),
+        github_repo="github.com/org/repo",
+        github_issue=1,
+        require_published_ref=True,
+    )
+
+    assert not result.is_ready
+    strict_check = next(
+        check for check in result.checks if check.name == "openspec_strict_validation"
+    )
+    assert not strict_check.passed
 
 
 def test_local_ref_fallback_cannot_authorize_production_admission(env):
