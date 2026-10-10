@@ -12,6 +12,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from minime.adapters.github import GitHubAdapter
+from minime.adapters.openspec import OpenSpecAdapter
 from minime.domain.enums import (
     PRIMARY_PROVIDERS,
     AdmissionBlockCondition,
@@ -120,8 +122,16 @@ class SchedulerService:
             self.readiness_service = orchestration_service.readiness_service
         else:
             self.readiness_service = ReadinessService(uow)
-        gh_adapter = getattr(self.readiness_service, "github_adapter", None)
-        os_adapter = getattr(self.readiness_service, "openspec_adapter", None)
+        gh_adapter = (
+            self.readiness_service.github_adapter
+            if isinstance(getattr(self.readiness_service, "github_adapter", None), GitHubAdapter)
+            else None
+        )
+        os_adapter = (
+            self.readiness_service.openspec_adapter
+            if isinstance(getattr(self.readiness_service, "openspec_adapter", None), OpenSpecAdapter)
+            else None
+        )
         self.openspec_adapter = os_adapter
         self.discovery_service = discovery_service or WorkDiscoveryService(
             uow,

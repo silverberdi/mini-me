@@ -1096,11 +1096,9 @@ class IntakeService:
                     elif latest_run.stop_outcome == OrchestrationStopOutcome.CANCELLED:
                         new_status = WorkItemStatus.CANCELLED
                         reason_code = "run_cancelled_reconciliation"
-                elif item.status == WorkItemStatus.READY:
-                    change_dir = Path(self.project_root) / project.openspec_path / "changes" / change_name
-                    if not change_dir.exists() or item.readiness_state != ReadinessState.READY:
-                        new_status = WorkItemStatus.BLOCKED
-                        reason_code = "stale_ready_artifacts_missing"
+                elif item.status == WorkItemStatus.READY and item.readiness_state != ReadinessState.READY:
+                    new_status = WorkItemStatus.BLOCKED
+                    reason_code = "stale_ready_artifacts_missing"
                 elif (
                     not is_done
                     and item.status in (WorkItemStatus.RUNNING, WorkItemStatus.PREPARING)
