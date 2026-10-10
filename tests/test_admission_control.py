@@ -82,7 +82,11 @@ def setup_test_project_and_change(
 
     create_isolated_openspec_change(root, change_name=change_name)
 
-    from tests.conftest import setup_managed_repository_fixture
+    from tests.conftest import (
+        attach_local_bare_origin,
+        publish_local_intake_ref,
+        setup_managed_repository_fixture,
+    )
 
     setup_managed_repository_fixture(
         uow=uow,
@@ -92,6 +96,27 @@ def setup_test_project_and_change(
         canonical_repository_identity="github.com/silverberdi/mini-me",
         remote_name="origin",
     )
+    canonical_identity = attach_local_bare_origin(root, uow=uow, project_id="mini-me")
+    published_sha = publish_local_intake_ref(root, change_name)
+
+    from minime.domain.enums import IntakeWorkspaceCreationState, IntakeWorkspacePublicationState
+    from minime.domain.models import IntakeWorkspaceOwnership
+
+    ow = IntakeWorkspaceOwnership(
+        workspace_id=f"ws-{change_name}",
+        project_id="mini-me",
+        item_key=change_name,
+        saga_id=f"saga-{change_name}",
+        change_name=change_name,
+        canonical_workspace_path=str(root),
+        canonical_repository_identity=canonical_identity,
+        base_sha="base123456",
+        creation_state=IntakeWorkspaceCreationState.ACTIVE,
+        publication_state=IntakeWorkspacePublicationState.PUBLISHED,
+        published_ref=f"refs/minime/intake/{change_name}",
+        published_sha=published_sha,
+    )
+    uow.intake_workspace_ownerships.save(ow)
     return project
 
 

@@ -363,6 +363,59 @@ class ManagedWorkspaceGuard:
                     resolved_path=resolved,
                 )
 
+            # Check IntakeWorkspaceOwnership first
+            intake_repo = getattr(self.uow, "intake_workspace_ownerships", None)
+            intake_ownership = None
+            if intake_repo:
+                intake_ownership = intake_repo.get_by_canonical_path(resolved)
+                if not intake_ownership:
+                    active_intake_list = (
+                        intake_repo.list_by_project(request.project_id)
+                        if hasattr(intake_repo, "list_by_project")
+                        else []
+                    )
+                    for iow in active_intake_list:
+                        iw_path = self.resolve_canonical_path(iow.canonical_workspace_path)
+                        if self._is_path_inside(resolved, iw_path) or resolved == iw_path:
+                            intake_ownership = iow
+                            break
+
+            if intake_ownership:
+                if intake_ownership.project_id != request.project_id:
+                    return WorkspaceMutationDecision(
+                        allowed=False,
+                        outcome=ExternalOutcome.FAILURE,
+                        reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
+                        workspace_role=WorkspaceRole.INTAKE_WORKSPACE,
+                        resolved_path=resolved,
+                        provider_detail=(
+                            f"Intake workspace project_id mismatch: expected '{request.project_id}', "
+                            f"found '{intake_ownership.project_id}'."
+                        ),
+                    )
+                from minime.domain.enums import IntakeWorkspaceCreationState
+                if (
+                    intake_ownership.creation_state != IntakeWorkspaceCreationState.ACTIVE
+                    and request.requested_operation != WorkspaceOperation.WORKTREE_DELETE
+                ):
+                    return WorkspaceMutationDecision(
+                        allowed=False,
+                        outcome=ExternalOutcome.FAILURE,
+                        reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
+                        workspace_role=WorkspaceRole.INTAKE_WORKSPACE,
+                        resolved_path=resolved,
+                        provider_detail=(
+                            f"Intake workspace creation_state '{intake_ownership.creation_state.value}' is not ACTIVE."
+                        ),
+                    )
+                return WorkspaceMutationDecision(
+                    allowed=True,
+                    outcome=ExternalOutcome.SUCCESS,
+                    reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                    workspace_role=WorkspaceRole.INTAKE_WORKSPACE,
+                    resolved_path=resolved,
+                )
+
             ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None)
             ownership = None
             if ownership_repo:
@@ -541,7 +594,12 @@ class ManagedWorkspaceGuard:
 
             if (
                 request.requested_operation
-                in (WorkspaceOperation.EDIT, WorkspaceOperation.GIT_COMMIT)
+                in (
+                    WorkspaceOperation.EDIT,
+                    WorkspaceOperation.GIT_COMMIT,
+                    WorkspaceOperation.OPENSPEC_AUTHORING,
+                    WorkspaceOperation.INTAKE_ARTIFACT_UPDATE,
+                )
                 and not is_marker_or_root
             ):
                 return WorkspaceMutationDecision(
@@ -553,7 +611,7 @@ class ManagedWorkspaceGuard:
                     provider_detail=(
                         f"Mutation operation '{request.requested_operation.value}' denied: "
                         f"Target path '{resolved}' is inside managed repository root '{managed_repo_root}'. "
-                        f"All work must be conducted within an ephemeral EXECUTION_WORKTREE."
+                        f"All intake authoring must be conducted within an isolated INTAKE_WORKSPACE."
                     ),
                 )
 

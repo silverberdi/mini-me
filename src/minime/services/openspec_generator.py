@@ -222,13 +222,16 @@ class OpenSpecGenerator:
         overwrite: bool = True,
         project_id: str | None = None,
         uow: Any | None = None,
+        target_workspace_path: str | Path | None = None,
     ) -> Path:
-        """Write the generated OpenSpec change directory and markdown files to disk under authorized MANAGED_REPOSITORY workspace."""
+        """Write the generated OpenSpec change directory and markdown files to disk under an authorized INTAKE_WORKSPACE."""
         eff_uow = uow or self.uow
         if not eff_uow or not project_id:
             raise RuntimeError(
                 "OpenSpec write denied: uow and project_id are mandatory for disk mutation."
             )
+
+        from minime.domain.exceptions import ManagedWorkspaceGuardDeniedError
 
         # Path confinement check on inputs
         if Path(openspec_path).is_absolute() or ".." in Path(openspec_path).parts:
@@ -244,6 +247,16 @@ class OpenSpecGenerator:
                 f"OpenSpec write denied: change_name '{generated.change_name}' fails path confinement check."
             )
 
+        # Reject unsafe generated artifact paths before resolving any workspace.
+        # Path validation is an input-safety invariant, not a consequence of
+        # having a currently authorizable intake workspace.
+        try:
+            manifest = self.build_artifact_manifest(generated)
+        except ValueError as err:
+            raise RuntimeError(
+                f"OpenSpec write denied: spec relative path fails path confinement check: {err}"
+            ) from err
+
         binding_repo = getattr(eff_uow, "project_managed_repository_bindings", None)
         binding = binding_repo.get_by_project_id(project_id) if binding_repo else None
         from minime.services.workspace_guard import is_binding_fully_valid
@@ -252,7 +265,37 @@ class OpenSpecGenerator:
             raise RuntimeError(
                 f"OpenSpec write denied: missing or invalid ProjectManagedRepositoryBinding for project '{project_id}'."
             )
-        base_root = Path(binding.managed_repository_root).resolve()
+
+        # Resolve target base root
+        if target_workspace_path is not None:
+            base_root = Path(target_workspace_path).resolve()
+        else:
+            intake_repo = getattr(eff_uow, "intake_workspace_ownerships", None)
+            active_ow = intake_repo.get_active_by_item_key(project_id, generated.change_name) if intake_repo else None
+            if not active_ow and intake_repo:
+                # search active list by change name
+                active_list = intake_repo.list_active()
+                for ow in active_list:
+                    if ow.project_id == project_id and ow.change_name == generated.change_name:
+                        active_ow = ow
+                        break
+            if active_ow:
+                base_root = Path(active_ow.canonical_workspace_path).resolve()
+            else:
+                raise ManagedWorkspaceGuardDeniedError(
+                    "OpenSpec write denied: no active durable IntakeWorkspaceOwnership "
+                    f"exists for project '{project_id}' and change '{generated.change_name}'. "
+                    "Workspace creation belongs exclusively to IntakeService."
+                )
+
+        # Reject direct writes into managed repository root
+        managed_root_resolved = Path(binding.managed_repository_root).resolve()
+        if base_root == managed_root_resolved:
+            raise ManagedWorkspaceGuardDeniedError(
+                f"OpenSpec write denied: Direct writes to managed_repository_root '{managed_root_resolved}' "
+                f"are strictly forbidden for intake authoring."
+            )
+
         openspec_root = (base_root / openspec_path).resolve()
 
         # Construct final intended change directory and verify containment
@@ -265,7 +308,6 @@ class OpenSpecGenerator:
                 f"OpenSpec write denied: change directory '{target_dir}' escapes OpenSpec root '{openspec_root}'."
             )
 
-        manifest = self.build_artifact_manifest(generated)
         contents = self._build_artifact_contents(generated)
         if set(contents) != set(manifest.files):
             raise RuntimeError("OpenSpec manifest/writer content mismatch")
@@ -338,11 +380,11 @@ class OpenSpecGenerator:
             req = WorkspaceMutationRequest(
                 project_id=project_id,
                 target_path=str(resolved_dest),
-                requested_operation=WorkspaceOperation.OPENSPEC_SYNC,
+                requested_operation=WorkspaceOperation.OPENSPEC_AUTHORING,
             )
             decision = guard.evaluate_mutation(req)
             if not decision.allowed or decision.workspace_role == WorkspaceRole.RUNTIME:
-                raise RuntimeError(
+                raise ManagedWorkspaceGuardDeniedError(
                     f"ManagedWorkspaceGuard denied OpenSpec generation write to '{target_path}': {decision.provider_detail or decision.reason_code.value}"
                 )
 

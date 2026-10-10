@@ -8,9 +8,8 @@ import inspect
 import json
 import logging
 import os
-import shutil
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -71,7 +70,7 @@ class WorktreeManager:
         operation: WorkspaceOperation,
         require_created_ownership: bool = False,
         job_id: str | None = None,
-    ) -> None:
+    ) -> bool:
         if not project_id:
             raise ValueError(
                 f"project_id is mandatory for managed workspace mutation '{operation.value}'."
@@ -320,6 +319,96 @@ class WorktreeManager:
         if not success:
             raise RuntimeError(stderr.decode().strip() or stdout.decode().strip())
         return stdout.decode().strip()
+
+    async def _materialize_verified_published_intake_artifacts(
+        self,
+        *,
+        destination_worktree: Path,
+        project_id: str,
+        change_name: str,
+        job_id: str,
+    ) -> None:
+        """Materialize only the verified remote intake tree into an execution worktree."""
+        intake_repo = getattr(self.uow, "intake_workspace_ownerships", None)
+        ownership = intake_repo.get_by_item_key(project_id, change_name) if intake_repo else None
+        if not ownership:
+            # This manager also serves historical/non-intake worktree callers.
+            # They receive no OpenSpec materialization; scheduler admission is
+            # the authority that requires a published intake identity.
+            return False
+        if not ownership.published_ref or not ownership.published_sha:
+            raise RuntimeError("Execution handoff denied: no published intake artifact identity exists.")
+
+        from minime.domain.enums import IntakeWorkspacePublicationState
+        from minime.services.workspace_guard import is_binding_fully_valid
+
+        if ownership.publication_state != IntakeWorkspacePublicationState.PUBLISHED:
+            raise RuntimeError("Execution handoff denied: intake artifacts are not durably published.")
+        binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
+        binding = binding_repo.get_by_project_id(project_id) if binding_repo else None
+        if not is_binding_fully_valid(binding):
+            raise RuntimeError("Execution handoff denied: managed repository binding is invalid.")
+        expected_ref = f"refs/minime/intake/{change_name}"
+        if ownership.published_ref != expected_ref:
+            raise RuntimeError("Execution handoff denied: published ref does not match change identity.")
+
+        observed = await self._git(
+            ["ls-remote", binding.remote_name, ownership.published_ref],
+            cwd=self.project_root,
+            job_id=job_id,
+            project_id=project_id,
+            operation_type="published_intake_ref_observe",
+            managed_worktree_path=destination_worktree,
+        )
+        observed_parts = observed.split()
+        if len(observed_parts) < 2 or observed_parts[0] != ownership.published_sha:
+            raise RuntimeError("Execution handoff denied: published intake ref drifted or is unobservable.")
+
+        await self._git(
+            ["fetch", "--no-tags", binding.remote_name, ownership.published_ref],
+            cwd=self.project_root,
+            job_id=job_id,
+            project_id=project_id,
+            operation_type="published_intake_ref_fetch",
+            managed_worktree_path=destination_worktree,
+        )
+        fetched_sha = await self._git(["rev-parse", "FETCH_HEAD"], cwd=self.project_root)
+        if fetched_sha != ownership.published_sha:
+            raise RuntimeError("Execution handoff denied: fetched intake commit differs from persisted SHA.")
+
+        prefix = f"openspec/changes/{change_name}/"
+        tree = await self._git(
+            ["ls-tree", "-r", "--name-only", ownership.published_sha, "--", prefix],
+            cwd=self.project_root,
+        )
+        relative_paths = [line[len(prefix):] for line in tree.splitlines() if line.startswith(prefix)]
+        required = {"proposal.md", "tasks.md", "design.md"}
+        actual = set(relative_paths)
+        if (
+            not required.issubset(actual)
+            or not any(path.startswith("specs/") and path.endswith(".md") for path in actual)
+            or any(
+                not path
+                or PurePosixPath(path).is_absolute()
+                or ".." in PurePosixPath(path).parts
+                or (path not in required and not (path.startswith("specs/") and path.endswith(".md")))
+                for path in actual
+            )
+        ):
+            raise RuntimeError("Execution handoff denied: published intake artifact manifest is invalid.")
+
+        destination = destination_worktree / "openspec" / "changes" / change_name
+        if destination.exists():
+            raise RuntimeError("Execution handoff denied: destination OpenSpec change already exists.")
+        for relative_path in relative_paths:
+            content = await self._git(
+                ["show", f"{ownership.published_sha}:{prefix}{relative_path}"],
+                cwd=self.project_root,
+            )
+            artifact_path = destination / relative_path
+            artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            artifact_path.write_text(content, encoding="utf-8")
+        return True
 
     def _resolve_real_run_id(
         self,
@@ -1463,48 +1552,12 @@ class WorktreeManager:
         )
         self._finalize_created_ownership(ownership)
 
-        # Copy active OpenSpec change directory into isolated worktree if present in project_root
-        raw_source_change_dir = self.project_root / "openspec" / "changes" / change_name
-        if raw_source_change_dir.exists():
-            source_change_dir = raw_source_change_dir.resolve()
-            openspec_changes_root = (self.project_root / "openspec" / "changes").resolve()
-            if not (
-                source_change_dir == openspec_changes_root
-                or openspec_changes_root in source_change_dir.parents
-            ):
-                raise RuntimeError(
-                    f"OpenSpec source change directory '{source_change_dir}' escapes '{openspec_changes_root}'."
-                )
-
-            dest_openspec_root = path.resolve() / "openspec"
-            dest_change_dir = dest_openspec_root / "changes" / change_name
-            if (
-                os.path.islink(dest_openspec_root)
-                or os.path.islink(dest_openspec_root / "changes")
-                or os.path.islink(dest_change_dir)
-            ):
-                raise RuntimeError(
-                    f"Symlink escape detected in OpenSpec destination path under '{path}'."
-                )
-
-            from minime.domain.models import WorkspaceMutationRequest
-            from minime.services.workspace_guard import ManagedWorkspaceGuard
-
-            guard = self.workspace_guard or ManagedWorkspaceGuard(self.uow)
-            dest_req = WorkspaceMutationRequest(
-                project_id=project_id or eff_project_id,
-                target_path=str(dest_change_dir),
-                requested_operation=WorkspaceOperation.EDIT,
-            )
-            dest_decision = guard.evaluate_mutation(dest_req)
-            if not dest_decision.allowed:
-                raise RuntimeError(
-                    f"ManagedWorkspaceGuard denied OpenSpec propagation to '{dest_change_dir}': {dest_decision.provider_detail}"
-                )
-
-            if not dest_change_dir.exists():
-                dest_change_dir.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copytree(source_change_dir, dest_change_dir)
+        await self._materialize_verified_published_intake_artifacts(
+            destination_worktree=path,
+            project_id=eff_project_id,
+            change_name=change_name,
+            job_id=job_id,
+        )
 
         return WorktreeInfo(path=path, branch_name=branch_name, base_sha=base_sha)
 

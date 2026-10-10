@@ -39,6 +39,7 @@ from minime.domain.models import (
     ExternalActionAttempt,
     ExternalActionResult,
     GitOperation,
+    IntakeWorkspaceOwnership,
     IntegrityAudit,
     Job,
     JobAttempt,
@@ -176,6 +177,50 @@ class OrchestrationWorktreeOwnershipRepositoryInterface(ABC):
 
     @abstractmethod
     def delete(self, worktree_id: str) -> None: ...
+
+
+class IntakeWorkspaceOwnershipRepositoryInterface(ABC):
+    @abstractmethod
+    def save(self, ownership: IntakeWorkspaceOwnership) -> None: ...
+
+    @abstractmethod
+    def get_by_id(self, workspace_id: str) -> IntakeWorkspaceOwnership | None: ...
+
+    @abstractmethod
+    def get_by_canonical_path(
+        self, canonical_workspace_path: str
+    ) -> IntakeWorkspaceOwnership | None: ...
+
+    @abstractmethod
+    def get_by_item_key(
+        self, project_id: str, item_key: str
+    ) -> IntakeWorkspaceOwnership | None: ...
+
+    @abstractmethod
+    def get_by_saga_id(self, saga_id: str) -> IntakeWorkspaceOwnership | None: ...
+
+    @abstractmethod
+    def get_active_by_item_key(
+        self, project_id: str, item_key: str
+    ) -> IntakeWorkspaceOwnership | None: ...
+
+    @abstractmethod
+    def get_active_by_canonical_path(
+        self, canonical_workspace_path: str
+    ) -> IntakeWorkspaceOwnership | None: ...
+
+    @abstractmethod
+    def get_active_by_saga_id(self, saga_id: str) -> IntakeWorkspaceOwnership | None: ...
+
+    @abstractmethod
+    def list_by_project(self, project_id: str) -> list[IntakeWorkspaceOwnership]: ...
+
+    @abstractmethod
+    def list_active(self) -> list[IntakeWorkspaceOwnership]: ...
+
+    @abstractmethod
+    def delete(self, workspace_id: str) -> None: ...
+
 
 
 class EventRepositoryInterface(ABC):
@@ -816,6 +861,7 @@ class PersistenceUnitOfWork(ABC):
     classification_snapshots: TaskClassificationSnapshotRepositoryInterface
     project_managed_repository_bindings: ProjectManagedRepositoryBindingRepositoryInterface
     orchestration_worktree_ownerships: OrchestrationWorktreeOwnershipRepositoryInterface
+    intake_workspace_ownerships: IntakeWorkspaceOwnershipRepositoryInterface
     claims: RecoveryClaimRepositoryInterface
     recovery_decisions: RecoveryDecisionRepositoryInterface
     external_action_attempts: ExternalActionAttemptRepositoryInterface

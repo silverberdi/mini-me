@@ -6,7 +6,11 @@ from datetime import timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from tests.conftest import InMemoryPersistenceUnitOfWork, setup_managed_repository_fixture
+from tests.conftest import (
+    InMemoryPersistenceUnitOfWork,
+    attach_local_bare_origin,
+    setup_managed_repository_fixture,
+)
 
 from minime.domain.enums import (
     AdmissionDecision,
@@ -92,6 +96,7 @@ def test_auto_prepare_on_backlog_creation_happy_path(
         repo_dir / ".minime" / "worktrees",
         canonical_repository_identity="github.com/silverberdi/auto-repo",
     )
+    attach_local_bare_origin(repo_dir, uow=in_memory_uow, project_id="auto-project")
     openspec_dir = repo_dir / "openspec"
     openspec_dir.mkdir(exist_ok=True)
 
@@ -164,11 +169,13 @@ def test_auto_prepare_on_backlog_creation_happy_path(
     assert item.github_issue_number == 101
     assert item.openspec_change_name is not None
 
-    # 2. OpenSpec change files must exist on disk
-    change_dir = openspec_dir / "changes" / item.openspec_change_name
-    assert (change_dir / "proposal.md").exists()
-    assert (change_dir / "tasks.md").exists()
-    assert (change_dir / "design.md").exists()
+    # 2. OpenSpec change files must exist in isolated intake workspace
+    ow = in_memory_uow.intake_workspace_ownerships.get_active_by_item_key("auto-project", item.item_key)
+    assert ow is not None
+    ws_change_dir = Path(ow.canonical_workspace_path) / "openspec" / "changes" / item.openspec_change_name
+    assert (ws_change_dir / "proposal.md").exists()
+    assert (ws_change_dir / "tasks.md").exists()
+    assert (ws_change_dir / "design.md").exists()
 
     # 3. Durable ProjectBinding must exist
     binding = in_memory_uow.bindings.get_by_project_and_change(
@@ -191,6 +198,7 @@ def test_auto_prepare_needs_human_on_ambiguity_and_resume(
         repo_dir / ".minime" / "worktrees",
         canonical_repository_identity="github.com/silverberdi/ambiguous-repo",
     )
+    attach_local_bare_origin(repo_dir, uow=in_memory_uow, project_id="ambiguous-project")
     openspec_dir = repo_dir / "openspec"
     openspec_dir.mkdir(exist_ok=True)
 

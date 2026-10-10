@@ -6,8 +6,10 @@ from unittest.mock import MagicMock
 
 from tests.conftest import (
     InMemoryPersistenceUnitOfWork,
+    attach_local_bare_origin,
     create_isolated_openspec_change,
     init_git_repo,
+    publish_local_intake_ref,
 )
 
 from minime.adapters.github import GitHubAdapter
@@ -16,6 +18,8 @@ from minime.domain.enums import (
     ChangeStatus,
     ExternalOutcome,
     ExternalReasonCode,
+    IntakeWorkspaceCreationState,
+    IntakeWorkspacePublicationState,
     OrchestrationStage,
     ProviderHealthStatus,
     RetrySafety,
@@ -23,6 +27,7 @@ from minime.domain.enums import (
 from minime.domain.models import (
     Change,
     ExternalActionResult,
+    IntakeWorkspaceOwnership,
     Project,
     ProjectBinding,
     ProjectManagedRepositoryBinding,
@@ -101,7 +106,29 @@ def test_autonomous_admission_and_run_creation(
     )
     (tmp_path / ".minime" / "worktrees").mkdir(parents=True, exist_ok=True)
     in_memory_uow.project_managed_repository_bindings.save(mb)
+    attach_local_bare_origin(tmp_path, uow=in_memory_uow, project_id="mini-me")
     create_isolated_openspec_change(tmp_path, change_name="016-autonomous-queue-work-selection")
+    published_sha = publish_local_intake_ref(tmp_path, "016-autonomous-queue-work-selection")
+    managed_binding = in_memory_uow.project_managed_repository_bindings.get_by_project_id(
+        "mini-me"
+    )
+    in_memory_uow.intake_workspace_ownerships.save(
+        IntakeWorkspaceOwnership(
+            workspace_id="ws-016-autonomous-queue-work-selection",
+            project_id="mini-me",
+            item_key="016-autonomous-queue-work-selection",
+            saga_id="saga-016-autonomous-queue-work-selection",
+            change_name="016-autonomous-queue-work-selection",
+            canonical_workspace_path=str(tmp_path),
+            canonical_repository_identity=managed_binding.canonical_repository_identity,
+            base_sha=published_sha,
+            head_sha=published_sha,
+            creation_state=IntakeWorkspaceCreationState.ACTIVE,
+            publication_state=IntakeWorkspacePublicationState.PUBLISHED,
+            published_ref="refs/minime/intake/016-autonomous-queue-work-selection",
+            published_sha=published_sha,
+        )
+    )
 
     mock_gh = MagicMock(spec=GitHubAdapter)
     mock_gh.validate_issue_binding.return_value = ExternalActionResult(

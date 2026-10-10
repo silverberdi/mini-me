@@ -33,3 +33,12 @@ class StaleClaimError(LifecycleTransitionError):
 
 class MissingRecoveryClaimContextError(StaleClaimError):
     """Raised when a protected recovery/continuation primitive is invoked without a valid RecoveryClaimContext."""
+
+
+class ManagedWorkspaceGuardDeniedError(DomainError):
+    """Raised when ManagedWorkspaceGuard rejects an unauthorized filesystem or Git operation."""
+
+
+class UnsafeIntakeWorkspaceStateError(DomainError):
+    """Raised when an intake workspace exhibits unsafe, dirty, or unmanifested file states."""
+

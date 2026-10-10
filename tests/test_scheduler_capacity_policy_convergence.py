@@ -21,6 +21,7 @@ from tests.conftest import (
     InMemoryPersistenceUnitOfWork,
     create_isolated_openspec_change,
     init_git_repo,
+    publish_verified_intake_workspace,
 )
 
 from minime.adapters.github import GitHubAdapter
@@ -130,6 +131,7 @@ def setup_test_environment(
         uow.provider_health._store.clear()
 
     create_isolated_openspec_change(root, change_name=change_name)
+    publish_verified_intake_workspace(uow, project, root, change_name)
 
     mock_gh = MagicMock(spec=GitHubAdapter)
     mock_gh.validate_issue_binding.return_value = ExternalActionResult(

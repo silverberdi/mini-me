@@ -19,6 +19,7 @@ from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
     Project,
     ProjectBinding,
+    PublishedIntakeArtifact,
     WorkQueueItem,
     utc_now,
 )
@@ -56,6 +57,44 @@ def extract_priority_from_labels(labels: list[Any] | None) -> QueuePriority:
             return QueuePriority.NORMAL
 
     return QueuePriority.NORMAL
+
+
+class PublishedIntakeArtifactSource:
+    """Discovers published intake artifact refs from durable DB intake workspace ownerships."""
+
+    def __init__(self, uow: PersistenceUnitOfWork):
+        self.uow = uow
+
+    def discover_published_artifacts(
+        self, project_id: str | None = None
+    ) -> list[PublishedIntakeArtifact]:
+        from minime.domain.enums import IntakeWorkspacePublicationState
+
+        intake_repo = getattr(self.uow, "intake_workspace_ownerships", None)
+        if not intake_repo:
+            return []
+
+        all_ownerships = intake_repo.list_active()
+        results: list[PublishedIntakeArtifact] = []
+        for ow in all_ownerships:
+            if project_id and ow.project_id != project_id:
+                continue
+            if (
+                ow.publication_state == IntakeWorkspacePublicationState.PUBLISHED
+                and ow.published_ref
+                and ow.published_sha
+            ):
+                results.append(
+                    PublishedIntakeArtifact(
+                        project_id=ow.project_id,
+                        change_name=ow.change_name,
+                        published_ref=ow.published_ref,
+                        published_sha=ow.published_sha,
+                        canonical_repository_identity=ow.canonical_repository_identity,
+                    )
+                )
+        return results
+
 
 
 class WorkDiscoveryService:

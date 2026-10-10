@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from tests.conftest import (
     InMemoryPersistenceUnitOfWork,
     ReadinessGitHubStub,
+    attach_local_bare_origin,
     setup_managed_repository_fixture,
 )
 
@@ -102,6 +103,7 @@ def test_api_backlog_crud_and_lifecycle(
 ) -> None:
     repo_dir = tmp_path / "api-repo"
     setup_managed_repository_fixture(in_memory_uow, "api-project", repo_dir, tmp_path / "worktrees")
+    attach_local_bare_origin(repo_dir, uow=in_memory_uow, project_id="api-project")
 
     github_stub = ReadinessGitHubStub()
     app.dependency_overrides[get_uow] = lambda: in_memory_uow

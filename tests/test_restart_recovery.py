@@ -260,6 +260,7 @@ async def test_worktree_add_records_managed_worktree_path_not_cwd(in_memory_uow,
         tmp_path,
         tmp_path / ".minime" / "worktrees",
         canonical_repository_identity="github.com/silverberdi/mini-me",
+        local_remote=False,
     )
     from minime.services.worktree_manager import WorktreeManager
 
@@ -364,6 +365,7 @@ async def test_worktree_remove_records_managed_worktree_path(in_memory_uow, tmp_
         tmp_path,
         tmp_path / ".minime" / "worktrees",
         canonical_repository_identity="github.com/silverberdi/mini-me",
+        local_remote=False,
     )
 
     from minime.services.worktree_manager import WorktreeManager

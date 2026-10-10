@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +18,9 @@ from minime.domain.enums import (
     ExternalActionStatus,
     ExternalActionType,
     ExternalOutcome,
+    ExternalReasonCode,
+    IntakeWorkspaceCreationState,
+    IntakeWorkspacePublicationState,
     OrchestrationStage,
     OrchestrationStopOutcome,
     QueuePriority,
@@ -21,12 +29,18 @@ from minime.domain.enums import (
     SagaType,
     WorkItemStatus,
 )
+from minime.domain.exceptions import (
+    ManagedWorkspaceGuardDeniedError,
+    UnsafeIntakeWorkspaceStateError,
+)
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
     BacklogItem,
     Change,
+    DurableSaga,
     Event,
     HumanAnswerRecord,
+    IntakeWorkspaceOwnership,
     Project,
     ProjectBinding,
     RecoveryClaimContext,
@@ -35,6 +49,7 @@ from minime.domain.models import (
     WorkItemPrepareResult,
     WorkItemUpdateInput,
     WorkQueueItem,
+    generate_uuid,
     utc_now,
 )
 from minime.logging import get_logger, set_correlation_context
@@ -48,9 +63,12 @@ logger = get_logger("services.intake")
 INTAKE_PHASES = [
     "INTAKE_CREATED",
     "CONTEXT_CHECKED",
+    "WORKSPACE_RESERVED",
+    "WORKSPACE_ACTIVE",
     "OPENSPEC_AUTHORED",
     "ISSUE_BOUND",
     "PROJECT_ITEM_BOUND",
+    "ARTIFACTS_PUBLISHED",
     "READINESS_EVALUATED",
     "READY",
 ]
@@ -66,6 +84,23 @@ def _has_passed_intake_phase(current_phase: str, target_phase: str) -> bool:
     except ValueError:
         targ_idx = 0
     return curr_idx >= targ_idx
+
+
+def _git_porcelain_path(line: str) -> str | None:
+    """Extract the filesystem path from a `git status --porcelain` v1 line.
+
+    Handles the common ``XY PATH`` form and renames (``XY OLD -> NEW``) without
+    relying on the porcelain v2 format.
+    """
+    if len(line) < 4:
+        return None
+    rest = line[3:]
+    if " -> " in rest:
+        rest = rest.split(" -> ", 1)[1]
+    rest = rest.strip()
+    if len(rest) >= 2 and rest[0] == '"' and rest[-1] == '"':
+        rest = rest[1:-1].replace('\\"', '"')
+    return rest
 
 
 def extract_canonical_archived_change_name(dir_name: str) -> str:
@@ -419,6 +454,20 @@ class IntakeService:
         if not _has_passed_intake_phase(saga.current_phase, "CONTEXT_CHECKED"):
             self.saga_engine.advance_phase(saga, "CONTEXT_CHECKED", claim_context=claim_context)
 
+        # Reserve and activate intake workspace
+        if not _has_passed_intake_phase(saga.current_phase, "WORKSPACE_RESERVED"):
+            workspace = self._reserve_intake_workspace(project, item, saga)
+            self.saga_engine.advance_phase(saga, "WORKSPACE_RESERVED", claim_context=claim_context)
+        else:
+            intake_repo = getattr(self.uow, "intake_workspace_ownerships", None)
+            workspace = intake_repo.get_active_by_item_key(project_id, item_key) if intake_repo else None
+            if not workspace:
+                workspace = self._reserve_intake_workspace(project, item, saga)
+
+        if not _has_passed_intake_phase(saga.current_phase, "WORKSPACE_ACTIVE"):
+            self._activate_intake_workspace(workspace, project, claim_context=claim_context)
+            self.saga_engine.advance_phase(saga, "WORKSPACE_ACTIVE", claim_context=claim_context)
+
         # 1. OpenSpec Authored Phase
         author_action_key = f"openspec_author:{project_id}:{change_name}"
         if not _has_passed_intake_phase(saga.current_phase, "OPENSPEC_AUTHORED"):
@@ -472,7 +521,10 @@ class IntakeService:
                     from minime.domain.models import ExternalActionResult
 
                     change_dir = (
-                        self.project_root / project.openspec_path / "changes" / change_name
+                        Path(workspace.canonical_workspace_path)
+                        / project.openspec_path
+                        / "changes"
+                        / change_name
                     )
                     proposal_file = change_dir / "proposal.md"
                     tasks_file = change_dir / "tasks.md"
@@ -481,7 +533,7 @@ class IntakeService:
                         return ExternalActionResult(
                             outcome=ExternalOutcome.SUCCESS,
                             source_adapter="filesystem",
-                            reason_code="OBSERVED_ON_DISK",
+                            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
                             data={"change_name": change_name, "path": str(change_dir)},
                             external_id=change_name,
                         )
@@ -500,7 +552,9 @@ class IntakeService:
                         overwrite=True,
                         project_id=project_id,
                         uow=self.uow,
+                        target_workspace_path=workspace.canonical_workspace_path,
                     )
+                    self._commit_intake_artifacts(workspace, generated, project)
                     return ExternalActionResult(
                         outcome=ExternalOutcome.SUCCESS,
                         source_adapter="filesystem",
@@ -777,6 +831,41 @@ class IntakeService:
             self.uow.bindings.save(binding)
         self.uow.commit()
 
+        # 5.5 Artifact Publication Phase (Compare-And-Swap)
+        if not _has_passed_intake_phase(saga.current_phase, "ARTIFACTS_PUBLISHED"):
+            try:
+                published_sha = self._publish_intake_artifacts_cas(workspace, project)
+                self.saga_engine.advance_phase(
+                    saga,
+                    "ARTIFACTS_PUBLISHED",
+                    evidence_references={"published_sha": published_sha},
+                    claim_context=claim_context,
+                )
+            except Exception as exc:
+                logger.error("Artifact publication failed for '%s': %s", change_name, exc)
+                authority = LifecycleTransitionAuthority(self.uow)
+                if item.status != WorkItemStatus.NEEDS_HUMAN:
+                    authority.transition_backlog_item(
+                        project_id=project_id,
+                        item_key=item_key,
+                        expected_from_state=item.status,
+                        to_state=WorkItemStatus.NEEDS_HUMAN,
+                        reason_code="conflicting_intake_publication_ref",
+                        actor=operator_email,
+                    )
+                self.saga_engine.block_saga(
+                    saga,
+                    blocking_reason=f"Artifact publication failed: {exc}",
+                    claim_context=claim_context,
+                )
+                self.uow.commit()
+                return WorkItemPrepareResult(
+                    item=item,
+                    openspec_change_name=change_name,
+                    readiness_state=ReadinessState.NOT_READY,
+                    unmet_readiness_reasons=[f"Artifact publication failed: {exc}"],
+                )
+
         # 6. Evaluate Definition of Ready (DoR)
         readiness_eval = self.readiness_service.evaluate_and_persist_change_readiness(
             project_id=project_id,
@@ -784,6 +873,7 @@ class IntakeService:
             project_root=str(self.project_root),
             github_repo=project.repository,
             github_issue=issue_number,
+            require_published_ref=True,
         )
 
         final_status = WorkItemStatus.READY if readiness_eval.is_ready else WorkItemStatus.PREPARING
@@ -1397,3 +1487,915 @@ class IntakeService:
                     )
 
         return prepared_items
+
+    def _reserve_intake_workspace(
+        self, project: Project, item: BacklogItem, saga: DurableSaga
+    ) -> IntakeWorkspaceOwnership:
+        intake_repo = getattr(self.uow, "intake_workspace_ownerships", None)
+        change_name = item.openspec_change_name or slugify(item.item_key)
+        if intake_repo:
+            existing = intake_repo.get_active_by_item_key(project.project_id, item.item_key)
+            if existing:
+                return existing
+
+        binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
+        binding = binding_repo.get_by_project_id(project.project_id) if binding_repo else None
+        wt_parent = binding.worktree_parent_dir if binding else str(self.project_root / ".minime" / "worktrees")
+        managed_root = binding.managed_repository_root if binding else str(self.project_root)
+        repo_identity = binding.canonical_repository_identity if binding else project.repository
+
+        workspace_id = generate_uuid()
+        canonical_workspace_path = os.path.realpath(
+            os.path.join(wt_parent, "intake-workspaces", project.project_id, workspace_id)
+        )
+
+        base_sha = "main"
+        if os.path.exists(managed_root):
+            try:
+                res = subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=managed_root,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if res.returncode == 0 and res.stdout.strip():
+                    base_sha = res.stdout.strip()
+            except Exception:
+                pass
+
+        ownership = IntakeWorkspaceOwnership(
+            workspace_id=workspace_id,
+            project_id=project.project_id,
+            item_key=item.item_key,
+            saga_id=saga.id,
+            change_name=change_name,
+            canonical_workspace_path=canonical_workspace_path,
+            canonical_repository_identity=repo_identity,
+            base_sha=base_sha,
+            creation_state=IntakeWorkspaceCreationState.RESERVED,
+            publication_state=IntakeWorkspacePublicationState.UNPUBLISHED,
+        )
+
+        if intake_repo:
+            intake_repo.save(ownership)
+            self.uow.commit()
+
+        return ownership
+
+    def _activate_intake_workspace(
+        self,
+        ownership: IntakeWorkspaceOwnership,
+        project: Project,
+        claim_context: RecoveryClaimContext | None = None,
+    ) -> None:
+        binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
+        binding = binding_repo.get_by_project_id(project.project_id) if binding_repo else None
+        managed_root = binding.managed_repository_root if binding else str(self.project_root)
+
+        ws_path = os.path.realpath(ownership.canonical_workspace_path)
+        worktree_parent = (
+            binding.worktree_parent_dir
+            if binding
+            else str(Path(managed_root) / ".minime" / "worktrees")
+        )
+        expected_parent = os.path.realpath(
+            os.path.join(worktree_parent, "intake-workspaces", project.project_id)
+        )
+        if os.path.commonpath([ws_path, expected_parent]) != expected_parent:
+            raise UnsafeIntakeWorkspaceStateError(
+                "INTAKE_WORKSPACE_PATH_OUTSIDE_PARENT"
+            )
+
+        def fail_closed(reason: str, *, detail: str | None = None) -> None:
+            if detail:
+                logger.error("Intake workspace activation failed [%s]: %s", reason, detail)
+            ownership.creation_state = IntakeWorkspaceCreationState.FAILED_PENDING_CLEANUP
+            intake_repo = getattr(self.uow, "intake_workspace_ownerships", None)
+            if intake_repo:
+                intake_repo.save(ownership)
+                self.uow.commit()
+            raise UnsafeIntakeWorkspaceStateError(reason)
+
+        try:
+            branch_name = f"intake/{ownership.change_name}"
+            listed = subprocess.run(
+                ["git", "worktree", "list", "--porcelain"],
+                cwd=managed_root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if listed.returncode != 0:
+                fail_closed("Unable to authoritatively enumerate Git worktrees for intake activation.")
+            worktree_paths = {
+                os.path.realpath(line.split(maxsplit=1)[1])
+                for line in listed.stdout.splitlines()
+                if line.startswith("worktree ")
+            }
+            if ws_path not in worktree_paths:
+                b_check = subprocess.run(
+                    ["git", "rev-parse", "--verify", branch_name],
+                    cwd=managed_root,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                cmd = (
+                    ["git", "worktree", "add", ws_path, branch_name]
+                    if b_check.returncode == 0
+                    else ["git", "worktree", "add", "-b", branch_name, ws_path, ownership.base_sha]
+                )
+                created = subprocess.run(
+                    cmd,
+                    cwd=managed_root,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if created.returncode != 0:
+                    fail_closed(
+                        "INTAKE_WORKTREE_ADD_FAILED",
+                        detail=created.stderr.strip(),
+                    )
+                listed = subprocess.run(
+                    ["git", "worktree", "list", "--porcelain"],
+                    cwd=managed_root,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                worktree_paths = {
+                    os.path.realpath(line.split(maxsplit=1)[1])
+                    for line in listed.stdout.splitlines()
+                    if line.startswith("worktree ")
+                }
+                if listed.returncode != 0 or ws_path not in worktree_paths:
+                    fail_closed("Git did not corroborate the newly created intake worktree.")
+
+            is_git_worktree = subprocess.run(
+                ["git", "rev-parse", "--is-inside-work-tree"],
+                cwd=ws_path,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if is_git_worktree.returncode != 0 or is_git_worktree.stdout.strip() != "true":
+                fail_closed("Intake workspace is not a valid Git worktree.")
+        except UnsafeIntakeWorkspaceStateError:
+            raise
+        except Exception as exc:
+            fail_closed("INTAKE_WORKTREE_ACTIVATION_FAILED", detail=str(exc))
+
+        marker_path = os.path.join(ws_path, ".minime_intake_workspace")
+        marker_data = {
+            "workspace_id": ownership.workspace_id,
+            "project_id": ownership.project_id,
+            "item_key": ownership.item_key,
+            "saga_id": ownership.saga_id,
+            "change_name": ownership.change_name,
+            "canonical_repository_identity": ownership.canonical_repository_identity,
+        }
+        with open(marker_path, "w", encoding="utf-8") as f:
+            json.dump(marker_data, f, indent=2)
+
+        ownership.creation_state = IntakeWorkspaceCreationState.ACTIVE
+        intake_repo = getattr(self.uow, "intake_workspace_ownerships", None)
+        if intake_repo:
+            intake_repo.save(ownership)
+            self.uow.commit()
+
+    def _compute_artifact_sha256(self, generated: Any) -> dict[str, str]:
+        """Compute deterministic SHA-256 fingerprints for the approved artifact manifest."""
+        contents = {
+            "proposal.md": generated.proposal_content,
+            "tasks.md": generated.tasks_content,
+            **generated.specs,
+        }
+        if generated.design_content:
+            contents["design.md"] = generated.design_content
+        return {
+            rel_path: hashlib.sha256(content.encode("utf-8")).hexdigest()
+            for rel_path, content in contents.items()
+        }
+
+    def _rev_parse_head(self, ws_path: str) -> str:
+        """Resolve HEAD authoritatively, raising on failure (never falls back to base_sha)."""
+        head_res = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=ws_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if head_res.returncode != 0 or not head_res.stdout.strip():
+            raise UnsafeIntakeWorkspaceStateError(
+                f"Git rev-parse HEAD failed in intake workspace '{ws_path}': "
+                f"{(head_res.stderr or '').strip()}"
+            )
+        return head_res.stdout.strip()
+
+    def _verify_committed_artifacts(
+        self,
+        ws_path: str,
+        head_sha: str,
+        change_dir_rel: str,
+        expected_paths: set[str],
+        manifest_files: tuple[str, ...],
+        expected_hashes: dict[str, str],
+    ) -> None:
+        """Fail closed unless the committed tree matches the approved manifest exactly."""
+        tree_res = subprocess.run(
+            ["git", "ls-tree", "-r", "--name-only", head_sha, "--", change_dir_rel],
+            cwd=ws_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if tree_res.returncode != 0:
+            raise UnsafeIntakeWorkspaceStateError(
+                f"Committed tree inspection failed for commit '{head_sha}': "
+                f"{tree_res.stderr.strip()}"
+            )
+        committed_paths = {p.strip() for p in tree_res.stdout.splitlines() if p.strip()}
+        if committed_paths != expected_paths:
+            raise UnsafeIntakeWorkspaceStateError(
+                f"Committed tree for '{head_sha}' does not match the approved manifest: "
+                f"expected={sorted(expected_paths)}, got={sorted(committed_paths)}."
+            )
+
+        for rel_file in manifest_files:
+            blob_path = f"{head_sha}:{change_dir_rel}/{rel_file}"
+            cat_res = subprocess.run(
+                ["git", "cat-file", "blob", blob_path],
+                cwd=ws_path,
+                capture_output=True,
+                text=False,
+                check=False,
+            )
+            if cat_res.returncode != 0:
+                raise UnsafeIntakeWorkspaceStateError(
+                    f"Committed artifact '{blob_path}' is unreadable: "
+                    f"{(cat_res.stderr or b'').decode(errors='replace').strip()}"
+                )
+            actual_hash = hashlib.sha256(cat_res.stdout).hexdigest()
+            if actual_hash != expected_hashes[rel_file]:
+                raise UnsafeIntakeWorkspaceStateError(
+                    f"Committed artifact '{rel_file}' SHA-256 mismatch "
+                    f"(expected {expected_hashes[rel_file]}, got {actual_hash})."
+                )
+
+        clean_res = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=ws_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if clean_res.returncode != 0:
+            raise UnsafeIntakeWorkspaceStateError(
+                f"Post-commit git status failed in intake workspace '{ws_path}': "
+                f"{clean_res.stderr.strip()}"
+            )
+        remaining = {_git_porcelain_path(line) for line in clean_res.stdout.splitlines()}
+        remaining.discard(None)
+        unexpected = remaining - {".minime_intake_workspace"}
+        if unexpected:
+            raise UnsafeIntakeWorkspaceStateError(
+                f"Intake workspace '{ws_path}' is not clean after commit: unexpected={sorted(unexpected)}."
+            )
+
+    def _commit_intake_artifacts(
+        self,
+        ownership: IntakeWorkspaceOwnership,
+        generated: Any,
+        project: Project,
+    ) -> str:
+        ws_path = ownership.canonical_workspace_path
+        if not os.path.exists(ws_path):
+            raise UnsafeIntakeWorkspaceStateError(
+                f"Intake workspace directory '{ws_path}' does not exist on disk."
+            )
+
+        manifest = self.openspec_generator.build_artifact_manifest(generated)
+        expected_hashes = self._compute_artifact_sha256(generated)
+        change_dir_rel = f"{project.openspec_path}/changes/{ownership.change_name}"
+        expected_paths = {f"{change_dir_rel}/{rel}" for rel in manifest.files}
+        allowed_rel_paths = expected_paths | {".minime_intake_workspace"}
+
+        # Observe-before-repeat: adopt a prior commit only when HEAD matches the durable
+        # fingerprint already recorded on the ownership record.
+        if ownership.head_sha:
+            head_probe = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=ws_path,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if head_probe.returncode == 0 and head_probe.stdout.strip() == ownership.head_sha:
+                self._verify_committed_artifacts(
+                    ws_path, ownership.head_sha, change_dir_rel, expected_paths,
+                    manifest.files, expected_hashes,
+                )
+                return ownership.head_sha
+
+        # 1. git status must succeed; every changed path must be an approved manifest artifact.
+        status_res = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=ws_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if status_res.returncode != 0:
+            raise UnsafeIntakeWorkspaceStateError(
+                f"Git status failed in intake workspace '{ws_path}': {status_res.stderr.strip()}"
+            )
+        for line in status_res.stdout.splitlines():
+            filepath = _git_porcelain_path(line)
+            if not filepath:
+                continue
+            if filepath not in allowed_rel_paths:
+                raise UnsafeIntakeWorkspaceStateError(
+                    f"Unexpected file '{filepath}' in intake workspace '{ws_path}'. "
+                    f"Only approved manifest artifacts may be committed."
+                )
+
+        # 2. Stage the authored change directory; fail closed on error.
+        add_res = subprocess.run(
+            ["git", "add", change_dir_rel],
+            cwd=ws_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if add_res.returncode != 0:
+            raise UnsafeIntakeWorkspaceStateError(
+                f"Git add failed for '{change_dir_rel}' in intake workspace '{ws_path}': "
+                f"{add_res.stderr.strip()}"
+            )
+
+        # 3. The staged set must equal the approved manifest exactly.
+        staged_res = subprocess.run(
+            ["git", "diff", "--cached", "--name-only"],
+            cwd=ws_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if staged_res.returncode != 0:
+            raise UnsafeIntakeWorkspaceStateError(
+                f"Git staged-file inspection failed in intake workspace '{ws_path}': "
+                f"{staged_res.stderr.strip()}"
+            )
+        staged_paths = {p.strip() for p in staged_res.stdout.splitlines() if p.strip()}
+        if staged_paths != expected_paths:
+            missing = sorted(expected_paths - staged_paths)
+            unexpected = sorted(staged_paths - expected_paths)
+            raise UnsafeIntakeWorkspaceStateError(
+                f"Staged artifacts do not match the approved manifest in '{ws_path}': "
+                f"missing={missing}, unexpected={unexpected}."
+            )
+
+        # 4. Commit; fail closed on any non-success (never substitute base_sha).
+        commit_res = subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=mini-me-bot",
+                "-c",
+                "user.email=bot@minime.internal",
+                "commit",
+                "-m",
+                f"docs(openspec): author canonical artifacts for {ownership.change_name}",
+            ],
+            cwd=ws_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if commit_res.returncode != 0:
+            raise UnsafeIntakeWorkspaceStateError(
+                f"Git commit failed in intake workspace '{ws_path}': "
+                f"{(commit_res.stderr or '').strip()}"
+            )
+
+        # 5. Resolve HEAD authoritatively.
+        head_sha = self._rev_parse_head(ws_path)
+
+        # 6. Verify committed tree identity and SHA-256 manifest hashes.
+        self._verify_committed_artifacts(
+            ws_path, head_sha, change_dir_rel, expected_paths,
+            manifest.files, expected_hashes,
+        )
+
+        ownership.head_sha = head_sha
+        intake_repo = getattr(self.uow, "intake_workspace_ownerships", None)
+        if intake_repo:
+            intake_repo.save(ownership)
+            self.uow.commit()
+
+        return head_sha
+
+    def _observe_remote_ref(
+        self,
+        managed_root: str,
+        remote: str,
+        ref: str,
+    ) -> tuple[str | None, bool]:
+        """Observe a remote ref authoritatively.
+
+        Returns ``(sha_or_none, ok)``. ``ok=False`` means the remote could not be
+        observed (transport failure / ambiguity); ``ok=True`` with ``None`` means the
+        ref is genuinely absent.
+        """
+        try:
+            ls_res = subprocess.run(
+                ["git", "ls-remote", remote, ref],
+                cwd=managed_root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except Exception as exc:
+            logger.warning("git ls-remote raised for ref '%s': %s", ref, exc)
+            return None, False
+
+        if ls_res.returncode != 0:
+            logger.warning("git ls-remote failed for ref '%s': %s", ref, ls_res.stderr.strip())
+            return None, False
+
+        lines = ls_res.stdout.splitlines()
+        if not lines:
+            return None, True
+        for line in lines:
+            parts = line.split()
+            if len(parts) >= 2 and parts[1] == ref:
+                return parts[0], True
+        # Output present but the exact ref was not matched -> ambiguous.
+        return None, False
+
+    def _mark_publication_failed(self, ownership: IntakeWorkspaceOwnership) -> None:
+        ownership.publication_state = IntakeWorkspacePublicationState.PUBLICATION_FAILED
+        intake_repo = getattr(self.uow, "intake_workspace_ownerships", None)
+        if intake_repo:
+            intake_repo.save(ownership)
+            self.uow.commit()
+
+    def _publish_intake_artifacts_cas(
+        self,
+        ownership: IntakeWorkspaceOwnership,
+        project: Project,
+    ) -> str:
+        binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
+        binding = binding_repo.get_by_project_id(project.project_id) if binding_repo else None
+        remote = binding.remote_name if binding else "origin"
+        managed_root = binding.managed_repository_root if binding else str(self.project_root)
+        published_ref = f"refs/minime/intake/{ownership.change_name}"
+
+        # Never publish from base_sha; only a durable authored commit qualifies.
+        head_sha = ownership.head_sha
+        if not head_sha:
+            self._mark_publication_failed(ownership)
+            raise RuntimeError(
+                f"PUBLICATION_FAILED: No candidate head SHA recorded for change "
+                f"'{ownership.change_name}'; refusing to publish base_sha."
+            )
+
+        observed_old_sha, observe_ok = self._observe_remote_ref(managed_root, remote, published_ref)
+        if not observe_ok:
+            self._mark_publication_failed(ownership)
+            raise RuntimeError(
+                f"PUBLICATION_TRANSPORT_FAILURE: Could not authoritatively observe remote ref "
+                f"'{published_ref}'; refusing to publish without remote truth."
+            )
+
+        push_needed = False
+        push_cmd: list[str] | None = None
+
+        if ownership.published_sha is None:
+            # Initial publication enforces an atomic expected-old-ref condition: the
+            # remote ref must be absent before we create it.
+            if observed_old_sha is not None:
+                self._mark_publication_failed(ownership)
+                raise RuntimeError(
+                    f"REF_CAS_MISMATCH: Conflicting publication ref '{published_ref}' already "
+                    f"exists on remote at SHA '{observed_old_sha}' (expected absent)."
+                )
+            if observed_old_sha == head_sha:
+                push_needed = False
+            else:
+                push_needed = True
+                # The initial create must be a compare-and-swap too.  The
+                # preceding ls-remote observation is advisory only: another
+                # publisher may create the ref after it completes.  An empty
+                # expected-old value makes git reject that race atomically.
+                push_cmd = [
+                    "git",
+                    "push",
+                    f"--force-with-lease={published_ref}:",
+                    remote,
+                    f"{head_sha}:{published_ref}",
+                ]
+        else:
+            # Subsequent publication uses an atomic exact-SHA CAS lease.
+            if observed_old_sha != ownership.published_sha:
+                self._mark_publication_failed(ownership)
+                raise RuntimeError(
+                    f"REF_CAS_MISMATCH: Remote ref '{published_ref}' current SHA '{observed_old_sha}' "
+                    f"does not match expected published_sha '{ownership.published_sha}'."
+                )
+            if observed_old_sha == head_sha:
+                push_needed = False
+            else:
+                push_needed = True
+                push_cmd = [
+                    "git",
+                    "push",
+                    f"--force-with-lease={published_ref}:{ownership.published_sha}",
+                    remote,
+                    f"{head_sha}:{published_ref}",
+                ]
+
+        if push_needed:
+            ownership.publication_state = IntakeWorkspacePublicationState.PUBLISHING
+            if getattr(self.uow, "intake_workspace_ownerships", None):
+                self.uow.intake_workspace_ownerships.save(ownership)
+                self.uow.commit()
+
+            push_res = subprocess.run(
+                push_cmd,
+                cwd=managed_root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if push_res.returncode != 0:
+                err_msg = (push_res.stderr or "").strip()
+                normalized_error = err_msg.lower()
+                is_unreachable_remote = any(
+                    term in normalized_error
+                    for term in [
+                        "repository not found",
+                        "could not resolve host",
+                        "connection refused",
+                        "does not appear to be a git repository",
+                        "cannot access",
+                        "network is unreachable",
+                        "timed out",
+                    ]
+                )
+                is_cas_conflict = any(
+                    term in normalized_error
+                    for term in [
+                        "stale info",
+                        "fetch first",
+                        "expected old value",
+                        "failed to update ref",
+                    ]
+                )
+                if is_unreachable_remote and remote == "local":
+                    # Local-only binding fallback: record a local ref for test/offline
+                    # environments. The authoritative final observation below still gates
+                    # PUBLISHED, so this can never fabricate a production publication.
+                    logger.warning(
+                        "Remote unreachable for git push in local environment; updating local ref '%s'",
+                        published_ref,
+                    )
+                    subprocess.run(
+                        ["git", "update-ref", published_ref, head_sha],
+                        cwd=managed_root,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                elif is_unreachable_remote:
+                    self._mark_publication_failed(ownership)
+                    raise RuntimeError(
+                        f"PUBLICATION_TRANSPORT_FAILURE: Git push could not reach remote for "
+                        f"'{published_ref}': {err_msg}"
+                    )
+                elif is_cas_conflict:
+                    self._mark_publication_failed(ownership)
+                    raise RuntimeError(
+                        f"REF_CAS_MISMATCH: Git push failed for '{published_ref}': {err_msg}"
+                    )
+                else:
+                    self._mark_publication_failed(ownership)
+                    raise RuntimeError(
+                        f"PUBLICATION_AMBIGUOUS: Git push failed for '{published_ref}' with an "
+                        f"unclassified result: {err_msg}"
+                    )
+
+        # Authoritative post-publication observation MUST return exactly head_sha.
+        final_sha, final_ok = self._observe_remote_ref(managed_root, remote, published_ref)
+        if not final_ok or final_sha != head_sha:
+            self._mark_publication_failed(ownership)
+            raise RuntimeError(
+                f"PUBLICATION_AMBIGUOUS: Post-publication observation of '{published_ref}' "
+                f"returned '{final_sha}' (ok={final_ok}); expected exact SHA '{head_sha}'."
+            )
+
+        ownership.publication_state = IntakeWorkspacePublicationState.PUBLISHED
+        ownership.published_ref = published_ref
+        ownership.published_sha = head_sha
+        if getattr(self.uow, "intake_workspace_ownerships", None):
+            self.uow.intake_workspace_ownerships.save(ownership)
+            self.uow.commit()
+
+        return head_sha
+
+    def cleanup_intake_workspace(
+        self,
+        workspace_id: str,
+        claim_context: RecoveryClaimContext | None = None,
+    ) -> bool:
+        intake_repo = getattr(self.uow, "intake_workspace_ownerships", None)
+        if not intake_repo:
+            return False
+
+        ownership = intake_repo.get_by_id(workspace_id)
+        if not ownership:
+            return False
+
+        if ownership.creation_state not in (
+            IntakeWorkspaceCreationState.RELEASED_PENDING_CLEANUP,
+            IntakeWorkspaceCreationState.FAILED_PENDING_CLEANUP,
+        ):
+            raise ManagedWorkspaceGuardDeniedError(
+                f"Cleanup unauthorized: creation_state '{ownership.creation_state.value}' "
+                f"is neither RELEASED_PENDING_CLEANUP nor FAILED_PENDING_CLEANUP."
+            )
+
+        binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
+        binding = binding_repo.get_by_project_id(ownership.project_id) if binding_repo else None
+        if not binding:
+            raise ManagedWorkspaceGuardDeniedError("Cleanup denied: managed repository binding is missing.")
+        managed_root = binding.managed_repository_root
+        target_path = os.path.realpath(ownership.canonical_workspace_path)
+        expected_path = os.path.realpath(
+            os.path.join(
+                binding.worktree_parent_dir,
+                "intake-workspaces",
+                ownership.project_id,
+                ownership.workspace_id,
+            )
+        )
+        if target_path != expected_path:
+            raise ManagedWorkspaceGuardDeniedError(
+                "Cleanup denied: durable workspace path does not match its canonical ownership path."
+            )
+
+        res = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            cwd=managed_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if res.returncode != 0:
+            raise ManagedWorkspaceGuardDeniedError(
+                f"Cleanup denied: Git worktree observation failed: {res.stderr.strip()}"
+            )
+        worktree_paths = {
+            os.path.realpath(line.split(maxsplit=1)[1])
+            for line in res.stdout.splitlines()
+            if line.startswith("worktree ")
+        }
+        if target_path not in worktree_paths:
+            raise ManagedWorkspaceGuardDeniedError(
+                "Cleanup denied: durable workspace is not corroborated by Git worktree state."
+            )
+
+        marker_path = os.path.join(target_path, ".minime_intake_workspace")
+        if not os.path.exists(marker_path):
+            raise ManagedWorkspaceGuardDeniedError(
+                f"Root marker file missing at '{marker_path}'."
+            )
+        try:
+            marker = json.loads(Path(marker_path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ManagedWorkspaceGuardDeniedError(
+                f"Cleanup denied: intake workspace marker is unreadable: {exc}"
+            ) from exc
+        if any(
+            marker.get(field) != getattr(ownership, field)
+            for field in ("workspace_id", "project_id", "item_key", "saga_id", "change_name")
+        ):
+            raise ManagedWorkspaceGuardDeniedError(
+                "Cleanup denied: intake workspace marker does not match durable ownership."
+            )
+
+        removed = subprocess.run(
+            ["git", "worktree", "remove", "--force", target_path],
+            cwd=managed_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if removed.returncode != 0 or os.path.lexists(target_path):
+            raise ManagedWorkspaceGuardDeniedError(
+                f"Cleanup denied: Git worktree removal did not complete: {removed.stderr.strip()}"
+            )
+        deleted_branch = subprocess.run(
+            ["git", "branch", "-D", f"intake/{ownership.change_name}"],
+            cwd=managed_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if deleted_branch.returncode != 0:
+            raise ManagedWorkspaceGuardDeniedError(
+                f"Cleanup halted after worktree removal: intake branch deletion failed: {deleted_branch.stderr.strip()}"
+            )
+
+        target_state = (
+            IntakeWorkspaceCreationState.RELEASED_CLEANED
+            if ownership.creation_state == IntakeWorkspaceCreationState.RELEASED_PENDING_CLEANUP
+            else IntakeWorkspaceCreationState.FAILED_CLEANED
+        )
+        ownership.creation_state = target_state
+        ownership.released_at = utc_now()
+        intake_repo.save(ownership)
+        self.uow.commit()
+        return True
+
+    def _legacy_artifacts_match_manifest(
+        self,
+        item_dir: Path,
+        manifest_files: tuple[str, ...],
+        expected_hashes: dict[str, str],
+    ) -> bool:
+        """Verify legacy on-disk artifacts exactly match the canonical manifest and hashes.
+
+        Only the individually approved OpenSpec artifacts are permitted; any missing,
+        extra, or hash-mismatching file makes the directory non-provable.
+        """
+        if not item_dir.is_dir():
+            return False
+        allowed = set(manifest_files)
+        for rel_file in allowed:
+            src = item_dir / rel_file
+            if not src.is_file():
+                return False
+            try:
+                actual = hashlib.sha256(src.read_bytes()).hexdigest()
+            except OSError:
+                return False
+            if actual != expected_hashes.get(rel_file):
+                return False
+        # Reject any file not in the approved manifest (no arbitrary legacy files).
+        for f in item_dir.rglob("*"):
+            if not f.is_file():
+                continue
+            rel = f.relative_to(item_dir).as_posix()
+            if rel not in allowed:
+                return False
+        return True
+
+    def reconcile_legacy_unowned_intake_artifacts(
+        self,
+        project_id: str,
+    ) -> dict[str, Any]:
+        binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
+        binding = binding_repo.get_by_project_id(project_id) if binding_repo else None
+        if not binding or not binding.managed_repository_root:
+            return {"provable_adopted": [], "ambiguous_needs_human": []}
+
+        managed_root = Path(binding.managed_repository_root).resolve()
+        changes_dir = managed_root / "openspec" / "changes"
+        if not changes_dir.exists() or not changes_dir.is_dir():
+            return {"provable_adopted": [], "ambiguous_needs_human": []}
+
+        intake_repo = getattr(self.uow, "intake_workspace_ownerships", None)
+        active_ownerships = intake_repo.list_by_project(project_id) if intake_repo else []
+        owned_change_names = {ow.change_name for ow in active_ownerships}
+
+        # Historical INTAKE sagas provide the checkpoint/identity evidence required to
+        # prove legacy artifacts were authored by a prior durable run.
+        saga_repo = getattr(self.uow, "durable_sagas", None)
+        historical_sagas = (
+            saga_repo.list_by_project(project_id, saga_type=SagaType.INTAKE)
+            if saga_repo and hasattr(saga_repo, "list_by_project")
+            else []
+        )
+        sagas_by_change: dict[str, Any] = {}
+        sagas_by_key: dict[str, Any] = {}
+        for saga in historical_sagas:
+            if saga.change_name:
+                sagas_by_change[saga.change_name] = saga
+            sagas_by_key[saga.work_item_key] = saga
+
+        provable: list[str] = []
+        ambiguous: list[str] = []
+
+        for item_dir in sorted(changes_dir.iterdir()):
+            if not item_dir.is_dir() or item_dir.name in ("archive", ".") or item_dir.name.startswith("."):
+                continue
+
+            cname = item_dir.name
+            if cname in owned_change_names:
+                continue
+
+            item = self.uow.backlog_items.get_by_project_and_key(project_id, cname)
+            project = self.uow.projects.get_by_id(project_id)
+
+            # Authoritative durable evidence (fail-closed; file existence alone is never
+            # sufficient to prove legacy attribution).
+            binding_ev = (
+                self.uow.bindings.get_by_project_and_change(project_id, cname)
+                if getattr(self.uow.bindings, "get_by_project_and_change", None)
+                else None
+            )
+            saga_ev = sagas_by_change.get(cname) or (sagas_by_key.get(item.item_key) if item else None)
+            actions = []
+            if saga_ev and getattr(self.uow.orchestration_external_actions, "list_by_saga", None):
+                actions = self.uow.orchestration_external_actions.list_by_saga(saga_ev.id)
+
+            generated = (
+                self.openspec_generator.generate_from_backlog_item(item, project_name=project.display_name)
+                if item else None
+            )
+            manifest = self.openspec_generator.build_artifact_manifest(generated) if generated else None
+            manifest_matches = False
+            if manifest and generated and generated.is_complete:
+                expected_hashes = self._compute_artifact_sha256(generated)
+                manifest_matches = self._legacy_artifacts_match_manifest(
+                    item_dir, manifest.files, expected_hashes
+                )
+
+            # Historical saga must have reached the authored checkpoint, and there must
+            # be corroborating external action + binding evidence.
+            binding_ok = bool(
+                binding_ev and binding_ev.is_valid and binding_ev.github_issue_number
+            )
+            saga_ok = bool(
+                saga_ev
+                and saga_ev.current_phase
+                and _has_passed_intake_phase(saga_ev.current_phase, "OPENSPEC_AUTHORED")
+            )
+            identity_ok = bool(
+                item is not None
+                and saga_ev is not None
+                and item.project_id == project_id
+                and item.openspec_change_name == cname
+                and item.item_key == saga_ev.work_item_key
+            )
+
+            is_provable = bool(
+                item is not None
+                and project is not None
+                and binding_ok
+                and saga_ok
+                and identity_ok
+                and bool(actions)
+                and manifest_matches
+            )
+
+            if is_provable:
+                try:
+                    workspace = self._reserve_intake_workspace(project, item, saga_ev)
+                    self._activate_intake_workspace(workspace, project)
+
+                    ws_change_dir = (
+                        Path(workspace.canonical_workspace_path)
+                        / "openspec"
+                        / "changes"
+                        / cname
+                    )
+                    ws_change_dir.mkdir(parents=True, exist_ok=True)
+                    # Copy ONLY the individually proven, allowed OpenSpec artifacts.
+                    for rel_file in manifest.files:
+                        src = item_dir / rel_file
+                        dest = ws_change_dir / rel_file
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(src, dest)
+
+                    self._commit_intake_artifacts(workspace, generated, project)
+                    self._publish_intake_artifacts_cas(workspace, project)
+                    provable.append(cname)
+                except Exception as exc:
+                    logger.warning(
+                        "Legacy intake artifact adoption failed for '%s': %s", cname, exc
+                    )
+                    ambiguous.append(cname)
+            else:
+                if item and item.status != WorkItemStatus.NEEDS_HUMAN:
+                    try:
+                        authority = LifecycleTransitionAuthority(self.uow)
+                        authority.transition_backlog_item(
+                            project_id=project_id,
+                            item_key=item.item_key,
+                            expected_from_state=item.status,
+                            to_state=WorkItemStatus.NEEDS_HUMAN,
+                            reason_code="legacy_unowned_intake_artifacts_detected",
+                            actor="reconciliation_authority",
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to transition legacy item '%s' to NEEDS_HUMAN: %s", cname, exc
+                        )
+                ambiguous.append(cname)
+
+        return {"provable_adopted": provable, "ambiguous_needs_human": ambiguous}

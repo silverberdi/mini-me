@@ -1540,6 +1540,67 @@ class OrchestrationWorktreeOwnershipModel(Base):
     project: Mapped[ProjectModel] = relationship("ProjectModel")
 
 
+class IntakeWorkspaceOwnershipModel(Base):
+    __tablename__ = "intake_workspace_ownerships"
+    __table_args__ = (
+        Index(
+            "uq_intake_workspace_active_item",
+            "project_id",
+            "item_key",
+            unique=True,
+            postgresql_where=text("creation_state IN ('RESERVED', 'CREATING', 'ACTIVE')"),
+            sqlite_where=text("creation_state IN ('RESERVED', 'CREATING', 'ACTIVE')"),
+        ),
+        Index(
+            "uq_intake_workspace_active_path",
+            "canonical_workspace_path",
+            unique=True,
+            postgresql_where=text("creation_state IN ('RESERVED', 'CREATING', 'ACTIVE')"),
+            sqlite_where=text("creation_state IN ('RESERVED', 'CREATING', 'ACTIVE')"),
+        ),
+        Index(
+            "uq_intake_workspace_active_saga",
+            "saga_id",
+            unique=True,
+            postgresql_where=text("creation_state IN ('RESERVED', 'CREATING', 'ACTIVE')"),
+            sqlite_where=text("creation_state IN ('RESERVED', 'CREATING', 'ACTIVE')"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    item_key: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    saga_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    change_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    canonical_workspace_path: Mapped[str] = mapped_column(
+        String(512), nullable=False, index=True
+    )
+    canonical_repository_identity: Mapped[str] = mapped_column(String(255), nullable=False)
+    base_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    head_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    creation_state: Mapped[str] = mapped_column(
+        String(32), default="RESERVED", nullable=False, index=True
+    )
+    publication_state: Mapped[str] = mapped_column(
+        String(32), default="UNPUBLISHED", nullable=False, index=True
+    )
+    published_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    published_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+    released_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    project: Mapped[ProjectModel] = relationship("ProjectModel")
+
+
 class RecoveryClaimModel(Base):
     __tablename__ = "recovery_claims"
 
