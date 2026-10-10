@@ -2,39 +2,48 @@
 
 ## Architecture & Design Decisions
 
-### 1. WorkItem Lifecycle Transition Matrix Extension
+### 1. WorkItem Lifecycle Transition Matrix & Evidence Enforcement
 In `LifecycleTransitionAuthority` (`src/minime/services/lifecycle_transition_authority.py`):
-Extend `ALLOWED_WORK_ITEM_TRANSITIONS[WorkItemStatus.READY]` to include `WorkItemStatus.COMPLETED`:
-```python
-    WorkItemStatus.READY: {
-        WorkItemStatus.ADMITTED,
-        WorkItemStatus.NEEDS_HUMAN,
-        WorkItemStatus.BLOCKED,
-        WorkItemStatus.CANCELLED,
-        WorkItemStatus.COMPLETED,
-    },
-```
-This enables direct, atomic convergence of `READY` backlog items to `COMPLETED` when evidence demonstrates that the change is archived or completed.
+Extend `ALLOWED_WORK_ITEM_TRANSITIONS[WorkItemStatus.READY]` and `[WorkItemStatus.BLOCKED]` to include `WorkItemStatus.COMPLETED`.
+Enforce that any transition to `WorkItemStatus.COMPLETED` requires an authoritative completion `reason_code`:
+- `canonical_completion_evidence`
+- `post_merge_completion`
+- `manual_completion_authority`
 
-### 2. Backlog Lifecycle Convergence Authority
+Arbitrary string reason codes for completion transitions are rejected with `LifecycleInvalidTransitionError`.
+
+### 2. Backlog Lifecycle Convergence & Evidence Precedence
 In `IntakeService` (`src/minime/services/intake_service.py`):
 Implement `reconcile_and_persist_backlog_items(project_id: str | None = None) -> list[BacklogItem]`:
 - Iterates backlog items for the given project(s).
-- Checks terminal status (skips already `COMPLETED` or `CANCELLED` items).
-- Inspects disk archive directories (`openspec/changes/archive/`), `Change` table records, and `OrchestrationRun` history.
-- Performs atomic CAS state transitions through `LifecycleTransitionAuthority` to update persisted DB rows and emit `LIFECYCLE_TRANSITION` events:
-  - Archive / DONE / Completed Run -> `COMPLETED`
-  - Cancelled Change / Cancelled Run -> `CANCELLED`
-  - Stale `READY` (missing active directory or `readiness_state != READY`) -> `BLOCKED`
+- Evaluates evidence in strict authoritative precedence:
+  1. Delivered / Archive / `ChangeStatus.DONE` evidence -> `COMPLETED`
+  2. Cancellation evidence (`ChangeStatus.CANCELLED` or cancelled run) -> `CANCELLED`
+  3. Physical active change directory absence or invalid readiness for `READY` items -> `BLOCKED` (`stale_ready_artifacts_missing`)
+- Physical artifact presence is checked at `Path(self.project_root) / project.openspec_path / "changes" / change_name`.
 
-### 3. Intake Sweep Integration
-In `IntakeService.sweep_unprepared_backlog_items()`:
-- Include `WorkItemStatus.BLOCKED` items in the sweep set if they meet roadmap/source eligibility.
-- Transition eligible `BLOCKED` items to `WorkItemStatus.PREPARING` via `LifecycleTransitionAuthority` before calling `prepare_work_item()`.
+### 3. Exact Archive Identity Matching
+In `IntakeService.reconcile_and_persist_backlog_items()`:
+- Archive directories in `openspec/changes/archive/` are parsed using `extract_canonical_archived_change_name()`:
+  - If directory name follows `YYYY-MM-DD-change-name` (10-char date prefix), the canonical change name `change-name` is extracted.
+  - Otherwise the exact folder name is used.
+- Matching performs strict exact equality (`change_name == archived_name`). Suffix matching (`endswith`) and fuzzy matching are forbidden to prevent identity collisions (e.g. `provider-safety` vs `safety`).
 
-### 4. Scheduler Execution Ordering
+### 4. Structural Allow-List Retry Eligibility & Loop Prevention
+In `IntakeService.is_blocked_retry_eligible(item)`:
+- Returns `True` ONLY if `unmet_readiness_reasons` contains EXACTLY `["stale_ready_artifacts_missing"]`.
+- Returns `False` if any other blocker, combination of blockers, or empty set is present.
+- Prevents infinite loops: After re-preparation, if DoR evaluation fails, specific DoR reasons replace `stale_ready_artifacts_missing`, making the item ineligible for further autonomous sweeps.
+
+### 5. Safe Adapter Dependency Resolution
+In `SchedulerService.__init__` (`src/minime/services/scheduler_service.py`):
+- Accepts optional explicit `openspec_adapter` and `github_adapter` parameters.
+- Uses `resolve_explicit_adapter(target_service, attr_name)` helper to inspect `readiness_service`:
+  - For `Mock`/`MagicMock` instances: returns the attribute ONLY if explicitly assigned (in `_mock_children` or `__dict__`), preventing bare `MagicMock` instances from auto-synthesizing child mocks.
+  - For non-`Mock` objects (concrete instances, custom fake classes, wrappers, protocols): returns standard `getattr` without enforcing concrete inheritance.
+
+### 6. Scheduler Execution Ordering
 In `SchedulerService.tick()` (`src/minime/services/scheduler_service.py`):
-Revise tick step sequence:
 1. `0.0` Provider health probe
 2. `0.01` Recovery convergence cycle (`recovery_convergence_service.reconcile_cycle()`)
 3. `0.02` Backlog lifecycle convergence (`intake_service.reconcile_and_persist_backlog_items()`)

@@ -669,3 +669,333 @@ def test_blocked_retry_idempotence_no_loop(test_setup):
     assert len(p1) == 0
     assert len(p2) == 0
     assert len(p3) == 0
+
+
+def test_major_1_ready_active_artifacts_presence_matrix(test_setup):
+    """MAJOR 1: Verify active artifact presence ordering:
+
+    - READY + readiness READY + active directory exists => remains READY
+    - READY + readiness READY + active directory absent => BLOCKED (stale_ready_artifacts_missing)
+    - READY + readiness NOT_READY + active directory absent => BLOCKED (stale_ready_artifacts_missing)
+    - READY + active directory absent BUT canonical archive exists => COMPLETED
+    - READY + active directory absent BUT cancellation evidence exists => CANCELLED
+    """
+    uow = test_setup["uow"]
+    changes_dir = test_setup["changes_dir"]
+    archive_dir = test_setup["archive_dir"]
+    intake_svc = test_setup["intake_svc"]
+
+    now = utc_now()
+
+    # 1. READY + readiness READY + active directory exists => READY
+    c1 = "active-exists-change"
+    (changes_dir / c1).mkdir()
+    uow.backlog_items.save(
+        BacklogItem(
+            project_id="test-proj",
+            item_key=c1,
+            title=c1,
+            status=WorkItemStatus.READY,
+            readiness_state=ReadinessState.READY,
+            openspec_change_name=c1,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+
+    # 2. READY + readiness READY + active directory absent => BLOCKED
+    c2 = "active-absent-ready-change"
+    uow.backlog_items.save(
+        BacklogItem(
+            project_id="test-proj",
+            item_key=c2,
+            title=c2,
+            status=WorkItemStatus.READY,
+            readiness_state=ReadinessState.READY,
+            openspec_change_name=c2,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+
+    # 3. READY + readiness NOT_READY + active directory absent => BLOCKED
+    c3 = "active-absent-not-ready-change"
+    uow.backlog_items.save(
+        BacklogItem(
+            project_id="test-proj",
+            item_key=c3,
+            title=c3,
+            status=WorkItemStatus.READY,
+            readiness_state=ReadinessState.NOT_READY,
+            unmet_readiness_reasons=["stale"],
+            openspec_change_name=c3,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+
+    # 4. READY + active directory absent BUT canonical archive exists => COMPLETED
+    c4 = "archived-change-item"
+    (archive_dir / f"2026-10-09-{c4}").mkdir()
+    uow.backlog_items.save(
+        BacklogItem(
+            project_id="test-proj",
+            item_key=c4,
+            title=c4,
+            status=WorkItemStatus.READY,
+            readiness_state=ReadinessState.READY,
+            openspec_change_name=c4,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+
+    # 5. READY + active directory absent BUT cancellation evidence exists => CANCELLED
+    c5 = "cancelled-change-item"
+    uow.changes.save(
+        Change(
+            project_id="test-proj",
+            name=c5,
+            status=ChangeStatus.CANCELLED,
+            discovered_at=now,
+            updated_at=now,
+        )
+    )
+    uow.backlog_items.save(
+        BacklogItem(
+            project_id="test-proj",
+            item_key=c5,
+            title=c5,
+            status=WorkItemStatus.READY,
+            readiness_state=ReadinessState.READY,
+            openspec_change_name=c5,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    uow.commit()
+
+    intake_svc.reconcile_and_persist_backlog_items("test-proj")
+
+    res1 = uow.backlog_items.get_by_project_and_key("test-proj", c1)
+    res2 = uow.backlog_items.get_by_project_and_key("test-proj", c2)
+    res3 = uow.backlog_items.get_by_project_and_key("test-proj", c3)
+    res4 = uow.backlog_items.get_by_project_and_key("test-proj", c4)
+    res5 = uow.backlog_items.get_by_project_and_key("test-proj", c5)
+
+    assert res1.status == WorkItemStatus.READY
+    assert res2.status == WorkItemStatus.BLOCKED
+    assert res2.unmet_readiness_reasons == ["stale_ready_artifacts_missing"]
+    assert res3.status == WorkItemStatus.BLOCKED
+    assert res3.unmet_readiness_reasons == ["stale_ready_artifacts_missing"]
+    assert res4.status == WorkItemStatus.COMPLETED
+    assert res5.status == WorkItemStatus.CANCELLED
+
+
+def test_major_2_retry_eligibility_allowlist():
+    """MAJOR 2: Prove is_blocked_retry_eligible is an exact allow-list for ['stale_ready_artifacts_missing']."""
+    def make_item(reasons: list[str]) -> BacklogItem:
+        now = utc_now()
+        return BacklogItem(
+            project_id="test-proj",
+            item_key="test-item",
+            title="Test Item",
+            status=WorkItemStatus.BLOCKED,
+            unmet_readiness_reasons=reasons,
+            created_at=now,
+            updated_at=now,
+        )
+
+    # EXACT MATCH -> RETRYABLE
+    assert IntakeService.is_blocked_retry_eligible(make_item(["stale_ready_artifacts_missing"])) is True
+    assert IntakeService.is_blocked_retry_eligible(make_item(["STALE_READY_ARTIFACTS_MISSING"])) is True
+
+    # COMBINATION WITH OTHER BLOCKERS -> NOT RETRYABLE
+    assert IntakeService.is_blocked_retry_eligible(make_item(["stale_ready_artifacts_missing", "auth_failed"])) is False
+    assert IntakeService.is_blocked_retry_eligible(make_item(["stale_ready_artifacts_missing", "budget_exhausted"])) is False
+    assert IntakeService.is_blocked_retry_eligible(make_item(["stale_ready_artifacts_missing", "manual_review_required"])) is False
+    assert IntakeService.is_blocked_retry_eligible(make_item(["stale_ready_artifacts_missing", "quota_exhausted"])) is False
+    assert IntakeService.is_blocked_retry_eligible(make_item(["stale_ready_artifacts_missing", "predecessor_incomplete"])) is False
+
+    # OTHER SINGLE BLOCKERS -> NOT RETRYABLE
+    assert IntakeService.is_blocked_retry_eligible(make_item(["auth_failed"])) is False
+    assert IntakeService.is_blocked_retry_eligible(make_item(["budget_exhausted"])) is False
+    assert IntakeService.is_blocked_retry_eligible(make_item([])) is False
+
+
+def test_major_3_archive_exact_identity_matching(test_setup):
+    """MAJOR 3: Prove archive matching requires exact identity and prevents suffix collisions.
+
+    Archived: provider-safety
+    Active/Backlog: safety -> MUST NOT match archived provider-safety!
+    """
+    uow = test_setup["uow"]
+    archive_dir = test_setup["archive_dir"]
+    intake_svc = test_setup["intake_svc"]
+
+    # Archive contains '2026-10-09-provider-safety' and 'something-foo' and 'provider-auth'
+    (archive_dir / "2026-10-09-provider-safety").mkdir()
+    (archive_dir / "something-foo").mkdir()
+    (archive_dir / "provider-auth").mkdir()
+
+    now = utc_now()
+    # Create backlog items for 'safety', 'foo', 'auth'
+    uow.backlog_items.save(BacklogItem(project_id="test-proj", item_key="safety", title="safety", status=WorkItemStatus.READY, openspec_change_name="safety", created_at=now, updated_at=now))
+    uow.backlog_items.save(BacklogItem(project_id="test-proj", item_key="foo", title="foo", status=WorkItemStatus.READY, openspec_change_name="foo", created_at=now, updated_at=now))
+    uow.backlog_items.save(BacklogItem(project_id="test-proj", item_key="auth", title="auth", status=WorkItemStatus.READY, openspec_change_name="auth", created_at=now, updated_at=now))
+
+    # Create backlog item for exact archived change 'provider-safety'
+    uow.backlog_items.save(BacklogItem(project_id="test-proj", item_key="provider-safety", title="provider-safety", status=WorkItemStatus.READY, openspec_change_name="provider-safety", created_at=now, updated_at=now))
+    uow.commit()
+
+    intake_svc.reconcile_and_persist_backlog_items("test-proj")
+
+    safety_item = uow.backlog_items.get_by_project_and_key("test-proj", "safety")
+    foo_item = uow.backlog_items.get_by_project_and_key("test-proj", "foo")
+    auth_item = uow.backlog_items.get_by_project_and_key("test-proj", "auth")
+    psafety_item = uow.backlog_items.get_by_project_and_key("test-proj", "provider-safety")
+
+    # safety, foo, auth must NOT match the suffix of provider-safety, something-foo, provider-auth
+    assert safety_item.status != WorkItemStatus.COMPLETED
+    assert foo_item.status != WorkItemStatus.COMPLETED
+    assert auth_item.status != WorkItemStatus.COMPLETED
+
+    # provider-safety MUST match exact canonical identity
+    assert psafety_item.status == WorkItemStatus.COMPLETED
+
+
+def test_major_4_adapter_dependency_safety():
+    """MAJOR 4: Verify adapter resolution handles explicit objects, fakes, and bare MagicMocks safely."""
+    from unittest.mock import MagicMock
+    from minime.adapters.github import GitHubAdapter
+    from minime.adapters.openspec import OpenSpecAdapter
+
+    uow = InMemoryPersistenceUnitOfWork()
+
+    # 1. Bare MagicMock readiness service -> github_adapter and openspec_adapter resolve to None
+    bare_mock_rs = MagicMock()
+    s_bare = SchedulerService(uow, readiness_service=bare_mock_rs)
+    assert s_bare.openspec_adapter is None
+    assert s_bare.github_adapter is None
+
+    # 2. Explicit fake adapter classes (do not inherit concrete production classes)
+    class CustomFakeGitHubAdapter:
+        pass
+
+    class CustomFakeOpenSpecAdapter:
+        pass
+
+    fake_gh = CustomFakeGitHubAdapter()
+    fake_os = CustomFakeOpenSpecAdapter()
+
+    # Pass explicit adapters to SchedulerService
+    s_fake = SchedulerService(uow, openspec_adapter=fake_os, github_adapter=fake_gh)
+    assert s_fake.openspec_adapter is fake_os
+    assert s_fake.github_adapter is fake_gh
+
+    # 3. Custom ReadinessService class with attached fake adapters
+    class CustomReadinessService:
+        def __init__(self):
+            self.github_adapter = fake_gh
+            self.openspec_adapter = fake_os
+
+    s_custom = SchedulerService(uow, readiness_service=CustomReadinessService())
+    assert s_custom.openspec_adapter is fake_os
+    assert s_custom.github_adapter is fake_gh
+
+    # 4. Explicitly assigned attributes on a MagicMock
+    mock_with_adapters = MagicMock(github_adapter=fake_gh, openspec_adapter=fake_os)
+    s_mock_assigned = SchedulerService(uow, readiness_service=mock_with_adapters)
+    assert s_mock_assigned.openspec_adapter is fake_os
+    assert s_mock_assigned.github_adapter is fake_gh
+
+
+def test_minor_1_completion_evidence_validation():
+    """MINOR 1: Verify LifecycleTransitionAuthority enforces authoritative completion reason codes."""
+    from minime.domain.exceptions import LifecycleInvalidTransitionError
+    from minime.services.lifecycle_transition_authority import LifecycleTransitionAuthority
+
+    uow = InMemoryPersistenceUnitOfWork()
+    authority = LifecycleTransitionAuthority(uow)
+
+    now = utc_now()
+    item = BacklogItem(
+        project_id="p1",
+        item_key="item-1",
+        title="Item 1",
+        status=WorkItemStatus.READY,
+        readiness_state=ReadinessState.READY,
+        created_at=now,
+        updated_at=now,
+    )
+    uow.backlog_items.save(item)
+
+    # Generic string reason code for COMPLETED transition => REJECTED
+    with pytest.raises(LifecycleInvalidTransitionError) as exc_info:
+        authority.transition_backlog_item(
+            project_id="p1",
+            item_key="item-1",
+            expected_from_state=WorkItemStatus.READY,
+            to_state=WorkItemStatus.COMPLETED,
+            reason_code="arbitrary_caller_reason",
+        )
+    assert "Transition to COMPLETED requires authoritative completion evidence" in str(exc_info.value)
+
+    # Authoritative completion reason code => ACCEPTED
+    res = authority.transition_backlog_item(
+        project_id="p1",
+        item_key="item-1",
+        expected_from_state=WorkItemStatus.READY,
+        to_state=WorkItemStatus.COMPLETED,
+        reason_code="canonical_completion_evidence",
+    )
+    assert res.status == WorkItemStatus.COMPLETED
+
+
+def test_minor_2_multi_tick_scheduler_loop_prevention(test_setup):
+    """MINOR 2: Prove multi-tick scheduler loop behavior:
+
+    Tick 1: stale READY -> BLOCKED (reason = stale_ready_artifacts_missing)
+    Tick 2: intake sweep moves BLOCKED -> PREPARING. DoR runs, fails, overwriting reason to specific DoR blocker.
+    Tick 3: subsequent tick does NOT re-sweep into PREPARING.
+    """
+    uow = test_setup["uow"]
+    scheduler_svc = test_setup["scheduler_svc"]
+    intake_svc = test_setup["intake_svc"]
+
+    change_name = "multi-tick-stale-item"
+    now = utc_now()
+
+    # Item starts READY but active change dir does not exist
+    item = BacklogItem(
+        project_id="test-proj",
+        item_key=change_name,
+        title="Multi Tick Stale Item",
+        status=WorkItemStatus.READY,
+        source=WorkItemSource.MANUAL_INTAKE,
+        priority=QueuePriority.NORMAL,
+        readiness_state=ReadinessState.READY,
+        openspec_change_name=change_name,
+        created_at=now,
+        updated_at=now,
+    )
+    uow.backlog_items.save(item)
+    uow.commit()
+
+    # TICK 1: Convergence runs -> stale READY transitions READY -> BLOCKED
+    intake_svc.reconcile_and_persist_backlog_items("test-proj")
+    it1 = uow.backlog_items.get_by_project_and_key("test-proj", change_name)
+    assert it1.status == WorkItemStatus.BLOCKED
+    assert it1.unmet_readiness_reasons == ["stale_ready_artifacts_missing"]
+
+    # TICK 2: Intake sweep runs -> item is retry-eligible, swept into PREPARING -> prepare_work_item runs -> DoR fails and overwrites reasons with specific DoR gap
+    prepared = intake_svc.sweep_unprepared_backlog_items("test-proj")
+    assert len(prepared) == 1
+    it2 = uow.backlog_items.get_by_project_and_key("test-proj", change_name)
+    assert it2.status in (WorkItemStatus.BLOCKED, WorkItemStatus.NEEDS_HUMAN, WorkItemStatus.BACKLOG)
+    assert "stale_ready_artifacts_missing" not in (it2.unmet_readiness_reasons or [])
+
+    # TICK 3: Subsequent intake sweep runs -> item is NO LONGER retry-eligible, not re-swept
+    prepared_3 = intake_svc.sweep_unprepared_backlog_items("test-proj")
+    assert len(prepared_3) == 0
+

@@ -114,7 +114,8 @@ def test_exhaustive_work_item_matrix(in_memory_uow, state):
             updated_at=now,
         )
         in_memory_uow.backlog_items.save(bk)
-        res = authority.transition_backlog_item("test-proj", key, state, target)
+        reason = "canonical_completion_evidence" if target == WorkItemStatus.COMPLETED else "state_transition"
+        res = authority.transition_backlog_item("test-proj", key, state, target, reason_code=reason)
         assert res.status == target
 
     for target in disallowed:

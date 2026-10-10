@@ -84,6 +84,14 @@ ALLOWED_WORK_ITEM_TRANSITIONS: dict[WorkItemStatus, set[WorkItemStatus]] = {
 }
 
 
+AUTHORITATIVE_COMPLETION_REASON_CODES: set[str] = {
+    "canonical_completion_evidence",
+    "post_merge_completion",
+    "post_merge_reconciled",
+    "manual_completion_authority",
+}
+
+
 class LifecycleTransitionAuthority:
     """Single canonical authority for durable Change and BacklogItem lifecycle transitions."""
 
@@ -204,7 +212,7 @@ class LifecycleTransitionAuthority:
         to_state: WorkItemStatus,
         run_id: str | None = None,
         reason_code: str = "state_transition",
-        actor: str = "authority",
+        actor: str = "actor",
         correlation_id: str | None = None,
         evidence_references: dict[str, Any] | None = None,
     ) -> BacklogItem:
@@ -213,6 +221,12 @@ class LifecycleTransitionAuthority:
         if to_state not in allowed_targets:
             raise LifecycleInvalidTransitionError(
                 f"Invalid WorkItem transition: '{expected_from_state.value}' -> '{to_state.value}' is not allowed."
+            )
+
+        if to_state == WorkItemStatus.COMPLETED and reason_code not in AUTHORITATIVE_COMPLETION_REASON_CODES:
+            raise LifecycleInvalidTransitionError(
+                f"Transition to COMPLETED requires authoritative completion evidence reason_code "
+                f"(expected one of {sorted(AUTHORITATIVE_COMPLETION_REASON_CODES)}, got '{reason_code}')."
             )
 
         item = self.uow.backlog_items.get_by_project_and_key(project_id, item_key)

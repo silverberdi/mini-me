@@ -95,6 +95,24 @@ HOURLY_AGING_RATE: float = 50.0
 CANONICAL_GLOBAL_MAX_JOBS: int = 1
 
 
+def resolve_explicit_adapter(target_service: Any, attr_name: str) -> Any | None:
+    """Extract an explicit adapter reference without triggering MagicMock auto-synthesis.
+
+    Distinguishes intentionally supplied objects (concrete instances, custom fake classes,
+    subclasses, wrappers, protocols, or explicitly assigned mock attributes) from bare,
+    unconstrained MagicMocks that synthesize child attributes on access.
+    """
+    if target_service is None:
+        return None
+    from unittest.mock import Mock
+
+    if isinstance(target_service, Mock):
+        if attr_name in target_service.__dict__.get("_mock_children", {}) or attr_name in target_service.__dict__:
+            return getattr(target_service, attr_name)
+        return None
+    return getattr(target_service, attr_name, None)
+
+
 class SchedulerService:
     """Autonomous work scheduler and queue dispatcher."""
 
@@ -109,6 +127,8 @@ class SchedulerService:
         post_merge_service: PostMergeReconciliationService | None = None,
         intake_service: IntakeService | None = None,
         model_independence_policy: ModelIndependencePolicy | None = None,
+        openspec_adapter: Any | None = None,
+        github_adapter: Any | None = None,
         max_global_jobs: int = 1,
         _test_global_max_jobs_override: int | None = None,
         one_active_implementation_per_project: bool = True,
@@ -122,17 +142,10 @@ class SchedulerService:
             self.readiness_service = orchestration_service.readiness_service
         else:
             self.readiness_service = ReadinessService(uow)
-        gh_adapter = (
-            self.readiness_service.github_adapter
-            if isinstance(getattr(self.readiness_service, "github_adapter", None), GitHubAdapter)
-            else None
-        )
-        os_adapter = (
-            self.readiness_service.openspec_adapter
-            if isinstance(getattr(self.readiness_service, "openspec_adapter", None), OpenSpecAdapter)
-            else None
-        )
+        gh_adapter = github_adapter or resolve_explicit_adapter(self.readiness_service, "github_adapter")
+        os_adapter = openspec_adapter or resolve_explicit_adapter(self.readiness_service, "openspec_adapter")
         self.openspec_adapter = os_adapter
+        self.github_adapter = gh_adapter
         self.discovery_service = discovery_service or WorkDiscoveryService(
             uow,
             project_root=self.project_root,

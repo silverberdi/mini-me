@@ -67,6 +67,27 @@ def _has_passed_intake_phase(current_phase: str, target_phase: str) -> bool:
     return curr_idx >= targ_idx
 
 
+def extract_canonical_archived_change_name(dir_name: str) -> str:
+    """Extract canonical change name from OpenSpec archive directory entry.
+
+    OpenSpec archive naming convention uses either:
+    1. 'YYYY-MM-DD-change-name' (10-char date prefix followed by hyphen)
+    2. 'change-name' (exact change name without date prefix)
+    """
+    parts = dir_name.split("-", 3)
+    if (
+        len(parts) == 4
+        and len(parts[0]) == 4
+        and parts[0].isdigit()
+        and len(parts[1]) == 2
+        and parts[1].isdigit()
+        and len(parts[2]) == 2
+        and parts[2].isdigit()
+    ):
+        return parts[3]
+    return dir_name
+
+
 class IntakeService:
     """Backend service for work intake, artifact generation, and execution admission."""
 
@@ -1033,9 +1054,7 @@ class IntakeService:
                 for p in archive_dir.iterdir():
                     if p.is_dir():
                         archived_change_names.add(p.name)
-                        parts = p.name.split("-", 3)
-                        if len(parts) == 4 and parts[0].isdigit() and len(parts[0]) == 4:
-                            archived_change_names.add(parts[3])
+                        archived_change_names.add(extract_canonical_archived_change_name(p.name))
 
             for item in items:
                 if item.status in (WorkItemStatus.COMPLETED, WorkItemStatus.CANCELLED):
@@ -1050,13 +1069,6 @@ class IntakeService:
                 is_archived = (
                     change_name in archived_change_names
                     or item.item_key in archived_change_names
-                    or any(
-                        a == change_name
-                        or a.endswith(f"-{change_name}")
-                        or a == item.item_key
-                        or a.endswith(f"-{item.item_key}")
-                        for a in archived_change_names
-                    )
                 )
                 is_run_completed = bool(
                     latest_run
@@ -1070,7 +1082,10 @@ class IntakeService:
                     or is_run_completed
                     or bool(change_rec and change_rec.status == ChangeStatus.DONE)
                 )
-                is_cancelled = bool(change_rec and change_rec.status == ChangeStatus.CANCELLED)
+                is_cancelled = bool(
+                    (change_rec and change_rec.status == ChangeStatus.CANCELLED)
+                    or (latest_run and latest_run.stop_outcome == OrchestrationStopOutcome.CANCELLED)
+                )
 
                 new_status = item.status
                 new_run_id = item.run_id
@@ -1082,23 +1097,25 @@ class IntakeService:
                 elif is_cancelled:
                     new_status = WorkItemStatus.CANCELLED
                     reason_code = "canonical_cancellation_evidence"
-                elif latest_run:
+                elif latest_run and latest_run.is_active:
                     new_run_id = latest_run.run_id
-                    if latest_run.is_active:
-                        new_status = WorkItemStatus.RUNNING
-                        reason_code = "active_run_reconciliation"
-                    elif latest_run.stop_outcome in {
-                        OrchestrationStopOutcome.NEEDS_HUMAN,
-                        OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE,
-                    }:
-                        new_status = WorkItemStatus.NEEDS_HUMAN
-                        reason_code = "human_gate_reconciliation"
-                    elif latest_run.stop_outcome == OrchestrationStopOutcome.CANCELLED:
-                        new_status = WorkItemStatus.CANCELLED
-                        reason_code = "run_cancelled_reconciliation"
-                elif item.status == WorkItemStatus.READY and item.readiness_state != ReadinessState.READY:
-                    new_status = WorkItemStatus.BLOCKED
-                    reason_code = "stale_ready_artifacts_missing"
+                    new_status = WorkItemStatus.RUNNING
+                    reason_code = "active_run_reconciliation"
+                elif latest_run and latest_run.stop_outcome in {
+                    OrchestrationStopOutcome.NEEDS_HUMAN,
+                    OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE,
+                }:
+                    new_run_id = latest_run.run_id
+                    new_status = WorkItemStatus.NEEDS_HUMAN
+                    reason_code = "human_gate_reconciliation"
+                elif item.status == WorkItemStatus.READY:
+                    active_change_dir = (
+                        Path(self.project_root) / project.openspec_path / "changes" / change_name
+                    )
+                    active_artifacts_present = active_change_dir.exists() and active_change_dir.is_dir()
+                    if not active_artifacts_present or item.readiness_state != ReadinessState.READY:
+                        new_status = WorkItemStatus.BLOCKED
+                        reason_code = "stale_ready_artifacts_missing"
                 elif (
                     not is_done
                     and item.status in (WorkItemStatus.RUNNING, WorkItemStatus.PREPARING)
@@ -1124,7 +1141,10 @@ class IntakeService:
                         )
                         if new_status == WorkItemStatus.BLOCKED and reason_code == "stale_ready_artifacts_missing":
                             updated_item = updated_item.model_copy(
-                                update={"unmet_readiness_reasons": ["stale_ready_artifacts_missing"]}
+                                update={
+                                    "readiness_state": ReadinessState.NOT_READY,
+                                    "unmet_readiness_reasons": ["stale_ready_artifacts_missing"],
+                                }
                             )
                             self.uow.backlog_items.save(updated_item)
                         reconciled_items.append(updated_item)
@@ -1245,38 +1265,19 @@ class IntakeService:
 
     @staticmethod
     def is_blocked_retry_eligible(item: BacklogItem) -> bool:
-        """Determine if a BLOCKED backlog item is deterministically eligible for autonomous preparation retry.
+        """Determine if a BLOCKED backlog item is eligible for single-cycle autonomous preparation.
 
-        A BLOCKED item is ONLY retryable if:
-        1. It was transitioned to BLOCKED specifically due to stale active artifact disappearance
-           (indicated by 'stale_ready_artifacts_missing' or 'change_dir_missing' in unmet_readiness_reasons).
-        2. It contains NO human-gated, dependency, capacity/provider, or unresolved readiness blockers.
+        Autonomous re-preparation is permitted ONLY when the normalized blocker set
+        contains EXACTLY the single canonical synthetic convergence reason ['stale_ready_artifacts_missing'].
+        If any other blocker, combination of blockers, or empty set is present, retry is forbidden.
         """
         if item.status != WorkItemStatus.BLOCKED:
             return False
 
-        unmet = [str(r).lower() for r in (item.unmet_readiness_reasons or [])]
+        reasons = item.unmet_readiness_reasons or []
+        normalized_reasons = [str(r).strip().lower() for r in reasons if str(r).strip()]
 
-        # 1. Human-required blockers
-        human_keywords = {"needs_human", "human_gated", "human_validation", "approval_required", "ambiguous"}
-        if any(any(kw in reason for kw in human_keywords) for reason in unmet):
-            return False
-
-        # 2. Dependency blockers
-        dep_keywords = {"dependency", "parent_task", "blocked_by"}
-        if any(any(kw in reason for kw in dep_keywords) for reason in unmet):
-            return False
-
-        # 3. Provider / capacity blockers
-        provider_keywords = {"provider", "capacity", "rate_limit", "degraded"}
-        if any(any(kw in reason for kw in provider_keywords) for reason in unmet):
-            return False
-
-        # 4. Must have explicit stale-state artifact disappearance marker to be re-preparable
-        stale_keywords = {"stale_ready_artifacts_missing", "change_dir_missing", "orphaned_ready_change"}
-        has_stale_marker = any(any(kw in reason for kw in stale_keywords) for reason in unmet)
-
-        return has_stale_marker
+        return normalized_reasons == ["stale_ready_artifacts_missing"]
 
     def sweep_unprepared_backlog_items(
         self,
