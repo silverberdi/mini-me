@@ -41,6 +41,8 @@ from minime.domain.enums import (
     FindingSeverity,
     GitOperationStatus,
     HumanGate,
+    IntakeWorkspaceCreationState,
+    IntakeWorkspacePublicationState,
     JobStatus,
     LockSafetyStatus,
     OperatorActionErrorCode,
@@ -78,8 +80,6 @@ from minime.domain.enums import (
     WorkspaceOperation,
     WorkspaceRole,
     WorktreeCreationState,
-    IntakeWorkspaceCreationState,
-    IntakeWorkspacePublicationState,
 )
 
 

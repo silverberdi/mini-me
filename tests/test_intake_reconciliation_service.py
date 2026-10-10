@@ -33,6 +33,7 @@ from minime.domain.models import (
     RecoveryClaimContext,
 )
 from minime.services.intake_reconciliation_service import IntakeReconciliationService
+from minime.services.intake_service import IntakeService
 from minime.services.openspec_generator import OpenSpecGenerator
 from minime.services.saga_engine import SagaEngine
 
@@ -147,9 +148,22 @@ def _setup_harness(tmp_path: Path, issue_state: str = "open", marker_key: str = 
     )
     uow.orchestration_external_actions.reserve(author_act)
 
+    # Intake artifacts are authored only inside the durable Git intake workspace.
+    # This fixture intentionally uses the production reservation/activation path
+    # rather than fabricating an ownership record or writing into managed base.
+    intake = IntakeService(uow, project_root=repo_dir, github_adapter=FakeGitHubAdapter())
+    ownership = intake._reserve_intake_workspace(project, item, saga)
+    intake._activate_intake_workspace(ownership, project)
+
     gen = OpenSpecGenerator(repo_dir, uow)
     generated = gen.generate_from_backlog_item(item, project.display_name)
-    gen.write_change_to_disk(project.openspec_path, generated, project_id=project.project_id, uow=uow)
+    gen.write_change_to_disk(
+        project.openspec_path,
+        generated,
+        project_id=project.project_id,
+        uow=uow,
+        target_workspace_path=ownership.canonical_workspace_path,
+    )
 
     gh_fake = FakeGitHubAdapter({
         ("github.com/org/managed-repo", 101): {
@@ -324,16 +338,35 @@ def test_manifest_equals_writer_output(tmp_path: Path):
     item = BacklogItem(project_id="p1", item_key="key1", title="Title", openspec_change_name="c1")
     uow.backlog_items.save(item)
 
+    saga = DurableSaga(
+        id="manifest-saga",
+        saga_type=SagaType.INTAKE,
+        project_id="p1",
+        work_item_key="key1",
+        change_name="c1",
+        status=SagaStatus.IN_PROGRESS,
+        current_phase="STARTED",
+    )
+    uow.durable_sagas.save(saga)
+    intake = IntakeService(uow, project_root=repo_dir, github_adapter=FakeGitHubAdapter())
+    ownership = intake._reserve_intake_workspace(project, item, saga)
+    intake._activate_intake_workspace(ownership, project)
+
     gen = OpenSpecGenerator(repo_dir, uow)
     generated = gen.generate_from_backlog_item(item, project.display_name)
     manifest = gen.build_artifact_manifest(generated)
-    target_dir = gen.write_change_to_disk(project.openspec_path, generated, project_id=project.project_id, uow=uow)
+    target_dir = gen.write_change_to_disk(
+        project.openspec_path,
+        generated,
+        project_id=project.project_id,
+        uow=uow,
+        target_workspace_path=ownership.canonical_workspace_path,
+    )
 
     actual_files = {str(p.relative_to(target_dir)) for p in target_dir.rglob("*") if p.is_file()}
     assert set(manifest.files) == actual_files
 
-    ow = uow.intake_workspace_ownerships.get_active_by_item_key("p1", "c1") or uow.intake_workspace_ownerships.get_active_by_item_key("p1", "key1")
-    base_repo = Path(ow.canonical_workspace_path) if ow else repo_dir
+    base_repo = Path(ownership.canonical_workspace_path)
 
     ls_files = subprocess.run(["git", "-C", str(base_repo), "ls-files", "--", str(target_dir)], capture_output=True, text=True).stdout.strip()
     assert ls_files == ""
@@ -670,9 +703,19 @@ def test_postgres_intake_reconciliation_integration(tmp_path: Path):
         )
         uow.orchestration_external_actions.reserve(author_act)
 
+        intake = IntakeService(uow, project_root=repo_dir, github_adapter=FakeGitHubAdapter())
+        ownership = intake._reserve_intake_workspace(project, item, saga)
+        intake._activate_intake_workspace(ownership, project)
+
         gen = OpenSpecGenerator(repo_dir, uow)
         generated = gen.generate_from_backlog_item(item, project.display_name)
-        gen.write_change_to_disk(project.openspec_path, generated, project_id=project.project_id, uow=uow)
+        gen.write_change_to_disk(
+            project.openspec_path,
+            generated,
+            project_id=project.project_id,
+            uow=uow,
+            target_workspace_path=ownership.canonical_workspace_path,
+        )
         uow.commit()
 
     gh_fake = FakeGitHubAdapter({

@@ -469,23 +469,6 @@ class InMemoryProjectBindingRepository(ProjectBindingRepositoryInterface):
                 )
         self._store[binding.binding_id] = binding.model_copy(deep=True)
 
-        if (
-            self._uow
-            and hasattr(self._uow, "intake_workspace_ownerships")
-            and self._uow.intake_workspace_ownerships
-        ):
-            cname = binding.openspec_change_name
-            if cname:
-                existing_ow = self._uow.intake_workspace_ownerships.get_active_by_item_key(
-                    binding.project_id, cname
-                )
-                if not existing_ow:
-                    self._uow.intake_workspace_ownerships.save(
-                        _make_verifiable_intake_ownership(
-                            self._uow, binding.project_id, cname, binding.repository
-                        )
-                    )
-
     def get_by_id(self, binding_id: str) -> ProjectBinding | None:
         b = self._store.get(binding_id)
         return b.model_copy(deep=True) if b else None
@@ -2884,6 +2867,60 @@ def publish_local_intake_ref(root: Path, change_name: str) -> str:
         capture_output=True,
     )
     return sha
+
+
+def publish_verified_intake_workspace(
+    uow: Any,
+    project: Project,
+    project_root: Path,
+    change_name: str,
+) -> IntakeWorkspaceOwnership:
+    """Create, commit, and publish an intake tree through the canonical service path.
+
+    Scheduler-admission tests use this helper when they exercise the real tick.
+    It deliberately avoids synthetic ownerships, SHAs, or local-only refs.
+    """
+    from minime.domain.enums import ReadinessState, SagaType, WorkItemSource, WorkItemStatus
+    from minime.domain.models import BacklogItem
+    from minime.services.intake_service import IntakeService
+    from minime.services.saga_engine import SagaEngine
+
+    item = uow.backlog_items.get_by_project_and_key(project.project_id, change_name)
+    if item is None:
+        item = BacklogItem(
+            project_id=project.project_id,
+            item_key=change_name,
+            title=change_name,
+            description="Canonical scheduler-admission fixture artifact.",
+            acceptance_criteria=["Published intake artifacts are valid."],
+            openspec_change_name=change_name,
+            source=WorkItemSource.LOCAL_BACKLOG,
+            status=WorkItemStatus.READY,
+            readiness_state=ReadinessState.READY,
+        )
+        uow.backlog_items.save(item)
+
+    saga_engine = SagaEngine(uow)
+    saga = saga_engine.start_saga(
+        SagaType.INTAKE,
+        project.project_id,
+        item.item_key,
+        change_name=change_name,
+    )
+    intake = IntakeService(uow, project_root=project_root)
+    ownership = intake._reserve_intake_workspace(project, item, saga)
+    intake._activate_intake_workspace(ownership, project)
+    generated = intake.openspec_generator.generate_from_backlog_item(item, project.display_name)
+    intake.openspec_generator.write_change_to_disk(
+        project.openspec_path,
+        generated,
+        project_id=project.project_id,
+        target_workspace_path=ownership.canonical_workspace_path,
+    )
+    intake._commit_intake_artifacts(ownership, generated, project)
+    intake._publish_intake_artifacts_cas(ownership, project)
+    saga_engine.complete_saga(saga, evidence_references={"published_sha": ownership.published_sha})
+    return ownership
 
 
 def create_test_worktree_ownership(

@@ -4,12 +4,24 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from conftest import ReadinessGitHubStub, create_isolated_openspec_change, init_git_repo
+from conftest import (
+    ReadinessGitHubStub,
+    create_isolated_openspec_change,
+    init_git_repo,
+    publish_local_intake_ref,
+)
 from minime.adapters.openspec import OpenSpecAdapter
-from minime.domain.enums import EventType, ReviewStatus, ReviewVerdict
+from minime.domain.enums import (
+    EventType,
+    IntakeWorkspaceCreationState,
+    IntakeWorkspacePublicationState,
+    ReviewStatus,
+    ReviewVerdict,
+)
 from minime.domain.models import (
     Change,
     Event,
+    IntakeWorkspaceOwnership,
     Job,
     OrchestrationCandidate,
     OrchestrationRun,
@@ -71,6 +83,27 @@ def test_lifecycle_gate_chain_end_to_end(in_memory_uow, tmp_path: Path):
         worktree_parent_dir=tmp_path / ".minime" / "worktrees",
         canonical_repository_identity="github.com/silverberdi/mini-me",
         remote_name="origin",
+    )
+    published_sha = publish_local_intake_ref(tmp_path, "chain-change")
+    managed_binding = in_memory_uow.project_managed_repository_bindings.get_by_project_id(
+        "mini-me"
+    )
+    in_memory_uow.intake_workspace_ownerships.save(
+        IntakeWorkspaceOwnership(
+            workspace_id="ws-chain-change",
+            project_id="mini-me",
+            item_key="chain-change",
+            saga_id="saga-chain-change",
+            change_name="chain-change",
+            canonical_workspace_path=str(tmp_path),
+            canonical_repository_identity=managed_binding.canonical_repository_identity,
+            base_sha=published_sha,
+            head_sha=published_sha,
+            creation_state=IntakeWorkspaceCreationState.ACTIVE,
+            publication_state=IntakeWorkspacePublicationState.PUBLISHED,
+            published_ref="refs/minime/intake/chain-change",
+            published_sha=published_sha,
+        )
     )
 
     # 1. Strict-validity (Phase A)

@@ -247,6 +247,16 @@ class OpenSpecGenerator:
                 f"OpenSpec write denied: change_name '{generated.change_name}' fails path confinement check."
             )
 
+        # Reject unsafe generated artifact paths before resolving any workspace.
+        # Path validation is an input-safety invariant, not a consequence of
+        # having a currently authorizable intake workspace.
+        try:
+            manifest = self.build_artifact_manifest(generated)
+        except ValueError as err:
+            raise RuntimeError(
+                f"OpenSpec write denied: spec relative path fails path confinement check: {err}"
+            ) from err
+
         binding_repo = getattr(eff_uow, "project_managed_repository_bindings", None)
         binding = binding_repo.get_by_project_id(project_id) if binding_repo else None
         from minime.services.workspace_guard import is_binding_fully_valid
@@ -272,50 +282,14 @@ class OpenSpecGenerator:
             if active_ow:
                 base_root = Path(active_ow.canonical_workspace_path).resolve()
             else:
-                from minime.domain.enums import IntakeWorkspaceCreationState, IntakeWorkspacePublicationState
-                from minime.domain.models import IntakeWorkspaceOwnership, generate_uuid
-                wt_parent = Path(binding.worktree_parent_dir).resolve()
-                ws_id = generate_uuid()
-                base_root = (wt_parent / "intake-workspaces" / project_id / ws_id).resolve()
-                managed_root = Path(binding.managed_repository_root).resolve()
-                if managed_root.exists() and (managed_root / ".git").exists():
-                    try:
-                        import subprocess
-                        subprocess.run(
-                            ["git", "worktree", "add", "--detach", str(base_root), "HEAD"],
-                            cwd=str(managed_root),
-                            capture_output=True,
-                            text=True,
-                            check=False,
-                        )
-                    except Exception:
-                        base_root.mkdir(parents=True, exist_ok=True)
-                else:
-                    base_root.mkdir(parents=True, exist_ok=True)
-                (base_root / ".minime_intake_workspace").write_text("{}")
-                if intake_repo:
-                    ow = IntakeWorkspaceOwnership(
-                        workspace_id=ws_id,
-                        project_id=project_id,
-                        item_key=generated.change_name,
-                        saga_id=f"saga-{ws_id}",
-                        change_name=generated.change_name,
-                        canonical_workspace_path=str(base_root),
-                        canonical_repository_identity=binding.canonical_repository_identity,
-                        base_sha="main",
-                        creation_state=IntakeWorkspaceCreationState.ACTIVE,
-                        publication_state=IntakeWorkspacePublicationState.UNPUBLISHED,
-                    )
-                    intake_repo.save(ow)
+                raise ManagedWorkspaceGuardDeniedError(
+                    "OpenSpec write denied: no active durable IntakeWorkspaceOwnership "
+                    f"exists for project '{project_id}' and change '{generated.change_name}'. "
+                    "Workspace creation belongs exclusively to IntakeService."
+                )
 
         # Reject direct writes into managed repository root
         managed_root_resolved = Path(binding.managed_repository_root).resolve()
-        try:
-            base_root.relative_to(managed_root_resolved)
-            is_inside_managed_repo = True
-        except ValueError:
-            is_inside_managed_repo = False
-
         if base_root == managed_root_resolved:
             raise ManagedWorkspaceGuardDeniedError(
                 f"OpenSpec write denied: Direct writes to managed_repository_root '{managed_root_resolved}' "
@@ -334,12 +308,6 @@ class OpenSpecGenerator:
                 f"OpenSpec write denied: change directory '{target_dir}' escapes OpenSpec root '{openspec_root}'."
             )
 
-        try:
-            manifest = self.build_artifact_manifest(generated)
-        except ValueError as err:
-            raise RuntimeError(
-                f"OpenSpec write denied: spec relative path fails path confinement check: {err}"
-            ) from err
         contents = self._build_artifact_contents(generated)
         if set(contents) != set(manifest.files):
             raise RuntimeError("OpenSpec manifest/writer content mismatch")

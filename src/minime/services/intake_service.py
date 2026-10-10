@@ -18,6 +18,7 @@ from minime.domain.enums import (
     ExternalActionStatus,
     ExternalActionType,
     ExternalOutcome,
+    ExternalReasonCode,
     IntakeWorkspaceCreationState,
     IntakeWorkspacePublicationState,
     OrchestrationStage,
@@ -532,7 +533,7 @@ class IntakeService:
                         return ExternalActionResult(
                             outcome=ExternalOutcome.SUCCESS,
                             source_adapter="filesystem",
-                            reason_code="OBSERVED_ON_DISK",
+                            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
                             data={"change_name": change_name, "path": str(change_dir)},
                             external_id=change_name,
                         )
@@ -872,6 +873,7 @@ class IntakeService:
             project_root=str(self.project_root),
             github_repo=project.repository,
             github_issue=issue_number,
+            require_published_ref=True,
         )
 
         final_status = WorkItemStatus.READY if readiness_eval.is_ready else WorkItemStatus.PREPARING
@@ -1551,56 +1553,111 @@ class IntakeService:
         binding = binding_repo.get_by_project_id(project.project_id) if binding_repo else None
         managed_root = binding.managed_repository_root if binding else str(self.project_root)
 
-        ws_path = ownership.canonical_workspace_path
-        os.makedirs(os.path.dirname(ws_path), exist_ok=True)
+        ws_path = os.path.realpath(ownership.canonical_workspace_path)
+        worktree_parent = (
+            binding.worktree_parent_dir
+            if binding
+            else str(Path(managed_root) / ".minime" / "worktrees")
+        )
+        expected_parent = os.path.realpath(
+            os.path.join(worktree_parent, "intake-workspaces", project.project_id)
+        )
+        if os.path.commonpath([ws_path, expected_parent]) != expected_parent:
+            raise UnsafeIntakeWorkspaceStateError(
+                "INTAKE_WORKSPACE_PATH_OUTSIDE_PARENT"
+            )
+
+        def fail_closed(reason: str, *, detail: str | None = None) -> None:
+            if detail:
+                logger.error("Intake workspace activation failed [%s]: %s", reason, detail)
+            ownership.creation_state = IntakeWorkspaceCreationState.FAILED_PENDING_CLEANUP
+            intake_repo = getattr(self.uow, "intake_workspace_ownerships", None)
+            if intake_repo:
+                intake_repo.save(ownership)
+                self.uow.commit()
+            raise UnsafeIntakeWorkspaceStateError(reason)
+
+        try:
+            branch_name = f"intake/{ownership.change_name}"
+            listed = subprocess.run(
+                ["git", "worktree", "list", "--porcelain"],
+                cwd=managed_root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if listed.returncode != 0:
+                fail_closed("Unable to authoritatively enumerate Git worktrees for intake activation.")
+            worktree_paths = {
+                os.path.realpath(line.split(maxsplit=1)[1])
+                for line in listed.stdout.splitlines()
+                if line.startswith("worktree ")
+            }
+            if ws_path not in worktree_paths:
+                b_check = subprocess.run(
+                    ["git", "rev-parse", "--verify", branch_name],
+                    cwd=managed_root,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                cmd = (
+                    ["git", "worktree", "add", ws_path, branch_name]
+                    if b_check.returncode == 0
+                    else ["git", "worktree", "add", "-b", branch_name, ws_path, ownership.base_sha]
+                )
+                created = subprocess.run(
+                    cmd,
+                    cwd=managed_root,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if created.returncode != 0:
+                    fail_closed(
+                        "INTAKE_WORKTREE_ADD_FAILED",
+                        detail=created.stderr.strip(),
+                    )
+                listed = subprocess.run(
+                    ["git", "worktree", "list", "--porcelain"],
+                    cwd=managed_root,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                worktree_paths = {
+                    os.path.realpath(line.split(maxsplit=1)[1])
+                    for line in listed.stdout.splitlines()
+                    if line.startswith("worktree ")
+                }
+                if listed.returncode != 0 or ws_path not in worktree_paths:
+                    fail_closed("Git did not corroborate the newly created intake worktree.")
+
+            is_git_worktree = subprocess.run(
+                ["git", "rev-parse", "--is-inside-work-tree"],
+                cwd=ws_path,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if is_git_worktree.returncode != 0 or is_git_worktree.stdout.strip() != "true":
+                fail_closed("Intake workspace is not a valid Git worktree.")
+        except UnsafeIntakeWorkspaceStateError:
+            raise
+        except Exception as exc:
+            fail_closed("INTAKE_WORKTREE_ACTIVATION_FAILED", detail=str(exc))
 
         marker_path = os.path.join(ws_path, ".minime_intake_workspace")
-        worktree_created = False
-
-        if os.path.exists(ws_path) and os.path.exists(marker_path):
-            worktree_created = True
-        else:
-            if os.path.exists(managed_root):
-                try:
-                    branch_name = f"intake/{ownership.change_name}"
-                    b_check = subprocess.run(
-                        ["git", "rev-parse", "--verify", branch_name],
-                        cwd=managed_root,
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                    )
-                    if b_check.returncode == 0:
-                        cmd = ["git", "worktree", "add", ws_path, branch_name]
-                    else:
-                        cmd = ["git", "worktree", "add", "-b", branch_name, ws_path, ownership.base_sha]
-                    res = subprocess.run(
-                        cmd,
-                        cwd=managed_root,
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                    )
-                    if res.returncode == 0:
-                        worktree_created = True
-                    else:
-                        logger.warning("Git worktree add stderr: %s", res.stderr)
-                except Exception as exc:
-                    logger.warning("Failed creating git worktree: %s", exc)
-
-            if not worktree_created:
-                os.makedirs(ws_path, exist_ok=True)
-
-            marker_data = {
-                "workspace_id": ownership.workspace_id,
-                "project_id": ownership.project_id,
-                "item_key": ownership.item_key,
-                "saga_id": ownership.saga_id,
-                "change_name": ownership.change_name,
-                "canonical_repository_identity": ownership.canonical_repository_identity,
-            }
-            with open(marker_path, "w", encoding="utf-8") as f:
-                json.dump(marker_data, f, indent=2)
+        marker_data = {
+            "workspace_id": ownership.workspace_id,
+            "project_id": ownership.project_id,
+            "item_key": ownership.item_key,
+            "saga_id": ownership.saga_id,
+            "change_name": ownership.change_name,
+            "canonical_repository_identity": ownership.canonical_repository_identity,
+        }
+        with open(marker_path, "w", encoding="utf-8") as f:
+            json.dump(marker_data, f, indent=2)
 
         ownership.creation_state = IntakeWorkspaceCreationState.ACTIVE
         intake_repo = getattr(self.uow, "intake_workspace_ownerships", None)
@@ -2071,58 +2128,87 @@ class IntakeService:
                 f"is neither RELEASED_PENDING_CLEANUP nor FAILED_PENDING_CLEANUP."
             )
 
-        target_path = os.path.realpath(ownership.canonical_workspace_path)
-        if target_path != os.path.realpath(ownership.canonical_workspace_path):
-            raise ManagedWorkspaceGuardDeniedError("Canonical path mismatch.")
-
         binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
         binding = binding_repo.get_by_project_id(ownership.project_id) if binding_repo else None
-        managed_root = binding.managed_repository_root if binding else str(self.project_root)
-
-        try:
-            res = subprocess.run(
-                ["git", "worktree", "list", "--porcelain"],
-                cwd=managed_root,
-                capture_output=True,
-                text=True,
-                check=False,
+        if not binding:
+            raise ManagedWorkspaceGuardDeniedError("Cleanup denied: managed repository binding is missing.")
+        managed_root = binding.managed_repository_root
+        target_path = os.path.realpath(ownership.canonical_workspace_path)
+        expected_path = os.path.realpath(
+            os.path.join(
+                binding.worktree_parent_dir,
+                "intake-workspaces",
+                ownership.project_id,
+                ownership.workspace_id,
             )
-            worktree_paths = [
-                os.path.realpath(line.split()[1])
-                for line in res.stdout.splitlines()
-                if line.startswith("worktree ")
-            ]
-            if target_path not in worktree_paths:
-                logger.warning("Target path %s not found in git worktree list", target_path)
-        except Exception as exc:
-            logger.warning("Git worktree list check failed: %s", exc)
+        )
+        if target_path != expected_path:
+            raise ManagedWorkspaceGuardDeniedError(
+                "Cleanup denied: durable workspace path does not match its canonical ownership path."
+            )
+
+        res = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            cwd=managed_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if res.returncode != 0:
+            raise ManagedWorkspaceGuardDeniedError(
+                f"Cleanup denied: Git worktree observation failed: {res.stderr.strip()}"
+            )
+        worktree_paths = {
+            os.path.realpath(line.split(maxsplit=1)[1])
+            for line in res.stdout.splitlines()
+            if line.startswith("worktree ")
+        }
+        if target_path not in worktree_paths:
+            raise ManagedWorkspaceGuardDeniedError(
+                "Cleanup denied: durable workspace is not corroborated by Git worktree state."
+            )
 
         marker_path = os.path.join(target_path, ".minime_intake_workspace")
         if not os.path.exists(marker_path):
             raise ManagedWorkspaceGuardDeniedError(
                 f"Root marker file missing at '{marker_path}'."
             )
-
         try:
-            subprocess.run(
-                ["git", "worktree", "remove", "--force", target_path],
-                cwd=managed_root,
-                capture_output=True,
-                text=True,
-                check=False,
+            marker = json.loads(Path(marker_path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ManagedWorkspaceGuardDeniedError(
+                f"Cleanup denied: intake workspace marker is unreadable: {exc}"
+            ) from exc
+        if any(
+            marker.get(field) != getattr(ownership, field)
+            for field in ("workspace_id", "project_id", "item_key", "saga_id", "change_name")
+        ):
+            raise ManagedWorkspaceGuardDeniedError(
+                "Cleanup denied: intake workspace marker does not match durable ownership."
             )
-            subprocess.run(
-                ["git", "branch", "-D", f"intake/{ownership.change_name}"],
-                cwd=managed_root,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-        except Exception as exc:
-            logger.warning("Error running git worktree remove: %s", exc)
 
-        if os.path.exists(target_path):
-            shutil.rmtree(target_path, ignore_errors=True)
+        removed = subprocess.run(
+            ["git", "worktree", "remove", "--force", target_path],
+            cwd=managed_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if removed.returncode != 0 or os.path.lexists(target_path):
+            raise ManagedWorkspaceGuardDeniedError(
+                f"Cleanup denied: Git worktree removal did not complete: {removed.stderr.strip()}"
+            )
+        deleted_branch = subprocess.run(
+            ["git", "branch", "-D", f"intake/{ownership.change_name}"],
+            cwd=managed_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if deleted_branch.returncode != 0:
+            raise ManagedWorkspaceGuardDeniedError(
+                f"Cleanup halted after worktree removal: intake branch deletion failed: {deleted_branch.stderr.strip()}"
+            )
 
         target_state = (
             IntakeWorkspaceCreationState.RELEASED_CLEANED

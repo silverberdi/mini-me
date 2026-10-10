@@ -19,6 +19,7 @@ from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
     Project,
     ProjectBinding,
+    PublishedIntakeArtifact,
     WorkQueueItem,
     utc_now,
 )
@@ -68,7 +69,6 @@ class PublishedIntakeArtifactSource:
         self, project_id: str | None = None
     ) -> list[PublishedIntakeArtifact]:
         from minime.domain.enums import IntakeWorkspacePublicationState
-        from minime.domain.models import PublishedIntakeArtifact
 
         intake_repo = getattr(self.uow, "intake_workspace_ownerships", None)
         if not intake_repo:

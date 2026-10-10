@@ -7,6 +7,7 @@ from tests.conftest import (
     InMemoryPersistenceUnitOfWork,
     create_isolated_openspec_change,
     init_git_repo,
+    publish_verified_intake_workspace,
 )
 
 from minime.adapters.github import GitHubAdapter
@@ -147,6 +148,9 @@ def test_real_scheduler_multi_item_acceptance(
             admission_eligible=True,
         )
     )
+
+    for change_name in (change_a, change_b, change_c):
+        publish_verified_intake_workspace(in_memory_uow, project, tmp_path, change_name)
 
     mock_gh = MagicMock(spec=GitHubAdapter)
     mock_gh.validate_issue_binding.return_value = ExternalActionResult(

@@ -3,26 +3,19 @@
 from __future__ import annotations
 
 import os
-import shutil
-import tempfile
 from pathlib import Path
+from typing import Any
+
 import pytest
 
 from minime.domain.enums import (
     IntakeWorkspaceCreationState,
     IntakeWorkspacePublicationState,
-    QueuePriority,
-    ReadinessState,
-    SagaStatus,
-    SagaType,
-    WorkItemSource,
-    WorkItemStatus,
     WorkspaceOperation,
     WorkspaceRole,
 )
 from minime.domain.exceptions import (
     ManagedWorkspaceGuardDeniedError,
-    UnsafeIntakeWorkspaceStateError,
 )
 from minime.domain.models import (
     BacklogItem,
@@ -30,12 +23,9 @@ from minime.domain.models import (
     Project,
     ProjectBinding,
     ProjectManagedRepositoryBinding,
-    generate_uuid,
-    utc_now,
 )
-from minime.services.discovery_service import PublishedIntakeArtifactSource, WorkDiscoveryService
-from minime.services.intake_service import INTAKE_PHASES, IntakeService
-from minime.services.openspec_generator import GeneratedOpenSpec, OpenSpecGenerator
+from minime.services.intake_service import IntakeService
+from minime.services.openspec_generator import OpenSpecGenerator
 from minime.services.readiness_service import ReadinessService
 from minime.services.workspace_guard import ManagedWorkspaceGuard
 
@@ -156,7 +146,7 @@ def tmp_env(tmp_path: Path):
     subprocess.run(["git", "config", "user.name", "test"], cwd=managed_root, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=managed_root, check=True)
     subprocess.run(["git", "remote", "add", "origin", "https://github.com/silverberdi/mini-me.git"], cwd=managed_root, check=True)
-    
+
     marker_content = {
         "project_id": "proj-1",
         "canonical_repository_identity": "silverberdi/mini-me",
@@ -337,12 +327,13 @@ def test_cleanup_intake_workspace_4_way_corroboration(tmp_env):
     with pytest.raises(ManagedWorkspaceGuardDeniedError):
         svc.cleanup_intake_workspace("ws-cleanup")
 
-    # Change state to RELEASED_PENDING_CLEANUP and retry
+    # A marker-only directory is not a Git corroborated worktree and must
+    # remain untouched even when durable cleanup is otherwise authorized.
     ow.creation_state = IntakeWorkspaceCreationState.RELEASED_PENDING_CLEANUP
     uow.intake_workspace_ownerships.save(ow)
 
-    res = svc.cleanup_intake_workspace("ws-cleanup")
-    assert res is True
-    assert not os.path.exists(ws_path)
+    with pytest.raises(ManagedWorkspaceGuardDeniedError, match="not corroborated"):
+        svc.cleanup_intake_workspace("ws-cleanup")
+    assert Path(ws_path).exists()
     updated_ow = uow.intake_workspace_ownerships.get_by_id("ws-cleanup")
-    assert updated_ow.creation_state == IntakeWorkspaceCreationState.RELEASED_CLEANED
+    assert updated_ow.creation_state == IntakeWorkspaceCreationState.RELEASED_PENDING_CLEANUP

@@ -251,7 +251,7 @@ class ReadinessService:
         current_active_change: str | None = None,
         github_repo: str | None = None,
         github_issue: int | None = None,
-        require_published_ref: bool = True,
+        require_published_ref: bool = False,
     ) -> ReadinessEvaluation:
         """Evaluate Definition of Ready purely against canonical criteria."""
         set_correlation_context(
@@ -842,6 +842,7 @@ class ReadinessService:
         current_active_change: str | None = None,
         github_repo: str | None = None,
         github_issue: int | None = None,
+        require_published_ref: bool = False,
     ) -> ReadinessEvaluation:
         """Command alias: Evaluate Definition of Ready and persist updated Change, Event, and MetricFact."""
         return self.evaluate_and_persist_change_readiness(
@@ -851,6 +852,7 @@ class ReadinessService:
             current_active_change=current_active_change,
             github_repo=github_repo,
             github_issue=github_issue,
+            require_published_ref=require_published_ref,
         )
 
     def evaluate_and_persist_change_readiness(
@@ -861,6 +863,7 @@ class ReadinessService:
         current_active_change: str | None = None,
         github_repo: str | None = None,
         github_issue: int | None = None,
+        require_published_ref: bool = False,
     ) -> ReadinessEvaluation:
         """Command: Evaluate Definition of Ready and persist updated Change, Event, and MetricFact."""
         evaluation = self.evaluate_change_readiness_pure(
@@ -870,6 +873,7 @@ class ReadinessService:
             current_active_change=current_active_change,
             github_repo=github_repo,
             github_issue=github_issue,
+            require_published_ref=require_published_ref,
         )
 
         status = evaluation.status

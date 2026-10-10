@@ -405,7 +405,11 @@ class SchedulerService:
         )
 
     def prepare_admission_evidence(
-        self, project_id: str, change_name: str
+        self,
+        project_id: str,
+        change_name: str,
+        *,
+        require_published_ref: bool = False,
     ) -> PreparedAdmissionEvidence:
         """Phase A: Pre-lock evidence preparation.
 
@@ -453,6 +457,7 @@ class SchedulerService:
             project_root=str(self.project_root),
             github_repo=project.repository,
             github_issue=binding.github_issue_number,
+            require_published_ref=require_published_ref,
         )
 
         # 2. Apply Attribution Gate evaluation (Git / OpenSpec subprocess check)
@@ -505,10 +510,20 @@ class SchedulerService:
         project_id: str,
         change_name: str,
         evidence: PreparedAdmissionEvidence | None = None,
+        *,
+        require_published_ref: bool = False,
     ) -> AdmissionEvaluationResult:
         """Evaluate full admission criteria and determine converged operational decision."""
         if evidence is None:
-            evidence = self.prepare_admission_evidence(project_id, change_name)
+            evidence = (
+                self.prepare_admission_evidence(
+                    project_id,
+                    change_name,
+                    require_published_ref=True,
+                )
+                if require_published_ref
+                else self.prepare_admission_evidence(project_id, change_name)
+            )
 
         # 1. Registered project check
         project = self.uow.projects.get_by_id(project_id)
@@ -722,6 +737,7 @@ class SchedulerService:
             project_root=str(self.project_root),
             github_repo=project.repository,
             github_issue=binding.github_issue_number,
+            require_published_ref=require_published_ref,
         )
         non_capacity_unmet = [
             r
@@ -1110,7 +1126,12 @@ class SchedulerService:
         )
 
     def admit_work_item(
-        self, project_id: str, change_name: str, drive_admitted: bool = False
+        self,
+        project_id: str,
+        change_name: str,
+        drive_admitted: bool = False,
+        *,
+        require_published_ref: bool = False,
     ) -> tuple[AdmissionDecision, SchedulerDecisionRecord, OrchestrationRun | None]:
         """Atomically evaluate admission and start native candidate execution if eligible under advisory lock."""
         from minime.db.concurrency import (
@@ -1119,7 +1140,15 @@ class SchedulerService:
         )
 
         # PHASE A: Pre-lock evidence preparation (no locks, no DB commits, all external/subprocess reads)
-        evidence = self.prepare_admission_evidence(project_id, change_name)
+        evidence = (
+            self.prepare_admission_evidence(
+                project_id,
+                change_name,
+                require_published_ref=True,
+            )
+            if require_published_ref
+            else self.prepare_admission_evidence(project_id, change_name)
+        )
 
         # PHASE B: Serialized DB authority (under advisory locks, single atomic DB transaction with retry)
         from minime.db.retry import TransactionRetryWrapper
@@ -1131,7 +1160,16 @@ class SchedulerService:
             self.uow.acquire_advisory_lock(global_key, lock_timeout="2s")
             self.uow.acquire_advisory_lock(project_key, lock_timeout="2s")
 
-            eval_result = self.evaluate_admission(project_id, change_name, evidence=evidence)
+            eval_result = (
+                self.evaluate_admission(
+                    project_id,
+                    change_name,
+                    evidence=evidence,
+                    require_published_ref=True,
+                )
+                if require_published_ref
+                else self.evaluate_admission(project_id, change_name, evidence=evidence)
+            )
             decision = eval_result.decision
             refusal_code = eval_result.legacy_refusal_code
             reason_summary = eval_result.rationale
@@ -1478,17 +1516,27 @@ class SchedulerService:
 
         for candidate in ranked_candidates:
             try:
-                eval_result = self.evaluate_admission(candidate.project_id, candidate.change_name)
+                eval_result = self.evaluate_admission(
+                    candidate.project_id,
+                    candidate.change_name,
+                    require_published_ref=True,
+                )
                 if eval_result.decision == AdmissionDecisionKind.RUN and available_slots > 0:
                     dec, record, run = self.admit_work_item(
-                        candidate.project_id, candidate.change_name, drive_admitted=drive_admitted
+                        candidate.project_id,
+                        candidate.change_name,
+                        drive_admitted=drive_admitted,
+                        require_published_ref=True,
                     )
                     decision_records.append(record)
                     if dec == AdmissionDecision.ADMITTED:
                         available_slots -= 1
                 elif eval_result.decision == AdmissionDecisionKind.DRAIN:
                     dec, record, run = self.admit_work_item(
-                        candidate.project_id, candidate.change_name, drive_admitted=drive_admitted
+                        candidate.project_id,
+                        candidate.change_name,
+                        drive_admitted=drive_admitted,
+                        require_published_ref=True,
                     )
                     decision_records.append(record)
                 else:
