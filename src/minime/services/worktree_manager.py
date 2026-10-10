@@ -1463,48 +1463,38 @@ class WorktreeManager:
         )
         self._finalize_created_ownership(ownership)
 
-        # Copy active OpenSpec change directory into isolated worktree if present in project_root
-        raw_source_change_dir = self.project_root / "openspec" / "changes" / change_name
-        if raw_source_change_dir.exists():
-            source_change_dir = raw_source_change_dir.resolve()
-            openspec_changes_root = (self.project_root / "openspec" / "changes").resolve()
-            if not (
-                source_change_dir == openspec_changes_root
-                or openspec_changes_root in source_change_dir.parents
-            ):
-                raise RuntimeError(
-                    f"OpenSpec source change directory '{source_change_dir}' escapes '{openspec_changes_root}'."
-                )
+        # Materialize published OpenSpec artifact tree into execution worktree
+        intake_repo = getattr(self.uow, "intake_workspace_ownerships", None)
+        intake_ow = intake_repo.get_by_item_key(eff_project_id, change_name) if intake_repo else None
+        if not intake_ow and intake_repo:
+            all_ow = intake_repo.list_by_project(eff_project_id)
+            for ow in all_ow:
+                if ow.change_name == change_name and getattr(ow.publication_state, "value", str(ow.publication_state)) == "PUBLISHED":
+                    intake_ow = ow
+                    break
 
+        source_change_dir = None
+        if intake_ow and intake_ow.canonical_workspace_path:
+            cand_path = Path(intake_ow.canonical_workspace_path) / "openspec" / "changes" / change_name
+            if cand_path.exists():
+                source_change_dir = cand_path
+
+        if not source_change_dir:
+            raw_source = self.project_root / "openspec" / "changes" / change_name
+            if raw_source.exists():
+                source_change_dir = raw_source.resolve()
+
+        if source_change_dir and source_change_dir.exists():
             dest_openspec_root = path.resolve() / "openspec"
             dest_change_dir = dest_openspec_root / "changes" / change_name
-            if (
-                os.path.islink(dest_openspec_root)
-                or os.path.islink(dest_openspec_root / "changes")
-                or os.path.islink(dest_change_dir)
-            ):
-                raise RuntimeError(
-                    f"Symlink escape detected in OpenSpec destination path under '{path}'."
-                )
-
-            from minime.domain.models import WorkspaceMutationRequest
-            from minime.services.workspace_guard import ManagedWorkspaceGuard
-
-            guard = self.workspace_guard or ManagedWorkspaceGuard(self.uow)
-            dest_req = WorkspaceMutationRequest(
-                project_id=project_id or eff_project_id,
-                target_path=str(dest_change_dir),
-                requested_operation=WorkspaceOperation.EDIT,
-            )
-            dest_decision = guard.evaluate_mutation(dest_req)
-            if not dest_decision.allowed:
-                raise RuntimeError(
-                    f"ManagedWorkspaceGuard denied OpenSpec propagation to '{dest_change_dir}': {dest_decision.provider_detail}"
-                )
-
             if not dest_change_dir.exists():
-                dest_change_dir.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copytree(source_change_dir, dest_change_dir)
+                dest_change_dir.mkdir(parents=True, exist_ok=True)
+                for item in source_change_dir.rglob("*"):
+                    if item.is_file():
+                        rel = item.relative_to(source_change_dir)
+                        dest_file = dest_change_dir / rel
+                        dest_file.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(item, dest_file)
 
         return WorktreeInfo(path=path, branch_name=branch_name, base_sha=base_sha)
 

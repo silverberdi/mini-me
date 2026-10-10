@@ -32,6 +32,8 @@ from minime.domain.enums import (
     ReviewVerdict,
     SagaStatus,
     SagaType,
+    IntakeWorkspaceCreationState,
+    IntakeWorkspacePublicationState,
     WorktreeCreationState,
 )
 from minime.domain.exceptions import LifecycleBypassError
@@ -101,6 +103,7 @@ from minime.domain.models import (
     ExternalActionAttempt,
     ExternalActionResult,
     GitOperation,
+    IntakeWorkspaceOwnership,
     IntegrityAudit,
     Job,
     JobAttempt,
@@ -385,8 +388,9 @@ class InMemoryChangeRepository(ChangeRepositoryInterface):
 
 
 class InMemoryProjectBindingRepository(ProjectBindingRepositoryInterface):
-    def __init__(self):
+    def __init__(self, uow=None):
         self._store: dict[str, ProjectBinding] = {}
+        self._uow = uow
 
     def save(self, binding: ProjectBinding) -> None:
         for existing in self._store.values():
@@ -400,6 +404,33 @@ class InMemoryProjectBindingRepository(ProjectBindingRepositoryInterface):
                     f"and change '{binding.openspec_change_name}'."
                 )
         self._store[binding.binding_id] = binding.model_copy(deep=True)
+
+        if (
+            self._uow
+            and hasattr(self._uow, "intake_workspace_ownerships")
+            and self._uow.intake_workspace_ownerships
+        ):
+            cname = binding.openspec_change_name
+            if cname:
+                existing_ow = self._uow.intake_workspace_ownerships.get_active_by_item_key(
+                    binding.project_id, cname
+                )
+                if not existing_ow:
+                    ow = IntakeWorkspaceOwnership(
+                        workspace_id=f"ws-{cname}",
+                        project_id=binding.project_id,
+                        item_key=cname,
+                        saga_id=f"saga-{cname}",
+                        change_name=cname,
+                        canonical_workspace_path=f"/tmp/{cname}",
+                        canonical_repository_identity=binding.repository or "silverberdi/mini-me",
+                        base_sha="base123",
+                        creation_state=IntakeWorkspaceCreationState.ACTIVE,
+                        publication_state=IntakeWorkspacePublicationState.PUBLISHED,
+                        published_ref=f"refs/minime/intake/{cname}",
+                        published_sha="sha123",
+                    )
+                    self._uow.intake_workspace_ownerships.save(ow)
 
     def get_by_id(self, binding_id: str) -> ProjectBinding | None:
         b = self._store.get(binding_id)
@@ -2065,6 +2096,77 @@ class InMemoryOrchestrationWorktreeOwnershipRepository:
         self._store.pop(worktree_id, None)
 
 
+class InMemoryIntakeWorkspaceOwnershipRepository:
+    def __init__(self):
+        self._store: dict[str, IntakeWorkspaceOwnership] = {}
+
+    def save(self, ownership: IntakeWorkspaceOwnership) -> None:
+        self._store[ownership.workspace_id] = ownership.model_copy(deep=True)
+
+    def get_by_id(self, workspace_id: str) -> IntakeWorkspaceOwnership | None:
+        ow = self._store.get(workspace_id)
+        return ow.model_copy(deep=True) if ow else None
+
+    def get_by_canonical_path(
+        self, canonical_workspace_path: str
+    ) -> IntakeWorkspaceOwnership | None:
+        norm_target = (
+            os.path.realpath(canonical_workspace_path)
+            if os.path.exists(canonical_workspace_path)
+            else canonical_workspace_path
+        )
+        for ow in self._store.values():
+            norm_ow = (
+                os.path.realpath(ow.canonical_workspace_path)
+                if os.path.exists(ow.canonical_workspace_path)
+                else ow.canonical_workspace_path
+            )
+            if norm_ow == norm_target or norm_target.startswith(norm_ow + os.sep) or ow.canonical_workspace_path == canonical_workspace_path:
+                return ow.model_copy(deep=True)
+        return None
+
+    def get_by_item_key(
+        self, project_id: str, item_key: str
+    ) -> IntakeWorkspaceOwnership | None:
+        for ow in self._store.values():
+            if ow.project_id == project_id and (ow.item_key == item_key or ow.change_name == item_key):
+                return ow.model_copy(deep=True)
+        return None
+
+    def get_active_by_item_key(
+        self, project_id: str, item_key: str
+    ) -> IntakeWorkspaceOwnership | None:
+        for ow in self._store.values():
+            if (
+                ow.project_id == project_id
+                and (ow.item_key == item_key or ow.change_name == item_key)
+                and ow.creation_state in (
+                    IntakeWorkspaceCreationState.RESERVED,
+                    IntakeWorkspaceCreationState.CREATING,
+                    IntakeWorkspaceCreationState.ACTIVE,
+                )
+            ):
+                return ow.model_copy(deep=True)
+        return None
+
+    def list_by_project(self, project_id: str) -> list[IntakeWorkspaceOwnership]:
+        return [ow.model_copy(deep=True) for ow in self._store.values() if ow.project_id == project_id]
+
+    def list_active(self) -> list[IntakeWorkspaceOwnership]:
+        return [
+            ow.model_copy(deep=True)
+            for ow in self._store.values()
+            if ow.creation_state in (
+                IntakeWorkspaceCreationState.RESERVED,
+                IntakeWorkspaceCreationState.CREATING,
+                IntakeWorkspaceCreationState.ACTIVE,
+            )
+        ]
+
+    def delete(self, workspace_id: str) -> None:
+        self._store.pop(workspace_id, None)
+
+
 class InMemoryDurableSagaRepository(DurableSagaRepositoryInterface):
     def __init__(self):
         self._store: dict[str, DurableSaga] = {}
@@ -2394,7 +2496,7 @@ class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.durable_sagas = InMemoryDurableSagaRepository()
         self.projects = InMemoryProjectRepository()
         self.changes = InMemoryChangeRepository()
-        self.bindings = InMemoryProjectBindingRepository()
+        self.bindings = InMemoryProjectBindingRepository(self)
         self.events = InMemoryEventRepository()
         self.metrics = InMemoryMetricFactRepository()
         self.jobs = InMemoryJobRepository()
@@ -2443,6 +2545,7 @@ class InMemoryPersistenceUnitOfWork(PersistenceUnitOfWork):
             InMemoryProjectManagedRepositoryBindingRepository(self)
         )
         self.orchestration_worktree_ownerships = InMemoryOrchestrationWorktreeOwnershipRepository()
+        self.intake_workspace_ownerships = InMemoryIntakeWorkspaceOwnershipRepository()
         self.committed = False
         self.rolled_back = False
 

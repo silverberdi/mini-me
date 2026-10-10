@@ -49,6 +49,24 @@ def _register(uow, project: Project, change_name: str, root: Path | None = None)
         )
     )
     uow.changes.save(Change(project_id=project.project_id, name=change_name))
+    from minime.domain.enums import IntakeWorkspaceCreationState, IntakeWorkspacePublicationState
+    from minime.domain.models import IntakeWorkspaceOwnership
+
+    ow = IntakeWorkspaceOwnership(
+        workspace_id=f"ws-{change_name}",
+        project_id=project.project_id,
+        item_key=change_name,
+        saga_id=f"saga-{change_name}",
+        change_name=change_name,
+        canonical_workspace_path=str(root) if root else f"/tmp/{change_name}",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+        base_sha="base123",
+        creation_state=IntakeWorkspaceCreationState.ACTIVE,
+        publication_state=IntakeWorkspacePublicationState.PUBLISHED,
+        published_ref=f"refs/minime/intake/{change_name}",
+        published_sha="sha123",
+    )
+    uow.intake_workspace_ownerships.save(ow)
     if root:
         from conftest import setup_managed_repository_fixture
 

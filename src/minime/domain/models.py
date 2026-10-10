@@ -78,6 +78,8 @@ from minime.domain.enums import (
     WorkspaceOperation,
     WorkspaceRole,
     WorktreeCreationState,
+    IntakeWorkspaceCreationState,
+    IntakeWorkspacePublicationState,
 )
 
 
@@ -1654,6 +1656,54 @@ class OrchestrationWorktreeOwnership(BaseModel):
             self.branch,
         ]
         return any(f in SYNTHETIC_AUTHORITY_PLACEHOLDERS for f in fields_to_check if f)
+
+
+class IntakeWorkspaceOwnership(BaseModel):
+    """Durable database ownership record for an isolated intake authoring workspace."""
+
+    workspace_id: str = Field(default_factory=generate_uuid)
+    project_id: str
+    item_key: str
+    saga_id: str
+    change_name: str
+    canonical_workspace_path: str
+    canonical_repository_identity: str
+    base_sha: str
+    head_sha: str | None = None
+    creation_state: IntakeWorkspaceCreationState = IntakeWorkspaceCreationState.RESERVED
+    publication_state: IntakeWorkspacePublicationState = IntakeWorkspacePublicationState.UNPUBLISHED
+    published_ref: str | None = None
+    published_sha: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+    released_at: datetime | None = None
+
+    @property
+    def id(self) -> str:
+        return self.workspace_id
+
+    @property
+    def is_active(self) -> bool:
+        return self.creation_state in (
+            IntakeWorkspaceCreationState.RESERVED,
+            IntakeWorkspaceCreationState.CREATING,
+            IntakeWorkspaceCreationState.ACTIVE,
+        )
+
+    @property
+    def is_published(self) -> bool:
+        return self.publication_state == IntakeWorkspacePublicationState.PUBLISHED
+
+
+class PublishedIntakeArtifact(BaseModel):
+    """Immutable metadata representation of a published intake OpenSpec artifact ref."""
+
+    project_id: str
+    change_name: str
+    published_ref: str
+    published_sha: str
+    canonical_repository_identity: str
+
 
 
 class WorkspaceMutationRequest(BaseModel):

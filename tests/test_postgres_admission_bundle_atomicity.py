@@ -436,6 +436,24 @@ def test_t05a_no_intermediate_admission_commit(
         )
         uow.provider_health.save(ProviderHealth(provider="codex", status=ProviderHealthStatus.AVAILABLE))
         uow.provider_health.save(ProviderHealth(provider="antigravity", status=ProviderHealthStatus.AVAILABLE))
+        from minime.domain.enums import IntakeWorkspaceCreationState, IntakeWorkspacePublicationState
+        from minime.domain.models import IntakeWorkspaceOwnership
+        uow.intake_workspace_ownerships.save(
+            IntakeWorkspaceOwnership(
+                workspace_id=f"ws-{project_id}-{change_name}",
+                project_id=project_id,
+                item_key=f"KEY-{change_name}",
+                saga_id=f"saga-{change_name}",
+                change_name=change_name,
+                canonical_workspace_path=str(tmp_path),
+                canonical_repository_identity="github.com/owner/repo",
+                base_sha="main",
+                creation_state=IntakeWorkspaceCreationState.ACTIVE,
+                publication_state=IntakeWorkspacePublicationState.PUBLISHED,
+                published_ref=f"refs/minime/intake/{change_name}",
+                published_sha="head123",
+            )
+        )
         uow.commit()
 
     # Part A: Test zero intermediate commits & exactly 1 commit on successful admission path
@@ -640,6 +658,24 @@ def test_t05b_locks_not_held_during_external_observations(
         )
         uow.provider_health.save(ProviderHealth(provider="codex", status=ProviderHealthStatus.AVAILABLE))
         uow.provider_health.save(ProviderHealth(provider="antigravity", status=ProviderHealthStatus.AVAILABLE))
+        from minime.domain.enums import IntakeWorkspaceCreationState, IntakeWorkspacePublicationState
+        from minime.domain.models import IntakeWorkspaceOwnership
+        uow.intake_workspace_ownerships.save(
+            IntakeWorkspaceOwnership(
+                workspace_id=f"ws-{project_id}-{change_name}",
+                project_id=project_id,
+                item_key=f"KEY-{change_name}",
+                saga_id=f"saga-{change_name}",
+                change_name=change_name,
+                canonical_workspace_path=str(tmp_path),
+                canonical_repository_identity="github.com/owner/repo",
+                base_sha="main",
+                creation_state=IntakeWorkspaceCreationState.ACTIVE,
+                publication_state=IntakeWorkspacePublicationState.PUBLISHED,
+                published_ref=f"refs/minime/intake/{change_name}",
+                published_sha="head123",
+            )
+        )
         uow.commit()
 
 

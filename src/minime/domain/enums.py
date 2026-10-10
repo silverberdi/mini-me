@@ -515,6 +515,9 @@ class ExternalActionType(str, Enum):
     OPENSPEC_ROLLBACK = "OPENSPEC_ROLLBACK"
     DEPLOY_EXECUTE = "DEPLOY_EXECUTE"
     SERVICE_RESTART = "SERVICE_RESTART"
+    INTAKE_WORKTREE_CREATE = "INTAKE_WORKTREE_CREATE"
+    INTAKE_GIT_COMMIT = "INTAKE_GIT_COMMIT"
+    INTAKE_ARTIFACT_PUBLISH = "INTAKE_ARTIFACT_PUBLISH"
 
 
 class IntakeReconciliationDisposition(str, Enum):
@@ -784,6 +787,7 @@ class WorkspaceRole(str, Enum):
     RUNTIME = "RUNTIME"
     MANAGED_REPOSITORY = "MANAGED_REPOSITORY"
     EXECUTION_WORKTREE = "EXECUTION_WORKTREE"
+    INTAKE_WORKSPACE = "INTAKE_WORKSPACE"
     UNKNOWN = "UNKNOWN"
 
 
@@ -798,6 +802,30 @@ class WorkspaceOperation(str, Enum):
     GIT_COMMIT = "GIT_COMMIT"
     OPENSPEC_SYNC = "OPENSPEC_SYNC"
     OPENSPEC_ARCHIVE = "OPENSPEC_ARCHIVE"
+    OPENSPEC_AUTHORING = "OPENSPEC_AUTHORING"
+    INTAKE_ARTIFACT_UPDATE = "INTAKE_ARTIFACT_UPDATE"
+
+
+class IntakeWorkspaceCreationState(str, Enum):
+    """Durable lifecycle states for isolated intake workspace ownership tracking."""
+
+    RESERVED = "RESERVED"
+    CREATING = "CREATING"
+    ACTIVE = "ACTIVE"
+    RELEASED_PENDING_CLEANUP = "RELEASED_PENDING_CLEANUP"
+    RELEASED_CLEANED = "RELEASED_CLEANED"
+    FAILED_PENDING_CLEANUP = "FAILED_PENDING_CLEANUP"
+    FAILED_CLEANED = "FAILED_CLEANED"
+    NEEDS_HUMAN = "NEEDS_HUMAN"
+
+
+class IntakeWorkspacePublicationState(str, Enum):
+    """Durable lifecycle states for authoritative intake artifact publication."""
+
+    UNPUBLISHED = "UNPUBLISHED"
+    PUBLISHING = "PUBLISHING"
+    PUBLISHED = "PUBLISHED"
+    PUBLICATION_FAILED = "PUBLICATION_FAILED"
 
 
 class WorktreeCreationState(str, Enum):

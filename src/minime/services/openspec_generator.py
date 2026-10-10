@@ -222,13 +222,16 @@ class OpenSpecGenerator:
         overwrite: bool = True,
         project_id: str | None = None,
         uow: Any | None = None,
+        target_workspace_path: str | Path | None = None,
     ) -> Path:
-        """Write the generated OpenSpec change directory and markdown files to disk under authorized MANAGED_REPOSITORY workspace."""
+        """Write the generated OpenSpec change directory and markdown files to disk under an authorized INTAKE_WORKSPACE."""
         eff_uow = uow or self.uow
         if not eff_uow or not project_id:
             raise RuntimeError(
                 "OpenSpec write denied: uow and project_id are mandatory for disk mutation."
             )
+
+        from minime.domain.exceptions import ManagedWorkspaceGuardDeniedError
 
         # Path confinement check on inputs
         if Path(openspec_path).is_absolute() or ".." in Path(openspec_path).parts:
@@ -252,7 +255,73 @@ class OpenSpecGenerator:
             raise RuntimeError(
                 f"OpenSpec write denied: missing or invalid ProjectManagedRepositoryBinding for project '{project_id}'."
             )
-        base_root = Path(binding.managed_repository_root).resolve()
+
+        # Resolve target base root
+        if target_workspace_path is not None:
+            base_root = Path(target_workspace_path).resolve()
+        else:
+            intake_repo = getattr(eff_uow, "intake_workspace_ownerships", None)
+            active_ow = intake_repo.get_active_by_item_key(project_id, generated.change_name) if intake_repo else None
+            if not active_ow and intake_repo:
+                # search active list by change name
+                active_list = intake_repo.list_active()
+                for ow in active_list:
+                    if ow.project_id == project_id and ow.change_name == generated.change_name:
+                        active_ow = ow
+                        break
+            if active_ow:
+                base_root = Path(active_ow.canonical_workspace_path).resolve()
+            else:
+                from minime.domain.enums import IntakeWorkspaceCreationState, IntakeWorkspacePublicationState
+                from minime.domain.models import IntakeWorkspaceOwnership, generate_uuid
+                wt_parent = Path(binding.worktree_parent_dir).resolve()
+                ws_id = generate_uuid()
+                base_root = (wt_parent / "intake-workspaces" / project_id / ws_id).resolve()
+                managed_root = Path(binding.managed_repository_root).resolve()
+                if managed_root.exists() and (managed_root / ".git").exists():
+                    try:
+                        import subprocess
+                        subprocess.run(
+                            ["git", "worktree", "add", "--detach", str(base_root), "HEAD"],
+                            cwd=str(managed_root),
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                        )
+                    except Exception:
+                        base_root.mkdir(parents=True, exist_ok=True)
+                else:
+                    base_root.mkdir(parents=True, exist_ok=True)
+                (base_root / ".minime_intake_workspace").write_text("{}")
+                if intake_repo:
+                    ow = IntakeWorkspaceOwnership(
+                        workspace_id=ws_id,
+                        project_id=project_id,
+                        item_key=generated.change_name,
+                        saga_id=f"saga-{ws_id}",
+                        change_name=generated.change_name,
+                        canonical_workspace_path=str(base_root),
+                        canonical_repository_identity=binding.canonical_repository_identity,
+                        base_sha="main",
+                        creation_state=IntakeWorkspaceCreationState.ACTIVE,
+                        publication_state=IntakeWorkspacePublicationState.UNPUBLISHED,
+                    )
+                    intake_repo.save(ow)
+
+        # Reject direct writes into managed repository root
+        managed_root_resolved = Path(binding.managed_repository_root).resolve()
+        try:
+            base_root.relative_to(managed_root_resolved)
+            is_inside_managed_repo = True
+        except ValueError:
+            is_inside_managed_repo = False
+
+        if base_root == managed_root_resolved:
+            raise ManagedWorkspaceGuardDeniedError(
+                f"OpenSpec write denied: Direct writes to managed_repository_root '{managed_root_resolved}' "
+                f"are strictly forbidden for intake authoring."
+            )
+
         openspec_root = (base_root / openspec_path).resolve()
 
         # Construct final intended change directory and verify containment
@@ -265,7 +334,12 @@ class OpenSpecGenerator:
                 f"OpenSpec write denied: change directory '{target_dir}' escapes OpenSpec root '{openspec_root}'."
             )
 
-        manifest = self.build_artifact_manifest(generated)
+        try:
+            manifest = self.build_artifact_manifest(generated)
+        except ValueError as err:
+            raise RuntimeError(
+                f"OpenSpec write denied: spec relative path fails path confinement check: {err}"
+            ) from err
         contents = self._build_artifact_contents(generated)
         if set(contents) != set(manifest.files):
             raise RuntimeError("OpenSpec manifest/writer content mismatch")
@@ -338,11 +412,11 @@ class OpenSpecGenerator:
             req = WorkspaceMutationRequest(
                 project_id=project_id,
                 target_path=str(resolved_dest),
-                requested_operation=WorkspaceOperation.OPENSPEC_SYNC,
+                requested_operation=WorkspaceOperation.OPENSPEC_AUTHORING,
             )
             decision = guard.evaluate_mutation(req)
             if not decision.allowed or decision.workspace_role == WorkspaceRole.RUNTIME:
-                raise RuntimeError(
+                raise ManagedWorkspaceGuardDeniedError(
                     f"ManagedWorkspaceGuard denied OpenSpec generation write to '{target_path}': {decision.provider_detail or decision.reason_code.value}"
                 )
 

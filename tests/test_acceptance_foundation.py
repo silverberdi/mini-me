@@ -280,6 +280,25 @@ def test_acceptance_runtime_state_outside_openspec(in_memory_uow, tmp_path):
         remote_name="origin",
     )
 
+    from minime.domain.enums import IntakeWorkspaceCreationState, IntakeWorkspacePublicationState
+    from minime.domain.models import IntakeWorkspaceOwnership
+
+    ow = IntakeWorkspaceOwnership(
+        workspace_id="ws-synthetic-change",
+        project_id="mini-me",
+        item_key="synthetic-change",
+        saga_id="saga-synthetic-change",
+        change_name="synthetic-change",
+        canonical_workspace_path=str(tmp_path),
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+        base_sha="base123",
+        creation_state=IntakeWorkspaceCreationState.ACTIVE,
+        publication_state=IntakeWorkspacePublicationState.PUBLISHED,
+        published_ref="refs/minime/intake/synthetic-change",
+        published_sha="sha123",
+    )
+    in_memory_uow.intake_workspace_ownerships.save(ow)
+
     readiness_service = ReadinessService(in_memory_uow, github_adapter=ReadinessGitHubStub())
     eval_result = readiness_service.evaluate_change_readiness(
         project_id="mini-me",

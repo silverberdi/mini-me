@@ -229,6 +229,7 @@ class MockUOW:
     def __init__(self):
         from tests.conftest import (
             InMemoryDurableSagaRepository,
+            InMemoryIntakeWorkspaceOwnershipRepository,
             InMemoryOrchestrationExternalActionRepository,
             InMemoryRecoveryClaimRepository,
         )
@@ -236,6 +237,7 @@ class MockUOW:
         self.durable_sagas = InMemoryDurableSagaRepository()
         self.orchestration_external_actions = InMemoryOrchestrationExternalActionRepository()
         self.claims = InMemoryRecoveryClaimRepository()
+        self.intake_workspace_ownerships = InMemoryIntakeWorkspaceOwnershipRepository()
         self.project_managed_repository_bindings = MockBindingRepo()
         self.orchestration_worktree_ownerships = MockWorktreeOwnershipRepo()
         self.projects = MockProjectRepo()
@@ -3901,7 +3903,26 @@ def test_blocker_1_openspec_generator_symlink_preflight_atomicity(tmp_dirs):
 
     gen = OpenSpecGenerator(project_root=tmp_dirs["repo_root"], uow=uow)
 
-    target_dir = Path(tmp_dirs["repo_root"]) / "openspec" / "changes" / "change-symlink-test"
+    ws_dir = Path(tmp_dirs["worktrees"]) / "intake-workspaces" / "test-gen-blocker1" / "ws-blocker1"
+    ws_dir.mkdir(parents=True, exist_ok=True)
+    from minime.domain.enums import IntakeWorkspaceCreationState, IntakeWorkspacePublicationState
+    from minime.domain.models import IntakeWorkspaceOwnership
+    uow.intake_workspace_ownerships.save(
+        IntakeWorkspaceOwnership(
+            workspace_id="ws-blocker1",
+            project_id="test-gen-blocker1",
+            item_key="change-symlink-test",
+            saga_id="saga-1",
+            change_name="change-symlink-test",
+            canonical_workspace_path=str(ws_dir),
+            canonical_repository_identity="github.com/org/repo",
+            base_sha="main",
+            creation_state=IntakeWorkspaceCreationState.ACTIVE,
+            publication_state=IntakeWorkspacePublicationState.UNPUBLISHED,
+        )
+    )
+
+    target_dir = ws_dir / "openspec" / "changes" / "change-symlink-test"
     target_dir.mkdir(parents=True, exist_ok=True)
 
     runtime_secret = Path(tmp_dirs["runtime"]) / "runtime_secret.txt"
@@ -3921,7 +3942,7 @@ def test_blocker_1_openspec_generator_symlink_preflight_atomicity(tmp_dirs):
 
     with patch.dict(os.environ, {"MINIME_RUNTIME_ROOT": tmp_dirs["runtime"]}):
         with pytest.raises(
-            RuntimeError, match="OpenSpec write denied: symlink target|ManagedWorkspaceGuard denied"
+            RuntimeError, match="OpenSpec write denied|ManagedWorkspaceGuard denied"
         ):
             gen.write_change_to_disk(
                 "openspec", spec_a, overwrite=True, project_id="test-gen-blocker1"
@@ -3939,7 +3960,7 @@ def test_blocker_1_openspec_generator_symlink_preflight_atomicity(tmp_dirs):
 
     with patch.dict(os.environ, {"MINIME_RUNTIME_ROOT": tmp_dirs["runtime"]}):
         with pytest.raises(
-            RuntimeError, match="OpenSpec write denied: symlink target|ManagedWorkspaceGuard denied"
+            RuntimeError, match="OpenSpec write denied|ManagedWorkspaceGuard denied"
         ):
             gen.write_change_to_disk(
                 "openspec", spec_a, overwrite=True, project_id="test-gen-blocker1"

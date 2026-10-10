@@ -80,6 +80,25 @@ def setup_test_project_and_change(
         )
     )
 
+    from minime.domain.enums import IntakeWorkspaceCreationState, IntakeWorkspacePublicationState
+    from minime.domain.models import IntakeWorkspaceOwnership
+
+    ow = IntakeWorkspaceOwnership(
+        workspace_id=f"ws-{change_name}",
+        project_id="mini-me",
+        item_key=change_name,
+        saga_id=f"saga-{change_name}",
+        change_name=change_name,
+        canonical_workspace_path=str(root),
+        canonical_repository_identity="silverberdi/mini-me",
+        base_sha="base123456",
+        creation_state=IntakeWorkspaceCreationState.ACTIVE,
+        publication_state=IntakeWorkspacePublicationState.PUBLISHED,
+        published_ref=f"refs/minime/intake/{change_name}",
+        published_sha="sha123456",
+    )
+    uow.intake_workspace_ownerships.save(ow)
+
     create_isolated_openspec_change(root, change_name=change_name)
 
     from tests.conftest import setup_managed_repository_fixture

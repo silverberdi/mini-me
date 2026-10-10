@@ -200,8 +200,11 @@ def test_end_to_end_autonomous_intake_proving(
     )
 
     # Verify OpenSpec files were written to disk
+    intake_ow = in_memory_uow.intake_workspace_ownerships.get_active_by_item_key(
+        "mini-me", "021-work-intake-project-onboarding-and-backlog-execution"
+    )
     change_dir = (
-        managed_target
+        Path(intake_ow.canonical_workspace_path)
         / "openspec"
         / "changes"
         / "021-work-intake-project-onboarding-and-backlog-execution"

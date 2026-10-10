@@ -457,10 +457,28 @@ class SchedulerService:
 
         # 2. Apply Attribution Gate evaluation (Git / OpenSpec subprocess check)
         from minime.services.lifecycle_gates import ApplyAttributionGate
+        intake_repo = getattr(self.uow, "intake_workspace_ownerships", None)
+        intake_ow = (
+            intake_repo.get_active_by_item_key(project_id, change_name)
+            or intake_repo.get_by_item_key(project_id, change_name)
+            if intake_repo
+            else None
+        )
+        if not intake_ow and intake_repo:
+            all_ow = intake_repo.list_by_project(project_id)
+            for ow in all_ow:
+                if ow.change_name == change_name:
+                    intake_ow = ow
+                    break
+        eff_root = (
+            intake_ow.canonical_workspace_path
+            if (intake_ow and Path(intake_ow.canonical_workspace_path).exists())
+            else self.project_root
+        )
         apply_result = ApplyAttributionGate(self.openspec_adapter).evaluate(
             project=project,
             change_name=change_name,
-            project_root=self.project_root,
+            project_root=eff_root,
         )
 
         # 3. Base SHA resolution (Git subprocess check)

@@ -40,6 +40,20 @@ class ReadinessService:
         self.openspec_adapter = openspec_adapter or OpenSpecAdapter()
         self.github_adapter = github_adapter or GitHubAdapter()
 
+    def validate_intake_workspace_preflight(
+        self,
+        project_id: str,
+        change_name: str,
+        workspace_path: str,
+    ) -> ReadinessEvaluation:
+        """Validate intake workspace artifacts preflight during WORKSPACE_ACTIVE authoring phase."""
+        return self.evaluate_change_readiness_pure(
+            project_id=project_id,
+            change_name=change_name,
+            project_root=workspace_path,
+            require_published_ref=False,
+        )
+
     def evaluate_change_readiness_pure(
         self,
         project_id: str,
@@ -48,6 +62,7 @@ class ReadinessService:
         current_active_change: str | None = None,
         github_repo: str | None = None,
         github_issue: int | None = None,
+        require_published_ref: bool = True,
     ) -> ReadinessEvaluation:
         """Evaluate Definition of Ready purely against canonical criteria."""
         set_correlation_context(
@@ -401,9 +416,60 @@ class ReadinessService:
                         )
                     )
 
-        # 5. OpenSpec artifacts evaluation
+        # 5. OpenSpec artifacts evaluation and published artifact identity check
+        from minime.domain.enums import IntakeWorkspacePublicationState
+
+        intake_repo = getattr(self.uow, "intake_workspace_ownerships", None)
+        intake_ow = (
+            intake_repo.get_active_by_item_key(project_id, change_name)
+            if intake_repo
+            else None
+        )
+        if not intake_ow and intake_repo:
+            all_list = intake_repo.list_by_project(project_id)
+            for ow in all_list:
+                if (
+                    ow.change_name == change_name
+                    and ow.publication_state == IntakeWorkspacePublicationState.PUBLISHED
+                ):
+                    intake_ow = ow
+                    break
+
+        if require_published_ref:
+            if (
+                not intake_ow
+                or intake_ow.publication_state != IntakeWorkspacePublicationState.PUBLISHED
+                or not intake_ow.published_ref
+                or not intake_ow.published_sha
+            ):
+                reason = (
+                    f"Admission readiness denied: OpenSpec change '{change_name}' has no verified published Git ref "
+                    f"identity (published_ref=refs/minime/intake/{change_name}). Unpublished workspaces cannot authorize admission."
+                )
+                checks.append(
+                    ReadinessCheck(name="published_artifact_identity", passed=False, reason=reason)
+                )
+                unmet_reasons.append(reason)
+            else:
+                checks.append(
+                    ReadinessCheck(
+                        name="published_artifact_identity",
+                        passed=True,
+                        details={
+                            "published_ref": intake_ow.published_ref,
+                            "published_sha": intake_ow.published_sha,
+                            "canonical_repository_identity": intake_ow.canonical_repository_identity,
+                        },
+                    )
+                )
+
+        eff_root = (
+            intake_ow.canonical_workspace_path
+            if (intake_ow and os.path.exists(intake_ow.canonical_workspace_path))
+            else project_root
+        )
         artifacts_eval = self.openspec_adapter.evaluate_artifacts(
-            project, change_name, project_root
+            project, change_name, eff_root
         )
         if not artifacts_eval["exists"]:
             reason = f"OpenSpec change directory for '{change_name}' does not exist on disk."
@@ -443,7 +509,7 @@ class ReadinessService:
         # deliberately blocking because readiness cannot truthfully be proven.
         if project.strict_validation_required:
             strict_result = StrictValidationGate(self.openspec_adapter).evaluate(
-                change_name=change_name, project_root=project_root
+                change_name=change_name, project_root=eff_root
             )
             if strict_result.is_blocking:
                 reason = f"{strict_result.reason.code}: {strict_result.reason.message}"

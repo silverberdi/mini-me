@@ -161,8 +161,23 @@ def _setup_harness(tmp_path: Path, issue_state: str = "open", marker_key: str = 
     return uow, repo_dir, claim, gh_fake
 
 
+def _get_harness_target(uow, repo_dir, project_id="p1", item_key="key1", change_name="c1"):
+    intake_repo = getattr(uow, "intake_workspace_ownerships", None)
+    ow = intake_repo.get_active_by_item_key(project_id, item_key) if intake_repo else None
+    if not ow and intake_repo:
+        active_list = intake_repo.list_active()
+        for item in active_list:
+            if item.project_id == project_id and (item.change_name == change_name or item.item_key == item_key):
+                ow = item
+                break
+    if ow and Path(ow.canonical_workspace_path).exists():
+        return Path(ow.canonical_workspace_path) / "openspec" / "changes" / change_name
+    return repo_dir / "openspec" / "changes" / change_name
+
+
 def test_invalid_discovery_happy_path(tmp_path: Path):
     uow, repo_dir, claim, gh_fake = _setup_harness(tmp_path)
+    target = _get_harness_target(uow, repo_dir)
     discovery = FakeContextDiscoveryService(projections=[])
     service = IntakeReconciliationService(uow, project_root=repo_dir, github_adapter=gh_fake, context_discovery_service=discovery)
 
@@ -175,7 +190,6 @@ def test_invalid_discovery_happy_path(tmp_path: Path):
     assert res.already_converged is False
     assert len(gh_fake.close_calls) == 1
 
-    target = repo_dir / "openspec" / "changes" / "c1"
     assert not target.exists()
 
 
@@ -318,17 +332,22 @@ def test_manifest_equals_writer_output(tmp_path: Path):
     actual_files = {str(p.relative_to(target_dir)) for p in target_dir.rglob("*") if p.is_file()}
     assert set(manifest.files) == actual_files
 
-    ls_files = subprocess.run(["git", "-C", str(repo_dir), "ls-files", "--", str(target_dir)], capture_output=True, text=True).stdout.strip()
+    ow = uow.intake_workspace_ownerships.get_active_by_item_key("p1", "c1") or uow.intake_workspace_ownerships.get_active_by_item_key("p1", "key1")
+    base_repo = Path(ow.canonical_workspace_path) if ow else repo_dir
+
+    ls_files = subprocess.run(["git", "-C", str(base_repo), "ls-files", "--", str(target_dir)], capture_output=True, text=True).stdout.strip()
     assert ls_files == ""
 
-    status = subprocess.run(["git", "-C", str(repo_dir), "status", "--porcelain", "--", str(target_dir)], capture_output=True, text=True).stdout.strip()
+    status = subprocess.run(["git", "-C", str(base_repo), "status", "--porcelain", "--", str(target_dir)], capture_output=True, text=True).stdout.strip()
     assert "??" in status
 
 
 def test_tracked_file_rejects_rollback(tmp_path: Path):
     uow, repo_dir, claim, gh_fake = _setup_harness(tmp_path)
-    target = repo_dir / "openspec" / "changes" / "c1"
-    subprocess.run(["git", "-C", str(repo_dir), "add", str(target)], check=True)
+    target = _get_harness_target(uow, repo_dir)
+    ow = uow.intake_workspace_ownerships.get_active_by_item_key("p1", "c1") or uow.intake_workspace_ownerships.get_active_by_item_key("p1", "key1")
+    base_repo = Path(ow.canonical_workspace_path) if ow else repo_dir
+    subprocess.run(["git", "-C", str(base_repo), "add", str(target)], check=True)
 
     discovery = FakeContextDiscoveryService(projections=[])
     service = IntakeReconciliationService(uow, project_root=repo_dir, github_adapter=gh_fake, context_discovery_service=discovery)
@@ -339,7 +358,7 @@ def test_tracked_file_rejects_rollback(tmp_path: Path):
 
 def test_unexpected_untracked_file_rejects_rollback(tmp_path: Path):
     uow, repo_dir, claim, gh_fake = _setup_harness(tmp_path)
-    target = repo_dir / "openspec" / "changes" / "c1"
+    target = _get_harness_target(uow, repo_dir)
     (target / "unexpected.txt").write_text("evil")
 
     discovery = FakeContextDiscoveryService(projections=[])
@@ -351,7 +370,7 @@ def test_unexpected_untracked_file_rejects_rollback(tmp_path: Path):
 
 def test_symlink_escape_rejects_rollback(tmp_path: Path):
     uow, repo_dir, claim, gh_fake = _setup_harness(tmp_path)
-    target = repo_dir / "openspec" / "changes" / "c1"
+    target = _get_harness_target(uow, repo_dir)
     outside = tmp_path / "outside.txt"
     outside.write_text("external")
     (target / "link.txt").symlink_to(outside)
@@ -365,7 +384,7 @@ def test_symlink_escape_rejects_rollback(tmp_path: Path):
 
 def test_absent_target_is_idempotent_success(tmp_path: Path):
     uow, repo_dir, claim, gh_fake = _setup_harness(tmp_path)
-    target = repo_dir / "openspec" / "changes" / "c1"
+    target = _get_harness_target(uow, repo_dir)
 
     for p in sorted((p for p in target.rglob("*") if p.is_file()), reverse=True):
         p.unlink()
@@ -502,8 +521,10 @@ def test_terminal_state_missing_rollback_checkpoint_rejected(tmp_path: Path):
 
 def test_ignored_file_rejects_rollback(tmp_path: Path):
     uow, repo_dir, claim, gh_fake = _setup_harness(tmp_path)
-    target = repo_dir / "openspec" / "changes" / "c1"
-    gitignore = repo_dir / ".gitignore"
+    target = _get_harness_target(uow, repo_dir)
+    ow = uow.intake_workspace_ownerships.get_active_by_item_key("p1", "key1")
+    base_repo = Path(ow.canonical_workspace_path) if ow else repo_dir
+    gitignore = base_repo / ".gitignore"
     gitignore.write_text("*.ignored\n")
     (target / "extra.ignored").write_text("ignored content")
 

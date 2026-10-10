@@ -42,9 +42,14 @@ def _is_planning_artifact(path: str, planning_root: str) -> bool:
     """Return True when a repo-relative path lives inside the OpenSpec planning tree or is system metadata."""
     normalized = path.replace("\\", "/")
     if (
-        normalized in (".minime-managed-project.json", ".minime_worktree_ownership.json")
+        normalized in (
+            ".minime-managed-project.json",
+            ".minime_worktree_ownership.json",
+            ".minime_intake_workspace",
+        )
         or normalized.endswith("/.minime-managed-project.json")
         or normalized.endswith("/.minime_worktree_ownership.json")
+        or normalized.endswith("/.minime_intake_workspace")
     ):
         return True
     return normalized == planning_root or normalized.startswith(planning_root + "/")

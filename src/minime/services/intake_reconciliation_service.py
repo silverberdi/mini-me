@@ -253,7 +253,21 @@ class IntakeReconciliationService:
         )
 
     def _rollback_artifacts(self, project, binding, item, saga, claim_context):
-        target = Path(binding.managed_repository_root) / project.openspec_path / "changes" / saga.change_name
+        intake_repo = getattr(self.uow, "intake_workspace_ownerships", None)
+        active_ow = intake_repo.get_active_by_item_key(project.project_id, item.item_key) if intake_repo else None
+        if not active_ow and intake_repo:
+            active_list = intake_repo.list_active()
+            for iow in active_list:
+                if iow.project_id == project.project_id and (iow.change_name == saga.change_name or iow.item_key == item.item_key):
+                    active_ow = iow
+                    break
+
+        if active_ow and Path(active_ow.canonical_workspace_path).exists():
+            target = Path(active_ow.canonical_workspace_path) / project.openspec_path / "changes" / saga.change_name
+            base_repo_dir = Path(active_ow.canonical_workspace_path)
+        else:
+            target = Path(binding.managed_repository_root) / project.openspec_path / "changes" / saga.change_name
+            base_repo_dir = Path(binding.managed_repository_root)
 
         guard = ManagedWorkspaceGuard(self.uow)
         decision = guard.evaluate_mutation(
@@ -292,7 +306,7 @@ class IntakeReconciliationService:
             allowed = set(manifest.files)
 
             tracked = subprocess.run(
-                ["git", "-C", str(binding.managed_repository_root), "ls-files", "--", str(target)],
+                ["git", "-C", str(base_repo_dir), "ls-files", "--", str(target)],
                 capture_output=True,
                 text=True,
             ).stdout.strip()
@@ -304,7 +318,7 @@ class IntakeReconciliationService:
                 [
                     "git",
                     "-C",
-                    str(binding.managed_repository_root),
+                    str(base_repo_dir),
                     "status",
                     "--porcelain",
                     "--untracked-files=all",
@@ -320,7 +334,7 @@ class IntakeReconciliationService:
             status_lines = [line for line in status_res.stdout.splitlines() if line.strip()]
 
             untracked_rel_files = set()
-            repo_root = Path(binding.managed_repository_root).resolve()
+            repo_root = base_repo_dir.resolve()
             target_resolved = target.resolve()
 
             for line in status_lines:

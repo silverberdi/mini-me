@@ -31,6 +31,7 @@ from minime.db.models import (
     EvidenceDiagnosticModel,
     ExternalActionAttemptModel,
     GitOperationModel,
+    IntakeWorkspaceOwnershipModel,
     IntegrityFindingModel,
     JobAttemptModel,
     JobHandoffModel,
@@ -135,6 +136,7 @@ from minime.domain.interfaces import (
     EvidenceDiagnosticRepositoryInterface,
     ExternalActionAttemptRepositoryInterface,
     GitOperationRepositoryInterface,
+    IntakeWorkspaceOwnershipRepositoryInterface,
     IntegrityFindingRepositoryInterface,
     JobAttemptRepositoryInterface,
     JobHandoffRepositoryInterface,
@@ -189,6 +191,9 @@ from minime.domain.models import (
     ExternalActionAttempt,
     GitOperation,
     HumanAnswerRecord,
+    IntakeWorkspaceOwnership,
+    IntakeWorkspaceCreationState,
+    IntakeWorkspacePublicationState,
     IntegrityAudit,
     Job,
     JobAttempt,
@@ -5052,6 +5057,172 @@ class PostgresOrchestrationWorktreeOwnershipRepository(
             self.session.delete(model)
 
 
+def intake_workspace_ownership_model_to_domain(
+    model: IntakeWorkspaceOwnershipModel,
+) -> IntakeWorkspaceOwnership:
+    return IntakeWorkspaceOwnership(
+        workspace_id=model.id,
+        project_id=model.project_id,
+        item_key=model.item_key,
+        saga_id=model.saga_id,
+        change_name=model.change_name,
+        canonical_workspace_path=model.canonical_workspace_path,
+        canonical_repository_identity=model.canonical_repository_identity,
+        base_sha=model.base_sha,
+        head_sha=model.head_sha,
+        creation_state=IntakeWorkspaceCreationState(model.creation_state),
+        publication_state=IntakeWorkspacePublicationState(model.publication_state),
+        published_ref=model.published_ref,
+        published_sha=model.published_sha,
+        created_at=model.created_at,
+        updated_at=model.updated_at,
+        released_at=model.released_at,
+    )
+
+
+class PostgresIntakeWorkspaceOwnershipRepository(
+    IntakeWorkspaceOwnershipRepositoryInterface
+):
+    def __init__(self, session: Session):
+        self.session = session
+
+    def save(self, ownership: IntakeWorkspaceOwnership) -> None:
+        existing = self.session.get(IntakeWorkspaceOwnershipModel, ownership.workspace_id)
+        if existing:
+            existing.project_id = ownership.project_id
+            existing.item_key = ownership.item_key
+            existing.saga_id = ownership.saga_id
+            existing.change_name = ownership.change_name
+            existing.canonical_workspace_path = ownership.canonical_workspace_path
+            existing.canonical_repository_identity = ownership.canonical_repository_identity
+            existing.base_sha = ownership.base_sha
+            existing.head_sha = ownership.head_sha
+            existing.creation_state = ownership.creation_state.value
+            existing.publication_state = ownership.publication_state.value
+            existing.published_ref = ownership.published_ref
+            existing.published_sha = ownership.published_sha
+            existing.released_at = ownership.released_at
+        else:
+            model = IntakeWorkspaceOwnershipModel(
+                id=ownership.workspace_id,
+                project_id=ownership.project_id,
+                item_key=ownership.item_key,
+                saga_id=ownership.saga_id,
+                change_name=ownership.change_name,
+                canonical_workspace_path=ownership.canonical_workspace_path,
+                canonical_repository_identity=ownership.canonical_repository_identity,
+                base_sha=ownership.base_sha,
+                head_sha=ownership.head_sha,
+                creation_state=ownership.creation_state.value,
+                publication_state=ownership.publication_state.value,
+                published_ref=ownership.published_ref,
+                published_sha=ownership.published_sha,
+                created_at=ownership.created_at,
+                updated_at=ownership.updated_at,
+                released_at=ownership.released_at,
+            )
+            self.session.add(model)
+        self.session.flush()
+
+    def get_by_id(self, workspace_id: str) -> IntakeWorkspaceOwnership | None:
+        model = self.session.get(IntakeWorkspaceOwnershipModel, workspace_id)
+        return intake_workspace_ownership_model_to_domain(model) if model else None
+
+    def get_by_canonical_path(
+        self, canonical_workspace_path: str
+    ) -> IntakeWorkspaceOwnership | None:
+        stmt = select(IntakeWorkspaceOwnershipModel).where(
+            IntakeWorkspaceOwnershipModel.canonical_workspace_path == canonical_workspace_path
+        )
+        model = self.session.scalars(stmt).first()
+        return intake_workspace_ownership_model_to_domain(model) if model else None
+
+    def get_by_item_key(
+        self, project_id: str, item_key: str
+    ) -> IntakeWorkspaceOwnership | None:
+        stmt = select(IntakeWorkspaceOwnershipModel).where(
+            IntakeWorkspaceOwnershipModel.project_id == project_id,
+            IntakeWorkspaceOwnershipModel.item_key == item_key,
+        )
+        model = self.session.scalars(stmt).first()
+        return intake_workspace_ownership_model_to_domain(model) if model else None
+
+    def get_by_saga_id(self, saga_id: str) -> IntakeWorkspaceOwnership | None:
+        stmt = select(IntakeWorkspaceOwnershipModel).where(
+            IntakeWorkspaceOwnershipModel.saga_id == saga_id
+        )
+        model = self.session.scalars(stmt).first()
+        return intake_workspace_ownership_model_to_domain(model) if model else None
+
+    def get_active_by_item_key(
+        self, project_id: str, item_key: str
+    ) -> IntakeWorkspaceOwnership | None:
+        active_states = [
+            IntakeWorkspaceCreationState.RESERVED.value,
+            IntakeWorkspaceCreationState.CREATING.value,
+            IntakeWorkspaceCreationState.ACTIVE.value,
+        ]
+        stmt = select(IntakeWorkspaceOwnershipModel).where(
+            IntakeWorkspaceOwnershipModel.project_id == project_id,
+            IntakeWorkspaceOwnershipModel.item_key == item_key,
+            IntakeWorkspaceOwnershipModel.creation_state.in_(active_states),
+        )
+        model = self.session.scalars(stmt).first()
+        return intake_workspace_ownership_model_to_domain(model) if model else None
+
+    def get_active_by_canonical_path(
+        self, canonical_workspace_path: str
+    ) -> IntakeWorkspaceOwnership | None:
+        active_states = [
+            IntakeWorkspaceCreationState.RESERVED.value,
+            IntakeWorkspaceCreationState.CREATING.value,
+            IntakeWorkspaceCreationState.ACTIVE.value,
+        ]
+        stmt = select(IntakeWorkspaceOwnershipModel).where(
+            IntakeWorkspaceOwnershipModel.canonical_workspace_path == canonical_workspace_path,
+            IntakeWorkspaceOwnershipModel.creation_state.in_(active_states),
+        )
+        model = self.session.scalars(stmt).first()
+        return intake_workspace_ownership_model_to_domain(model) if model else None
+
+    def get_active_by_saga_id(self, saga_id: str) -> IntakeWorkspaceOwnership | None:
+        active_states = [
+            IntakeWorkspaceCreationState.RESERVED.value,
+            IntakeWorkspaceCreationState.CREATING.value,
+            IntakeWorkspaceCreationState.ACTIVE.value,
+        ]
+        stmt = select(IntakeWorkspaceOwnershipModel).where(
+            IntakeWorkspaceOwnershipModel.saga_id == saga_id,
+            IntakeWorkspaceOwnershipModel.creation_state.in_(active_states),
+        )
+        model = self.session.scalars(stmt).first()
+        return intake_workspace_ownership_model_to_domain(model) if model else None
+
+    def list_by_project(self, project_id: str) -> list[IntakeWorkspaceOwnership]:
+        stmt = select(IntakeWorkspaceOwnershipModel).where(
+            IntakeWorkspaceOwnershipModel.project_id == project_id
+        )
+        models = self.session.scalars(stmt).all()
+        return [intake_workspace_ownership_model_to_domain(m) for m in models]
+
+    def list_active(self) -> list[IntakeWorkspaceOwnership]:
+        active_states = [
+            IntakeWorkspaceCreationState.RESERVED.value,
+            IntakeWorkspaceCreationState.CREATING.value,
+            IntakeWorkspaceCreationState.ACTIVE.value,
+        ]
+        stmt = select(IntakeWorkspaceOwnershipModel).where(
+            IntakeWorkspaceOwnershipModel.creation_state.in_(active_states)
+        )
+        models = self.session.scalars(stmt).all()
+        return [intake_workspace_ownership_model_to_domain(m) for m in models]
+
+    def delete(self, workspace_id: str) -> None:
+        model = self.session.get(IntakeWorkspaceOwnershipModel, workspace_id)
+        if model:
+            self.session.delete(model)
+
+
 class PostgresRecoveryClaimRepository(RecoveryClaimRepositoryInterface):
     def __init__(self, session: Session):
         self.session = session
@@ -5468,6 +5639,9 @@ class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
             PostgresProjectManagedRepositoryBindingRepository(session)
         )
         self.orchestration_worktree_ownerships = PostgresOrchestrationWorktreeOwnershipRepository(
+            session
+        )
+        self.intake_workspace_ownerships = PostgresIntakeWorkspaceOwnershipRepository(
             session
         )
         self.durable_sagas = PostgresDurableSagaRepository(session)
