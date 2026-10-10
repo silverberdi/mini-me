@@ -867,8 +867,6 @@ def test_major_3_archive_exact_identity_matching(test_setup):
 def test_major_4_adapter_dependency_safety():
     """MAJOR 4: Verify adapter resolution handles explicit objects, fakes, and bare MagicMocks safely."""
     from unittest.mock import MagicMock
-    from minime.adapters.github import GitHubAdapter
-    from minime.adapters.openspec import OpenSpecAdapter
 
     uow = InMemoryPersistenceUnitOfWork()
 
@@ -960,7 +958,6 @@ def test_minor_2_multi_tick_scheduler_loop_prevention(test_setup):
     Tick 3: subsequent tick does NOT re-sweep into PREPARING.
     """
     uow = test_setup["uow"]
-    scheduler_svc = test_setup["scheduler_svc"]
     intake_svc = test_setup["intake_svc"]
 
     change_name = "multi-tick-stale-item"
@@ -998,4 +995,130 @@ def test_minor_2_multi_tick_scheduler_loop_prevention(test_setup):
     # TICK 3: Subsequent intake sweep runs -> item is NO LONGER retry-eligible, not re-swept
     prepared_3 = intake_svc.sweep_unprepared_backlog_items("test-proj")
     assert len(prepared_3) == 0
+
+
+def test_major_repository_root_resolution(tmp_path):
+    """MAJOR: Verify reconcile_and_persist_backlog_items uses managed_repository_root when binding exists.
+
+    Proves:
+    1. Active change existing ONLY under managed_repository_root remains READY (process/project_root != managed_repository_root).
+    2. Missing active directory in managed_repository_root transitions to BLOCKED(stale_ready_artifacts_missing).
+    3. Archived change under managed_repository_root transitions to COMPLETED.
+    4. Active or archived artifacts under unrelated self.project_root are IGNORED when a managed binding exists.
+    """
+    from minime.domain.models import Project, ProjectManagedRepositoryBinding
+
+    unrelated_project_root = tmp_path / "unrelated_working_dir"
+    unrelated_project_root.mkdir(parents=True, exist_ok=True)
+
+    managed_repo_dir = tmp_path / "managed_repo_dir"
+    managed_repo_dir.mkdir(parents=True, exist_ok=True)
+
+    uow = InMemoryPersistenceUnitOfWork()
+    now = utc_now()
+
+    project = Project(
+        project_id="test-managed-proj",
+        display_name="Managed Test Project",
+        repository="github.com/org/repo",
+        openspec_path="openspec",
+        created_at=now,
+        updated_at=now,
+    )
+    uow.projects.save(project)
+
+    binding = ProjectManagedRepositoryBinding(
+        project_id="test-managed-proj",
+        canonical_repository_identity="github.com/org/repo",
+        managed_repository_root=str(managed_repo_dir),
+        worktree_parent_dir=str(tmp_path / "worktrees"),
+        is_valid=True,
+    )
+    uow.project_managed_repository_bindings.save(binding)
+
+    # Setup active change 'change-a' under managed_repo_dir ONLY
+    (managed_repo_dir / "openspec" / "changes" / "change-a").mkdir(parents=True, exist_ok=True)
+
+    item_a = BacklogItem(
+        project_id="test-managed-proj",
+        item_key="change-a",
+        title="Change A",
+        status=WorkItemStatus.READY,
+        readiness_state=ReadinessState.READY,
+        openspec_change_name="change-a",
+        created_at=now,
+        updated_at=now,
+    )
+    uow.backlog_items.save(item_a)
+
+    # Setup item_b: active dir missing from managed_repo_dir
+    item_b = BacklogItem(
+        project_id="test-managed-proj",
+        item_key="change-b",
+        title="Change B",
+        status=WorkItemStatus.READY,
+        readiness_state=ReadinessState.READY,
+        openspec_change_name="change-b",
+        created_at=now,
+        updated_at=now,
+    )
+    uow.backlog_items.save(item_b)
+
+    # Setup item_c: archive exists under managed_repo_dir
+    (managed_repo_dir / "openspec" / "changes" / "archive" / "2026-10-08-change-c").mkdir(
+        parents=True, exist_ok=True
+    )
+    item_c = BacklogItem(
+        project_id="test-managed-proj",
+        item_key="change-c",
+        title="Change C",
+        status=WorkItemStatus.READY,
+        readiness_state=ReadinessState.READY,
+        openspec_change_name="change-c",
+        created_at=now,
+        updated_at=now,
+    )
+    uow.backlog_items.save(item_c)
+
+    # Setup item_d: active AND archive exist ONLY under unrelated_project_root
+    (unrelated_project_root / "openspec" / "changes" / "change-d").mkdir(
+        parents=True, exist_ok=True
+    )
+    (unrelated_project_root / "openspec" / "changes" / "archive" / "change-d").mkdir(
+        parents=True, exist_ok=True
+    )
+    item_d = BacklogItem(
+        project_id="test-managed-proj",
+        item_key="change-d",
+        title="Change D",
+        status=WorkItemStatus.READY,
+        readiness_state=ReadinessState.READY,
+        openspec_change_name="change-d",
+        created_at=now,
+        updated_at=now,
+    )
+    uow.backlog_items.save(item_d)
+
+    uow.commit()
+
+    # Instantiate IntakeService with unrelated_project_root
+    intake_svc = IntakeService(uow, project_root=unrelated_project_root)
+
+    # Run reconciliation
+    reconciled = intake_svc.reconcile_and_persist_backlog_items("test-managed-proj")
+    rec_by_key = {item.item_key: item for item in reconciled}
+
+    # 1. item_a (active ONLY under managed_repo_dir) -> remains READY
+    assert rec_by_key["change-a"].status == WorkItemStatus.READY
+
+    # 2. item_b (active missing from managed_repo_dir) -> BLOCKED(stale_ready_artifacts_missing)
+    assert rec_by_key["change-b"].status == WorkItemStatus.BLOCKED
+    assert rec_by_key["change-b"].unmet_readiness_reasons == ["stale_ready_artifacts_missing"]
+
+    # 3. item_c (archive under managed_repo_dir) -> COMPLETED
+    assert rec_by_key["change-c"].status == WorkItemStatus.COMPLETED
+
+    # 4. item_d (artifacts ONLY under unrelated_project_root) -> IGNORED, transitions to BLOCKED
+    assert rec_by_key["change-d"].status == WorkItemStatus.BLOCKED
+
 

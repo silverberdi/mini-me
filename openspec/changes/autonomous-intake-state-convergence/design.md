@@ -8,6 +8,7 @@ Extend `ALLOWED_WORK_ITEM_TRANSITIONS[WorkItemStatus.READY]` and `[WorkItemStatu
 Enforce that any transition to `WorkItemStatus.COMPLETED` requires an authoritative completion `reason_code`:
 - `canonical_completion_evidence`
 - `post_merge_completion`
+- `post_merge_reconciled`
 - `manual_completion_authority`
 
 Arbitrary string reason codes for completion transitions are rejected with `LifecycleInvalidTransitionError`.
@@ -20,7 +21,7 @@ Implement `reconcile_and_persist_backlog_items(project_id: str | None = None) ->
   1. Delivered / Archive / `ChangeStatus.DONE` evidence -> `COMPLETED`
   2. Cancellation evidence (`ChangeStatus.CANCELLED` or cancelled run) -> `CANCELLED`
   3. Physical active change directory absence or invalid readiness for `READY` items -> `BLOCKED` (`stale_ready_artifacts_missing`)
-- Physical artifact presence is checked at `Path(self.project_root) / project.openspec_path / "changes" / change_name`.
+- Physical artifact presence and archive directories are checked at `_resolve_project_root(project) / project.openspec_path / ...`, which uses `managed_repository_root` from the canonical project binding when present and valid, falling back to `self.project_root` for unmanaged/legacy/test scenarios.
 
 ### 3. Exact Archive Identity Matching
 In `IntakeService.reconcile_and_persist_backlog_items()`:

@@ -12,8 +12,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from minime.adapters.github import GitHubAdapter
-from minime.adapters.openspec import OpenSpecAdapter
 from minime.domain.enums import (
     PRIMARY_PROVIDERS,
     AdmissionBlockCondition,

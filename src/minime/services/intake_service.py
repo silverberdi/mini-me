@@ -27,6 +27,7 @@ from minime.domain.models import (
     Change,
     Event,
     HumanAnswerRecord,
+    Project,
     ProjectBinding,
     RecoveryClaimContext,
     WorkItemAnswerInput,
@@ -115,6 +116,18 @@ class IntakeService:
             uow=self.uow,
         )
         self.saga_engine = saga_engine or SagaEngine(self.uow)
+
+    def _resolve_project_root(self, project: Project | str) -> Path:
+        """Resolve canonical managed repository root for project, falling back to self.project_root."""
+        project_id = project.project_id if isinstance(project, Project) else project
+        binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
+        if binding_repo:
+            binding = binding_repo.get_by_project_id(project_id)
+            if binding and binding.managed_repository_root:
+                b_root = Path(binding.managed_repository_root)
+                if b_root.exists() and b_root.is_dir():
+                    return b_root
+        return self.project_root
 
     def create_work_item(
         self,
@@ -1035,6 +1048,7 @@ class IntakeService:
         authority = LifecycleTransitionAuthority(self.uow)
 
         for project in projects:
+            eff_root = self._resolve_project_root(project)
             pid = project.project_id
             items = self.uow.backlog_items.list_by_project(pid)
             if not items:
@@ -1049,7 +1063,7 @@ class IntakeService:
             changes_by_name = {c.name: c for c in changes}
 
             archived_change_names: set[str] = set()
-            archive_dir = Path(self.project_root) / project.openspec_path / "changes" / "archive"
+            archive_dir = eff_root / project.openspec_path / "changes" / "archive"
             if archive_dir.exists() and archive_dir.is_dir():
                 for p in archive_dir.iterdir():
                     if p.is_dir():
@@ -1110,7 +1124,7 @@ class IntakeService:
                     reason_code = "human_gate_reconciliation"
                 elif item.status == WorkItemStatus.READY:
                     active_change_dir = (
-                        Path(self.project_root) / project.openspec_path / "changes" / change_name
+                        eff_root / project.openspec_path / "changes" / change_name
                     )
                     active_artifacts_present = active_change_dir.exists() and active_change_dir.is_dir()
                     if not active_artifacts_present or item.readiness_state != ReadinessState.READY:
@@ -1181,7 +1195,8 @@ class IntakeService:
         project = self.uow.projects.get_by_id(project_id)
         archived_change_names: set[str] = set()
         if project:
-            archive_dir = Path(self.project_root) / project.openspec_path / "changes" / "archive"
+            eff_root = self._resolve_project_root(project)
+            archive_dir = eff_root / project.openspec_path / "changes" / "archive"
             if archive_dir.exists() and archive_dir.is_dir():
                 for p in archive_dir.iterdir():
                     if p.is_dir():

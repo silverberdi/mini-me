@@ -38,7 +38,7 @@ Prior to autonomous intake sweep during scheduler execution, the system MUST eva
 #### SCENARIO: Authoritative Completion Evidence Requirement
 - **GIVEN** a caller attempting to transition a BacklogItem to `COMPLETED` via `LifecycleTransitionAuthority`
 - **WHEN** `transition_backlog_item` is invoked
-- **THEN** the system MUST enforce that `to_state == COMPLETED` requires an authoritative completion `reason_code` (`canonical_completion_evidence`, `post_merge_completion`, or `manual_completion_authority`).
+- **THEN** the system MUST enforce that `to_state == COMPLETED` requires an authoritative completion `reason_code` (`canonical_completion_evidence`, `post_merge_completion`, `post_merge_reconciled`, or `manual_completion_authority`).
 
 #### SCENARIO: Adapter Dependency Safety
 - **GIVEN** `SchedulerService` initialization with an explicit concrete adapter, fake adapter, wrapper, protocol implementation, or bare mock
