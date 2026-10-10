@@ -1772,7 +1772,7 @@ class IntakeService:
                         term in err_msg.lower()
                         for term in ["repository not found", "could not resolve host", "connection refused", "does not appear to be a git repository", "cannot access"]
                     )
-                    if is_unreachable_remote:
+                    if is_unreachable_remote and remote == "local":
                         logger.warning("Remote unreachable for git push in environment; updating local ref '%s'", published_ref)
                         subprocess.run(
                             ["git", "update-ref", published_ref, head_sha],
