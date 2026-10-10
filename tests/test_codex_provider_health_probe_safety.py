@@ -157,7 +157,7 @@ async def test_expensive_probe_runs_when_actionable_ready_work_exists(in_memory_
 @pytest.mark.asyncio
 async def test_auth_401_transitions_health_to_auth_required(in_memory_uow, tmp_path: Path):
     """Verify HTTP 401 / token_expired transitions health to AUTH_REQUIRED and yields NEEDS_HUMAN."""
-    from conftest import setup_managed_repository_fixture
+    from conftest import create_isolated_openspec_change, setup_managed_repository_fixture
     setup_managed_repository_fixture(
         uow=in_memory_uow,
         project_id="mini-me",
@@ -165,6 +165,7 @@ async def test_auth_401_transitions_health_to_auth_required(in_memory_uow, tmp_p
         worktree_parent_dir=tmp_path / ".minime" / "worktrees",
         canonical_repository_identity="github.com/silverberdi/mini-me",
     )
+    create_isolated_openspec_change(tmp_path, "001-ready-task")
     svc = ProviderHealthService(uow=in_memory_uow)
 
 
@@ -262,7 +263,7 @@ async def test_auth_401_transitions_health_to_auth_required(in_memory_uow, tmp_p
 @pytest.mark.asyncio
 async def test_subsequent_tick_bypasses_probing_when_auth_required(in_memory_uow, tmp_path: Path):
     """Regression test: AUTH_REQUIRED is terminal for automatic probing; subsequent ticks do NOT dispatch paid probes."""
-    from conftest import setup_managed_repository_fixture
+    from conftest import create_isolated_openspec_change, setup_managed_repository_fixture
     setup_managed_repository_fixture(
         uow=in_memory_uow,
         project_id="mini-me",
@@ -270,6 +271,7 @@ async def test_subsequent_tick_bypasses_probing_when_auth_required(in_memory_uow
         worktree_parent_dir=tmp_path / ".minime" / "worktrees",
         canonical_repository_identity="github.com/silverberdi/mini-me",
     )
+    create_isolated_openspec_change(tmp_path, "001-ready-task")
     svc = ProviderHealthService(uow=in_memory_uow)
 
 

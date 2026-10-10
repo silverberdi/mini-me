@@ -27,6 +27,7 @@ from minime.domain.models import (
     Change,
     Event,
     HumanAnswerRecord,
+    Project,
     ProjectBinding,
     RecoveryClaimContext,
     WorkItemAnswerInput,
@@ -67,6 +68,27 @@ def _has_passed_intake_phase(current_phase: str, target_phase: str) -> bool:
     return curr_idx >= targ_idx
 
 
+def extract_canonical_archived_change_name(dir_name: str) -> str:
+    """Extract canonical change name from OpenSpec archive directory entry.
+
+    OpenSpec archive naming convention uses either:
+    1. 'YYYY-MM-DD-change-name' (10-char date prefix followed by hyphen)
+    2. 'change-name' (exact change name without date prefix)
+    """
+    parts = dir_name.split("-", 3)
+    if (
+        len(parts) == 4
+        and len(parts[0]) == 4
+        and parts[0].isdigit()
+        and len(parts[1]) == 2
+        and parts[1].isdigit()
+        and len(parts[2]) == 2
+        and parts[2].isdigit()
+    ):
+        return parts[3]
+    return dir_name
+
+
 class IntakeService:
     """Backend service for work intake, artifact generation, and execution admission."""
 
@@ -94,6 +116,18 @@ class IntakeService:
             uow=self.uow,
         )
         self.saga_engine = saga_engine or SagaEngine(self.uow)
+
+    def _resolve_project_root(self, project: Project | str) -> Path:
+        """Resolve canonical managed repository root for project, falling back to self.project_root."""
+        project_id = project.project_id if isinstance(project, Project) else project
+        binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
+        if binding_repo:
+            binding = binding_repo.get_by_project_id(project_id)
+            if binding and binding.managed_repository_root:
+                b_root = Path(binding.managed_repository_root)
+                if b_root.exists() and b_root.is_dir():
+                    return b_root
+        return self.project_root
 
     def create_work_item(
         self,
@@ -1002,6 +1036,147 @@ class IntakeService:
         self.uow.events.save(event)
         self.uow.commit()
 
+    def reconcile_and_persist_backlog_items(
+        self, project_id: str | None = None
+    ) -> list[BacklogItem]:
+        """Reconcile backlog items against canonical evidence and persist state transitions via LifecycleTransitionAuthority."""
+        projects = self.uow.projects.list_all()
+        if project_id:
+            projects = [p for p in projects if p.project_id == project_id]
+
+        reconciled_items: list[BacklogItem] = []
+        authority = LifecycleTransitionAuthority(self.uow)
+
+        for project in projects:
+            eff_root = self._resolve_project_root(project)
+            pid = project.project_id
+            items = self.uow.backlog_items.list_by_project(pid)
+            if not items:
+                continue
+
+            runs = self.uow.orchestration_runs.list_runs(project_id=pid)
+            runs_by_change: dict[str, list[Any]] = {}
+            for r in runs:
+                runs_by_change.setdefault(r.change_name, []).append(r)
+
+            changes = self.uow.changes.list_by_project(pid)
+            changes_by_name = {c.name: c for c in changes}
+
+            archived_change_names: set[str] = set()
+            archive_dir = eff_root / project.openspec_path / "changes" / "archive"
+            if archive_dir.exists() and archive_dir.is_dir():
+                for p in archive_dir.iterdir():
+                    if p.is_dir():
+                        archived_change_names.add(p.name)
+                        archived_change_names.add(extract_canonical_archived_change_name(p.name))
+
+            for item in items:
+                if item.status in (WorkItemStatus.COMPLETED, WorkItemStatus.CANCELLED):
+                    reconciled_items.append(item)
+                    continue
+
+                change_name = item.openspec_change_name or item.item_key
+                item_runs = runs_by_change.get(change_name, []) or runs_by_change.get(item.item_key, [])
+                latest_run = item_runs[-1] if item_runs else None
+                change_rec = changes_by_name.get(change_name) or changes_by_name.get(item.item_key)
+
+                is_archived = (
+                    change_name in archived_change_names
+                    or item.item_key in archived_change_names
+                )
+                is_run_completed = bool(
+                    latest_run
+                    and (
+                        latest_run.current_stage == OrchestrationStage.COMPLETED
+                        or latest_run.stop_outcome == OrchestrationStopOutcome.COMPLETED
+                    )
+                )
+                is_done = (
+                    is_archived
+                    or is_run_completed
+                    or bool(change_rec and change_rec.status == ChangeStatus.DONE)
+                )
+                is_cancelled = bool(
+                    (change_rec and change_rec.status == ChangeStatus.CANCELLED)
+                    or (latest_run and latest_run.stop_outcome == OrchestrationStopOutcome.CANCELLED)
+                )
+
+                new_status = item.status
+                new_run_id = item.run_id
+                reason_code = "backlog_reconciliation"
+
+                if is_done:
+                    new_status = WorkItemStatus.COMPLETED
+                    reason_code = "canonical_completion_evidence"
+                elif is_cancelled:
+                    new_status = WorkItemStatus.CANCELLED
+                    reason_code = "canonical_cancellation_evidence"
+                elif latest_run and latest_run.is_active:
+                    new_run_id = latest_run.run_id
+                    new_status = WorkItemStatus.RUNNING
+                    reason_code = "active_run_reconciliation"
+                elif latest_run and latest_run.stop_outcome in {
+                    OrchestrationStopOutcome.NEEDS_HUMAN,
+                    OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE,
+                }:
+                    new_run_id = latest_run.run_id
+                    new_status = WorkItemStatus.NEEDS_HUMAN
+                    reason_code = "human_gate_reconciliation"
+                elif item.status == WorkItemStatus.READY:
+                    active_change_dir = (
+                        eff_root / project.openspec_path / "changes" / change_name
+                    )
+                    active_artifacts_present = active_change_dir.exists() and active_change_dir.is_dir()
+                    if not active_artifacts_present or item.readiness_state != ReadinessState.READY:
+                        new_status = WorkItemStatus.BLOCKED
+                        reason_code = "stale_ready_artifacts_missing"
+                elif (
+                    not is_done
+                    and item.status in (WorkItemStatus.RUNNING, WorkItemStatus.PREPARING)
+                    and not item_runs
+                ):
+                    if item.readiness_state == ReadinessState.READY:
+                        new_status = WorkItemStatus.READY
+                        reason_code = "orphaned_preparing_to_ready"
+                    else:
+                        new_status = WorkItemStatus.BACKLOG
+                        reason_code = "orphaned_preparing_to_backlog"
+
+                if new_status != item.status:
+                    try:
+                        updated_item = authority.transition_backlog_item(
+                            project_id=pid,
+                            item_key=item.item_key,
+                            expected_from_state=item.status,
+                            to_state=new_status,
+                            run_id=new_run_id,
+                            reason_code=reason_code,
+                            actor="system-backlog-convergence",
+                        )
+                        if new_status == WorkItemStatus.BLOCKED and reason_code == "stale_ready_artifacts_missing":
+                            updated_item = updated_item.model_copy(
+                                update={
+                                    "readiness_state": ReadinessState.NOT_READY,
+                                    "unmet_readiness_reasons": ["stale_ready_artifacts_missing"],
+                                }
+                            )
+                            self.uow.backlog_items.save(updated_item)
+                        reconciled_items.append(updated_item)
+                    except Exception as exc:
+                        logger.warning(
+                            "Backlog lifecycle convergence transition failed for item '%s' (%s -> %s): %s",
+                            item.item_key,
+                            item.status.value,
+                            new_status.value,
+                            exc,
+                        )
+                        reconciled_items.append(item)
+                else:
+                    reconciled_items.append(item)
+
+        self.uow.commit()
+        return reconciled_items
+
     def reconcile_backlog_projections(self, project_id: str) -> list[BacklogItem]:
         """Reconcile and project accurate backlog item execution states against canonical runs and changes."""
         items = self.uow.backlog_items.list_by_project(project_id)
@@ -1020,7 +1195,8 @@ class IntakeService:
         project = self.uow.projects.get_by_id(project_id)
         archived_change_names: set[str] = set()
         if project:
-            archive_dir = Path(self.project_root) / project.openspec_path / "changes" / "archive"
+            eff_root = self._resolve_project_root(project)
+            archive_dir = eff_root / project.openspec_path / "changes" / "archive"
             if archive_dir.exists() and archive_dir.is_dir():
                 for p in archive_dir.iterdir():
                     if p.is_dir():
@@ -1094,17 +1270,29 @@ class IntakeService:
                     new_status = WorkItemStatus.BACKLOG
 
             if new_status != item.status or new_run_id != item.run_id:
-                projected_item = item.model_copy(
-                    update={
-                        "status": new_status,
-                        "run_id": new_run_id,
-                    }
+                reconciled_items.append(
+                    item.model_copy(update={"status": new_status, "run_id": new_run_id})
                 )
-                reconciled_items.append(projected_item)
             else:
                 reconciled_items.append(item)
 
         return reconciled_items
+
+    @staticmethod
+    def is_blocked_retry_eligible(item: BacklogItem) -> bool:
+        """Determine if a BLOCKED backlog item is eligible for single-cycle autonomous preparation.
+
+        Autonomous re-preparation is permitted ONLY when the normalized blocker set
+        contains EXACTLY the single canonical synthetic convergence reason ['stale_ready_artifacts_missing'].
+        If any other blocker, combination of blockers, or empty set is present, retry is forbidden.
+        """
+        if item.status != WorkItemStatus.BLOCKED:
+            return False
+
+        reasons = item.unmet_readiness_reasons or []
+        normalized_reasons = [str(r).strip().lower() for r in reasons if str(r).strip()]
+
+        return normalized_reasons == ["stale_ready_artifacts_missing"]
 
     def sweep_unprepared_backlog_items(
         self,
@@ -1120,7 +1308,7 @@ class IntakeService:
             if not getattr(project, "auto_prepare", True):
                 continue
 
-            # ROADMAP state is a pure projection.  Preserve the persisted lifecycle
+            # ROADMAP state is a pure projection. Preserve the persisted lifecycle
             # record, but use current source evidence to decide whether autonomous
             # preparation is authorized.
             roadmap_ready_keys: set[str] = set()
@@ -1149,11 +1337,13 @@ class IntakeService:
             unprepared = [
                 it
                 for it in items
-                if it.status
-                in (
-                    WorkItemStatus.BACKLOG,
-                    WorkItemStatus.CONTEXT_CHECK,
-                    WorkItemStatus.PREPARING,
+                if (
+                    it.status in (
+                        WorkItemStatus.BACKLOG,
+                        WorkItemStatus.CONTEXT_CHECK,
+                        WorkItemStatus.PREPARING,
+                    )
+                    or (it.status == WorkItemStatus.BLOCKED and IntakeService.is_blocked_retry_eligible(it))
                 )
                 and it.readiness_state != ReadinessState.READY
                 and it.status
