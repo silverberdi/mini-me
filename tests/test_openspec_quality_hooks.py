@@ -1,4 +1,4 @@
-"""Comprehensive tests for OpenSpec Lifecycle Quality Hooks V1."""
+"""Comprehensive tests for OpenSpec Lifecycle Quality Hooks V1 with fail-closed evidence enforcement."""
 
 from __future__ import annotations
 
@@ -19,8 +19,11 @@ from minime.quality_hooks.models import (
     FindingSeverity,
     FindingStatus,
     HookVerdict,
+    HumanApprovalEvidence,
+    MergeEvidence,
     QualityHookFinding,
     QualityHookStage,
+    ReviewEvidence,
     ReviewSpecialty,
     VerificationResult,
 )
@@ -86,59 +89,122 @@ def test_pre_apply_hook_readiness(tmp_path: Path):
     assert "not found" in report_missing.verdict_reason.lower()
 
 
-def test_post_apply_expert_review_and_independence(tmp_path: Path):
-    """Verify POST-APPLY evaluates model independence, specialties, and findings."""
-    # Case 1: Same model identity -> BLOCKED
+def test_post_apply_fails_closed_without_review_evidence(tmp_path: Path):
+    """POST-APPLY Defect 2 Remediation: verify failure when review evidence is missing or stale."""
+    # Negative test 1: Self-declared identities without review evidence -> MUST be BLOCKED
+    report_no_evidence = evaluate_post_apply(
+        change_id="test-change",
+        base_sha=BASE_SHA,
+        candidate_sha=CANDIDATE_SHA,
+        implementer_identity="codex",
+        implementer_model_identity="openai/gpt-4o",
+        review_evidence=None,
+        _override_changed_files=["src/minime/services/auth_service.py"],
+        _override_diff_text="def test(): pass",
+        repo_root=tmp_path,
+    )
+    assert report_no_evidence.final_verdict == HookVerdict.BLOCKED
+    assert "review evidence is missing" in report_no_evidence.verdict_reason.lower()
+
+    # Negative test 2: Stale review evidence bound to different SHA -> MUST be BLOCKED
+    stale_evidence = ReviewEvidence(
+        candidate_sha="3333333333333333333333333333333333333333",  # Mismatched SHA
+        reviewer_identity="antigravity",
+        reviewer_model_identity="google/gemini-2.5-pro",
+        verdict="approve",
+        summary="Looks good",
+        evaluated_specialties=[ReviewSpecialty.SECURITY_AUTH],
+        evidence_source="reviews/review-001.json",
+    )
+    report_stale = evaluate_post_apply(
+        change_id="test-change",
+        base_sha=BASE_SHA,
+        candidate_sha=CANDIDATE_SHA,
+        implementer_identity="codex",
+        implementer_model_identity="openai/gpt-4o",
+        review_evidence=stale_evidence,
+        _override_changed_files=["src/minime/services/auth_service.py"],
+        _override_diff_text="def test(): pass",
+        repo_root=tmp_path,
+    )
+    assert report_stale.final_verdict == HookVerdict.BLOCKED
+    assert "stale review" in report_stale.verdict_reason.lower()
+
+    # Negative test 3: Same model identity in review evidence -> MUST be BLOCKED
+    same_model_evidence = ReviewEvidence(
+        candidate_sha=CANDIDATE_SHA,
+        reviewer_identity="antigravity",
+        reviewer_model_identity="openai/gpt-4o",  # Same as implementer!
+        verdict="approve",
+        summary="Self review attempt",
+        evaluated_specialties=[ReviewSpecialty.SECURITY_AUTH],
+        evidence_source="reviews/review-002.json",
+    )
     report_same_model = evaluate_post_apply(
         change_id="test-change",
         base_sha=BASE_SHA,
         candidate_sha=CANDIDATE_SHA,
         implementer_identity="codex",
         implementer_model_identity="openai/gpt-4o",
-        reviewer_identity="antigravity",
-        reviewer_model_identity="openai/gpt-4o",
-        changed_files=["src/minime/services/auth_service.py"],
-        evaluated_specialties=[ReviewSpecialty.SECURITY_AUTH],
+        review_evidence=same_model_evidence,
+        _override_changed_files=["src/minime/services/auth_service.py"],
+        _override_diff_text="def test(): pass",
         repo_root=tmp_path,
     )
     assert report_same_model.final_verdict == HookVerdict.BLOCKED
     assert "independence" in report_same_model.verdict_reason.lower()
 
-    # Case 2: Required specialty missing -> BLOCKED
+    # Negative test 4: Missing required specialty in review evidence -> MUST be BLOCKED
+    missing_spec_evidence = ReviewEvidence(
+        candidate_sha=CANDIDATE_SHA,
+        reviewer_identity="antigravity",
+        reviewer_model_identity="google/gemini-2.5-pro",
+        verdict="approve",
+        summary="Missed security specialty",
+        evaluated_specialties=[ReviewSpecialty.GENERAL_ARCHITECTURE],  # Missing SECURITY_AUTH
+        evidence_source="reviews/review-003.json",
+    )
     report_missing_spec = evaluate_post_apply(
         change_id="test-change",
         base_sha=BASE_SHA,
         candidate_sha=CANDIDATE_SHA,
         implementer_identity="codex",
         implementer_model_identity="openai/gpt-4o",
-        reviewer_identity="antigravity",
-        reviewer_model_identity="google/gemini-2.5-pro",
-        changed_files=["src/minime/services/auth_service.py"],
-        evaluated_specialties=[],  # Missing SECURITY_AUTH
+        review_evidence=missing_spec_evidence,
+        _override_changed_files=["src/minime/services/auth_service.py"],
+        _override_diff_text="def test(): pass",
         repo_root=tmp_path,
     )
     assert report_missing_spec.final_verdict == HookVerdict.BLOCKED
     assert "unfulfilled" in report_missing_spec.verdict_reason.lower()
 
-    # Case 3: Fully compliant review -> PASS
-    report_compliant = evaluate_post_apply(
+    # Positive test: Valid, independent review evidence covering required specialty -> PASS
+    valid_evidence = ReviewEvidence(
+        candidate_sha=CANDIDATE_SHA,
+        reviewer_identity="antigravity",
+        reviewer_model_identity="google/gemini-2.5-pro",
+        verdict="approve",
+        summary="Full review passed",
+        evaluated_specialties=[ReviewSpecialty.SECURITY_AUTH],
+        evidence_source="reviews/review-004.json",
+    )
+    report_valid = evaluate_post_apply(
         change_id="test-change",
         base_sha=BASE_SHA,
         candidate_sha=CANDIDATE_SHA,
         implementer_identity="codex",
         implementer_model_identity="openai/gpt-4o",
-        reviewer_identity="antigravity",
-        reviewer_model_identity="google/gemini-2.5-pro",
-        changed_files=["src/minime/services/auth_service.py"],
-        evaluated_specialties=[ReviewSpecialty.SECURITY_AUTH],
+        review_evidence=valid_evidence,
+        _override_changed_files=["src/minime/services/auth_service.py"],
+        _override_diff_text="def test(): pass",
         repo_root=tmp_path,
     )
-    assert report_compliant.final_verdict == HookVerdict.PASS
+    assert report_valid.final_verdict == HookVerdict.PASS
 
 
-def test_verify_hook_gate(tmp_path: Path):
-    """Verify VERIFY gate requires evidence and zero unresolved CRITICAL/HIGH findings."""
-    # Missing verification result -> BLOCKED
+def test_verify_fails_closed_without_candidate_evidence(tmp_path: Path):
+    """VERIFY Defect 1 Remediation: verify failure when verification evidence is missing, unbound, or failing."""
+    # Negative test 1: verification_result is None -> MUST be BLOCKED
     report_no_evidence = evaluate_verify(
         change_id="test-change",
         base_sha=BASE_SHA,
@@ -149,82 +215,172 @@ def test_verify_hook_gate(tmp_path: Path):
     assert report_no_evidence.final_verdict == HookVerdict.BLOCKED
     assert "missing" in report_no_evidence.verdict_reason.lower()
 
-    # Failed deterministic checks -> FAIL
-    failed_res = VerificationResult(
-        deterministic_checks_passed=False,
-        tests_passed=False,
-        linters_passed=True,
-        schemas_passed=True,
-    )
-    report_check_fail = evaluate_verify(
-        change_id="test-change",
-        base_sha=BASE_SHA,
-        candidate_sha=CANDIDATE_SHA,
-        verification_result=failed_res,
-        repo_root=tmp_path,
-    )
-    assert report_check_fail.final_verdict == HookVerdict.FAIL
-
-    # Unresolved CRITICAL finding -> FAIL
-    crit_finding = QualityHookFinding(
-        finding_id="FIND-001",
-        specialty=ReviewSpecialty.SECURITY_AUTH,
-        severity=FindingSeverity.CRITICAL,
-        requirement_reference="SPEC-01",
-        observed_evidence="Security leak detected",
-        expected_behavior="Sanitized output",
-        suggested_remediation="Fix leak",
-        status=FindingStatus.UNRESOLVED,
-    )
-    passed_res = VerificationResult(
+    # Negative test 2: verification_result candidate_sha mismatch -> MUST be BLOCKED
+    mismatched_evidence = VerificationResult(
+        candidate_sha="9999999999999999999999999999999999999999",  # Wrong SHA
         deterministic_checks_passed=True,
         tests_passed=True,
         linters_passed=True,
         schemas_passed=True,
+        evidence_source="pytest-run-log",
+    )
+    report_mismatch = evaluate_verify(
+        change_id="test-change",
+        base_sha=BASE_SHA,
+        candidate_sha=CANDIDATE_SHA,
+        verification_result=mismatched_evidence,
+        repo_root=tmp_path,
+    )
+    assert report_mismatch.final_verdict == HookVerdict.BLOCKED
+    assert "does not match" in report_mismatch.verdict_reason.lower()
+
+    # Negative test 3: Failed deterministic checks in evidence -> MUST be FAIL
+    failed_checks_evidence = VerificationResult(
+        candidate_sha=CANDIDATE_SHA,
+        deterministic_checks_passed=False,
+        tests_passed=False,
+        linters_passed=True,
+        schemas_passed=True,
+        evidence_source="pytest-run-log",
+    )
+    report_checks_fail = evaluate_verify(
+        change_id="test-change",
+        base_sha=BASE_SHA,
+        candidate_sha=CANDIDATE_SHA,
+        verification_result=failed_checks_evidence,
+        repo_root=tmp_path,
+    )
+    assert report_checks_fail.final_verdict == HookVerdict.FAIL
+    assert "failed" in report_checks_fail.verdict_reason.lower()
+
+    # Negative test 4: Unresolved CRITICAL finding -> MUST be FAIL
+    crit_finding = QualityHookFinding(
+        finding_id="FIND-001",
+        specialty=ReviewSpecialty.SECURITY_AUTH,
+        severity=FindingSeverity.CRITICAL,
+        requirement_reference="CANONICAL#auth",
+        observed_evidence="Unauthenticated fallback",
+        expected_behavior="Fail-closed",
+        suggested_remediation="Raise error",
+        status=FindingStatus.UNRESOLVED,
+    )
+    valid_checks_evidence = VerificationResult(
+        candidate_sha=CANDIDATE_SHA,
+        deterministic_checks_passed=True,
+        tests_passed=True,
+        linters_passed=True,
+        schemas_passed=True,
+        evidence_source="pytest-run-log",
     )
     report_finding_fail = evaluate_verify(
         change_id="test-change",
         base_sha=BASE_SHA,
         candidate_sha=CANDIDATE_SHA,
-        verification_result=passed_res,
+        verification_result=valid_checks_evidence,
         findings=[crit_finding],
         repo_root=tmp_path,
     )
     assert report_finding_fail.final_verdict == HookVerdict.FAIL
 
-    # Clean verification -> PASS
+    # Positive test: Valid evidence bound to candidate SHA with zero unresolved issues -> PASS
     report_pass = evaluate_verify(
         change_id="test-change",
         base_sha=BASE_SHA,
         candidate_sha=CANDIDATE_SHA,
-        verification_result=passed_res,
+        verification_result=valid_checks_evidence,
         findings=[],
         repo_root=tmp_path,
     )
     assert report_pass.final_verdict == HookVerdict.PASS
 
 
-def test_archive_hook_delivery_integrity(tmp_path: Path):
-    """Verify ARCHIVE hook enforces DoD and mandatory human merge."""
-    # Not merged by human -> FAIL
-    report_auto_merge = evaluate_archive(
+def test_archive_fails_closed_without_authoritative_sources(tmp_path: Path):
+    """ARCHIVE Defect 3 Remediation: verify failure when merge or human approval evidence is absent or invalid."""
+    # Negative test 1: Both merge and approval evidence missing -> MUST be BLOCKED
+    report_no_evidence = evaluate_archive(
         change_id="test-change",
         base_sha=BASE_SHA,
         candidate_sha=CANDIDATE_SHA,
-        pr_merged_by_human=False,
+        merge_evidence=None,
+        human_approval_evidence=None,
         repo_root=tmp_path,
     )
-    assert report_auto_merge.final_verdict == HookVerdict.FAIL
-    assert any(f.finding_id == "ARCHIVE-NO-HUMAN-MERGE" for f in report_auto_merge.findings)
+    assert report_no_evidence.final_verdict == HookVerdict.BLOCKED
+    assert "merge verification evidence is missing" in report_no_evidence.verdict_reason.lower()
 
-    # Valid human merge and approval -> PASS
+    # Negative test 2: Merge evidence present but human approval missing -> MUST be BLOCKED
+    valid_merge = MergeEvidence(
+        candidate_sha=CANDIDATE_SHA,
+        target_branch="main",
+        is_merged=True,
+        merged_by="silverberdi",
+        merged_by_type="User",
+        evidence_source="github_api_pr_details",
+    )
+    report_missing_approval = evaluate_archive(
+        change_id="test-change",
+        base_sha=BASE_SHA,
+        candidate_sha=CANDIDATE_SHA,
+        merge_evidence=valid_merge,
+        human_approval_evidence=None,
+        repo_root=tmp_path,
+    )
+    assert report_missing_approval.final_verdict == HookVerdict.BLOCKED
+    assert "human approval evidence is missing" in report_missing_approval.verdict_reason.lower()
+
+    # Negative test 3: Merge was executed by a Bot -> MUST be FAIL (human merge mandatory in MVP)
+    bot_merge = MergeEvidence(
+        candidate_sha=CANDIDATE_SHA,
+        target_branch="main",
+        is_merged=True,
+        merged_by="github-actions[bot]",
+        merged_by_type="Bot",
+        evidence_source="github_api_pr_details",
+    )
+    valid_approval = HumanApprovalEvidence(
+        candidate_head_sha=CANDIDATE_SHA,
+        base_sha=BASE_SHA,
+        decision="approve",
+        approver_identity="operator",
+        evidence_source="human-validation-report.json",
+    )
+    report_bot_merge = evaluate_archive(
+        change_id="test-change",
+        base_sha=BASE_SHA,
+        candidate_sha=CANDIDATE_SHA,
+        merge_evidence=bot_merge,
+        human_approval_evidence=valid_approval,
+        repo_root=tmp_path,
+    )
+    assert report_bot_merge.final_verdict == HookVerdict.FAIL
+    assert any(f.finding_id == "ARCHIVE-NO-HUMAN-MERGE" for f in report_bot_merge.findings)
+
+    # Negative test 4: Human approval decision was "reject" -> MUST be FAIL
+    rejected_approval = HumanApprovalEvidence(
+        candidate_head_sha=CANDIDATE_SHA,
+        base_sha=BASE_SHA,
+        decision="reject",
+        approver_identity="operator",
+        evidence_source="human-validation-report.json",
+    )
+    report_rejected_approval = evaluate_archive(
+        change_id="test-change",
+        base_sha=BASE_SHA,
+        candidate_sha=CANDIDATE_SHA,
+        merge_evidence=valid_merge,
+        human_approval_evidence=rejected_approval,
+        repo_root=tmp_path,
+    )
+    assert report_rejected_approval.final_verdict == HookVerdict.FAIL
+    assert any(f.finding_id == "ARCHIVE-MISSING-HUMAN-APPROVAL" for f in report_rejected_approval.findings)
+
+    # Positive test: Valid human merge + approved human validation -> PASS
     report_archive_pass = evaluate_archive(
         change_id="test-change",
         base_sha=BASE_SHA,
         candidate_sha=CANDIDATE_SHA,
-        pr_merged_by_human=True,
-        pr_number=140,
-        human_approval_recorded=True,
+        merge_evidence=valid_merge,
+        human_approval_evidence=valid_approval,
         repo_root=tmp_path,
     )
     assert report_archive_pass.final_verdict == HookVerdict.PASS
@@ -240,7 +396,6 @@ def _get_git_auth_bundle(self):
         logger.warning(f"Token fetch failed: {e}")
         return {}
 """
-
     findings = analyze_pr139_regressions("intake_service.py", buggy_code)
     assert len(findings) == 1
     assert findings[0].finding_id.startswith("PR139-AUTH-SWALLOW")
@@ -255,17 +410,24 @@ raise ValueError(f"Authorization token: {secret_token} rejected")
     assert leak_findings[0].severity == FindingSeverity.CRITICAL
 
     # Verify that evaluating POST-APPLY with this diff results in FAIL
+    review_ev = ReviewEvidence(
+        candidate_sha=CANDIDATE_SHA,
+        reviewer_identity="antigravity",
+        reviewer_model_identity="google/gemini-2.5-pro",
+        verdict="approve",
+        summary="Testing diff scan",
+        evaluated_specialties=[ReviewSpecialty.SECURITY_AUTH, ReviewSpecialty.RELIABILITY_RECOVERY],
+        evidence_source="reviews/review.json",
+    )
     report = evaluate_post_apply(
         change_id="test-change",
         base_sha=BASE_SHA,
         candidate_sha=CANDIDATE_SHA,
         implementer_identity="codex",
         implementer_model_identity="openai/gpt-4o",
-        reviewer_identity="antigravity",
-        reviewer_model_identity="google/gemini-2.5-pro",
-        changed_files=["src/minime/services/intake_service.py"],
-        diff_text=buggy_code,
-        evaluated_specialties=[ReviewSpecialty.SECURITY_AUTH, ReviewSpecialty.RELIABILITY_RECOVERY],
+        review_evidence=review_ev,
+        _override_changed_files=["src/minime/services/intake_service.py"],
+        _override_diff_text=buggy_code,
         repo_root=Path("/tmp"),
     )
     assert report.final_verdict == HookVerdict.FAIL
@@ -273,7 +435,7 @@ raise ValueError(f"Authorization token: {secret_token} rejected")
 
 
 def test_cli_quality_hooks(tmp_path: Path):
-    """Verify quality-hooks CLI commands work as expected."""
+    """Verify quality-hooks CLI commands work as expected and fail closed without evidence."""
     # 1. select-specialties
     result = runner.invoke(
         cli_app,
@@ -283,16 +445,32 @@ def test_cli_quality_hooks(tmp_path: Path):
     data = json.loads(result.output)
     assert "security_auth" in data["required_specialties"]
 
-    # 2. validate-report
-    report = evaluate_pre_apply(
-        change_id="cli-change",
-        base_sha=BASE_SHA,
-        candidate_sha=CANDIDATE_SHA,
-        repo_root=tmp_path,
+    # 2. evaluate-verify fails closed without evidence
+    verify_fail = runner.invoke(
+        cli_app,
+        [
+            "evaluate-verify",
+            "-c", "test-change",
+            "--base-sha", BASE_SHA,
+            "--candidate-sha", CANDIDATE_SHA,
+            "--repo-root", str(tmp_path),
+        ],
     )
-    report_file = tmp_path / "report.json"
-    report_file.write_text(report.model_dump_json(indent=2), encoding="utf-8")
+    assert verify_fail.exit_code == 1
+    verify_report = json.loads(verify_fail.output)
+    assert verify_report["final_verdict"] == "BLOCKED"
 
-    val_res = runner.invoke(cli_app, ["validate-report", "-r", str(report_file)])
-    assert val_res.exit_code == 0
-    assert "Valid report" in val_res.output
+    # 3. evaluate-archive fails closed without evidence
+    archive_fail = runner.invoke(
+        cli_app,
+        [
+            "evaluate-archive",
+            "-c", "test-change",
+            "--base-sha", BASE_SHA,
+            "--candidate-sha", CANDIDATE_SHA,
+            "--repo-root", str(tmp_path),
+        ],
+    )
+    assert archive_fail.exit_code == 1
+    archive_report = json.loads(archive_fail.output)
+    assert archive_report["final_verdict"] == "BLOCKED"

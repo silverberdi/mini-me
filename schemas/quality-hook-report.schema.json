@@ -177,13 +177,18 @@
       ],
       "additionalProperties": false,
       "required": [
+        "candidate_sha",
         "deterministic_checks_passed",
         "tests_passed",
         "linters_passed",
         "schemas_passed",
+        "evidence_source",
         "check_details"
       ],
       "properties": {
+        "candidate_sha": {
+          "type": "string"
+        },
         "deterministic_checks_passed": {
           "type": "boolean"
         },
@@ -195,6 +200,9 @@
         },
         "schemas_passed": {
           "type": "boolean"
+        },
+        "evidence_source": {
+          "type": "string"
         },
         "check_details": {
           "type": "object"

@@ -78,13 +78,56 @@ class QualityHookFinding(BaseModel):
 
 
 class VerificationResult(BaseModel):
+    """Verifiable deterministic checks result bound strictly to candidate SHA."""
     model_config = ConfigDict(extra="forbid")
 
-    deterministic_checks_passed: bool = Field(default=True)
-    tests_passed: bool = Field(default=True)
-    linters_passed: bool = Field(default=True)
-    schemas_passed: bool = Field(default=True)
-    check_details: dict[str, Any] = Field(default_factory=dict)
+    candidate_sha: str = Field(description="Exact candidate SHA that was verified")
+    deterministic_checks_passed: bool = Field(description="Strict boolean whether all checks passed")
+    tests_passed: bool = Field(description="Strict boolean whether test suite passed")
+    linters_passed: bool = Field(description="Strict boolean whether linters passed")
+    schemas_passed: bool = Field(description="Strict boolean whether schema validations passed")
+    evidence_source: str = Field(description="Verifiable source of execution logs or diagnostic report")
+    check_details: dict[str, Any] = Field(default_factory=dict, description="Detailed check breakdown")
+
+
+class ReviewEvidence(BaseModel):
+    """Verifiable independent review evidence bound strictly to candidate SHA."""
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_sha: str = Field(description="Exact candidate SHA that was reviewed")
+    reviewer_identity: str = Field(description="Authoritative reviewer role/agent identity")
+    reviewer_model_identity: str = Field(description="Authoritative reviewer model identity")
+    verdict: str = Field(description="Review verdict: approve, changes_requested, needs_human")
+    summary: str = Field(description="Substantive review summary")
+    evaluated_specialties: list[ReviewSpecialty] = Field(description="Specialties verified during review")
+    findings: list[QualityHookFinding] = Field(default_factory=list, description="Findings reported by reviewer")
+    evidence_source: str = Field(description="Authoritative artifact path or execution reference")
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class HumanApprovalEvidence(BaseModel):
+    """Verifiable human approval record bound strictly to candidate tuple."""
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_head_sha: str = Field(description="Exact candidate head SHA approved")
+    base_sha: str = Field(description="Base SHA approved against")
+    decision: str = Field(description="Decision: approve, request_changes, reject")
+    approver_identity: str = Field(description="Authorized human operator identity")
+    evidence_source: str = Field(description="Authoritative source (e.g. human validation report or DB)")
+    notes: str | None = Field(default=None)
+
+
+class MergeEvidence(BaseModel):
+    """Verifiable delivery/merge evidence bound strictly to candidate SHA."""
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_sha: str = Field(description="Exact candidate SHA merged")
+    target_branch: str = Field(description="Target base branch merged into")
+    is_merged: bool = Field(description="Whether pull request or commit was merged")
+    merged_by: str = Field(description="Identity that performed merge (must be human, not bot)")
+    merged_by_type: str = Field(default="User", description="Identity type (User vs Bot)")
+    merge_commit_sha: str | None = Field(default=None, description="Resulting merge commit SHA")
+    evidence_source: str = Field(description="Authoritative source (GitHub API details or git ancestry)")
 
 
 class QualityHookReport(BaseModel):

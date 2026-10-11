@@ -120,11 +120,12 @@ Archive a completed change in the experimental workflow.
    If the sync failed, or any capability does not match, report what differs and stop — do not archive. Nothing has moved and `changeRoot` is intact, so the user can fix the mismatch or re-run the sync and start the archive again.
 
    **ARCHIVE Quality Hook Gate (Delivery Integrity)**:
-   Execute the ARCHIVE quality hook gate to confirm Definition of Done (DoD) and mandatory human merge:
+   Execute the ARCHIVE quality hook gate to confirm Definition of Done (DoD) via authoritative merge and human approval evidence:
    ```bash
-   python -m minime.quality_hooks.cli evaluate-archive --change "<name>" --base-sha "$(git merge-base origin/main HEAD)" --candidate-sha "$(git rev-parse HEAD)" --merged-by-human
+   python -m minime.quality_hooks.cli evaluate-archive --change "<name>" --base-sha "$(git merge-base origin/main HEAD)" --candidate-sha "$(git rev-parse HEAD)" --merge-evidence-file "<merge.json>" --human-approval-file "<approval.json>"
    ```
-   - Human merge confirmation is strictly mandatory in MVP.
+   - Authoritative human merge and human approval verification is strictly mandatory in MVP.
+   - Self-declared claims without evidence return `BLOCKED`, never `PASS`.
    - All blocking CRITICAL/HIGH findings must be resolved.
    - If the hook fails or is blocked, do NOT archive.
 

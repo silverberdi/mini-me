@@ -1,7 +1,8 @@
-"""Core evaluation engine for OpenSpec Lifecycle Quality Hooks."""
+"""Core evaluation engine for OpenSpec Lifecycle Quality Hooks with authoritative evidence enforcement."""
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 from minime.quality_hooks.analyzers.archive_analyzer import analyze_archive_integrity
@@ -13,9 +14,12 @@ from minime.quality_hooks.models import (
     FindingSeverity,
     FindingStatus,
     HookVerdict,
+    HumanApprovalEvidence,
+    MergeEvidence,
     QualityHookFinding,
     QualityHookReport,
     QualityHookStage,
+    ReviewEvidence,
     ReviewSpecialty,
     VerificationResult,
     utc_now,
@@ -38,11 +42,11 @@ def resolve_final_verdict(
         reasons = blocked_reasons or ["Evaluation blocked by unmet lifecycle preconditions."]
         return HookVerdict.BLOCKED, "; ".join(reasons)
 
-    if require_verification_evidence and verification_result is None:
-        return HookVerdict.BLOCKED, "Mandatory verification evidence is missing; evaluation is BLOCKED."
-
-    if verification_result is not None and not verification_result.deterministic_checks_passed:
-        return HookVerdict.FAIL, "Deterministic checks (tests/linters/schemas) failed."
+    if require_verification_evidence:
+        if verification_result is None:
+            return HookVerdict.BLOCKED, "Mandatory verification evidence is missing; evaluation is BLOCKED."
+        if not verification_result.deterministic_checks_passed:
+            return HookVerdict.FAIL, "Deterministic checks (tests/linters/schemas) failed in verified evidence."
 
     unresolved_blocking = [
         f for f in findings
@@ -114,16 +118,20 @@ def evaluate_post_apply(
     candidate_sha: str,
     implementer_identity: str | None = None,
     implementer_model_identity: str | None = None,
-    reviewer_identity: str | None = None,
-    reviewer_model_identity: str | None = None,
-    changed_files: list[str] | None = None,
-    diff_text: str = "",
-    evaluated_specialties: list[ReviewSpecialty] | None = None,
-    custom_findings: list[QualityHookFinding] | None = None,
+    review_evidence: ReviewEvidence | None = None,
     repo_root: str | Path = ".",
+    # Fallbacks only allowed for testing with mock git
+    _override_changed_files: list[str] | None = None,
+    _override_diff_text: str | None = None,
 ) -> QualityHookReport:
-    """Evaluate POST-APPLY stage: Expert Review, Dynamic Specialties, and Independence."""
-    findings: list[QualityHookFinding] = list(custom_findings or [])
+    """Evaluate POST-APPLY stage: Expert Review, Dynamic Specialties, and Independence.
+
+    Authoritative constraints:
+    1. Obtains changed files and real diff directly from Git (base_sha..candidate_sha).
+    2. Requires verifiable ReviewEvidence bound strictly to candidate_sha.
+    3. Self-declared reviewer identity or specialties without review evidence is BLOCKED.
+    """
+    findings: list[QualityHookFinding] = []
     blocked_reasons: list[str] = []
 
     # 1. Candidate Identity
@@ -132,32 +140,99 @@ def evaluate_post_apply(
     if any(f.severity == FindingSeverity.CRITICAL for f in id_findings):
         blocked_reasons.append("Candidate SHA validation failed.")
 
-    # 2. Reviewer Independence
-    indep_findings = analyze_model_independence(
-        implementer_identity=implementer_identity,
-        implementer_model_identity=implementer_model_identity,
-        reviewer_identity=reviewer_identity,
-        reviewer_model_identity=reviewer_model_identity,
-    )
-    findings.extend(indep_findings)
-    if any(f.severity == FindingSeverity.CRITICAL for f in indep_findings):
-        blocked_reasons.append("Reviewer independence violated (same agent or same model family).")
+    # 2. Authoritative Git diff and changed files extraction
+    changed_files: list[str] = []
+    diff_text: str = ""
 
-    # 3. Dynamic Specialty Selection
-    files = list(changed_files or [])
-    required_specialties = select_specialties_for_diff(diff_text, files)
-    evaluated = list(evaluated_specialties or [])
+    if _override_changed_files is not None and _override_diff_text is not None:
+        changed_files = list(_override_changed_files)
+        diff_text = _override_diff_text
+    else:
+        root_path = Path(repo_root)
+        if not (root_path / ".git").exists():
+            blocked_reasons.append(f"Repository at '{repo_root}' is not a valid Git worktree.")
+        else:
+            diff_files_proc = subprocess.run(
+                ["git", "diff", "--name-only", f"{base_sha}..{candidate_sha}"],
+                cwd=str(root_path),
+                capture_output=True,
+                text=True,
+            )
+            diff_proc = subprocess.run(
+                ["git", "diff", f"{base_sha}..{candidate_sha}"],
+                cwd=str(root_path),
+                capture_output=True,
+                text=True,
+            )
+            if diff_files_proc.returncode != 0 or diff_proc.returncode != 0:
+                blocked_reasons.append(
+                    f"Failed to obtain authoritative git diff for {base_sha}..{candidate_sha}: {diff_files_proc.stderr or diff_proc.stderr}"
+                )
+            else:
+                changed_files = [f.strip() for f in diff_files_proc.stdout.splitlines() if f.strip()]
+                diff_text = diff_proc.stdout
 
-    # Check unfulfilled specialties
-    missing_specialties = [s for s in required_specialties if s not in evaluated]
-    if missing_specialties:
+    # 3. Dynamic Specialty Selection from authoritative diff
+    required_specialties = select_specialties_for_diff(diff_text, changed_files)
+
+    # 4. Enforce Verifiable Review Evidence (FAIL-CLOSED: cannot just declare reviewer)
+    reviewer_identity: str | None = None
+    reviewer_model_identity: str | None = None
+    evaluated_specialties: list[ReviewSpecialty] = []
+
+    if review_evidence is None:
         blocked_reasons.append(
-            f"Required review specialties unfulfilled: {', '.join(s.label for s in missing_specialties)}"
+            "Verifiable review evidence is missing. Self-declared specialties or reviewer models without authoritative review evidence are rejected."
         )
+    else:
+        # Candidate binding check
+        if review_evidence.candidate_sha != candidate_sha:
+            blocked_reasons.append(
+                f"Review evidence is bound to SHA '{review_evidence.candidate_sha}', which does not match candidate SHA '{candidate_sha}' (stale review)."
+            )
 
-    # 4. PR #139 Regression Pattern Checks on changed code
+        reviewer_identity = review_evidence.reviewer_identity
+        reviewer_model_identity = review_evidence.reviewer_model_identity
+        evaluated_specialties = list(review_evidence.evaluated_specialties)
+        findings.extend(review_evidence.findings)
+
+        # Reviewer Independence check
+        indep_findings = analyze_model_independence(
+            implementer_identity=implementer_identity,
+            implementer_model_identity=implementer_model_identity,
+            reviewer_identity=reviewer_identity,
+            reviewer_model_identity=reviewer_model_identity,
+        )
+        findings.extend(indep_findings)
+        if any(f.severity == FindingSeverity.CRITICAL for f in indep_findings):
+            blocked_reasons.append("Reviewer independence violated (same agent or same model family).")
+
+        # Specialty fulfillment check
+        missing_specialties = [s for s in required_specialties if s not in evaluated_specialties]
+        if missing_specialties:
+            blocked_reasons.append(
+                f"Required review specialties unfulfilled by review evidence: {', '.join(s.label for s in missing_specialties)}"
+            )
+
+        # Review verdict check
+        if review_evidence.verdict.lower() in ("changes_requested", "reject"):
+            findings.append(
+                QualityHookFinding(
+                    finding_id="REVIEW-VERDICT-REJECTED",
+                    specialty=ReviewSpecialty.GENERAL_ARCHITECTURE,
+                    severity=FindingSeverity.HIGH,
+                    file_path=None,
+                    requirement_reference="REVIEWER-CONTRACT#verdict",
+                    observed_evidence=f"Reviewer rendered negative verdict: {review_evidence.verdict} ({review_evidence.summary})",
+                    expected_behavior="Candidate must receive approval from authoritative reviewer.",
+                    suggested_remediation="Address reviewer feedback and request re-review.",
+                    status=FindingStatus.UNRESOLVED,
+                )
+            )
+
+    # 5. Scan git diff for PR #139 regression pattern
     if diff_text:
-        reg_findings = analyze_pr139_regressions("diff", diff_text)
+        reg_findings = analyze_pr139_regressions("git_diff", diff_text)
         findings.extend(reg_findings)
 
     is_blocked = len(blocked_reasons) > 0
@@ -179,7 +254,7 @@ def evaluate_post_apply(
         reviewer_identity=reviewer_identity,
         reviewer_model_identity=reviewer_model_identity,
         required_specialties=required_specialties,
-        evaluated_specialties=evaluated,
+        evaluated_specialties=evaluated_specialties,
         findings=findings,
         final_verdict=verdict,
         verdict_reason=reason,
@@ -197,7 +272,13 @@ def evaluate_verify(
     findings: list[QualityHookFinding] | None = None,
     repo_root: str | Path = ".",
 ) -> QualityHookReport:
-    """Evaluate VERIFY stage: Quality & Acceptance Gate (evidence mandatory)."""
+    """Evaluate VERIFY stage: Quality & Acceptance Gate (strictly evidence-based).
+
+    Authoritative constraints:
+    1. Zero assumed PASS results.
+    2. Verification evidence MUST exist and be bound strictly to candidate_sha.
+    3. Missing or unbound evidence fails closed as BLOCKED.
+    """
     all_findings = list(findings or [])
     blocked_reasons: list[str] = []
 
@@ -207,9 +288,16 @@ def evaluate_verify(
     if any(f.severity == FindingSeverity.CRITICAL for f in id_findings):
         blocked_reasons.append("Candidate SHA validation failed.")
 
-    # 2. Missing Evidence Check -> BLOCKED
+    # 2. Strict evidence requirement
     if verification_result is None:
-        blocked_reasons.append("Mandatory deterministic verification evidence is missing.")
+        blocked_reasons.append("Mandatory deterministic verification evidence is missing; evaluation is BLOCKED.")
+    else:
+        if verification_result.candidate_sha != candidate_sha:
+            blocked_reasons.append(
+                f"Verification evidence candidate SHA '{verification_result.candidate_sha}' does not match candidate SHA '{candidate_sha}'."
+            )
+        if not verification_result.evidence_source:
+            blocked_reasons.append("Verification evidence lacks a verifiable source or log reference.")
 
     is_blocked = len(blocked_reasons) > 0
     verdict, reason = resolve_final_verdict(
@@ -241,13 +329,18 @@ def evaluate_archive(
     repository_identity: str = "silverberdi/mini-me",
     base_sha: str,
     candidate_sha: str,
-    pr_merged_by_human: bool,
-    pr_number: int | None = None,
-    human_approval_recorded: bool = True,
+    merge_evidence: MergeEvidence | None = None,
+    human_approval_evidence: HumanApprovalEvidence | None = None,
     findings: list[QualityHookFinding] | None = None,
     repo_root: str | Path = ".",
 ) -> QualityHookReport:
-    """Evaluate ARCHIVE stage: Delivery Integrity and DoD Validation."""
+    """Evaluate ARCHIVE stage: Delivery Integrity and DoD Validation.
+
+    Authoritative constraints:
+    1. No self-claim flags (--merged-by-human) or default approval values.
+    2. Must verify merge and human approval from authoritative evidence bound to candidate SHA.
+    3. Missing authoritative query mechanism or evidence returns BLOCKED, never PASS.
+    """
     all_findings = list(findings or [])
     blocked_reasons: list[str] = []
 
@@ -257,15 +350,57 @@ def evaluate_archive(
     if any(f.severity == FindingSeverity.CRITICAL for f in id_findings):
         blocked_reasons.append("Candidate SHA validation failed.")
 
+    # 2. Check Merge Evidence
+    pr_merged_by_human = False
+    if merge_evidence is None:
+        blocked_reasons.append(
+            "Authoritative merge verification evidence is missing; failing closed as BLOCKED."
+        )
+    else:
+        if merge_evidence.candidate_sha != candidate_sha:
+            blocked_reasons.append(
+                f"Merge evidence candidate SHA '{merge_evidence.candidate_sha}' does not match candidate '{candidate_sha}'."
+            )
+        else:
+            is_bot = (
+                merge_evidence.merged_by_type.lower() == "bot"
+                or merge_evidence.merged_by.endswith("[bot]")
+            )
+            if merge_evidence.is_merged and not is_bot:
+                pr_merged_by_human = True
+            else:
+                pr_merged_by_human = False
+
+    # 3. Check Human Approval Evidence
+    human_approval_recorded = False
+    if human_approval_evidence is None:
+        blocked_reasons.append(
+            "Authoritative human approval evidence is missing; failing closed as BLOCKED."
+        )
+    else:
+        if human_approval_evidence.candidate_head_sha != candidate_sha:
+            blocked_reasons.append(
+                f"Human approval evidence candidate SHA '{human_approval_evidence.candidate_head_sha}' does not match candidate '{candidate_sha}'."
+            )
+        elif human_approval_evidence.base_sha != base_sha:
+            blocked_reasons.append(
+                f"Human approval evidence base SHA '{human_approval_evidence.base_sha}' does not match base '{base_sha}'."
+            )
+        else:
+            if human_approval_evidence.decision.lower() == "approve":
+                human_approval_recorded = True
+            else:
+                human_approval_recorded = False
+
+    # 4. Check unresolved findings
     has_unresolved_crit_high = any(
         f.status == FindingStatus.UNRESOLVED and f.severity in (FindingSeverity.CRITICAL, FindingSeverity.HIGH)
         for f in all_findings
     )
 
-    # 2. Archive DoD Integrity
+    # 5. Analyze Archive Integrity
     archive_findings = analyze_archive_integrity(
         pr_merged_by_human=pr_merged_by_human,
-        pr_number=pr_number,
         human_approval_recorded=human_approval_recorded,
         has_unresolved_critical_high=has_unresolved_crit_high,
     )

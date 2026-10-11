@@ -15,6 +15,7 @@ This skill enforces model- and tool-agnostic quality gates associated with speci
    - Execution: `python -m minime.quality_hooks.cli evaluate-pre-apply --change "<id>" --base-sha "<base>" --candidate-sha "<cand>"`
 
 2. **`POST-APPLY` (Expert Review & Dynamic Specialties)**
+   - Obtains authoritative changed files and git diff directly from Git (`base_sha..candidate_sha`).
    - Dynamically selects required review specialties based on changed files and diff content:
      - `security_auth` (Security & Authorization)
      - `data_migrations` (Data & Migrations)
@@ -23,17 +24,20 @@ This skill enforces model- and tool-agnostic quality gates associated with speci
      - `operational_delivery` (Operational Delivery)
      - `general_architecture` (General Architecture & Scope)
    - Enforces Reviewer Independence: the implementer and reviewer must be complementary distinct roles, and same model identity self-review is forbidden.
+   - Requires authoritative review evidence (`--review-evidence-file`). Self-declared identities or declared specialties without evidence are strictly `BLOCKED`.
    - Scans diff for regression patterns (including PR #139 auth failure swallowing and secret leakage).
-   - Execution: `python -m minime.quality_hooks.cli evaluate-post-apply --change "<id>" --base-sha "<base>" --candidate-sha "<cand>" --implementer-model "<model>" --reviewer-model "<model>"`
+   - Execution: `python -m minime.quality_hooks.cli evaluate-post-apply --change "<id>" --base-sha "<base>" --candidate-sha "<cand>" --implementer-model "<model>" --review-evidence-file "<review.json>"`
 
 3. **`VERIFY` (Quality & Acceptance Gate)**
-   - Requires concrete deterministic evidence (test results, lint results, schema checks). Missing evidence = `BLOCKED`.
+   - Eliminates assumed PASS results. Tests, linters, and schemas are never assumed successful by default.
+   - Requires concrete deterministic evidence bound strictly to the candidate SHA (`--evidence-file` or `--run-checks`). Missing evidence = `BLOCKED`.
    - Requires zero unresolved `CRITICAL` or `HIGH` findings. Any unresolved `CRITICAL` or `HIGH` finding = `FAIL`.
    - Returns explicit verdict: `PASS`, `FAIL`, or `BLOCKED`.
-   - Execution: `python -m minime.quality_hooks.cli evaluate-verify --change "<id>" --base-sha "<base>" --candidate-sha "<cand>"`
+   - Execution: `python -m minime.quality_hooks.cli evaluate-verify --change "<id>" --base-sha "<base>" --candidate-sha "<cand>" --evidence-file "<evidence.json>"` (or `--run-checks`)
 
 4. **`ARCHIVE` (Delivery Integrity)**
    - Validates Definition of Done (DoD) compliance.
-   - Requires mandatory human merge evidence (no autonomous merge in MVP).
-   - Requires recorded human approval and candidate SHA alignment.
-   - Execution: `python -m minime.quality_hooks.cli evaluate-archive --change "<id>" --base-sha "<base>" --candidate-sha "<cand>" --merged-by-human`
+   - Requires authoritative merge evidence bound to candidate SHA and confirmed human merge (`--merge-evidence-file`). Self-declared flags are not accepted.
+   - Requires authoritative recorded human approval bound to candidate tuple (`--human-approval-file`).
+   - Returns `BLOCKED` if authoritative evidence is absent.
+   - Execution: `python -m minime.quality_hooks.cli evaluate-archive --change "<id>" --base-sha "<base>" --candidate-sha "<cand>" --merge-evidence-file "<merge.json>" --human-approval-file "<approval.json>"`

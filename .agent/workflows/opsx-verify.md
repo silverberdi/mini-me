@@ -138,13 +138,13 @@ Verify that an implementation matches the change artifacts (specs, tasks, design
       - Each with specific recommendation
 
    **VERIFY Quality Hook Gate**:
-   Execute the VERIFY quality hook evaluation:
+   Execute the VERIFY quality hook evaluation with verified deterministic evidence:
    ```bash
-   python -m minime.quality_hooks.cli evaluate-verify --change "<name>" --base-sha "$(git merge-base origin/main HEAD)" --candidate-sha "$(git rev-parse HEAD)"
+   python -m minime.quality_hooks.cli evaluate-verify --change "<name>" --base-sha "$(git merge-base origin/main HEAD)" --candidate-sha "$(git rev-parse HEAD)" --run-checks
    ```
    - Requires zero unresolved `CRITICAL` or `HIGH` findings.
-   - Requires deterministic test/linter/schema evidence.
-   - Missing evidence produces a `BLOCKED` verdict.
+   - Requires deterministic test/linter/schema evidence bound to candidate SHA.
+   - Missing or unverified evidence produces a `BLOCKED` verdict. Never assumes PASS.
 
    **Final Assessment**:
    - If CRITICAL/HIGH issues: "X critical/high issue(s) found. Verdict: FAIL. Fix before archiving."
