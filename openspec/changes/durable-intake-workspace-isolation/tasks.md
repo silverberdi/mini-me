@@ -32,3 +32,7 @@
   - [x] 7.1 Implement 4-way fenced cleanup for intake workspaces authorized ONLY when `creation_state` is `RELEASED_PENDING_CLEANUP` or `FAILED_PENDING_CLEANUP` <!-- id: 21 -->
   - [x] 7.2 Implement read-only legacy artifact attribution check and adoption into a new owned workspace (`PROVABLE_LEGACY_ARTIFACT` vs `AMBIGUOUS_LEGACY_ARTIFACT` -> `NEEDS_HUMAN`) <!-- id: 22 -->
   - [x] 7.3 Implement comprehensive unit and integration test suite covering all synchronized contract test scenarios <!-- id: 23 -->
+
+- [x] 8. Post-READY Main-Advancement Publication Authority <!-- id: 26 -->
+  - [x] 8.1 Permit only a durably validated `INTAKE_ARTIFACT_PUBLISH` dispatch for a completed `INTAKE` saga at `READY`, without changing saga state <!-- id: 27 -->
+  - [x] 8.2 Prove PostgreSQL positive dispatch, terminal/identity/fence negative cases, reserved-action recovery, and P→P2 admission/handoff behavior <!-- id: 28 -->
