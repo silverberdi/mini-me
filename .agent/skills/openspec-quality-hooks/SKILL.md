@@ -24,20 +24,21 @@ This skill enforces model- and tool-agnostic quality gates associated with speci
      - `operational_delivery` (Operational Delivery)
      - `general_architecture` (General Architecture & Scope)
    - Enforces Reviewer Independence: the implementer and reviewer must be complementary distinct roles, and same model identity self-review is forbidden.
-   - Requires authoritative review evidence (`--review-evidence-file`). Self-declared identities or declared specialties without evidence are strictly `BLOCKED`.
+   - The CLI obtains changed files and candidate blobs directly from Git. JSON review files and provenance labels are not authenticated evidence. Since durable reviewer records do not currently record specialty-level coverage, POST-APPLY is `BLOCKED` until that existing authority can prove reviewer identity, independence, candidate binding, and required specialties.
    - Scans diff for regression patterns (including PR #139 auth failure swallowing and secret leakage).
-   - Execution: `python -m minime.quality_hooks.cli evaluate-post-apply --change "<id>" --base-sha "<base>" --candidate-sha "<cand>" --implementer-model "<model>" --review-evidence-file "<review.json>"`
+   - Execution: `python -m minime.quality_hooks.cli evaluate-post-apply --change "<id>" --base-sha "<base>" --candidate-sha "<cand>" --implementer-model "<model>"` (a review JSON file is not authority and cannot produce `PASS`).
 
 3. **`VERIFY` (Quality & Acceptance Gate)**
    - Eliminates assumed PASS results. Tests, linters, and schemas are never assumed successful by default.
-   - Requires concrete deterministic evidence bound strictly to the candidate SHA (`--evidence-file` or `--run-checks`). Missing evidence = `BLOCKED`.
+   - `--run-checks` verifies a clean worktree including untracked files, exports the exact candidate Git tree, and executes tests, Ruff, JSON Schema meta-validation, and strict OpenSpec validation there. Caller-supplied evidence files are never authority. Missing tools or inability to prove the candidate tree = `BLOCKED`.
    - Requires zero unresolved `CRITICAL` or `HIGH` findings. Any unresolved `CRITICAL` or `HIGH` finding = `FAIL`.
    - Returns explicit verdict: `PASS`, `FAIL`, or `BLOCKED`.
-   - Execution: `python -m minime.quality_hooks.cli evaluate-verify --change "<id>" --base-sha "<base>" --candidate-sha "<cand>" --evidence-file "<evidence.json>"` (or `--run-checks`)
+   - Execution: `python -m minime.quality_hooks.cli evaluate-verify --change "<id>" --base-sha "<base>" --candidate-sha "<cand>" --run-checks`
 
 4. **`ARCHIVE` (Delivery Integrity)**
    - Validates Definition of Done (DoD) compliance.
-   - Requires authoritative merge evidence bound to candidate SHA and confirmed human merge (`--merge-evidence-file`). Self-declared flags are not accepted.
-   - Requires authoritative recorded human approval bound to candidate tuple (`--human-approval-file`).
-   - Returns `BLOCKED` if authoritative evidence is absent.
-   - Execution: `python -m minime.quality_hooks.cli evaluate-archive --change "<id>" --base-sha "<base>" --candidate-sha "<cand>" --merge-evidence-file "<merge.json>" --human-approval-file "<approval.json>"`
+   - Queries GitHub directly for the PR merge identity and a human approval bound to the exact head SHA; local JSON claims are not accepted.
+   - The gate remains `BLOCKED` because no canonical aggregate Definition-of-Done record is currently connected. Do not describe a `PASS` or full closure until that evidence exists.
+   - Execution: `python -m minime.quality_hooks.cli evaluate-archive --change "<id>" --base-sha "<base>" --candidate-sha "<cand>" --pull-request-number <number> --target-branch main`
+
+Executable controls are the Git worktree/tree checks, test/lint/schema commands, GitHub PR lookup, and authenticated GitHub review lookup. Workflow and skill text is guidance only and never itself proves a gate.

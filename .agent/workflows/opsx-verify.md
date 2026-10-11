@@ -143,12 +143,12 @@ Verify that an implementation matches the change artifacts (specs, tasks, design
    python -m minime.quality_hooks.cli evaluate-verify --change "<name>" --base-sha "$(git merge-base origin/main HEAD)" --candidate-sha "$(git rev-parse HEAD)" --run-checks
    ```
    - Requires zero unresolved `CRITICAL` or `HIGH` findings.
-   - Requires deterministic test/linter/schema evidence bound to candidate SHA.
-   - Missing or unverified evidence produces a `BLOCKED` verdict. Never assumes PASS.
+   - `--run-checks` rejects any tracked or untracked worktree dirt, exports the exact candidate commit tree, and runs pytest, Ruff, JSON Schema meta-validation, and strict OpenSpec validation against that export.
+   - Caller-provided evidence JSON is never authority. Missing tools or inability to prove the tree produces `BLOCKED`; failed executed checks produce `FAIL`.
 
    **Final Assessment**:
    - If CRITICAL/HIGH issues: "X critical/high issue(s) found. Verdict: FAIL. Fix before archiving."
-   - If only warnings/suggestions: "No critical/high issues. Verdict: PASS. Ready for archive."
+   - A PASS is allowed only when the executable gate itself returns PASS; warnings/suggestions alone do not authorize it.
    - If missing evidence or preconditions: "Verdict: BLOCKED."
 
 **Verification Heuristics**

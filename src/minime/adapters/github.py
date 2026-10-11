@@ -1402,6 +1402,7 @@ class GitHubAdapter(GitHubAdapterInterface):
                 "merged_at": data.get("merged_at"),
                 "merged_by": merged_by,
                 "merged_by_login": merged_by.get("login") if isinstance(merged_by, dict) else None,
+                "merged_by_type": merged_by.get("type") if isinstance(merged_by, dict) else None,
                 "merge_commit_sha": data.get("merge_commit_sha"),
                 "head_sha": head.get("sha"),
                 "head_branch": head.get("ref"),
@@ -1433,6 +1434,78 @@ class GitHubAdapter(GitHubAdapterInterface):
                 reason_code=ExternalReasonCode.UNOBSERVABLE,
                 retry_safety=RetrySafety.SAFE,
                 provider_detail=str(exc),
+                error_message=str(exc),
+            )
+
+    def get_pull_request_reviews(
+        self, repository: str, pr_number: int
+    ) -> ExternalActionResult[list[dict[str, Any]]]:
+        """Read authenticated GitHub review records for a pull request."""
+        repo = self._repo(repository)
+        try:
+            response = self._request(
+                "GET", f"/repos/{repo}/pulls/{pr_number}/reviews", params={"per_page": 100}
+            )
+            if response.status_code in (401, 403):
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                    retry_safety=RetrySafety.SAFE,
+                    error_message="GitHub App is unauthorized for pull-request review lookup.",
+                )
+            if response.status_code >= 400:
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.UNKNOWN,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.UNOBSERVABLE,
+                    retry_safety=RetrySafety.SAFE,
+                    provider_detail=f"HTTP {response.status_code}",
+                    error_message="GitHub pull-request reviews are unobservable.",
+                )
+            if response.links.get("next"):
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.UNKNOWN,
+                    source_adapter="github_rest",
+                    reason_code=ExternalReasonCode.UNOBSERVABLE,
+                    retry_safety=RetrySafety.SAFE,
+                    error_message="GitHub review history exceeds one page; complete approval history is unobservable.",
+                )
+            payload = response.json()
+            if not isinstance(payload, list) or any(not isinstance(row, dict) for row in payload):
+                raise ValueError("Invalid GitHub review response.")
+            reviews = [
+                {
+                    "state": row.get("state"),
+                    "commit_id": row.get("commit_id"),
+                    "user_login": (row.get("user") or {}).get("login"),
+                    "user_type": (row.get("user") or {}).get("type"),
+                    "submitted_at": row.get("submitted_at"),
+                }
+                for row in payload
+            ]
+            return ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                retry_safety=RetrySafety.SAFE,
+                data=reviews,
+                external_id=str(pr_number),
+            )
+        except GitHubAuthorizationError as exc:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.AUTH_REQUIRED,
+                retry_safety=RetrySafety.SAFE,
+                error_message=str(exc),
+            )
+        except Exception as exc:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                retry_safety=RetrySafety.SAFE,
                 error_message=str(exc),
             )
 

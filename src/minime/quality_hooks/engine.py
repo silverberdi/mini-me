@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
+import sys
+import tarfile
+import tempfile
+from datetime import datetime
 from pathlib import Path
 
+from minime.domain.interfaces import GitHubAdapterInterface
 from minime.quality_hooks.analyzers.archive_analyzer import analyze_archive_integrity
 from minime.quality_hooks.analyzers.candidate_identity import analyze_candidate_identity
-from minime.quality_hooks.analyzers.model_independence import analyze_model_independence
 from minime.quality_hooks.analyzers.pre_apply_analyzer import analyze_pre_apply_readiness
 from minime.quality_hooks.analyzers.regression_pr139 import analyze_pr139_regressions
 from minime.quality_hooks.models import (
@@ -26,28 +31,6 @@ from minime.quality_hooks.models import (
 )
 from minime.quality_hooks.specialties import select_specialties_for_diff
 
-TRUSTED_VERIFICATION_PROVENANCES = {
-    "canonical-worktree-runner",
-    "canonical-ci-runner",
-    "canonical-checks-runner",
-}
-
-TRUSTED_REVIEW_PROVENANCES = {
-    "canonical-uow-review",
-    "canonical-github-review",
-    "canonical-reviewer-runner",
-}
-
-TRUSTED_MERGE_PROVENANCES = {
-    "canonical-git-ancestry",
-    "canonical-github-pr",
-}
-
-TRUSTED_APPROVAL_PROVENANCES = {
-    "canonical-validation-authority",
-    "canonical-github-approval",
-}
-
 
 def resolve_final_verdict(
     findings: list[QualityHookFinding],
@@ -64,24 +47,36 @@ def resolve_final_verdict(
 
     if require_verification_evidence:
         if verification_result is None:
-            return HookVerdict.BLOCKED, "Mandatory verification evidence is missing; evaluation is BLOCKED."
+            return (
+                HookVerdict.BLOCKED,
+                "Mandatory verification evidence is missing; evaluation is BLOCKED.",
+            )
         if not verification_result.deterministic_checks_passed:
-            return HookVerdict.FAIL, "Deterministic checks (tests/linters/schemas) failed in verified evidence."
+            return (
+                HookVerdict.FAIL,
+                "Deterministic checks (tests/linters/schemas) failed in verified evidence.",
+            )
         if not verification_result.schemas_passed:
             return HookVerdict.FAIL, "Schema validation checks failed or were not executed."
 
     unresolved_blocking = [
-        f for f in findings
-        if f.status == FindingStatus.UNRESOLVED and f.severity in (FindingSeverity.CRITICAL, FindingSeverity.HIGH)
+        f
+        for f in findings
+        if f.status == FindingStatus.UNRESOLVED
+        and f.severity in (FindingSeverity.CRITICAL, FindingSeverity.HIGH)
     ]
 
     if unresolved_blocking:
         summary = f"{len(unresolved_blocking)} unresolved CRITICAL/HIGH finding(s): " + ", ".join(
-            f"[{f.severity}] {f.finding_id}: {f.observed_evidence[:60]}" for f in unresolved_blocking[:3]
+            f"[{f.severity}] {f.finding_id}: {f.observed_evidence[:60]}"
+            for f in unresolved_blocking[:3]
         )
         return HookVerdict.FAIL, summary
 
-    return HookVerdict.PASS, "All deterministic checks and quality rules passed with zero unresolved blocking findings."
+    return (
+        HookVerdict.PASS,
+        "All deterministic checks and quality rules passed with zero unresolved blocking findings.",
+    )
 
 
 def evaluate_pre_apply(
@@ -98,7 +93,9 @@ def evaluate_pre_apply(
     blocked_reasons: list[str] = []
 
     # 1. Candidate and Base SHA validation
-    id_findings = analyze_candidate_identity(repo_root, base_sha, candidate_sha, repository_identity)
+    id_findings = analyze_candidate_identity(
+        repo_root, base_sha, candidate_sha, repository_identity
+    )
     findings.extend(id_findings)
     if any(f.severity == FindingSeverity.CRITICAL for f in id_findings):
         blocked_reasons.append("Base or Candidate SHA is invalid or unreachable in repository.")
@@ -142,21 +139,21 @@ def evaluate_post_apply(
     implementer_model_identity: str | None = None,
     review_evidence: ReviewEvidence | None = None,
     repo_root: str | Path = ".",
-    _override_changed_files: list[str] | None = None,
-    _override_diff_text: str | None = None,
 ) -> QualityHookReport:
     """Evaluate POST-APPLY stage: Expert Review, Dynamic Specialties, and Independence.
 
     Authoritative constraints:
     1. Obtains changed files and real diff directly from Git (base_sha..candidate_sha).
-    2. Requires verifiable ReviewEvidence with trusted canonical provenance.
-    3. Self-declared or unverified review JSON is rejected fail-closed as BLOCKED.
+    2. Requires a canonical persisted review carrying specialty-level evidence.
+    3. ReviewEvidence is only a report payload; its provenance string is not authority.
     """
     findings: list[QualityHookFinding] = []
     blocked_reasons: list[str] = []
 
     # 1. Candidate Identity
-    id_findings = analyze_candidate_identity(repo_root, base_sha, candidate_sha, repository_identity)
+    id_findings = analyze_candidate_identity(
+        repo_root, base_sha, candidate_sha, repository_identity
+    )
     findings.extend(id_findings)
     if any(f.severity == FindingSeverity.CRITICAL for f in id_findings):
         blocked_reasons.append("Candidate SHA validation failed.")
@@ -165,105 +162,57 @@ def evaluate_post_apply(
     changed_files: list[str] = []
     diff_text: str = ""
 
-    if _override_changed_files is not None and _override_diff_text is not None:
-        changed_files = list(_override_changed_files)
-        diff_text = _override_diff_text
+    root_path = Path(repo_root)
+    if not (root_path / ".git").exists():
+        blocked_reasons.append(f"Repository at '{repo_root}' is not a valid Git worktree.")
     else:
-        root_path = Path(repo_root)
-        if not (root_path / ".git").exists():
-            blocked_reasons.append(f"Repository at '{repo_root}' is not a valid Git worktree.")
+        diff_files_proc = subprocess.run(
+            ["git", "diff", "--name-only", f"{base_sha}..{candidate_sha}"],
+            cwd=str(root_path),
+            capture_output=True,
+            text=True,
+        )
+        diff_proc = subprocess.run(
+            ["git", "diff", f"{base_sha}..{candidate_sha}"],
+            cwd=str(root_path),
+            capture_output=True,
+            text=True,
+        )
+        if diff_files_proc.returncode != 0 or diff_proc.returncode != 0:
+            blocked_reasons.append(
+                f"Failed to obtain authoritative git diff for {base_sha}..{candidate_sha}: {diff_files_proc.stderr or diff_proc.stderr}"
+            )
         else:
-            diff_files_proc = subprocess.run(
-                ["git", "diff", "--name-only", f"{base_sha}..{candidate_sha}"],
-                cwd=str(root_path),
-                capture_output=True,
-                text=True,
-            )
-            diff_proc = subprocess.run(
-                ["git", "diff", f"{base_sha}..{candidate_sha}"],
-                cwd=str(root_path),
-                capture_output=True,
-                text=True,
-            )
-            if diff_files_proc.returncode != 0 or diff_proc.returncode != 0:
-                blocked_reasons.append(
-                    f"Failed to obtain authoritative git diff for {base_sha}..{candidate_sha}: {diff_files_proc.stderr or diff_proc.stderr}"
-                )
-            else:
-                changed_files = [f.strip() for f in diff_files_proc.stdout.splitlines() if f.strip()]
-                diff_text = diff_proc.stdout
+            changed_files = [f.strip() for f in diff_files_proc.stdout.splitlines() if f.strip()]
+            diff_text = diff_proc.stdout
 
     # 3. Dynamic Specialty Selection from authoritative diff
     required_specialties = select_specialties_for_diff(diff_text, changed_files)
 
-    # 4. Enforce Verifiable Review Evidence with Canonical Provenance
-    reviewer_identity: str | None = None
-    reviewer_model_identity: str | None = None
-    evaluated_specialties: list[ReviewSpecialty] = []
+    # 4. No existing durable review source records authenticated identities plus specialty coverage.
+    # ReviewEvidence is intentionally not projected into the report: its fields are caller claims.
+    blocked_reasons.append(
+        "Canonical specialty-aware reviewer evidence is unavailable; reviewer identity, independence, "
+        "candidate binding, and evaluated specialties cannot be authenticated."
+    )
 
-    if review_evidence is None:
-        blocked_reasons.append(
-            "Verifiable review evidence is missing. Self-declared specialties or reviewer models without authoritative review evidence are rejected."
+    # 5. Scan the final candidate blobs (not diff-prefixed lines) for PR #139 regressions.
+    for changed_file in changed_files:
+        blob = subprocess.run(
+            ["git", "show", f"{candidate_sha}:{changed_file}"],
+            cwd=root_path,
+            capture_output=True,
+            text=True,
         )
-    else:
-        # Provenance check against canonical review authority
-        if review_evidence.provenance not in TRUSTED_REVIEW_PROVENANCES:
-            blocked_reasons.append(
-                f"Review evidence provenance '{review_evidence.provenance}' is not a trusted canonical review authority; "
-                "untrusted self-declared review JSON is rejected as BLOCKED (missing canonical review authority integration)."
-            )
+        if blob.returncode == 0:
+            findings.extend(analyze_pr139_regressions(changed_file, blob.stdout))
 
-        # Candidate binding check
-        if review_evidence.candidate_sha != candidate_sha:
-            blocked_reasons.append(
-                f"Review evidence is bound to SHA '{review_evidence.candidate_sha}', which does not match candidate SHA '{candidate_sha}' (stale review)."
-            )
-
-        reviewer_identity = review_evidence.reviewer_identity
-        reviewer_model_identity = review_evidence.reviewer_model_identity
-        evaluated_specialties = list(review_evidence.evaluated_specialties)
-        findings.extend(review_evidence.findings)
-
-        # Reviewer Independence check
-        indep_findings = analyze_model_independence(
-            implementer_identity=implementer_identity,
-            implementer_model_identity=implementer_model_identity,
-            reviewer_identity=reviewer_identity,
-            reviewer_model_identity=reviewer_model_identity,
-        )
-        findings.extend(indep_findings)
-        if any(f.severity == FindingSeverity.CRITICAL for f in indep_findings):
-            blocked_reasons.append("Reviewer independence violated (same agent or same model family).")
-
-        # Specialty fulfillment check
-        missing_specialties = [s for s in required_specialties if s not in evaluated_specialties]
-        if missing_specialties:
-            blocked_reasons.append(
-                f"Required review specialties unfulfilled by review evidence: {', '.join(s.label for s in missing_specialties)}"
-            )
-
-        # Review verdict check
-        if review_evidence.verdict.lower() in ("changes_requested", "reject"):
-            findings.append(
-                QualityHookFinding(
-                    finding_id="REVIEW-VERDICT-REJECTED",
-                    specialty=ReviewSpecialty.GENERAL_ARCHITECTURE,
-                    severity=FindingSeverity.HIGH,
-                    file_path=None,
-                    requirement_reference="REVIEWER-CONTRACT#verdict",
-                    observed_evidence=f"Reviewer rendered negative verdict: {review_evidence.verdict} ({review_evidence.summary})",
-                    expected_behavior="Candidate must receive approval from authoritative reviewer.",
-                    suggested_remediation="Address reviewer feedback and request re-review.",
-                    status=FindingStatus.UNRESOLVED,
-                )
-            )
-
-    # 5. Scan git diff for PR #139 regression pattern
-    if diff_text:
-        reg_findings = analyze_pr139_regressions("git_diff", diff_text)
-        findings.extend(reg_findings)
-
-    is_blocked = len(blocked_reasons) > 0
+    has_blocking_findings = any(
+        f.status == FindingStatus.UNRESOLVED
+        and f.severity in (FindingSeverity.CRITICAL, FindingSeverity.HIGH)
+        for f in findings
+    )
+    is_blocked = len(blocked_reasons) > 0 and not has_blocking_findings
     verdict, reason = resolve_final_verdict(
         findings,
         is_blocked=is_blocked,
@@ -279,15 +228,121 @@ def evaluate_post_apply(
         candidate_sha=candidate_sha,
         implementer_identity=implementer_identity,
         implementer_model_identity=implementer_model_identity,
-        reviewer_identity=reviewer_identity,
-        reviewer_model_identity=reviewer_model_identity,
+        reviewer_identity=None,
+        reviewer_model_identity=None,
         required_specialties=required_specialties,
-        evaluated_specialties=evaluated_specialties,
+        evaluated_specialties=[],
         findings=findings,
         final_verdict=verdict,
         verdict_reason=reason,
         evaluated_at=utc_now(),
     )
+
+
+def _run_checks_for_candidate(
+    repo_root: str | Path, candidate_sha: str
+) -> tuple[VerificationResult | None, str | None]:
+    """Run checks against an isolated export of the exact clean candidate commit."""
+    root_path = Path(repo_root).resolve()
+    if not (root_path / ".git").exists():
+        return None, f"Repository path '{root_path}' is not a Git worktree."
+
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=root_path, capture_output=True, text=True
+    )
+    if head.returncode or head.stdout.strip() != candidate_sha:
+        return (
+            None,
+            f"Worktree HEAD '{head.stdout.strip()}' does not match candidate SHA '{candidate_sha}'.",
+        )
+
+    status = subprocess.run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        cwd=root_path,
+        capture_output=True,
+        text=True,
+    )
+    if status.returncode or status.stdout.strip():
+        return (
+            None,
+            "Candidate worktree has tracked or untracked changes; execution identity is not provable.",
+        )
+
+    with tempfile.TemporaryDirectory(prefix="minime-quality-verify-") as temp_dir:
+        archive_path = Path(temp_dir) / "candidate.tar"
+        extracted = Path(temp_dir) / "candidate"
+        extracted.mkdir()
+        archive = subprocess.run(
+            ["git", "archive", "--format=tar", "--output", str(archive_path), candidate_sha],
+            cwd=root_path,
+            capture_output=True,
+            text=True,
+        )
+        if archive.returncode:
+            return None, f"Cannot materialize candidate Git tree: {archive.stderr.strip()}"
+        try:
+            with tarfile.open(archive_path) as candidate_tar:
+                candidate_tar.extractall(extracted, filter="data")
+        except (OSError, tarfile.TarError, ValueError) as exc:
+            return None, f"Cannot safely materialize candidate Git tree: {exc}"
+
+        def run(args: list[str]) -> subprocess.CompletedProcess[str]:
+            try:
+                return subprocess.run(
+                    args, cwd=extracted, capture_output=True, text=True, timeout=3600
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                return subprocess.CompletedProcess(args, 127, "", str(exc))
+
+        tests = run([sys.executable, "-m", "pytest", "-q"])
+        lint = run([sys.executable, "-m", "ruff", "check", "src", "tests"])
+        openspec = run(["openspec", "validate", "--all", "--strict"])
+
+        for name, proc in (("pytest", tests), ("Ruff", lint), ("OpenSpec", openspec)):
+            if proc.returncode == 127 and (
+                "No such file" in proc.stderr or "not found" in proc.stderr
+            ):
+                return None, f"{name} executable is unavailable; candidate verification is BLOCKED."
+
+        schema_files = sorted((extracted / "schemas").glob("*.json"))
+        schema_ok = bool(schema_files)
+        schema_error = None
+        try:
+            from jsonschema.validators import validator_for
+        except ImportError:
+            return None, "JSON Schema validator is unavailable; candidate verification is BLOCKED."
+        try:
+            for schema_file in schema_files:
+                schema = json.loads(schema_file.read_text(encoding="utf-8"))
+                validator_for(schema).check_schema(schema)
+        except Exception as exc:
+            schema_ok = False
+            schema_error = str(exc)
+
+        checks_ok = (
+            tests.returncode == 0
+            and lint.returncode == 0
+            and openspec.returncode == 0
+            and schema_ok
+        )
+        result = VerificationResult(
+            candidate_sha=candidate_sha,
+            deterministic_checks_passed=checks_ok,
+            tests_passed=tests.returncode == 0,
+            linters_passed=lint.returncode == 0,
+            schemas_passed=openspec.returncode == 0 and schema_ok,
+            evidence_source="isolated-git-archive-runner",
+            provenance="canonical-worktree-runner",
+            check_details={
+                "pytest_returncode": tests.returncode,
+                "ruff_returncode": lint.returncode,
+                "openspec_strict_returncode": openspec.returncode,
+                "json_schemas_validated": len(schema_files),
+                "json_schema_error": schema_error,
+                "execution_tree": "git archive of exact candidate commit",
+            },
+        )
+        return result, None
 
 
 def evaluate_verify(
@@ -296,7 +351,8 @@ def evaluate_verify(
     repository_identity: str = "silverberdi/mini-me",
     base_sha: str,
     candidate_sha: str,
-    verification_result: VerificationResult | None,
+    verification_result: VerificationResult | None = None,
+    run_checks: bool = False,
     findings: list[QualityHookFinding] | None = None,
     repo_root: str | Path = ".",
 ) -> QualityHookReport:
@@ -304,58 +360,39 @@ def evaluate_verify(
 
     Authoritative constraints:
     1. Zero assumed PASS results.
-    2. Verification evidence MUST exist and be bound strictly to candidate_sha with trusted provenance.
-    3. Untrusted self-declared or unverified evidence fails closed as BLOCKED.
+    2. Checks run in-process against a clean Git archive of the exact candidate commit.
+    3. Caller-supplied result objects are not accepted as evidence.
     """
     all_findings = list(findings or [])
     blocked_reasons: list[str] = []
 
     # 1. Candidate Identity
-    id_findings = analyze_candidate_identity(repo_root, base_sha, candidate_sha, repository_identity)
+    id_findings = analyze_candidate_identity(
+        repo_root, base_sha, candidate_sha, repository_identity
+    )
     all_findings.extend(id_findings)
     if any(f.severity == FindingSeverity.CRITICAL for f in id_findings):
         blocked_reasons.append("Candidate SHA validation failed.")
 
-    # 2. Strict evidence & provenance requirement
-    if verification_result is None:
-        blocked_reasons.append("Mandatory deterministic verification evidence is missing; evaluation is BLOCKED.")
+    # 2. Execute checks here; a serialized result or caller-built model is not an authority.
+    if run_checks:
+        verification_result, run_error = _run_checks_for_candidate(repo_root, candidate_sha)
+        if run_error:
+            blocked_reasons.append(run_error)
+    elif verification_result is not None:
+        blocked_reasons.append(
+            "Caller-supplied verification payload is not authoritative; use --run-checks to execute checks on the candidate tree."
+        )
     else:
+        blocked_reasons.append("Mandatory deterministic verification checks were not executed.")
+
+    if verification_result is not None and run_checks:
         if verification_result.candidate_sha != candidate_sha:
             blocked_reasons.append(
-                f"Verification evidence candidate SHA '{verification_result.candidate_sha}' does not match candidate SHA '{candidate_sha}'."
+                "Executed verification is not bound to the requested candidate SHA."
             )
-        if verification_result.provenance not in TRUSTED_VERIFICATION_PROVENANCES:
-            blocked_reasons.append(
-                f"Verification evidence provenance '{verification_result.provenance}' is not a trusted canonical authority; "
-                "untrusted self-declared verification is BLOCKED."
-            )
-        elif verification_result.provenance == "canonical-worktree-runner":
-            root_path = Path(repo_root)
-            if not (root_path / ".git").exists():
-                blocked_reasons.append(
-                    f"Repository path '{root_path}' is not a valid Git repository; cannot verify worktree identity for candidate SHA."
-                )
-            else:
-                head_res = subprocess.run(
-                    ["git", "rev-parse", "HEAD"],
-                    cwd=str(root_path),
-                    capture_output=True,
-                    text=True,
-                )
-                if head_res.returncode != 0 or head_res.stdout.strip() != candidate_sha:
-                    blocked_reasons.append(
-                        f"Working tree HEAD '{head_res.stdout.strip()}' does not match candidate SHA '{candidate_sha}'; "
-                        "cannot attribute working tree execution to candidate SHA."
-                    )
-                diff_index_res = subprocess.run(
-                    ["git", "diff-index", "--quiet", "HEAD", "--"],
-                    cwd=str(root_path),
-                    check=False,
-                )
-                if diff_index_res.returncode != 0:
-                    blocked_reasons.append(
-                        "Working tree contains uncommitted modifications to tracked files; cannot attribute execution to committed candidate SHA."
-                    )
+        if verification_result.provenance != "canonical-worktree-runner":
+            blocked_reasons.append("Internal verification runner identity is unavailable.")
 
     is_blocked = len(blocked_reasons) > 0
     verdict, reason = resolve_final_verdict(
@@ -387,107 +424,141 @@ def evaluate_archive(
     repository_identity: str = "silverberdi/mini-me",
     base_sha: str,
     candidate_sha: str,
+    pull_request_number: int | None = None,
+    target_branch: str = "main",
+    github_adapter: GitHubAdapterInterface | None = None,
     merge_evidence: MergeEvidence | None = None,
     human_approval_evidence: HumanApprovalEvidence | None = None,
     findings: list[QualityHookFinding] | None = None,
     repo_root: str | Path = ".",
 ) -> QualityHookReport:
-    """Evaluate ARCHIVE stage: Delivery Integrity and DoD Validation.
-
-    Authoritative constraints:
-    1. Must verify merge and human approval from canonical authorities.
-    2. Untrusted self-declared JSON files without canonical provenance return BLOCKED.
-    3. Identifies missing canonical integrations when verification cannot proceed.
-    """
+    """Evaluate ARCHIVE from GitHub observations; serialized evidence is never authority."""
     all_findings = list(findings or [])
     blocked_reasons: list[str] = []
 
     # 1. Candidate Identity
-    id_findings = analyze_candidate_identity(repo_root, base_sha, candidate_sha, repository_identity)
+    id_findings = analyze_candidate_identity(
+        repo_root, base_sha, candidate_sha, repository_identity
+    )
     all_findings.extend(id_findings)
     if any(f.severity == FindingSeverity.CRITICAL for f in id_findings):
         blocked_reasons.append("Candidate SHA validation failed.")
 
-    # 2. Check Merge Evidence & Provenance
+    # Supplied evidence models are untrusted payloads, regardless of provenance labels.
+    if merge_evidence is not None or human_approval_evidence is not None:
+        blocked_reasons.append(
+            "Caller-supplied merge/approval payloads are not accepted as authority."
+        )
+
+    # 2. Observe the actual PR through the configured GitHub adapter.
     pr_merged_by_human = False
-    if merge_evidence is None:
-        blocked_reasons.append(
-            "Authoritative merge verification evidence is missing; failing closed as BLOCKED (missing merge authority integration)."
-        )
-    else:
-        if merge_evidence.candidate_sha != candidate_sha:
-            blocked_reasons.append(
-                f"Merge evidence candidate SHA '{merge_evidence.candidate_sha}' does not match candidate '{candidate_sha}'."
-            )
-        elif merge_evidence.provenance not in TRUSTED_MERGE_PROVENANCES:
-            blocked_reasons.append(
-                f"Merge evidence provenance '{merge_evidence.provenance}' is not a trusted canonical authority; "
-                "untrusted self-declared merge JSON is rejected as BLOCKED (missing canonical merge authority integration)."
-            )
-        else:
-            # Check git ancestry if provenance is canonical-git-ancestry and repo is accessible
-            if merge_evidence.provenance == "canonical-git-ancestry":
-                root_path = Path(repo_root)
-                if (root_path / ".git").exists():
-                    anc_res = subprocess.run(
-                        ["git", "merge-base", "--is-ancestor", candidate_sha, merge_evidence.target_branch],
-                        cwd=str(root_path),
-                        capture_output=True,
-                        text=True,
-                    )
-                    if anc_res.returncode != 0:
-                        all_findings.append(
-                            QualityHookFinding(
-                                finding_id="ARCHIVE-NO-GIT-ANCESTRY",
-                                specialty=ReviewSpecialty.GENERAL_ARCHITECTURE,
-                                severity=FindingSeverity.CRITICAL,
-                                file_path=None,
-                                requirement_reference="CANONICAL-DECISIONS#git-ancestry",
-                                observed_evidence=f"Candidate SHA '{candidate_sha}' is not an ancestor of target branch '{merge_evidence.target_branch}'.",
-                                expected_behavior="Candidate commit must be merged into target branch history.",
-                                suggested_remediation="Merge candidate into target base branch before archiving.",
-                                status=FindingStatus.UNRESOLVED,
-                            )
-                        )
-
-            is_bot = (
-                merge_evidence.merged_by_type.lower() == "bot"
-                or merge_evidence.merged_by.endswith("[bot]")
-            )
-            if merge_evidence.is_merged and not is_bot:
-                pr_merged_by_human = True
-            else:
-                pr_merged_by_human = False
-
-    # 3. Check Human Approval Evidence & Provenance
     human_approval_recorded = False
-    if human_approval_evidence is None:
+    if pull_request_number is None or pull_request_number <= 0:
         blocked_reasons.append(
-            "Authoritative human approval evidence is missing; failing closed as BLOCKED (missing human validation authority integration)."
+            "A pull-request number is required for direct GitHub merge verification."
         )
     else:
-        if human_approval_evidence.candidate_head_sha != candidate_sha:
-            blocked_reasons.append(
-                f"Human approval evidence candidate SHA '{human_approval_evidence.candidate_head_sha}' does not match candidate '{candidate_sha}'."
+        if github_adapter is None:
+            from minime.adapters.github import GitHubAdapter
+
+            github_adapter = GitHubAdapter()
+        try:
+            pr_result = github_adapter.get_pull_request_details(
+                repository_identity, pull_request_number
             )
-        elif human_approval_evidence.base_sha != base_sha:
-            blocked_reasons.append(
-                f"Human approval evidence base SHA '{human_approval_evidence.base_sha}' does not match base '{base_sha}'."
-            )
-        elif human_approval_evidence.provenance not in TRUSTED_APPROVAL_PROVENANCES:
-            blocked_reasons.append(
-                f"Human approval provenance '{human_approval_evidence.provenance}' is not a trusted canonical authority; "
-                "untrusted self-declared approval JSON is rejected as BLOCKED (missing ValidationAuthorityService or GitHub human approval integration)."
-            )
+        except Exception as exc:
+            pr_result = None
+            blocked_reasons.append(f"GitHub pull-request lookup failed closed: {exc}")
+        pr = pr_result.data if pr_result is not None and pr_result.is_success else None
+        if not isinstance(pr, dict):
+            blocked_reasons.append("GitHub pull-request state is unavailable; ARCHIVE is BLOCKED.")
         else:
-            if human_approval_evidence.decision.lower() == "approve":
-                human_approval_recorded = True
+            merged_by_type = pr.get("merged_by_type")
+            merged_by_login = pr.get("merged_by_login")
+            pr_merged_by_human = bool(
+                pr.get("number") == pull_request_number
+                and pr.get("head_sha") == candidate_sha
+                and pr.get("base_branch") == target_branch
+                and pr.get("is_merged") is True
+                and pr.get("merged_at")
+                and pr.get("merge_commit_sha")
+                and merged_by_type == "User"
+                and merged_by_login
+                and not str(merged_by_login).endswith("[bot]")
+            )
+            if not pr_merged_by_human:
+                blocked_reasons.append(
+                    "GitHub PR does not prove a human merge of the exact candidate SHA into the requested target branch."
+                )
+
+            try:
+                reviews_result = github_adapter.get_pull_request_reviews(
+                    repository_identity, pull_request_number
+                )
+            except Exception as exc:
+                reviews_result = None
+                blocked_reasons.append(f"GitHub review lookup failed closed: {exc}")
+            reviews = (
+                reviews_result.data
+                if reviews_result is not None and reviews_result.is_success
+                else None
+            )
+            if reviews is None:
+                blocked_reasons.append(
+                    "GitHub pull-request approvals are unavailable; ARCHIVE is BLOCKED."
+                )
             else:
-                human_approval_recorded = False
+                latest_by_reviewer: dict[str, tuple[datetime, dict]] = {}
+                invalid_review_time = False
+                for row in reviews:
+                    reviewer = row.get("user_login")
+                    if reviewer and row.get("user_type") == "User":
+                        try:
+                            reviewed_at = datetime.fromisoformat(
+                                row.get("submitted_at", "").replace("Z", "+00:00")
+                            )
+                            if reviewed_at.tzinfo is None:
+                                raise ValueError(
+                                    "Review timestamp is missing timezone information."
+                                )
+                        except (AttributeError, TypeError, ValueError):
+                            invalid_review_time = True
+                            continue
+                        current = latest_by_reviewer.get(reviewer)
+                        if current is None or reviewed_at > current[0]:
+                            latest_by_reviewer[reviewer] = (reviewed_at, row)
+                human_approval_recorded = any(
+                    row.get("state") == "APPROVED"
+                    and row.get("commit_id") == candidate_sha
+                    and not reviewer.endswith("[bot]")
+                    for reviewer, (_, row) in latest_by_reviewer.items()
+                )
+                if invalid_review_time:
+                    blocked_reasons.append(
+                        "GitHub review timestamps are incomplete or invalid; approval ordering cannot be verified."
+                    )
+                    human_approval_recorded = False
+                elif not human_approval_recorded:
+                    blocked_reasons.append(
+                        "No authenticated human GitHub approval is bound to the exact candidate SHA."
+                    )
+
+    # GitHub review binds to the immutable head. Confirm the supplied base is an ancestor.
+    base_relation = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", base_sha, candidate_sha],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+    )
+    if base_relation.returncode != 0:
+        blocked_reasons.append(
+            "Candidate/base ancestry could not be verified in the local Git object database."
+        )
 
     # 4. Check unresolved findings
     has_unresolved_crit_high = any(
-        f.status == FindingStatus.UNRESOLVED and f.severity in (FindingSeverity.CRITICAL, FindingSeverity.HIGH)
+        f.status == FindingStatus.UNRESOLVED
+        and f.severity in (FindingSeverity.CRITICAL, FindingSeverity.HIGH)
         for f in all_findings
     )
 
@@ -498,6 +569,11 @@ def evaluate_archive(
         has_unresolved_critical_high=has_unresolved_crit_high,
     )
     all_findings.extend(archive_findings)
+
+    # No canonical aggregate Definition-of-Done authority is currently wired to this gate.
+    blocked_reasons.append(
+        "Full Definition-of-Done evidence is not available from a canonical lifecycle authority; closure cannot be declared."
+    )
 
     is_blocked = len(blocked_reasons) > 0
     verdict, reason = resolve_final_verdict(

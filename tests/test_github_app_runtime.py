@@ -150,6 +150,60 @@ def test_rest_pr_states_and_auth_header():
     assert res3.reason_code == ExternalReasonCode.CONFLICT
 
 
+def test_pull_request_human_merge_and_reviews_are_read_from_github():
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        if request.url.path.endswith("/reviews"):
+            return httpx.Response(
+                200,
+                json=[{
+                    "state": "APPROVED",
+                    "commit_id": "candidate-sha",
+                    "submitted_at": "2026-10-11T12:00:00Z",
+                    "user": {"login": "human-reviewer", "type": "User"},
+                }],
+            )
+        return httpx.Response(
+            200,
+            json={
+                "number": 42,
+                "merged": True,
+                "merged_at": "2026-10-11T12:30:00Z",
+                "merge_commit_sha": "merge-sha",
+                "merged_by": {"login": "human-merger", "type": "User"},
+                "head": {"sha": "candidate-sha", "ref": "feature"},
+                "base": {"sha": "base-sha", "ref": "main"},
+            },
+        )
+
+    class Auth:
+        _cached = None
+        client = httpx.Client(
+            transport=httpx.MockTransport(handler), base_url="https://api.github.com"
+        )
+
+        def get_installation_token(self):
+            return "installation-token"
+
+    adapter = GitHubAdapter(auth=Auth())
+    pr = adapter.get_pull_request_details("o/r", 42)
+    reviews = adapter.get_pull_request_reviews("o/r", 42)
+
+    assert pr.is_success
+    assert pr.data["merged_by_type"] == "User"
+    assert reviews.is_success
+    assert reviews.data == [{
+        "state": "APPROVED",
+        "commit_id": "candidate-sha",
+        "user_login": "human-reviewer",
+        "user_type": "User",
+        "submitted_at": "2026-10-11T12:00:00Z",
+    }]
+    assert all(req.headers["Authorization"] == "Bearer installation-token" for req in requests)
+
+
 def test_issue_validation_distinguishes_not_found_and_unobservable():
     class Auth:
         _cached = None

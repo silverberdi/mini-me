@@ -8,6 +8,8 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
+from minime.domain.enums import ExternalOutcome, ExternalReasonCode, RetrySafety
+from minime.domain.models import ExternalActionResult
 from minime.quality_hooks.analyzers.regression_pr139 import analyze_pr139_regressions
 from minime.quality_hooks.cli import cli_app
 from minime.quality_hooks.engine import (
@@ -35,6 +37,27 @@ runner = CliRunner()
 BASE_SHA = "1111111111111111111111111111111111111111"
 CANDIDATE_SHA = "2222222222222222222222222222222222222222"
 ANOTHER_SHA = "8888888888888888888888888888888888888888"
+
+
+def _git_repo_with_two_commits(repo: Path) -> tuple[str, str]:
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    source = repo / "tracked.txt"
+    source.write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True)
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    source.write_text("candidate\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "candidate"], cwd=repo, check=True, capture_output=True)
+    candidate_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    return base_sha, candidate_sha
 
 
 def test_dynamic_specialty_selection():
@@ -109,12 +132,14 @@ def test_adversarial_post_apply_rejection(tmp_path: Path):
         implementer_identity="codex",
         implementer_model_identity="openai/gpt-4o",
         review_evidence=untrusted_review,
-        _override_changed_files=["src/minime/services/auth_service.py"],
-        _override_diff_text="def test(): pass",
         repo_root=tmp_path,
     )
     assert report_untrusted.final_verdict == HookVerdict.BLOCKED
-    assert "not a trusted canonical review authority" in report_untrusted.verdict_reason.lower()
+    assert (
+        "canonical specialty-aware reviewer evidence is unavailable"
+        in report_untrusted.verdict_reason.lower()
+    )
+    assert report_untrusted.reviewer_identity is None
 
     # Adversarial 2: Review claiming candidate SHA of another commit -> MUST be BLOCKED
     another_commit_review = ReviewEvidence(
@@ -134,12 +159,13 @@ def test_adversarial_post_apply_rejection(tmp_path: Path):
         implementer_identity="codex",
         implementer_model_identity="openai/gpt-4o",
         review_evidence=another_commit_review,
-        _override_changed_files=["src/minime/services/auth_service.py"],
-        _override_diff_text="def test(): pass",
         repo_root=tmp_path,
     )
     assert report_another.final_verdict == HookVerdict.BLOCKED
-    assert "does not match candidate sha" in report_another.verdict_reason.lower()
+    assert (
+        "canonical specialty-aware reviewer evidence is unavailable"
+        in report_another.verdict_reason.lower()
+    )
 
     # Adversarial 3: Same model family self-review in canonical evidence -> MUST be BLOCKED
     same_model_review = ReviewEvidence(
@@ -159,14 +185,12 @@ def test_adversarial_post_apply_rejection(tmp_path: Path):
         implementer_identity="codex",
         implementer_model_identity="openai/gpt-4o",
         review_evidence=same_model_review,
-        _override_changed_files=["src/minime/services/auth_service.py"],
-        _override_diff_text="def test(): pass",
         repo_root=tmp_path,
     )
     assert report_same_model.final_verdict == HookVerdict.BLOCKED
-    assert "independence" in report_same_model.verdict_reason.lower()
+    assert report_same_model.reviewer_model_identity is None
 
-    # Legitimate canonical review with independent reviewer covering specialties -> PASS
+    # Even plausible identity, specialties and provenance claims are not authenticated authority.
     legit_review = ReviewEvidence(
         candidate_sha=CANDIDATE_SHA,
         reviewer_identity="antigravity",
@@ -184,11 +208,13 @@ def test_adversarial_post_apply_rejection(tmp_path: Path):
         implementer_identity="codex",
         implementer_model_identity="openai/gpt-4o",
         review_evidence=legit_review,
-        _override_changed_files=["src/minime/services/auth_service.py"],
-        _override_diff_text="def test(): pass",
         repo_root=tmp_path,
     )
-    assert report_legit.final_verdict == HookVerdict.PASS
+    assert report_legit.final_verdict == HookVerdict.BLOCKED
+    assert (
+        "canonical specialty-aware reviewer evidence is unavailable"
+        in report_legit.verdict_reason.lower()
+    )
 
 
 def test_adversarial_verify_rejection(tmp_path: Path):
@@ -211,7 +237,10 @@ def test_adversarial_verify_rejection(tmp_path: Path):
         repo_root=tmp_path,
     )
     assert report_untrusted.final_verdict == HookVerdict.BLOCKED
-    assert "not a trusted canonical authority" in report_untrusted.verdict_reason.lower()
+    assert (
+        "caller-supplied verification payload is not authoritative"
+        in report_untrusted.verdict_reason.lower()
+    )
 
     # Adversarial 2: Verification result with candidate SHA of another commit -> MUST be BLOCKED
     mismatched_sha_res = VerificationResult(
@@ -231,7 +260,10 @@ def test_adversarial_verify_rejection(tmp_path: Path):
         repo_root=tmp_path,
     )
     assert report_mismatched.final_verdict == HookVerdict.BLOCKED
-    assert "does not match candidate sha" in report_mismatched.verdict_reason.lower()
+    assert (
+        "caller-supplied verification payload is not authoritative"
+        in report_mismatched.verdict_reason.lower()
+    )
 
     # Adversarial 3: Fictitious test result where schemas_passed was not run/failed -> MUST be FAIL
     schema_failed_res = VerificationResult(
@@ -250,8 +282,11 @@ def test_adversarial_verify_rejection(tmp_path: Path):
         verification_result=schema_failed_res,
         repo_root=tmp_path,
     )
-    assert report_schema_fail.final_verdict == HookVerdict.FAIL
-    assert "schema validation checks failed" in report_schema_fail.verdict_reason.lower()
+    assert report_schema_fail.final_verdict == HookVerdict.BLOCKED
+    assert (
+        "caller-supplied verification payload is not authoritative"
+        in report_schema_fail.verdict_reason.lower()
+    )
 
     # Adversarial 4: Canonical worktree runner on non-git dir -> MUST be BLOCKED
     worktree_res = VerificationResult(
@@ -271,7 +306,10 @@ def test_adversarial_verify_rejection(tmp_path: Path):
         repo_root=tmp_path,
     )
     assert report_nongit.final_verdict == HookVerdict.BLOCKED
-    assert "not a valid git repository" in report_nongit.verdict_reason.lower()
+    assert (
+        "caller-supplied verification payload is not authoritative"
+        in report_nongit.verdict_reason.lower()
+    )
 
     # Adversarial 5: Canonical worktree runner on git repo with mismatched HEAD
     git_repo = tmp_path / "repo"
@@ -290,9 +328,12 @@ def test_adversarial_verify_rejection(tmp_path: Path):
         repo_root=git_repo,
     )
     assert report_worktree_mismatch.final_verdict == HookVerdict.BLOCKED
-    assert "working tree head" in report_worktree_mismatch.verdict_reason.lower()
+    from minime.quality_hooks.engine import _run_checks_for_candidate
 
-    # Legitimate canonical verification with all checks passed -> PASS
+    _, mismatch_reason = _run_checks_for_candidate(git_repo, CANDIDATE_SHA)
+    assert mismatch_reason and "does not match candidate sha" in mismatch_reason.lower()
+
+    # A plausible provenance string in a JSON-shaped payload is still not execution evidence.
     legit_res = VerificationResult(
         candidate_sha=CANDIDATE_SHA,
         deterministic_checks_passed=True,
@@ -310,7 +351,111 @@ def test_adversarial_verify_rejection(tmp_path: Path):
         findings=[],
         repo_root=tmp_path,
     )
-    assert report_legit.final_verdict == HookVerdict.PASS
+    assert report_legit.final_verdict == HookVerdict.BLOCKED
+    assert (
+        "caller-supplied verification payload is not authoritative"
+        in report_legit.verdict_reason.lower()
+    )
+
+
+def test_verify_refuses_untracked_candidate_tree_even_with_exact_head(tmp_path: Path):
+    from minime.quality_hooks.engine import _run_checks_for_candidate
+
+    repo = tmp_path / "candidate"
+    _, candidate_sha = _git_repo_with_two_commits(repo)
+    (repo / "tests").mkdir()
+    (repo / "tests" / "untracked_test.py").write_text("def test_extra(): pass\n", encoding="utf-8")
+
+    result, reason = _run_checks_for_candidate(repo, candidate_sha)
+    assert result is None
+    assert reason and "untracked changes" in reason.lower()
+
+
+def test_archive_queries_github_and_still_requires_canonical_dod(tmp_path: Path):
+    repo = tmp_path / "candidate"
+    base_sha, candidate_sha = _git_repo_with_two_commits(repo)
+
+    class GitHubAuthority:
+        def __init__(self):
+            self.pr_calls = 0
+            self.review_calls = 0
+            self.reviews = [
+                {
+                    "state": "APPROVED",
+                    "commit_id": candidate_sha,
+                    "user_type": "User",
+                    "user_login": "human-reviewer",
+                    "submitted_at": "2026-10-11T12:00:00Z",
+                }
+            ]
+
+        def get_pull_request_details(self, repository, pr_number):
+            self.pr_calls += 1
+            return ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                retry_safety=RetrySafety.SAFE,
+                data={
+                    "number": pr_number,
+                    "head_sha": candidate_sha,
+                    "base_branch": "main",
+                    "is_merged": True,
+                    "merged_at": "2026-10-11T10:00:00Z",
+                    "merge_commit_sha": "a" * 40,
+                    "merged_by_type": "User",
+                    "merged_by_login": "human-operator",
+                },
+            )
+
+        def get_pull_request_reviews(self, repository, pr_number):
+            self.review_calls += 1
+            return ExternalActionResult(
+                outcome=ExternalOutcome.SUCCESS,
+                source_adapter="github_rest",
+                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                retry_safety=RetrySafety.SAFE,
+                data=self.reviews,
+            )
+
+    authority = GitHubAuthority()
+    report = evaluate_archive(
+        change_id="test-change",
+        base_sha=base_sha,
+        candidate_sha=candidate_sha,
+        pull_request_number=42,
+        github_adapter=authority,
+        repo_root=repo,
+    )
+    assert authority.pr_calls == authority.review_calls == 1
+    assert not any(
+        finding.finding_id in {"ARCHIVE-NO-HUMAN-MERGE", "ARCHIVE-MISSING-HUMAN-APPROVAL"}
+        for finding in report.findings
+    )
+    assert report.final_verdict == HookVerdict.BLOCKED
+    assert "full definition-of-done evidence is not available" in report.verdict_reason.lower()
+
+    authority.reviews.append(
+        {
+            "state": "CHANGES_REQUESTED",
+            "commit_id": candidate_sha,
+            "user_type": "User",
+            "user_login": "human-reviewer",
+            "submitted_at": "2026-10-11T13:00:00Z",
+        }
+    )
+    stale_approval = evaluate_archive(
+        change_id="test-change",
+        base_sha=base_sha,
+        candidate_sha=candidate_sha,
+        pull_request_number=42,
+        github_adapter=authority,
+        repo_root=repo,
+    )
+    assert any(
+        finding.finding_id == "ARCHIVE-MISSING-HUMAN-APPROVAL"
+        for finding in stale_approval.findings
+    )
 
 
 def test_adversarial_archive_rejection(tmp_path: Path):
@@ -351,7 +496,10 @@ def test_adversarial_archive_rejection(tmp_path: Path):
         repo_root=tmp_path,
     )
     assert report_fake_merge.final_verdict == HookVerdict.BLOCKED
-    assert "not a trusted canonical authority" in report_fake_merge.verdict_reason.lower()
+    assert (
+        "caller-supplied merge/approval payloads are not accepted"
+        in report_fake_merge.verdict_reason.lower()
+    )
 
     # Adversarial 2: Fabricated human approval JSON with untrusted provenance -> MUST be BLOCKED
     fake_approval = HumanApprovalEvidence(
@@ -371,7 +519,10 @@ def test_adversarial_archive_rejection(tmp_path: Path):
         repo_root=tmp_path,
     )
     assert report_fake_approval.final_verdict == HookVerdict.BLOCKED
-    assert "not a trusted canonical authority" in report_fake_approval.verdict_reason.lower()
+    assert (
+        "caller-supplied merge/approval payloads are not accepted"
+        in report_fake_approval.verdict_reason.lower()
+    )
 
     # Adversarial 3: Merge evidence with candidate SHA of another commit -> MUST be BLOCKED
     another_merge = MergeEvidence(
@@ -392,7 +543,10 @@ def test_adversarial_archive_rejection(tmp_path: Path):
         repo_root=tmp_path,
     )
     assert report_another_merge.final_verdict == HookVerdict.BLOCKED
-    assert "does not match candidate" in report_another_merge.verdict_reason.lower()
+    assert (
+        "caller-supplied merge/approval payloads are not accepted"
+        in report_another_merge.verdict_reason.lower()
+    )
 
     # Adversarial 4: Automated bot merge -> MUST be FAIL (human merge mandatory in MVP)
     bot_merge = MergeEvidence(
@@ -412,10 +566,13 @@ def test_adversarial_archive_rejection(tmp_path: Path):
         human_approval_evidence=valid_approval,
         repo_root=tmp_path,
     )
-    assert report_bot_merge.final_verdict == HookVerdict.FAIL
-    assert any(f.finding_id == "ARCHIVE-NO-HUMAN-MERGE" for f in report_bot_merge.findings)
+    assert report_bot_merge.final_verdict == HookVerdict.BLOCKED
+    assert (
+        "caller-supplied merge/approval payloads are not accepted"
+        in report_bot_merge.verdict_reason.lower()
+    )
 
-    # Legitimate canonical merge and approval -> PASS
+    # Even matching provenance strings do not replace direct GitHub and DoD evidence.
     report_legit = evaluate_archive(
         change_id="test-change",
         base_sha=BASE_SHA,
@@ -424,10 +581,14 @@ def test_adversarial_archive_rejection(tmp_path: Path):
         human_approval_evidence=valid_approval,
         repo_root=tmp_path,
     )
-    assert report_legit.final_verdict == HookVerdict.PASS
+    assert report_legit.final_verdict == HookVerdict.BLOCKED
+    assert (
+        "caller-supplied merge/approval payloads are not accepted"
+        in report_legit.verdict_reason.lower()
+    )
 
 
-def test_pr139_regression_fixture():
+def test_pr139_regression_fixture(tmp_path: Path):
     """Verify static analyzer catches PR #139 auth swallowing and secret leakage patterns."""
     buggy_code = """
 def _get_git_auth_bundle(self):
@@ -461,16 +622,35 @@ raise ValueError(f"Authorization token: {secret_token} rejected")
         evidence_source="canonical-review.json",
         provenance="canonical-uow-review",
     )
+    repo = tmp_path / "quality-hooks-pr139-fixture"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    source = repo / "src" / "minime" / "services" / "intake_service.py"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("def safe():\n    return None\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True)
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    source.write_text(buggy_code, encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "introduce regression"], cwd=repo, check=True, capture_output=True
+    )
+    candidate_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
     report = evaluate_post_apply(
         change_id="test-change",
-        base_sha=BASE_SHA,
-        candidate_sha=CANDIDATE_SHA,
+        base_sha=base_sha,
+        candidate_sha=candidate_sha,
         implementer_identity="codex",
         implementer_model_identity="openai/gpt-4o",
         review_evidence=review_ev,
-        _override_changed_files=["src/minime/services/intake_service.py"],
-        _override_diff_text=buggy_code,
-        repo_root=Path("/tmp"),
+        repo_root=repo,
     )
     assert report.final_verdict == HookVerdict.FAIL
     assert any("PR139-AUTH-SWALLOW" in f.finding_id for f in report.findings)
@@ -492,42 +672,103 @@ def test_cli_quality_hooks_fails_closed_without_evidence(tmp_path: Path):
         cli_app,
         [
             "evaluate-verify",
-            "-c", "test-change",
-            "--base-sha", BASE_SHA,
-            "--candidate-sha", CANDIDATE_SHA,
-            "--repo-root", str(tmp_path),
+            "-c",
+            "test-change",
+            "--base-sha",
+            BASE_SHA,
+            "--candidate-sha",
+            CANDIDATE_SHA,
+            "--repo-root",
+            str(tmp_path),
         ],
     )
     assert verify_fail.exit_code == 1
     verify_report = json.loads(verify_fail.output)
     assert verify_report["final_verdict"] == "BLOCKED"
 
+    declared_checks = tmp_path / "claimed-checks.json"
+    declared_checks.write_text(
+        VerificationResult(
+            candidate_sha=CANDIDATE_SHA,
+            deterministic_checks_passed=True,
+            tests_passed=True,
+            linters_passed=True,
+            schemas_passed=True,
+            evidence_source="ci-run-pretend",
+            provenance="canonical-ci-runner",
+        ).model_dump_json(),
+        encoding="utf-8",
+    )
+    forged_verify = runner.invoke(
+        cli_app,
+        [
+            "evaluate-verify",
+            "-c",
+            "test-change",
+            "--base-sha",
+            BASE_SHA,
+            "--candidate-sha",
+            CANDIDATE_SHA,
+            "--evidence-file",
+            str(declared_checks),
+            "--repo-root",
+            str(tmp_path),
+        ],
+    )
+    assert forged_verify.exit_code == 1
+    assert json.loads(forged_verify.output)["final_verdict"] == "BLOCKED"
+
     # 3. evaluate-archive fails closed without evidence
     archive_fail = runner.invoke(
         cli_app,
         [
             "evaluate-archive",
-            "-c", "test-change",
-            "--base-sha", BASE_SHA,
-            "--candidate-sha", CANDIDATE_SHA,
-            "--repo-root", str(tmp_path),
+            "-c",
+            "test-change",
+            "--base-sha",
+            BASE_SHA,
+            "--candidate-sha",
+            CANDIDATE_SHA,
+            "--repo-root",
+            str(tmp_path),
         ],
     )
     assert archive_fail.exit_code == 1
     archive_report = json.loads(archive_fail.output)
     assert archive_report["final_verdict"] == "BLOCKED"
 
-    # 4. evaluate-post-apply fails closed without review evidence file
+    # 4. A JSON review with trusted-looking provenance is ignored by the CLI.
+    claimed_review = tmp_path / "claimed-review.json"
+    claimed_review.write_text(
+        ReviewEvidence(
+            candidate_sha=CANDIDATE_SHA,
+            reviewer_identity="invented-reviewer",
+            reviewer_model_identity="invented-model",
+            verdict="approve",
+            summary="claimed approval",
+            evaluated_specialties=[ReviewSpecialty.GENERAL_ARCHITECTURE],
+            evidence_source="local",
+            provenance="canonical-uow-review",
+        ).model_dump_json(),
+        encoding="utf-8",
+    )
     post_apply_fail = runner.invoke(
         cli_app,
         [
             "evaluate-post-apply",
-            "-c", "test-change",
-            "--base-sha", BASE_SHA,
-            "--candidate-sha", CANDIDATE_SHA,
-            "--repo-root", str(tmp_path),
+            "-c",
+            "test-change",
+            "--base-sha",
+            BASE_SHA,
+            "--candidate-sha",
+            CANDIDATE_SHA,
+            "--review-evidence-file",
+            str(claimed_review),
+            "--repo-root",
+            str(tmp_path),
         ],
     )
     assert post_apply_fail.exit_code == 1
     post_report = json.loads(post_apply_fail.output)
     assert post_report["final_verdict"] == "BLOCKED"
+    assert post_report["reviewer_identity"] is None

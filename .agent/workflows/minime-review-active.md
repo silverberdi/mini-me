@@ -22,10 +22,10 @@ Use `minime-reviewer` plus canonical/repository/provider/evidence guards. Start 
    - Scan diff for fail-closed regressions (e.g. PR #139 auth failure swallowing, secret leakage in exceptions).
    - Ensure negative/denial branches and failure recovery paths are explicitly handled and tested.
 
-   - Run POST-APPLY evaluation requiring verifiable review evidence:
+   - Run POST-APPLY evaluation. Do not pass review JSON as authority:
      ```bash
-     python -m minime.quality_hooks.cli evaluate-post-apply --change "<name>" --base-sha "<base>" --candidate-sha "<cand>" --implementer-model "<impl_model>" --review-evidence-file "<review.json>"
+     python -m minime.quality_hooks.cli evaluate-post-apply --change "<name>" --base-sha "<base>" --candidate-sha "<cand>" --implementer-model "<impl_model>"
      ```
-   - Self-declared reviews without verifiable evidence files are rejected as `BLOCKED`.
+   - A provenance label or review JSON is not authenticated evidence. Current durable reviewer records do not carry specialty-level coverage, so this gate remains `BLOCKED` until a canonical source proves reviewer identity, independence, candidate binding, and specialties.
    - Findings must conform to `schemas/quality-hook-report.schema.json`.
    - Any unresolved `CRITICAL` or `HIGH` finding produces a `FAIL` verdict.
