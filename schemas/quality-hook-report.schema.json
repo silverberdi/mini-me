@@ -1,0 +1,220 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "QualityHookReport",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "hook_id",
+    "contract_version",
+    "change_id",
+    "repository_identity",
+    "base_sha",
+    "candidate_sha",
+    "required_specialties",
+    "evaluated_specialties",
+    "findings",
+    "final_verdict",
+    "verdict_reason",
+    "evaluated_at"
+  ],
+  "properties": {
+    "hook_id": {
+      "type": "string",
+      "enum": [
+        "PRE-APPLY",
+        "POST-APPLY",
+        "VERIFY",
+        "ARCHIVE"
+      ]
+    },
+    "contract_version": {
+      "type": "string"
+    },
+    "change_id": {
+      "type": "string"
+    },
+    "repository_identity": {
+      "type": "string"
+    },
+    "base_sha": {
+      "type": "string"
+    },
+    "candidate_sha": {
+      "type": "string"
+    },
+    "implementer_identity": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "implementer_model_identity": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "reviewer_identity": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "reviewer_model_identity": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "required_specialties": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "security_auth",
+          "data_migrations",
+          "reliability_recovery",
+          "tests_coverage",
+          "operational_delivery",
+          "general_architecture"
+        ]
+      }
+    },
+    "evaluated_specialties": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "security_auth",
+          "data_migrations",
+          "reliability_recovery",
+          "tests_coverage",
+          "operational_delivery",
+          "general_architecture"
+        ]
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "finding_id",
+          "specialty",
+          "severity",
+          "requirement_reference",
+          "observed_evidence",
+          "expected_behavior",
+          "suggested_remediation",
+          "status"
+        ],
+        "properties": {
+          "finding_id": {
+            "type": "string"
+          },
+          "specialty": {
+            "type": "string",
+            "enum": [
+              "security_auth",
+              "data_migrations",
+              "reliability_recovery",
+              "tests_coverage",
+              "operational_delivery",
+              "general_architecture"
+            ]
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "CRITICAL",
+              "HIGH",
+              "MEDIUM",
+              "LOW",
+              "INFO"
+            ]
+          },
+          "file_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "line_number": {
+            "type": [
+              "integer",
+              "string",
+              "null"
+            ]
+          },
+          "requirement_reference": {
+            "type": "string"
+          },
+          "observed_evidence": {
+            "type": "string"
+          },
+          "expected_behavior": {
+            "type": "string"
+          },
+          "suggested_remediation": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "UNRESOLVED",
+              "RESOLVED",
+              "WAIVED"
+            ]
+          }
+        }
+      }
+    },
+    "verification_result": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "deterministic_checks_passed",
+        "tests_passed",
+        "linters_passed",
+        "schemas_passed",
+        "check_details"
+      ],
+      "properties": {
+        "deterministic_checks_passed": {
+          "type": "boolean"
+        },
+        "tests_passed": {
+          "type": "boolean"
+        },
+        "linters_passed": {
+          "type": "boolean"
+        },
+        "schemas_passed": {
+          "type": "boolean"
+        },
+        "check_details": {
+          "type": "object"
+        }
+      }
+    },
+    "final_verdict": {
+      "type": "string",
+      "enum": [
+        "PASS",
+        "FAIL",
+        "BLOCKED"
+      ]
+    },
+    "verdict_reason": {
+      "type": "string"
+    },
+    "evaluated_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

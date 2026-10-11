@@ -119,6 +119,15 @@ Archive a completed change in the experimental workflow.
 
    If the sync failed, or any capability does not match, report what differs and stop — do not archive. Nothing has moved and `changeRoot` is intact, so the user can fix the mismatch or re-run the sync and start the archive again.
 
+   **ARCHIVE Quality Hook Gate (Delivery Integrity)**:
+   Execute the ARCHIVE quality hook gate to confirm Definition of Done (DoD) and mandatory human merge:
+   ```bash
+   python -m minime.quality_hooks.cli evaluate-archive --change "<name>" --base-sha "$(git merge-base origin/main HEAD)" --candidate-sha "$(git rev-parse HEAD)" --merged-by-human
+   ```
+   - Human merge confirmation is strictly mandatory in MVP.
+   - All blocking CRITICAL/HIGH findings must be resolved.
+   - If the hook fails or is blocked, do NOT archive.
+
 5. **Perform the archive**
 
    Create an `archive` directory under `planningHome.changesDir` if it doesn't exist:

@@ -137,10 +137,19 @@ Verify that an implementation matches the change artifacts (specs, tasks, design
       - Minor improvements
       - Each with specific recommendation
 
+   **VERIFY Quality Hook Gate**:
+   Execute the VERIFY quality hook evaluation:
+   ```bash
+   python -m minime.quality_hooks.cli evaluate-verify --change "<name>" --base-sha "$(git merge-base origin/main HEAD)" --candidate-sha "$(git rev-parse HEAD)"
+   ```
+   - Requires zero unresolved `CRITICAL` or `HIGH` findings.
+   - Requires deterministic test/linter/schema evidence.
+   - Missing evidence produces a `BLOCKED` verdict.
+
    **Final Assessment**:
-   - If CRITICAL issues: "X critical issue(s) found. Fix before archiving."
-   - If only warnings: "No critical issues. Y warning(s) to consider. Ready for archive (with noted improvements)."
-   - If all clear: "All checks passed. Ready for archive."
+   - If CRITICAL/HIGH issues: "X critical/high issue(s) found. Verdict: FAIL. Fix before archiving."
+   - If only warnings/suggestions: "No critical/high issues. Verdict: PASS. Ready for archive."
+   - If missing evidence or preconditions: "Verdict: BLOCKED."
 
 **Verification Heuristics**
 
