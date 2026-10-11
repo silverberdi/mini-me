@@ -28,6 +28,7 @@ from minime.domain.enums import (
     SagaStatus,
     SagaType,
     WorkItemStatus,
+    WorkspaceOperation,
 )
 from minime.domain.exceptions import (
     ManagedWorkspaceGuardDeniedError,
@@ -39,6 +40,7 @@ from minime.domain.models import (
     Change,
     DurableSaga,
     Event,
+    ExternalActionResult,
     HumanAnswerRecord,
     IntakeWorkspaceOwnership,
     Project,
@@ -49,6 +51,7 @@ from minime.domain.models import (
     WorkItemPrepareResult,
     WorkItemUpdateInput,
     WorkQueueItem,
+    WorkspaceMutationRequest,
     generate_uuid,
     utc_now,
 )
@@ -57,6 +60,7 @@ from minime.services.lifecycle_transition_authority import LifecycleTransitionAu
 from minime.services.openspec_generator import OpenSpecGenerator, slugify
 from minime.services.readiness_service import ReadinessService
 from minime.services.saga_engine import SagaEngine
+from minime.services.workspace_guard import ManagedWorkspaceGuard, is_binding_fully_valid
 
 logger = get_logger("services.intake")
 
@@ -229,6 +233,7 @@ class IntakeService:
         if getattr(project, "auto_prepare", True):
             logger.info("Auto-preparing backlog item '%s' for project '%s'", item_key, project_id)
             from minime.services.recovery_convergence_service import RecoveryConvergenceService
+
             rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
             claim_ctx = rec_svc.acquire_claim(f"intake:{project_id}:{item_key}")
             prep_result = self.prepare_work_item(
@@ -366,9 +371,12 @@ class IntakeService:
         self.uow.commit()
 
         from minime.services.recovery_convergence_service import RecoveryConvergenceService
+
         rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
         claim_ctx = rec_svc.acquire_claim(f"intake:{project_id}:{item_key}")
-        prep_result = self.prepare_work_item(project_id, item_key, operator_email=operator_email, claim_context=claim_ctx)
+        prep_result = self.prepare_work_item(
+            project_id, item_key, operator_email=operator_email, claim_context=claim_ctx
+        )
         return prep_result.item
 
     def prepare_work_item(
@@ -460,7 +468,9 @@ class IntakeService:
             self.saga_engine.advance_phase(saga, "WORKSPACE_RESERVED", claim_context=claim_context)
         else:
             intake_repo = getattr(self.uow, "intake_workspace_ownerships", None)
-            workspace = intake_repo.get_active_by_item_key(project_id, item_key) if intake_repo else None
+            workspace = (
+                intake_repo.get_active_by_item_key(project_id, item_key) if intake_repo else None
+            )
             if not workspace:
                 workspace = self._reserve_intake_workspace(project, item, saga)
 
@@ -517,6 +527,7 @@ class IntakeService:
                 not existing_author_action
                 or existing_author_action.status != ExternalActionStatus.COMPLETED
             ):
+
                 def _observe_openspec():
                     from minime.domain.models import ExternalActionResult
 
@@ -575,9 +586,13 @@ class IntakeService:
                 )
 
                 if fenced_res and getattr(fenced_res, "result_application_authorized", False):
-                    self.saga_engine.advance_phase(saga, "OPENSPEC_AUTHORED", claim_context=claim_context)
+                    self.saga_engine.advance_phase(
+                        saga, "OPENSPEC_AUTHORED", claim_context=claim_context
+                    )
             else:
-                self.saga_engine.advance_phase(saga, "OPENSPEC_AUTHORED", claim_context=claim_context)
+                self.saga_engine.advance_phase(
+                    saga, "OPENSPEC_AUTHORED", claim_context=claim_context
+                )
 
         # Save/update Change entity in DB if missing
         if not change_record:
@@ -662,6 +677,7 @@ class IntakeService:
                         ],
                     )
                 else:
+
                     def _mutate_issue():
                         return self.github_adapter.create_issue(
                             repository=project.repository,
@@ -681,7 +697,11 @@ class IntakeService:
                             mutation_fn=_mutate_issue,
                             saga_id=saga.id,
                         )
-                        if issue_res and getattr(issue_res, "outcome", None) == ExternalOutcome.SUCCESS and getattr(issue_res, "data", None):
+                        if (
+                            issue_res
+                            and getattr(issue_res, "outcome", None) == ExternalOutcome.SUCCESS
+                            and getattr(issue_res, "data", None)
+                        ):
                             issue_number = getattr(issue_res, "data", {}).get("number")
                             issue_url = getattr(issue_res, "data", {}).get("html_url")
                     except Exception as exc:
@@ -776,6 +796,7 @@ class IntakeService:
                             ],
                         )
                     else:
+
                         def _mutate_project_item_add():
                             return self.github_adapter.add_issue_to_project(
                                 project_number=project.github_project_number,
@@ -794,7 +815,11 @@ class IntakeService:
                                 mutation_fn=_mutate_project_item_add,
                                 saga_id=saga.id,
                             )
-                            if project_res and getattr(project_res, "outcome", None) == ExternalOutcome.SUCCESS and getattr(project_res, "data", None):
+                            if (
+                                project_res
+                                and getattr(project_res, "outcome", None) == ExternalOutcome.SUCCESS
+                                and getattr(project_res, "data", None)
+                            ):
                                 project_item_id = str(getattr(project_res, "data", ""))
                         except Exception as exc:
                             logger.warning(
@@ -930,7 +955,9 @@ class IntakeService:
             self.saga_engine.complete_saga(saga, claim_context=claim_context)
         else:
             self.saga_engine.block_saga(
-                saga, blocking_reason="; ".join(readiness_eval.unmet_reasons), claim_context=claim_context
+                saga,
+                blocking_reason="; ".join(readiness_eval.unmet_reasons),
+                claim_context=claim_context,
             )
 
         # 8. Update WorkQueueItem for scheduler discovery
@@ -1010,9 +1037,12 @@ class IntakeService:
         # 1. Verify DoR Readiness
         if item.readiness_state != ReadinessState.READY:
             from minime.services.recovery_convergence_service import RecoveryConvergenceService
+
             rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
             claim_ctx = rec_svc.acquire_claim(f"intake:{project_id}:{item_key}")
-            prep_res = self.prepare_work_item(project_id, item_key, operator_email=operator_email, claim_context=claim_ctx)
+            prep_res = self.prepare_work_item(
+                project_id, item_key, operator_email=operator_email, claim_context=claim_ctx
+            )
             item = prep_res.item
             if item.readiness_state != ReadinessState.READY:
                 reasons = (
@@ -1166,13 +1196,14 @@ class IntakeService:
                     continue
 
                 change_name = item.openspec_change_name or item.item_key
-                item_runs = runs_by_change.get(change_name, []) or runs_by_change.get(item.item_key, [])
+                item_runs = runs_by_change.get(change_name, []) or runs_by_change.get(
+                    item.item_key, []
+                )
                 latest_run = item_runs[-1] if item_runs else None
                 change_rec = changes_by_name.get(change_name) or changes_by_name.get(item.item_key)
 
                 is_archived = (
-                    change_name in archived_change_names
-                    or item.item_key in archived_change_names
+                    change_name in archived_change_names or item.item_key in archived_change_names
                 )
                 is_run_completed = bool(
                     latest_run
@@ -1188,7 +1219,9 @@ class IntakeService:
                 )
                 is_cancelled = bool(
                     (change_rec and change_rec.status == ChangeStatus.CANCELLED)
-                    or (latest_run and latest_run.stop_outcome == OrchestrationStopOutcome.CANCELLED)
+                    or (
+                        latest_run and latest_run.stop_outcome == OrchestrationStopOutcome.CANCELLED
+                    )
                 )
 
                 new_status = item.status
@@ -1213,10 +1246,10 @@ class IntakeService:
                     new_status = WorkItemStatus.NEEDS_HUMAN
                     reason_code = "human_gate_reconciliation"
                 elif item.status == WorkItemStatus.READY:
-                    active_change_dir = (
-                        eff_root / project.openspec_path / "changes" / change_name
+                    active_change_dir = eff_root / project.openspec_path / "changes" / change_name
+                    active_artifacts_present = (
+                        active_change_dir.exists() and active_change_dir.is_dir()
                     )
-                    active_artifacts_present = active_change_dir.exists() and active_change_dir.is_dir()
                     if not active_artifacts_present or item.readiness_state != ReadinessState.READY:
                         new_status = WorkItemStatus.BLOCKED
                         reason_code = "stale_ready_artifacts_missing"
@@ -1243,7 +1276,10 @@ class IntakeService:
                             reason_code=reason_code,
                             actor="system-backlog-convergence",
                         )
-                        if new_status == WorkItemStatus.BLOCKED and reason_code == "stale_ready_artifacts_missing":
+                        if (
+                            new_status == WorkItemStatus.BLOCKED
+                            and reason_code == "stale_ready_artifacts_missing"
+                        ):
                             updated_item = updated_item.model_copy(
                                 update={
                                     "readiness_state": ReadinessState.NOT_READY,
@@ -1428,12 +1464,16 @@ class IntakeService:
                 it
                 for it in items
                 if (
-                    it.status in (
+                    it.status
+                    in (
                         WorkItemStatus.BACKLOG,
                         WorkItemStatus.CONTEXT_CHECK,
                         WorkItemStatus.PREPARING,
                     )
-                    or (it.status == WorkItemStatus.BLOCKED and IntakeService.is_blocked_retry_eligible(it))
+                    or (
+                        it.status == WorkItemStatus.BLOCKED
+                        and IntakeService.is_blocked_retry_eligible(it)
+                    )
                 )
                 and it.readiness_state != ReadinessState.READY
                 and it.status
@@ -1444,10 +1484,7 @@ class IntakeService:
                     WorkItemStatus.RUNNING,
                     WorkItemStatus.ADMITTED,
                 )
-                and (
-                    it.source.value != "ROADMAP"
-                    or it.item_key in roadmap_ready_keys
-                )
+                and (it.source.value != "ROADMAP" or it.item_key in roadmap_ready_keys)
             ]
 
             priority_order = {
@@ -1468,8 +1505,11 @@ class IntakeService:
                     from minime.services.recovery_convergence_service import (
                         RecoveryConvergenceService,
                     )
+
                     rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
-                    claim_ctx = rec_svc.acquire_claim(f"intake:{project.project_id}:{item.item_key}")
+                    claim_ctx = rec_svc.acquire_claim(
+                        f"intake:{project.project_id}:{item.item_key}"
+                    )
                     res = self.prepare_work_item(
                         project.project_id,
                         item.item_key,
@@ -1500,7 +1540,11 @@ class IntakeService:
 
         binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
         binding = binding_repo.get_by_project_id(project.project_id) if binding_repo else None
-        wt_parent = binding.worktree_parent_dir if binding else str(self.project_root / ".minime" / "worktrees")
+        wt_parent = (
+            binding.worktree_parent_dir
+            if binding
+            else str(self.project_root / ".minime" / "worktrees")
+        )
         managed_root = binding.managed_repository_root if binding else str(self.project_root)
         repo_identity = binding.canonical_repository_identity if binding else project.repository
 
@@ -1563,9 +1607,7 @@ class IntakeService:
             os.path.join(worktree_parent, "intake-workspaces", project.project_id)
         )
         if os.path.commonpath([ws_path, expected_parent]) != expected_parent:
-            raise UnsafeIntakeWorkspaceStateError(
-                "INTAKE_WORKSPACE_PATH_OUTSIDE_PARENT"
-            )
+            raise UnsafeIntakeWorkspaceStateError("INTAKE_WORKSPACE_PATH_OUTSIDE_PARENT")
 
         def fail_closed(reason: str, *, detail: str | None = None) -> None:
             if detail:
@@ -1587,7 +1629,9 @@ class IntakeService:
                 check=False,
             )
             if listed.returncode != 0:
-                fail_closed("Unable to authoritatively enumerate Git worktrees for intake activation.")
+                fail_closed(
+                    "Unable to authoritatively enumerate Git worktrees for intake activation."
+                )
             worktree_paths = {
                 os.path.realpath(line.split(maxsplit=1)[1])
                 for line in listed.stdout.splitlines()
@@ -1795,8 +1839,12 @@ class IntakeService:
             )
             if head_probe.returncode == 0 and head_probe.stdout.strip() == ownership.head_sha:
                 self._verify_committed_artifacts(
-                    ws_path, ownership.head_sha, change_dir_rel, expected_paths,
-                    manifest.files, expected_hashes,
+                    ws_path,
+                    ownership.head_sha,
+                    change_dir_rel,
+                    expected_paths,
+                    manifest.files,
+                    expected_hashes,
                 )
                 return ownership.head_sha
 
@@ -1886,8 +1934,12 @@ class IntakeService:
 
         # 6. Verify committed tree identity and SHA-256 manifest hashes.
         self._verify_committed_artifacts(
-            ws_path, head_sha, change_dir_rel, expected_paths,
-            manifest.files, expected_hashes,
+            ws_path,
+            head_sha,
+            change_dir_rel,
+            expected_paths,
+            manifest.files,
+            expected_hashes,
         )
 
         ownership.head_sha = head_sha
@@ -1898,7 +1950,9 @@ class IntakeService:
 
         return head_sha
 
-    def _get_git_auth_bundle(self, managed_root: str, remote: str) -> tuple[dict[str, str], tuple[str, ...]]:
+    def _get_git_auth_bundle(
+        self, managed_root: str, remote: str
+    ) -> tuple[dict[str, str], tuple[str, ...]]:
         if not self.github_adapter:
             return {}, ()
         try:
@@ -1954,7 +2008,9 @@ class IntakeService:
                 check=False,
             )
         except GitHubAuthorizationError as exc:
-            logger.warning("git ls-remote authorization failed for ref '%s': %s", ref, redact_secrets(str(exc)))
+            logger.warning(
+                "git ls-remote authorization failed for ref '%s': %s", ref, redact_secrets(str(exc))
+            )
             return None, False
         except Exception as exc:
             logger.warning("git ls-remote raised for ref '%s': %s", ref, redact_secrets(str(exc)))
@@ -1975,10 +2031,839 @@ class IntakeService:
         # Output present but the exact ref was not matched -> ambiguous.
         return None, False
 
-    def _mark_publication_failed(self, ownership: IntakeWorkspaceOwnership) -> None:
-        ownership.publication_state = IntakeWorkspacePublicationState.PUBLICATION_FAILED
+    @staticmethod
+    def _run_git_for_main_advancement(
+        args: list[str], *, cwd: str | Path, env: dict[str, str]
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *args],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+            timeout=60,
+        )
+
+    def _main_advancement_git_env(
+        self, managed_root: str, remote: str
+    ) -> tuple[dict[str, str], tuple[str, ...]]:
+        auth_env, secrets = self._get_git_auth_bundle(managed_root, remote)
+        env = os.environ.copy()
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        for key in ("GIT_TRACE", "GIT_TRACE_PACKET", "GIT_TRACE_CURL", "GIT_CURL_VERBOSE"):
+            env.pop(key, None)
+        env.update(auth_env)
+        return env, secrets
+
+    def _main_advancement_artifact_manifest(
+        self,
+        repo_root: str,
+        base_sha: str,
+        published_sha: str,
+        change_name: str,
+        openspec_path: str,
+    ) -> tuple[str, ...]:
+        """Verify P is one planning-only commit over A and return its exact artifact paths."""
+        prefix = f"{openspec_path}/changes/{change_name}/"
+        if any(part in ("", ".", "..") for part in Path(prefix).parts):
+            raise UnsafeIntakeWorkspaceStateError("Unsafe OpenSpec change path in intake identity.")
+
+        parent = self._run_git_for_main_advancement(
+            ["rev-parse", f"{published_sha}^"], cwd=repo_root, env=os.environ.copy()
+        )
+        if parent.returncode != 0 or parent.stdout.strip() != base_sha:
+            raise UnsafeIntakeWorkspaceStateError(
+                "Published intake commit is not the original direct child of its recorded base."
+            )
+
+        diff = self._run_git_for_main_advancement(
+            ["diff-tree", "--no-commit-id", "--name-status", "-r", base_sha, published_sha],
+            cwd=repo_root,
+            env=os.environ.copy(),
+        )
+        if diff.returncode != 0:
+            raise UnsafeIntakeWorkspaceStateError(
+                "Could not inspect the original published commit diff."
+            )
+        changed_paths: set[str] = set()
+        for row in diff.stdout.splitlines():
+            fields = row.split("\t")
+            if len(fields) != 2 or fields[0] not in {"A", "M"}:
+                raise UnsafeIntakeWorkspaceStateError(
+                    "Published intake commit contains a deletion, rename, copy, or unrecognized Git change."
+                )
+            path = fields[1]
+            if not path.startswith(prefix):
+                raise UnsafeIntakeWorkspaceStateError(
+                    f"Published intake commit contains non-planning change '{path}'."
+                )
+            changed_paths.add(path)
+
+        tree = self._run_git_for_main_advancement(
+            ["ls-tree", "-r", "--name-only", published_sha, "--", prefix],
+            cwd=repo_root,
+            env=os.environ.copy(),
+        )
+        if tree.returncode != 0:
+            raise UnsafeIntakeWorkspaceStateError(
+                "Could not inspect the published OpenSpec artifact tree."
+            )
+        paths = tuple(sorted(p.strip() for p in tree.stdout.splitlines() if p.strip()))
+        expected = {"proposal.md", "tasks.md", "design.md"}
+        relative = {path[len(prefix) :] for path in paths if path.startswith(prefix)}
+        if (
+            changed_paths != set(paths)
+            or not expected.issubset(relative)
+            or not any(path.startswith("specs/") and path.endswith(".md") for path in relative)
+            or any(
+                not path
+                or Path(path).is_absolute()
+                or ".." in Path(path).parts
+                or not (path in expected or (path.startswith("specs/") and path.endswith(".md")))
+                for path in relative
+            )
+        ):
+            raise UnsafeIntakeWorkspaceStateError(
+                "Published intake commit does not match the authorized OpenSpec artifact manifest."
+            )
+        return paths
+
+    def _verify_intake_workspace_marker(
+        self, ownership: IntakeWorkspaceOwnership, managed_root: str, worktree_parent: str
+    ) -> Path:
+        workspace = Path(ownership.canonical_workspace_path).resolve()
+        expected_parent = (
+            Path(worktree_parent) / "intake-workspaces" / ownership.project_id
+        ).resolve()
+        if workspace == Path(managed_root).resolve() or expected_parent not in workspace.parents:
+            raise UnsafeIntakeWorkspaceStateError(
+                "Intake workspace path is outside its authorized parent."
+            )
+        marker = workspace / ".minime_intake_workspace"
+        try:
+            data = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise UnsafeIntakeWorkspaceStateError(
+                "Intake workspace ownership marker is unreadable."
+            ) from exc
+        expected = {
+            "workspace_id": ownership.workspace_id,
+            "project_id": ownership.project_id,
+            "item_key": ownership.item_key,
+            "saga_id": ownership.saga_id,
+            "change_name": ownership.change_name,
+            "canonical_repository_identity": ownership.canonical_repository_identity,
+        }
+        if any(data.get(key) != value for key, value in expected.items()):
+            raise UnsafeIntakeWorkspaceStateError(
+                "Intake workspace marker does not match durable ownership."
+            )
+        return workspace
+
+    def _observe_main_advancement_candidate(
+        self,
+        *,
+        ownership: IntakeWorkspaceOwnership,
+        project: Project,
+        binding: Any,
+        base_sha: str,
+        original_published_sha: str,
+        candidate_sha: str | None = None,
+    ) -> ExternalActionResult:
+        """Observe the remote publication without dispatching or trusting local ref state."""
+        from minime.domain.enums import ExternalOutcome, ExternalReasonCode
+
+        managed_root = binding.managed_repository_root
+        remote = binding.remote_name
+        published_ref = f"refs/minime/intake/{ownership.change_name}"
+        observed, ok = self._observe_remote_ref(managed_root, remote, published_ref)
+        if not ok:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="git_cli",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                error_message="Published intake ref could not be observed authoritatively.",
+            )
+        if observed == original_published_sha:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="git_cli",
+                reason_code=ExternalReasonCode.NOT_FOUND,
+                data={"published_sha": original_published_sha, "base_sha": base_sha},
+            )
+        if observed is None:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.AMBIGUOUS,
+                source_adapter="git_cli",
+                reason_code=ExternalReasonCode.CONFLICT,
+                error_message="The published intake ref disappeared during main advancement.",
+            )
+
+        expected_candidate = candidate_sha
+        if not expected_candidate:
+            workspace = Path(ownership.canonical_workspace_path)
+            head = self._run_git_for_main_advancement(
+                ["rev-parse", "HEAD"], cwd=workspace, env=os.environ.copy()
+            )
+            expected_candidate = head.stdout.strip() if head.returncode == 0 else None
+        if observed != expected_candidate or not expected_candidate:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.AMBIGUOUS,
+                source_adapter="git_cli",
+                reason_code=ExternalReasonCode.CONFLICT,
+                error_message="Published intake ref moved to an unexpected candidate during reconciliation.",
+            )
+
+        parent = self._run_git_for_main_advancement(
+            ["rev-parse", f"{observed}^"], cwd=managed_root, env=os.environ.copy()
+        )
+        if parent.returncode != 0 or parent.stdout.strip() != base_sha:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.AMBIGUOUS,
+                source_adapter="git_cli",
+                reason_code=ExternalReasonCode.CONFLICT,
+                error_message="Observed published candidate is not based on the expected current main SHA.",
+            )
+        try:
+            original_paths = self._main_advancement_artifact_manifest(
+                managed_root,
+                ownership.base_sha,
+                original_published_sha,
+                ownership.change_name,
+                project.openspec_path,
+            )
+        except Exception:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.AMBIGUOUS,
+                source_adapter="git_cli",
+                reason_code=ExternalReasonCode.CONFLICT,
+                error_message="Original published artifact ownership could not be reverified.",
+            )
+        target_prefix = f"{project.openspec_path}/changes/{ownership.change_name}/"
+        candidate_paths = self._run_git_for_main_advancement(
+            ["ls-tree", "-r", "--name-only", observed, "--", target_prefix],
+            cwd=managed_root,
+            env=os.environ.copy(),
+        )
+        if candidate_paths.returncode != 0:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.UNKNOWN,
+                source_adapter="git_cli",
+                reason_code=ExternalReasonCode.UNOBSERVABLE,
+                error_message="Could not verify the observed candidate artifact tree.",
+            )
+        relative_paths = tuple(
+            sorted(
+                p[len(target_prefix) :]
+                for p in candidate_paths.stdout.splitlines()
+                if p.startswith(target_prefix)
+            )
+        )
+        expected_relative = tuple(
+            sorted(
+                p[len(f"{project.openspec_path}/changes/{ownership.change_name}/") :]
+                for p in original_paths
+            )
+        )
+        if relative_paths != expected_relative:
+            return ExternalActionResult(
+                outcome=ExternalOutcome.AMBIGUOUS,
+                source_adapter="git_cli",
+                reason_code=ExternalReasonCode.CONFLICT,
+                error_message="Observed candidate artifact manifest differs from the original publication.",
+            )
+        for relative in expected_relative:
+            old_blob = self._run_git_for_main_advancement(
+                ["rev-parse", f"{original_published_sha}:{target_prefix}{relative}"],
+                cwd=managed_root,
+                env=os.environ.copy(),
+            )
+            new_blob = self._run_git_for_main_advancement(
+                ["rev-parse", f"{observed}:{target_prefix}{relative}"],
+                cwd=managed_root,
+                env=os.environ.copy(),
+            )
+            if (
+                old_blob.returncode != 0
+                or new_blob.returncode != 0
+                or old_blob.stdout != new_blob.stdout
+            ):
+                return ExternalActionResult(
+                    outcome=ExternalOutcome.AMBIGUOUS,
+                    source_adapter="git_cli",
+                    reason_code=ExternalReasonCode.CONFLICT,
+                    error_message="Observed candidate changed the original published artifact content.",
+                )
+        return ExternalActionResult(
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="git_cli",
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+            data={"base_sha": base_sha, "published_sha": observed},
+            external_id=observed,
+        )
+
+    def _materialize_main_advance_candidate(
+        self,
+        *,
+        ownership: IntakeWorkspaceOwnership,
+        project: Project,
+        binding: Any,
+        base_sha: str,
+        original_published_sha: str,
+        artifact_paths: tuple[str, ...],
+        workspace: Path,
+    ) -> str:
+        managed_root = binding.managed_repository_root
+        remote = binding.remote_name
+        env, secrets = self._main_advancement_git_env(managed_root, remote)
+        main_now, main_ok = self._observe_remote_ref(
+            managed_root, remote, f"refs/heads/{project.base_branch}"
+        )
+        if not main_ok or main_now != base_sha:
+            raise UnsafeIntakeWorkspaceStateError(
+                "Canonical main moved during intake reconciliation."
+            )
+
+        head = self._run_git_for_main_advancement(["rev-parse", "HEAD"], cwd=workspace, env=env)
+        if head.returncode != 0:
+            raise UnsafeIntakeWorkspaceStateError(
+                "Cannot inspect the authorized intake workspace HEAD."
+            )
+        current_head = head.stdout.strip()
+        if current_head not in {ownership.head_sha, base_sha} or (
+            current_head == ownership.head_sha and current_head != original_published_sha
+        ):
+            candidate_check = self._observe_main_advancement_candidate(
+                ownership=ownership,
+                project=project,
+                binding=binding,
+                base_sha=base_sha,
+                original_published_sha=original_published_sha,
+                candidate_sha=current_head,
+            )
+            if candidate_check.outcome == ExternalOutcome.SUCCESS:
+                return current_head
+            parent = self._run_git_for_main_advancement(
+                ["rev-parse", f"{current_head}^"], cwd=workspace, env=env
+            )
+            if parent.returncode != 0 or parent.stdout.strip() != base_sha:
+                raise UnsafeIntakeWorkspaceStateError(
+                    "Intake workspace contains an unexpected candidate commit."
+                )
+            resumed_tree = self._run_git_for_main_advancement(
+                [
+                    "ls-tree",
+                    "-r",
+                    "--name-only",
+                    current_head,
+                    "--",
+                    f"{project.openspec_path}/changes/{ownership.change_name}/",
+                ],
+                cwd=workspace,
+                env=env,
+            )
+            if resumed_tree.returncode != 0 or set(resumed_tree.stdout.splitlines()) != set(
+                artifact_paths
+            ):
+                raise UnsafeIntakeWorkspaceStateError(
+                    "Resumed candidate tree differs from the published manifest."
+                )
+            for path in artifact_paths:
+                old_blob = self._run_git_for_main_advancement(
+                    ["rev-parse", f"{original_published_sha}:{path}"], cwd=managed_root, env=env
+                )
+                new_blob = self._run_git_for_main_advancement(
+                    ["rev-parse", f"{current_head}:{path}"], cwd=workspace, env=env
+                )
+                if (
+                    old_blob.returncode != 0
+                    or new_blob.returncode != 0
+                    or old_blob.stdout != new_blob.stdout
+                ):
+                    raise UnsafeIntakeWorkspaceStateError(
+                        "Resumed candidate altered published artifact content."
+                    )
+            return current_head
+
+        status = self._run_git_for_main_advancement(
+            ["status", "--porcelain=v1", "--untracked-files=all"], cwd=workspace, env=env
+        )
+        if status.returncode != 0:
+            raise UnsafeIntakeWorkspaceStateError("Cannot inspect intake workspace cleanliness.")
+        allowed_status = {".minime_intake_workspace"}
+        target_prefix = f"{project.openspec_path}/changes/{ownership.change_name}/"
+        for row in status.stdout.splitlines():
+            path = _git_porcelain_path(row)
+            if not path or (path not in allowed_status and not path.startswith(target_prefix)):
+                raise UnsafeIntakeWorkspaceStateError(
+                    f"Unexpected workspace mutation '{path}' during main advancement."
+                )
+
+        if current_head == ownership.head_sha:
+            checkout = self._run_git_for_main_advancement(
+                ["checkout", "--detach", base_sha], cwd=workspace, env=env
+            )
+            if checkout.returncode != 0:
+                raise UnsafeIntakeWorkspaceStateError(
+                    "Could not move authorized workspace to current main."
+                )
+        elif current_head != base_sha:
+            raise UnsafeIntakeWorkspaceStateError(
+                "Authorized workspace is not based on expected main."
+            )
+
+        target_dir = workspace / project.openspec_path / "changes" / ownership.change_name
+        if target_dir.exists():
+            existing = self._run_git_for_main_advancement(
+                ["ls-tree", "-r", "--name-only", base_sha, "--", target_prefix],
+                cwd=managed_root,
+                env=env,
+            )
+            if existing.returncode != 0 or existing.stdout.strip():
+                raise UnsafeIntakeWorkspaceStateError(
+                    "Current main already contains the intake change path; refusing to overwrite it."
+                )
+            # A partial retry may have created files before process interruption. They are
+            # accepted only when each one is an exact blob from the original publication.
+            actual = {
+                p.relative_to(target_dir).as_posix()
+                for p in target_dir.rglob("*")
+                if p.is_file() and not p.is_symlink()
+            }
+            expected = {path[len(target_prefix) :] for path in artifact_paths}
+            if not actual.issubset(expected):
+                raise UnsafeIntakeWorkspaceStateError(
+                    "Partial candidate contains unexpected artifact paths."
+                )
+            for relative in actual:
+                expected_blob = self._run_git_for_main_advancement(
+                    ["rev-parse", f"{original_published_sha}:{target_prefix}{relative}"],
+                    cwd=managed_root,
+                    env=env,
+                )
+                actual_blob = self._run_git_for_main_advancement(
+                    ["hash-object", str(target_dir / relative)], cwd=workspace, env=env
+                )
+                if (
+                    expected_blob.returncode != 0
+                    or actual_blob.returncode != 0
+                    or expected_blob.stdout != actual_blob.stdout
+                ):
+                    raise UnsafeIntakeWorkspaceStateError(
+                        "Partial candidate artifact content differs from P."
+                    )
+
+        for path in artifact_paths:
+            relative = path[len(target_prefix) :]
+            blob = self._run_git_for_main_advancement(
+                ["cat-file", "blob", f"{original_published_sha}:{path}"],
+                cwd=managed_root,
+                env=env,
+            )
+            if blob.returncode != 0:
+                raise UnsafeIntakeWorkspaceStateError(
+                    f"Could not read published artifact '{path}'."
+                )
+            destination = target_dir / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(blob.stdout.encode("utf-8", errors="surrogateescape"))
+
+        # Strict validation is read-only and happens against the exact materialized tree.
+        validation = self.openspec_adapter.validate_change_strict(ownership.change_name, workspace)
+        if validation.get("status") != "PASS":
+            raise UnsafeIntakeWorkspaceStateError(
+                "Materialized published OpenSpec artifacts failed strict validation on current main."
+            )
+
+        add = self._run_git_for_main_advancement(
+            ["add", "--", *[f"{target_prefix}{p[len(target_prefix) :]}" for p in artifact_paths]],
+            cwd=workspace,
+            env=env,
+        )
+        if add.returncode != 0:
+            raise UnsafeIntakeWorkspaceStateError(
+                "Could not stage the exact published artifact manifest."
+            )
+        staged = self._run_git_for_main_advancement(
+            ["diff", "--cached", "--name-only"], cwd=workspace, env=env
+        )
+        if staged.returncode != 0 or set(staged.stdout.splitlines()) != set(artifact_paths):
+            raise UnsafeIntakeWorkspaceStateError(
+                "Staged files differ from the authorized artifact manifest."
+            )
+        commit = self._run_git_for_main_advancement(
+            [
+                "-c",
+                "user.name=mini-me-bot",
+                "-c",
+                "user.email=bot@minime.internal",
+                "commit",
+                "-m",
+                f"docs(openspec): rebase published artifacts for {ownership.change_name} onto {base_sha[:12]}",
+            ],
+            cwd=workspace,
+            env=env,
+        )
+        if commit.returncode != 0:
+            raise UnsafeIntakeWorkspaceStateError(
+                "Could not create deterministic main-advancement candidate commit."
+            )
+        candidate = self._rev_parse_head(str(workspace))
+        parent = self._run_git_for_main_advancement(
+            ["rev-parse", f"{candidate}^"], cwd=workspace, env=env
+        )
+        if parent.returncode != 0 or parent.stdout.strip() != base_sha:
+            raise UnsafeIntakeWorkspaceStateError(
+                "New candidate commit is not based directly on current main."
+            )
+        # The remote still points at P here; validate the local candidate directly below.
+        candidate_tree = self._run_git_for_main_advancement(
+            ["ls-tree", "-r", "--name-only", candidate, "--", target_prefix],
+            cwd=workspace,
+            env=env,
+        )
+        if candidate_tree.returncode != 0 or set(candidate_tree.stdout.splitlines()) != set(
+            artifact_paths
+        ):
+            raise UnsafeIntakeWorkspaceStateError(
+                "Candidate tree differs from the source artifact manifest."
+            )
+        for path in artifact_paths:
+            old_blob = self._run_git_for_main_advancement(
+                ["rev-parse", f"{original_published_sha}:{path}"], cwd=managed_root, env=env
+            )
+            new_blob = self._run_git_for_main_advancement(
+                ["rev-parse", f"{candidate}:{path}"], cwd=workspace, env=env
+            )
+            if (
+                old_blob.returncode != 0
+                or new_blob.returncode != 0
+                or old_blob.stdout != new_blob.stdout
+            ):
+                raise UnsafeIntakeWorkspaceStateError(
+                    "Candidate commit changed original artifact content."
+                )
+        return candidate
+
+    def reconcile_main_advancement_before_admission(
+        self, project_id: str, change_name: str
+    ) -> str | None:
+        """Rebase only the immutable published OpenSpec artifact tree onto an advanced main.
+
+        This command is called before pure admission evaluation and before the advisory-lock
+        transaction. It never creates Runs or Jobs and never edits the managed checkout.
+        """
+        from minime.domain.enums import ExternalOutcome, ExternalReasonCode, SagaType
+        from minime.domain.models import validate_claim_context_authoritative
+        from minime.services.recovery_convergence_service import RecoveryConvergenceService
+
+        project = self.uow.projects.get_by_id(project_id)
         intake_repo = getattr(self.uow, "intake_workspace_ownerships", None)
-        if intake_repo:
+        binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
+        if not project or not intake_repo or not binding_repo:
+            return None
+        ownership = intake_repo.get_by_item_key(project_id, change_name)
+        if (
+            not ownership
+            or ownership.publication_state != IntakeWorkspacePublicationState.PUBLISHED
+        ):
+            return None
+        binding = binding_repo.get_by_project_id(project_id)
+        if not is_binding_fully_valid(binding):
+            raise UnsafeIntakeWorkspaceStateError(
+                "Managed repository binding is not valid for intake reconciliation."
+            )
+        if (
+            ownership.project_id != project_id
+            or ownership.change_name != change_name
+            or ownership.canonical_repository_identity != binding.canonical_repository_identity
+            or ownership.published_ref != f"refs/minime/intake/{change_name}"
+            or not ownership.published_sha
+            or not ownership.head_sha
+        ):
+            raise UnsafeIntakeWorkspaceStateError(
+                "Durable intake publication identity is inconsistent."
+            )
+
+        managed_root = binding.managed_repository_root
+        remote = binding.remote_name
+        main_ref = f"refs/heads/{project.base_branch}"
+        observed_main, observe_ok = self._observe_remote_ref(managed_root, remote, main_ref)
+        if not observe_ok or not observed_main:
+            raise UnsafeIntakeWorkspaceStateError(
+                "Canonical main could not be observed authoritatively."
+            )
+        # Historical published flows may predate durable backlog/saga linkage.
+        # If main has not advanced, no reconciliation mutation is needed; the
+        # normal published-ref readiness check still governs admission.
+        if observed_main == ownership.base_sha:
+            return None
+
+        item = self.uow.backlog_items.get_by_project_and_key(project_id, ownership.item_key)
+        project_binding = self.uow.bindings.get_by_project_and_change(project_id, change_name)
+        if (
+            not item
+            or item.openspec_change_name != change_name
+            or not project_binding
+            or not project_binding.is_valid
+            or project_binding.repository != project.repository
+            or project_binding.openspec_change_name != change_name
+        ):
+            raise UnsafeIntakeWorkspaceStateError(
+                "Backlog/issue binding does not match the intake publication."
+            )
+        saga = self.uow.durable_sagas.get_by_id(ownership.saga_id)
+        if (
+            not saga
+            or saga.saga_type != SagaType.INTAKE
+            or saga.project_id != project_id
+            or saga.change_name != change_name
+            or saga.work_item_key != ownership.item_key
+        ):
+            raise UnsafeIntakeWorkspaceStateError(
+                "Durable INTAKE saga does not match the published workspace."
+            )
+        if any(
+            run.project_id == project_id and run.change_name == change_name
+            for run in self.uow.orchestration_runs.list_runs(is_active=True)
+        ):
+            return None
+        if any(
+            job.project_id == project_id and job.change_name == change_name
+            for job in self.uow.jobs.list_active_jobs()
+        ):
+            return None
+
+        workspace = self._verify_intake_workspace_marker(
+            ownership, managed_root, binding.worktree_parent_dir
+        )
+        guard = ManagedWorkspaceGuard(self.uow)
+        decision = guard.evaluate_mutation(
+            WorkspaceMutationRequest(
+                project_id=project_id,
+                target_path=str(workspace),
+                requested_operation=WorkspaceOperation.INTAKE_ARTIFACT_UPDATE,
+            )
+        )
+        if not decision.allowed:
+            raise ManagedWorkspaceGuardDeniedError(
+                f"Main-advancement materialization denied: {decision.provider_detail or decision.reason_code.value}"
+            )
+
+        env, _ = self._main_advancement_git_env(managed_root, remote)
+        tracking_ref = f"refs/remotes/{remote}/{project.base_branch}"
+        fetched = self._run_git_for_main_advancement(
+            ["fetch", "--no-tags", remote, f"{main_ref}:{tracking_ref}"],
+            cwd=managed_root,
+            env=env,
+        )
+        if fetched.returncode != 0:
+            raise UnsafeIntakeWorkspaceStateError(
+                "Could not fetch canonical main with service credentials."
+            )
+        fetched_main = self._run_git_for_main_advancement(
+            ["rev-parse", f"{tracking_ref}^{{commit}}"], cwd=managed_root, env=env
+        )
+        if fetched_main.returncode != 0 or fetched_main.stdout.strip() != observed_main:
+            raise UnsafeIntakeWorkspaceStateError(
+                "Fetched main differs from its authoritative remote observation."
+            )
+        base_sha = observed_main
+
+        ancestry = self._run_git_for_main_advancement(
+            ["merge-base", "--is-ancestor", ownership.base_sha, base_sha], cwd=managed_root, env=env
+        )
+        if ancestry.returncode != 0:
+            raise UnsafeIntakeWorkspaceStateError(
+                "Canonical main is not a verified fast-forward from the recorded base."
+            )
+        published_remote, published_ok = self._observe_remote_ref(
+            managed_root, remote, ownership.published_ref
+        )
+        action_key = f"intake_main_advance_publish:{project_id}:{change_name}:{base_sha}"
+        existing_action = self.uow.orchestration_external_actions.get_by_action_key(action_key)
+        if not published_ok or (
+            published_remote != ownership.published_sha and existing_action is None
+        ):
+            raise UnsafeIntakeWorkspaceStateError(
+                "Published intake ref drifted before main-advancement reconciliation."
+            )
+        if (
+            self._run_git_for_main_advancement(
+                ["merge-base", "--is-ancestor", ownership.published_sha, base_sha],
+                cwd=managed_root,
+                env=env,
+            ).returncode
+            == 0
+        ):
+            raise UnsafeIntakeWorkspaceStateError(
+                "Published intake commit is already reachable from main; post-merge lifecycle reconciliation is required."
+            )
+
+        artifact_paths = self._main_advancement_artifact_manifest(
+            managed_root,
+            ownership.base_sha,
+            ownership.published_sha,
+            change_name,
+            project.openspec_path,
+        )
+        head = self._run_git_for_main_advancement(["rev-parse", "HEAD"], cwd=workspace, env=env)
+        if head.returncode != 0 or head.stdout.strip() != ownership.published_sha:
+            # Resume is allowed only at B or at a candidate direct child of B; the
+            # action observer performs the exact candidate proof during recovery.
+            head_sha = head.stdout.strip() if head.returncode == 0 else ""
+            parent = (
+                self._run_git_for_main_advancement(
+                    ["rev-parse", f"{head_sha}^"], cwd=workspace, env=env
+                )
+                if head_sha
+                else None
+            )
+            if not parent or parent.returncode != 0 or parent.stdout.strip() != base_sha:
+                raise UnsafeIntakeWorkspaceStateError(
+                    "Intake workspace HEAD is not the published candidate or a resumable B candidate."
+                )
+
+        claim_service = RecoveryConvergenceService(
+            self.uow, project_root=self.project_root, github_adapter=self.github_adapter
+        )
+        claim_context = claim_service.acquire_claim(f"intake:{project_id}:{ownership.item_key}")
+        if not claim_context:
+            raise UnsafeIntakeWorkspaceStateError(
+                "Could not acquire the authoritative intake recovery claim."
+            )
+        try:
+            validate_claim_context_authoritative(self.uow, claim_context)
+
+            def observe_candidate() -> ExternalActionResult:
+                return self._observe_main_advancement_candidate(
+                    ownership=ownership,
+                    project=project,
+                    binding=binding,
+                    base_sha=base_sha,
+                    original_published_sha=ownership.published_sha,
+                )
+
+            def mutate_candidate() -> ExternalActionResult:
+                try:
+                    candidate_sha = self._materialize_main_advance_candidate(
+                        ownership=ownership,
+                        project=project,
+                        binding=binding,
+                        base_sha=base_sha,
+                        original_published_sha=ownership.published_sha,
+                        artifact_paths=artifact_paths,
+                        workspace=workspace,
+                    )
+                    ownership.head_sha = candidate_sha
+                    self.uow.intake_workspace_ownerships.save(ownership)
+                    self.uow.commit()
+                    # _publish performs strict P -> P2 CAS and authoritative post-push
+                    # observation. Its durable ownership update is applied only after
+                    # that remote observation succeeds.
+                    self._publish_intake_artifacts_cas(ownership, project, persist_ownership=False)
+                    final_sha, final_ok = self._observe_remote_ref(
+                        managed_root, remote, ownership.published_ref
+                    )
+                    if not final_ok or final_sha != candidate_sha:
+                        return ExternalActionResult(
+                            outcome=ExternalOutcome.AMBIGUOUS,
+                            source_adapter="git_cli",
+                            reason_code=ExternalReasonCode.UNOBSERVABLE,
+                            error_message="Published candidate was not authoritatively observed after push.",
+                            data={"retry_safety": "SAFE"},
+                        )
+                    ownership.base_sha = base_sha
+                    ownership.head_sha = candidate_sha
+                    ownership.published_sha = candidate_sha
+                    ownership.published_ref = f"refs/minime/intake/{change_name}"
+                    ownership.publication_state = IntakeWorkspacePublicationState.PUBLISHED
+                    intake_repo.save(ownership)
+                    self.uow.commit()
+                    return ExternalActionResult(
+                        outcome=ExternalOutcome.SUCCESS,
+                        source_adapter="git_cli",
+                        reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                        data={"base_sha": base_sha, "published_sha": candidate_sha},
+                        external_id=candidate_sha,
+                    )
+                except Exception as exc:
+                    message = redact_secrets(str(exc))
+                    terminal_conflict = any(
+                        token in message.lower()
+                        for token in (
+                            "conflict",
+                            "mismatch",
+                            "unexpected",
+                            "not an authorized",
+                            "failed strict validation",
+                        )
+                    )
+                    return ExternalActionResult(
+                        outcome=ExternalOutcome.FAILURE
+                        if terminal_conflict
+                        else ExternalOutcome.AMBIGUOUS,
+                        source_adapter="git_cli",
+                        reason_code=ExternalReasonCode.CONFLICT
+                        if terminal_conflict
+                        else ExternalReasonCode.UNOBSERVABLE,
+                        error_message=message,
+                        data={"retry_safety": "NEVER" if terminal_conflict else "SAFE"},
+                    )
+
+            result = self.saga_engine.execute_fenced_external_action(
+                claim_context=claim_context,
+                action_key=action_key,
+                action_type=ExternalActionType.INTAKE_ARTIFACT_PUBLISH,
+                target_identity=change_name,
+                request_fingerprint=f"{ownership.base_sha}:{ownership.published_sha}:{base_sha}",
+                mutation_fn=mutate_candidate,
+                observation_fn=observe_candidate,
+                saga_id=saga.id,
+            )
+            if (
+                not result.result_application_authorized
+                or result.outcome != ExternalOutcome.SUCCESS
+            ):
+                raise UnsafeIntakeWorkspaceStateError(
+                    result.error_message
+                    or "Main-advancement publication did not complete authoritatively."
+                )
+            observed_candidate = result.remote_identifier
+            if not observed_candidate and isinstance(result.result_payload, dict):
+                observed_candidate = result.result_payload.get("published_sha")
+            final_sha, final_ok = self._observe_remote_ref(
+                managed_root, remote, ownership.published_ref
+            )
+            if not observed_candidate or not final_ok or final_sha != observed_candidate:
+                raise UnsafeIntakeWorkspaceStateError(
+                    "Publication result cannot be verified from the remote ref."
+                )
+            parent = self._run_git_for_main_advancement(
+                ["rev-parse", f"{final_sha}^"], cwd=managed_root, env=env
+            )
+            if parent.returncode != 0 or parent.stdout.strip() != base_sha:
+                raise UnsafeIntakeWorkspaceStateError(
+                    "Observed published candidate is not based on current main."
+                )
+            ownership.base_sha = base_sha
+            ownership.head_sha = final_sha
+            ownership.published_sha = final_sha
+            ownership.publication_state = IntakeWorkspacePublicationState.PUBLISHED
+            intake_repo.save(ownership)
+            self.uow.commit()
+            return final_sha
+        finally:
+            claim_service.release_claim(claim_context)
+
+    def _mark_publication_failed(
+        self, ownership: IntakeWorkspaceOwnership, *, persist: bool = True
+    ) -> None:
+        if persist:
+            ownership.publication_state = IntakeWorkspacePublicationState.PUBLICATION_FAILED
+        intake_repo = getattr(self.uow, "intake_workspace_ownerships", None)
+        if intake_repo and persist:
             intake_repo.save(ownership)
             self.uow.commit()
 
@@ -1986,6 +2871,8 @@ class IntakeService:
         self,
         ownership: IntakeWorkspaceOwnership,
         project: Project,
+        *,
+        persist_ownership: bool = True,
     ) -> str:
         binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
         binding = binding_repo.get_by_project_id(project.project_id) if binding_repo else None
@@ -1996,7 +2883,7 @@ class IntakeService:
         # Never publish from base_sha; only a durable authored commit qualifies.
         head_sha = ownership.head_sha
         if not head_sha:
-            self._mark_publication_failed(ownership)
+            self._mark_publication_failed(ownership, persist=persist_ownership)
             raise RuntimeError(
                 f"PUBLICATION_FAILED: No candidate head SHA recorded for change "
                 f"'{ownership.change_name}'; refusing to publish base_sha."
@@ -2004,7 +2891,7 @@ class IntakeService:
 
         observed_old_sha, observe_ok = self._observe_remote_ref(managed_root, remote, published_ref)
         if not observe_ok:
-            self._mark_publication_failed(ownership)
+            self._mark_publication_failed(ownership, persist=persist_ownership)
             raise RuntimeError(
                 f"PUBLICATION_TRANSPORT_FAILURE: Could not authoritatively observe remote ref "
                 f"'{published_ref}'; refusing to publish without remote truth."
@@ -2015,7 +2902,7 @@ class IntakeService:
         try:
             auth_env, auth_secrets = self._get_git_auth_bundle(managed_root, remote)
         except GitHubAuthorizationError as exc:
-            self._mark_publication_failed(ownership)
+            self._mark_publication_failed(ownership, persist=persist_ownership)
             raise RuntimeError(
                 f"PUBLICATION_TRANSPORT_FAILURE: Could not obtain required Git authorization for "
                 f"'{published_ref}': {redact_secrets(str(exc))}"
@@ -2025,7 +2912,7 @@ class IntakeService:
             # Initial publication enforces an atomic expected-old-ref condition: the
             # remote ref must be absent before we create it.
             if observed_old_sha is not None:
-                self._mark_publication_failed(ownership)
+                self._mark_publication_failed(ownership, persist=persist_ownership)
                 raise RuntimeError(
                     f"REF_CAS_MISMATCH: Conflicting publication ref '{published_ref}' already "
                     f"exists on remote at SHA '{observed_old_sha}' (expected absent)."
@@ -2048,7 +2935,7 @@ class IntakeService:
         else:
             # Subsequent publication uses an atomic exact-SHA CAS lease.
             if observed_old_sha != ownership.published_sha:
-                self._mark_publication_failed(ownership)
+                self._mark_publication_failed(ownership, persist=persist_ownership)
                 raise RuntimeError(
                     f"REF_CAS_MISMATCH: Remote ref '{published_ref}' current SHA '{observed_old_sha}' "
                     f"does not match expected published_sha '{ownership.published_sha}'."
@@ -2066,8 +2953,9 @@ class IntakeService:
                 ]
 
         if push_needed and push_cmd:
-            ownership.publication_state = IntakeWorkspacePublicationState.PUBLISHING
-            if getattr(self.uow, "intake_workspace_ownerships", None):
+            if persist_ownership:
+                ownership.publication_state = IntakeWorkspacePublicationState.PUBLISHING
+            if persist_ownership and getattr(self.uow, "intake_workspace_ownerships", None):
                 self.uow.intake_workspace_ownerships.save(ownership)
                 self.uow.commit()
 
@@ -2123,18 +3011,18 @@ class IntakeService:
                         check=False,
                     )
                 elif is_unreachable_remote:
-                    self._mark_publication_failed(ownership)
+                    self._mark_publication_failed(ownership, persist=persist_ownership)
                     raise RuntimeError(
                         f"PUBLICATION_TRANSPORT_FAILURE: Git push could not reach remote for "
                         f"'{published_ref}': {err_msg}"
                     )
                 elif is_cas_conflict:
-                    self._mark_publication_failed(ownership)
+                    self._mark_publication_failed(ownership, persist=persist_ownership)
                     raise RuntimeError(
                         f"REF_CAS_MISMATCH: Git push failed for '{published_ref}': {err_msg}"
                     )
                 else:
-                    self._mark_publication_failed(ownership)
+                    self._mark_publication_failed(ownership, persist=persist_ownership)
                     raise RuntimeError(
                         f"PUBLICATION_AMBIGUOUS: Git push failed for '{published_ref}' with an "
                         f"unclassified result: {err_msg}"
@@ -2143,7 +3031,7 @@ class IntakeService:
         # Authoritative post-publication observation MUST return exactly head_sha.
         final_sha, final_ok = self._observe_remote_ref(managed_root, remote, published_ref)
         if not final_ok or final_sha != head_sha:
-            self._mark_publication_failed(ownership)
+            self._mark_publication_failed(ownership, persist=persist_ownership)
             raise RuntimeError(
                 f"PUBLICATION_AMBIGUOUS: Post-publication observation of '{published_ref}' "
                 f"returned '{final_sha}' (ok={final_ok}); expected exact SHA '{head_sha}'."
@@ -2152,7 +3040,7 @@ class IntakeService:
         ownership.publication_state = IntakeWorkspacePublicationState.PUBLISHED
         ownership.published_ref = published_ref
         ownership.published_sha = head_sha
-        if getattr(self.uow, "intake_workspace_ownerships", None):
+        if persist_ownership and getattr(self.uow, "intake_workspace_ownerships", None):
             self.uow.intake_workspace_ownerships.save(ownership)
             self.uow.commit()
 
@@ -2183,7 +3071,9 @@ class IntakeService:
         binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
         binding = binding_repo.get_by_project_id(ownership.project_id) if binding_repo else None
         if not binding:
-            raise ManagedWorkspaceGuardDeniedError("Cleanup denied: managed repository binding is missing.")
+            raise ManagedWorkspaceGuardDeniedError(
+                "Cleanup denied: managed repository binding is missing."
+            )
         managed_root = binding.managed_repository_root
         target_path = os.path.realpath(ownership.canonical_workspace_path)
         expected_path = os.path.realpath(
@@ -2222,9 +3112,7 @@ class IntakeService:
 
         marker_path = os.path.join(target_path, ".minime_intake_workspace")
         if not os.path.exists(marker_path):
-            raise ManagedWorkspaceGuardDeniedError(
-                f"Root marker file missing at '{marker_path}'."
-            )
+            raise ManagedWorkspaceGuardDeniedError(f"Root marker file missing at '{marker_path}'.")
         try:
             marker = json.loads(Path(marker_path).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
@@ -2343,7 +3231,11 @@ class IntakeService:
         ambiguous: list[str] = []
 
         for item_dir in sorted(changes_dir.iterdir()):
-            if not item_dir.is_dir() or item_dir.name in ("archive", ".") or item_dir.name.startswith("."):
+            if (
+                not item_dir.is_dir()
+                or item_dir.name in ("archive", ".")
+                or item_dir.name.startswith(".")
+            ):
                 continue
 
             cname = item_dir.name
@@ -2360,16 +3252,23 @@ class IntakeService:
                 if getattr(self.uow.bindings, "get_by_project_and_change", None)
                 else None
             )
-            saga_ev = sagas_by_change.get(cname) or (sagas_by_key.get(item.item_key) if item else None)
+            saga_ev = sagas_by_change.get(cname) or (
+                sagas_by_key.get(item.item_key) if item else None
+            )
             actions = []
             if saga_ev and getattr(self.uow.orchestration_external_actions, "list_by_saga", None):
                 actions = self.uow.orchestration_external_actions.list_by_saga(saga_ev.id)
 
             generated = (
-                self.openspec_generator.generate_from_backlog_item(item, project_name=project.display_name)
-                if item else None
+                self.openspec_generator.generate_from_backlog_item(
+                    item, project_name=project.display_name
+                )
+                if item
+                else None
             )
-            manifest = self.openspec_generator.build_artifact_manifest(generated) if generated else None
+            manifest = (
+                self.openspec_generator.build_artifact_manifest(generated) if generated else None
+            )
             manifest_matches = False
             if manifest and generated and generated.is_complete:
                 expected_hashes = self._compute_artifact_sha256(generated)
@@ -2379,9 +3278,7 @@ class IntakeService:
 
             # Historical saga must have reached the authored checkpoint, and there must
             # be corroborating external action + binding evidence.
-            binding_ok = bool(
-                binding_ev and binding_ev.is_valid and binding_ev.github_issue_number
-            )
+            binding_ok = bool(binding_ev and binding_ev.is_valid and binding_ev.github_issue_number)
             saga_ok = bool(
                 saga_ev
                 and saga_ev.current_phase
@@ -2411,10 +3308,7 @@ class IntakeService:
                     self._activate_intake_workspace(workspace, project)
 
                     ws_change_dir = (
-                        Path(workspace.canonical_workspace_path)
-                        / "openspec"
-                        / "changes"
-                        / cname
+                        Path(workspace.canonical_workspace_path) / "openspec" / "changes" / cname
                     )
                     ws_change_dir.mkdir(parents=True, exist_ok=True)
                     # Copy ONLY the individually proven, allowed OpenSpec artifacts.

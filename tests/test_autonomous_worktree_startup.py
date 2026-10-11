@@ -107,11 +107,13 @@ def test_autonomous_admission_and_run_creation(
     (tmp_path / ".minime" / "worktrees").mkdir(parents=True, exist_ok=True)
     in_memory_uow.project_managed_repository_bindings.save(mb)
     attach_local_bare_origin(tmp_path, uow=in_memory_uow, project_id="mini-me")
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    subprocess.run(["git", "push", "origin", "main"], cwd=tmp_path, check=True, capture_output=True)
     create_isolated_openspec_change(tmp_path, change_name="016-autonomous-queue-work-selection")
     published_sha = publish_local_intake_ref(tmp_path, "016-autonomous-queue-work-selection")
-    managed_binding = in_memory_uow.project_managed_repository_bindings.get_by_project_id(
-        "mini-me"
-    )
+    managed_binding = in_memory_uow.project_managed_repository_bindings.get_by_project_id("mini-me")
     in_memory_uow.intake_workspace_ownerships.save(
         IntakeWorkspaceOwnership(
             workspace_id="ws-016-autonomous-queue-work-selection",
@@ -121,7 +123,7 @@ def test_autonomous_admission_and_run_creation(
             change_name="016-autonomous-queue-work-selection",
             canonical_workspace_path=str(tmp_path),
             canonical_repository_identity=managed_binding.canonical_repository_identity,
-            base_sha=published_sha,
+            base_sha=base_sha,
             head_sha=published_sha,
             creation_state=IntakeWorkspaceCreationState.ACTIVE,
             publication_state=IntakeWorkspacePublicationState.PUBLISHED,

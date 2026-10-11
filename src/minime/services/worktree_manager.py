@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
+from minime.adapters.github import GitHubAdapter
+
 if TYPE_CHECKING:
     from minime.services.workspace_guard import ManagedWorkspaceGuard
 
@@ -29,6 +31,7 @@ from minime.domain.models import (
     WorktreeCleanupResult,
     utc_now,
 )
+from minime.logging import redact_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +58,7 @@ class WorktreeManager:
         project_root: str | Path,
         uow: PersistenceUnitOfWork,
         workspace_guard: ManagedWorkspaceGuard | None = None,
+        github_adapter: GitHubAdapter | None = None,
     ):
         if uow is None:
             raise ValueError("PersistenceUnitOfWork (uow) is required for WorktreeManager.")
@@ -62,6 +66,7 @@ class WorktreeManager:
         self.worktrees_root = self.project_root / ".minime" / "worktrees"
         self.uow = uow
         self.workspace_guard = workspace_guard
+        self.github_adapter = github_adapter or GitHubAdapter()
 
     def _authorize_mutating_operation(
         self,
@@ -277,6 +282,46 @@ class WorktreeManager:
     ) -> str:
         command_cwd = cwd or self.project_root
         git_op = None
+        env = os.environ.copy()
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        auth_secrets: tuple[str, ...] = ()
+
+        # Remote reads during published-intake handoff must use the same non-
+        # interactive GitHub App authority as intake publication. Credentials are
+        # installed only through child-process config env and never enter argv/logs.
+        if args and args[0] in {"fetch", "ls-remote", "push"}:
+            eff_project_id = project_id or self._resolve_project_id(project_id, job_id)
+            binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
+            binding = (
+                binding_repo.get_by_project_id(eff_project_id)
+                if binding_repo and eff_project_id
+                else None
+            )
+            remote_name = getattr(binding, "remote_name", None) or "origin"
+            remote_url_proc = await asyncio.create_subprocess_exec(
+                "git",
+                "remote",
+                "get-url",
+                remote_name,
+                cwd=str(command_cwd),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+            )
+            remote_url_out, _ = await remote_url_proc.communicate()
+            if remote_url_proc.returncode != 0:
+                raise RuntimeError(
+                    f"Git remote '{remote_name}' cannot be resolved for published intake handoff."
+                )
+            try:
+                auth_bundle = self.github_adapter._git_auth_bundle(remote_url_out.decode().strip())
+            except Exception as exc:
+                raise RuntimeError(
+                    f"GitHub App authorization for remote '{remote_name}' is unavailable: "
+                    f"{redact_secrets(str(exc))}"
+                ) from None
+            env.update(dict(auth_bundle.env))
+            auth_secrets = tuple(auth_bundle.secrets)
 
         if self.uow and job_id and operation_type:
             target_wt = Path(managed_worktree_path or command_cwd).resolve()
@@ -297,6 +342,7 @@ class WorktreeManager:
             cwd=str(command_cwd),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
 
         if git_op and self.uow and proc.pid:
@@ -317,7 +363,10 @@ class WorktreeManager:
             self._flush_uow()
 
         if not success:
-            raise RuntimeError(stderr.decode().strip() or stdout.decode().strip())
+            error = (
+                stderr.decode(errors="replace").strip() or stdout.decode(errors="replace").strip()
+            )
+            raise RuntimeError(redact_secrets(error, list(auth_secrets)))
         return stdout.decode().strip()
 
     async def _materialize_verified_published_intake_artifacts(
@@ -337,20 +386,26 @@ class WorktreeManager:
             # the authority that requires a published intake identity.
             return False
         if not ownership.published_ref or not ownership.published_sha:
-            raise RuntimeError("Execution handoff denied: no published intake artifact identity exists.")
+            raise RuntimeError(
+                "Execution handoff denied: no published intake artifact identity exists."
+            )
 
         from minime.domain.enums import IntakeWorkspacePublicationState
         from minime.services.workspace_guard import is_binding_fully_valid
 
         if ownership.publication_state != IntakeWorkspacePublicationState.PUBLISHED:
-            raise RuntimeError("Execution handoff denied: intake artifacts are not durably published.")
+            raise RuntimeError(
+                "Execution handoff denied: intake artifacts are not durably published."
+            )
         binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
         binding = binding_repo.get_by_project_id(project_id) if binding_repo else None
         if not is_binding_fully_valid(binding):
             raise RuntimeError("Execution handoff denied: managed repository binding is invalid.")
         expected_ref = f"refs/minime/intake/{change_name}"
         if ownership.published_ref != expected_ref:
-            raise RuntimeError("Execution handoff denied: published ref does not match change identity.")
+            raise RuntimeError(
+                "Execution handoff denied: published ref does not match change identity."
+            )
 
         observed = await self._git(
             ["ls-remote", binding.remote_name, ownership.published_ref],
@@ -362,7 +417,9 @@ class WorktreeManager:
         )
         observed_parts = observed.split()
         if len(observed_parts) < 2 or observed_parts[0] != ownership.published_sha:
-            raise RuntimeError("Execution handoff denied: published intake ref drifted or is unobservable.")
+            raise RuntimeError(
+                "Execution handoff denied: published intake ref drifted or is unobservable."
+            )
 
         await self._git(
             ["fetch", "--no-tags", binding.remote_name, ownership.published_ref],
@@ -374,14 +431,18 @@ class WorktreeManager:
         )
         fetched_sha = await self._git(["rev-parse", "FETCH_HEAD"], cwd=self.project_root)
         if fetched_sha != ownership.published_sha:
-            raise RuntimeError("Execution handoff denied: fetched intake commit differs from persisted SHA.")
+            raise RuntimeError(
+                "Execution handoff denied: fetched intake commit differs from persisted SHA."
+            )
 
         prefix = f"openspec/changes/{change_name}/"
         tree = await self._git(
             ["ls-tree", "-r", "--name-only", ownership.published_sha, "--", prefix],
             cwd=self.project_root,
         )
-        relative_paths = [line[len(prefix):] for line in tree.splitlines() if line.startswith(prefix)]
+        relative_paths = [
+            line[len(prefix) :] for line in tree.splitlines() if line.startswith(prefix)
+        ]
         required = {"proposal.md", "tasks.md", "design.md"}
         actual = set(relative_paths)
         if (
@@ -391,15 +452,22 @@ class WorktreeManager:
                 not path
                 or PurePosixPath(path).is_absolute()
                 or ".." in PurePosixPath(path).parts
-                or (path not in required and not (path.startswith("specs/") and path.endswith(".md")))
+                or (
+                    path not in required
+                    and not (path.startswith("specs/") and path.endswith(".md"))
+                )
                 for path in actual
             )
         ):
-            raise RuntimeError("Execution handoff denied: published intake artifact manifest is invalid.")
+            raise RuntimeError(
+                "Execution handoff denied: published intake artifact manifest is invalid."
+            )
 
         destination = destination_worktree / "openspec" / "changes" / change_name
         if destination.exists():
-            raise RuntimeError("Execution handoff denied: destination OpenSpec change already exists.")
+            raise RuntimeError(
+                "Execution handoff denied: destination OpenSpec change already exists."
+            )
         for relative_path in relative_paths:
             content = await self._git(
                 ["show", f"{ownership.published_sha}:{prefix}{relative_path}"],

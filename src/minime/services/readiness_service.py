@@ -6,6 +6,7 @@ import os
 import subprocess
 import tempfile
 from pathlib import Path, PurePosixPath
+from urllib.parse import urlsplit
 
 from minime.adapters.github import GitHubAdapter, GitHubAuthorizationError, GitHubRemoteError
 from minime.adapters.openspec import OpenSpecAdapter
@@ -24,7 +25,7 @@ from minime.domain.models import (
     ReadinessEvaluation,
     utc_now,
 )
-from minime.logging import get_logger, set_correlation_context
+from minime.logging import get_logger, redact_secrets, set_correlation_context
 from minime.services.lifecycle_gates import StrictValidationGate
 
 logger = get_logger("services.readiness")
@@ -57,35 +58,93 @@ class ReadinessService:
             require_published_ref=False,
         )
 
+    def _git_auth_for_remote(self, remote_url: str):
+        parsed = urlsplit(remote_url)
+        if "@" in parsed.netloc or parsed.query or parsed.fragment:
+            raise GitHubAuthorizationError(
+                "Git remote URL contains inline credentials or sensitive query data."
+            )
+        return self.github_adapter._git_auth_bundle(remote_url)
+
     def _observe_published_ref(
         self, managed_root: str, remote: str, published_ref: str
-    ) -> tuple[str | None, bool]:
+    ) -> tuple[str | None, bool, str | None]:
         """Authoritatively observe a published remote ref.
 
-        Returns ``(sha_or_none, ok)``. ``ok=False`` means the remote could not be
-        observed (transport failure / ambiguity); ``ok=True`` with ``None`` means absent.
+        Returns ``(sha_or_none, ok, error)``. ``ok=False`` means the remote could
+        not be observed (authorization/transport failure / ambiguity); ``ok=True``
+        with ``None`` means absent.
         """
+        auth_secrets: tuple[str, ...] = ()
+        env = os.environ.copy()
+        env["GIT_TERMINAL_PROMPT"] = "0"
         try:
+            remote_url = subprocess.run(
+                ["git", "remote", "get-url", remote],
+                cwd=managed_root,
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False,
+            )
+            if remote_url.returncode != 0 or not remote_url.stdout.strip():
+                logger.warning("Published repository remote '%s' could not be resolved.", remote)
+                return None, False, "Published repository remote could not be resolved."
+            auth = self._git_auth_for_remote(remote_url.stdout.strip())
+            env.update(dict(auth.env))
+            auth_secrets = tuple(auth.secrets)
             res = subprocess.run(
                 ["git", "ls-remote", remote, published_ref],
                 cwd=managed_root,
                 capture_output=True,
                 text=True,
+                env=env,
                 check=False,
             )
+        except GitHubAuthorizationError as exc:
+            logger.warning(
+                "GitHub App authorization for published ref '%s' was denied: %s",
+                published_ref,
+                redact_secrets(str(exc), list(auth_secrets)),
+            )
+            return None, False, "GitHub App authorization was denied for published-ref observation."
         except Exception as exc:
-            logger.warning("git ls-remote raised for '%s': %s", published_ref, exc)
-            return None, False
+            logger.warning(
+                "git ls-remote raised for '%s': %s",
+                published_ref,
+                redact_secrets(str(exc), list(auth_secrets)),
+            )
+            return None, False, "Published-ref observation failed before remote state was proven."
         if res.returncode != 0:
-            return None, False
+            logger.warning(
+                "Authenticated git ls-remote failed for '%s': %s",
+                published_ref,
+                redact_secrets(res.stderr.strip(), list(auth_secrets)),
+            )
+            stderr = res.stderr.lower()
+            if any(
+                marker in stderr
+                for marker in (
+                    "authentication failed",
+                    "access denied",
+                    "permission denied",
+                    "unauthorized",
+                )
+            ):
+                return (
+                    None,
+                    False,
+                    "GitHub App authorization was denied for published-ref observation.",
+                )
+            return None, False, "Authenticated published-ref observation failed."
         lines = res.stdout.splitlines()
         if not lines:
-            return None, True
+            return None, True, None
         for line in lines:
             parts = line.split()
             if len(parts) >= 2 and parts[1] == published_ref:
-                return parts[0], True
-        return None, False
+                return parts[0], True, None
+        return None, False, "Published-ref observation returned an ambiguous response."
 
     def _evaluate_verified_published_tree(
         self,
@@ -105,18 +164,46 @@ class ReadinessService:
         read-only object view fetched from the remote ref without changing the
         managed checkout or any of its refs.
         """
+        git_env = os.environ.copy()
+        git_env["GIT_TERMINAL_PROMPT"] = "0"
+        auth_secrets: tuple[str, ...] = ()
         try:
             remote_url_result = subprocess.run(
                 ["git", "remote", "get-url", remote],
                 cwd=managed_root,
                 capture_output=True,
                 text=True,
+                env=git_env,
                 check=False,
             )
             if remote_url_result.returncode != 0 or not remote_url_result.stdout.strip():
                 return None, None, "Published repository remote could not be resolved."
             remote_url = remote_url_result.stdout.strip()
+            auth = self._git_auth_for_remote(remote_url)
+            git_env.update(dict(auth.env))
+            auth_secrets = tuple(auth.secrets)
+        except GitHubAuthorizationError as exc:
+            logger.warning(
+                "GitHub App authorization for published artifact fetch was denied: %s",
+                redact_secrets(str(exc)),
+            )
+            return (
+                None,
+                None,
+                "GitHub App authorization is unavailable for published artifact inspection.",
+            )
+        except Exception as exc:
+            logger.warning(
+                "Published artifact remote authorization setup failed: %s",
+                redact_secrets(str(exc)),
+            )
+            return (
+                None,
+                None,
+                "Published artifact remote authorization could not be established.",
+            )
 
+        try:
             with tempfile.TemporaryDirectory(prefix="minime-published-readiness-") as temp_dir:
                 temp_root = Path(temp_dir)
                 object_repo = temp_root / "objects.git"
@@ -128,7 +215,11 @@ class ReadinessService:
                     check=False,
                 )
                 if init.returncode != 0:
-                    return None, None, "Temporary published-tree object store could not be initialized."
+                    return (
+                        None,
+                        None,
+                        "Temporary published-tree object store could not be initialized.",
+                    )
 
                 fetch = subprocess.run(
                     [
@@ -141,10 +232,33 @@ class ReadinessService:
                     ],
                     capture_output=True,
                     text=True,
+                    env=git_env,
                     check=False,
                 )
                 if fetch.returncode != 0:
-                    return None, None, "Published ref could not be fetched for authoritative inspection."
+                    logger.warning(
+                        "Authenticated fetch for published ref failed: %s",
+                        redact_secrets(fetch.stderr.strip(), list(auth_secrets)),
+                    )
+                    if any(
+                        marker in fetch.stderr.lower()
+                        for marker in (
+                            "authentication failed",
+                            "access denied",
+                            "permission denied",
+                            "unauthorized",
+                        )
+                    ):
+                        return (
+                            None,
+                            None,
+                            "GitHub App authorization was denied while fetching published artifacts.",
+                        )
+                    return (
+                        None,
+                        None,
+                        "Published ref could not be fetched for authoritative inspection.",
+                    )
 
                 fetched = subprocess.run(
                     ["git", f"--git-dir={object_repo}", "rev-parse", "FETCH_HEAD"],
@@ -183,8 +297,12 @@ class ReadinessService:
                 relative_paths: list[str] = []
                 for full_path in filter(None, tree_result.stdout.splitlines()):
                     if not full_path.startswith(change_prefix):
-                        return None, None, "Published artifact path escaped the expected change root."
-                    relative_path = full_path[len(change_prefix):]
+                        return (
+                            None,
+                            None,
+                            "Published artifact path escaped the expected change root.",
+                        )
+                    relative_path = full_path[len(change_prefix) :]
                     pure_path = PurePosixPath(relative_path)
                     if (
                         not relative_path
@@ -199,7 +317,11 @@ class ReadinessService:
                 actual = set(relative_paths)
                 if not required.issubset(actual):
                     missing = ", ".join(sorted(required - actual))
-                    return None, None, f"Published artifact tree is missing required files: {missing}."
+                    return (
+                        None,
+                        None,
+                        f"Published artifact tree is missing required files: {missing}.",
+                    )
                 if not any(path.startswith("specs/") and path.endswith(".md") for path in actual):
                     return None, None, "Published artifact tree is missing specs/**/*.md."
                 unexpected = {
@@ -218,12 +340,21 @@ class ReadinessService:
 
                 for relative_path in relative_paths:
                     blob = subprocess.run(
-                        ["git", f"--git-dir={object_repo}", "show", f"{published_sha}:{change_prefix}{relative_path}"],
+                        [
+                            "git",
+                            f"--git-dir={object_repo}",
+                            "show",
+                            f"{published_sha}:{change_prefix}{relative_path}",
+                        ],
                         capture_output=True,
                         check=False,
                     )
                     if blob.returncode != 0:
-                        return None, None, f"Published artifact '{relative_path}' could not be read."
+                        return (
+                            None,
+                            None,
+                            f"Published artifact '{relative_path}' could not be read.",
+                        )
                     destination = tree_root / change_prefix / relative_path
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     destination.write_bytes(blob.stdout)
@@ -610,9 +741,7 @@ class ReadinessService:
 
         intake_repo = getattr(self.uow, "intake_workspace_ownerships", None)
         intake_ow = (
-            intake_repo.get_active_by_item_key(project_id, change_name)
-            if intake_repo
-            else None
+            intake_repo.get_active_by_item_key(project_id, change_name) if intake_repo else None
         )
         if not intake_ow and intake_repo:
             all_list = intake_repo.list_by_project(project_id)
@@ -678,19 +807,21 @@ class ReadinessService:
                     != normalize_repository_identity(managed_binding.canonical_repository_identity)
                 )
 
-                observed_sha, observe_ok = self._observe_published_ref(
+                observed_sha, observe_ok, observation_error = self._observe_published_ref(
                     managed_root, remote, intake_ow.published_ref
                 )
                 drift = not observe_ok or observed_sha != intake_ow.published_sha
 
                 if identity_mismatch or repo_mismatch or drift:
-                    reason = (
+                    reason = observation_error or (
                         f"Published ref drift or identity mismatch for '{change_name}': "
                         f"identity_mismatch={identity_mismatch}, repo_mismatch={repo_mismatch}, "
                         f"observed_sha={observed_sha}, expected_sha={intake_ow.published_sha}."
                     )
                     checks.append(
-                        ReadinessCheck(name="published_artifact_identity", passed=False, reason=reason)
+                        ReadinessCheck(
+                            name="published_artifact_identity", passed=False, reason=reason
+                        )
                     )
                     unmet_reasons.append(reason)
                 else:
@@ -734,9 +865,7 @@ class ReadinessService:
             )
 
         if artifacts_eval is None:
-            reason = (
-                f"Published OpenSpec artifact tree for '{change_name}' could not be authoritatively evaluated."
-            )
+            reason = f"Published OpenSpec artifact tree for '{change_name}' could not be authoritatively evaluated."
             checks.append(ReadinessCheck(name="openspec_artifacts", passed=False, reason=reason))
             unmet_reasons.append(reason)
         else:
