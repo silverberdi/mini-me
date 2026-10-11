@@ -379,7 +379,27 @@ class WorktreeManager:
     ) -> None:
         """Materialize only the verified remote intake tree into an execution worktree."""
         intake_repo = getattr(self.uow, "intake_workspace_ownerships", None)
-        ownership = intake_repo.get_by_item_key(project_id, change_name) if intake_repo else None
+        from minime.services.intake_workspace_ownership_selection import (
+            resolve_published_intake_ownership,
+        )
+
+        backlog_repo = getattr(self.uow, "backlog_items", None)
+        linked_item = (
+            backlog_repo.get_by_openspec_change_name(project_id, change_name)
+            if backlog_repo
+            else None
+        )
+        ownership = (
+            resolve_published_intake_ownership(
+                intake_repo,
+                project_id=project_id,
+                change_name=change_name,
+                item_key=linked_item.item_key if linked_item else None,
+                allow_released=True,
+            )
+            if intake_repo
+            else None
+        )
         if not ownership:
             # This manager also serves historical/non-intake worktree callers.
             # They receive no OpenSpec materialization; scheduler admission is
@@ -401,6 +421,10 @@ class WorktreeManager:
         binding = binding_repo.get_by_project_id(project_id) if binding_repo else None
         if not is_binding_fully_valid(binding):
             raise RuntimeError("Execution handoff denied: managed repository binding is invalid.")
+        if ownership.canonical_repository_identity != binding.canonical_repository_identity:
+            raise RuntimeError(
+                "Execution handoff denied: intake ownership repository identity conflicts with the managed binding."
+            )
         expected_ref = f"refs/minime/intake/{change_name}"
         if ownership.published_ref != expected_ref:
             raise RuntimeError(

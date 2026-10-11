@@ -2563,11 +2563,18 @@ class IntakeService:
         binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
         if not project or not intake_repo or not binding_repo:
             return None
-        ownership = intake_repo.get_by_item_key(project_id, change_name)
-        if (
-            not ownership
-            or ownership.publication_state != IntakeWorkspacePublicationState.PUBLISHED
-        ):
+        from minime.services.intake_workspace_ownership_selection import (
+            resolve_published_intake_ownership,
+        )
+
+        linked_item = self.uow.backlog_items.get_by_openspec_change_name(project_id, change_name)
+        ownership = resolve_published_intake_ownership(
+            intake_repo,
+            project_id=project_id,
+            change_name=change_name,
+            item_key=linked_item.item_key if linked_item else None,
+        )
+        if not ownership:
             return None
         binding = binding_repo.get_by_project_id(project_id)
         if not is_binding_fully_valid(binding):
@@ -2593,6 +2600,12 @@ class IntakeService:
         if not observe_ok or not observed_main:
             raise UnsafeIntakeWorkspaceStateError(
                 "Canonical main could not be observed authoritatively."
+            )
+        if not ownership.is_active:
+            if observed_main == ownership.base_sha:
+                return None
+            raise UnsafeIntakeWorkspaceStateError(
+                "Main advanced but the published intake workspace ownership is no longer active."
             )
         # Historical published flows may predate durable backlog/saga linkage.
         # If main has not advanced, no reconciliation mutation is needed; the

@@ -5,6 +5,13 @@
 ### Requirement: Durable Intake Workspace Ownership
 The system MUST track intake workspace ownership via a dedicated `IntakeWorkspaceOwnership` domain and database entity bound to `project_id`, `item_key`, `saga_id`, `change_name`, `canonical_workspace_path`, `base_sha`, `creation_state`, and `publication_state`.
 
+#### SCENARIO: Historical ownership does not shadow the current published workspace
+- **GIVEN** an item has a historical failed/unpublished ownership record and a separate active/published ownership record for the same project, item, and change
+- **WHEN** pre-admission main-advancement reconciliation, scheduler publication-obligation detection, readiness, or execution handoff resolves ownership
+- **THEN** the active/published record MUST be selected as the current publication authority, and the historical failed record MUST NOT be selected in its place
+- **AND** if ownership records are contradictory or no valid publication authority exists when intake publication is required, the operation MUST fail closed
+- **AND** historical ownership records MUST remain unchanged
+
 #### SCENARIO: Managed Repository Immutability During Intake
 - **GIVEN** a BacklogItem undergoing autonomous intake preparation
 - **WHEN** OpenSpec generation, readiness evaluation, issue binding, or artifact publication executes

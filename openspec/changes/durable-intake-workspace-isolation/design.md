@@ -124,3 +124,10 @@ When `SchedulerService.admit_work_item()` admits a `READY` item:
 5. Verify resulting paths and hash provenance.
 6. Record `canonical_base_sha = B` and `published_sha = P` in durable execution handoff evidence.
 7. Fail closed immediately on conflict or unexpected path.
+
+### 13. Ownership Record Selection
+- Repository queries that can return multiple ownership attempts MUST NOT use an unordered first row as authority.
+- Before admission, select exactly one ownership for the project/change whose creation state is `ACTIVE` and publication state is `PUBLISHED`; historical failed/unpublished attempts do not shadow it.
+- A historical-only failed/unpublished record is not equivalent to absence of ownership and MUST block an intake-required admission.
+- Execution handoff may use a unique released (`RELEASED_PENDING_CLEANUP` or `RELEASED_CLEANED`) published ownership when the lifecycle has released the workspace before handoff. Active ownership takes precedence; contradictory or ambiguous identities fail closed.
+- No ownership history preserves legacy non-intake behavior. Readiness continues to prioritize the active ownership query.

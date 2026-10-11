@@ -25,6 +25,7 @@
 - [x] 6. Execution Handoff & Main-Advancement Materialization <!-- id: 17 -->
   - [x] 6.1 Implement main-advancement pre-admission reconciliation (re-authoring/materializing candidate P2 onto current main B) <!-- id: 18 -->
   - [x] 6.2 Update execution worktree creation (`OrchestrationWorktreeOwnership`) to materialize OpenSpec artifact tree from `published_sha` onto base `B` <!-- id: 19 -->
+  - [x] 6.3 Resolve the authoritative active/published ownership independently of historical failed attempts across reconciliation, admission, and execution handoff; preserve released published handoff compatibility <!-- id: 24 -->
 
 - [x] 7. 4-Way Cleanup Protocol & Legacy Adoption <!-- id: 20 -->
   - [x] 7.1 Implement 4-way fenced cleanup for intake workspaces authorized ONLY when `creation_state` is `RELEASED_PENDING_CLEANUP` or `FAILED_PENDING_CLEANUP` <!-- id: 21 -->
