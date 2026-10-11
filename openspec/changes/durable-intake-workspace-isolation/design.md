@@ -135,3 +135,10 @@ When `SchedulerService.admit_work_item()` admits a `READY` item:
 ### 14. Main-Advancement Action Request Fingerprint
 - The fenced external action for `INTAKE_ARTIFACT_PUBLISH` must compute its `request_fingerprint` as a deterministic SHA-256 hexadecimal digest over the ordered triple `f"{ownership.base_sha}:{ownership.published_sha}:{base_sha}".encode("utf-8")`.
 - This ensures the fingerprint strictly conforms to the PostgreSQL `VARCHAR(64)` column limit without schema mutation, while uniquely and immutably binding the action to the exact base, published artifact, and new base commit identities.
+
+### 15. Post-READY Main-Advancement Publication Authority
+- Main-advancement reconciliation runs after the intake saga has completed at phase `READY`, but before Run admission. It MUST NOT reopen, restart, or otherwise mutate the completed saga.
+- The PostgreSQL fenced dispatch-intent transaction MAY authorize a terminal parent only for `INTAKE_ARTIFACT_PUBLISH` when the locked saga is `INTAKE` / `COMPLETED` / `READY`, the claim key exactly binds its project and work item, and the action is bound to that same saga and change.
+- The exception additionally requires exactly one non-historical active ownership row for the saga with matching project/item/change, `creation_state == ACTIVE`, `publication_state == PUBLISHED`, the canonical `refs/minime/intake/<change_name>` identity, consistent published/head SHA, and a valid project-managed repository binding whose canonical repository identity matches both project and ownership. Historical failed/released records do not shadow this authority.
+- The action key's new-base SHA and its SHA-256 request fingerprint MUST match the durable old base and published SHA. Existing claim lease/fence validation, Stage B/D dispatch authorization, CAS publication, remote observation, and result application fences remain mandatory.
+- Every other mutation attached to a terminal saga, including `FAILED`, `CANCELLED`, a completed saga outside `READY`, or any identity/publication/binding mismatch, MUST remain rejected.

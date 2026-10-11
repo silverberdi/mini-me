@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import re
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -5331,6 +5333,100 @@ class PostgresRecoveryClaimRepository(RecoveryClaimRepositoryInterface):
         model = self.session.scalars(stmt).first()
         return model is not None
 
+    def _completed_intake_publish_is_authorized(
+        self,
+        *,
+        claim_key: str,
+        action_key: str,
+        action_model: OrchestrationExternalActionModel,
+        saga: DurableSagaModel,
+    ) -> bool:
+        """Validate the sole external publication allowed after an INTAKE saga completes.
+
+        This exception is intentionally checked from locked durable rows, not from
+        caller-provided authorization metadata. The existing INTAKE claim still
+        supplies the fence; this only proves the narrow post-READY operation.
+        """
+        if (
+            saga.saga_type != SagaType.INTAKE.value
+            or saga.status != SagaStatus.COMPLETED.value
+            or saga.current_phase != "READY"
+            or action_model.saga_id != saga.id
+            or action_model.action_type != ExternalActionType.INTAKE_ARTIFACT_PUBLISH.value
+            or not saga.change_name
+            or action_model.target_identity != saga.change_name
+            or claim_key != f"intake:{saga.project_id}:{saga.work_item_key}"
+        ):
+            return False
+
+        prefix = f"intake_main_advance_publish:{saga.project_id}:{saga.change_name}:"
+        if not action_key.startswith(prefix):
+            return False
+        new_base_sha = action_key[len(prefix) :]
+        if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", new_base_sha):
+            return False
+
+        active_ownership_rows = self.session.scalars(
+            select(IntakeWorkspaceOwnershipModel)
+            .where(IntakeWorkspaceOwnershipModel.saga_id == saga.id)
+            .where(
+                IntakeWorkspaceOwnershipModel.creation_state.in_(
+                    [
+                        IntakeWorkspaceCreationState.RESERVED.value,
+                        IntakeWorkspaceCreationState.CREATING.value,
+                        IntakeWorkspaceCreationState.ACTIVE.value,
+                    ]
+                )
+            )
+            .with_for_update()
+        ).all()
+        if len(active_ownership_rows) != 1:
+            return False
+        ownership = active_ownership_rows[0]
+        if (
+            ownership.project_id != saga.project_id
+            or ownership.item_key != saga.work_item_key
+            or ownership.change_name != saga.change_name
+            or ownership.creation_state != IntakeWorkspaceCreationState.ACTIVE.value
+            or ownership.publication_state != IntakeWorkspacePublicationState.PUBLISHED.value
+            or ownership.published_ref != f"refs/minime/intake/{saga.change_name}"
+            or not ownership.published_sha
+            or ownership.head_sha != ownership.published_sha
+            or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", ownership.published_sha)
+            or not ownership.base_sha
+            or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", ownership.base_sha)
+        ):
+            return False
+
+        binding = self.session.scalars(
+            select(ProjectManagedRepositoryBindingModel)
+            .where(ProjectManagedRepositoryBindingModel.project_id == saga.project_id)
+            .with_for_update()
+        ).first()
+        project = self.session.get(ProjectModel, saga.project_id)
+        if (
+            not binding
+            or not binding.is_valid
+            or binding.mismatch_reasons
+            or not binding.remote_name
+            or not binding.managed_repository_root
+            or not binding.worktree_parent_dir
+            or binding.canonical_repository_identity != ownership.canonical_repository_identity
+            or not project
+        ):
+            return False
+        from minime.services.repository_identity import normalize_repository_identity
+
+        if normalize_repository_identity(project.repository) != normalize_repository_identity(
+            binding.canonical_repository_identity
+        ):
+            return False
+
+        expected_fingerprint = hashlib.sha256(
+            f"{ownership.base_sha}:{ownership.published_sha}:{new_base_sha}".encode("utf-8")
+        ).hexdigest()
+        return action_model.request_fingerprint == expected_fingerprint
+
     def commit_fenced_dispatch_intent(
         self,
         claim_key: str,
@@ -5397,9 +5493,21 @@ class PostgresRecoveryClaimRepository(RecoveryClaimRepositoryInterface):
                     f"Parent closure saga '{expected_saga_id}' for claim '{claim_key}' is inactive or missing."
                 )
         elif claim_key.startswith("intake:"):
+            if (
+                action_model.action_type == ExternalActionType.INTAKE_ARTIFACT_PUBLISH.value
+                and not action_model.saga_id
+            ):
+                self.session.rollback()
+                raise StaleClaimError(
+                    f"INTAKE_ARTIFACT_PUBLISH action '{action_key}' is not linked to a durable intake saga."
+                )
             if action_model.saga_id:
-                saga = self.session.get(DurableSagaModel, action_model.saga_id)
-                if not saga or saga.status in (SagaStatus.COMPLETED.value, SagaStatus.FAILED.value):
+                saga = self.session.scalars(
+                    select(DurableSagaModel)
+                    .where(DurableSagaModel.id == action_model.saga_id)
+                    .with_for_update()
+                ).first()
+                if not saga:
                     self.session.rollback()
                     raise StaleClaimError(
                         f"Parent intake saga '{action_model.saga_id}' for claim '{claim_key}' is inactive or missing."
@@ -5410,6 +5518,25 @@ class PostgresRecoveryClaimRepository(RecoveryClaimRepositoryInterface):
                     raise ValueError(
                         f"Cross-parent action dispatch rejected: action '{action_key}' is bound to intake saga '{saga.id}' ({expected_key}), but claim key is '{claim_key}'."
                     )
+                if saga.status in (
+                    SagaStatus.COMPLETED.value,
+                    SagaStatus.FAILED.value,
+                    SagaStatus.CANCELLED.value,
+                ):
+                    allowed_post_ready_publish = (
+                        saga.status == SagaStatus.COMPLETED.value
+                        and self._completed_intake_publish_is_authorized(
+                            claim_key=claim_key,
+                            action_key=action_key,
+                            action_model=action_model,
+                            saga=saga,
+                        )
+                    )
+                    if not allowed_post_ready_publish:
+                        self.session.rollback()
+                        raise StaleClaimError(
+                            f"Parent intake saga '{action_model.saga_id}' is terminal; only an authorized post-READY INTAKE_ARTIFACT_PUBLISH may dispatch."
+                        )
 
         attempts_stmt = select(ExternalActionAttemptModel).where(
             ExternalActionAttemptModel.action_key == action_key

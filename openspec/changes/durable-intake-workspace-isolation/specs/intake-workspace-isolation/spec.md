@@ -5,6 +5,16 @@
 ### Requirement: Durable Intake Workspace Ownership
 The system MUST track intake workspace ownership via a dedicated `IntakeWorkspaceOwnership` domain and database entity bound to `project_id`, `item_key`, `saga_id`, `change_name`, `canonical_workspace_path`, `base_sha`, `creation_state`, and `publication_state`.
 
+#### Scenario: Completed READY intake saga authorizes only post-READY artifact publication
+- **GIVEN** an `INTAKE` saga is durably `COMPLETED` at phase `READY`
+- **AND** a live fenced claim binds the same project and work item
+- **AND** exactly one non-historical active ownership for that saga is `ACTIVE` / `PUBLISHED` with a consistent publication ref/SHA and a valid matching managed-repository binding
+- **WHEN** the exact same-saga `INTAKE_ARTIFACT_PUBLISH` action dispatches a main-advancement candidate whose action key and SHA-256 fingerprint bind the old base, old published SHA, and new base
+- **THEN** PostgreSQL MAY commit the dispatch intent while preserving the original saga as `COMPLETED` / `READY`
+- **AND** the operation MUST still use the existing fenced claim, Stage B/D authorization, remote CAS, authoritative observe-before-repeat, and post-I/O fence checks
+- **AND** no other action or terminal saga state gains dispatch authority
+- **AND** missing, expired, contradictory, failed, cancelled, or otherwise inconsistent claim/action/ownership/repository evidence MUST fail closed
+
 #### SCENARIO: Historical ownership does not shadow the current published workspace
 - **GIVEN** an item has a historical failed/unpublished ownership record and a separate active/published ownership record for the same project, item, and change
 - **WHEN** pre-admission main-advancement reconciliation, scheduler publication-obligation detection, readiness, or execution handoff resolves ownership
