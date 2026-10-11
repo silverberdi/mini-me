@@ -52,7 +52,7 @@ from minime.domain.models import (
     generate_uuid,
     utc_now,
 )
-from minime.logging import get_logger, set_correlation_context
+from minime.logging import get_logger, redact_secrets, set_correlation_context
 from minime.services.lifecycle_transition_authority import LifecycleTransitionAuthority
 from minime.services.openspec_generator import OpenSpecGenerator, slugify
 from minime.services.readiness_service import ReadinessService
@@ -1898,6 +1898,25 @@ class IntakeService:
 
         return head_sha
 
+    def _get_git_auth_bundle(self, managed_root: str, remote: str) -> tuple[dict[str, str], tuple[str, ...]]:
+        if not self.github_adapter:
+            return {}, ()
+        try:
+            res = subprocess.run(
+                ["git", "remote", "get-url", remote],
+                cwd=managed_root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                remote_url = res.stdout.strip()
+                auth = self.github_adapter._git_auth_bundle(remote_url)
+                return dict(auth.env), auth.secrets
+        except Exception as exc:
+            logger.warning("Failed to obtain Git auth args for remote '%s': %s", remote, exc)
+        return {}, ()
+
     def _observe_remote_ref(
         self,
         managed_root: str,
@@ -1911,11 +1930,17 @@ class IntakeService:
         ref is genuinely absent.
         """
         try:
+            auth_env, auth_secrets = self._get_git_auth_bundle(managed_root, remote)
+            env = os.environ.copy()
+            env["GIT_TERMINAL_PROMPT"] = "0"
+            if auth_env:
+                env.update(auth_env)
             ls_res = subprocess.run(
                 ["git", "ls-remote", remote, ref],
                 cwd=managed_root,
                 capture_output=True,
                 text=True,
+                env=env,
                 check=False,
             )
         except Exception as exc:
@@ -1923,7 +1948,8 @@ class IntakeService:
             return None, False
 
         if ls_res.returncode != 0:
-            logger.warning("git ls-remote failed for ref '%s': %s", ref, ls_res.stderr.strip())
+            err_output = redact_secrets(ls_res.stderr.strip(), list(auth_secrets))
+            logger.warning("git ls-remote failed for ref '%s': %s", ref, err_output)
             return None, False
 
         lines = ls_res.stdout.splitlines()
@@ -1973,6 +1999,7 @@ class IntakeService:
 
         push_needed = False
         push_cmd: list[str] | None = None
+        auth_env, auth_secrets = self._get_git_auth_bundle(managed_root, remote)
 
         if ownership.published_sha is None:
             # Initial publication enforces an atomic expected-old-ref condition: the
@@ -2018,21 +2045,26 @@ class IntakeService:
                     f"{head_sha}:{published_ref}",
                 ]
 
-        if push_needed:
+        if push_needed and push_cmd:
             ownership.publication_state = IntakeWorkspacePublicationState.PUBLISHING
             if getattr(self.uow, "intake_workspace_ownerships", None):
                 self.uow.intake_workspace_ownerships.save(ownership)
                 self.uow.commit()
 
+            env = os.environ.copy()
+            env["GIT_TERMINAL_PROMPT"] = "0"
+            if auth_env:
+                env.update(auth_env)
             push_res = subprocess.run(
                 push_cmd,
                 cwd=managed_root,
                 capture_output=True,
                 text=True,
+                env=env,
                 check=False,
             )
             if push_res.returncode != 0:
-                err_msg = (push_res.stderr or "").strip()
+                err_msg = redact_secrets((push_res.stderr or "").strip(), list(auth_secrets))
                 normalized_error = err_msg.lower()
                 is_unreachable_remote = any(
                     term in normalized_error
