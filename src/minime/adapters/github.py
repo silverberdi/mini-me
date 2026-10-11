@@ -8,7 +8,7 @@ import os
 import re
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -50,6 +50,7 @@ class _CachedInstallationToken:
 class _GitAuthBundle:
     args: tuple[str, ...]
     secrets: tuple[str, ...]
+    env: dict[str, str] = field(default_factory=dict)
 
 
 class GitHubAppAuth:
@@ -1115,26 +1116,41 @@ class GitHubAdapter(GitHubAdapterInterface):
 
     def _git_auth_bundle(self, remote_url: str) -> _GitAuthBundle:
         if self._is_local_remote(remote_url):
-            return _GitAuthBundle((), ())
+            return _GitAuthBundle((), (), {})
         if not remote_url.startswith(("http://", "https://")):
             raise GitHubAuthorizationError("GitHub App authorization requires an HTTPS Git remote.")
         token = self._token()
         encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode()
         basic = f"Basic {encoded}"
         header = f"http.extraHeader=Authorization: {basic}"
+        auth_env = {
+            "GIT_CONFIG_COUNT": "2",
+            "GIT_CONFIG_KEY_0": "credential.helper",
+            "GIT_CONFIG_VALUE_0": "",
+            "GIT_CONFIG_KEY_1": "http.extraHeader",
+            "GIT_CONFIG_VALUE_1": f"Authorization: {basic}",
+        }
         return _GitAuthBundle(
-            args=("-c", "credential.helper=", "-c", header),
+            args=(),
             secrets=(token, encoded, basic, header),
+            env=auth_env,
         )
 
     @staticmethod
     def _run_git(
-        args: list[str], *, cwd: Path, timeout: int, secrets: list[str] | None = None
+        args: list[str],
+        *,
+        cwd: Path,
+        timeout: int,
+        secrets: list[str] | None = None,
+        auth_env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         failure: RuntimeError | None = None
         try:
             env = os.environ.copy()
             env["GIT_TERMINAL_PROMPT"] = "0"
+            if auth_env:
+                env.update(auth_env)
             if secrets:
                 for variable in (
                     "GIT_TRACE",
@@ -1198,6 +1214,7 @@ class GitHubAdapter(GitHubAdapterInterface):
                 cwd=repo,
                 timeout=30,
                 secrets=list(auth.secrets),
+                auth_env=auth.env,
             )
             if result.returncode == 0:
                 obs_res = self.get_remote_branch_head(worktree_path, branch, remote=remote)
@@ -1300,6 +1317,7 @@ class GitHubAdapter(GitHubAdapterInterface):
                 cwd=repo,
                 timeout=15,
                 secrets=list(auth.secrets),
+                auth_env=auth.env,
             )
             if result.returncode == 0:
                 stdout = result.stdout.strip()
