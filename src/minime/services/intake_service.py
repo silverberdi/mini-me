@@ -2825,12 +2825,15 @@ class IntakeService:
                         data={"retry_safety": "NEVER" if terminal_conflict else "SAFE"},
                     )
 
+            request_fingerprint = hashlib.sha256(
+                f"{ownership.base_sha}:{ownership.published_sha}:{base_sha}".encode("utf-8")
+            ).hexdigest()
             result = self.saga_engine.execute_fenced_external_action(
                 claim_context=claim_context,
                 action_key=action_key,
                 action_type=ExternalActionType.INTAKE_ARTIFACT_PUBLISH,
                 target_identity=change_name,
-                request_fingerprint=f"{ownership.base_sha}:{ownership.published_sha}:{base_sha}",
+                request_fingerprint=request_fingerprint,
                 mutation_fn=mutate_candidate,
                 observation_fn=observe_candidate,
                 saga_id=saga.id,

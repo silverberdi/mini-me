@@ -131,3 +131,7 @@ When `SchedulerService.admit_work_item()` admits a `READY` item:
 - A historical-only failed/unpublished record is not equivalent to absence of ownership and MUST block an intake-required admission.
 - Execution handoff may use a unique released (`RELEASED_PENDING_CLEANUP` or `RELEASED_CLEANED`) published ownership when the lifecycle has released the workspace before handoff. Active ownership takes precedence; contradictory or ambiguous identities fail closed.
 - No ownership history preserves legacy non-intake behavior. Readiness continues to prioritize the active ownership query.
+
+### 14. Main-Advancement Action Request Fingerprint
+- The fenced external action for `INTAKE_ARTIFACT_PUBLISH` must compute its `request_fingerprint` as a deterministic SHA-256 hexadecimal digest over the ordered triple `f"{ownership.base_sha}:{ownership.published_sha}:{base_sha}".encode("utf-8")`.
+- This ensures the fingerprint strictly conforms to the PostgreSQL `VARCHAR(64)` column limit without schema mutation, while uniquely and immutably binding the action to the exact base, published artifact, and new base commit identities.
