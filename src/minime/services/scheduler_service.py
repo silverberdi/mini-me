@@ -1161,9 +1161,20 @@ class SchedulerService:
             derive_project_admission_lock_key,
         )
 
+        # Durable intake ownership establishes the published-artifact admission
+        # contract even when callers use the legacy defaults (including
+        # `minime orchestrate start`). Preserve historical no-ownership flows.
+        intake_ownerships = getattr(self.uow, "intake_workspace_ownerships", None)
+        intake_ownership = (
+            intake_ownerships.get_by_item_key(project_id, change_name)
+            if intake_ownerships
+            else None
+        )
+        admission_requires_published_ref = require_published_ref or intake_ownership is not None
+
         # Main-advancement repair is a separate fenced command executed before
         # evidence collection. It never runs under Stage F advisory locks.
-        if require_published_ref:
+        if admission_requires_published_ref:
             self.intake_service.reconcile_main_advancement_before_admission(project_id, change_name)
 
         # PHASE A: Pre-lock evidence preparation (no locks, no DB commits, all external/subprocess reads)
@@ -1173,7 +1184,7 @@ class SchedulerService:
                 change_name,
                 require_published_ref=True,
             )
-            if require_published_ref
+            if admission_requires_published_ref
             else self.prepare_admission_evidence(project_id, change_name)
         )
 
@@ -1196,7 +1207,7 @@ class SchedulerService:
                     evidence=evidence,
                     require_published_ref=True,
                 )
-                if require_published_ref
+                if admission_requires_published_ref
                 else self.evaluate_admission(project_id, change_name, evidence=evidence)
             )
             decision = eval_result.decision

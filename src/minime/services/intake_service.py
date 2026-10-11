@@ -2574,6 +2574,32 @@ class IntakeService:
             raise UnsafeIntakeWorkspaceStateError(
                 "Managed repository binding is not valid for intake reconciliation."
             )
+        if (
+            ownership.project_id != project_id
+            or ownership.change_name != change_name
+            or ownership.canonical_repository_identity != binding.canonical_repository_identity
+            or ownership.published_ref != f"refs/minime/intake/{change_name}"
+            or not ownership.published_sha
+            or not ownership.head_sha
+        ):
+            raise UnsafeIntakeWorkspaceStateError(
+                "Durable intake publication identity is inconsistent."
+            )
+
+        managed_root = binding.managed_repository_root
+        remote = binding.remote_name
+        main_ref = f"refs/heads/{project.base_branch}"
+        observed_main, observe_ok = self._observe_remote_ref(managed_root, remote, main_ref)
+        if not observe_ok or not observed_main:
+            raise UnsafeIntakeWorkspaceStateError(
+                "Canonical main could not be observed authoritatively."
+            )
+        # Historical published flows may predate durable backlog/saga linkage.
+        # If main has not advanced, no reconciliation mutation is needed; the
+        # normal published-ref readiness check still governs admission.
+        if observed_main == ownership.base_sha:
+            return None
+
         item = self.uow.backlog_items.get_by_project_and_key(project_id, ownership.item_key)
         project_binding = self.uow.bindings.get_by_project_and_change(project_id, change_name)
         if (
@@ -2586,17 +2612,6 @@ class IntakeService:
         ):
             raise UnsafeIntakeWorkspaceStateError(
                 "Backlog/issue binding does not match the intake publication."
-            )
-        if (
-            ownership.project_id != project_id
-            or ownership.change_name != change_name
-            or ownership.canonical_repository_identity != binding.canonical_repository_identity
-            or ownership.published_ref != f"refs/minime/intake/{change_name}"
-            or not ownership.published_sha
-            or not ownership.head_sha
-        ):
-            raise UnsafeIntakeWorkspaceStateError(
-                "Durable intake publication identity is inconsistent."
             )
         saga = self.uow.durable_sagas.get_by_id(ownership.saga_id)
         if (
@@ -2620,7 +2635,6 @@ class IntakeService:
         ):
             return None
 
-        managed_root = binding.managed_repository_root
         workspace = self._verify_intake_workspace_marker(
             ownership, managed_root, binding.worktree_parent_dir
         )
@@ -2636,16 +2650,6 @@ class IntakeService:
             raise ManagedWorkspaceGuardDeniedError(
                 f"Main-advancement materialization denied: {decision.provider_detail or decision.reason_code.value}"
             )
-
-        remote = binding.remote_name
-        main_ref = f"refs/heads/{project.base_branch}"
-        observed_main, observe_ok = self._observe_remote_ref(managed_root, remote, main_ref)
-        if not observe_ok or not observed_main:
-            raise UnsafeIntakeWorkspaceStateError(
-                "Canonical main could not be observed authoritatively."
-            )
-        if observed_main == ownership.base_sha:
-            return None
 
         env, _ = self._main_advancement_git_env(managed_root, remote)
         tracking_ref = f"refs/remotes/{remote}/{project.base_branch}"

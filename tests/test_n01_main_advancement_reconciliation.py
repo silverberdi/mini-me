@@ -15,14 +15,19 @@ from tests.conftest import (
     setup_managed_repository_fixture,
 )
 
+from minime.adapters.github import GitHubAdapter, GitHubAuthorizationError
 from minime.domain.enums import (
+    ChangeStatus,
+    IntakeWorkspacePublicationState,
     ReadinessState,
     WorkItemStatus,
 )
-from minime.domain.models import BacklogItem, Project, ProjectBinding, utc_now
+from minime.domain.models import BacklogItem, Change, Project, ProjectBinding, utc_now
 from minime.services.intake_service import IntakeService
 from minime.services.lifecycle_gates import ApplyAttributionGate, GateStatus
 from minime.services.openspec_generator import GeneratedOpenSpec
+from minime.services.readiness_service import ReadinessService
+from minime.services.scheduler_service import SchedulerService
 from minime.services.worktree_manager import WorktreeManager
 
 
@@ -49,6 +54,59 @@ def _commit(root: Path, message: str) -> str:
         capture_output=True,
     )
     return _git(root, "rev-parse", "HEAD")
+
+
+def _simulate_private_https_remote(monkeypatch, env):
+    """Route fake private-HTTPS Git URLs to the test bare remote, retaining auth env."""
+    private_url = "https://github.example/silverberdi/mini-me.git"
+    subprocess.run(
+        ["git", "remote", "set-url", "origin", private_url],
+        cwd=env["repo"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    token = "ephemeral-test-installation-token"
+    auth_env = {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "http.extraHeader",
+        "GIT_CONFIG_VALUE_0": "Authorization: Basic ephemeral-test-header",
+    }
+    auth_calls: list[str] = []
+    operations: list[tuple[list[str], dict[str, str]]] = []
+
+    def auth_bundle(_adapter, remote_url):
+        auth_calls.append(remote_url)
+        if remote_url != private_url:
+            raise AssertionError("GitHub App auth requested for unexpected remote identity")
+        return SimpleNamespace(env=auth_env, secrets=(token, "ephemeral-test-header"))
+
+    real_run = subprocess.run
+
+    def simulated_run(command, *args, **kwargs):
+        argv = [str(part) for part in command]
+        env_arg = dict(kwargs.get("env") or {})
+        if argv[:3] == ["git", "remote", "get-url"] and len(argv) == 4:
+            return subprocess.CompletedProcess(argv, 0, private_url + "\n", "")
+        if argv[:3] == ["git", "ls-remote", "origin"]:
+            operations.append((argv, env_arg))
+            argv[2] = str(env["bare"])
+        elif argv[0] == "git" and "fetch" in argv:
+            url_index = next(
+                (i for i, value in enumerate(argv) if value in (private_url, "origin")),
+                None,
+            )
+            if url_index is not None:
+                operations.append((argv, env_arg))
+                argv[url_index] = str(env["bare"])
+        elif argv[:2] == ["git", "push"] and "origin" in argv:
+            operations.append((argv, env_arg))
+            argv[argv.index("origin")] = str(env["bare"])
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(GitHubAdapter, "_git_auth_bundle", auth_bundle)
+    monkeypatch.setattr(subprocess, "run", simulated_run)
+    return private_url, token, auth_calls, operations
 
 
 @pytest.fixture
@@ -391,3 +449,233 @@ def test_published_artifact_handoff_uses_noninteractive_github_app_git_env(intak
     assert captured["GIT_TERMINAL_PROMPT"] == "0"
     assert captured["GIT_CONFIG_VALUE_0"] == ""
     assert captured["GIT_CONFIG_VALUE_1"].startswith("Authorization: Basic ")
+
+
+def test_readiness_published_ref_and_tree_fetch_use_app_auth(intake_env, monkeypatch):
+    env = intake_env
+    private_url, token, auth_calls, operations = _simulate_private_https_remote(monkeypatch, env)
+    readiness = ReadinessService(
+        env["uow"],
+        openspec_adapter=env["service"].openspec_adapter,
+        github_adapter=GitHubAdapter(),
+    )
+    ref = f"refs/minime/intake/{env['change_name']}"
+
+    observed, ok, error = readiness._observe_published_ref(str(env["repo"]), "origin", ref)
+    assert ok and observed == env["p_sha"]
+    assert error is None
+
+    artifacts, strict, error = readiness._evaluate_verified_published_tree(
+        project=env["project"],
+        change_name=env["change_name"],
+        managed_root=str(env["repo"]),
+        remote="origin",
+        published_ref=ref,
+        published_sha=env["p_sha"],
+    )
+    assert error is None
+    assert artifacts and artifacts["exists"]
+    assert len(auth_calls) >= 2
+    assert all(url == private_url for url in auth_calls)
+    authenticated_network_calls = [
+        (argv, child_env)
+        for argv, child_env in operations
+        if "ls-remote" in argv or "fetch" in argv
+    ]
+    assert any("ls-remote" in argv for argv, _ in authenticated_network_calls)
+    assert any("fetch" in argv for argv, _ in authenticated_network_calls)
+    for argv, child_env in authenticated_network_calls:
+        assert child_env.get("GIT_TERMINAL_PROMPT") == "0"
+        assert child_env.get("GIT_CONFIG_VALUE_0") == "Authorization: Basic ephemeral-test-header"
+        assert token not in " ".join(argv)
+
+
+def test_readiness_denies_published_tree_when_app_auth_cannot_be_minted(intake_env, monkeypatch):
+    env = intake_env
+    _simulate_private_https_remote(monkeypatch, env)
+
+    def deny_auth(_adapter, _remote_url):
+        raise GitHubAuthorizationError("installation token unavailable")
+
+    monkeypatch.setattr(GitHubAdapter, "_git_auth_bundle", deny_auth)
+    readiness = ReadinessService(env["uow"], github_adapter=GitHubAdapter())
+    observed, ok, observation_error = readiness._observe_published_ref(
+        str(env["repo"]), "origin", f"refs/minime/intake/{env['change_name']}"
+    )
+    assert observed is None and not ok
+    assert observation_error and "GitHub App authorization was denied" in observation_error
+
+    artifacts, strict, error = readiness._evaluate_verified_published_tree(
+        project=env["project"],
+        change_name=env["change_name"],
+        managed_root=str(env["repo"]),
+        remote="origin",
+        published_ref=f"refs/minime/intake/{env['change_name']}",
+        published_sha=env["p_sha"],
+    )
+    assert artifacts is None and strict is None
+    assert error and "GitHub App authorization is unavailable" in error
+
+    project_binding = env["uow"].bindings.get_by_project_and_change("mini-me", env["change_name"])
+    project_binding.is_valid = True
+    env["uow"].bindings.save(project_binding)
+    evaluation = readiness.evaluate_change_readiness_pure(
+        project_id="mini-me",
+        change_name=env["change_name"],
+        project_root=str(env["repo"]),
+        github_repo=env["project"].repository,
+        github_issue=133,
+        require_published_ref=True,
+    )
+    assert not evaluation.is_ready
+    assert any(
+        "GitHub App authorization was denied" in reason for reason in evaluation.unmet_reasons
+    )
+
+
+def test_readiness_rejects_inline_remote_credentials_without_echoing_them(intake_env, caplog):
+    env = intake_env
+    secret = "must-never-appear-in-argv-or-logs"
+    subprocess.run(
+        [
+            "git",
+            "remote",
+            "set-url",
+            "origin",
+            f"https://x-access-token:{secret}@github.example/silverberdi/mini-me.git",
+        ],
+        cwd=env["repo"],
+        check=True,
+        capture_output=True,
+    )
+    readiness = ReadinessService(env["uow"], github_adapter=GitHubAdapter())
+    observed, ok, error = readiness._observe_published_ref(
+        str(env["repo"]), "origin", f"refs/minime/intake/{env['change_name']}"
+    )
+    assert observed is None and not ok
+    assert error and "GitHub App authorization was denied" in error
+    assert secret not in caplog.text
+
+
+def test_orchestrate_start_cli_reconciles_and_checks_published_tree_auth(intake_env, monkeypatch):
+    env = intake_env
+    _advance_main(env)
+    private_url, token, auth_calls, operations = _simulate_private_https_remote(monkeypatch, env)
+
+    class FakeSessionContext:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, *_args):
+            return None
+
+    monkeypatch.setattr("minime.cli.main.db_manager.session", lambda: FakeSessionContext())
+    monkeypatch.setattr(
+        "minime.cli.main.PostgresPersistenceUnitOfWork", lambda _session: env["uow"]
+    )
+
+    sequence: list[str] = []
+    original_reconcile = IntakeService.reconcile_main_advancement_before_admission
+
+    def tracked_reconcile(service, project_id, change_name):
+        sequence.append("reconcile")
+        return original_reconcile(service, project_id, change_name)
+
+    original_observe = ReadinessService._observe_published_ref
+
+    def tracked_observe(service, *args, **kwargs):
+        sequence.append("readiness_ref_observation")
+        return original_observe(service, *args, **kwargs)
+
+    original_tree = ReadinessService._evaluate_verified_published_tree
+
+    def tracked_tree(service, *args, **kwargs):
+        sequence.append("readiness_tree_fetch")
+        return original_tree(service, *args, **kwargs)
+
+    monkeypatch.setattr(
+        IntakeService, "reconcile_main_advancement_before_admission", tracked_reconcile
+    )
+    monkeypatch.setattr(ReadinessService, "_observe_published_ref", tracked_observe)
+    monkeypatch.setattr(ReadinessService, "_evaluate_verified_published_tree", tracked_tree)
+
+    from typer.testing import CliRunner
+
+    from minime.cli.main import app as cli_app
+
+    result = CliRunner().invoke(
+        cli_app,
+        [
+            "orchestrate",
+            "start",
+            "mini-me",
+            env["change_name"],
+            "--path",
+            str(env["repo"]),
+        ],
+    )
+    assert result.exit_code != 0  # Other gates may block this isolated fixture.
+    assert "reconcile" in sequence
+    assert "readiness_ref_observation" in sequence
+    assert "readiness_tree_fetch" in sequence
+    assert sequence.index("reconcile") < sequence.index("readiness_ref_observation")
+    assert sequence.index("readiness_ref_observation") < sequence.index("readiness_tree_fetch")
+    assert any(
+        "ls-remote" in argv and child_env.get("GIT_TERMINAL_PROMPT") == "0"
+        for argv, child_env in operations
+    )
+    assert any(
+        "fetch" in argv and child_env.get("GIT_TERMINAL_PROMPT") == "0"
+        for argv, child_env in operations
+    )
+    assert auth_calls and all(url == private_url for url in auth_calls)
+    for argv, child_env in operations:
+        if "ls-remote" in argv or "fetch" in argv or "push" in argv:
+            assert (
+                child_env.get("GIT_CONFIG_VALUE_0") == "Authorization: Basic ephemeral-test-header"
+            )
+            assert token not in " ".join(argv)
+    updated = env["uow"].intake_workspace_ownerships.get_by_id(env["ownership"].workspace_id)
+    assert updated.base_sha != env["a_sha"]
+    assert env["uow"].orchestration_runs.list_runs(is_active=True) == []
+    assert env["uow"].jobs.list_active_jobs() == []
+
+
+def test_unpublished_owned_intake_cannot_use_legacy_admission_default(intake_env):
+    env = intake_env
+    ownership = env["uow"].intake_workspace_ownerships.get_by_id(env["ownership"].workspace_id)
+    ownership.publication_state = IntakeWorkspacePublicationState.UNPUBLISHED
+    ownership.published_ref = None
+    ownership.published_sha = None
+    env["uow"].intake_workspace_ownerships.save(ownership)
+    env["uow"].changes.save(
+        Change(
+            project_id="mini-me",
+            name=env["change_name"],
+            schema_name="feature",
+            status=ChangeStatus.READY,
+        )
+    )
+
+    scheduler = SchedulerService(
+        env["uow"],
+        project_root=env["repo"],
+        readiness_service=ReadinessService(
+            env["uow"], openspec_adapter=env["service"].openspec_adapter
+        ),
+    )
+    captured_requirements: list[bool] = []
+    original_prepare = scheduler.prepare_admission_evidence
+
+    def capture_requirement(*args, **kwargs):
+        captured_requirements.append(bool(kwargs.get("require_published_ref", False)))
+        return original_prepare(*args, **kwargs)
+
+    scheduler.prepare_admission_evidence = capture_requirement
+    _decision, _record, run = scheduler.admit_work_item(
+        "mini-me", env["change_name"], drive_admitted=True
+    )
+    assert captured_requirements == [True]
+    assert run is None
+    assert env["uow"].orchestration_runs.list_runs(is_active=True) == []
+    assert env["uow"].jobs.list_active_jobs() == []
