@@ -183,6 +183,7 @@
         "linters_passed",
         "schemas_passed",
         "evidence_source",
+        "provenance",
         "check_details"
       ],
       "properties": {
@@ -202,6 +203,9 @@
           "type": "boolean"
         },
         "evidence_source": {
+          "type": "string"
+        },
+        "provenance": {
           "type": "string"
         },
         "check_details": {

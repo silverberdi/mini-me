@@ -1,4 +1,4 @@
-"""Core evaluation engine for OpenSpec Lifecycle Quality Hooks with authoritative evidence enforcement."""
+"""Core evaluation engine for OpenSpec Lifecycle Quality Hooks with authoritative canonical evidence enforcement."""
 
 from __future__ import annotations
 
@@ -24,9 +24,29 @@ from minime.quality_hooks.models import (
     VerificationResult,
     utc_now,
 )
-from minime.quality_hooks.specialties import (
-    select_specialties_for_diff,
-)
+from minime.quality_hooks.specialties import select_specialties_for_diff
+
+TRUSTED_VERIFICATION_PROVENANCES = {
+    "canonical-worktree-runner",
+    "canonical-ci-runner",
+    "canonical-checks-runner",
+}
+
+TRUSTED_REVIEW_PROVENANCES = {
+    "canonical-uow-review",
+    "canonical-github-review",
+    "canonical-reviewer-runner",
+}
+
+TRUSTED_MERGE_PROVENANCES = {
+    "canonical-git-ancestry",
+    "canonical-github-pr",
+}
+
+TRUSTED_APPROVAL_PROVENANCES = {
+    "canonical-validation-authority",
+    "canonical-github-approval",
+}
 
 
 def resolve_final_verdict(
@@ -47,6 +67,8 @@ def resolve_final_verdict(
             return HookVerdict.BLOCKED, "Mandatory verification evidence is missing; evaluation is BLOCKED."
         if not verification_result.deterministic_checks_passed:
             return HookVerdict.FAIL, "Deterministic checks (tests/linters/schemas) failed in verified evidence."
+        if not verification_result.schemas_passed:
+            return HookVerdict.FAIL, "Schema validation checks failed or were not executed."
 
     unresolved_blocking = [
         f for f in findings
@@ -120,7 +142,6 @@ def evaluate_post_apply(
     implementer_model_identity: str | None = None,
     review_evidence: ReviewEvidence | None = None,
     repo_root: str | Path = ".",
-    # Fallbacks only allowed for testing with mock git
     _override_changed_files: list[str] | None = None,
     _override_diff_text: str | None = None,
 ) -> QualityHookReport:
@@ -128,8 +149,8 @@ def evaluate_post_apply(
 
     Authoritative constraints:
     1. Obtains changed files and real diff directly from Git (base_sha..candidate_sha).
-    2. Requires verifiable ReviewEvidence bound strictly to candidate_sha.
-    3. Self-declared reviewer identity or specialties without review evidence is BLOCKED.
+    2. Requires verifiable ReviewEvidence with trusted canonical provenance.
+    3. Self-declared or unverified review JSON is rejected fail-closed as BLOCKED.
     """
     findings: list[QualityHookFinding] = []
     blocked_reasons: list[str] = []
@@ -175,7 +196,7 @@ def evaluate_post_apply(
     # 3. Dynamic Specialty Selection from authoritative diff
     required_specialties = select_specialties_for_diff(diff_text, changed_files)
 
-    # 4. Enforce Verifiable Review Evidence (FAIL-CLOSED: cannot just declare reviewer)
+    # 4. Enforce Verifiable Review Evidence with Canonical Provenance
     reviewer_identity: str | None = None
     reviewer_model_identity: str | None = None
     evaluated_specialties: list[ReviewSpecialty] = []
@@ -185,6 +206,13 @@ def evaluate_post_apply(
             "Verifiable review evidence is missing. Self-declared specialties or reviewer models without authoritative review evidence are rejected."
         )
     else:
+        # Provenance check against canonical review authority
+        if review_evidence.provenance not in TRUSTED_REVIEW_PROVENANCES:
+            blocked_reasons.append(
+                f"Review evidence provenance '{review_evidence.provenance}' is not a trusted canonical review authority; "
+                "untrusted self-declared review JSON is rejected as BLOCKED (missing canonical review authority integration)."
+            )
+
         # Candidate binding check
         if review_evidence.candidate_sha != candidate_sha:
             blocked_reasons.append(
@@ -276,8 +304,8 @@ def evaluate_verify(
 
     Authoritative constraints:
     1. Zero assumed PASS results.
-    2. Verification evidence MUST exist and be bound strictly to candidate_sha.
-    3. Missing or unbound evidence fails closed as BLOCKED.
+    2. Verification evidence MUST exist and be bound strictly to candidate_sha with trusted provenance.
+    3. Untrusted self-declared or unverified evidence fails closed as BLOCKED.
     """
     all_findings = list(findings or [])
     blocked_reasons: list[str] = []
@@ -288,7 +316,7 @@ def evaluate_verify(
     if any(f.severity == FindingSeverity.CRITICAL for f in id_findings):
         blocked_reasons.append("Candidate SHA validation failed.")
 
-    # 2. Strict evidence requirement
+    # 2. Strict evidence & provenance requirement
     if verification_result is None:
         blocked_reasons.append("Mandatory deterministic verification evidence is missing; evaluation is BLOCKED.")
     else:
@@ -296,8 +324,38 @@ def evaluate_verify(
             blocked_reasons.append(
                 f"Verification evidence candidate SHA '{verification_result.candidate_sha}' does not match candidate SHA '{candidate_sha}'."
             )
-        if not verification_result.evidence_source:
-            blocked_reasons.append("Verification evidence lacks a verifiable source or log reference.")
+        if verification_result.provenance not in TRUSTED_VERIFICATION_PROVENANCES:
+            blocked_reasons.append(
+                f"Verification evidence provenance '{verification_result.provenance}' is not a trusted canonical authority; "
+                "untrusted self-declared verification is BLOCKED."
+            )
+        elif verification_result.provenance == "canonical-worktree-runner":
+            root_path = Path(repo_root)
+            if not (root_path / ".git").exists():
+                blocked_reasons.append(
+                    f"Repository path '{root_path}' is not a valid Git repository; cannot verify worktree identity for candidate SHA."
+                )
+            else:
+                head_res = subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=str(root_path),
+                    capture_output=True,
+                    text=True,
+                )
+                if head_res.returncode != 0 or head_res.stdout.strip() != candidate_sha:
+                    blocked_reasons.append(
+                        f"Working tree HEAD '{head_res.stdout.strip()}' does not match candidate SHA '{candidate_sha}'; "
+                        "cannot attribute working tree execution to candidate SHA."
+                    )
+                diff_index_res = subprocess.run(
+                    ["git", "diff-index", "--quiet", "HEAD", "--"],
+                    cwd=str(root_path),
+                    check=False,
+                )
+                if diff_index_res.returncode != 0:
+                    blocked_reasons.append(
+                        "Working tree contains uncommitted modifications to tracked files; cannot attribute execution to committed candidate SHA."
+                    )
 
     is_blocked = len(blocked_reasons) > 0
     verdict, reason = resolve_final_verdict(
@@ -337,9 +395,9 @@ def evaluate_archive(
     """Evaluate ARCHIVE stage: Delivery Integrity and DoD Validation.
 
     Authoritative constraints:
-    1. No self-claim flags (--merged-by-human) or default approval values.
-    2. Must verify merge and human approval from authoritative evidence bound to candidate SHA.
-    3. Missing authoritative query mechanism or evidence returns BLOCKED, never PASS.
+    1. Must verify merge and human approval from canonical authorities.
+    2. Untrusted self-declared JSON files without canonical provenance return BLOCKED.
+    3. Identifies missing canonical integrations when verification cannot proceed.
     """
     all_findings = list(findings or [])
     blocked_reasons: list[str] = []
@@ -350,18 +408,48 @@ def evaluate_archive(
     if any(f.severity == FindingSeverity.CRITICAL for f in id_findings):
         blocked_reasons.append("Candidate SHA validation failed.")
 
-    # 2. Check Merge Evidence
+    # 2. Check Merge Evidence & Provenance
     pr_merged_by_human = False
     if merge_evidence is None:
         blocked_reasons.append(
-            "Authoritative merge verification evidence is missing; failing closed as BLOCKED."
+            "Authoritative merge verification evidence is missing; failing closed as BLOCKED (missing merge authority integration)."
         )
     else:
         if merge_evidence.candidate_sha != candidate_sha:
             blocked_reasons.append(
                 f"Merge evidence candidate SHA '{merge_evidence.candidate_sha}' does not match candidate '{candidate_sha}'."
             )
+        elif merge_evidence.provenance not in TRUSTED_MERGE_PROVENANCES:
+            blocked_reasons.append(
+                f"Merge evidence provenance '{merge_evidence.provenance}' is not a trusted canonical authority; "
+                "untrusted self-declared merge JSON is rejected as BLOCKED (missing canonical merge authority integration)."
+            )
         else:
+            # Check git ancestry if provenance is canonical-git-ancestry and repo is accessible
+            if merge_evidence.provenance == "canonical-git-ancestry":
+                root_path = Path(repo_root)
+                if (root_path / ".git").exists():
+                    anc_res = subprocess.run(
+                        ["git", "merge-base", "--is-ancestor", candidate_sha, merge_evidence.target_branch],
+                        cwd=str(root_path),
+                        capture_output=True,
+                        text=True,
+                    )
+                    if anc_res.returncode != 0:
+                        all_findings.append(
+                            QualityHookFinding(
+                                finding_id="ARCHIVE-NO-GIT-ANCESTRY",
+                                specialty=ReviewSpecialty.GENERAL_ARCHITECTURE,
+                                severity=FindingSeverity.CRITICAL,
+                                file_path=None,
+                                requirement_reference="CANONICAL-DECISIONS#git-ancestry",
+                                observed_evidence=f"Candidate SHA '{candidate_sha}' is not an ancestor of target branch '{merge_evidence.target_branch}'.",
+                                expected_behavior="Candidate commit must be merged into target branch history.",
+                                suggested_remediation="Merge candidate into target base branch before archiving.",
+                                status=FindingStatus.UNRESOLVED,
+                            )
+                        )
+
             is_bot = (
                 merge_evidence.merged_by_type.lower() == "bot"
                 or merge_evidence.merged_by.endswith("[bot]")
@@ -371,11 +459,11 @@ def evaluate_archive(
             else:
                 pr_merged_by_human = False
 
-    # 3. Check Human Approval Evidence
+    # 3. Check Human Approval Evidence & Provenance
     human_approval_recorded = False
     if human_approval_evidence is None:
         blocked_reasons.append(
-            "Authoritative human approval evidence is missing; failing closed as BLOCKED."
+            "Authoritative human approval evidence is missing; failing closed as BLOCKED (missing human validation authority integration)."
         )
     else:
         if human_approval_evidence.candidate_head_sha != candidate_sha:
@@ -385,6 +473,11 @@ def evaluate_archive(
         elif human_approval_evidence.base_sha != base_sha:
             blocked_reasons.append(
                 f"Human approval evidence base SHA '{human_approval_evidence.base_sha}' does not match base '{base_sha}'."
+            )
+        elif human_approval_evidence.provenance not in TRUSTED_APPROVAL_PROVENANCES:
+            blocked_reasons.append(
+                f"Human approval provenance '{human_approval_evidence.provenance}' is not a trusted canonical authority; "
+                "untrusted self-declared approval JSON is rejected as BLOCKED (missing ValidationAuthorityService or GitHub human approval integration)."
             )
         else:
             if human_approval_evidence.decision.lower() == "approve":

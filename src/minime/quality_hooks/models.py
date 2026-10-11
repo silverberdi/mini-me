@@ -1,4 +1,4 @@
-"""Pydantic models for OpenSpec Lifecycle Quality Hooks V1."""
+"""Pydantic models for OpenSpec Lifecycle Quality Hooks V1 with strict canonical evidence provenance."""
 
 from __future__ import annotations
 
@@ -78,7 +78,7 @@ class QualityHookFinding(BaseModel):
 
 
 class VerificationResult(BaseModel):
-    """Verifiable deterministic checks result bound strictly to candidate SHA."""
+    """Verifiable deterministic checks result bound strictly to candidate SHA with trusted provenance."""
     model_config = ConfigDict(extra="forbid")
 
     candidate_sha: str = Field(description="Exact candidate SHA that was verified")
@@ -87,11 +87,12 @@ class VerificationResult(BaseModel):
     linters_passed: bool = Field(description="Strict boolean whether linters passed")
     schemas_passed: bool = Field(description="Strict boolean whether schema validations passed")
     evidence_source: str = Field(description="Verifiable source of execution logs or diagnostic report")
+    provenance: str = Field(description="Canonical authority source (e.g. canonical-worktree-runner, canonical-ci-runner, canonical-checks-runner)")
     check_details: dict[str, Any] = Field(default_factory=dict, description="Detailed check breakdown")
 
 
 class ReviewEvidence(BaseModel):
-    """Verifiable independent review evidence bound strictly to candidate SHA."""
+    """Verifiable independent review evidence bound strictly to candidate SHA with canonical provenance."""
     model_config = ConfigDict(extra="forbid")
 
     candidate_sha: str = Field(description="Exact candidate SHA that was reviewed")
@@ -102,11 +103,12 @@ class ReviewEvidence(BaseModel):
     evaluated_specialties: list[ReviewSpecialty] = Field(description="Specialties verified during review")
     findings: list[QualityHookFinding] = Field(default_factory=list, description="Findings reported by reviewer")
     evidence_source: str = Field(description="Authoritative artifact path or execution reference")
+    provenance: str = Field(description="Canonical authority source (e.g. canonical-uow-review, canonical-github-review, canonical-reviewer-runner)")
     details: dict[str, Any] = Field(default_factory=dict)
 
 
 class HumanApprovalEvidence(BaseModel):
-    """Verifiable human approval record bound strictly to candidate tuple."""
+    """Verifiable human approval record bound strictly to candidate tuple with canonical authority provenance."""
     model_config = ConfigDict(extra="forbid")
 
     candidate_head_sha: str = Field(description="Exact candidate head SHA approved")
@@ -114,11 +116,12 @@ class HumanApprovalEvidence(BaseModel):
     decision: str = Field(description="Decision: approve, request_changes, reject")
     approver_identity: str = Field(description="Authorized human operator identity")
     evidence_source: str = Field(description="Authoritative source (e.g. human validation report or DB)")
+    provenance: str = Field(description="Canonical authority source (e.g. canonical-validation-authority, canonical-github-approval)")
     notes: str | None = Field(default=None)
 
 
 class MergeEvidence(BaseModel):
-    """Verifiable delivery/merge evidence bound strictly to candidate SHA."""
+    """Verifiable delivery/merge evidence bound strictly to candidate SHA with canonical authority provenance."""
     model_config = ConfigDict(extra="forbid")
 
     candidate_sha: str = Field(description="Exact candidate SHA merged")
@@ -128,6 +131,7 @@ class MergeEvidence(BaseModel):
     merged_by_type: str = Field(default="User", description="Identity type (User vs Bot)")
     merge_commit_sha: str | None = Field(default=None, description="Resulting merge commit SHA")
     evidence_source: str = Field(description="Authoritative source (GitHub API details or git ancestry)")
+    provenance: str = Field(description="Canonical authority source (e.g. canonical-git-ancestry, canonical-github-pr)")
 
 
 class QualityHookReport(BaseModel):

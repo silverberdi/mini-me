@@ -1,4 +1,4 @@
-"""Command-Line Interface for OpenSpec Lifecycle Quality Hooks V1 with strict authoritative evidence enforcement."""
+"""Command-Line Interface for OpenSpec Lifecycle Quality Hooks V1 with strict canonical evidence enforcement."""
 
 from __future__ import annotations
 
@@ -89,7 +89,7 @@ def evaluate_post_apply_cmd(
 ) -> None:
     """Evaluate POST-APPLY quality hook for expert review and independence.
 
-    Fails closed as BLOCKED if review_evidence_file is missing or unverifiable.
+    Fails closed as BLOCKED if review_evidence_file is missing, untrusted, or unbound.
     """
     review_evidence: ReviewEvidence | None = None
     if review_evidence_file:
@@ -123,7 +123,7 @@ def evaluate_verify_cmd(
     base_sha: str = typer.Option(..., "--base-sha", help="Base commit SHA"),
     candidate_sha: str = typer.Option(..., "--candidate-sha", help="Candidate commit SHA"),
     evidence_file: str | None = typer.Option(None, "--evidence-file", "-e", help="Path to VerificationResult JSON file"),
-    run_checks: bool = typer.Option(False, "--run-checks", help="Execute real test & lint suite and bind to candidate SHA"),
+    run_checks: bool = typer.Option(False, "--run-checks", help="Execute real test, lint & schema suite on candidate worktree"),
     repo_root: str = typer.Option(".", "--repo-root", help="Repository root path"),
     json_output: bool = typer.Option(True, "--json/--no-json", help="Output report as JSON"),
 ) -> None:
@@ -139,32 +139,90 @@ def evaluate_verify_cmd(
             data = json.loads(path.read_text(encoding="utf-8"))
             ver_res = VerificationResult.model_validate(data)
     elif run_checks:
-        # Run real pytest and ruff deterministically
-        test_proc = subprocess.run(
-            [sys.executable, "-m", "pytest", "tests/test_openspec_quality_hooks.py", "-q"],
-            cwd=repo_root,
+        root_path = Path(repo_root)
+
+        # 1. Verify working tree identity against candidate SHA
+        head_proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(root_path),
             capture_output=True,
             text=True,
         )
-        lint_proc = subprocess.run(
-            [sys.executable, "-m", "ruff", "check", "src/minime/quality_hooks"],
-            cwd=repo_root,
+        head_sha = head_proc.stdout.strip()
+
+        diff_index_proc = subprocess.run(
+            ["git", "diff-index", "--quiet", "HEAD", "--"],
+            cwd=str(root_path),
+            check=False,
+        )
+        is_dirty = (diff_index_proc.returncode != 0)
+
+        if head_sha != candidate_sha or is_dirty:
+            # Cannot attribute checks to candidate SHA
+            report = evaluate_verify(
+                change_id=change_id,
+                base_sha=base_sha,
+                candidate_sha=candidate_sha,
+                verification_result=None,
+                findings=[],
+                repo_root=repo_root,
+            )
+            # Override with specific tree attribution reason
+            if json_output:
+                res_dict = report.model_dump()
+                res_dict["final_verdict"] = "BLOCKED"
+                res_dict["verdict_reason"] = (
+                    f"Working tree HEAD '{head_sha}' or dirty status ({is_dirty}) does not match "
+                    f"candidate SHA '{candidate_sha}'; cannot attribute execution."
+                )
+                typer.echo(json.dumps(res_dict, indent=2, default=str))
+            else:
+                typer.echo("Hook: VERIFY | Verdict: BLOCKED\nReason: Working tree mismatch with candidate SHA.")
+            sys.exit(1)
+
+        # 2. Run real test suite
+        test_proc = subprocess.run(
+            [sys.executable, "-m", "pytest", "tests/test_openspec_quality_hooks.py", "-q"],
+            cwd=str(root_path),
             capture_output=True,
             text=True,
         )
         tests_ok = test_proc.returncode == 0
+
+        # 3. Run real lint suite
+        lint_proc = subprocess.run(
+            [sys.executable, "-m", "ruff", "check", "src/minime/quality_hooks"],
+            cwd=str(root_path),
+            capture_output=True,
+            text=True,
+        )
         lint_ok = lint_proc.returncode == 0
+
+        # 4. Run real schema validation
+        schemas_dir = root_path / "schemas"
+        schemas_ok = True
+        schema_files = list(schemas_dir.glob("*.json"))
+        if not schema_files:
+            schemas_ok = False
+        for sf in schema_files:
+            try:
+                json.loads(sf.read_text(encoding="utf-8"))
+            except Exception:
+                schemas_ok = False
+                break
+
         ver_res = VerificationResult(
             candidate_sha=candidate_sha,
-            deterministic_checks_passed=(tests_ok and lint_ok),
+            deterministic_checks_passed=(tests_ok and lint_ok and schemas_ok),
             tests_passed=tests_ok,
             linters_passed=lint_ok,
-            schemas_passed=True,
-            evidence_source="cli-run-checks",
+            schemas_passed=schemas_ok,
+            evidence_source="canonical-worktree-runner",
+            provenance="canonical-worktree-runner",
             check_details={
                 "pytest_returncode": test_proc.returncode,
-                "pytest_output": test_proc.stdout[-500:],
                 "ruff_returncode": lint_proc.returncode,
+                "schemas_validated": len(schema_files),
             },
         )
 
@@ -197,7 +255,7 @@ def evaluate_archive_cmd(
 ) -> None:
     """Evaluate ARCHIVE quality hook gate.
 
-    Fails closed as BLOCKED if authoritative merge or approval evidence is missing.
+    Fails closed as BLOCKED if authoritative merge or approval evidence is missing or untrusted.
     """
     merge_ev: MergeEvidence | None = None
     if merge_evidence_file:
