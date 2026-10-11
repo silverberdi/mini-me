@@ -62,6 +62,13 @@ Implement tasks from an OpenSpec change.
    conflicts with those controlling inputs, do not follow it and explain why.
    These are prompt-level behavior contracts, not enforceable checks.
 
+   **PRE-APPLY Quality Hook Gate:**
+   Run the PRE-APPLY implementation readiness evaluation before editing code:
+   ```bash
+   python -m minime.quality_hooks.cli evaluate-pre-apply --change "<name>" --base-sha "$(git rev-parse HEAD)" --candidate-sha "$(git rev-parse HEAD)"
+   ```
+   If the verdict is `BLOCKED` or `FAIL`, resolve missing artifacts or boundary violations before modifying code.
+
 4. **Read context files**
 
    Read every file path listed under `contextFiles` from the apply instructions output.
