@@ -474,18 +474,21 @@ class SchedulerService:
         from minime.services.lifecycle_gates import ApplyAttributionGate
 
         intake_repo = getattr(self.uow, "intake_workspace_ownerships", None)
+        from minime.services.intake_workspace_ownership_selection import (
+            resolve_published_intake_ownership,
+        )
+
+        intake_item_key = backlog_rec.item_key if backlog_rec else None
         intake_ow = (
-            intake_repo.get_active_by_item_key(project_id, change_name)
-            or intake_repo.get_by_item_key(project_id, change_name)
+            resolve_published_intake_ownership(
+                intake_repo,
+                project_id=project_id,
+                change_name=change_name,
+                item_key=intake_item_key,
+            )
             if intake_repo
             else None
         )
-        if not intake_ow and intake_repo:
-            all_ow = intake_repo.list_by_project(project_id)
-            for ow in all_ow:
-                if ow.change_name == change_name:
-                    intake_ow = ow
-                    break
         eff_root = (
             intake_ow.canonical_workspace_path
             if (intake_ow and Path(intake_ow.canonical_workspace_path).exists())
@@ -1165,11 +1168,25 @@ class SchedulerService:
         # contract even when callers use the legacy defaults (including
         # `minime orchestrate start`). Preserve historical no-ownership flows.
         intake_ownerships = getattr(self.uow, "intake_workspace_ownerships", None)
+        from minime.services.intake_workspace_ownership_selection import (
+            resolve_published_intake_ownership,
+        )
+
+        linked_item = self.uow.backlog_items.get_by_openspec_change_name(project_id, change_name)
+        intake_item_key = linked_item.item_key if linked_item else None
         intake_ownership = (
-            intake_ownerships.get_by_item_key(project_id, change_name)
+            resolve_published_intake_ownership(
+                intake_ownerships,
+                project_id=project_id,
+                change_name=change_name,
+                item_key=intake_item_key,
+            )
             if intake_ownerships
             else None
         )
+        # A resolved active or released historical publication remains intake-owned
+        # and must use published-ref readiness. Failed-only history is rejected by
+        # the resolver rather than treated as an absence of ownership.
         admission_requires_published_ref = require_published_ref or intake_ownership is not None
 
         # Main-advancement repair is a separate fenced command executed before

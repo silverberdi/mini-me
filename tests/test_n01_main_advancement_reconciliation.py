@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,12 +19,29 @@ from tests.conftest import (
 from minime.adapters.github import GitHubAdapter, GitHubAuthorizationError
 from minime.domain.enums import (
     ChangeStatus,
+    ExternalOutcome,
+    ExternalReasonCode,
+    IntakeWorkspaceCreationState,
     IntakeWorkspacePublicationState,
+    ProviderHealthStatus,
     ReadinessState,
+    RetrySafety,
     WorkItemStatus,
 )
-from minime.domain.models import BacklogItem, Change, Project, ProjectBinding, utc_now
+from minime.domain.models import (
+    BacklogItem,
+    Change,
+    ExternalActionResult,
+    Project,
+    ProjectBinding,
+    ProviderHealth,
+    utc_now,
+)
 from minime.services.intake_service import IntakeService
+from minime.services.intake_workspace_ownership_selection import (
+    IntakeWorkspaceOwnershipSelectionError,
+    resolve_published_intake_ownership,
+)
 from minime.services.lifecycle_gates import ApplyAttributionGate, GateStatus
 from minime.services.openspec_generator import GeneratedOpenSpec
 from minime.services.readiness_service import ReadinessService
@@ -211,6 +229,35 @@ def _advance_main(env, *, conflicting_artifact: bool = False) -> str:
     b_sha = _commit(repo, "advance main independently")
     subprocess.run(["git", "push", "origin", "main"], cwd=repo, check=True, capture_output=True)
     return b_sha
+
+
+def _insert_failed_history_before_active(env):
+    """Reproduce PostgreSQL's historical-first row order without changing authority."""
+    repository = env["uow"].intake_workspace_ownerships
+    active = repository.get_by_id(env["ownership"].workspace_id)
+    historical = active.model_copy(
+        update={
+            "workspace_id": str(uuid.uuid4()),
+            "canonical_workspace_path": str(
+                Path(active.canonical_workspace_path).with_name("failed")
+            ),
+            "creation_state": IntakeWorkspaceCreationState.FAILED_PENDING_CLEANUP,
+            "publication_state": IntakeWorkspacePublicationState.UNPUBLISHED,
+            "head_sha": None,
+            "published_ref": None,
+            "published_sha": None,
+        }
+    )
+    # The in-memory test repository preserves insertion order, intentionally
+    # reproducing the old get_by_item_key() ambiguity.
+    repository._store.clear()
+    repository.save(historical)
+    repository.save(active)
+    assert (
+        repository.get_by_item_key("mini-me", env["change_name"]).workspace_id
+        == historical.workspace_id
+    )
+    return historical, active
 
 
 def test_ap_without_main_advance_remains_valid(intake_env):
@@ -559,6 +606,7 @@ def test_readiness_rejects_inline_remote_credentials_without_echoing_them(intake
 
 def test_orchestrate_start_cli_reconciles_and_checks_published_tree_auth(intake_env, monkeypatch):
     env = intake_env
+    historical, active = _insert_failed_history_before_active(env)
     _advance_main(env)
     private_url, token, auth_calls, operations = _simulate_private_https_remote(monkeypatch, env)
 
@@ -575,6 +623,19 @@ def test_orchestrate_start_cli_reconciles_and_checks_published_tree_auth(intake_
     )
 
     sequence: list[str] = []
+    resolved_ownership_ids: list[str] = []
+    original_resolver = resolve_published_intake_ownership
+
+    def tracked_resolver(*args, **kwargs):
+        selected = original_resolver(*args, **kwargs)
+        if selected:
+            resolved_ownership_ids.append(selected.workspace_id)
+        return selected
+
+    monkeypatch.setattr(
+        "minime.services.intake_workspace_ownership_selection.resolve_published_intake_ownership",
+        tracked_resolver,
+    )
     original_reconcile = IntakeService.reconcile_main_advancement_before_admission
 
     def tracked_reconcile(service, project_id, change_name):
@@ -637,8 +698,286 @@ def test_orchestrate_start_cli_reconciles_and_checks_published_tree_auth(intake_
             assert token not in " ".join(argv)
     updated = env["uow"].intake_workspace_ownerships.get_by_id(env["ownership"].workspace_id)
     assert updated.base_sha != env["a_sha"]
+    assert updated.workspace_id == active.workspace_id
+    unchanged_history = env["uow"].intake_workspace_ownerships.get_by_id(historical.workspace_id)
+    assert unchanged_history.creation_state == IntakeWorkspaceCreationState.FAILED_PENDING_CLEANUP
+    assert unchanged_history.publication_state == IntakeWorkspacePublicationState.UNPUBLISHED
+    assert unchanged_history.published_sha is None
+    assert resolved_ownership_ids
+    assert set(resolved_ownership_ids) == {active.workspace_id}
     assert env["uow"].orchestration_runs.list_runs(is_active=True) == []
     assert env["uow"].jobs.list_active_jobs() == []
+
+
+def test_handoff_materializes_from_active_publication_not_failed_history(intake_env, monkeypatch):
+    env = intake_env
+    historical, active = _insert_failed_history_before_active(env)
+    from minime.adapters.github import GitHubAdapter
+    from minime.services.worktree_manager import WorktreeManager
+
+    # Permit this local bare test remote through the same Git child-process path;
+    # Git itself performs ls-remote/fetch and the real handoff selector/materializer.
+    monkeypatch.setattr(
+        GitHubAdapter,
+        "_git_auth_bundle",
+        lambda _adapter, _url: SimpleNamespace(env={}, secrets=()),
+    )
+    destination = env["repo"].parent / "execution-worktree"
+    destination.mkdir()
+    manager = WorktreeManager(env["repo"], env["uow"])
+    result = asyncio.run(
+        manager._materialize_verified_published_intake_artifacts(
+            destination_worktree=destination,
+            project_id="mini-me",
+            change_name=env["change_name"],
+            job_id="test-job",
+        )
+    )
+    assert result is True
+    assert (destination / "openspec/changes" / env["change_name"] / "proposal.md").is_file()
+    assert (destination / "openspec/changes" / env["change_name"] / "proposal.md").read_text(
+        encoding="utf-8"
+    ).strip() == (
+        Path(active.canonical_workspace_path)
+        / "openspec/changes"
+        / env["change_name"]
+        / "proposal.md"
+    ).read_text(encoding="utf-8").strip()
+    assert (
+        env["uow"].intake_workspace_ownerships.get_by_id(historical.workspace_id).published_sha
+        is None
+    )
+
+
+def test_cli_start_resolves_active_owner_through_p2_readiness_admission_and_handoff(
+    intake_env, monkeypatch
+):
+    env = intake_env
+    historical, active = _insert_failed_history_before_active(env)
+    _advance_main(env)
+
+    # The fixture's Git remote is a local bare repository. Keep Git operations
+    # real while avoiding network credentials and provider execution.
+    from minime.adapters.github import GitHubAdapter
+    from minime.services.worktree_manager import WorktreeManager
+
+    monkeypatch.setattr(
+        GitHubAdapter,
+        "_git_auth_bundle",
+        lambda _adapter, _url: SimpleNamespace(env={}, secrets=()),
+    )
+    monkeypatch.setattr(
+        GitHubAdapter,
+        "validate_issue_binding",
+        lambda _adapter, *_args, **_kwargs: ExternalActionResult(
+            outcome=ExternalOutcome.SUCCESS,
+            source_adapter="test-observation",
+            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+            retry_safety=RetrySafety.SAFE,
+            data=True,
+        ),
+    )
+    for provider in ("codex", "antigravity"):
+        env["uow"].provider_health.save(
+            ProviderHealth(provider=provider, status=ProviderHealthStatus.AVAILABLE)
+        )
+    env["uow"].changes.save(
+        Change(
+            project_id="mini-me",
+            name=env["change_name"],
+            schema_name="feature",
+            status=ChangeStatus.READY,
+            last_readiness_status=ReadinessState.READY,
+        )
+    )
+
+    class FakeSessionContext:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, *_args):
+            return None
+
+    monkeypatch.setattr("minime.cli.main.db_manager.session", lambda: FakeSessionContext())
+    monkeypatch.setattr(
+        "minime.cli.main.PostgresPersistenceUnitOfWork", lambda _session: env["uow"]
+    )
+
+    selected_ids: list[str] = []
+    original_resolver = resolve_published_intake_ownership
+
+    def tracked_resolver(*args, **kwargs):
+        owner = original_resolver(*args, **kwargs)
+        if owner:
+            selected_ids.append(owner.workspace_id)
+        return owner
+
+    monkeypatch.setattr(
+        "minime.services.intake_workspace_ownership_selection.resolve_published_intake_ownership",
+        tracked_resolver,
+    )
+    observed_readiness: list[str] = []
+    readiness_ownership_ids: list[str] = []
+    ownership_repo = env["uow"].intake_workspace_ownerships
+    original_active_lookup = ownership_repo.get_active_by_item_key
+
+    def tracked_active_lookup(project_id, item_key):
+        owner = original_active_lookup(project_id, item_key)
+        if owner:
+            readiness_ownership_ids.append(owner.workspace_id)
+        return owner
+
+    ownership_repo.get_active_by_item_key = tracked_active_lookup
+    original_tree_evaluation = ReadinessService._evaluate_verified_published_tree
+
+    def tracked_tree_evaluation(service, **kwargs):
+        observed_readiness.append(kwargs["published_sha"])
+        return original_tree_evaluation(service, **kwargs)
+
+    monkeypatch.setattr(
+        ReadinessService,
+        "_evaluate_verified_published_tree",
+        tracked_tree_evaluation,
+    )
+    materialized: list[Path] = []
+    original_handoff = WorktreeManager._materialize_verified_published_intake_artifacts
+
+    async def stop_after_real_handoff(manager, **kwargs):
+        await original_handoff(manager, **kwargs)
+        materialized.append(
+            kwargs["destination_worktree"]
+            / "openspec"
+            / "changes"
+            / kwargs["change_name"]
+            / "proposal.md"
+        )
+        # Stop the integration run before any provider is invoked. The real
+        # published-tree selector and materializer have already completed.
+        raise RuntimeError("test stop after verified published handoff")
+
+    monkeypatch.setattr(
+        WorktreeManager,
+        "_materialize_verified_published_intake_artifacts",
+        stop_after_real_handoff,
+    )
+
+    from typer.testing import CliRunner
+
+    from minime.cli.main import app as cli_app
+
+    result = CliRunner().invoke(
+        cli_app,
+        [
+            "orchestrate",
+            "start",
+            "mini-me",
+            env["change_name"],
+            "--path",
+            str(env["repo"]),
+        ],
+    )
+    updated = env["uow"].intake_workspace_ownerships.get_by_id(active.workspace_id)
+    assert updated.base_sha != env["a_sha"]
+    assert updated.published_sha != env["p_sha"]
+    assert observed_readiness == [updated.published_sha]
+    assert selected_ids and set(selected_ids) == {active.workspace_id}
+    assert readiness_ownership_ids
+    assert set(readiness_ownership_ids) == {active.workspace_id}
+    assert len(selected_ids) >= 3
+    assert materialized and materialized[0].is_file(), result.output
+    assert (
+        env["uow"].intake_workspace_ownerships.get_by_id(historical.workspace_id).published_sha
+        is None
+    )
+    assert env["uow"].orchestration_runs.list_runs()
+
+
+def test_only_failed_historical_ownership_cannot_authorize_admission(intake_env):
+    env = intake_env
+    historical, _active = _insert_failed_history_before_active(env)
+    repository = env["uow"].intake_workspace_ownerships
+    repository._store.pop(env["ownership"].workspace_id)
+    with pytest.raises(IntakeWorkspaceOwnershipSelectionError, match="Historical intake ownership"):
+        resolve_published_intake_ownership(
+            repository,
+            project_id="mini-me",
+            change_name=env["change_name"],
+        )
+    scheduler = SchedulerService(
+        env["uow"],
+        project_root=env["repo"],
+        readiness_service=ReadinessService(env["uow"]),
+    )
+    with pytest.raises(IntakeWorkspaceOwnershipSelectionError):
+        scheduler.admit_work_item("mini-me", env["change_name"])
+    assert env["uow"].orchestration_runs.list_runs(is_active=True) == []
+    assert (
+        repository.get_by_id(historical.workspace_id).publication_state
+        == IntakeWorkspacePublicationState.UNPUBLISHED
+    )
+
+
+def test_contradictory_ownership_identity_fails_closed(intake_env):
+    env = intake_env
+    owner = env["ownership"]
+    contradictory = owner.model_copy(
+        update={"workspace_id": str(uuid.uuid4()), "item_key": "different-item"}
+    )
+    env["uow"].intake_workspace_ownerships.save(contradictory)
+    with pytest.raises(
+        IntakeWorkspaceOwnershipSelectionError, match="conflicting project, item, or change"
+    ):
+        resolve_published_intake_ownership(
+            env["uow"].intake_workspace_ownerships,
+            project_id="mini-me",
+            change_name=env["change_name"],
+        )
+
+
+def test_published_sha_contradiction_blocks_main_advancement(intake_env):
+    env = intake_env
+    _advance_main(env)
+    owner = env["ownership"].model_copy(update={"published_sha": "f" * 40})
+    env["uow"].intake_workspace_ownerships.save(owner)
+    with pytest.raises(Exception, match="Published intake ref drifted"):
+        env["service"].reconcile_main_advancement_before_admission("mini-me", env["change_name"])
+    unchanged = env["uow"].intake_workspace_ownerships.get_by_id(owner.workspace_id)
+    assert unchanged.published_sha == "f" * 40
+    observed, ok = env["service"]._observe_remote_ref(
+        str(env["repo"]), "origin", owner.published_ref
+    )
+    assert ok and observed == env["p_sha"]
+
+
+def test_handoff_accepts_unique_released_publication(intake_env, monkeypatch):
+    env = intake_env
+    historical, active = _insert_failed_history_before_active(env)
+    active.creation_state = IntakeWorkspaceCreationState.RELEASED_PENDING_CLEANUP
+    env["uow"].intake_workspace_ownerships.save(active)
+    from minime.adapters.github import GitHubAdapter
+    from minime.services.worktree_manager import WorktreeManager
+
+    monkeypatch.setattr(
+        GitHubAdapter,
+        "_git_auth_bundle",
+        lambda _adapter, _url: SimpleNamespace(env={}, secrets=()),
+    )
+    destination = env["repo"].parent / "released-execution-worktree"
+    destination.mkdir()
+    result = asyncio.run(
+        WorktreeManager(env["repo"], env["uow"])._materialize_verified_published_intake_artifacts(
+            destination_worktree=destination,
+            project_id="mini-me",
+            change_name=env["change_name"],
+            job_id="released-job",
+        )
+    )
+    assert result is True
+    assert (destination / "openspec/changes" / env["change_name"] / "proposal.md").is_file()
+    assert (
+        env["uow"].intake_workspace_ownerships.get_by_id(historical.workspace_id).published_sha
+        is None
+    )
 
 
 def test_unpublished_owned_intake_cannot_use_legacy_admission_default(intake_env):
@@ -664,18 +1003,10 @@ def test_unpublished_owned_intake_cannot_use_legacy_admission_default(intake_env
             env["uow"], openspec_adapter=env["service"].openspec_adapter
         ),
     )
-    captured_requirements: list[bool] = []
-    original_prepare = scheduler.prepare_admission_evidence
-
-    def capture_requirement(*args, **kwargs):
-        captured_requirements.append(bool(kwargs.get("require_published_ref", False)))
-        return original_prepare(*args, **kwargs)
-
-    scheduler.prepare_admission_evidence = capture_requirement
-    _decision, _record, run = scheduler.admit_work_item(
-        "mini-me", env["change_name"], drive_admitted=True
-    )
-    assert captured_requirements == [True]
-    assert run is None
+    with pytest.raises(
+        IntakeWorkspaceOwnershipSelectionError,
+        match="Active intake workspace ownership is not an active published authority",
+    ):
+        scheduler.admit_work_item("mini-me", env["change_name"], drive_admitted=True)
     assert env["uow"].orchestration_runs.list_runs(is_active=True) == []
     assert env["uow"].jobs.list_active_jobs() == []
