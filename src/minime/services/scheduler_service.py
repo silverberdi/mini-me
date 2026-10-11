@@ -79,6 +79,7 @@ class PreparedAdmissionEvidence:
     change_exists: bool = True
     binding_valid: bool = True
 
+
 PRIORITY_BASE_SCORES: dict[QueuePriority, float] = {
     QueuePriority.CRITICAL: 10000.0,
     QueuePriority.HIGH: 5000.0,
@@ -105,7 +106,10 @@ def resolve_explicit_adapter(target_service: Any, attr_name: str) -> Any | None:
     from unittest.mock import Mock
 
     if isinstance(target_service, Mock):
-        if attr_name in target_service.__dict__.get("_mock_children", {}) or attr_name in target_service.__dict__:
+        if (
+            attr_name in target_service.__dict__.get("_mock_children", {})
+            or attr_name in target_service.__dict__
+        ):
             return getattr(target_service, attr_name)
         return None
     return getattr(target_service, attr_name, None)
@@ -136,12 +140,19 @@ class SchedulerService:
         self.project_root = Path(project_root).resolve()
         if readiness_service is not None:
             self.readiness_service = readiness_service
-        elif orchestration_service is not None and getattr(orchestration_service, "readiness_service", None) is not None:
+        elif (
+            orchestration_service is not None
+            and getattr(orchestration_service, "readiness_service", None) is not None
+        ):
             self.readiness_service = orchestration_service.readiness_service
         else:
             self.readiness_service = ReadinessService(uow)
-        gh_adapter = github_adapter or resolve_explicit_adapter(self.readiness_service, "github_adapter")
-        os_adapter = openspec_adapter or resolve_explicit_adapter(self.readiness_service, "openspec_adapter")
+        gh_adapter = github_adapter or resolve_explicit_adapter(
+            self.readiness_service, "github_adapter"
+        )
+        os_adapter = openspec_adapter or resolve_explicit_adapter(
+            self.readiness_service, "openspec_adapter"
+        )
         self.openspec_adapter = os_adapter
         self.github_adapter = gh_adapter
         self.discovery_service = discovery_service or WorkDiscoveryService(
@@ -440,7 +451,6 @@ class SchedulerService:
                 change_exists=False,
             )
 
-
         binding = self.uow.bindings.get_by_project_and_change(project_id, change_name)
         if not binding or not binding.is_valid or not binding.github_issue_number:
             return PreparedAdmissionEvidence(
@@ -462,6 +472,7 @@ class SchedulerService:
 
         # 2. Apply Attribution Gate evaluation (Git / OpenSpec subprocess check)
         from minime.services.lifecycle_gates import ApplyAttributionGate
+
         intake_repo = getattr(self.uow, "intake_workspace_ownerships", None)
         intake_ow = (
             intake_repo.get_active_by_item_key(project_id, change_name)
@@ -487,9 +498,7 @@ class SchedulerService:
         )
 
         # 3. Base SHA resolution (Git subprocess check)
-        observed_base_sha = self.orchestration_service._resolve_base_sha(
-            project, self.project_root
-        )
+        observed_base_sha = self.orchestration_service._resolve_base_sha(project, self.project_root)
 
         return PreparedAdmissionEvidence(
             project_id=project_id,
@@ -569,7 +578,10 @@ class SchedulerService:
                         rationale=f"Active orchestration run '{active_run.run_id}' already exists for project '{project_id}' and change '{change_name}'.",
                         legacy_decision=AdmissionDecision.REFUSED,
                         legacy_refusal_code=AdmissionRefusalCode.CHANGE_ALREADY_ACTIVE,
-                        refusal_details={"code": "DUPLICATE_ACTIVE_RUN", "existing_run_id": active_run.run_id},
+                        refusal_details={
+                            "code": "DUPLICATE_ACTIVE_RUN",
+                            "existing_run_id": active_run.run_id,
+                        },
                     )
 
         if change_rec and change_rec.status in (ChangeStatus.DONE, ChangeStatus.CANCELLED):
@@ -596,7 +608,10 @@ class SchedulerService:
                 rationale=f"Active orchestration run '{existing_active.run_id}' already exists for change '{change_name}'.",
                 legacy_decision=AdmissionDecision.REFUSED,
                 legacy_refusal_code=AdmissionRefusalCode.CHANGE_ALREADY_ACTIVE,
-                refusal_details={"code": "DUPLICATE_ACTIVE_RUN", "existing_run_id": existing_active.run_id},
+                refusal_details={
+                    "code": "DUPLICATE_ACTIVE_RUN",
+                    "existing_run_id": existing_active.run_id,
+                },
             )
 
         if backlog_rec and backlog_rec.status != WorkItemStatus.READY:
@@ -614,7 +629,12 @@ class SchedulerService:
 
         # 2. Durable ProjectBinding check
         binding = self.uow.bindings.get_by_project_and_change(project_id, change_name)
-        if not binding or not binding.is_valid or not binding.github_issue_number or not evidence.binding_valid:
+        if (
+            not binding
+            or not binding.is_valid
+            or not binding.github_issue_number
+            or not evidence.binding_valid
+        ):
             return AdmissionEvaluationResult(
                 decision=AdmissionDecisionKind.NEEDS_HUMAN,
                 project_id=project_id,
@@ -631,7 +651,6 @@ class SchedulerService:
             evidence.github_issue_number != binding.github_issue_number
             or evidence.github_repo != project.repository
         ):
-
             return AdmissionEvaluationResult(
                 decision=AdmissionDecisionKind.NEEDS_HUMAN,
                 project_id=project_id,
@@ -661,7 +680,6 @@ class SchedulerService:
                     **evidence.apply_attribution_result.reason.details,
                 },
             )
-
 
         # Capture canonical existing provider-health truth BEFORE readiness/capacity
         # checks can synthesize records. Absent rows must remain UNKNOWN for the
@@ -731,13 +749,17 @@ class SchedulerService:
                         )
 
         # 4. Definition of Ready (DoR) check — pure evaluation from evidence (zero DB commits)
-        readiness = evidence.readiness_evaluation if evidence and evidence.readiness_evaluation else self.readiness_service.evaluate_change_readiness_pure(
-            project_id=project_id,
-            change_name=change_name,
-            project_root=str(self.project_root),
-            github_repo=project.repository,
-            github_issue=binding.github_issue_number,
-            require_published_ref=require_published_ref,
+        readiness = (
+            evidence.readiness_evaluation
+            if evidence and evidence.readiness_evaluation
+            else self.readiness_service.evaluate_change_readiness_pure(
+                project_id=project_id,
+                change_name=change_name,
+                project_root=str(self.project_root),
+                github_repo=project.repository,
+                github_issue=binding.github_issue_number,
+                require_published_ref=require_published_ref,
+            )
         )
         non_capacity_unmet = [
             r
@@ -1139,6 +1161,11 @@ class SchedulerService:
             derive_project_admission_lock_key,
         )
 
+        # Main-advancement repair is a separate fenced command executed before
+        # evidence collection. It never runs under Stage F advisory locks.
+        if require_published_ref:
+            self.intake_service.reconcile_main_advancement_before_admission(project_id, change_name)
+
         # PHASE A: Pre-lock evidence preparation (no locks, no DB commits, all external/subprocess reads)
         evidence = (
             self.prepare_admission_evidence(
@@ -1153,7 +1180,9 @@ class SchedulerService:
         # PHASE B: Serialized DB authority (under advisory locks, single atomic DB transaction with retry)
         from minime.db.retry import TransactionRetryWrapper
 
-        def _phase_b_body() -> tuple[AdmissionDecision, SchedulerDecisionRecord, OrchestrationRun | None]:
+        def _phase_b_body() -> tuple[
+            AdmissionDecision, SchedulerDecisionRecord, OrchestrationRun | None
+        ]:
             global_key = derive_global_admission_lock_key()
             project_key = derive_project_admission_lock_key(project_id)
 
@@ -1229,8 +1258,12 @@ class SchedulerService:
                         cooldown_until=eval_result.cooldown_until,
                         concurrency_snapshot=concurrency_snapshot,
                         capacity_snapshot=capacity_snapshot,
-                        refusal_details=admission_result.refusal_details or {"code": refusal_code_str},
-                        run_id=str(admission_result.existing_run_id) if admission_result and getattr(admission_result, "existing_run_id", None) is not None else None,
+                        refusal_details=admission_result.refusal_details
+                        or {"code": refusal_code_str},
+                        run_id=str(admission_result.existing_run_id)
+                        if admission_result
+                        and getattr(admission_result, "existing_run_id", None) is not None
+                        else None,
                         evaluated_at=utc_now(),
                     )
                     self.uow.scheduler_decisions.save(decision_record)
@@ -1256,7 +1289,9 @@ class SchedulerService:
                     cooldown_until=eval_result.cooldown_until,
                     concurrency_snapshot=concurrency_snapshot,
                     capacity_snapshot=capacity_snapshot,
-                    run_id=str(run.run_id) if run and getattr(run, "run_id", None) is not None else None,
+                    run_id=str(run.run_id)
+                    if run and getattr(run, "run_id", None) is not None
+                    else None,
                     evaluated_at=utc_now(),
                 )
                 self.uow.scheduler_decisions.save(decision_record)
@@ -1350,12 +1385,20 @@ class SchedulerService:
                 return AdmissionDecision.ADMITTED, decision_record, run
 
             else:
-                if eval_result and eval_result.refusal_details and "code" in eval_result.refusal_details:
+                if (
+                    eval_result
+                    and eval_result.refusal_details
+                    and "code" in eval_result.refusal_details
+                ):
                     details = dict(eval_result.refusal_details)
                 elif refusal_code == AdmissionRefusalCode.CHANGE_ALREADY_ACTIVE:
                     active_runs = self.uow.orchestration_runs.list_runs(is_active=True)
                     existing = next(
-                        (r for r in active_runs if r.project_id == project_id and r.change_name == change_name),
+                        (
+                            r
+                            for r in active_runs
+                            if r.project_id == project_id and r.change_name == change_name
+                        ),
                         None,
                     )
                     details = {
@@ -1365,8 +1408,12 @@ class SchedulerService:
                 elif refusal_code == AdmissionRefusalCode.NOT_READY:
                     details = {"code": "NOT_READY"}
                     if "Definition of Ready unmet:" in reason_summary:
-                        reasons_part = reason_summary.split("Definition of Ready unmet:", 1)[1].strip()
-                        details["unmet_reasons"] = [r.strip() for r in reasons_part.split(";") if r.strip()]
+                        reasons_part = reason_summary.split("Definition of Ready unmet:", 1)[
+                            1
+                        ].strip()
+                        details["unmet_reasons"] = [
+                            r.strip() for r in reasons_part.split(";") if r.strip()
+                        ]
                 else:
                     details = {"code": refusal_code.value if refusal_code else "REFUSED"}
 
@@ -1388,7 +1435,9 @@ class SchedulerService:
                     concurrency_snapshot=concurrency_snapshot,
                     capacity_snapshot=capacity_snapshot,
                     refusal_details=details,
-                    run_id=str(details.get("existing_run_id")) if details.get("existing_run_id") is not None else None,
+                    run_id=str(details.get("existing_run_id"))
+                    if details.get("existing_run_id") is not None
+                    else None,
                     evaluated_at=utc_now(),
                 )
                 self.uow.scheduler_decisions.save(decision_record)
@@ -1423,6 +1472,7 @@ class SchedulerService:
                 claim_ctx = self.recovery_convergence_service.acquire_claim(f"run:{run.run_id}")
                 if claim_ctx is None:
                     from minime.domain.models import MissingRecoveryClaimContextError
+
                     raise MissingRecoveryClaimContextError(
                         f"Failed to acquire canonical run claim for run '{run.run_id}' after fresh admission."
                     )
@@ -1516,6 +1566,11 @@ class SchedulerService:
 
         for candidate in ranked_candidates:
             try:
+                # This mutating reconciliation command must precede pure admission
+                # evaluation and stays outside the advisory-lock transaction.
+                self.intake_service.reconcile_main_advancement_before_admission(
+                    candidate.project_id, candidate.change_name
+                )
                 eval_result = self.evaluate_admission(
                     candidate.project_id,
                     candidate.change_name,

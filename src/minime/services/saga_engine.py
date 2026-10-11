@@ -99,6 +99,7 @@ class SagaEngine:
             raise RuntimeError(f"Failed to recover active saga for {work_item_key}")
 
         from minime.db.savepoint import execute_with_savepoint_recovery
+
         session = getattr(self.uow, "session", None)
         if session is not None and hasattr(session, "begin_nested"):
             saved, recovery_res = execute_with_savepoint_recovery(
@@ -336,7 +337,6 @@ class SagaEngine:
         else:
             self.uow.orchestration_external_actions.reserve(action)
 
-
         event = Event(
             project_id="system",
             change_id=action_key,
@@ -424,7 +424,8 @@ class SagaEngine:
         # 2. Observation classification & remote check
         attempts = (
             self.uow.external_action_attempts.list_by_action_key(action_key)
-            if hasattr(self.uow, "external_action_attempts") and self.uow.external_action_attempts is not None
+            if hasattr(self.uow, "external_action_attempts")
+            and self.uow.external_action_attempts is not None
             else []
         )
         if action.last_dispatch_intent_id or action.remote_identifier or attempts:
@@ -436,12 +437,16 @@ class SagaEngine:
         if observation_fn is not None:
             obs_res = observation_fn()
             if obs_res is not None and getattr(obs_res, "outcome", None) == ExternalOutcome.SUCCESS:
-                remote_id = getattr(obs_res, "external_id", None) or str(getattr(obs_res, "data", ""))
+                remote_id = getattr(obs_res, "external_id", None) or str(
+                    getattr(obs_res, "data", "")
+                )
                 self.record_action_result(
                     action_key=action_key,
                     status=ExternalActionStatus.COMPLETED,
                     remote_identifier=remote_id,
-                    result_payload=getattr(obs_res, "data", None) if isinstance(getattr(obs_res, "data", None), dict) else None,
+                    result_payload=getattr(obs_res, "data", None)
+                    if isinstance(getattr(obs_res, "data", None), dict)
+                    else None,
                 )
                 is_valid = _check_fence_valid()
                 return FencedDispatchResult(
@@ -452,7 +457,9 @@ class SagaEngine:
                     fence_token=claim_context.fence_token if claim_context else 1,
                     is_stale=not is_valid,
                     remote_identifier=remote_id,
-                    result_payload=getattr(obs_res, "data", None) if isinstance(getattr(obs_res, "data", None), dict) else None,
+                    result_payload=getattr(obs_res, "data", None)
+                    if isinstance(getattr(obs_res, "data", None), dict)
+                    else None,
                 )
             elif obs_res is not None and getattr(obs_res, "outcome", None) in (
                 ExternalOutcome.FAILURE,
@@ -462,27 +469,39 @@ class SagaEngine:
                 from minime.domain.enums import ExternalReasonCode
 
                 obs_outcome = getattr(obs_res, "outcome", ExternalOutcome.FAILURE)
-                if obs_outcome == ExternalOutcome.FAILURE and getattr(obs_res, "reason_code", None) == ExternalReasonCode.NOT_FOUND:
+                if (
+                    obs_outcome == ExternalOutcome.FAILURE
+                    and getattr(obs_res, "reason_code", None) == ExternalReasonCode.NOT_FOUND
+                ):
                     observation_proven_absent = True
                 else:
-                    err_msg = getattr(obs_res, "error_message", None) or f"Observation outcome: {obs_outcome.value}"
+                    err_msg = (
+                        getattr(obs_res, "error_message", None)
+                        or f"Observation outcome: {obs_outcome.value}"
+                    )
                     status_enum = (
                         ExternalActionStatus.AMBIGUOUS
                         if obs_outcome == ExternalOutcome.AMBIGUOUS
                         else ExternalActionStatus.FAILED
                     )
-                    payload = {"retry_safety": "SAFE"} if action.action_type in (
-                        ExternalActionType.BRANCH_PUSH,
-                        ExternalActionType.PR_CREATE,
-                        ExternalActionType.ISSUE_CREATE,
-                        ExternalActionType.ISSUE_CLOSE,
-                        ExternalActionType.PROJECT_ITEM_ADD,
-                        ExternalActionType.PROJECT_ITEM_EDIT,
-                        ExternalActionType.BRANCH_DELETE,
-                        ExternalActionType.WORKTREE_DELETE,
-                        ExternalActionType.OPENSPEC_SYNC,
-                        ExternalActionType.OPENSPEC_ARCHIVE,
-                    ) else None
+                    payload = (
+                        {"retry_safety": "SAFE"}
+                        if action.action_type
+                        in (
+                            ExternalActionType.BRANCH_PUSH,
+                            ExternalActionType.PR_CREATE,
+                            ExternalActionType.ISSUE_CREATE,
+                            ExternalActionType.ISSUE_CLOSE,
+                            ExternalActionType.PROJECT_ITEM_ADD,
+                            ExternalActionType.PROJECT_ITEM_EDIT,
+                            ExternalActionType.BRANCH_DELETE,
+                            ExternalActionType.WORKTREE_DELETE,
+                            ExternalActionType.OPENSPEC_SYNC,
+                            ExternalActionType.OPENSPEC_ARCHIVE,
+                            ExternalActionType.INTAKE_ARTIFACT_PUBLISH,
+                        )
+                        else None
+                    )
                     self.record_action_result(
                         action_key=action_key,
                         status=status_enum,
@@ -515,7 +534,11 @@ class SagaEngine:
             )
 
         # 4. Atomic Commit Fenced Dispatch Intent (SHORT DB TRANSACTION BEFORE I/O)
-        if claim_context is not None and hasattr(self.uow, "claims") and self.uow.claims is not None:
+        if (
+            claim_context is not None
+            and hasattr(self.uow, "claims")
+            and self.uow.claims is not None
+        ):
             attempt_number = len(attempts) + 1
             self.uow.claims.commit_fenced_dispatch_intent(
                 claim_key=claim_context.claim_key,
@@ -528,7 +551,11 @@ class SagaEngine:
 
         # 5. Execute slow external mutation (NO DB LOCK HELD, WITH OPERATIONAL HEARTBEAT)
         heartbeat_failed = False
-        if claim_context is not None and hasattr(self.uow, "claims") and self.uow.claims is not None:
+        if (
+            claim_context is not None
+            and hasattr(self.uow, "claims")
+            and self.uow.claims is not None
+        ):
             from minime.services.recovery_convergence_service import OperationalHeartbeat
 
             renew_claim = getattr(self.uow, "renew_claim_heartbeat_isolated", None)
@@ -543,6 +570,7 @@ class SagaEngine:
                         fence_token=context.fence_token,
                         lease_seconds=lease,
                     )
+
             hb = OperationalHeartbeat(
                 claim_context=claim_context,
                 interval_seconds=self.heartbeat_interval_seconds,
@@ -583,6 +611,7 @@ class SagaEngine:
                 ExternalActionType.WORKTREE_DELETE,
                 ExternalActionType.OPENSPEC_SYNC,
                 ExternalActionType.OPENSPEC_ARCHIVE,
+                ExternalActionType.INTAKE_ARTIFACT_PUBLISH,
             ):
                 payload.setdefault("retry_safety", "SAFE")
             self.record_action_result(
@@ -605,6 +634,7 @@ class SagaEngine:
                 ExternalActionType.WORKTREE_DELETE,
                 ExternalActionType.OPENSPEC_SYNC,
                 ExternalActionType.OPENSPEC_ARCHIVE,
+                ExternalActionType.INTAKE_ARTIFACT_PUBLISH,
             ):
                 payload.setdefault("retry_safety", "SAFE")
             self.record_action_result(
@@ -631,7 +661,9 @@ class SagaEngine:
 
         # 7. Post-I/O Fence CAS check to authorize lifecycle application
         is_valid = _check_fence_valid()
-        final_outcome = outcome or (ExternalOutcome.SUCCESS if res is True else ExternalOutcome.FAILURE)
+        final_outcome = outcome or (
+            ExternalOutcome.SUCCESS if res is True else ExternalOutcome.FAILURE
+        )
         return FencedDispatchResult(
             action_key=action_key,
             result=res,
@@ -756,12 +788,17 @@ class SagaEngine:
 
         if saga.status == SagaStatus.BLOCKED:
             saga = self.uow.durable_sagas.update_status(
-                saga.id, status=SagaStatus.IN_PROGRESS, blocking_reason=None, claim_context=claim_context
+                saga.id,
+                status=SagaStatus.IN_PROGRESS,
+                blocking_reason=None,
+                claim_context=claim_context,
             )
 
         if saga.saga_type == SagaType.INTAKE:
             if intake_service is not None:
-                intake_service.prepare_work_item(saga.project_id, saga.work_item_key, claim_context=claim_context)
+                intake_service.prepare_work_item(
+                    saga.project_id, saga.work_item_key, claim_context=claim_context
+                )
         elif saga.saga_type == SagaType.CLOSURE:
             if post_merge_service is not None:
                 post_merge_service.reconcile_post_merge(
