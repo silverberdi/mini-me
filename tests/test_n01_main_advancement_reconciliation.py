@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import subprocess
 import uuid
 from pathlib import Path
@@ -395,6 +396,15 @@ def test_post_push_observation_recovers_without_second_push(intake_env, monkeypa
     )
     assert action is not None
     assert action.status.value == "COMPLETED"
+    expected_fp = hashlib.sha256(
+        f"{env['ownership'].base_sha}:{env['p_sha']}:{_git(env['bare'], 'rev-parse', 'refs/heads/main')}".encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    assert action.request_fingerprint == expected_fp
+    assert len(action.request_fingerprint) == 64
+    assert len(action.action_key) <= 128
+    assert len(action.target_identity) <= 255
 
 
 def test_main_advance_cas_race_never_overwrites_competing_ref(intake_env, monkeypatch):
@@ -1010,3 +1020,229 @@ def test_unpublished_owned_intake_cannot_use_legacy_admission_default(intake_env
         scheduler.admit_work_item("mini-me", env["change_name"], drive_admitted=True)
     assert env["uow"].orchestration_runs.list_runs(is_active=True) == []
     assert env["uow"].jobs.list_active_jobs() == []
+
+
+def test_main_advancement_fingerprint_determinism_and_length():
+    base1 = "ea5d9a9cdea7d1ae54c3e8fdcceefaa2b017ebc8"
+    pub1 = "d7c54f672ec2f982a80b86c82d478cfd49a32b18"
+    new_base1 = "03232740197835a430ead07ef40ef95ee61cd7c2"
+
+    raw = f"{base1}:{pub1}:{new_base1}".encode("utf-8")
+    fp1 = hashlib.sha256(raw).hexdigest()
+
+    # 1. Exact 64 hex characters
+    assert len(fp1) == 64
+    assert all(c in "0123456789abcdef" for c in fp1)
+
+    # 2. Determinism for identical inputs
+    fp2 = hashlib.sha256(f"{base1}:{pub1}:{new_base1}".encode("utf-8")).hexdigest()
+    assert fp1 == fp2
+
+    # 3. Sensitivity to changes in any of the three SHAs
+    diff_base = hashlib.sha256(f"1{base1[1:]}:{pub1}:{new_base1}".encode("utf-8")).hexdigest()
+    assert diff_base != fp1
+    assert len(diff_base) == 64
+
+    diff_pub = hashlib.sha256(f"{base1}:1{pub1[1:]}:{new_base1}".encode("utf-8")).hexdigest()
+    assert diff_pub != fp1
+    assert len(diff_pub) == 64
+
+    diff_new_base = hashlib.sha256(f"{base1}:{pub1}:1{new_base1[1:]}".encode("utf-8")).hexdigest()
+    assert diff_new_base != fp1
+    assert len(diff_new_base) == 64
+
+    # 4. Sensitivity to ordering (non-commutative)
+    diff_order = hashlib.sha256(f"{pub1}:{base1}:{new_base1}".encode("utf-8")).hexdigest()
+    assert diff_order != fp1
+
+
+def test_no_remote_push_occurs_before_durable_reservation(intake_env, monkeypatch):
+    env = intake_env
+    _advance_main(env)
+    service = env["service"]
+    events: list[str] = []
+
+    original_execute_action = env["service"].saga_engine.execute_fenced_external_action
+
+    def tracked_execute_action(*args, **kwargs):
+        events.append(f"fenced_action:{kwargs.get('action_type')}")
+        return original_execute_action(*args, **kwargs)
+
+    real_run = __import__("minime.services.intake_service", fromlist=["subprocess"]).subprocess.run
+
+    def tracked_run(command, *args, **kwargs):
+        if command[:2] == ["git", "push"]:
+            events.append("git_push")
+        return real_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(
+        env["service"].saga_engine, "execute_fenced_external_action", tracked_execute_action
+    )
+    monkeypatch.setattr("minime.services.intake_service.subprocess.run", tracked_run)
+
+    p2 = service.reconcile_main_advancement_before_admission("mini-me", env["change_name"])
+    assert p2
+    assert "git_push" in events
+    action_event_idx = events.index("fenced_action:ExternalActionType.INTAKE_ARTIFACT_PUBLISH")
+    push_event_idx = events.index("git_push")
+    assert action_event_idx < push_event_idx, (
+        f"Durable reservation must precede git push. Events: {events}"
+    )
+
+
+def test_reconciliation_with_failed_history_persists_64char_action(intake_env):
+    env = intake_env
+    historical, active = _insert_failed_history_before_active(env)
+    new_b = _advance_main(env)
+    service = env["service"]
+
+    p2 = service.reconcile_main_advancement_before_admission("mini-me", env["change_name"])
+    assert p2
+
+    # Active ownership is updated to P2 and new_b
+    updated_active = env["uow"].intake_workspace_ownerships.get_by_id(active.workspace_id)
+    assert updated_active.base_sha == new_b
+    assert updated_active.published_sha == p2
+
+    # Historical ownership is completely unchanged
+    untouched_historical = env["uow"].intake_workspace_ownerships.get_by_id(historical.workspace_id)
+    assert untouched_historical.published_sha is None
+    assert untouched_historical.publication_state == IntakeWorkspacePublicationState.UNPUBLISHED
+
+    # Action is persisted with exactly 64-char fingerprint
+    action_key = f"intake_main_advance_publish:mini-me:{env['change_name']}:{new_b}"
+    action = env["uow"].orchestration_external_actions.get_by_action_key(action_key)
+    assert action is not None
+    assert len(action.request_fingerprint) == 64
+    assert action.status.value == "COMPLETED"
+
+
+def test_action_reservation_with_real_postgresql_isolated():
+    import os
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+
+    from minime.db.models import Base, ProjectModel
+    from minime.db.repository import PostgresPersistenceUnitOfWork
+    from minime.domain.enums import ExternalActionStatus, ExternalActionType, SagaStatus, SagaType
+    from minime.domain.models import DurableSaga, OrchestrationExternalAction
+
+    candidate_urls = [
+        os.environ.get("MINIME_TEST_DATABASE_URL"),
+        "postgresql+psycopg://silveriobernal@localhost:54333/minime_test",
+        "postgresql+psycopg://testuser@localhost:54333/minime_test",
+    ]
+    engine = None
+    for url in candidate_urls:
+        if not url:
+            continue
+        try:
+            candidate_eng = create_engine(url, pool_pre_ping=True)
+            with candidate_eng.connect() as conn:
+                conn.execute(
+                    candidate_eng.dialect.statement_compiler(
+                        candidate_eng.dialect, None
+                    ).process.__self__.compile(candidate_eng.dialect)
+                    if False
+                    else None or __import__("sqlalchemy").text("SELECT 1")
+                )
+            engine = candidate_eng
+            break
+        except Exception:
+            continue
+
+    if engine is None:
+        pytest.skip("Local PostgreSQL test instance not available on port 54333")
+
+    Base.metadata.create_all(engine)
+
+    base1 = "ea5d9a9cdea7d1ae54c3e8fdcceefaa2b017ebc8"
+    pub1 = "d7c54f672ec2f982a80b86c82d478cfd49a32b18"
+    new_base1 = "03232740197835a430ead07ef40ef95ee61cd7c2"
+
+    fp_64 = hashlib.sha256(f"{base1}:{pub1}:{new_base1}".encode("utf-8")).hexdigest()
+    raw_122 = f"{base1}:{pub1}:{new_base1}"
+
+    test_item = f"test-item-{uuid.uuid4().hex[:8]}"
+    with Session(engine) as s:
+        uow = PostgresPersistenceUnitOfWork(s)
+        if not uow.projects.get_by_id("mini-me"):
+            proj = ProjectModel(
+                id="mini-me",
+                display_name="mini-me",
+                openspec_path="openspec",
+                repository="silverberdi/mini-me",
+            )
+            s.add(proj)
+            s.commit()
+
+        saga_id = str(uuid.uuid4())
+        saga = DurableSaga(
+            id=saga_id,
+            project_id="mini-me",
+            work_item_key=test_item,
+            saga_type=SagaType.INTAKE,
+            status=SagaStatus.IN_PROGRESS,
+            current_phase="RECONCILING",
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        )
+        uow.durable_sagas.save(saga)
+        s.commit()
+
+        # Step 1: Prove PostgreSQL strictly rejects raw 122-char string with StringDataRightTruncation
+        bad_action_key = f"intake_main_advance_publish:mini-me:{test_item}:bad"
+        bad_action = OrchestrationExternalAction(
+            id=str(uuid.uuid4()),
+            run_id=None,
+            saga_id=saga_id,
+            action_key=bad_action_key,
+            action_type=ExternalActionType.INTAKE_ARTIFACT_PUBLISH,
+            target_identity=test_item,
+            request_fingerprint=raw_122,
+            generation=1,
+            status=ExternalActionStatus.RESERVED,
+            reserved_at=utc_now(),
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        )
+        uow.orchestration_external_actions.reserve(bad_action)
+        with pytest.raises(Exception) as exc_info:
+            s.commit()
+        assert "value too long for type character varying(64)" in str(exc_info.value)
+        s.rollback()
+
+        # Step 2: Prove PostgreSQL cleanly accepts and commits 64-char SHA-256 fingerprint
+        good_action_key = f"intake_main_advance_publish:mini-me:{test_item}:{new_base1}"
+        good_action = OrchestrationExternalAction(
+            id=str(uuid.uuid4()),
+            run_id=None,
+            saga_id=saga_id,
+            action_key=good_action_key,
+            action_type=ExternalActionType.INTAKE_ARTIFACT_PUBLISH,
+            target_identity=test_item,
+            request_fingerprint=fp_64,
+            generation=1,
+            status=ExternalActionStatus.RESERVED,
+            reserved_at=utc_now(),
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        )
+        uow.orchestration_external_actions.reserve(good_action)
+        s.commit()
+
+        # Step 3: Query back and verify persistence & length
+        saved = uow.orchestration_external_actions.get_by_action_key(good_action_key)
+        assert saved is not None
+        assert saved.request_fingerprint == fp_64
+        assert len(saved.request_fingerprint) == 64
+        assert saved.action_type == ExternalActionType.INTAKE_ARTIFACT_PUBLISH
+        assert len(saved.action_key) <= 128
+        assert len(saved.target_identity) <= 255
+
+        # Step 4: Idempotence - reserving existing action key again preserves identity
+        uow.orchestration_external_actions.reserve(good_action)
+        s.commit()
+        again = uow.orchestration_external_actions.get_by_action_key(good_action_key)
+        assert again.action_id == saved.action_id

@@ -37,6 +37,12 @@ The system MUST track intake workspace ownership via a dedicated `IntakeWorkspac
 - **WHEN** canonical `origin/main` advances to commit `B` before admission (where `P` is not merged and `A != B`)
 - **THEN** scheduler admission MUST reject execution from stale base `A` and materialize a new published candidate onto current main `B` without mutating commit `P`, CAS-updating `published_ref` to new `published_sha = P2`. If materialization conflicts, the item MUST transition to `NEEDS_HUMAN` (`main_advancement_conflict_detected`).
 
+#### SCENARIO: Main Advancement External Action Request Fingerprint Storage Compliance
+- **GIVEN** an active published intake workspace undergoing main-advancement reconciliation
+- **WHEN** the `INTAKE_ARTIFACT_PUBLISH` external action is reserved and executed
+- **THEN** its `request_fingerprint` MUST be computed as a deterministic 64-hex SHA-256 digest of the ordered triple `base_sha:published_sha:new_base_sha`
+- **AND** the action MUST be successfully persisted into PostgreSQL without exceeding the `VARCHAR(64)` column limit
+
 #### SCENARIO: Deterministic Execution Handoff Algorithm
 - **GIVEN** an admitted execution run (`OrchestrationWorktreeOwnership`)
 - **WHEN** execution worktree creation executes
