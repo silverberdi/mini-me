@@ -10,7 +10,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from minime.adapters.github import GitHubAdapter
+from minime.adapters.github import GitHubAdapter, GitHubAuthorizationError
 from minime.adapters.openspec import OpenSpecAdapter
 from minime.domain.enums import (
     ChangeStatus,
@@ -1913,9 +1913,19 @@ class IntakeService:
                 remote_url = res.stdout.strip()
                 auth = self.github_adapter._git_auth_bundle(remote_url)
                 return dict(auth.env), auth.secrets
+            return {}, ()
+        except GitHubAuthorizationError as exc:
+            safe_msg = redact_secrets(str(exc))
+            logger.warning("GitHub App authorization failed for remote '%s': %s", remote, safe_msg)
+            raise GitHubAuthorizationError(
+                f"Could not authorize Git operation for remote '{remote}': {safe_msg}"
+            ) from None
         except Exception as exc:
-            logger.warning("Failed to obtain Git auth args for remote '%s': %s", remote, exc)
-        return {}, ()
+            safe_msg = redact_secrets(str(exc))
+            logger.warning("Failed to obtain Git auth bundle for remote '%s': %s", remote, safe_msg)
+            raise GitHubAuthorizationError(
+                f"Could not obtain Git authorization for remote '{remote}': {safe_msg}"
+            ) from None
 
     def _observe_remote_ref(
         self,
@@ -1943,8 +1953,11 @@ class IntakeService:
                 env=env,
                 check=False,
             )
+        except GitHubAuthorizationError as exc:
+            logger.warning("git ls-remote authorization failed for ref '%s': %s", ref, redact_secrets(str(exc)))
+            return None, False
         except Exception as exc:
-            logger.warning("git ls-remote raised for ref '%s': %s", ref, exc)
+            logger.warning("git ls-remote raised for ref '%s': %s", ref, redact_secrets(str(exc)))
             return None, False
 
         if ls_res.returncode != 0:
@@ -1999,7 +2012,14 @@ class IntakeService:
 
         push_needed = False
         push_cmd: list[str] | None = None
-        auth_env, auth_secrets = self._get_git_auth_bundle(managed_root, remote)
+        try:
+            auth_env, auth_secrets = self._get_git_auth_bundle(managed_root, remote)
+        except GitHubAuthorizationError as exc:
+            self._mark_publication_failed(ownership)
+            raise RuntimeError(
+                f"PUBLICATION_TRANSPORT_FAILURE: Could not obtain required Git authorization for "
+                f"'{published_ref}': {redact_secrets(str(exc))}"
+            ) from None
 
         if ownership.published_sha is None:
             # Initial publication enforces an atomic expected-old-ref condition: the

@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from minime.adapters.github import GitHubAdapter, _GitAuthBundle
+from minime.adapters.github import GitHubAdapter, GitHubAuthorizationError, _GitAuthBundle
 from minime.domain.enums import (
     IntakeWorkspaceCreationState,
     IntakeWorkspacePublicationState,
@@ -198,6 +198,9 @@ def test_publish_reuses_existing_publication_when_sha_matches(tmp_path):
 
 def test_publish_raises_cas_mismatch_on_conflicting_remote_sha(tmp_path):
     uow = MagicMock()
+    uow.project_managed_repository_bindings.get_by_project_id.return_value = MagicMock(
+        remote_name="origin", managed_repository_root=str(tmp_path)
+    )
     adapter = MagicMock()
     adapter._git_auth_bundle.return_value = _GitAuthBundle((), (), {})
     service = IntakeService(uow=uow, github_adapter=adapter)
@@ -228,6 +231,9 @@ def test_publish_raises_cas_mismatch_on_conflicting_remote_sha(tmp_path):
 
 def test_publish_transport_failure_does_not_mutate_blindly(tmp_path):
     uow = MagicMock()
+    uow.project_managed_repository_bindings.get_by_project_id.return_value = MagicMock(
+        remote_name="origin", managed_repository_root=str(tmp_path)
+    )
     adapter = MagicMock()
     adapter._git_auth_bundle.return_value = _GitAuthBundle((), (), {})
     service = IntakeService(uow=uow, github_adapter=adapter)
@@ -296,3 +302,86 @@ def test_ownership_contract_and_workspace_isolation_preserved(tmp_path):
     assert ownership.base_sha == "ea5d9a9cdea7d1ae54c3e8fdcceefaa2b017ebc8"
     assert ownership.head_sha == "d7c54f672ec2f982a80b86c82d478cfd49a32b18"
     assert ownership.creation_state == IntakeWorkspaceCreationState.ACTIVE
+
+
+def test_get_git_auth_bundle_propagates_auth_error_without_leaking_secrets(tmp_path):
+    uow = MagicMock()
+    adapter = MagicMock()
+    secret_raw = "ghs_1234567890secrettoken"
+    secret_token = f"token={secret_raw}"
+    adapter._git_auth_bundle.side_effect = GitHubAuthorizationError(
+        f"Authorization failed for {secret_token}"
+    )
+    service = IntakeService(uow=uow, github_adapter=adapter)
+
+    def mock_run(cmd, *args, **kwargs):
+        if cmd[1] == "remote":
+            return subprocess.CompletedProcess(cmd, 0, stdout="https://github.com/silverberdi/mini-me.git\n", stderr="")
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="failed")
+
+    with patch("minime.services.intake_service.subprocess.run", side_effect=mock_run):
+        with pytest.raises(GitHubAuthorizationError) as exc_info:
+            service._get_git_auth_bundle(str(tmp_path), "origin")
+
+        assert "Could not authorize Git operation" in str(exc_info.value)
+        assert secret_raw not in str(exc_info.value)
+        assert "token=[REDACTED]" in str(exc_info.value)
+
+
+def test_publish_fails_closed_without_executing_push_when_auth_fails(tmp_path):
+    uow = MagicMock()
+    uow.project_managed_repository_bindings.get_by_project_id.return_value = MagicMock(
+        remote_name="origin", managed_repository_root=str(tmp_path)
+    )
+    adapter = MagicMock()
+    adapter._git_auth_bundle.side_effect = GitHubAuthorizationError("Installation token expired")
+    service = IntakeService(uow=uow, github_adapter=adapter)
+
+    project = Project(project_id="mini-me", display_name="mini me", repository="silverberdi/mini-me")
+    ownership = IntakeWorkspaceOwnership(
+        workspace_id="ws-123",
+        project_id="mini-me",
+        saga_id="saga-123",
+        item_key="test-change",
+        change_name="test-change",
+        canonical_workspace_path=str(tmp_path),
+        canonical_repository_identity="silverberdi/mini-me",
+        base_sha="base-sha",
+        head_sha="head-sha-123",
+        creation_state=IntakeWorkspaceCreationState.ACTIVE,
+        publication_state=IntakeWorkspacePublicationState.UNPUBLISHED,
+    )
+
+    run_calls = []
+
+    def mock_run(cmd, *args, **kwargs):
+        run_calls.append(cmd)
+        if cmd[1] == "remote":
+            return subprocess.CompletedProcess(cmd, 0, stdout="https://github.com/silverberdi/mini-me.git\n", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    with patch("minime.services.intake_service.subprocess.run", side_effect=mock_run):
+        with pytest.raises(RuntimeError) as exc_info:
+            service._publish_intake_artifacts_cas(ownership, project)
+
+        assert "PUBLICATION_TRANSPORT_FAILURE" in str(exc_info.value)
+        assert ownership.publication_state == IntakeWorkspacePublicationState.PUBLICATION_FAILED
+        push_cmds = [cmd for cmd in run_calls if "push" in cmd]
+        assert len(push_cmds) == 0
+
+
+def test_get_git_auth_bundle_handles_local_remotes_cleanly(tmp_path):
+    uow = MagicMock()
+    adapter = MagicMock()
+    adapter._git_auth_bundle.return_value = _GitAuthBundle((), (), {})
+    service = IntakeService(uow=uow, github_adapter=adapter)
+
+    def mock_run(cmd, *args, **kwargs):
+        if cmd[1] == "remote":
+            return subprocess.CompletedProcess(cmd, 0, stdout="/tmp/local-repo.git\n", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    with patch("minime.services.intake_service.subprocess.run", side_effect=mock_run):
+        env_dict, secrets = service._get_git_auth_bundle(str(tmp_path), "local")
+        assert env_dict == {}
+        assert secrets == ()
