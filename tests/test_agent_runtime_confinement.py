@@ -197,6 +197,129 @@ def test_antigravity_auth_is_projected_as_one_private_file_and_rotation_is_not_p
     assert "host-only" in (gemini_home / "settings.json").read_text(encoding="utf-8")
 
 
+def _fake_antigravity_oauth(*, access="old-access-secret", refresh="stable-refresh-secret"):
+    return {
+        "token": {
+            "access_token": access,
+            "token_type": "Bearer",
+            "refresh_token": refresh,
+            "expiry": "2026-10-12T12:00:00Z",
+        },
+        "auth_method": "oauth",
+    }
+
+
+@pytest.mark.parametrize(
+    "change,expected",
+    [
+        ({"access_token": "new-access-secret", "expiry": "2026-10-12T13:00:00Z"}, True),
+        ({"refresh_token": "rotated-refresh-secret"}, False),
+        ({"token_type": "Other"}, False),
+        ({"extra_field": "unexpected"}, False),
+        ({"access_token": ""}, False),
+    ],
+)
+def test_antigravity_oauth_rotation_classifier_accepts_access_refresh_only(change, expected):
+    from minime.services.agent_confinement import AgentRuntimeState
+
+    original = _fake_antigravity_oauth()
+    changed = json.loads(json.dumps(original))
+    changed["token"].update(change)
+    assert AgentRuntimeState._is_access_refresh_only(
+        json.dumps(original).encode(), json.dumps(changed).encode()
+    ) is expected
+
+
+def test_antigravity_access_refresh_detection_keeps_persistent_source_unchanged(tmp_path: Path):
+    confinement, _worktree, _runtime = _confinement(tmp_path)
+    source = tmp_path / "ag-oauth-token"
+    original = _fake_antigravity_oauth()
+    source.write_text(json.dumps(original), encoding="utf-8")
+    source.chmod(0o600)
+
+    with confinement.runtime_session({}, antigravity_auth_source=str(source)) as runtime:
+        changed = _fake_antigravity_oauth(access="new-access-secret")
+        changed["token"]["expiry"] = "2026-10-12T13:00:00Z"
+        runtime.antigravity_auth_copy.write_text(json.dumps(changed), encoding="utf-8")
+        assert runtime.observe_credential_state() is True
+        assert runtime.credential_access_refresh_only is True
+        private_root = runtime.host_root
+
+    assert not private_root.exists()
+    assert json.loads(source.read_text(encoding="utf-8")) == original
+
+
+@pytest.mark.skipif(
+    platform.system() != "Linux" or not shutil.which("bwrap"),
+    reason="real Bubblewrap is required to prove stdout redaction of refreshed credentials",
+)
+def test_real_bubblewrap_access_refresh_redacts_new_token_and_preserves_result(tmp_path: Path):
+    confinement, worktree, _runtime = _confinement(tmp_path)
+    source = tmp_path / "ag-oauth-token"
+    source.write_text(json.dumps(_fake_antigravity_oauth()), encoding="utf-8")
+    source.chmod(0o600)
+    script = (
+        "import json,os,pathlib; "
+        "p=pathlib.Path(os.environ['HOME'])/'.gemini'/'antigravity-cli'/'antigravity-oauth-token'; "
+        "d=json.loads(p.read_text()); "
+        "d['token']['access_token']='new-access-secret'; "
+        "d['token']['expiry']='2026-10-12T13:00:00Z'; "
+        "p.write_text(json.dumps(d)); "
+        "print('review-result new-access-secret old-access-secret')"
+    )
+    result = asyncio.run(
+        confinement.run_confined_async_subprocess(
+            [sys.executable, "-c", script],
+            cwd=str(worktree),
+            input_bytes=None,
+            timeout_seconds=10,
+            env=os.environ.copy(),
+            antigravity_auth_source=str(source),
+        )
+    )
+    assert result.returncode == 0
+    assert result.credential_rotation_detected is True
+    assert result.credential_access_refresh_only is True
+    assert b"review-result" in result.stdout
+    assert b"new-access-secret" not in result.stdout + result.stderr
+    assert b"old-access-secret" not in result.stdout + result.stderr
+    assert json.loads(source.read_text(encoding="utf-8")) == _fake_antigravity_oauth()
+
+
+@pytest.mark.skipif(
+    platform.system() != "Linux" or not shutil.which("bwrap"),
+    reason="real Bubblewrap is required to prove refresh-authority rotation fails closed",
+)
+def test_real_bubblewrap_refresh_authority_rotation_suppresses_output(tmp_path: Path):
+    confinement, worktree, _runtime = _confinement(tmp_path)
+    source = tmp_path / "ag-oauth-token"
+    source.write_text(json.dumps(_fake_antigravity_oauth()), encoding="utf-8")
+    source.chmod(0o600)
+    script = (
+        "import json,os,pathlib; "
+        "p=pathlib.Path(os.environ['HOME'])/'.gemini'/'antigravity-cli'/'antigravity-oauth-token'; "
+        "d=json.loads(p.read_text()); "
+        "d['token']['refresh_token']='rotated-refresh-secret'; "
+        "p.write_text(json.dumps(d)); "
+        "print('sensitive-output rotated-refresh-secret')"
+    )
+    result = asyncio.run(
+        confinement.run_confined_async_subprocess(
+            [sys.executable, "-c", script],
+            cwd=str(worktree),
+            input_bytes=None,
+            timeout_seconds=10,
+            env=os.environ.copy(),
+            antigravity_auth_source=str(source),
+        )
+    )
+    assert result.credential_rotation_detected is True
+    assert result.credential_access_refresh_only is False
+    assert result.stdout == b""
+    assert b"rotated-refresh-secret" not in result.stderr
+    assert json.loads(source.read_text(encoding="utf-8")) == _fake_antigravity_oauth()
+
+
 def test_antigravity_auth_source_rejects_symlinks_and_unsafe_permissions(tmp_path: Path):
     confinement, _worktree, _runtime = _confinement(tmp_path)
     source = tmp_path / "agy-token"
@@ -297,7 +420,10 @@ def test_real_bubblewrap_agy_models_authenticates_without_inference(tmp_path: Pa
     )
     # `agy models` performs auth/catalog observation only; it sends no model prompt.
     assert result.returncode == 0, "confined `agy models` authentication/catalog check failed"
-    assert result.credential_rotation_detected is False
+    # A real OAuth access-token refresh is legitimate only if its refresh
+    # authority and all other metadata are unchanged.
+    assert not result.credential_rotation_detected or result.credential_access_refresh_only
+    assert b"Provider credential rotation was not persisted." not in result.stderr
     assert b"antigravity-oauth-token" not in result.stdout + result.stderr
 
 
