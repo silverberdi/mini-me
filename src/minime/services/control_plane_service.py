@@ -685,8 +685,32 @@ class ControlPlaneService:
             run.run_id, source=RecoverySource.CONTROL_PLANE, force=True
         )
         resumed_run = self.uow.orchestration_runs.get_by_id(run.run_id) or run
-
-        summary = f"Run resumed successfully at stage {resumed_run.current_stage.value}."
+        linked_job = (
+            self.uow.jobs.get_by_id(resumed_run.active_job_id)
+            if resumed_run.active_job_id
+            else None
+        )
+        job_status = linked_job.status.value if linked_job else None
+        continuation_active = bool(
+            resumed_run.is_active
+            and linked_job
+            and linked_job.status
+            in {
+                JobStatus.RUNNING,
+                JobStatus.CHECKS_RUNNING,
+                JobStatus.REVIEW_RUNNING,
+                JobStatus.AUDIT_RUNNING,
+            }
+        )
+        run_active = bool(resumed_run.is_active)
+        outcome = resumed_run.stop_outcome.value if resumed_run.stop_outcome else "NONE"
+        job_result = job_status or "NO_LINKED_JOB"
+        summary = (
+            f"Continue request processed; persisted run_active={str(run_active).lower()}, "
+            f"stage={resumed_run.current_stage.value}, outcome={outcome}, "
+            f"linked_job_status={job_result}, "
+            f"execution_active={str(continuation_active).lower()}."
+        )
         record = OperatorActionRecord(
             action_request_id=request.action_request_id,
             project_id=request.project_id,
@@ -703,7 +727,16 @@ class ControlPlaneService:
             resulting_outcome=resumed_run.stop_outcome.value if resumed_run.stop_outcome else None,
             resulting_gate=resumed_run.human_gate.value if resumed_run.human_gate else None,
             parameters_json=sanitized_params,
-            result_payload_json={"resumed_stage": resumed_run.current_stage.value},
+            result_payload_json={
+                "request_processed": True,
+                "run_active": run_active,
+                "execution_active": continuation_active,
+                "resulting_stage": resumed_run.current_stage.value,
+                "resulting_outcome": resumed_run.stop_outcome.value
+                if resumed_run.stop_outcome
+                else None,
+                "linked_job_status": job_status,
+            },
         )
         self.uow.operator_actions.save(record)
         self.uow.events.save(
@@ -717,6 +750,9 @@ class ControlPlaneService:
                     "change_name": request.change_name,
                     "run_id": request.run_id,
                     "stage": resumed_run.current_stage.value,
+                    "run_active": run_active,
+                    "execution_active": continuation_active,
+                    "linked_job_status": job_status,
                 },
                 timestamp=utc_now(),
             )
@@ -731,7 +767,16 @@ class ControlPlaneService:
             resulting_stage=resumed_run.current_stage,
             resulting_outcome=resumed_run.stop_outcome,
             resulting_gate=resumed_run.human_gate,
-            payload={"resumed_stage": resumed_run.current_stage.value},
+            payload={
+                "request_processed": True,
+                "run_active": run_active,
+                "execution_active": continuation_active,
+                "resulting_stage": resumed_run.current_stage.value,
+                "resulting_outcome": resumed_run.stop_outcome.value
+                if resumed_run.stop_outcome
+                else None,
+                "linked_job_status": job_status,
+            },
         )
 
     def _execute_retry(

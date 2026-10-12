@@ -13,14 +13,25 @@ The system SHALL continue an existing Run and its linked Job only through canoni
 - **WHEN** repository identity, ownership, branch, base SHA, recovery snapshot, integration base, or published artifact identity cannot be proven
 - **THEN** continuation fails closed without adopting an arbitrary directory or restoring terminal ownership by direct mutation
 
-#### Scenario: Main advanced after the prior attempt
-- **WHEN** the current canonical base differs from the durable worktree source base and the configured integration policy cannot prove safe reconstruction
+#### Scenario: Main advanced as a descendant after the prior attempt
+- **WHEN** the authoritative remote base is C and the durable worktree source base is B
+- **AND** an exact authenticated fetch resolves to C when the local managed base ref is stale
+- **AND** the local managed base ref is an ancestor of C
+- **AND** Git proves B is an ancestor of C
+- **AND** a second authoritative remote observation still reports C before recreation
+- **THEN** WorktreeManager reconstructs the preserved recovery branch from its original B-based snapshot
+- **AND** ownership, WorktreeInfo, Run, and Job continue to record B as their source base
+- **AND** C is retained only as the observed current integration base, without rewriting historical provenance
+
+#### Scenario: Main diverged, was rewritten, or remote observation is ambiguous
+- **WHEN** B or the local managed base is not an ancestor of authoritative remote base C
+- **OR** the authenticated fetch does not equal the SHA returned by remote observation
 - **THEN** WorktreeManager blocks reconstruction and preserves existing Run/Job/worktree evidence
 
-#### Scenario: Remote main advanced while the managed local ref is stale
-- **WHEN** the bound repository's authoritative remote base ref differs from the persisted source base
-- **THEN** WorktreeManager blocks reconstruction even if the managed checkout's local base ref is unchanged
-- **AND** it observes the ref using the existing non-interactive GitHub App Git authority
+#### Scenario: CONTINUE request completes but execution does not remain active
+- **WHEN** the Control Plane processes CONTINUE and the synchronous continuation reaches a stopped, waiting, or failed persisted state
+- **THEN** the action result reports the actual persisted Run outcome and linked Job status
+- **AND** it does not claim that execution resumed successfully
 
 #### Scenario: Recovery continues after a local environment failure
 - **WHEN** the prior attempt is durably recorded as an environment/provider infrastructure failure with no candidate and a valid recovery snapshot

@@ -8,6 +8,7 @@ import inspect
 import json
 import logging
 import os
+import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
@@ -25,6 +26,7 @@ from minime.domain.enums import (
     GitOperationStatus,
     JobStatus,
     OrchestrationStage,
+    OrchestrationStopOutcome,
     WorkspaceOperation,
     WorktreeCreationState,
 )
@@ -1630,6 +1632,16 @@ class WorktreeManager:
             canonical_base_branch = canonical_base_branch[len(remote_prefix) :]
         elif canonical_base_branch.startswith("origin/"):
             canonical_base_branch = canonical_base_branch.removeprefix("origin/")
+        project_repo = getattr(self.uow, "projects", None)
+        project = project_repo.get_by_id(project_id) if project_repo else None
+        if not project or not project.base_branch:
+            refuse("the project's canonical base branch is unavailable.")
+        declared_base_branch = project.base_branch.removeprefix("refs/heads/")
+        for prefix in (remote_prefix, "origin/"):
+            if declared_base_branch.startswith(prefix):
+                declared_base_branch = declared_base_branch.removeprefix(prefix)
+        if declared_base_branch != canonical_base_branch:
+            refuse("requested base branch conflicts with the project's canonical base branch.")
         remote_ref = f"refs/heads/{canonical_base_branch}"
         try:
             remote_observation = await self._git(
@@ -1640,8 +1652,74 @@ class WorktreeManager:
         remote_lines = [line.split() for line in remote_observation.splitlines() if line.strip()]
         if len(remote_lines) != 1 or len(remote_lines[0]) != 2 or remote_lines[0][1] != remote_ref:
             refuse("canonical remote base ref observation was missing or ambiguous.")
-        if remote_lines[0][0] != ownership.source_base_sha:
-            refuse("canonical remote base branch advanced after the original attempt.")
+        remote_base_sha = remote_lines[0][0]
+        observation_ref = f"refs/minime/observed-base/{uuid.uuid4().hex}"
+        try:
+            if remote_base_sha != current_base_sha:
+                # Resolve a stale-but-not-divergent managed ref using the
+                # existing authenticated Git authority. Fetch only the exact
+                # observed base into a disposable private ref; never move the
+                # managed base branch or its working tree.
+                await self._git(
+                    [
+                        "fetch",
+                        "--no-tags",
+                        "--no-write-fetch-head",
+                        remote_name,
+                        f"{remote_ref}:{observation_ref}",
+                    ],
+                    project_id=project_id,
+                )
+                fetched_sha = (
+                    await self._git(
+                        ["rev-parse", "--verify", f"{observation_ref}^{{commit}}"],
+                        cwd=self.project_root,
+                    )
+                ).strip()
+                if fetched_sha != remote_base_sha:
+                    refuse(
+                        "canonical remote base changed between observation and authenticated fetch."
+                    )
+            else:
+                fetched_sha = remote_base_sha
+        except Exception:
+            refuse("authoritative remote base could not be resolved consistently.")
+        finally:
+            try:
+                await self._git(["update-ref", "-d", observation_ref], cwd=self.project_root)
+            except Exception:
+                # The observation ref is disposable and is never used as
+                # authority by a later invocation.
+                pass
+
+        # The recovery branch remains rooted in its original, durable base B.
+        # A later main tip C is acceptable only as an observed descendant; it
+        # must never replace B in ownership, Run/Job, or WorktreeInfo lineage.
+        source_base = ownership.source_base_sha
+        if not source_base:
+            refuse("durable original base is missing.")
+        try:
+            resolved_source_base = (
+                await self._git(
+                    ["rev-parse", "--verify", f"{source_base}^{{commit}}"],
+                    cwd=self.project_root,
+                )
+            ).strip()
+            if resolved_source_base != source_base:
+                refuse("durable original base is not an exact local commit identity.")
+            await self._git(
+                ["merge-base", "--is-ancestor", source_base, fetched_sha],
+                cwd=self.project_root,
+            )
+        except Exception:
+            refuse("authoritative current base is not provably a descendant of the original base.")
+        try:
+            await self._git(
+                ["merge-base", "--is-ancestor", current_base_sha, fetched_sha],
+                cwd=self.project_root,
+            )
+        except Exception:
+            refuse("local managed base branch diverges from the authoritative remote base.")
 
         job = self.uow.jobs.get_by_id(job_id)
         run = self.uow.orchestration_runs.get_by_id(run_id)
@@ -1650,10 +1728,17 @@ class WorktreeManager:
             or job.project_id != project_id
             or job.change_name != change_name
             # RecoveryConvergenceService first converts an interrupted RUNNING
-            # execution to QUEUED before OrchestrationService resumes the same
+            # execution to QUEUED, or a prior environment stop to
+            # WAITING_CAPACITY, before OrchestrationService resumes the same
             # run. That canonical checkpoint is valid only with all the run,
             # attempt, ownership, and snapshot proofs enforced below.
-            or job.status not in {JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.NEEDS_HUMAN}
+            or job.status
+            not in {
+                JobStatus.QUEUED,
+                JobStatus.RUNNING,
+                JobStatus.NEEDS_HUMAN,
+                JobStatus.WAITING_CAPACITY,
+            }
         ):
             refuse("the linked job identity or resumable status is inconsistent.")
         if (
@@ -1664,17 +1749,16 @@ class WorktreeManager:
             or run.current_stage != OrchestrationStage.IMPLEMENTING
         ):
             refuse("the linked orchestration run identity or stage is inconsistent.")
+        if run.stop_outcome in {
+            OrchestrationStopOutcome.COMPLETED,
+            OrchestrationStopOutcome.CANCELLED,
+        }:
+            refuse("the linked orchestration run is terminal and cannot be reconstructed.")
         if job.candidate_sha or run.current_candidate_sha:
             refuse("candidate evidence exists; this no-candidate recovery path cannot be used.")
 
-        source_base = ownership.source_base_sha
-        if (
-            not source_base
-            or run.base_sha != source_base
-            or (job.base_sha and job.base_sha != source_base)
-            or current_base_sha != source_base
-        ):
-            refuse("base SHA advanced or conflicts with durable run/job/worktree lineage.")
+        if run.base_sha != source_base or (job.base_sha and job.base_sha != source_base):
+            refuse("base SHA conflicts with durable run/job/worktree lineage.")
 
         attempts_repo = getattr(self.uow, "job_attempts", None)
         attempts = attempts_repo.list_by_job(job_id) if attempts_repo else []
@@ -1771,6 +1855,22 @@ class WorktreeManager:
             refuse(
                 "no unique durable recovery-snapshot event binds this exact branch SHA and path."
             )
+        try:
+            final_remote_observation = await self._git(
+                ["ls-remote", remote_name, remote_ref], project_id=project_id
+            )
+        except Exception:
+            refuse("canonical remote base could not be re-observed before recreation.")
+        final_remote_lines = [
+            line.split() for line in final_remote_observation.splitlines() if line.strip()
+        ]
+        if (
+            len(final_remote_lines) != 1
+            or len(final_remote_lines[0]) != 2
+            or final_remote_lines[0][1] != remote_ref
+            or final_remote_lines[0][0] != remote_base_sha
+        ):
+            refuse("canonical remote base changed during recreation validation.")
         return branch_sha
 
     async def create_worktree(
@@ -1823,6 +1923,7 @@ class WorktreeManager:
         historical_ownership = (
             worktree_ownership_repo.get_by_job_id(job_id) if worktree_ownership_repo else None
         )
+        recreation_source_base = None
         if (
             historical_ownership
             and historical_ownership.creation_state == WorktreeCreationState.DELETED
@@ -1846,6 +1947,7 @@ class WorktreeManager:
                 base_branch=base_branch,
                 current_base_sha=base_sha,
             )
+            recreation_source_base = historical_ownership.source_base_sha
         else:
             branch_name = requested_branch_name or f"minime/{eff_change_name}-{job_id}"
 
@@ -1880,7 +1982,7 @@ class WorktreeManager:
             branch=branch_name,
             run_id=run_id,
             change_name=change_name,
-            source_base_sha=base_sha,
+            source_base_sha=recreation_source_base or base_sha,
         )
 
         branch_exists = False
@@ -1911,7 +2013,7 @@ class WorktreeManager:
             path,
             ownership,
             expected_branch=branch_name,
-            expected_base_sha=base_sha,
+            expected_base_sha=recreation_source_base or base_sha,
             expected_head_sha=recovered_head_sha,
         )
         self._finalize_created_ownership(ownership)
@@ -1923,7 +2025,11 @@ class WorktreeManager:
             job_id=job_id,
         )
 
-        return WorktreeInfo(path=path, branch_name=branch_name, base_sha=base_sha)
+        return WorktreeInfo(
+            path=path,
+            branch_name=branch_name,
+            base_sha=recreation_source_base or base_sha,
+        )
 
     async def current_sha(self, worktree_path: str | Path) -> str:
         return await self._git(["rev-parse", "HEAD"], cwd=Path(worktree_path))
