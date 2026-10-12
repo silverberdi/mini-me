@@ -18,6 +18,7 @@ from minime.domain.enums import (
     ProviderResultClass,
 )
 from minime.services.agent_confinement import (
+    AgentConfinementError,
     AgentCredentialError,
     AgentProcessConfinement,
 )
@@ -149,9 +150,10 @@ def test_unsafe_or_symlinked_credential_source_fails_closed(tmp_path: Path):
             pytest.fail("symlink auth source should not enter the runtime")
 
 
-def test_bubblewrap_command_binds_only_worktree_and_private_state(tmp_path: Path):
+def test_bubblewrap_command_binds_only_worktree_and_private_state(tmp_path: Path, monkeypatch):
     confinement, worktree, runtime_root = _confinement(tmp_path)
     confinement.confinement_mechanism = "bubblewrap"
+    monkeypatch.setattr(confinement, "_host_resolver_projection", lambda: None)
     with confinement.runtime_session({}) as runtime:
         command = confinement.wrap_command(["/usr/bin/true"], runtime)
 
@@ -167,6 +169,237 @@ def test_bubblewrap_command_binds_only_worktree_and_private_state(tmp_path: Path
     assert ["--tmpfs", "/run"] == command[command.index("--tmpfs") : command.index("--tmpfs") + 2]
     assert "--unshare-pid" in command
     assert "/global" not in " ".join(command)
+
+
+def test_resolver_projection_only_exposes_verified_target_under_private_run(tmp_path: Path):
+    run_root = tmp_path / "run"
+    resolver_dir = run_root / "systemd" / "resolve"
+    resolver_dir.mkdir(parents=True)
+    resolver_file = resolver_dir / "stub-resolv.conf"
+    resolver_file.write_text("nameserver 192.0.2.53\n", encoding="utf-8")
+    resolv_link = tmp_path / "resolv.conf"
+    resolv_link.symlink_to(resolver_file)
+
+    projection = AgentProcessConfinement._host_resolver_projection(str(resolv_link), str(run_root))
+    assert projection == (str(resolver_file), str(resolver_file))
+
+    mounts = AgentProcessConfinement._bubblewrap_resolver_mounts(
+        "/host/run/systemd/resolve/stub-resolv.conf",
+        "/run/systemd/resolve/stub-resolv.conf",
+    )
+    assert mounts == [
+        "--dir",
+        "/run/systemd",
+        "--dir",
+        "/run/systemd/resolve",
+        "--ro-bind",
+        "/host/run/systemd/resolve/stub-resolv.conf",
+        "/run/systemd/resolve/stub-resolv.conf",
+    ]
+    assert "--bind" not in mounts
+    assert "/run" not in mounts
+
+
+def test_resolver_projection_preserves_lexical_run_target_for_symlinked_file(tmp_path: Path):
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    actual_file = tmp_path / "resolver-data" / "resolv.conf"
+    actual_file.parent.mkdir()
+    actual_file.write_text("nameserver 192.0.2.53\n", encoding="utf-8")
+    resolver_alias = run_root / "resolver-alias"
+    resolver_alias.symlink_to(actual_file)
+    resolv_link = tmp_path / "resolv.conf"
+    resolv_link.symlink_to(resolver_alias)
+
+    assert AgentProcessConfinement._host_resolver_projection(str(resolv_link), str(run_root)) == (
+        str(actual_file),
+        str(resolver_alias),
+    )
+
+
+def test_resolver_projection_accepts_ordinary_config_and_rejects_unsafe_targets(tmp_path: Path):
+    ordinary = tmp_path / "resolv.conf"
+    ordinary.write_text("nameserver 192.0.2.53\n", encoding="utf-8")
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    assert AgentProcessConfinement._host_resolver_projection(str(ordinary), str(run_root)) is None
+
+    directory_link = tmp_path / "directory-resolv.conf"
+    directory_link.symlink_to(tmp_path, target_is_directory=True)
+    with pytest.raises(AgentConfinementError, match="resolver configuration"):
+        AgentProcessConfinement._host_resolver_projection(
+            str(directory_link), str(tmp_path / "run")
+        )
+    broken_link = tmp_path / "broken-resolv.conf"
+    broken_link.symlink_to(tmp_path / "missing-resolv.conf")
+    with pytest.raises(AgentConfinementError, match="unavailable or unverifiable"):
+        AgentProcessConfinement._host_resolver_projection(str(broken_link), str(run_root))
+
+
+def test_resolver_mount_rejects_runtime_collision_and_path_traversal():
+    for destination in (
+        "/run/minime-agent/resolver.conf",
+        "/run/systemd/../minime-agent/resolver.conf",
+        "/run/../etc/resolv.conf",
+    ):
+        with pytest.raises(AgentConfinementError, match="unsafe|escaped"):
+            AgentProcessConfinement._bubblewrap_resolver_mounts(
+                "/run/systemd/resolve/stub-resolv.conf", destination
+            )
+
+
+def test_runtime_session_mounts_only_resolver_file_after_private_run(tmp_path: Path, monkeypatch):
+    confinement, worktree, _runtime_root = _confinement(tmp_path)
+    confinement.confinement_mechanism = "bubblewrap"
+    resolver = tmp_path / "stub-resolv.conf"
+    resolver.write_text("nameserver 192.0.2.53\n", encoding="utf-8")
+    monkeypatch.setattr(
+        confinement,
+        "_host_resolver_projection",
+        lambda: (str(resolver), "/run/systemd/resolve/stub-resolv.conf"),
+    )
+    with confinement.runtime_session({}) as runtime:
+        command = confinement.wrap_command(["/usr/bin/true"], runtime)
+
+    run_tmpfs = command.index("--tmpfs")
+    dns_bind = command.index("--ro-bind", run_tmpfs)
+    private_runtime_bind = command.index("--bind", dns_bind)
+    assert run_tmpfs < dns_bind < private_runtime_bind
+    assert command[dns_bind : dns_bind + 3] == [
+        "--ro-bind",
+        str(resolver),
+        "/run/systemd/resolve/stub-resolv.conf",
+    ]
+    assert "--unshare-net" not in command
+
+
+@pytest.mark.skipif(
+    platform.system().lower() != "linux" or not shutil.which("bwrap") or not shutil.which("getent"),
+    reason="effective DNS boundary proof requires Linux, Bubblewrap, and getent",
+)
+def test_real_bubblewrap_private_run_projects_dns_read_only_and_resolves(
+    tmp_path: Path, monkeypatch
+):
+    confinement, worktree, _runtime = _confinement(tmp_path)
+    confinement.confinement_mechanism = "bubblewrap"
+    # Use the host's actual resolver bytes at a /run-shaped test path, and an isolated /etc
+    # containing the corresponding symlink. This models Ubuntu without changing host config.
+    source = tmp_path / "host-run" / "systemd" / "resolve" / "stub-resolv.conf"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(Path("/etc/resolv.conf").read_bytes())
+    source.chmod(0o444)
+    (source.parent / "host-only.sock").write_text("must stay hidden", encoding="utf-8")
+    host_hosts = tmp_path / "host-hosts"
+    host_hosts.write_bytes(Path("/etc/hosts").read_bytes())
+    host_nsswitch = tmp_path / "host-nsswitch.conf"
+    host_nsswitch.write_bytes(Path("/etc/nsswitch.conf").read_bytes())
+    monkeypatch.setattr(
+        confinement,
+        "_host_resolver_projection",
+        lambda: (str(source), "/run/systemd/resolve/stub-resolv.conf"),
+    )
+
+    with confinement.runtime_session({}) as runtime:
+        resolver_path = "/run/systemd/resolve/stub-resolv.conf"
+
+        def overlay_etc(command: list[str]) -> list[str]:
+            mount_args = [
+                "--tmpfs",
+                "/etc",
+                "--ro-bind",
+                str(host_hosts),
+                "/etc/hosts",
+                "--ro-bind",
+                str(host_nsswitch),
+                "/etc/nsswitch.conf",
+                "--symlink",
+                resolver_path,
+                "/etc/resolv.conf",
+            ]
+            command = list(command)
+            insert_at = command.index("--unshare-pid")
+            command[insert_at:insert_at] = mount_args
+            return command
+
+        visible = subprocess.run(
+            overlay_etc(
+                confinement.wrap_command(
+                    [
+                        "sh",
+                        "-c",
+                        f"test -r {resolver_path} && test ! -e /run/systemd/resolve/host-only.sock && getent hosts example.com",
+                    ],
+                    runtime,
+                )
+            ),
+            cwd=worktree,
+            env=runtime.environment,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        assert visible.returncode == 0, visible.stderr
+        assert visible.stdout.strip()
+
+        denied_write = subprocess.run(
+            overlay_etc(
+                confinement.wrap_command(["sh", "-c", f"echo unsafe > {resolver_path}"], runtime)
+            ),
+            cwd=worktree,
+            env=runtime.environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert denied_write.returncode != 0
+
+        hidden_socket = subprocess.run(
+            confinement.wrap_command(
+                ["sh", "-c", "test ! -e /run/host-service.sock && test -d /run/minime-agent"],
+                runtime,
+            ),
+            cwd=worktree,
+            env=runtime.environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert hidden_socket.returncode == 0, hidden_socket.stderr
+        old_profile = [
+            "bwrap",
+            "--ro-bind",
+            "/",
+            "/",
+            "--tmpfs",
+            "/run",
+            "--tmpfs",
+            "/etc",
+            "--ro-bind",
+            str(host_hosts),
+            "/etc/hosts",
+            "--ro-bind",
+            str(host_nsswitch),
+            "/etc/nsswitch.conf",
+            "--symlink",
+            resolver_path,
+            "/etc/resolv.conf",
+            "--unshare-pid",
+            "--chdir",
+            str(worktree.resolve()),
+            "sh",
+            "-c",
+            "test ! -e /run/systemd/resolve/stub-resolv.conf && ! getent hosts example.com",
+        ]
+        absent = subprocess.run(
+            old_profile,
+            cwd=worktree,
+            env=runtime.environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert absent.returncode == 0
 
 
 def test_environment_filesystem_failures_are_not_provider_failures():

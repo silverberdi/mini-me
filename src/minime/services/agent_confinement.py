@@ -422,6 +422,108 @@ class AgentProcessConfinement:
     def _generate_darwin_sandbox_profile(self) -> str:
         return self._generate_profile()
 
+    @staticmethod
+    def _host_resolver_projection(
+        resolv_conf_path: str = "/etc/resolv.conf", run_root: str = "/run"
+    ) -> tuple[str, str] | None:
+        """Return the exact resolver file hidden by Bubblewrap's private /run."""
+        try:
+            resolver_link = Path(resolv_conf_path)
+            if not resolver_link.is_absolute():
+                raise OSError("resolver path is not absolute")
+            link_info = resolver_link.lstat()
+            raw_link_target = (
+                os.readlink(resolver_link) if stat.S_ISLNK(link_info.st_mode) else None
+            )
+            lexical_target = (
+                Path(os.path.normpath(str(resolver_link.parent / raw_link_target)))
+                if raw_link_target is not None and not Path(raw_link_target).is_absolute()
+                else Path(os.path.normpath(raw_link_target))
+                if raw_link_target is not None
+                else resolver_link
+            )
+            target = resolver_link.resolve(strict=True)
+            target_info = target.stat()
+            run_path = Path(run_root).resolve(strict=True)
+            after_link_info = resolver_link.lstat()
+            if (
+                after_link_info.st_ino != link_info.st_ino
+                or after_link_info.st_dev != link_info.st_dev
+                or after_link_info.st_mode != link_info.st_mode
+                or after_link_info.st_mtime_ns != link_info.st_mtime_ns
+                or after_link_info.st_ctime_ns != link_info.st_ctime_ns
+                or (
+                    raw_link_target is not None
+                    and (
+                        not stat.S_ISLNK(after_link_info.st_mode)
+                        or os.readlink(resolver_link) != raw_link_target
+                    )
+                )
+            ):
+                raise OSError("resolver link changed during validation")
+        except OSError as exc:
+            raise AgentConfinementError(
+                "Host DNS resolver configuration is unavailable or unverifiable."
+            ) from exc
+
+        if not stat.S_ISREG(target_info.st_mode) or not os.access(target, os.R_OK):
+            raise AgentConfinementError(
+                "Host DNS resolver configuration is not a readable regular file."
+            )
+
+        def is_beneath(path: Path, root: Path) -> bool:
+            try:
+                return os.path.commonpath((str(path), str(root))) == str(root)
+            except ValueError:
+                return False
+
+        if is_beneath(lexical_target, run_path):
+            destination = lexical_target
+        elif is_beneath(target, run_path):
+            destination = target
+        else:
+            return None
+        if destination == run_path:
+            raise AgentConfinementError(
+                "Host DNS resolver target conflicts with the private agent runtime."
+            )
+        if is_beneath(destination, Path(AgentProcessConfinement.SANDBOX_RUNTIME_ROOT)):
+            raise AgentConfinementError(
+                "Host DNS resolver target conflicts with the private agent runtime."
+            )
+        return str(target), str(destination)
+
+    @staticmethod
+    def _bubblewrap_resolver_mounts(source: str, destination: str) -> list[str]:
+        """Create only missing parents below the private /run, then bind one file RO."""
+        source_path = Path(source)
+        destination_path = Path(destination)
+        run_root = Path("/run")
+        if (
+            not source_path.is_absolute()
+            or not destination_path.is_absolute()
+            or str(destination_path) != os.path.normpath(destination)
+            or destination_path == run_root
+            or run_root not in destination_path.parents
+            or destination_path == Path(AgentProcessConfinement.SANDBOX_RUNTIME_ROOT)
+            or Path(AgentProcessConfinement.SANDBOX_RUNTIME_ROOT) in destination_path.parents
+        ):
+            raise AgentConfinementError("Host DNS resolver projection path is unsafe.")
+
+        parents: list[Path] = []
+        parent = destination_path.parent
+        while parent != run_root:
+            if run_root not in parent.parents:
+                raise AgentConfinementError("Host DNS resolver projection escaped private /run.")
+            parents.append(parent)
+            parent = parent.parent
+
+        mounts: list[str] = []
+        for directory in reversed(parents):
+            mounts.extend(("--dir", str(directory)))
+        mounts.extend(("--ro-bind", str(source_path), str(destination_path)))
+        return mounts
+
     def wrap_command(
         self,
         cmd: Sequence[str] | str,
@@ -454,6 +556,13 @@ class AgentProcessConfinement:
                     [
                         "--tmpfs",
                         "/run",
+                    ]
+                )
+                resolver_projection = self._host_resolver_projection()
+                if resolver_projection is not None:
+                    wrapped.extend(self._bubblewrap_resolver_mounts(*resolver_projection))
+                wrapped.extend(
+                    [
                         "--dir",
                         runtime_state.sandbox_root,
                         "--bind",
