@@ -1551,19 +1551,20 @@ def test_postgres_continue_accepts_only_recovery_evidenced_incomplete_premature_
 
 
 @pytest.mark.parametrize(
-    "payload_update,event_age_seconds",
+    "payload_update,event_age_seconds,expected",
     [
-        ({"recovery_source": "STARTUP"}, 1),
-        ({"run_id": "different-run"}, 1),
-        ({"run_generation": 2}, 1),
-        ({"recovered_status": JobStatus.FAILED.value}, 1),
-        ({}, 600),  # recovery event predates the interrupted attempt
+        ({}, 1, True),  # positive control: fully valid event, decision, and live claim
+        ({"recovery_source": "STARTUP"}, 1, False),
+        ({"run_id": "different-run"}, 1, False),
+        ({"run_generation": 2}, 1, False),
+        ({"recovered_status": JobStatus.FAILED.value}, 1, False),
+        ({}, 600, False),  # recovery event predates the interrupted attempt
     ],
 )
-def test_crash_recovery_predicate_rejects_stale_or_contradictory_continue_evidence(
-    tmp_path: Path, payload_update: dict, event_age_seconds: int
+def test_crash_recovery_predicate_accepts_valid_and_rejects_contradictory_evidence(
+    tmp_path: Path, payload_update: dict, event_age_seconds: int, expected: bool
 ):
-    """A JOB_RECOVERED-shaped record is insufficient unless it matches this CONTINUE."""
+    """Exercise event-specific checks with otherwise valid recovery authority."""
     from datetime import timedelta
 
     project_id = "predicate-project"
@@ -1600,11 +1601,44 @@ def test_crash_recovery_predicate_rejects_stale_or_contradictory_continue_eviden
         def list_by_run(self, _run_id):
             return []
 
+    class Decisions:
+        def list_by_cycle(self, cycle_id):
+            if cycle_id != "cycle-1":
+                return []
+            return [
+                SimpleNamespace(
+                    claim_key=f"run:{run_id}",
+                    identity_type="RUN",
+                    identity_id=run_id,
+                    project_id=project_id,
+                    change_name=change_name,
+                    source="CONTROL_PLANE",
+                    planned_action="DRIVE_CONTINUATION",
+                    status="EXECUTING",
+                    fence_token=7,
+                )
+            ]
+
+    class Claims:
+        def get_by_key(self, claim_key):
+            if claim_key != f"run:{run_id}":
+                return None
+            return SimpleNamespace(is_active=True, fence_token=7, owner_instance_id="worker")
+
+        def validate_cas(self, *, claim_key, owner_instance_id, fence_token):
+            return (
+                claim_key == f"run:{run_id}"
+                and owner_instance_id == "worker"
+                and fence_token == 7
+            )
+
     manager = WorktreeManager(
         tmp_path,
         SimpleNamespace(
             events=EventRepository(),
             orchestration_external_actions=ExternalActions(),
+            recovery_decisions=Decisions(),
+            claims=Claims(),
         ),
     )
     accepted = manager._has_durable_crash_interruption_recovery(
@@ -1637,7 +1671,7 @@ def test_crash_recovery_predicate_rejects_stale_or_contradictory_continue_eviden
         project_id=project_id,
         change_name=change_name,
     )
-    assert accepted is False
+    assert accepted is expected
 
 
 @pytest.mark.parametrize("pending_external_action,claim_valid", [(True, True), (False, False)])
