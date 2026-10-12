@@ -150,6 +150,13 @@ def test_unsafe_or_symlinked_credential_source_fails_closed(tmp_path: Path):
             pytest.fail("symlink auth source should not enter the runtime")
 
 
+def test_antigravity_auth_source_resolves_actual_cli_oauth_path(tmp_path: Path):
+    host_home = tmp_path / "service-home"
+    assert AgentProcessConfinement.antigravity_auth_source(
+        {"HOME": str(host_home)}
+    ) == str(host_home / ".gemini" / "antigravity-cli" / "antigravity-oauth-token")
+
+
 def test_antigravity_auth_is_projected_as_one_private_file_and_rotation_is_not_persisted(
     tmp_path: Path,
 ):
@@ -157,7 +164,9 @@ def test_antigravity_auth_is_projected_as_one_private_file_and_rotation_is_not_p
     host_home = tmp_path / "host-home"
     gemini_home = host_home / ".gemini"
     gemini_home.mkdir(parents=True)
-    source = gemini_home / "jetski-standalone-oauth-token"
+    host_cli_home = gemini_home / "antigravity-cli"
+    host_cli_home.mkdir(mode=0o700)
+    source = host_cli_home / "antigravity-oauth-token"
     source.write_text("opaque-authentication-token-for-test", encoding="utf-8")
     source.chmod(0o600)
     (gemini_home / "settings.json").write_text('{"unrelated":"host-only"}', encoding="utf-8")
@@ -167,13 +176,16 @@ def test_antigravity_auth_is_projected_as_one_private_file_and_rotation_is_not_p
     ) as runtime:
         private_home = Path(runtime.environment["HOME"])
         private_gemini_home = private_home / ".gemini"
+        private_cli_home = private_gemini_home / "antigravity-cli"
         projected = runtime.antigravity_auth_copy
-        assert projected == private_gemini_home / "jetski-standalone-oauth-token"
+        assert projected == private_cli_home / "antigravity-oauth-token"
         assert projected.read_text(encoding="utf-8") == "opaque-authentication-token-for-test"
         assert stat.S_IMODE(projected.stat().st_mode) == 0o600
         assert stat.S_IMODE(private_gemini_home.stat().st_mode) == 0o700
-        assert {path.name for path in private_gemini_home.iterdir()} == {
-            "jetski-standalone-oauth-token"
+        assert stat.S_IMODE(private_cli_home.stat().st_mode) == 0o700
+        assert {path.name for path in private_gemini_home.iterdir()} == {"antigravity-cli"}
+        assert {path.name for path in private_cli_home.iterdir()} == {
+            "antigravity-oauth-token"
         }
         assert "opaque-authentication-token-for-test" in runtime.sensitive_values
         projected.write_text("rotated-private-token", encoding="utf-8")
@@ -222,8 +234,10 @@ def test_real_bubblewrap_projects_only_antigravity_auth_and_enforces_write_bound
             "import os,pathlib",
             "home=pathlib.Path(os.environ['HOME'])",
             "gemini=home/'.gemini'",
-            "assert [p.name for p in gemini.iterdir()]==['jetski-standalone-oauth-token']",
-            "assert (gemini/'jetski-standalone-oauth-token').read_text()=='private-auth-token-for-test'",
+            "assert [p.name for p in gemini.iterdir()]==['antigravity-cli']",
+            "cli=gemini/'antigravity-cli'",
+            "assert [p.name for p in cli.iterdir()]==['antigravity-oauth-token']",
+            "assert (cli/'antigravity-oauth-token').read_text()=='private-auth-token-for-test'",
             "pathlib.Path(os.environ['MINIME_CONFINED_WORKTREE'],'allowed.txt').write_text('ok')",
             "blocked=False",
             "try:",
@@ -284,7 +298,7 @@ def test_real_bubblewrap_agy_models_authenticates_without_inference(tmp_path: Pa
     # `agy models` performs auth/catalog observation only; it sends no model prompt.
     assert result.returncode == 0, "confined `agy models` authentication/catalog check failed"
     assert result.credential_rotation_detected is False
-    assert b"jetski-standalone-oauth-token" not in result.stdout + result.stderr
+    assert b"antigravity-oauth-token" not in result.stdout + result.stderr
 
 
 def test_bubblewrap_command_binds_only_worktree_and_private_state(tmp_path: Path, monkeypatch):
