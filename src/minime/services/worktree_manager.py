@@ -2221,7 +2221,14 @@ class WorktreeManager:
         project_id: str,
         change_name: str,
     ) -> bool:
-        """Recognize only an unfinished attempt followed by durable restart recovery for this Job/Run."""
+        """Recognize an unfinished attempt followed by canonical on-demand Run recovery.
+
+        JOB_RECOVERED is emitted by RecoveryConvergenceService after Control Plane
+        CONTINUE obtains the Run claim. It is not, by itself, proof of a host crash:
+        the incomplete PREMATURE_STOP, attempt/counter relation, exact Run/Job
+        linkage, CREATED snapshot, publication, and Git checks in the caller are
+        all required as corroborating evidence.
+        """
         if (
             latest_attempt.normalized_outcome != ExecutionOutcome.PREMATURE_STOP
             or latest_attempt.completed_at is not None
@@ -2233,6 +2240,8 @@ class WorktreeManager:
             or run.project_id != project_id
             or run.change_name != change_name
             or run.active_job_id != job.job_id
+            or run.current_stage != OrchestrationStage.IMPLEMENTING
+            or run.current_generation < 1
             or run.current_candidate_sha is not None
             or run.base_sha != source_base
             or (job.base_sha and job.base_sha != source_base)
@@ -2243,73 +2252,90 @@ class WorktreeManager:
         if not events_repo:
             return False
         events = events_repo.list_events(project_id=project_id, change_id=change_name, limit=10000)
-        post_attempt_events = [
-            event for event in events if event.timestamp > latest_attempt.started_at
-        ]
-        interrupted = [
-            event
-            for event in post_attempt_events
-            if event.event_type == EventType.JOB_INTERRUPTED and event.operation_id == job.job_id
-        ]
+        recovery_events = [event for event in events if event.timestamp > latest_attempt.started_at]
         recovered_jobs = [
             event
-            for event in post_attempt_events
+            for event in recovery_events
             if event.event_type == EventType.JOB_RECOVERED and event.operation_id == job.job_id
         ]
-        recovered_runs = [
-            event
-            for event in post_attempt_events
-            if event.event_type == EventType.ORCHESTRATION_RECOVERED
-            and event.operation_id == run.run_id
-        ]
-        if not interrupted or not recovered_jobs or not recovered_runs:
+        if not recovered_jobs:
             return False
 
-        valid_interruption = all(
-            event.project_id == project_id
-            and event.change_id == change_name
-            and event.payload.get("job_id") == job.job_id
-            and event.payload.get("project_id") == project_id
-            and event.payload.get("change_id") == change_name
-            and event.payload.get("previous_status") == JobStatus.RUNNING.value
-            and event.payload.get("interrupted_stage") == "implementer"
-            and event.payload.get("candidate_sha") is None
-            and event.payload.get("base_sha") == source_base
-            and event.payload.get("recovery_cycle_id")
-            for event in interrupted
+        # This payload is produced only by the canonical run-continuation
+        # recovery branch. Require its source, linked Run and generation, rather
+        # than treating an arbitrary/old JOB_RECOVERED as authorization.
+        latest_recovery = max(recovered_jobs, key=lambda event: event.timestamp)
+        valid_latest_recovery = (
+            latest_recovery.project_id == project_id
+            and latest_recovery.change_id == change_name
+            and latest_recovery.payload.get("job_id") == job.job_id
+            and latest_recovery.payload.get("run_id") == run.run_id
+            and latest_recovery.payload.get("run_generation") == run.current_generation
+            and latest_recovery.payload.get("recovery_source") == "CONTROL_PLANE"
+            and latest_recovery.payload.get("interrupted_stage") == "implementer"
+            and latest_recovery.payload.get("recovered_status") == JobStatus.QUEUED.value
+            and latest_recovery.payload.get("recovery_cycle_id")
         )
-        valid_job_recovery = all(
-            event.project_id == project_id
-            and event.change_id == change_name
-            and event.payload.get("job_id") == job.job_id
-            and event.payload.get("recovered_status")
-            in {
-                JobStatus.QUEUED.value,
-                JobStatus.RUNNING.value,
-                JobStatus.NEEDS_HUMAN.value,
-                JobStatus.WAITING_CAPACITY.value,
-            }
-            and event.payload.get("recovery_cycle_id")
-            for event in recovered_jobs
-        )
-        valid_run_recovery = all(
-            event.project_id == project_id
-            and event.change_id == change_name
-            and event.payload.get("run_id") == run.run_id
-            and event.payload.get("stage") == OrchestrationStage.IMPLEMENTING.value
-            and event.payload.get("recovery_cycle_id")
-            for event in recovered_runs
-        )
-        if not (valid_interruption and valid_job_recovery and valid_run_recovery):
+        if not valid_latest_recovery:
             return False
 
-        return any(
-            interrupted_event.timestamp < job_event.timestamp
-            and interrupted_event.timestamp < run_event.timestamp
-            for interrupted_event in interrupted
-            for job_event in recovered_jobs
-            for run_event in recovered_runs
+        decisions_repo = getattr(self.uow, "recovery_decisions", None)
+        if not decisions_repo or not callable(getattr(decisions_repo, "list_by_cycle", None)):
+            return False
+        canonical_decisions = decisions_repo.list_by_cycle(
+            latest_recovery.payload["recovery_cycle_id"]
         )
+        if len(canonical_decisions) != 1:
+            return False
+        decision = canonical_decisions[0]
+        if (
+            decision.claim_key != f"run:{run.run_id}"
+            or decision.identity_type != "RUN"
+            or decision.identity_id != run.run_id
+            or decision.project_id != project_id
+            or decision.change_name != change_name
+            or getattr(decision.source, "value", decision.source) != "CONTROL_PLANE"
+            or decision.planned_action != "DRIVE_CONTINUATION"
+            or getattr(decision.status, "value", decision.status) != "EXECUTING"
+            or not decision.fence_token
+        ):
+            return False
+
+        claims_repo = getattr(self.uow, "claims", None)
+        if (
+            not claims_repo
+            or not callable(getattr(claims_repo, "get_by_key", None))
+            or not callable(getattr(claims_repo, "validate_cas", None))
+        ):
+            return False
+        claim = claims_repo.get_by_key(decision.claim_key)
+        if (
+            not claim
+            or not claim.is_active
+            or claim.fence_token != decision.fence_token
+            or not claims_repo.validate_cas(
+                claim_key=decision.claim_key,
+                owner_instance_id=claim.owner_instance_id,
+                fence_token=decision.fence_token,
+            )
+        ):
+            return False
+
+        # Unresolved or candidate-bearing actions contradict the no-candidate
+        # recovery case; completed non-candidate history is retained.
+        actions_repo = getattr(self.uow, "orchestration_external_actions", None)
+        if not actions_repo or not callable(getattr(actions_repo, "list_by_run", None)):
+            return False
+        for action in actions_repo.list_by_run(run.run_id):
+            action_status = getattr(action.status, "value", action.status)
+            if action.candidate_sha or action_status in {
+                "RESERVED",
+                "EXECUTING",
+                "UNKNOWN",
+                "AMBIGUOUS",
+            }:
+                return False
+        return True
 
     async def create_worktree(
         self,

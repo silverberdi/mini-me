@@ -8,6 +8,7 @@ import os
 import subprocess
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine, func, select, text
@@ -28,6 +29,7 @@ from minime.domain.enums import (
     ContinuationDecision,
     EventType,
     ExecutionOutcome,
+    ExternalActionStatus,
     ExternalOutcome,
     HumanGate,
     JobStatus,
@@ -1123,7 +1125,7 @@ def test_postgres_continue_adopts_created_recovery_worktree_and_repairs_only_fin
 def test_postgres_continue_accepts_only_recovery_evidenced_incomplete_premature_stop(
     isolated_pg_session_factory, tmp_path: Path, monkeypatch
 ):
-    """A restart-backed in-flight attempt can continue the same CREATED worktree once."""
+    """One canonical CONTINUE emits recovery evidence and adopts the same CREATED worktree."""
     from datetime import timedelta
 
     from conftest import publish_verified_intake_workspace, setup_managed_repository_fixture
@@ -1277,58 +1279,6 @@ def test_postgres_continue_accepts_only_recovery_evidenced_incomplete_premature_
         assert _git(worktree.path, "rev-parse", "HEAD") == snapshot_sha
         assert _git(worktree.path, "status", "--porcelain=v1", "--untracked-files=all") == ""
 
-        interruption_at = crash_attempt_at + timedelta(seconds=5)
-        job_recovery_at = interruption_at + timedelta(seconds=1)
-        run_recovery_at = interruption_at + timedelta(seconds=2)
-        interruption_event = Event(
-            event_type=EventType.JOB_INTERRUPTED,
-            project_id=project_id,
-            change_id=change_name,
-            operation_id=job_id,
-            timestamp=interruption_at,
-            payload={
-                "job_id": job_id,
-                "project_id": project_id,
-                "change_id": change_name,
-                "previous_status": JobStatus.RUNNING.value,
-                "interrupted_stage": "implementer",
-                "candidate_sha": None,
-                "base_sha": base_sha,
-                "implementer_role": "codex",
-                "recovery_cycle_id": "restart-cycle-1",
-            },
-        )
-        job_recovery_event = Event(
-            event_type=EventType.JOB_RECOVERED,
-            project_id=project_id,
-            change_id=change_name,
-            operation_id=job_id,
-            timestamp=job_recovery_at,
-            payload={
-                "job_id": job_id,
-                "new_status": JobStatus.QUEUED.value,
-                "recovered_status": JobStatus.QUEUED.value,
-                "interrupted_stage": "implementer",
-                "recovery_cycle_id": "restart-cycle-1",
-            },
-        )
-        run_recovery_event = Event(
-            event_type=EventType.ORCHESTRATION_RECOVERED,
-            project_id=project_id,
-            change_id=change_name,
-            operation_id=run_id,
-            timestamp=run_recovery_at,
-            payload={
-                "run_id": run_id,
-                "stage": OrchestrationStage.IMPLEMENTING.value,
-                "resumable_stage": OrchestrationStage.IMPLEMENTING.value,
-                "recovery_cycle_id": "restart-cycle-2",
-            },
-        )
-        for event in (interruption_event, job_recovery_event, run_recovery_event):
-            uow.events.save(event)
-        uow.commit()
-
         def verify_recovery_denied(reason: str) -> None:
             with pytest.raises(RuntimeError, match=reason):
                 asyncio.run(
@@ -1344,28 +1294,24 @@ def test_postgres_continue_accepts_only_recovery_evidenced_incomplete_premature_
                     )
                 )
 
-        # Required event evidence cannot be inferred from the recovery branch alone.
-        persisted_interruption = session.get(EventModel, interruption_event.event_id)
-        session.delete(persisted_interruption)
-        session.commit()
+        # The production-equivalent pre-CONTINUE state contains no startup
+        # interruption/recovery events. A CREATED snapshot alone is not enough.
         verify_recovery_denied("does not prove an environment/provider")
-        session.add(
-            EventModel(
-                id=interruption_event.event_id,
-                event_type=interruption_event.event_type.value,
-                project_id=project_id,
-                change_id=change_name,
-                operation_id=job_id,
-                payload=interruption_event.payload,
-                timestamp=interruption_event.timestamp,
+        assert not any(
+            event.event_type
+            in {
+                EventType.JOB_INTERRUPTED,
+                EventType.JOB_RECOVERED,
+                EventType.ORCHESTRATION_RECOVERED,
+            }
+            for event in uow.events.list_events(
+                project_id=project_id, change_id=change_name, limit=10000
             )
         )
-        session.commit()
-        persisted_interruption = session.get(EventModel, interruption_event.event_id)
 
         # A finalized PREMATURE_STOP is never covered by the crash exception.
         persisted_attempt = session.get(JobAttemptModel, crash_attempt.attempt_id)
-        persisted_attempt.completed_at = run_recovery_at
+        persisted_attempt.completed_at = crash_attempt_at + timedelta(seconds=5)
         persisted_attempt.duration_ms = 1
         session.commit()
         verify_recovery_denied("does not prove an environment/provider")
@@ -1373,24 +1319,12 @@ def test_postgres_continue_accepts_only_recovery_evidenced_incomplete_premature_
         persisted_attempt.duration_ms = None
         session.commit()
 
-        # Contradictory event identity is denied; exact durable history is restored for the one CONTINUE.
-        original_interruption_payload = dict(persisted_interruption.payload)
-        persisted_interruption.payload = {
-            **original_interruption_payload,
-            "base_sha": "contradictory-base",
-        }
+        # Restore the intentionally incomplete attempt without manufacturing
+        # any recovery events. The single real CONTINUE below must create the
+        # JOB_RECOVERED evidence through RecoveryConvergenceService itself.
+        persisted_attempt.completed_at = None
+        persisted_attempt.duration_ms = None
         session.commit()
-        verify_recovery_denied("does not prove an environment/provider")
-        persisted_interruption.payload = original_interruption_payload
-        session.commit()
-        assert manager._has_durable_crash_interruption_recovery(
-            latest_attempt=uow.job_attempts.list_by_job(job_id)[-1],
-            job=uow.jobs.get_by_id(job_id),
-            run=uow.orchestration_runs.get_by_id(run_id),
-            source_base=base_sha,
-            project_id=project_id,
-            change_name=change_name,
-        )
 
         persisted_job_before_continue = uow.jobs.get_by_id(job_id)
         persisted_attempts_before_continue = uow.job_attempts.list_by_job(job_id)
@@ -1427,6 +1361,10 @@ def test_postgres_continue_accepts_only_recovery_evidenced_incomplete_premature_
 
         untracked = worktree.path / "unauthorized.txt"
         untracked.write_text("must block\n", encoding="utf-8")
+        # Exercise the shared Git cleanliness guard independently of the new
+        # crash-evidence predicate; no recovery event is fabricated here.
+        persisted_attempt.normalized_outcome = ExecutionOutcome.ENVIRONMENT_UNAVAILABLE.value
+        session.commit()
         with pytest.raises(RuntimeError, match="CREATED recovery worktree contains changes"):
             asyncio.run(
                 manager._verify_deleted_worktree_recreation(
@@ -1440,6 +1378,8 @@ def test_postgres_continue_accepts_only_recovery_evidenced_incomplete_premature_
                     current_base_sha=base_sha,
                 )
             )
+        persisted_attempt.normalized_outcome = ExecutionOutcome.PREMATURE_STOP.value
+        session.commit()
         untracked.unlink()
 
         ownership = uow.orchestration_worktree_ownerships.get_by_job_id(job_id)
@@ -1522,6 +1462,30 @@ def test_postgres_continue_accepts_only_recovery_evidenced_incomplete_premature_
             )
         )
         assert result.status == OperatorActionStatus.COMPLETED, result.summary
+        generated_recovery_events = [
+            event
+            for event in uow.events.list_events(
+                project_id=project_id, change_id=change_name, limit=10000
+            )
+            if event.event_type == EventType.JOB_RECOVERED
+            and event.operation_id == job_id
+            and event.timestamp > crash_attempt.started_at
+        ]
+        assert generated_recovery_events, "canonical CONTINUE did not persist JOB_RECOVERED"
+        assert any(
+            event.payload.get("run_id") == run_id
+            and event.payload.get("run_generation") == run.current_generation
+            and event.payload.get("recovery_source") == "CONTROL_PLANE"
+            and event.payload.get("interrupted_stage") == "implementer"
+            and event.payload.get("recovered_status") == JobStatus.QUEUED.value
+            for event in generated_recovery_events
+        )
+        assert not any(
+            event.event_type in {EventType.JOB_INTERRUPTED, EventType.ORCHESTRATION_RECOVERED}
+            for event in uow.events.list_events(
+                project_id=project_id, change_id=change_name, limit=10000
+            )
+        )
         assert runner.result is not None
         assert "diagnostic runner reached" in "\n".join(runner.result.stdout)
         persisted_job = uow.jobs.get_by_id(job_id)
@@ -1562,3 +1526,206 @@ def test_postgres_continue_accepts_only_recovery_evidenced_incomplete_premature_
             == before_jobs
             == 1
         )
+
+
+@pytest.mark.parametrize(
+    "payload_update,event_age_seconds",
+    [
+        ({"recovery_source": "STARTUP"}, 1),
+        ({"run_id": "different-run"}, 1),
+        ({"run_generation": 2}, 1),
+        ({"recovered_status": JobStatus.FAILED.value}, 1),
+        ({}, 600),  # recovery event predates the interrupted attempt
+    ],
+)
+def test_crash_recovery_predicate_rejects_stale_or_contradictory_continue_evidence(
+    tmp_path: Path, payload_update: dict, event_age_seconds: int
+):
+    """A JOB_RECOVERED-shaped record is insufficient unless it matches this CONTINUE."""
+    from datetime import timedelta
+
+    project_id = "predicate-project"
+    change_name = "operational-blocker-visibility"
+    run_id = "predicate-run"
+    job_id = "predicate-job"
+    base_sha = "b" * 40
+    attempt_started = utc_now() - timedelta(minutes=2)
+    event = Event(
+        event_type=EventType.JOB_RECOVERED,
+        project_id=project_id,
+        change_id=change_name,
+        operation_id=job_id,
+        timestamp=attempt_started - timedelta(seconds=event_age_seconds)
+        if event_age_seconds > 10
+        else attempt_started + timedelta(seconds=event_age_seconds),
+        payload={
+            "job_id": job_id,
+            "run_id": run_id,
+            "run_generation": 1,
+            "recovery_source": "CONTROL_PLANE",
+            "interrupted_stage": "implementer",
+            "recovered_status": JobStatus.QUEUED.value,
+            "recovery_cycle_id": "cycle-1",
+            **payload_update,
+        },
+    )
+
+    class EventRepository:
+        def list_events(self, **_kwargs):
+            return [event]
+
+    class ExternalActions:
+        def list_by_run(self, _run_id):
+            return []
+
+    manager = WorktreeManager(
+        tmp_path,
+        SimpleNamespace(
+            events=EventRepository(),
+            orchestration_external_actions=ExternalActions(),
+        ),
+    )
+    accepted = manager._has_durable_crash_interruption_recovery(
+        latest_attempt=SimpleNamespace(
+            normalized_outcome=ExecutionOutcome.PREMATURE_STOP,
+            completed_at=None,
+            duration_ms=None,
+            attempt_number=2,
+            started_at=attempt_started,
+        ),
+        job=SimpleNamespace(
+            job_id=job_id,
+            attempt_count=1,
+            project_id=project_id,
+            change_name=change_name,
+            candidate_sha=None,
+            base_sha=base_sha,
+        ),
+        run=SimpleNamespace(
+            run_id=run_id,
+            project_id=project_id,
+            change_name=change_name,
+            active_job_id=job_id,
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            current_generation=1,
+            current_candidate_sha=None,
+            base_sha=base_sha,
+        ),
+        source_base=base_sha,
+        project_id=project_id,
+        change_name=change_name,
+    )
+    assert accepted is False
+
+
+@pytest.mark.parametrize("pending_external_action,claim_valid", [(True, True), (False, False)])
+def test_crash_recovery_predicate_rejects_stale_claim_or_pending_external_action(
+    tmp_path: Path, pending_external_action: bool, claim_valid: bool
+):
+    """A stale fence or unresolved external effect blocks this no-candidate path."""
+    from datetime import timedelta
+
+    project_id = "predicate-project"
+    change_name = "operational-blocker-visibility"
+    run_id = "predicate-run"
+    job_id = "predicate-job"
+    base_sha = "b" * 40
+    started_at = utc_now() - timedelta(minutes=1)
+    event = Event(
+        event_type=EventType.JOB_RECOVERED,
+        project_id=project_id,
+        change_id=change_name,
+        operation_id=job_id,
+        timestamp=utc_now(),
+        payload={
+            "job_id": job_id,
+            "run_id": run_id,
+            "run_generation": 1,
+            "recovery_source": "CONTROL_PLANE",
+            "interrupted_stage": "implementer",
+            "recovered_status": JobStatus.QUEUED.value,
+            "recovery_cycle_id": "cycle-1",
+        },
+    )
+
+    class Repository:
+        def list_events(self, **_kwargs):
+            return [event]
+
+        def list_by_run(self, _run_id):
+            return (
+                [
+                    SimpleNamespace(
+                        candidate_sha=None,
+                        status=ExternalActionStatus.AMBIGUOUS,
+                    )
+                ]
+                if pending_external_action
+                else []
+            )
+
+        def list_by_cycle(self, cycle_id):
+            assert cycle_id == "cycle-1"
+            return [
+                SimpleNamespace(
+                    claim_key=f"run:{run_id}",
+                    identity_type="RUN",
+                    identity_id=run_id,
+                    project_id=project_id,
+                    change_name=change_name,
+                    source="CONTROL_PLANE",
+                    planned_action="DRIVE_CONTINUATION",
+                    status="EXECUTING",
+                    fence_token=7,
+                )
+            ]
+
+    class Claims:
+        def get_by_key(self, claim_key):
+            assert claim_key == f"run:{run_id}"
+            return SimpleNamespace(is_active=True, fence_token=7, owner_instance_id="worker")
+
+        def validate_cas(self, *, claim_key, owner_instance_id, fence_token):
+            return (
+                claim_key == f"run:{run_id}" and owner_instance_id == "worker" and fence_token == 7
+            ) and claim_valid
+
+    manager = WorktreeManager(
+        tmp_path,
+        SimpleNamespace(
+            events=Repository(),
+            orchestration_external_actions=Repository(),
+            recovery_decisions=Repository(),
+            claims=Claims(),
+        ),
+    )
+    assert not manager._has_durable_crash_interruption_recovery(
+        latest_attempt=SimpleNamespace(
+            normalized_outcome=ExecutionOutcome.PREMATURE_STOP,
+            completed_at=None,
+            duration_ms=None,
+            attempt_number=2,
+            started_at=started_at,
+        ),
+        job=SimpleNamespace(
+            job_id=job_id,
+            attempt_count=1,
+            project_id=project_id,
+            change_name=change_name,
+            candidate_sha=None,
+            base_sha=base_sha,
+        ),
+        run=SimpleNamespace(
+            run_id=run_id,
+            project_id=project_id,
+            change_name=change_name,
+            active_job_id=job_id,
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            current_generation=1,
+            current_candidate_sha=None,
+            base_sha=base_sha,
+        ),
+        source_base=base_sha,
+        project_id=project_id,
+        change_name=change_name,
+    )
