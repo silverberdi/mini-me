@@ -194,6 +194,7 @@ class ProviderResultClass(str, Enum):
     MALFORMED_OUTPUT = "malformed_output"
     CANCELLED = "cancelled"
     POLICY_DENIED = "policy_denied"
+    ENVIRONMENT_UNAVAILABLE = "environment_unavailable"
     UNSAFE_BINDING = "unsafe_binding"
     UNKNOWN_ERROR = "unknown_error"
     BUDGET_DENIAL = "budget_denial"

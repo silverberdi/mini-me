@@ -251,6 +251,8 @@ class OutcomeGovernanceService:
                 return ExecutionOutcome.PROVIDER_EXHAUSTED
             if provider_result.result_class == ProviderResultClass.AUTH_ERROR:
                 return ExecutionOutcome.AUTH_REQUIRED
+            if provider_result.result_class == ProviderResultClass.ENVIRONMENT_UNAVAILABLE:
+                return ExecutionOutcome.ENVIRONMENT_UNAVAILABLE
             if provider_result.result_class in (
                 ProviderResultClass.TIMEOUT,
                 ProviderResultClass.UNKNOWN_ERROR,

@@ -18,9 +18,13 @@ if TYPE_CHECKING:
     from minime.services.workspace_guard import ManagedWorkspaceGuard
 
 from minime.domain.enums import (
+    EventType,
+    ExecutionOutcome,
     ExternalOutcome,
     ExternalReasonCode,
     GitOperationStatus,
+    JobStatus,
+    OrchestrationStage,
     WorkspaceOperation,
     WorktreeCreationState,
 )
@@ -369,6 +373,22 @@ class WorktreeManager:
             raise RuntimeError(redact_secrets(error, list(auth_secrets)))
         return stdout.decode().strip()
 
+    async def _git_show_bytes(self, object_path: str) -> bytes:
+        """Read an exact published blob without text trimming or newline rewriting."""
+        proc = await asyncio.create_subprocess_exec(
+            "git",
+            "show",
+            object_path,
+            cwd=str(self.project_root),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        )
+        stdout, _stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise RuntimeError("Published artifact content is unobservable.")
+        return stdout
+
     async def _materialize_verified_published_intake_artifacts(
         self,
         *,
@@ -489,17 +509,34 @@ class WorktreeManager:
 
         destination = destination_worktree / "openspec" / "changes" / change_name
         if destination.exists():
-            raise RuntimeError(
-                "Execution handoff denied: destination OpenSpec change already exists."
-            )
+            actual_paths: set[str] = set()
+            for candidate in destination.rglob("*"):
+                if candidate.is_symlink():
+                    raise RuntimeError(
+                        "Execution handoff denied: existing OpenSpec materialization contains a symlink."
+                    )
+                if candidate.is_file():
+                    actual_paths.add(candidate.relative_to(destination).as_posix())
+            if actual_paths != set(relative_paths):
+                raise RuntimeError(
+                    "Execution handoff denied: existing OpenSpec materialization differs from the published manifest."
+                )
+            for relative_path in relative_paths:
+                expected_content = await self._git_show_bytes(
+                    f"{ownership.published_sha}:{prefix}{relative_path}"
+                )
+                if (destination / relative_path).read_bytes() != expected_content:
+                    raise RuntimeError(
+                        "Execution handoff denied: existing OpenSpec materialization content differs from the published tree."
+                    )
+            return True
         for relative_path in relative_paths:
-            content = await self._git(
-                ["show", f"{ownership.published_sha}:{prefix}{relative_path}"],
-                cwd=self.project_root,
+            content = await self._git_show_bytes(
+                f"{ownership.published_sha}:{prefix}{relative_path}"
             )
             artifact_path = destination / relative_path
             artifact_path.parent.mkdir(parents=True, exist_ok=True)
-            artifact_path.write_text(content, encoding="utf-8")
+            artifact_path.write_bytes(content)
         return True
 
     def _resolve_real_run_id(
@@ -875,6 +912,7 @@ class WorktreeManager:
         ownership: OrchestrationWorktreeOwnership,
         expected_branch: str,
         expected_base_sha: str | None = None,
+        expected_head_sha: str | None = None,
     ) -> None:
         resolved_path = path.resolve()
         canonical_path = str(resolved_path)
@@ -916,9 +954,10 @@ class WorktreeManager:
                 ).strip()
             except Exception:
                 expected_sha = expected_base_sha.strip()
-            if head_sha != expected_sha:
+            expected_head = expected_head_sha or expected_sha
+            if head_sha != expected_head:
                 raise RuntimeError(
-                    f"Worktree postcondition failed: actual HEAD SHA '{head_sha}' does not match expected SHA '{expected_sha}'."
+                    f"Worktree postcondition failed: actual HEAD SHA '{head_sha}' does not match expected SHA '{expected_head}'."
                 )
 
         if self.uow:
@@ -1535,6 +1574,205 @@ class WorktreeManager:
                 f"Refusing to adopt existing {worktree_kind} at '{path}': Adoption check failed: {err}"
             )
 
+    async def _verify_deleted_worktree_recreation(
+        self,
+        *,
+        job_id: str,
+        project_id: str,
+        run_id: str,
+        change_name: str,
+        path: Path,
+        branch: str,
+        base_branch: str,
+        current_base_sha: str,
+    ) -> str | None:
+        """Prove a DELETED worktree's exact recovery branch before reactivation."""
+        ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None)
+        ownership = ownership_repo.get_by_job_id(job_id) if ownership_repo else None
+        if not ownership or ownership.creation_state != WorktreeCreationState.DELETED:
+            return None
+
+        def refuse(reason: str) -> None:
+            raise RuntimeError(f"Deleted worktree recreation denied: {reason}")
+
+        if path.exists() or path.is_symlink():
+            refuse("the durably owned worktree path is not absent.")
+        if str(Path(ownership.canonical_worktree_path).resolve()) != str(path.resolve()):
+            refuse("durable canonical path does not match the derived job path.")
+        if (
+            ownership.project_id != project_id
+            or ownership.job_id != job_id
+            or ownership.run_id != run_id
+            or ownership.change_name != change_name
+            or ownership.branch != branch
+        ):
+            refuse("project, job, run, change, or persisted branch identity conflicts.")
+
+        binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
+        binding = binding_repo.get_by_project_id(project_id) if binding_repo else None
+        from minime.services.workspace_guard import ManagedWorkspaceGuard, is_binding_fully_valid
+
+        if not is_binding_fully_valid(binding):
+            refuse("the project-managed repository binding is not valid.")
+        if binding.canonical_repository_identity != ownership.source_repository_identity:
+            refuse("the durable source repository identity conflicts with the project binding.")
+        guard = self.workspace_guard or ManagedWorkspaceGuard(self.uow)
+        git_ok, git_reason = guard.verify_git_repository_identity(
+            str(self.project_root), binding.canonical_repository_identity, binding.remote_name
+        )
+        if not git_ok:
+            refuse(f"managed repository identity could not be verified: {git_reason}")
+
+        canonical_base_branch = base_branch
+        remote_name = binding.remote_name or "origin"
+        remote_prefix = f"{remote_name}/"
+        if canonical_base_branch.startswith(remote_prefix):
+            canonical_base_branch = canonical_base_branch[len(remote_prefix) :]
+        elif canonical_base_branch.startswith("origin/"):
+            canonical_base_branch = canonical_base_branch.removeprefix("origin/")
+        remote_ref = f"refs/heads/{canonical_base_branch}"
+        try:
+            remote_observation = await self._git(
+                ["ls-remote", remote_name, remote_ref], project_id=project_id
+            )
+        except Exception as exc:
+            refuse(f"canonical remote base ref could not be verified: {exc}")
+        remote_lines = [line.split() for line in remote_observation.splitlines() if line.strip()]
+        if len(remote_lines) != 1 or len(remote_lines[0]) != 2 or remote_lines[0][1] != remote_ref:
+            refuse("canonical remote base ref observation was missing or ambiguous.")
+        if remote_lines[0][0] != ownership.source_base_sha:
+            refuse("canonical remote base branch advanced after the original attempt.")
+
+        job = self.uow.jobs.get_by_id(job_id)
+        run = self.uow.orchestration_runs.get_by_id(run_id)
+        if (
+            not job
+            or job.project_id != project_id
+            or job.change_name != change_name
+            # RecoveryConvergenceService first converts an interrupted RUNNING
+            # execution to QUEUED before OrchestrationService resumes the same
+            # run. That canonical checkpoint is valid only with all the run,
+            # attempt, ownership, and snapshot proofs enforced below.
+            or job.status not in {JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.NEEDS_HUMAN}
+        ):
+            refuse("the linked job identity or resumable status is inconsistent.")
+        if (
+            not run
+            or run.project_id != project_id
+            or run.change_name != change_name
+            or run.active_job_id != job_id
+            or run.current_stage != OrchestrationStage.IMPLEMENTING
+        ):
+            refuse("the linked orchestration run identity or stage is inconsistent.")
+        if job.candidate_sha or run.current_candidate_sha:
+            refuse("candidate evidence exists; this no-candidate recovery path cannot be used.")
+
+        source_base = ownership.source_base_sha
+        if (
+            not source_base
+            or run.base_sha != source_base
+            or (job.base_sha and job.base_sha != source_base)
+            or current_base_sha != source_base
+        ):
+            refuse("base SHA advanced or conflicts with durable run/job/worktree lineage.")
+
+        attempts_repo = getattr(self.uow, "job_attempts", None)
+        attempts = attempts_repo.list_by_job(job_id) if attempts_repo else []
+        if not attempts or attempts[-1].normalized_outcome not in {
+            ExecutionOutcome.ENVIRONMENT_UNAVAILABLE,
+            ExecutionOutcome.PROVIDER_FAILURE,
+        }:
+            refuse(
+                "the latest durable attempt does not prove an environment/provider initialization failure."
+            )
+
+        if (
+            await self._git(["check-ref-format", "--branch", branch], cwd=self.project_root)
+        ).strip() != branch:
+            refuse("persisted recovery branch is not a valid local branch name.")
+        ref = f"refs/heads/{branch}"
+        try:
+            branch_sha = (
+                await self._git(["rev-parse", "--verify", ref], cwd=self.project_root)
+            ).strip()
+        except Exception as exc:
+            refuse(f"persisted recovery branch is not observable: {exc}")
+        if not branch_sha:
+            refuse("persisted recovery branch has no observable commit.")
+        if branch_sha == source_base:
+            return branch_sha
+
+        try:
+            parent_sha = (
+                await self._git(["rev-parse", f"{branch_sha}^"], cwd=self.project_root)
+            ).strip()
+            commit_count = (
+                await self._git(
+                    ["rev-list", "--count", f"{source_base}..{branch_sha}"], cwd=self.project_root
+                )
+            ).strip()
+            subject = (
+                await self._git(["show", "-s", "--format=%s", branch_sha], cwd=self.project_root)
+            ).strip()
+            author = (
+                await self._git(
+                    ["show", "-s", "--format=%an%x00%ae", branch_sha], cwd=self.project_root
+                )
+            ).strip()
+            changed = {
+                line.strip()
+                for line in (
+                    await self._git(
+                        ["diff", "--name-only", f"{source_base}..{branch_sha}"],
+                        cwd=self.project_root,
+                    )
+                ).splitlines()
+                if line.strip()
+            }
+            tree_lines = (
+                await self._git(
+                    ["ls-tree", "-r", branch_sha, "--", f"openspec/changes/{change_name}/"],
+                    cwd=self.project_root,
+                )
+            ).splitlines()
+        except Exception as exc:
+            refuse(f"recovery commit evidence is not observable: {exc}")
+
+        authorized_prefix = f"openspec/changes/{change_name}/"
+        if (
+            parent_sha != source_base
+            or commit_count != "1"
+            or subject != f"mini me recovery snapshot for {job_id}"
+            or author != "mini me recovery\x00mini-me-recovery@localhost"
+            or not changed
+            or any(not item.startswith(authorized_prefix) for item in changed)
+            or any(not line.startswith("100644 blob ") for line in tree_lines)
+        ):
+            refuse(
+                "branch tip is not one exact artifact-only recovery snapshot rooted at the original base."
+            )
+
+        events_repo = getattr(self.uow, "events", None)
+        events = (
+            events_repo.list_events(project_id=project_id, change_id=change_name, limit=1000)
+            if events_repo
+            else []
+        )
+        recovery_events = [
+            event
+            for event in events
+            if event.event_type == EventType.WORKTREE_RECOVERY_SNAPSHOT
+            and event.payload.get("job_id") == job_id
+            and event.payload.get("branch") == branch
+            and event.payload.get("recovery_sha") == branch_sha
+            and str(Path(event.payload.get("worktree_path", "")).resolve()) == str(path.resolve())
+        ]
+        if len(recovery_events) != 1:
+            refuse(
+                "no unique durable recovery-snapshot event binds this exact branch SHA and path."
+            )
+        return branch_sha
+
     async def create_worktree(
         self,
         job_id: str,
@@ -1579,7 +1817,37 @@ class WorktreeManager:
         eff_change_name = self._resolve_real_change_name(
             job_id, change_name, project_id=eff_project_id, run_id=eff_run_id
         )
-        branch_name = branch_name or f"minime/{eff_change_name}-{job_id}"
+        requested_branch_name = branch_name
+        recovered_head_sha = None
+        worktree_ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None)
+        historical_ownership = (
+            worktree_ownership_repo.get_by_job_id(job_id) if worktree_ownership_repo else None
+        )
+        if (
+            historical_ownership
+            and historical_ownership.creation_state == WorktreeCreationState.DELETED
+        ):
+            if requested_branch_name and requested_branch_name != historical_ownership.branch:
+                raise RuntimeError(
+                    "Deleted worktree recreation denied: caller branch differs from persisted branch identity."
+                )
+            branch_name = historical_ownership.branch
+            if not eff_project_id or not eff_run_id:
+                raise RuntimeError(
+                    "Deleted worktree recreation denied: durable project/run identity is unavailable."
+                )
+            recovered_head_sha = await self._verify_deleted_worktree_recreation(
+                job_id=job_id,
+                project_id=eff_project_id,
+                run_id=eff_run_id,
+                change_name=eff_change_name,
+                path=path,
+                branch=branch_name,
+                base_branch=base_branch,
+                current_base_sha=base_sha,
+            )
+        else:
+            branch_name = requested_branch_name or f"minime/{eff_change_name}-{job_id}"
 
         if path.exists():
             if not reuse_existing:
@@ -1640,7 +1908,11 @@ class WorktreeManager:
         # 4. Write marker, prove postconditions, and transition to CREATED
         self._write_ownership_marker(path, ownership)
         await self._verify_creation_postconditions(
-            path, ownership, expected_branch=branch_name, expected_base_sha=base_sha
+            path,
+            ownership,
+            expected_branch=branch_name,
+            expected_base_sha=base_sha,
+            expected_head_sha=recovered_head_sha,
         )
         self._finalize_created_ownership(ownership)
 

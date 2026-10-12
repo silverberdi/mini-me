@@ -743,7 +743,7 @@ class OperationsDashboardService:
         from minime.services.agent_confinement import AgentProcessConfinement
         from minime.services.workspace_guard import ManagedWorkspaceGuard
 
-        confinement_active = AgentProcessConfinement("/tmp").is_confinement_available()
+        confinement_active = AgentProcessConfinement.is_host_confinement_available()
         guard = ManagedWorkspaceGuard(self.uow)
         runtime_path = guard.runtime_root
 

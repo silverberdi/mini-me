@@ -24,6 +24,7 @@ class ReviewerResult:
     stderr: list[str]
     duration_ms: int
     preflight_error: str | None = None
+    environment_error: bool = False
 
 
 class ReviewerRunnerInterface:
@@ -69,6 +70,9 @@ class CliReviewerRunner(ReviewerRunnerInterface):
         confinement = AgentProcessConfinement(allowed_worktree_path=str(worktree_path))
         preflight_check = confinement.validate_command_preflight(cwd=str(worktree_path))
         if preflight_check.outcome != ExternalOutcome.SUCCESS:
+            environment_error = confinement.is_local_environment_preflight_error(
+                preflight_check.error_message
+            )
             return ReviewerResult(
                 exit_code=-2,
                 timed_out=False,
@@ -80,7 +84,8 @@ class CliReviewerRunner(ReviewerRunnerInterface):
                     )
                 ],
                 duration_ms=0,
-                preflight_error=preflight_check.error_message,
+                preflight_error=None if environment_error else preflight_check.error_message,
+                environment_error=environment_error,
             )
 
         if self.profile is not None:
@@ -96,79 +101,47 @@ class CliReviewerRunner(ReviewerRunnerInterface):
                 )
 
         raw_command = self._command_for_prompt(prompt_context)
+        input_bytes = (
+            prompt_context.encode()
+            if not self.profile or self.profile.prompt_transport == "stdin"
+            else None
+        )
         try:
-            wrapped_command = confinement.wrap_command(raw_command)
+            process_result = await confinement.run_confined_async_subprocess(
+                raw_command,
+                cwd=str(worktree_path),
+                input_bytes=input_bytes,
+                timeout_seconds=timeout_seconds,
+                codex_auth_source=(
+                    confinement.codex_auth_source()
+                    if self.profile is not None and self.profile.provider.lower() == "codex"
+                    else None
+                ),
+            )
         except AgentConfinementError as err:
             return ReviewerResult(
                 exit_code=-2,
                 timed_out=False,
                 stdout=[],
                 stderr=[redact_secrets(str(err))],
-                duration_ms=0,
-                preflight_error=str(err),
+                duration_ms=int((asyncio.get_running_loop().time() - start) * 1000),
+                preflight_error=(
+                    "CODEX_CREDENTIAL_UNAVAILABLE"
+                    if not err.environment_unavailable
+                    else "AGENT_RUNTIME_UNAVAILABLE"
+                ),
+                environment_error=err.environment_unavailable,
             )
-
-        proc = await asyncio.create_subprocess_exec(
-            *wrapped_command,
-            cwd=str(worktree_path),
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=confinement.prepare_environment(),
-            start_new_session=True,
-        )
-        timed_out = False
-        stdout = b""
-        stderr = b""
-        try:
-            try:
-                stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(
-                        prompt_context.encode()
-                        if not self.profile or self.profile.prompt_transport == "stdin"
-                        else None
-                    ),
-                    timeout=timeout_seconds,
-                )
-            except asyncio.TimeoutError:
-                timed_out = True
-                try:
-                    os.killpg(proc.pid, signal.SIGTERM)
-                except OSError:
-                    pass
-                try:
-                    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=5)
-                except (asyncio.TimeoutError, Exception):
-                    try:
-                        os.killpg(proc.pid, signal.SIGKILL)
-                    except OSError:
-                        pass
-                    stdout, stderr = await proc.communicate()
-        except BaseException as exc:
-            # Bounded, cancellation-protected cleanup: SIGTERM -> grace -> SIGKILL,
-            # awaiting process-group termination BEFORE the exception propagates.
-            # Re-arm cancellation after cleanup so it is never silently swallowed.
-            task = asyncio.current_task()
-            was_cancelled = (
-                isinstance(exc, asyncio.CancelledError)
-                and task is not None
-                and task.cancelling() > 0
-            )
-            if was_cancelled:
-                task.uncancel()
-            try:
-                await self._terminate_process_group(proc)
-            finally:
-                if was_cancelled:
-                    task.cancel()
-            raise
         duration_ms = int((asyncio.get_running_loop().time() - start) * 1000)
+        rotation_error = process_result.credential_rotation_detected
         return ReviewerResult(
-            exit_code=proc.returncode if proc.returncode is not None else -1,
-            timed_out=timed_out,
-            stdout=self._sanitize_output(stdout),
-            stderr=self._sanitize_output(stderr),
+            exit_code=process_result.returncode,
+            timed_out=process_result.timed_out,
+            stdout=self._sanitize_output(process_result.stdout),
+            stderr=self._sanitize_output(process_result.stderr),
             duration_ms=duration_ms,
+            preflight_error=("CODEX_CREDENTIAL_ROTATION_NOT_PERSISTED" if rotation_error else None),
+            environment_error=rotation_error,
         )
 
     async def _terminate_process_group(self, proc: asyncio.subprocess.Process) -> None:
