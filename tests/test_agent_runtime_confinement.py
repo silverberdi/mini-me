@@ -174,7 +174,15 @@ def test_antigravity_auth_is_projected_as_one_private_file_and_rotation_is_not_p
     with confinement.runtime_session(
         {"HOME": str(host_home)}, antigravity_auth_source=str(source)
     ) as runtime:
-        private_home = Path(runtime.environment["HOME"])
+        # The credential copy is a host-side private file, while the CLI sees
+        # the same directory through Bubblewrap's /run/minime-agent mount.
+        private_home = runtime.host_root / "home"
+        expected_cli_home = (
+            Path(runtime.sandbox_root) / "home"
+            if confinement.confinement_mechanism == "bubblewrap"
+            else private_home
+        )
+        assert Path(runtime.environment["HOME"]) == expected_cli_home
         private_gemini_home = private_home / ".gemini"
         private_cli_home = private_gemini_home / "antigravity-cli"
         projected = runtime.antigravity_auth_copy
