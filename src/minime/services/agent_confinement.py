@@ -54,19 +54,28 @@ class AgentRuntimeState:
     environment: dict[str, str]
     auth_copy: Path | None = None
     initial_auth_digest: str | None = None
+    antigravity_auth_copy: Path | None = None
+    initial_antigravity_auth_digest: str | None = None
     credential_rotation_detected: bool = False
     sensitive_values: tuple[str, ...] = field(default=(), repr=False)
 
     def observe_credential_state(self) -> bool:
         """Detect a private auth-file rewrite without exposing its contents or digest."""
-        if self.auth_copy is None or self.initial_auth_digest is None:
-            return False
-        try:
-            current_digest = hashlib.sha256(self.auth_copy.read_bytes()).hexdigest()
-        except OSError:
-            self.credential_rotation_detected = True
-            return True
-        self.credential_rotation_detected = current_digest != self.initial_auth_digest
+        for path, expected in (
+            (self.auth_copy, self.initial_auth_digest),
+            (self.antigravity_auth_copy, self.initial_antigravity_auth_digest),
+        ):
+            if path is None or expected is None:
+                continue
+            try:
+                current_digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            except OSError:
+                self.credential_rotation_detected = True
+                return True
+            if current_digest != expected:
+                self.credential_rotation_detected = True
+                return True
+        self.credential_rotation_detected = False
         return self.credential_rotation_detected
 
 
@@ -221,8 +230,9 @@ class AgentProcessConfinement:
         self,
         base_env: dict[str, str] | None = None,
         codex_auth_source: str | None = None,
+        antigravity_auth_source: str | None = None,
     ) -> Iterator[AgentRuntimeState]:
-        """Create and destroy one private runtime, copying only authorized Codex auth."""
+        """Create one private runtime with only explicitly authorized provider credentials."""
         temp_parent = self._validate_temp_parent(
             self.private_state_parent or self._default_private_state_parent()
         )
@@ -263,6 +273,8 @@ class AgentProcessConfinement:
 
             auth_copy: Path | None = None
             initial_auth_digest: str | None = None
+            antigravity_auth_copy: Path | None = None
+            initial_antigravity_auth_digest: str | None = None
             sensitive_values: tuple[str, ...] = ()
             if codex_auth_source is not None:
                 auth_copy = subdirs["codex"] / "auth.json"
@@ -273,12 +285,32 @@ class AgentProcessConfinement:
             else:
                 safe_env.pop("CODEX_HOME", None)
 
+            if antigravity_auth_source is not None:
+                gemini_home = subdirs["home"] / ".gemini"
+                gemini_home.mkdir(mode=0o700)
+                os.chmod(gemini_home, 0o700)
+                antigravity_auth_copy = gemini_home / "jetski-standalone-oauth-token"
+                self._copy_authorized_auth_file(antigravity_auth_source, antigravity_auth_copy)
+                initial_antigravity_auth_digest = hashlib.sha256(
+                    antigravity_auth_copy.read_bytes()
+                ).hexdigest()
+                sensitive_values = tuple(
+                    sorted(
+                        set(sensitive_values)
+                        | set(self._read_opaque_credential_values(antigravity_auth_copy)),
+                        key=len,
+                        reverse=True,
+                    )
+                )
+
             runtime = AgentRuntimeState(
                 host_root=host_root,
                 sandbox_root=sandbox_root,
                 environment=safe_env,
                 auth_copy=auth_copy,
                 initial_auth_digest=initial_auth_digest,
+                antigravity_auth_copy=antigravity_auth_copy,
+                initial_antigravity_auth_digest=initial_antigravity_auth_digest,
                 sensitive_values=sensitive_values,
             )
             try:
@@ -309,6 +341,36 @@ class AgentProcessConfinement:
         return tuple(sorted(values, key=len, reverse=True))
 
     @staticmethod
+    def _read_opaque_credential_values(auth_path: Path) -> tuple[str, ...]:
+        """Return redaction candidates for a single opaque Antigravity token file."""
+        try:
+            value = auth_path.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError) as exc:
+            raise AgentCredentialError(
+                "Authorized Antigravity credentials are unreadable."
+            ) from exc
+        if not value:
+            return ()
+        candidates = {value} if len(value) >= 8 else set()
+        try:
+            payload = json.loads(value)
+        except json.JSONDecodeError:
+            payload = None
+
+        def collect_strings(item: object) -> None:
+            if isinstance(item, str) and len(item) >= 8:
+                candidates.add(item)
+            elif isinstance(item, dict):
+                for child in item.values():
+                    collect_strings(child)
+            elif isinstance(item, list):
+                for child in item:
+                    collect_strings(child)
+
+        collect_strings(payload)
+        return tuple(sorted(candidates, key=len, reverse=True))
+
+    @staticmethod
     def _scrub_credential_values(output: bytes, values: tuple[str, ...]) -> bytes:
         for value in values:
             output = output.replace(value.encode("utf-8"), b"[REDACTED_CODEX_CREDENTIAL]")
@@ -322,19 +384,27 @@ class AgentProcessConfinement:
 
     @staticmethod
     def _copy_codex_auth(source: str, target: Path) -> None:
+        AgentProcessConfinement._copy_authorized_auth_file(source, target)
+
+    @staticmethod
+    def _copy_authorized_auth_file(source: str, target: Path) -> None:
         source_path = Path(source).expanduser()
         try:
+            if source_path.resolve(strict=True) != source_path.absolute():
+                raise AgentCredentialError(
+                    "Authorized provider auth path contains a symlink component."
+                )
             source_info = source_path.lstat()
             if not stat.S_ISREG(source_info.st_mode) or stat.S_ISLNK(source_info.st_mode):
-                raise AgentCredentialError("Authorized Codex auth source is not a regular file.")
+                raise AgentCredentialError("Authorized provider auth source is not a regular file.")
             groups = set(os.getgroups()) | {os.getegid()}
             if source_info.st_uid != os.geteuid() and source_info.st_gid not in groups:
                 raise AgentCredentialError(
-                    "Authorized Codex auth source is not readable by this service identity."
+                    "Authorized provider auth source is not readable by this service identity."
                 )
-            if stat.S_IMODE(source_info.st_mode) & 0o027:
+            if stat.S_IMODE(source_info.st_mode) & 0o077:
                 raise AgentCredentialError(
-                    "Authorized Codex auth source has unsafe group/world permissions."
+                    "Authorized provider auth source has unsafe group/world permissions."
                 )
             flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
             source_fd = os.open(source_path, flags)
@@ -348,7 +418,7 @@ class AgentProcessConfinement:
                     or opened_info.st_gid != source_info.st_gid
                 ):
                     raise AgentCredentialError(
-                        "Authorized Codex auth source changed during validation."
+                        "Authorized provider auth source changed during validation."
                     )
                 target_fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 try:
@@ -364,7 +434,7 @@ class AgentProcessConfinement:
                         or after_copy.st_ctime_ns != opened_info.st_ctime_ns
                     ):
                         raise AgentCredentialError(
-                            "Authorized Codex auth source changed while being copied."
+                            "Authorized provider auth source changed while being copied."
                         )
                     os.fsync(target_fd)
                     os.fchmod(target_fd, 0o600)
@@ -375,7 +445,7 @@ class AgentProcessConfinement:
         except AgentCredentialError:
             raise
         except OSError as exc:
-            raise AgentCredentialError("Authorized Codex credentials are unavailable.") from exc
+            raise AgentCredentialError("Authorized provider credentials are unavailable.") from exc
 
     @staticmethod
     def codex_auth_source(base_env: dict[str, str] | None = None) -> str:
@@ -389,6 +459,14 @@ class AgentProcessConfinement:
         else:
             root = Path.home() / ".codex"
         return str(root / "auth.json")
+
+    @staticmethod
+    def antigravity_auth_source(base_env: dict[str, str] | None = None) -> str:
+        """Resolve the one standalone Antigravity CLI auth file; never its whole home."""
+        env = base_env or os.environ
+        home = env.get("HOME")
+        root = Path(home).expanduser() if home else Path.home()
+        return str(root / ".gemini" / "jetski-standalone-oauth-token")
 
     @staticmethod
     def _build_darwin_sandbox_profile(
@@ -599,6 +677,7 @@ class AgentProcessConfinement:
         timeout_seconds: int,
         env: dict[str, str] | None = None,
         codex_auth_source: str | None = None,
+        antigravity_auth_source: str | None = None,
         unshare_network: bool = False,
     ) -> AgentProcessResult:
         """Run an async subprocess, guaranteeing process and private-state cleanup."""
@@ -607,7 +686,9 @@ class AgentProcessConfinement:
             raise AgentConfinementError(preflight.error_message or "Confinement preflight failed.")
         runtime_state = None
         try:
-            with self.runtime_session(env, codex_auth_source) as runtime_state:
+            with self.runtime_session(
+                env, codex_auth_source, antigravity_auth_source
+            ) as runtime_state:
                 command = self.wrap_command(cmd, runtime_state, unshare_network=unshare_network)
                 process = await asyncio.create_subprocess_exec(
                     *command,
@@ -644,7 +725,7 @@ class AgentProcessConfinement:
                     # child output too: it may contain the newly rotated secret, which
                     # was not present in the initial redaction set.
                     stdout = b""
-                    stderr = b"Codex credential rotation was not persisted."
+                    stderr = b"Provider credential rotation was not persisted."
                 return AgentProcessResult(
                     returncode=process.returncode if process.returncode is not None else -1,
                     stdout=self._scrub_credential_values(stdout, runtime_state.sensitive_values),
@@ -690,6 +771,7 @@ class AgentProcessConfinement:
         env: dict[str, str] | None = None,
         *,
         codex_auth_source: str | None = None,
+        antigravity_auth_source: str | None = None,
         unshare_network: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         """Synchronous confined execution used by checks with no Codex credentials."""
@@ -698,7 +780,7 @@ class AgentProcessConfinement:
             raise AgentConfinementError(
                 f"Preflight confinement check failed: {preflight.error_message}"
             )
-        with self.runtime_session(env, codex_auth_source) as runtime_state:
+        with self.runtime_session(env, codex_auth_source, antigravity_auth_source) as runtime_state:
             wrapped = self.wrap_command(cmd, runtime_state, unshare_network=unshare_network)
             process: subprocess.Popen[str] | None = None
             try:

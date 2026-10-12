@@ -910,82 +910,156 @@ class ControlPlaneService:
                 sanitized_params=sanitized_params,
             )
 
-        # Check provider health
-        health = self.uow.provider_health.get_by_provider(target_executor)
-        if health and health.status == ProviderHealthStatus.EXHAUSTED:
+        job = self.uow.jobs.get_by_id(run.active_job_id) if run.active_job_id else None
+        if not job or job.project_id != run.project_id or job.change_name != run.change_name:
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.AUTHORITY_MISMATCH,
+                summary="REASSIGN requires the exact linked Job for this Run.",
+                sanitized_params=sanitized_params,
+            )
+
+        if job.status not in {JobStatus.NEEDS_HUMAN, JobStatus.FAILED, JobStatus.RECOVERY_BLOCKED}:
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.ACTION_NOT_ALLOWED,
+                summary=f"Cannot reassign linked Job in status {job.status.value}.",
+                sanitized_params=sanitized_params,
+            )
+        if job.current_executor == target_executor:
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.ACTION_NOT_ALLOWED,
+                summary="Target executor is already assigned to the linked Job.",
+                sanitized_params=sanitized_params,
+            )
+        if job.reassignment_count >= 2:
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.BUDGET_BLOCKED,
+                summary="Canonical per-job reassignment limit (2) has been reached.",
+                sanitized_params=sanitized_params,
+            )
+
+        # An unknown or stale provider-health state is not authorization to
+        # dispatch a manually selected executor.
+        health = self.provider_health_service.get_existing_health(target_executor)
+        if not health or health.status != ProviderHealthStatus.AVAILABLE:
             return self._record_and_return_rejection(
                 request=request,
                 run=run,
                 error_code=OperatorActionErrorCode.PROVIDER_UNAVAILABLE,
-                summary=f"Target provider '{target_executor}' is currently exhausted.",
+                summary=f"Target provider '{target_executor}' is not currently available.",
                 sanitized_params=sanitized_params,
             )
 
-        # Increment reassignment count and update run
-        run.reassignment_count += 1
-        run.pending_handoff = {
-            "to_executor": target_executor,
-            "reassigned_by": request.actor_identity,
-            "reassigned_at": utc_now().isoformat(),
-        }
-        self.uow.orchestration_runs.save(run)
-        self.uow.commit()
-
+        # REASSIGN only records durable intent. Execution remains a distinct
+        # operator CONTINUE action. The existing job repository performs the
+        # executor mutation under the current run claim/fence.
         rec_svc = RecoveryConvergenceService(self.uow, project_root=self.project_root)
-        rec_svc.request_run_continuation(run.run_id, source=RecoverySource.CONTROL_PLANE)
-        resumed_run = self.uow.orchestration_runs.get_by_id(run.run_id) or run
-
-        summary = (
-            f"Run reassigned to {target_executor} (reassignment #{resumed_run.reassignment_count})."
-        )
-        record = OperatorActionRecord(
-            action_request_id=request.action_request_id,
-            project_id=request.project_id,
-            change_name=request.change_name,
-            run_id=request.run_id,
-            action_type=request.action_type,
-            actor_identity=request.actor_identity,
-            source_interface=request.source_interface,
-            precondition_stage=run.current_stage.value,
-            precondition_gate=run.human_gate.value if run.human_gate else None,
-            status=OperatorActionStatus.COMPLETED,
-            summary=summary,
-            resulting_stage=resumed_run.current_stage.value,
-            resulting_outcome=resumed_run.stop_outcome.value if resumed_run.stop_outcome else None,
-            resulting_gate=resumed_run.human_gate.value if resumed_run.human_gate else None,
-            parameters_json=sanitized_params,
-            result_payload_json={
-                "target_executor": target_executor,
-                "reassignment_count": resumed_run.reassignment_count,
-            },
-        )
-        self.uow.operator_actions.save(record)
-        self.uow.events.save(
-            Event(
-                event_type=EventType.OPERATOR_ACTION_EXECUTED,
-                payload={
-                    "action_request_id": request.action_request_id,
-                    "action_type": request.action_type.value,
-                    "target_executor": target_executor,
-                    "run_id": request.run_id,
-                },
-                timestamp=utc_now(),
+        claim = rec_svc.acquire_claim(f"run:{run.run_id}")
+        if not claim:
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.RECOVERY_REQUIRED,
+                summary="Could not acquire the canonical run recovery claim for reassignment.",
+                sanitized_params=sanitized_params,
             )
+        from minime.domain.models import RecoveryClaimContext
+
+        claim_context = RecoveryClaimContext(
+            claim_key=claim.claim_key,
+            owner_instance_id=claim.owner_instance_id,
+            fence_token=claim.fence_token,
+            lease_expires_at=claim.lease_expires_at,
         )
-        self.uow.commit()
+        committed = False
+        try:
+            current_job = self.uow.jobs.get_by_id(job.job_id)
+            if (
+                not current_job
+                or current_job.project_id != run.project_id
+                or current_job.change_name != run.change_name
+                or current_job.status
+                not in {JobStatus.NEEDS_HUMAN, JobStatus.FAILED, JobStatus.RECOVERY_BLOCKED}
+                or current_job.reassignment_count >= 2
+            ):
+                raise ValueError("Linked Job changed or reached the reassignment ceiling.")
+            self.uow.jobs.update_executor_fenced(
+                current_job.job_id, target_executor, claim_context=claim_context
+            )
+            current_job.current_executor = target_executor
+            current_job.reassignment_count += 1
+            self.uow.jobs.save(current_job)
+            summary = (
+                f"Executor reassignment to {target_executor} was durably applied; "
+                "a separate authorized CONTINUE is required to resume execution."
+            )
+            record = OperatorActionRecord(
+                action_request_id=request.action_request_id,
+                project_id=request.project_id,
+                change_name=request.change_name,
+                run_id=request.run_id,
+                job_id=current_job.job_id,
+                action_type=request.action_type,
+                actor_identity=request.actor_identity,
+                source_interface=request.source_interface,
+                precondition_stage=run.current_stage.value,
+                precondition_gate=run.human_gate.value if run.human_gate else None,
+                status=OperatorActionStatus.COMPLETED,
+                summary=summary,
+                parameters_json=sanitized_params,
+                result_payload_json={
+                    "target_executor": target_executor,
+                    "executor_assignment_applied": True,
+                    "reassignment_count": current_job.reassignment_count,
+                    "execution_started": False,
+                },
+            )
+            self.uow.operator_actions.save(record)
+            self.uow.events.save(
+                Event(
+                    event_type=EventType.OPERATOR_ACTION_EXECUTED,
+                    payload={
+                        "action_request_id": request.action_request_id,
+                        "action_type": request.action_type.value,
+                        "target_executor": target_executor,
+                        "run_id": request.run_id,
+                        "job_id": current_job.job_id,
+                        "execution_started": False,
+                    },
+                    timestamp=utc_now(),
+                )
+            )
+            rec_svc.validate_claim(claim_context)
+            self.uow.commit()
+            committed = True
+            result_payload = record.result_payload_json
+        finally:
+            if not committed:
+                self.uow.rollback()
+            try:
+                rec_svc.release_claim(claim_context)
+            except Exception:
+                # The assignment plus action record are already atomic and
+                # durable once committed; lease expiry remains the safe
+                # fallback if best-effort release itself is unavailable.
+                logger.warning("Could not release reassignment recovery claim for %s", run.run_id)
 
         return OperatorActionResult(
             action_request_id=request.action_request_id,
             action_type=request.action_type,
             status=OperatorActionStatus.COMPLETED,
             summary=summary,
-            resulting_stage=resumed_run.current_stage,
-            resulting_outcome=resumed_run.stop_outcome,
-            resulting_gate=resumed_run.human_gate,
-            payload={
-                "target_executor": target_executor,
-                "reassignment_count": resumed_run.reassignment_count,
-            },
+            resulting_stage=run.current_stage,
+            resulting_outcome=run.stop_outcome,
+            resulting_gate=run.human_gate,
+            payload=result_payload,
         )
 
     def _execute_resolve_gate(

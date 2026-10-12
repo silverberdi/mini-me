@@ -9,15 +9,37 @@ from typing import Any
 
 import pytest
 
-from minime.domain.enums import ChangeStatus, EventType, JobStatus, ReadinessState
-from minime.domain.models import Change, JobHandoff, Project, RecoveryClaimContext, utc_now
+from minime.domain.enums import (
+    ChangeStatus,
+    EventType,
+    ExecutionOutcome,
+    HumanGate,
+    JobStatus,
+    OperatorActionType,
+    OrchestrationStage,
+    OrchestrationStopOutcome,
+    ProgressClassification,
+    ReadinessState,
+)
+from minime.domain.models import (
+    Change,
+    Job,
+    JobAttempt,
+    JobHandoff,
+    OperatorActionRequest,
+    OrchestrationRun,
+    Project,
+    RecoveryClaimContext,
+    utc_now,
+)
+from minime.services.control_plane_service import ControlPlaneService
 from minime.services.deepseek_auditor_runner import MockAuditorRunner
 from minime.services.execution_pipeline import (
     ExecutionPipelineService,
     format_candidate_workspace_context,
 )
 from minime.services.handoff_manager import HandoffManager
-from minime.services.implementer_runner import MockImplementerRunner
+from minime.services.implementer_runner import ImplementerResult, MockImplementerRunner
 from minime.services.openspec_tasks import OpenSpecTaskTracker
 from minime.services.reviewer_runner import MockReviewerRunner
 from minime.services.worktree_manager import WorktreeInfo
@@ -272,6 +294,166 @@ def seed_ready_change(
     )
     in_memory_uow.projects.save(project)
     in_memory_uow.changes.save(change)
+
+
+def test_control_plane_reassign_then_continue_reaches_codex_runner_over_old_handoff(
+    in_memory_uow, tmp_path, monkeypatch
+):
+    from minime.domain.enums import ProviderHealthStatus
+    from minime.domain.models import ProviderHealth
+
+    change_name = "n01-provider-reassignment"
+    seed_ready_change(
+        in_memory_uow,
+        tmp_path,
+        "# Tasks\n\n## 1. Work\n- [ ] 1.1 Implement the authorized task\n",
+        checks=[],
+        change_name=change_name,
+    )
+    project = in_memory_uow.projects.get_by_id("mini-me")
+    project.external_providers_allowed = ["codex", "antigravity"]
+    in_memory_uow.projects.save(project)
+    run = OrchestrationRun(
+        run_id="run-n01-reassign-integration",
+        project_id=project.project_id,
+        change_name=change_name,
+        base_sha="baseline-sha",
+        current_stage=OrchestrationStage.IMPLEMENTING,
+        resumable_stage=OrchestrationStage.IMPLEMENTING,
+        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+        human_gate=HumanGate.NEEDS_HUMAN,
+        stop_reason="SAME_SHA_RETRY_SUPPRESSED",
+        is_active=False,
+        active_job_id="job-n01-reassign-integration",
+    )
+    job = Job(
+        job_id=run.active_job_id,
+        project_id=project.project_id,
+        change_name=change_name,
+        implementer_role="antigravity",
+        current_executor="antigravity",
+        status=JobStatus.NEEDS_HUMAN,
+        attempt_count=3,
+        reassignment_count=1,
+    )
+    in_memory_uow.orchestration_runs.save(run)
+    in_memory_uow.jobs.save(job)
+    for number in range(1, 4):
+        in_memory_uow.job_attempts.save(
+            JobAttempt(
+                attempt_id=f"n01-historical-{number}",
+                job_id=job.job_id,
+                attempt_number=number,
+                executor_role="antigravity",
+                model_identity="antigravity:model",
+                normalized_outcome=ExecutionOutcome.PREMATURE_STOP.value,
+                progress_classification=ProgressClassification.NO_PROGRESS,
+                start_sha="same-candidate-sha",
+                end_sha="same-candidate-sha",
+                is_same_sha_duplicate=number == 3,
+                error_details={
+                    "reason": "SAME_SHA_RETRY_SUPPRESSED" if number == 3 else "no progress"
+                },
+            )
+        )
+    old_handoff = JobHandoff(
+        job_id=job.job_id,
+        from_attempt_id="n01-historical-2",
+        from_executor="codex",
+        to_executor="antigravity",
+        worktree_path=str(tmp_path / "historical-worktree"),
+        base_sha="baseline-sha",
+        candidate_sha="same-candidate-sha",
+    )
+    in_memory_uow.job_handoffs.save(old_handoff)
+    in_memory_uow.provider_health.save(
+        ProviderHealth(provider="codex", status=ProviderHealthStatus.AVAILABLE)
+    )
+    in_memory_uow.provider_health.save(
+        ProviderHealth(provider="antigravity", status=ProviderHealthStatus.AVAILABLE)
+    )
+    in_memory_uow.commit()
+
+    selected_runners: list[str] = []
+
+    class DiagnosticRunner:
+        async def run(self, worktree_path: Path, prompt_context: str, timeout_seconds: int):
+            del worktree_path, prompt_context, timeout_seconds
+            return ImplementerResult(
+                exit_code=-2,
+                timed_out=False,
+                stdout=[],
+                stderr=["diagnostic runner reached; no provider invoked"],
+                duration_ms=0,
+                preflight_error="TEST_ENVIRONMENT_UNAVAILABLE",
+                environment_error=True,
+            )
+
+    def runner_for_selected_executor(executor: str):
+        selected_runners.append(executor)
+        assert executor == "codex"
+        return DiagnosticRunner()
+
+    monkeypatch.setattr(
+        "minime.services.execution_pipeline.runner_for_implementer",
+        runner_for_selected_executor,
+    )
+    pipeline = ExecutionPipelineService(
+        in_memory_uow,
+        project_root=tmp_path,
+        worktree_manager=FakeWorktreeManager(tmp_path),
+        implementer_timeout_seconds=5,
+    )
+    # RecoveryConvergenceService constructs the canonical OrchestrationService
+    # itself; supply its actual execution pipeline with deterministic Git/runner
+    # boundaries rather than simulating recovery's result.
+    monkeypatch.setattr(
+        "minime.services.orchestration_service.ExecutionPipelineService",
+        lambda *args, **kwargs: pipeline,
+    )
+    control = ControlPlaneService(in_memory_uow, project_root=tmp_path)
+    reassigned = control.execute_action(
+        OperatorActionRequest(
+            action_request_id="n01-human-reassign-codex",
+            project_id=project.project_id,
+            change_name=change_name,
+            run_id=run.run_id,
+            action_type=OperatorActionType.REASSIGN,
+            parameters={"target_executor": "codex"},
+            actor_identity="authorized-human",
+            source_interface="cli",
+            expected_stage=OrchestrationStage.IMPLEMENTING,
+            expected_generation=1,
+        )
+    )
+    assert reassigned.status.value == "COMPLETED"
+    assert reassigned.payload["execution_started"] is False
+    assert in_memory_uow.jobs.get_by_id(job.job_id).attempt_count == 3
+    assert selected_runners == []
+
+    continued = control.execute_action(
+        OperatorActionRequest(
+            action_request_id="n01-human-continue-after-reassign",
+            project_id=project.project_id,
+            change_name=change_name,
+            run_id=run.run_id,
+            action_type=OperatorActionType.CONTINUE,
+            actor_identity="authorized-human",
+            source_interface="cli",
+            expected_stage=OrchestrationStage.IMPLEMENTING,
+            expected_generation=1,
+        )
+    )
+
+    assert selected_runners == ["codex"]
+    assert continued.payload["request_processed"] is True
+    assert in_memory_uow.jobs.get_by_id(job.job_id).attempt_count == 3
+    assert len(in_memory_uow.jobs.list_by_project(project.project_id)) == 1
+    assert len(in_memory_uow.orchestration_runs.list_runs()) == 1
+    assert len(in_memory_uow.job_attempts.list_by_job(job.job_id)) == 4
+    assert in_memory_uow.job_attempts.list_by_job(job.job_id)[2].error_details["reason"] == (
+        "SAME_SHA_RETRY_SUPPRESSED"
+    )
 
 
 @pytest.mark.asyncio

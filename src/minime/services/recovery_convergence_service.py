@@ -479,16 +479,19 @@ class RecoveryConvergenceService:
         }:
             return
 
-        # Handle pending unconsumed handoff
+        # A newer completed operator REASSIGN action supersedes an older
+        # automatic handoff. Resolve both through the shared durable selector.
         if hasattr(self.uow, "job_handoffs") and self.uow.job_handoffs is not None:
-            pending_handoff = next(
-                (h for h in self.uow.job_handoffs.list_by_job(job.job_id) if not h.is_consumed),
-                None,
+            from minime.services.operator_executor_selection import effective_job_executor
+
+            run = self.uow.orchestration_runs.get_active_run(job.project_id, job.change_name)
+            selected_executor, _, _operator_selected = effective_job_executor(
+                self.uow, run, job
             )
-            if pending_handoff:
+            if selected_executor and selected_executor != job.current_executor:
                 self.uow.jobs.update_executor_fenced(
                     job.job_id,
-                    pending_handoff.to_executor,
+                    selected_executor,
                     claim_context=claim_context,
                 )
 

@@ -150,6 +150,143 @@ def test_unsafe_or_symlinked_credential_source_fails_closed(tmp_path: Path):
             pytest.fail("symlink auth source should not enter the runtime")
 
 
+def test_antigravity_auth_is_projected_as_one_private_file_and_rotation_is_not_persisted(
+    tmp_path: Path,
+):
+    confinement, _worktree, _runtime = _confinement(tmp_path)
+    host_home = tmp_path / "host-home"
+    gemini_home = host_home / ".gemini"
+    gemini_home.mkdir(parents=True)
+    source = gemini_home / "jetski-standalone-oauth-token"
+    source.write_text("opaque-authentication-token-for-test", encoding="utf-8")
+    source.chmod(0o600)
+    (gemini_home / "settings.json").write_text('{"unrelated":"host-only"}', encoding="utf-8")
+
+    with confinement.runtime_session(
+        {"HOME": str(host_home)}, antigravity_auth_source=str(source)
+    ) as runtime:
+        private_home = Path(runtime.environment["HOME"])
+        private_gemini_home = private_home / ".gemini"
+        projected = runtime.antigravity_auth_copy
+        assert projected == private_gemini_home / "jetski-standalone-oauth-token"
+        assert projected.read_text(encoding="utf-8") == "opaque-authentication-token-for-test"
+        assert stat.S_IMODE(projected.stat().st_mode) == 0o600
+        assert stat.S_IMODE(private_gemini_home.stat().st_mode) == 0o700
+        assert {path.name for path in private_gemini_home.iterdir()} == {
+            "jetski-standalone-oauth-token"
+        }
+        assert "opaque-authentication-token-for-test" in runtime.sensitive_values
+        projected.write_text("rotated-private-token", encoding="utf-8")
+        assert runtime.observe_credential_state() is True
+        private_root = runtime.host_root
+
+    assert not private_root.exists()
+    assert source.read_text(encoding="utf-8") == "opaque-authentication-token-for-test"
+    assert "host-only" in (gemini_home / "settings.json").read_text(encoding="utf-8")
+
+
+def test_antigravity_auth_source_rejects_symlinks_and_unsafe_permissions(tmp_path: Path):
+    confinement, _worktree, _runtime = _confinement(tmp_path)
+    source = tmp_path / "agy-token"
+    source.write_text("opaque-authentication-token", encoding="utf-8")
+    source.chmod(0o640)
+    with pytest.raises(AgentCredentialError):
+        with confinement.runtime_session({}, antigravity_auth_source=str(source)):
+            pytest.fail("group-readable auth source should fail closed")
+    source.chmod(0o600)
+    symlink = tmp_path / "agy-token-link"
+    symlink.symlink_to(source)
+    with pytest.raises(AgentCredentialError):
+        with confinement.runtime_session({}, antigravity_auth_source=str(symlink)):
+            pytest.fail("symlinked auth source should fail closed")
+
+
+@pytest.mark.skipif(
+    platform.system() != "Linux" or not shutil.which("bwrap"),
+    reason="real Linux Bubblewrap is required for write-boundary proof",
+)
+def test_real_bubblewrap_projects_only_antigravity_auth_and_enforces_write_boundary(
+    tmp_path: Path,
+):
+    confinement, worktree, runtime_root = _confinement(tmp_path)
+    source = tmp_path / "agy-token"
+    source.write_text("private-auth-token-for-test", encoding="utf-8")
+    source.chmod(0o600)
+    unrelated_home = tmp_path / "host-home"
+    unrelated_gemini = unrelated_home / ".gemini"
+    unrelated_gemini.mkdir(parents=True)
+    unrelated_file = unrelated_gemini / "settings.json"
+    unrelated_file.write_text("host-only", encoding="utf-8")
+    script = "\n".join(
+        (
+            "import os,pathlib",
+            "home=pathlib.Path(os.environ['HOME'])",
+            "gemini=home/'.gemini'",
+            "assert [p.name for p in gemini.iterdir()]==['jetski-standalone-oauth-token']",
+            "assert (gemini/'jetski-standalone-oauth-token').read_text()=='private-auth-token-for-test'",
+            "pathlib.Path(os.environ['MINIME_CONFINED_WORKTREE'],'allowed.txt').write_text('ok')",
+            "blocked=False",
+            "try:",
+            " pathlib.Path(os.environ['MINIME_RUNTIME_ROOT'],'denied.txt').write_text('no')",
+            "except OSError:",
+            " blocked=True",
+            "assert blocked",
+            f"blocked=False\ntry:\n pathlib.Path({str(unrelated_file)!r}).write_text('no')",
+            "except OSError:",
+            " blocked=True",
+            "assert blocked",
+            "print('boundary-ok')",
+        )
+    )
+
+    with confinement.runtime_session(
+        {"HOME": str(unrelated_home)}, antigravity_auth_source=str(source)
+    ) as runtime:
+        private_root = runtime.host_root
+        wrapped = confinement.wrap_command([sys.executable, "-c", script], runtime)
+        result = subprocess.run(
+            wrapped,
+            cwd=str(worktree),
+            env=runtime.environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "boundary-ok"
+
+    assert not private_root.exists()
+    assert (worktree / "allowed.txt").read_text(encoding="utf-8") == "ok"
+    assert not (runtime_root / "denied.txt").exists()
+    assert unrelated_file.read_text(encoding="utf-8") == "host-only"
+    assert source.read_text(encoding="utf-8") == "private-auth-token-for-test"
+
+
+@pytest.mark.skipif(
+    platform.system() != "Linux" or not shutil.which("bwrap") or not shutil.which("agy"),
+    reason="real Bubblewrap and Antigravity CLI are required for catalog-auth proof",
+)
+def test_real_bubblewrap_agy_models_authenticates_without_inference(tmp_path: Path):
+    confinement, worktree, _runtime = _confinement(tmp_path)
+    source = Path(AgentProcessConfinement.antigravity_auth_source())
+    if not source.is_file():
+        pytest.skip("authorized Antigravity auth source is unavailable")
+    result = asyncio.run(
+        confinement.run_confined_async_subprocess(
+            [shutil.which("agy") or "agy", "models"],
+            cwd=str(worktree),
+            input_bytes=None,
+            timeout_seconds=60,
+            env=os.environ.copy(),
+            antigravity_auth_source=str(source),
+        )
+    )
+    # `agy models` performs auth/catalog observation only; it sends no model prompt.
+    assert result.returncode == 0, "confined `agy models` authentication/catalog check failed"
+    assert result.credential_rotation_detected is False
+    assert b"jetski-standalone-oauth-token" not in result.stdout + result.stderr
+
+
 def test_bubblewrap_command_binds_only_worktree_and_private_state(tmp_path: Path, monkeypatch):
     confinement, worktree, runtime_root = _confinement(tmp_path)
     confinement.confinement_mechanism = "bubblewrap"
