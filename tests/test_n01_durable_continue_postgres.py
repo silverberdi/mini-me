@@ -914,6 +914,10 @@ def test_postgres_continue_adopts_created_recovery_worktree_and_repairs_only_fin
         assert failed_job.attempt_count == 1
         assert failed_run.is_active is False
         assert failed_run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
+        assert first_result.payload["run_active"] is False
+        assert first_result.payload["execution_active"] is False
+        assert first_result.payload["linked_job_status"] == JobStatus.FAILED.value
+        assert "resumed successfully" not in first_result.summary.lower()
 
         artifact_root = worktree_path / "openspec" / "changes" / change_name
 
