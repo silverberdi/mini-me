@@ -1152,6 +1152,11 @@ class RecoveryConvergenceService:
                                 "recovered_status": updated.status.value,
                                 "interrupted_stage": interrupted_stage,
                                 "recovery_cycle_id": cycle_id,
+                                # Bind recovery evidence to the canonical on-demand
+                                # CONTINUE authority and its exact Run generation.
+                                "run_id": run.run_id,
+                                "run_generation": run.current_generation,
+                                "recovery_source": source.value,
                             },
                             timestamp=utc_now(),
                         )

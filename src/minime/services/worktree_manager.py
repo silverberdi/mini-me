@@ -12,7 +12,7 @@ import stat
 import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from minime.adapters.github import GitHubAdapter
 
@@ -2029,12 +2029,38 @@ class WorktreeManager:
 
         attempts_repo = getattr(self.uow, "job_attempts", None)
         attempts = attempts_repo.list_by_job(job_id) if attempts_repo else []
-        if not attempts or attempts[-1].normalized_outcome not in {
+        if not attempts:
+            refuse(
+                "the latest durable attempt does not prove a recoverable initialization failure."
+            )
+        # Preserve the pre-existing ordering/acceptance behavior for ordinary
+        # environment/provider initialization failures. The new exceptional
+        # PREMATURE_STOP route requires a unique latest attempt identity.
+        latest_attempt = attempts[-1]
+        ordinary_recovery_outcome = latest_attempt.normalized_outcome in {
             ExecutionOutcome.ENVIRONMENT_UNAVAILABLE,
             ExecutionOutcome.PROVIDER_FAILURE,
-        }:
+        }
+        latest_attempt_number = max(attempt.attempt_number for attempt in attempts)
+        latest_attempts = [
+            attempt for attempt in attempts if attempt.attempt_number == latest_attempt_number
+        ]
+        crash_interrupted_recovery = (
+            is_created_recovery
+            and len(latest_attempts) == 1
+            and latest_attempt.attempt_number == latest_attempt_number
+            and self._has_durable_crash_interruption_recovery(
+                latest_attempt=latest_attempt,
+                job=job,
+                run=run,
+                source_base=source_base,
+                project_id=project_id,
+                change_name=change_name,
+            )
+        )
+        if not ordinary_recovery_outcome and not crash_interrupted_recovery:
             refuse(
-                "the latest durable attempt does not prove an environment/provider initialization failure."
+                "the latest durable attempt does not prove an environment/provider initialization failure or an evidenced crash-interrupted CREATED recovery."
             )
 
         if (
@@ -2184,6 +2210,132 @@ class WorktreeManager:
         ):
             refuse("canonical remote base changed during recreation validation.")
         return branch_sha
+
+    def _has_durable_crash_interruption_recovery(
+        self,
+        *,
+        latest_attempt: Any,
+        job: Any,
+        run: Any,
+        source_base: str,
+        project_id: str,
+        change_name: str,
+    ) -> bool:
+        """Recognize an unfinished attempt followed by canonical on-demand Run recovery.
+
+        JOB_RECOVERED is emitted by RecoveryConvergenceService after Control Plane
+        CONTINUE obtains the Run claim. It is not, by itself, proof of a host crash:
+        the incomplete PREMATURE_STOP, attempt/counter relation, exact Run/Job
+        linkage, CREATED snapshot, publication, and Git checks in the caller are
+        all required as corroborating evidence.
+        """
+        if (
+            latest_attempt.normalized_outcome != ExecutionOutcome.PREMATURE_STOP
+            or latest_attempt.completed_at is not None
+            or latest_attempt.duration_ms is not None
+            or latest_attempt.attempt_number != job.attempt_count + 1
+            or job.project_id != project_id
+            or job.change_name != change_name
+            or job.candidate_sha is not None
+            or run.project_id != project_id
+            or run.change_name != change_name
+            or run.active_job_id != job.job_id
+            or run.current_stage != OrchestrationStage.IMPLEMENTING
+            or run.current_generation < 1
+            or run.current_candidate_sha is not None
+            or run.base_sha != source_base
+            or (job.base_sha and job.base_sha != source_base)
+        ):
+            return False
+
+        events_repo = getattr(self.uow, "events", None)
+        if not events_repo:
+            return False
+        events = events_repo.list_events(project_id=project_id, change_id=change_name, limit=10000)
+        recovery_events = [event for event in events if event.timestamp > latest_attempt.started_at]
+        recovered_jobs = [
+            event
+            for event in recovery_events
+            if event.event_type == EventType.JOB_RECOVERED and event.operation_id == job.job_id
+        ]
+        if not recovered_jobs:
+            return False
+
+        # This payload is produced only by the canonical run-continuation
+        # recovery branch. Require its source, linked Run and generation, rather
+        # than treating an arbitrary/old JOB_RECOVERED as authorization.
+        latest_recovery = max(recovered_jobs, key=lambda event: event.timestamp)
+        valid_latest_recovery = (
+            latest_recovery.project_id == project_id
+            and latest_recovery.change_id == change_name
+            and latest_recovery.payload.get("job_id") == job.job_id
+            and latest_recovery.payload.get("run_id") == run.run_id
+            and latest_recovery.payload.get("run_generation") == run.current_generation
+            and latest_recovery.payload.get("recovery_source") == "CONTROL_PLANE"
+            and latest_recovery.payload.get("interrupted_stage") == "implementer"
+            and latest_recovery.payload.get("recovered_status") == JobStatus.QUEUED.value
+            and latest_recovery.payload.get("recovery_cycle_id")
+        )
+        if not valid_latest_recovery:
+            return False
+
+        decisions_repo = getattr(self.uow, "recovery_decisions", None)
+        if not decisions_repo or not callable(getattr(decisions_repo, "list_by_cycle", None)):
+            return False
+        canonical_decisions = decisions_repo.list_by_cycle(
+            latest_recovery.payload["recovery_cycle_id"]
+        )
+        if len(canonical_decisions) != 1:
+            return False
+        decision = canonical_decisions[0]
+        if (
+            decision.claim_key != f"run:{run.run_id}"
+            or decision.identity_type != "RUN"
+            or decision.identity_id != run.run_id
+            or decision.project_id != project_id
+            or decision.change_name != change_name
+            or getattr(decision.source, "value", decision.source) != "CONTROL_PLANE"
+            or decision.planned_action != "DRIVE_CONTINUATION"
+            or getattr(decision.status, "value", decision.status) != "EXECUTING"
+            or not decision.fence_token
+        ):
+            return False
+
+        claims_repo = getattr(self.uow, "claims", None)
+        if (
+            not claims_repo
+            or not callable(getattr(claims_repo, "get_by_key", None))
+            or not callable(getattr(claims_repo, "validate_cas", None))
+        ):
+            return False
+        claim = claims_repo.get_by_key(decision.claim_key)
+        if (
+            not claim
+            or not claim.is_active
+            or claim.fence_token != decision.fence_token
+            or not claims_repo.validate_cas(
+                claim_key=decision.claim_key,
+                owner_instance_id=claim.owner_instance_id,
+                fence_token=decision.fence_token,
+            )
+        ):
+            return False
+
+        # Unresolved or candidate-bearing actions contradict the no-candidate
+        # recovery case; completed non-candidate history is retained.
+        actions_repo = getattr(self.uow, "orchestration_external_actions", None)
+        if not actions_repo or not callable(getattr(actions_repo, "list_by_run", None)):
+            return False
+        for action in actions_repo.list_by_run(run.run_id):
+            action_status = getattr(action.status, "value", action.status)
+            if action.candidate_sha or action_status in {
+                "RESERVED",
+                "EXECUTING",
+                "UNKNOWN",
+                "AMBIGUOUS",
+            }:
+                return False
+        return True
 
     async def create_worktree(
         self,

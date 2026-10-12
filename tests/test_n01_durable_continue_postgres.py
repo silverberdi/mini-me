@@ -8,6 +8,7 @@ import os
 import subprocess
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine, func, select, text
@@ -15,12 +16,20 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
 
 from minime.config import CliInvocationProfile
-from minime.db.models import Base, DurableSagaModel, EventModel, JobModel, OrchestrationRunModel
+from minime.db.models import (
+    Base,
+    DurableSagaModel,
+    EventModel,
+    JobAttemptModel,
+    JobModel,
+    OrchestrationRunModel,
+)
 from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.domain.enums import (
     ContinuationDecision,
     EventType,
     ExecutionOutcome,
+    ExternalActionStatus,
     ExternalOutcome,
     HumanGate,
     JobStatus,
@@ -39,6 +48,7 @@ from minime.domain.models import (
     OrchestrationRun,
     Project,
     ProviderHealth,
+    utc_now,
 )
 from minime.services import execution_pipeline
 from minime.services.agent_confinement import AgentProcessConfinement
@@ -1110,3 +1120,668 @@ def test_postgres_continue_adopts_created_recovery_worktree_and_repairs_only_fin
         assert len(reconciliation_events) == 1
         assert set(reconciliation_events[0].payload["reconciled_paths"]) == set(historical_contents)
         assert set(reconciliation_events[0].payload["prior_sha256"]) == set(historical_contents)
+
+
+def test_postgres_continue_accepts_only_recovery_evidenced_incomplete_premature_stop(
+    isolated_pg_session_factory, tmp_path: Path, monkeypatch
+):
+    """One canonical CONTINUE emits recovery evidence and adopts the same CREATED worktree."""
+    from datetime import timedelta
+
+    from conftest import publish_verified_intake_workspace, setup_managed_repository_fixture
+
+    project_id = f"n01-crash-{uuid.uuid4().hex[:8]}"
+    change_name = "operational-blocker-visibility"
+    run_id = "627adcf0-ee2a-4e3b-8211-1972c7dbec00"
+    job_id = "7c6c20dd-cf8f-486d-ad3e-e0e5de1b19e0"
+    recovery_branch = f"minime/{change_name}-{job_id}"
+    managed_root = tmp_path / "managed"
+    worktree_parent = tmp_path / "worktrees"
+    remote = tmp_path / "managed.origin.git"
+
+    with isolated_pg_session_factory() as session:
+        uow = PostgresPersistenceUnitOfWork(session)
+        project = Project(
+            project_id=project_id,
+            display_name="N01 crash recovery regression",
+            repository=str(remote),
+            base_branch="main",
+            openspec_path="openspec",
+            implementer="codex",
+        )
+        uow.projects.save(project)
+        setup_managed_repository_fixture(
+            uow,
+            project_id=project_id,
+            repo_root=managed_root,
+            worktree_parent_dir=worktree_parent,
+            canonical_repository_identity=str(remote),
+            remote_url=str(remote),
+        )
+        _git(managed_root, "push", "origin", "main")
+        base_sha = _git(managed_root, "rev-parse", "main")
+        intake_ownership = publish_verified_intake_workspace(
+            uow, project, managed_root, change_name
+        )
+        published_sha = intake_ownership.published_sha
+        assert published_sha
+
+        job = Job(
+            job_id=job_id,
+            project_id=project_id,
+            change_name=change_name,
+            implementer_role="codex",
+            current_executor="codex",
+            status=JobStatus.FAILED,
+            base_sha=base_sha,
+            attempt_count=1,
+        )
+        run = OrchestrationRun(
+            run_id=run_id,
+            project_id=project_id,
+            change_name=change_name,
+            base_sha=base_sha,
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            resumable_stage=OrchestrationStage.IMPLEMENTING,
+            active_job_id=job_id,
+            current_candidate_sha=None,
+            is_active=False,
+            stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+            human_gate=HumanGate.NEEDS_HUMAN,
+            stop_reason="Host interrupted the in-flight executor process.",
+        )
+        uow.jobs.save(job)
+        uow.orchestration_runs.save(run)
+        uow.provider_health.save(
+            ProviderHealth(provider="codex", status=ProviderHealthStatus.AVAILABLE)
+        )
+        first_attempt_at = utc_now() - timedelta(minutes=5)
+        crash_attempt_at = utc_now() - timedelta(minutes=3)
+        uow.job_attempts.save(
+            JobAttempt(
+                job_id=job_id,
+                attempt_number=1,
+                executor_role="codex",
+                model_identity="codex",
+                normalized_outcome=ExecutionOutcome.ENVIRONMENT_UNAVAILABLE,
+                completed_at=first_attempt_at + timedelta(seconds=4),
+                duration_ms=4000,
+                started_at=first_attempt_at,
+            )
+        )
+        crash_attempt = JobAttempt(
+            job_id=job_id,
+            attempt_number=2,
+            executor_role="codex",
+            model_identity="codex",
+            start_sha=base_sha,
+            normalized_outcome=ExecutionOutcome.PREMATURE_STOP,
+            started_at=crash_attempt_at,
+            completed_at=None,
+            duration_ms=None,
+        )
+        uow.job_attempts.save(crash_attempt)
+        uow.commit()
+
+        manager = WorktreeManager(managed_root, uow)
+        worktree = asyncio.run(
+            manager.create_worktree(
+                job_id,
+                change_name,
+                base_branch="main",
+                project_id=project_id,
+                branch_name=recovery_branch,
+                run_id=run_id,
+            )
+        )
+        assert worktree.base_sha == base_sha
+        artifact_root = worktree.path / "openspec" / "changes" / change_name
+        published_paths = _git(
+            managed_root,
+            "ls-tree",
+            "-r",
+            "--name-only",
+            published_sha,
+            "--",
+            f"openspec/changes/{change_name}/",
+        ).splitlines()
+        assert len(published_paths) >= 4
+        for repository_path in published_paths:
+            relative = Path(repository_path).relative_to(Path("openspec/changes") / change_name)
+            content = _git_bytes(managed_root, "show", f"{published_sha}:{repository_path}")
+            assert content.endswith(b"\n")
+            target = artifact_root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content[:-1])
+
+        snapshot_sha = asyncio.run(manager.create_recovery_snapshot(job_id, project_id))
+        assert snapshot_sha and snapshot_sha != base_sha
+        ownership_before = uow.orchestration_worktree_ownerships.get_by_job_id(job_id)
+        assert ownership_before.creation_state == WorktreeCreationState.CREATED
+        assert ownership_before.source_base_sha == base_sha
+        snapshot_payload = {
+            "job_id": job_id,
+            "branch": recovery_branch,
+            "recovery_sha": snapshot_sha,
+            "worktree_path": str(worktree.path.resolve()),
+            "authoritative_candidate": False,
+        }
+        uow.events.save(
+            Event(
+                event_type=EventType.WORKTREE_RECOVERY_SNAPSHOT,
+                project_id=project_id,
+                change_id=change_name,
+                operation_id=job_id,
+                payload=snapshot_payload,
+            )
+        )
+        uow.commit()
+        assert _git(worktree.path, "rev-parse", "HEAD") == snapshot_sha
+        assert _git(worktree.path, "status", "--porcelain=v1", "--untracked-files=all") == ""
+
+        advancing_clone = tmp_path / "crash-recovery-main-advance"
+        subprocess.run(
+            ["git", "clone", str(remote), str(advancing_clone)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        _git(advancing_clone, "config", "user.name", "Remote Main Advance")
+        _git(advancing_clone, "config", "user.email", "advance@localhost")
+        (advancing_clone / "unrelated-main-advance.txt").write_text("unrelated\n")
+        _git(advancing_clone, "add", "unrelated-main-advance.txt")
+        _git(advancing_clone, "commit", "-m", "unrelated main advance")
+        _git(advancing_clone, "push", "origin", "main")
+        advanced_main_sha = _git(advancing_clone, "rev-parse", "main")
+        assert advanced_main_sha != base_sha
+        assert _git(managed_root, "rev-parse", "main") == base_sha
+        _git(advancing_clone, "merge-base", "--is-ancestor", base_sha, advanced_main_sha)
+
+        def verify_recovery_denied(reason: str) -> None:
+            with pytest.raises(RuntimeError, match=reason):
+                asyncio.run(
+                    manager._verify_deleted_worktree_recreation(
+                        job_id=job_id,
+                        project_id=project_id,
+                        run_id=run_id,
+                        change_name=change_name,
+                        path=worktree.path.resolve(),
+                        branch=recovery_branch,
+                        base_branch="main",
+                        current_base_sha=base_sha,
+                    )
+                )
+
+        # The production-equivalent pre-CONTINUE state contains no startup
+        # interruption/recovery events. A CREATED snapshot alone is not enough.
+        verify_recovery_denied("does not prove an environment/provider")
+        assert not any(
+            event.event_type
+            in {
+                EventType.JOB_INTERRUPTED,
+                EventType.JOB_RECOVERED,
+                EventType.ORCHESTRATION_RECOVERED,
+            }
+            for event in uow.events.list_events(
+                project_id=project_id, change_id=change_name, limit=10000
+            )
+        )
+
+        # A finalized PREMATURE_STOP is never covered by the crash exception.
+        persisted_attempt = session.get(JobAttemptModel, crash_attempt.attempt_id)
+        persisted_attempt.completed_at = crash_attempt_at + timedelta(seconds=5)
+        persisted_attempt.duration_ms = 1
+        session.commit()
+        verify_recovery_denied("does not prove an environment/provider")
+        persisted_attempt.completed_at = None
+        persisted_attempt.duration_ms = None
+        session.commit()
+
+        # Restore the intentionally incomplete attempt without manufacturing
+        # any recovery events. The single real CONTINUE below must create the
+        # JOB_RECOVERED evidence through RecoveryConvergenceService itself.
+        persisted_attempt.completed_at = None
+        persisted_attempt.duration_ms = None
+        session.commit()
+
+        persisted_job_before_continue = uow.jobs.get_by_id(job_id)
+        persisted_attempts_before_continue = uow.job_attempts.list_by_job(job_id)
+        assert persisted_job_before_continue.attempt_count == 1
+        assert persisted_attempts_before_continue[-1].attempt_number == 2
+        assert (
+            persisted_attempts_before_continue[-1].normalized_outcome
+            == ExecutionOutcome.PREMATURE_STOP
+        )
+        assert persisted_attempts_before_continue[-1].completed_at is None
+        assert persisted_attempts_before_continue[-1].duration_ms is None
+
+        persisted_job_for_candidate = session.get(JobModel, job_id)
+        persisted_run_for_candidate = session.get(OrchestrationRunModel, run_id)
+        persisted_job_for_candidate.candidate_sha = "unauthorized-candidate"
+        persisted_run_for_candidate.current_candidate_sha = "unauthorized-candidate"
+        session.commit()
+        with pytest.raises(RuntimeError, match="candidate evidence exists"):
+            asyncio.run(
+                manager._verify_deleted_worktree_recreation(
+                    job_id=job_id,
+                    project_id=project_id,
+                    run_id=run_id,
+                    change_name=change_name,
+                    path=worktree.path.resolve(),
+                    branch=recovery_branch,
+                    base_branch="main",
+                    current_base_sha=base_sha,
+                )
+            )
+        persisted_job_for_candidate.candidate_sha = None
+        persisted_run_for_candidate.current_candidate_sha = None
+        session.commit()
+
+        untracked = worktree.path / "unauthorized.txt"
+        untracked.write_text("must block\n", encoding="utf-8")
+        # Exercise the shared Git cleanliness guard independently of the new
+        # crash-evidence predicate; no recovery event is fabricated here.
+        persisted_attempt.normalized_outcome = ExecutionOutcome.ENVIRONMENT_UNAVAILABLE.value
+        session.commit()
+        with pytest.raises(RuntimeError, match="CREATED recovery worktree contains changes"):
+            asyncio.run(
+                manager._verify_deleted_worktree_recreation(
+                    job_id=job_id,
+                    project_id=project_id,
+                    run_id=run_id,
+                    change_name=change_name,
+                    path=worktree.path.resolve(),
+                    branch=recovery_branch,
+                    base_branch="main",
+                    current_base_sha=base_sha,
+                )
+            )
+        persisted_attempt.normalized_outcome = ExecutionOutcome.PREMATURE_STOP.value
+        session.commit()
+        untracked.unlink()
+
+        ownership = uow.orchestration_worktree_ownerships.get_by_job_id(job_id)
+        ownership.creation_state = WorktreeCreationState.DELETED
+        uow.orchestration_worktree_ownerships.save(ownership)
+        uow.commit()
+        with pytest.raises(RuntimeError, match="DELETED worktree path is not absent"):
+            asyncio.run(
+                manager._verify_deleted_worktree_recreation(
+                    job_id=job_id,
+                    project_id=project_id,
+                    run_id=run_id,
+                    change_name=change_name,
+                    path=worktree.path.resolve(),
+                    branch=recovery_branch,
+                    base_branch="main",
+                    current_base_sha=base_sha,
+                )
+            )
+        ownership.creation_state = WorktreeCreationState.CREATED
+        uow.orchestration_worktree_ownerships.save(ownership)
+        uow.commit()
+
+        runtime_root = tmp_path / "runtime"
+        runtime_root.mkdir()
+        monkeypatch.setenv("MINIME_RUNTIME_ROOT", str(runtime_root))
+        diagnostic_cli = tmp_path / "diagnostic-cli"
+        diagnostic_cli.write_text(
+            "#!/usr/bin/env python3\nimport sys\n"
+            "if '--help' in sys.argv:\n    print('diagnostic cli help')\n"
+            "else:\n    print('diagnostic runner reached')\n",
+            encoding="utf-8",
+        )
+        diagnostic_cli.chmod(0o700)
+        profile = CliInvocationProfile(
+            provider="diagnostic-cli",
+            role="implementer",
+            executable=str(diagnostic_cli),
+            args=(),
+            prompt_transport="stdin",
+        )
+
+        class RecordingRunner:
+            def __init__(self):
+                self.delegate = CliImplementerRunner(profile)
+                self.result = None
+
+            async def run(self, candidate_path, prompt_context, timeout_seconds):
+                assert Path(candidate_path).resolve() == worktree.path.resolve()
+                assert _git(Path(candidate_path), "rev-parse", "HEAD") == snapshot_sha
+                assert _git(Path(candidate_path), "branch", "--show-current") == recovery_branch
+                self.result = await self.delegate.run(
+                    candidate_path, prompt_context, timeout_seconds
+                )
+                return self.result
+
+        runner = RecordingRunner()
+        monkeypatch.setattr(execution_pipeline, "runner_for_implementer", lambda _provider: runner)
+        before_runs = session.scalar(
+            select(func.count())
+            .select_from(OrchestrationRunModel)
+            .where(OrchestrationRunModel.project_id == project_id)
+        )
+        before_jobs = session.scalar(
+            select(func.count()).select_from(JobModel).where(JobModel.project_id == project_id)
+        )
+        action_run = uow.orchestration_runs.get_by_id(run_id)
+        result = ControlPlaneService(uow, project_root=managed_root).execute_action(
+            OperatorActionRequest(
+                action_request_id=str(uuid.uuid4()),
+                project_id=project_id,
+                change_name=change_name,
+                run_id=run_id,
+                action_type=OperatorActionType.CONTINUE,
+                actor_identity="test-crash-recovery-operator",
+                source_interface="cli",
+                expected_stage=action_run.current_stage,
+                expected_generation=action_run.current_generation,
+                expected_candidate_sha=action_run.current_candidate_sha,
+            )
+        )
+        assert result.status == OperatorActionStatus.COMPLETED, result.summary
+        generated_recovery_events = [
+            event
+            for event in uow.events.list_events(
+                project_id=project_id, change_id=change_name, limit=10000
+            )
+            if event.event_type == EventType.JOB_RECOVERED
+            and event.operation_id == job_id
+            and event.timestamp > crash_attempt.started_at
+        ]
+        assert generated_recovery_events, "canonical CONTINUE did not persist JOB_RECOVERED"
+        assert any(
+            event.payload.get("run_id") == run_id
+            and event.payload.get("run_generation") == run.current_generation
+            and event.payload.get("recovery_source") == "CONTROL_PLANE"
+            and event.payload.get("interrupted_stage") == "implementer"
+            and event.payload.get("recovered_status") == JobStatus.QUEUED.value
+            for event in generated_recovery_events
+        )
+        assert not any(
+            event.event_type in {EventType.JOB_INTERRUPTED, EventType.ORCHESTRATION_RECOVERED}
+            for event in uow.events.list_events(
+                project_id=project_id, change_id=change_name, limit=10000
+            )
+        )
+        assert runner.result is not None
+        assert "diagnostic runner reached" in "\n".join(runner.result.stdout)
+        persisted_job = uow.jobs.get_by_id(job_id)
+        persisted_run = uow.orchestration_runs.get_by_id(run_id)
+        persisted_ownership = uow.orchestration_worktree_ownerships.get_by_job_id(job_id)
+        assert persisted_job.job_id == job_id and persisted_job.base_sha == base_sha
+        assert persisted_job.attempt_count >= 1
+        original_inflight_attempt = uow.job_attempts.get_by_id(crash_attempt.attempt_id)
+        assert original_inflight_attempt.normalized_outcome == ExecutionOutcome.PREMATURE_STOP
+        assert original_inflight_attempt.completed_at is None
+        assert original_inflight_attempt.duration_ms is None
+        assert persisted_run.run_id == run_id and persisted_run.base_sha == base_sha
+        assert persisted_run.active_job_id == job_id
+        assert persisted_job.candidate_sha is None and persisted_run.current_candidate_sha is None
+        assert persisted_ownership.creation_state == WorktreeCreationState.CREATED
+        assert persisted_ownership.source_base_sha == base_sha
+        assert (
+            _git(advancing_clone, "ls-remote", "origin", "refs/heads/main").split()[0]
+            == advanced_main_sha
+        )
+        assert _git(managed_root, "rev-parse", f"refs/heads/{recovery_branch}") == snapshot_sha
+        assert (
+            _git(managed_root, "ls-remote", "origin", f"refs/minime/intake/{change_name}").split()[
+                0
+            ]
+            == published_sha
+        )
+        assert len(uow.job_attempts.list_by_job(job_id)) >= 2
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(OrchestrationRunModel)
+                .where(OrchestrationRunModel.project_id == project_id)
+            )
+            == before_runs
+            == 1
+        )
+        assert (
+            session.scalar(
+                select(func.count()).select_from(JobModel).where(JobModel.project_id == project_id)
+            )
+            == before_jobs
+            == 1
+        )
+
+
+@pytest.mark.parametrize(
+    "payload_update,event_age_seconds,expected",
+    [
+        ({}, 1, True),  # positive control: fully valid event, decision, and live claim
+        ({"recovery_source": "STARTUP"}, 1, False),
+        ({"run_id": "different-run"}, 1, False),
+        ({"run_generation": 2}, 1, False),
+        ({"recovered_status": JobStatus.FAILED.value}, 1, False),
+        ({}, 600, False),  # recovery event predates the interrupted attempt
+    ],
+)
+def test_crash_recovery_predicate_accepts_valid_and_rejects_contradictory_evidence(
+    tmp_path: Path, payload_update: dict, event_age_seconds: int, expected: bool
+):
+    """Exercise event-specific checks with otherwise valid recovery authority."""
+    from datetime import timedelta
+
+    project_id = "predicate-project"
+    change_name = "operational-blocker-visibility"
+    run_id = "predicate-run"
+    job_id = "predicate-job"
+    base_sha = "b" * 40
+    attempt_started = utc_now() - timedelta(minutes=2)
+    event = Event(
+        event_type=EventType.JOB_RECOVERED,
+        project_id=project_id,
+        change_id=change_name,
+        operation_id=job_id,
+        timestamp=attempt_started - timedelta(seconds=event_age_seconds)
+        if event_age_seconds > 10
+        else attempt_started + timedelta(seconds=event_age_seconds),
+        payload={
+            "job_id": job_id,
+            "run_id": run_id,
+            "run_generation": 1,
+            "recovery_source": "CONTROL_PLANE",
+            "interrupted_stage": "implementer",
+            "recovered_status": JobStatus.QUEUED.value,
+            "recovery_cycle_id": "cycle-1",
+            **payload_update,
+        },
+    )
+
+    class EventRepository:
+        def list_events(self, **_kwargs):
+            return [event]
+
+    class ExternalActions:
+        def list_by_run(self, _run_id):
+            return []
+
+    class Decisions:
+        def list_by_cycle(self, cycle_id):
+            if cycle_id != "cycle-1":
+                return []
+            return [
+                SimpleNamespace(
+                    claim_key=f"run:{run_id}",
+                    identity_type="RUN",
+                    identity_id=run_id,
+                    project_id=project_id,
+                    change_name=change_name,
+                    source="CONTROL_PLANE",
+                    planned_action="DRIVE_CONTINUATION",
+                    status="EXECUTING",
+                    fence_token=7,
+                )
+            ]
+
+    class Claims:
+        def get_by_key(self, claim_key):
+            if claim_key != f"run:{run_id}":
+                return None
+            return SimpleNamespace(is_active=True, fence_token=7, owner_instance_id="worker")
+
+        def validate_cas(self, *, claim_key, owner_instance_id, fence_token):
+            return (
+                claim_key == f"run:{run_id}"
+                and owner_instance_id == "worker"
+                and fence_token == 7
+            )
+
+    manager = WorktreeManager(
+        tmp_path,
+        SimpleNamespace(
+            events=EventRepository(),
+            orchestration_external_actions=ExternalActions(),
+            recovery_decisions=Decisions(),
+            claims=Claims(),
+        ),
+    )
+    accepted = manager._has_durable_crash_interruption_recovery(
+        latest_attempt=SimpleNamespace(
+            normalized_outcome=ExecutionOutcome.PREMATURE_STOP,
+            completed_at=None,
+            duration_ms=None,
+            attempt_number=2,
+            started_at=attempt_started,
+        ),
+        job=SimpleNamespace(
+            job_id=job_id,
+            attempt_count=1,
+            project_id=project_id,
+            change_name=change_name,
+            candidate_sha=None,
+            base_sha=base_sha,
+        ),
+        run=SimpleNamespace(
+            run_id=run_id,
+            project_id=project_id,
+            change_name=change_name,
+            active_job_id=job_id,
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            current_generation=1,
+            current_candidate_sha=None,
+            base_sha=base_sha,
+        ),
+        source_base=base_sha,
+        project_id=project_id,
+        change_name=change_name,
+    )
+    assert accepted is expected
+
+
+@pytest.mark.parametrize("pending_external_action,claim_valid", [(True, True), (False, False)])
+def test_crash_recovery_predicate_rejects_stale_claim_or_pending_external_action(
+    tmp_path: Path, pending_external_action: bool, claim_valid: bool
+):
+    """A stale fence or unresolved external effect blocks this no-candidate path."""
+    from datetime import timedelta
+
+    project_id = "predicate-project"
+    change_name = "operational-blocker-visibility"
+    run_id = "predicate-run"
+    job_id = "predicate-job"
+    base_sha = "b" * 40
+    started_at = utc_now() - timedelta(minutes=1)
+    event = Event(
+        event_type=EventType.JOB_RECOVERED,
+        project_id=project_id,
+        change_id=change_name,
+        operation_id=job_id,
+        timestamp=utc_now(),
+        payload={
+            "job_id": job_id,
+            "run_id": run_id,
+            "run_generation": 1,
+            "recovery_source": "CONTROL_PLANE",
+            "interrupted_stage": "implementer",
+            "recovered_status": JobStatus.QUEUED.value,
+            "recovery_cycle_id": "cycle-1",
+        },
+    )
+
+    class Repository:
+        def list_events(self, **_kwargs):
+            return [event]
+
+        def list_by_run(self, _run_id):
+            return (
+                [
+                    SimpleNamespace(
+                        candidate_sha=None,
+                        status=ExternalActionStatus.AMBIGUOUS,
+                    )
+                ]
+                if pending_external_action
+                else []
+            )
+
+        def list_by_cycle(self, cycle_id):
+            assert cycle_id == "cycle-1"
+            return [
+                SimpleNamespace(
+                    claim_key=f"run:{run_id}",
+                    identity_type="RUN",
+                    identity_id=run_id,
+                    project_id=project_id,
+                    change_name=change_name,
+                    source="CONTROL_PLANE",
+                    planned_action="DRIVE_CONTINUATION",
+                    status="EXECUTING",
+                    fence_token=7,
+                )
+            ]
+
+    class Claims:
+        def get_by_key(self, claim_key):
+            assert claim_key == f"run:{run_id}"
+            return SimpleNamespace(is_active=True, fence_token=7, owner_instance_id="worker")
+
+        def validate_cas(self, *, claim_key, owner_instance_id, fence_token):
+            return (
+                claim_key == f"run:{run_id}" and owner_instance_id == "worker" and fence_token == 7
+            ) and claim_valid
+
+    manager = WorktreeManager(
+        tmp_path,
+        SimpleNamespace(
+            events=Repository(),
+            orchestration_external_actions=Repository(),
+            recovery_decisions=Repository(),
+            claims=Claims(),
+        ),
+    )
+    assert not manager._has_durable_crash_interruption_recovery(
+        latest_attempt=SimpleNamespace(
+            normalized_outcome=ExecutionOutcome.PREMATURE_STOP,
+            completed_at=None,
+            duration_ms=None,
+            attempt_number=2,
+            started_at=started_at,
+        ),
+        job=SimpleNamespace(
+            job_id=job_id,
+            attempt_count=1,
+            project_id=project_id,
+            change_name=change_name,
+            candidate_sha=None,
+            base_sha=base_sha,
+        ),
+        run=SimpleNamespace(
+            run_id=run_id,
+            project_id=project_id,
+            change_name=change_name,
+            active_job_id=job_id,
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            current_generation=1,
+            current_candidate_sha=None,
+            base_sha=base_sha,
+        ),
+        source_base=base_sha,
+        project_id=project_id,
+        change_name=change_name,
+    )
