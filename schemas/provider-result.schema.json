@@ -19,6 +19,7 @@
         "malformed_output",
         "cancelled",
         "policy_denied",
+        "environment_unavailable",
         "unsafe_binding",
         "unknown_error"
       ]

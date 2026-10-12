@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import json
 import os
 import platform
 import shutil
+import signal
+import stat
 import subprocess
-from typing import Sequence
+import tempfile
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Iterator, Sequence
 
 from minime.domain.enums import ExternalOutcome, ExternalReasonCode
 from minime.domain.models import ExternalActionResult
@@ -15,49 +24,137 @@ from minime.domain.models import ExternalActionResult
 class AgentConfinementError(RuntimeError):
     """Raised when process confinement capability is unavailable or breached."""
 
-    pass
+    def __init__(self, message: str, *, environment_unavailable: bool = True):
+        super().__init__(message)
+        self.environment_unavailable = environment_unavailable
+
+
+class AgentCredentialError(AgentConfinementError):
+    """Raised when the existing Codex credential authority cannot be projected safely."""
+
+    def __init__(self, message: str):
+        super().__init__(message, environment_unavailable=False)
+
+
+@dataclass(frozen=True)
+class AgentProcessResult:
+    returncode: int
+    stdout: bytes
+    stderr: bytes
+    timed_out: bool = False
+    credential_rotation_detected: bool = False
+
+
+@dataclass
+class AgentRuntimeState:
+    """One private, disposable runtime view for a single confined subprocess."""
+
+    host_root: Path
+    sandbox_root: str
+    environment: dict[str, str]
+    auth_copy: Path | None = None
+    initial_auth_digest: str | None = None
+    credential_rotation_detected: bool = False
+    sensitive_values: tuple[str, ...] = field(default=(), repr=False)
+
+    def observe_credential_state(self) -> bool:
+        """Detect a private auth-file rewrite without exposing its contents or digest."""
+        if self.auth_copy is None or self.initial_auth_digest is None:
+            return False
+        try:
+            current_digest = hashlib.sha256(self.auth_copy.read_bytes()).hexdigest()
+        except OSError:
+            self.credential_rotation_detected = True
+            return True
+        self.credential_rotation_detected = current_digest != self.initial_auth_digest
+        return self.credential_rotation_detected
 
 
 class AgentProcessConfinement:
-    """Enforceable OS/kernel process write confinement wrapper for arbitrary-command agents."""
+    """Enforce OS-level write confinement with attempt-private non-code state."""
+
+    SANDBOX_RUNTIME_ROOT = "/run/minime-agent"
 
     def __init__(
         self,
         allowed_worktree_path: str,
         runtime_root: str | None = None,
         require_kernel_confinement: bool = True,
+        private_state_parent: str | None = None,
     ):
-        self.allowed_worktree_path = os.path.realpath(allowed_worktree_path)
-        self.runtime_root = os.path.realpath(
-            runtime_root
-            or os.environ.get("MINIME_RUNTIME_ROOT", os.path.join(os.getcwd(), ".minime"))
+        self.allowed_worktree_path = self._canonical_directory(
+            allowed_worktree_path, "assigned worktree"
         )
+        self.runtime_root = self._canonical_directory(
+            runtime_root
+            or os.environ.get("MINIME_RUNTIME_ROOT", os.path.join(os.getcwd(), ".minime")),
+            "runtime root",
+        )
+        if self._is_path_inside(
+            self.allowed_worktree_path, self.runtime_root
+        ) or self._is_path_inside(self.runtime_root, self.allowed_worktree_path):
+            raise AgentConfinementError(
+                "Assigned worktree and runtime root must be separate canonical directories."
+            )
+        self.private_state_parent = private_state_parent
         self.require_kernel_confinement = require_kernel_confinement
         self.confinement_mechanism = self._detect_confinement_mechanism()
 
-    def _detect_confinement_mechanism(self) -> str:
+    @staticmethod
+    def _canonical_directory(raw_path: str, label: str) -> str:
+        path = Path(raw_path).expanduser()
+        try:
+            resolved = path.resolve(strict=False)
+            info = resolved.stat() if resolved.exists() else None
+        except OSError as exc:
+            raise AgentConfinementError(f"{label} is unavailable.") from exc
+        if info is not None and not stat.S_ISDIR(info.st_mode):
+            raise AgentConfinementError(f"{label} is not a directory.")
+        return str(resolved)
+
+    @staticmethod
+    def _validate_temp_parent(raw_path: str) -> Path:
+        raw = Path(raw_path)
+        try:
+            parent = raw.resolve(strict=True)
+            info = parent.stat()
+        except OSError as exc:
+            raise AgentConfinementError("Private runtime temporary parent is unavailable.") from exc
+        if not stat.S_ISDIR(info.st_mode):
+            raise AgentConfinementError("Private runtime temporary parent is not a directory.")
+        mode = stat.S_IMODE(info.st_mode)
+        if mode & stat.S_IWOTH and not mode & stat.S_ISVTX:
+            raise AgentConfinementError(
+                "Private runtime temporary parent is world-writable without sticky-bit protection."
+            )
+        return parent
+
+    @staticmethod
+    def _detect_confinement_mechanism() -> str:
         """Detect OS-level confinement capability on system."""
         system = platform.system().lower()
         if system == "linux":
             if shutil.which("bwrap"):
                 return "bubblewrap"
             return "none"
-        elif system == "darwin":
+        if system == "darwin":
             if shutil.which("sandbox-exec") or os.path.exists("/usr/bin/sandbox-exec"):
                 return "darwin_sandbox"
-            return "none"
         return "none"
 
     def is_confinement_available(self) -> bool:
         """Check if enforceable process confinement is operational."""
-        if self.confinement_mechanism == "none":
-            return False
-        return True
+        return self.confinement_mechanism != "none"
+
+    @classmethod
+    def is_host_confinement_available(cls) -> bool:
+        """Report platform capability without constructing a worktree sandbox."""
+        return cls._detect_confinement_mechanism() != "none"
 
     def validate_command_preflight(
         self, cwd: str, target_paths: list[str] | None = None
     ) -> ExternalActionResult[bool]:
-        """Verify that cwd and target paths remain strictly inside allowed_worktree_path."""
+        """Verify cwd and targets remain strictly inside the assigned worktree."""
         if not self.is_confinement_available():
             return ExternalActionResult[bool](
                 outcome=ExternalOutcome.FAILURE,
@@ -66,36 +163,37 @@ class AgentProcessConfinement:
                 data=False,
                 error_message="Agent process confinement capability unavailable. Failing closed.",
             )
-
-        resolved_cwd = os.path.realpath(cwd)
-
-        # Cwd must be inside allowed_worktree_path
-        if not self._is_path_inside(resolved_cwd, self.allowed_worktree_path):
+        if not Path(self.allowed_worktree_path).is_dir():
             return ExternalActionResult[bool](
                 outcome=ExternalOutcome.FAILURE,
                 source_adapter="agent_confinement",
                 reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
                 data=False,
-                error_message=(
-                    f"Subprocess cwd '{resolved_cwd}' is outside allowed worktree '{self.allowed_worktree_path}'."
-                ),
+                error_message="Assigned worktree is not an available directory.",
+            )
+        if not Path(self.runtime_root).is_dir():
+            return ExternalActionResult[bool](
+                outcome=ExternalOutcome.FAILURE,
+                source_adapter="agent_confinement",
+                reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
+                data=False,
+                error_message="Runtime root is not an available directory.",
             )
 
-        # Check target paths if specified
-        if target_paths:
-            for p in target_paths:
-                resolved_p = os.path.realpath(p)
-                if not self._is_path_inside(resolved_p, self.allowed_worktree_path):
-                    return ExternalActionResult[bool](
-                        outcome=ExternalOutcome.FAILURE,
-                        source_adapter="agent_confinement",
-                        reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
-                        data=False,
-                        error_message=(
-                            f"Target path '{resolved_p}' is outside allowed worktree '{self.allowed_worktree_path}'."
-                        ),
-                    )
-
+        paths = [cwd, *(target_paths or [])]
+        for raw_path in paths:
+            resolved = os.path.realpath(raw_path)
+            if not self._is_path_inside(resolved, self.allowed_worktree_path):
+                return ExternalActionResult[bool](
+                    outcome=ExternalOutcome.FAILURE,
+                    source_adapter="agent_confinement",
+                    reason_code=ExternalReasonCode.POSTCONDITION_NOT_PROVEN,
+                    data=False,
+                    error_message=(
+                        f"Subprocess path '{resolved}' is outside assigned worktree "
+                        f"'{self.allowed_worktree_path}'."
+                    ),
+                )
         return ExternalActionResult[bool](
             outcome=ExternalOutcome.SUCCESS,
             source_adapter="agent_confinement",
@@ -103,36 +201,243 @@ class AgentProcessConfinement:
             data=True,
         )
 
-    def _generate_darwin_sandbox_profile(self) -> str:
-        """Construct a macOS sandbox profile strictly denying file write outside allowed_worktree_path, protecting runtime_root."""
+    @staticmethod
+    def is_local_environment_preflight_error(message: str | None) -> bool:
+        """Identify only local confinement/runtime availability failures."""
+        normalized = (message or "").lower()
+        return any(
+            marker in normalized
+            for marker in (
+                "confinement capability unavailable",
+                "assigned worktree is not an available directory",
+                "runtime root is not an available directory",
+                "private runtime temporary parent is unavailable",
+                "private runtime temporary parent is not a directory",
+            )
+        )
+
+    @contextmanager
+    def runtime_session(
+        self,
+        base_env: dict[str, str] | None = None,
+        codex_auth_source: str | None = None,
+    ) -> Iterator[AgentRuntimeState]:
+        """Create and destroy one private runtime, copying only authorized Codex auth."""
+        temp_parent = self._validate_temp_parent(
+            self.private_state_parent or self._default_private_state_parent()
+        )
+        with tempfile.TemporaryDirectory(
+            prefix="minime-agent-state-", dir=str(temp_parent)
+        ) as raw_root:
+            host_root = Path(raw_root)
+            os.chmod(host_root, 0o700)
+            subdirs = {
+                name: host_root / name
+                for name in ("home", "codex", "tmp", "cache", "state", "config", "runtime")
+            }
+            for directory in subdirs.values():
+                directory.mkdir(mode=0o700)
+                os.chmod(directory, 0o700)
+            (subdirs["codex"] / "tmp").mkdir(mode=0o700)
+
+            safe_env = self.prepare_environment(base_env)
+            sandbox_root = self.SANDBOX_RUNTIME_ROOT
+            sandbox_dirs = {name: f"{sandbox_root}/{name}" for name in subdirs}
+            if self.confinement_mechanism != "bubblewrap":
+                sandbox_dirs = {name: str(path) for name, path in subdirs.items()}
+            safe_env.update(
+                {
+                    "HOME": sandbox_dirs["home"],
+                    "TMPDIR": sandbox_dirs["tmp"],
+                    "TMP": sandbox_dirs["tmp"],
+                    "TEMP": sandbox_dirs["tmp"],
+                    "XDG_CONFIG_HOME": sandbox_dirs["config"],
+                    "XDG_CACHE_HOME": sandbox_dirs["cache"],
+                    "XDG_STATE_HOME": sandbox_dirs["state"],
+                    "XDG_RUNTIME_DIR": sandbox_dirs["runtime"],
+                    "PWD": self.allowed_worktree_path,
+                    "MINIME_CONFINED_WORKTREE": self.allowed_worktree_path,
+                    "MINIME_RUNTIME_ROOT": self.runtime_root,
+                }
+            )
+
+            auth_copy: Path | None = None
+            initial_auth_digest: str | None = None
+            sensitive_values: tuple[str, ...] = ()
+            if codex_auth_source is not None:
+                auth_copy = subdirs["codex"] / "auth.json"
+                self._copy_codex_auth(codex_auth_source, auth_copy)
+                initial_auth_digest = hashlib.sha256(auth_copy.read_bytes()).hexdigest()
+                sensitive_values = self._read_credential_values(auth_copy)
+                safe_env["CODEX_HOME"] = sandbox_dirs["codex"]
+            else:
+                safe_env.pop("CODEX_HOME", None)
+
+            runtime = AgentRuntimeState(
+                host_root=host_root,
+                sandbox_root=sandbox_root,
+                environment=safe_env,
+                auth_copy=auth_copy,
+                initial_auth_digest=initial_auth_digest,
+                sensitive_values=sensitive_values,
+            )
+            try:
+                yield runtime
+            finally:
+                runtime.observe_credential_state()
+
+    @staticmethod
+    def _read_credential_values(auth_path: Path) -> tuple[str, ...]:
+        """Read credential string values in memory for output scrubbing only."""
+        try:
+            payload = json.loads(auth_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise AgentCredentialError("Authorized Codex auth file is not valid JSON.") from exc
+        values: set[str] = set()
+
+        def collect(value: object) -> None:
+            if isinstance(value, str) and len(value) >= 8:
+                values.add(value)
+            elif isinstance(value, dict):
+                for child in value.values():
+                    collect(child)
+            elif isinstance(value, list):
+                for child in value:
+                    collect(child)
+
+        collect(payload)
+        return tuple(sorted(values, key=len, reverse=True))
+
+    @staticmethod
+    def _scrub_credential_values(output: bytes, values: tuple[str, ...]) -> bytes:
+        for value in values:
+            output = output.replace(value.encode("utf-8"), b"[REDACTED_CODEX_CREDENTIAL]")
+        return output
+
+    @staticmethod
+    def _default_private_state_parent() -> str:
+        if platform.system().lower() == "linux" and Path("/var/tmp").is_dir():
+            return "/var/tmp"
+        return tempfile.gettempdir()
+
+    @staticmethod
+    def _copy_codex_auth(source: str, target: Path) -> None:
+        source_path = Path(source).expanduser()
+        try:
+            source_info = source_path.lstat()
+            if not stat.S_ISREG(source_info.st_mode) or stat.S_ISLNK(source_info.st_mode):
+                raise AgentCredentialError("Authorized Codex auth source is not a regular file.")
+            groups = set(os.getgroups()) | {os.getegid()}
+            if source_info.st_uid != os.geteuid() and source_info.st_gid not in groups:
+                raise AgentCredentialError(
+                    "Authorized Codex auth source is not readable by this service identity."
+                )
+            if stat.S_IMODE(source_info.st_mode) & 0o027:
+                raise AgentCredentialError(
+                    "Authorized Codex auth source has unsafe group/world permissions."
+                )
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            source_fd = os.open(source_path, flags)
+            try:
+                opened_info = os.fstat(source_fd)
+                if (
+                    not stat.S_ISREG(opened_info.st_mode)
+                    or opened_info.st_ino != source_info.st_ino
+                    or opened_info.st_dev != source_info.st_dev
+                    or opened_info.st_uid != source_info.st_uid
+                    or opened_info.st_gid != source_info.st_gid
+                ):
+                    raise AgentCredentialError(
+                        "Authorized Codex auth source changed during validation."
+                    )
+                target_fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                try:
+                    while chunk := os.read(source_fd, 65536):
+                        view = memoryview(chunk)
+                        while view:
+                            written = os.write(target_fd, view)
+                            view = view[written:]
+                    after_copy = os.fstat(source_fd)
+                    if (
+                        after_copy.st_size != opened_info.st_size
+                        or after_copy.st_mtime_ns != opened_info.st_mtime_ns
+                        or after_copy.st_ctime_ns != opened_info.st_ctime_ns
+                    ):
+                        raise AgentCredentialError(
+                            "Authorized Codex auth source changed while being copied."
+                        )
+                    os.fsync(target_fd)
+                    os.fchmod(target_fd, 0o600)
+                finally:
+                    os.close(target_fd)
+            finally:
+                os.close(source_fd)
+        except AgentCredentialError:
+            raise
+        except OSError as exc:
+            raise AgentCredentialError("Authorized Codex credentials are unavailable.") from exc
+
+    @staticmethod
+    def codex_auth_source(base_env: dict[str, str] | None = None) -> str:
+        env = base_env or os.environ
+        codex_home = env.get("CODEX_HOME")
+        home = env.get("HOME")
+        if codex_home:
+            root = Path(codex_home).expanduser()
+        elif home:
+            root = Path(home).expanduser() / ".codex"
+        else:
+            root = Path.home() / ".codex"
+        return str(root / "auth.json")
+
+    @staticmethod
+    def _build_darwin_sandbox_profile(
+        allowed_worktree_path: str,
+        runtime_root: str,
+        private_state_root: str | None = None,
+    ) -> str:
+        """Deny host writes except the assigned worktree and private session state."""
+        private_allow = (
+            f'(allow file-write* (subpath "{private_state_root}"))\n' if private_state_root else ""
+        )
         return (
             "(version 1)\n"
             "(allow default)\n"
             "(deny file-write*)\n"
-            f'(allow file-write* (subpath "{self.allowed_worktree_path}"))\n'
-            '(allow file-write* (literal "/dev/null"))\n'
-            '(allow file-write* (literal "/dev/zero"))\n'
-            '(allow file-write* (literal "/dev/tty"))\n'
-            '(allow file-write* (regex #"^/dev/fd/"))\n'
-            '(allow file-write* (regex #"^/dev/std(in|out|err)"))\n'
-            f'(deny file-write* (subpath "{self.runtime_root}"))\n'
+            f'(allow file-write* (subpath "{allowed_worktree_path}"))\n'
+            + private_allow
+            + '(allow file-write* (literal "/dev/null"))\n'
+            + '(allow file-write* (literal "/dev/zero"))\n'
+            + '(allow file-write* (literal "/dev/tty"))\n'
+            + '(allow file-write* (regex #"^/dev/fd/"))\n'
+            + '(allow file-write* (regex #"^/dev/std(in|out|err)"))\n'
+            + f'(deny file-write* (subpath "{runtime_root}"))\n'
         )
 
-    def wrap_command(self, cmd: Sequence[str] | str) -> list[str]:
-        """Wrap command with OS-level sandbox confinement binary (bwrap / sandbox-exec)."""
+    def _generate_profile(self, private_state_root: str | None = None) -> str:
+        return self._build_darwin_sandbox_profile(
+            self.allowed_worktree_path, self.runtime_root, private_state_root
+        )
+
+    def _generate_darwin_sandbox_profile(self) -> str:
+        return self._generate_profile()
+
+    def wrap_command(
+        self,
+        cmd: Sequence[str] | str,
+        runtime_state: AgentRuntimeState | None = None,
+        *,
+        unshare_network: bool = False,
+    ) -> list[str]:
+        """Wrap a process and bind only its assigned worktree plus private state."""
         if not self.is_confinement_available():
             raise AgentConfinementError(
                 "Confinement unavailable; cannot execute agent process unconstrained."
             )
-
-        if isinstance(cmd, str):
-            command_args = ["sh", "-c", cmd]
-        else:
-            command_args = list(cmd)
+        command_args = ["sh", "-c", cmd] if isinstance(cmd, str) else list(cmd)
 
         if self.confinement_mechanism == "bubblewrap":
-            # Bubblewrap sandbox on Linux: bind worktree RW, bind runtime RO
-            return [
+            wrapped = [
                 "bwrap",
                 "--ro-bind",
                 "/",
@@ -143,23 +448,130 @@ class AgentProcessConfinement:
                 "--ro-bind",
                 self.runtime_root,
                 self.runtime_root,
-                "--unshare-pid",
-                "--chdir",
-                self.allowed_worktree_path,
-            ] + command_args
+            ]
+            if runtime_state is not None:
+                wrapped.extend(
+                    [
+                        "--tmpfs",
+                        "/run",
+                        "--dir",
+                        runtime_state.sandbox_root,
+                        "--bind",
+                        str(runtime_state.host_root),
+                        runtime_state.sandbox_root,
+                    ]
+                )
+            if unshare_network:
+                wrapped.append("--unshare-net")
+            wrapped.extend(["--unshare-pid", "--chdir", self.allowed_worktree_path, *command_args])
+            return wrapped
 
-        elif self.confinement_mechanism == "darwin_sandbox":
-            profile = self._generate_darwin_sandbox_profile()
+        if self.confinement_mechanism == "darwin_sandbox":
+            profile = self._generate_profile(
+                str(runtime_state.host_root) if runtime_state is not None else None
+            )
             sandbox_bin = (
                 "/usr/bin/sandbox-exec"
                 if os.path.exists("/usr/bin/sandbox-exec")
                 else "sandbox-exec"
             )
-            return [sandbox_bin, "-p", profile] + command_args
+            return [sandbox_bin, "-p", profile, *command_args]
 
         raise AgentConfinementError(
             f"Unsupported or fail-open confinement mechanism: '{self.confinement_mechanism}'."
         )
+
+    async def run_confined_async_subprocess(
+        self,
+        cmd: Sequence[str] | str,
+        cwd: str,
+        *,
+        input_bytes: bytes | None,
+        timeout_seconds: int,
+        env: dict[str, str] | None = None,
+        codex_auth_source: str | None = None,
+        unshare_network: bool = False,
+    ) -> AgentProcessResult:
+        """Run an async subprocess, guaranteeing process and private-state cleanup."""
+        preflight = self.validate_command_preflight(cwd=cwd)
+        if preflight.outcome != ExternalOutcome.SUCCESS:
+            raise AgentConfinementError(preflight.error_message or "Confinement preflight failed.")
+        runtime_state = None
+        try:
+            with self.runtime_session(env, codex_auth_source) as runtime_state:
+                command = self.wrap_command(cmd, runtime_state, unshare_network=unshare_network)
+                process = await asyncio.create_subprocess_exec(
+                    *command,
+                    cwd=self.allowed_worktree_path,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=runtime_state.environment,
+                    start_new_session=True,
+                )
+                timed_out = False
+                try:
+                    stdout, stderr = await asyncio.wait_for(
+                        process.communicate(input_bytes), timeout=timeout_seconds
+                    )
+                except asyncio.TimeoutError:
+                    timed_out = True
+                    await self._terminate_process_group(process)
+                    stdout = stderr = b""
+                except BaseException:
+                    task = asyncio.current_task()
+                    was_cancelled = task is not None and task.cancelling() > 0
+                    if was_cancelled:
+                        task.uncancel()
+                    try:
+                        await self._terminate_process_group(process)
+                    finally:
+                        if was_cancelled:
+                            task.cancel()
+                    raise
+                rotation = runtime_state.observe_credential_state()
+                if rotation:
+                    # A refreshed credential is deliberately not persisted. Drop all
+                    # child output too: it may contain the newly rotated secret, which
+                    # was not present in the initial redaction set.
+                    stdout = b""
+                    stderr = b"Codex credential rotation was not persisted."
+                return AgentProcessResult(
+                    returncode=process.returncode if process.returncode is not None else -1,
+                    stdout=self._scrub_credential_values(stdout, runtime_state.sensitive_values),
+                    stderr=self._scrub_credential_values(stderr, runtime_state.sensitive_values),
+                    timed_out=timed_out,
+                    credential_rotation_detected=rotation,
+                )
+        except asyncio.CancelledError:
+            raise
+        except AgentConfinementError:
+            raise
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise AgentConfinementError(
+                "Confined process runtime could not be initialized."
+            ) from exc
+
+    async def _terminate_process_group(self, process: asyncio.subprocess.Process) -> None:
+        if process.returncode is not None:
+            return
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except OSError:
+            pass
+        try:
+            await asyncio.wait_for(process.communicate(), timeout=5.0)
+            return
+        except Exception:
+            pass
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        try:
+            await process.communicate()
+        except Exception:
+            pass
 
     def run_confined_subprocess(
         self,
@@ -167,38 +579,82 @@ class AgentProcessConfinement:
         cwd: str,
         timeout_seconds: int = 300,
         env: dict[str, str] | None = None,
+        *,
+        codex_auth_source: str | None = None,
+        unshare_network: bool = False,
     ) -> subprocess.CompletedProcess[str]:
-        """Execute arbitrary agent subprocess under OS confinement, failing closed on violations."""
+        """Synchronous confined execution used by checks with no Codex credentials."""
         preflight = self.validate_command_preflight(cwd=cwd)
         if preflight.outcome != ExternalOutcome.SUCCESS:
             raise AgentConfinementError(
                 f"Preflight confinement check failed: {preflight.error_message}"
             )
-
-        wrapped_cmd = self.wrap_command(cmd)
-        exec_env = self.prepare_environment(env)
-
-        return subprocess.run(
-            wrapped_cmd,
-            cwd=self.allowed_worktree_path,
-            env=exec_env,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-        )
+        with self.runtime_session(env, codex_auth_source) as runtime_state:
+            wrapped = self.wrap_command(cmd, runtime_state, unshare_network=unshare_network)
+            process: subprocess.Popen[str] | None = None
+            try:
+                process = subprocess.Popen(
+                    wrapped,
+                    cwd=self.allowed_worktree_path,
+                    env=runtime_state.environment,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    start_new_session=True,
+                )
+                try:
+                    stdout, stderr = process.communicate(timeout=timeout_seconds)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(process.pid, signal.SIGTERM)
+                    except OSError:
+                        pass
+                    try:
+                        stdout, stderr = process.communicate(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except OSError:
+                            pass
+                        stdout, stderr = process.communicate()
+                    raise
+                result = subprocess.CompletedProcess(wrapped, process.returncode, stdout, stderr)
+            except subprocess.TimeoutExpired:
+                raise
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise AgentConfinementError(
+                    "Confined process runtime could not be initialized."
+                ) from exc
+            runtime_state.observe_credential_state()
+            return result
 
     def prepare_environment(self, base_env: dict[str, str] | None = None) -> dict[str, str]:
-        """Construct isolated environment variables for agent subprocess execution."""
-        env = dict(base_env or os.environ)
-        env["PWD"] = self.allowed_worktree_path
-        env["MINIME_CONFINED_WORKTREE"] = self.allowed_worktree_path
-        env["MINIME_RUNTIME_ROOT"] = self.runtime_root
+        """Return a sanitized inherited environment before per-attempt paths are set."""
+        source = os.environ if base_env is None else base_env
+        env: dict[str, str] = {}
+        secret_markers = (
+            "API_KEY",
+            "TOKEN",
+            "PASSWORD",
+            "SECRET",
+            "PRIVATE_KEY",
+            "DATABASE_URL",
+            "CONNECTION_STRING",
+        )
+        for key, value in source.items():
+            normalized = key.upper()
+            if normalized.startswith("MINIME_") or any(
+                marker in normalized for marker in secret_markers
+            ):
+                continue
+            env[key] = value
         return env
 
-    def _is_path_inside(self, path: str, parent: str) -> bool:
-        """Check if path is equal to or contained within parent."""
+    @staticmethod
+    def _is_path_inside(path: str, parent: str) -> bool:
+        """Use path-component containment, never textual-prefix containment."""
         try:
-            rel = os.path.relpath(path, parent)
-            return not rel.startswith("..") and rel != ".."
+            Path(path).relative_to(Path(parent))
+            return True
         except ValueError:
             return False

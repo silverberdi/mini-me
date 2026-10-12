@@ -141,6 +141,10 @@ def test_idempotent_duplicate_request(in_memory_uow, seeded_project_and_run):
 
     result1 = service.execute_action(req)
     assert result1.status == OperatorActionStatus.COMPLETED
+    assert "Continue request processed" in result1.summary
+    assert "resumed successfully" not in result1.summary.lower()
+    assert result1.payload["request_processed"] is True
+    assert result1.payload["execution_active"] is False
 
     # Second call with the same action_request_id should return recorded result immediately
     result2 = service.execute_action(req)
@@ -150,6 +154,62 @@ def test_idempotent_duplicate_request(in_memory_uow, seeded_project_and_run):
     # Verify only 1 record is created in DB
     records = in_memory_uow.operator_actions.list_by_run("run-101")
     assert len(records) == 1
+
+
+def test_continue_reports_persisted_human_and_failed_job_outcome(
+    in_memory_uow, seeded_project_and_run
+):
+    project, change, run = seeded_project_and_run
+    job = Job(
+        job_id="job-continue-failed",
+        project_id=project.project_id,
+        change_name=change.name,
+        implementer_role="codex",
+        current_executor="codex",
+        status=JobStatus.NEEDS_HUMAN,
+        base_sha=run.base_sha,
+    )
+    run.active_job_id = job.job_id
+    run.stop_outcome = OrchestrationStopOutcome.NEEDS_HUMAN
+    run.human_gate = HumanGate.NEEDS_HUMAN
+    run.is_active = False
+    in_memory_uow.jobs.save(job)
+    in_memory_uow.orchestration_runs.save(run)
+    in_memory_uow.commit()
+
+    class FailedContinuation:
+        def request_run_continuation(self, run_id, *, source, force):
+            persisted_run = in_memory_uow.orchestration_runs.get_by_id(run_id)
+            persisted_run.is_active = False
+            persisted_run.stop_outcome = OrchestrationStopOutcome.NEEDS_HUMAN
+            persisted_run.human_gate = HumanGate.NEEDS_HUMAN
+            persisted_job = in_memory_uow.jobs.get_by_id(job.job_id)
+            persisted_job.status = JobStatus.FAILED
+            in_memory_uow.orchestration_runs.save(persisted_run)
+            in_memory_uow.jobs.save(persisted_job)
+            in_memory_uow.commit()
+
+    service = ControlPlaneService(in_memory_uow)
+    service.recovery_convergence_service = FailedContinuation()
+    request = OperatorActionRequest(
+        project_id=project.project_id,
+        change_name=change.name,
+        run_id=run.run_id,
+        action_type=OperatorActionType.CONTINUE,
+        actor_identity="operator",
+        source_interface="cli",
+    )
+
+    result = service.execute_action(request)
+
+    assert result.status == OperatorActionStatus.COMPLETED
+    assert result.resulting_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
+    assert result.payload["run_active"] is False
+    assert result.payload["execution_active"] is False
+    assert result.payload["linked_job_status"] == JobStatus.FAILED.value
+    assert "outcome=NEEDS_HUMAN" in result.summary
+    assert "linked_job_status=FAILED" in result.summary
+    assert "resumed successfully" not in result.summary.lower()
 
 
 def test_cancel_active_run_safety(in_memory_uow, seeded_project_and_run):

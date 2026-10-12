@@ -55,6 +55,26 @@ class ProviderOutcomeParser:
         re.compile(r"forbidden", re.IGNORECASE),
     ]
 
+    _POLICY_PATTERNS = [
+        re.compile(r"policy[_\s-]?denied", re.IGNORECASE),
+        re.compile(r"policy[_\s-]?violation", re.IGNORECASE),
+        re.compile(r"content[_\s-]?filter", re.IGNORECASE),
+        re.compile(r"safety[_\s-]?policy", re.IGNORECASE),
+    ]
+
+    _AGENT_ENVIRONMENT_PATTERNS = [
+        re.compile(r"\bEROFS\b", re.IGNORECASE),
+        re.compile(r"read[_\s-]?only file system", re.IGNORECASE),
+        re.compile(r"read[_\s-]?only filesystem", re.IGNORECASE),
+        re.compile(r"failed to initialize (?:sqlite )?state runtime", re.IGNORECASE),
+        re.compile(r"unable to create path aliases", re.IGNORECASE),
+        re.compile(
+            r"(?:ENOENT|no such file or directory|missing required path).*"
+            r"(?:CODEX_HOME|TMPDIR|XDG_RUNTIME_DIR|/run/minime-agent|\.codex/tmp|state runtime|path aliases)",
+            re.IGNORECASE | re.DOTALL,
+        ),
+    ]
+
     # Patterns for transient errors
     _TRANSIENT_PATTERNS = [
         re.compile(r"connection\s+reset", re.IGNORECASE),
@@ -94,6 +114,7 @@ class ProviderOutcomeParser:
         stdout_lines: list[str],
         stderr_lines: list[str],
         domain_verdict_valid: bool = False,
+        environment_failure: bool = False,
     ) -> NormalizedProviderResult:
         """Parse raw process runner output into a NormalizedProviderResult."""
         combined_text = "\n".join(stdout_lines + stderr_lines)
@@ -109,30 +130,7 @@ class ProviderOutcomeParser:
                 raw_output=combined_text[:1000],
             )
 
-        # 2. Domain verdict validity check: If valid domain verdict is recognized (e.g. CHANGES_REQUIRED or READY_TO_MERGE)
-        # Domain verdicts represent valid outcomes and do not degrade provider health.
-        if domain_verdict_valid:
-            return NormalizedProviderResult(
-                result_class=ProviderResultClass.SUCCESS,
-                provider=provider,
-                role=role,
-                model=model,
-                summary=f"Provider {provider} completed successfully for {role}",
-                raw_output=combined_text[:1000],
-            )
-
-        # 3. Clean exit with 0 code
-        if exit_code == 0:
-            return NormalizedProviderResult(
-                result_class=ProviderResultClass.SUCCESS,
-                provider=provider,
-                role=role,
-                model=model,
-                summary=f"Provider {provider} exited successfully",
-                raw_output=combined_text[:1000],
-            )
-
-        # 4. Check for quota exhaustion
+        # 2. Quota/rate/auth/policy signals outrank a local runtime failure.
         for pat in cls._QUOTA_PATTERNS:
             if pat.search(combined_text):
                 retry_after, reset_at = cls.extract_reset_hints(combined_text)
@@ -147,7 +145,6 @@ class ProviderOutcomeParser:
                     raw_output=combined_text[:1000],
                 )
 
-        # 5. Check for rate limit
         for pat in cls._RATE_LIMIT_PATTERNS:
             if pat.search(combined_text):
                 retry_after, reset_at = cls.extract_reset_hints(combined_text)
@@ -162,7 +159,6 @@ class ProviderOutcomeParser:
                     raw_output=combined_text[:1000],
                 )
 
-        # 6. Check for auth error
         for pat in cls._AUTH_PATTERNS:
             if pat.search(combined_text):
                 return NormalizedProviderResult(
@@ -174,7 +170,51 @@ class ProviderOutcomeParser:
                     raw_output=combined_text[:1000],
                 )
 
-        # 7. Check for transient error
+        for pat in cls._POLICY_PATTERNS:
+            if pat.search(combined_text):
+                return NormalizedProviderResult(
+                    result_class=ProviderResultClass.POLICY_DENIED,
+                    provider=provider,
+                    role=role,
+                    model=model,
+                    summary=f"Provider {provider} reported a policy denial",
+                    raw_output=combined_text[:1000],
+                )
+
+        if environment_failure or any(
+            pattern.search(combined_text) for pattern in cls._AGENT_ENVIRONMENT_PATTERNS
+        ):
+            return NormalizedProviderResult(
+                result_class=ProviderResultClass.ENVIRONMENT_UNAVAILABLE,
+                provider=provider,
+                role=role,
+                model=model,
+                summary="Confined agent runtime is unavailable",
+                raw_output=combined_text[:1000],
+            )
+
+        # 3. Valid domain verdicts are successful provider outcomes.
+        if domain_verdict_valid:
+            return NormalizedProviderResult(
+                result_class=ProviderResultClass.SUCCESS,
+                provider=provider,
+                role=role,
+                model=model,
+                summary=f"Provider {provider} completed successfully for {role}",
+                raw_output=combined_text[:1000],
+            )
+
+        if exit_code == 0:
+            return NormalizedProviderResult(
+                result_class=ProviderResultClass.SUCCESS,
+                provider=provider,
+                role=role,
+                model=model,
+                summary=f"Provider {provider} exited successfully",
+                raw_output=combined_text[:1000],
+            )
+
+        # 5. Check for transient error
         for pat in cls._TRANSIENT_PATTERNS:
             if pat.search(combined_text):
                 return NormalizedProviderResult(

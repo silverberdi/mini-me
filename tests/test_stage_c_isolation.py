@@ -4315,14 +4315,32 @@ def test_task_a_readiness_admission_fence_complete_current_truth_proof(tmp_dirs)
     uow.project_managed_repository_bindings.save(binding)
 
 
-def test_task_b_checks_runner_process_confinement(tmp_dirs):
+def test_task_b_checks_runner_process_confinement(tmp_dirs, monkeypatch):
     wt_path = Path(tmp_dirs["worktrees"]) / "wt-checks-confinement"
     wt_path.mkdir(parents=True, exist_ok=True)
     rt_path = Path(tmp_dirs["runtime"])
+    rt_path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("MINIME_RUNTIME_ROOT", str(rt_path))
 
+    from minime.services.agent_confinement import AgentProcessConfinement
     from minime.services.checks_runner import ChecksRunner
 
     runner = ChecksRunner(timeout_seconds=10)
+
+    if not AgentProcessConfinement.is_host_confinement_available():
+        unavailable = asyncio.run(
+            runner.run(
+                job_id="job-c-unavailable",
+                checks=[{"name": "echo-test", "command": "echo hello"}],
+                worktree_path=wt_path,
+            )
+        )
+        assert unavailable.passed is False
+        assert (
+            unavailable.diagnostics[0].diagnostic_status
+            == EvidenceDiagnosticStatus.ENVIRONMENT_UNAVAILABLE
+        )
+        return
 
     # 1. Normal check inside worktree succeeds
     res1 = asyncio.run(
@@ -4332,7 +4350,9 @@ def test_task_b_checks_runner_process_confinement(tmp_dirs):
             worktree_path=wt_path,
         )
     )
-    assert res1.passed is True
+    assert res1.passed is True, (
+        f"{res1!r}; results={res1.results!r}; diagnostics={res1.diagnostics!r}"
+    )
 
     # 2. Write inside assigned worktree succeeds
     res2 = asyncio.run(

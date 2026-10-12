@@ -810,7 +810,9 @@ class ExecutionPipelineService:
                     )
                     runner_stdout = result.stdout
                     runner_stderr = result.stderr
-                    if getattr(result, "preflight_error", None):
+                    if getattr(result, "environment_error", False):
+                        has_environment_failure = True
+                    elif getattr(result, "preflight_error", None):
                         has_preflight_failure = True
 
                     for line in result.stdout:
@@ -837,8 +839,12 @@ class ExecutionPipelineService:
                         timed_out=result.timed_out,
                         stdout_lines=result.stdout,
                         stderr_lines=result.stderr,
+                        environment_failure=has_environment_failure,
                     )
-                    if not has_preflight_failure:
+                    if (
+                        not has_preflight_failure
+                        and imp_outcome.result_class != ProviderResultClass.ENVIRONMENT_UNAVAILABLE
+                    ):
                         self.health_service.record_outcome(imp_outcome)
                     if result.timed_out or imp_outcome.result_class == ProviderResultClass.TIMEOUT:
                         self._save_event(
@@ -2023,8 +2029,24 @@ class ExecutionPipelineService:
                     stdout_lines=review_result.stdout,
                     stderr_lines=review_result.stderr,
                     domain_verdict_valid=domain_verdict_valid,
+                    environment_failure=getattr(review_result, "environment_error", False),
                 )
-                self.health_service.record_outcome(rev_outcome)
+                if rev_outcome.result_class != ProviderResultClass.ENVIRONMENT_UNAVAILABLE:
+                    self.health_service.record_outcome(rev_outcome)
+
+                if rev_outcome.result_class == ProviderResultClass.ENVIRONMENT_UNAVAILABLE:
+                    reason = (
+                        "ENVIRONMENT_UNAVAILABLE: confined reviewer runtime initialization failed; "
+                        "waiting for local environment correction without provider penalty."
+                    )
+                    self.uow.reviews.transition(
+                        review.review_id,
+                        ReviewStatus.REVIEW_FAILED.value,
+                        error_message=reason,
+                    )
+                    job = self.uow.jobs.set_waiting_capacity(job.job_id, effective_reviewer, reason)
+                    self.uow.commit()
+                    return job
 
                 if rev_outcome.result_class in {
                     ProviderResultClass.QUOTA_LIMIT,
