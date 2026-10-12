@@ -1279,6 +1279,24 @@ def test_postgres_continue_accepts_only_recovery_evidenced_incomplete_premature_
         assert _git(worktree.path, "rev-parse", "HEAD") == snapshot_sha
         assert _git(worktree.path, "status", "--porcelain=v1", "--untracked-files=all") == ""
 
+        advancing_clone = tmp_path / "crash-recovery-main-advance"
+        subprocess.run(
+            ["git", "clone", str(remote), str(advancing_clone)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        _git(advancing_clone, "config", "user.name", "Remote Main Advance")
+        _git(advancing_clone, "config", "user.email", "advance@localhost")
+        (advancing_clone / "unrelated-main-advance.txt").write_text("unrelated\n")
+        _git(advancing_clone, "add", "unrelated-main-advance.txt")
+        _git(advancing_clone, "commit", "-m", "unrelated main advance")
+        _git(advancing_clone, "push", "origin", "main")
+        advanced_main_sha = _git(advancing_clone, "rev-parse", "main")
+        assert advanced_main_sha != base_sha
+        assert _git(managed_root, "rev-parse", "main") == base_sha
+        _git(advancing_clone, "merge-base", "--is-ancestor", base_sha, advanced_main_sha)
+
         def verify_recovery_denied(reason: str) -> None:
             with pytest.raises(RuntimeError, match=reason):
                 asyncio.run(
@@ -1502,6 +1520,10 @@ def test_postgres_continue_accepts_only_recovery_evidenced_incomplete_premature_
         assert persisted_job.candidate_sha is None and persisted_run.current_candidate_sha is None
         assert persisted_ownership.creation_state == WorktreeCreationState.CREATED
         assert persisted_ownership.source_base_sha == base_sha
+        assert (
+            _git(advancing_clone, "ls-remote", "origin", "refs/heads/main").split()[0]
+            == advanced_main_sha
+        )
         assert _git(managed_root, "rev-parse", f"refs/heads/{recovery_branch}") == snapshot_sha
         assert (
             _git(managed_root, "ls-remote", "origin", f"refs/minime/intake/{change_name}").split()[
