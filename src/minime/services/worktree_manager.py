@@ -8,6 +8,7 @@ import inspect
 import json
 import logging
 import os
+import stat
 import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -32,6 +33,7 @@ from minime.domain.enums import (
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
+    Event,
     GitOperation,
     OrchestrationWorktreeOwnership,
     WorktreeCleanupResult,
@@ -373,7 +375,18 @@ class WorktreeManager:
                 stderr.decode(errors="replace").strip() or stdout.decode(errors="replace").strip()
             )
             raise RuntimeError(redact_secrets(error, list(auth_secrets)))
-        return stdout.decode().strip()
+        decoded_stdout = stdout.decode()
+        # Porcelain status encodes index/worktree state in leading spaces. A
+        # generic strip() destroys that security-relevant distinction (" M"
+        # becomes "M ") and can misclassify a permitted unstaged artifact
+        # repair as staged content. Preserve the exact NUL-delimited records.
+        if (
+            args
+            and args[0] == "status"
+            and any(argument.startswith("--porcelain") for argument in args[1:])
+        ):
+            return decoded_stdout
+        return decoded_stdout.strip()
 
     async def _git_show_bytes(self, object_path: str) -> bytes:
         """Read an exact published blob without text trimming or newline rewriting."""
@@ -398,6 +411,7 @@ class WorktreeManager:
         project_id: str,
         change_name: str,
         job_id: str,
+        recovery_snapshot_sha: str | None = None,
     ) -> None:
         """Materialize only the verified remote intake tree into an execution worktree."""
         intake_repo = getattr(self.uow, "intake_workspace_ownerships", None)
@@ -462,7 +476,11 @@ class WorktreeManager:
             managed_worktree_path=destination_worktree,
         )
         observed_parts = observed.split()
-        if len(observed_parts) < 2 or observed_parts[0] != ownership.published_sha:
+        if (
+            len(observed_parts) != 2
+            or observed_parts[0] != ownership.published_sha
+            or observed_parts[1] != ownership.published_ref
+        ):
             raise RuntimeError(
                 "Execution handoff denied: published intake ref drifted or is unobservable."
             )
@@ -483,21 +501,36 @@ class WorktreeManager:
 
         prefix = f"openspec/changes/{change_name}/"
         tree = await self._git(
-            ["ls-tree", "-r", "--name-only", ownership.published_sha, "--", prefix],
+            ["ls-tree", "-r", "-z", ownership.published_sha, "--", prefix],
             cwd=self.project_root,
         )
-        relative_paths = [
-            line[len(prefix) :] for line in tree.splitlines() if line.startswith(prefix)
-        ]
+        tree_entries = [entry for entry in tree.split("\0") if entry]
+        relative_paths: list[str] = []
+        for entry in tree_entries:
+            metadata, separator, path_text = entry.partition("\t")
+            fields = metadata.split()
+            if (
+                not separator
+                or len(fields) != 3
+                or fields[0] != "100644"
+                or fields[1] != "blob"
+                or not path_text.startswith(prefix)
+            ):
+                raise RuntimeError(
+                    "Execution handoff denied: published intake tree contains a non-regular or malformed entry."
+                )
+            relative_paths.append(path_text[len(prefix) :])
         required = {"proposal.md", "tasks.md", "design.md"}
         actual = set(relative_paths)
         if (
-            not required.issubset(actual)
+            len(actual) != len(relative_paths)
+            or not required.issubset(actual)
             or not any(path.startswith("specs/") and path.endswith(".md") for path in actual)
             or any(
                 not path
                 or PurePosixPath(path).is_absolute()
                 or ".." in PurePosixPath(path).parts
+                or "\\" in path
                 or (
                     path not in required
                     and not (path.startswith("specs/") and path.endswith(".md"))
@@ -510,8 +543,35 @@ class WorktreeManager:
             )
 
         destination = destination_worktree / "openspec" / "changes" / change_name
+        worktree_root = destination_worktree.resolve()
+        path_component = worktree_root
+        for component in ("openspec", "changes", change_name):
+            path_component = path_component / component
+            if path_component.is_symlink():
+                raise RuntimeError(
+                    "Execution handoff denied: OpenSpec materialization path contains a symlink."
+                )
+        if not path_component.resolve().is_relative_to(worktree_root):
+            raise RuntimeError(
+                "Execution handoff denied: OpenSpec materialization path escapes its worktree."
+            )
+        if destination.is_symlink():
+            raise RuntimeError(
+                "Execution handoff denied: OpenSpec materialization path is a symlink."
+            )
+        if recovery_snapshot_sha and not destination.is_dir():
+            raise RuntimeError(
+                "Execution handoff denied: verified recovery snapshot artifacts are absent from the worktree."
+            )
         if destination.exists():
+            expected_dirs = {
+                str(parent)
+                for relative_path in relative_paths
+                for parent in PurePosixPath(relative_path).parents
+                if str(parent) != "."
+            }
             actual_paths: set[str] = set()
+            actual_dirs: set[str] = set()
             for candidate in destination.rglob("*"):
                 if candidate.is_symlink():
                     raise RuntimeError(
@@ -519,18 +579,217 @@ class WorktreeManager:
                     )
                 if candidate.is_file():
                     actual_paths.add(candidate.relative_to(destination).as_posix())
-            if actual_paths != set(relative_paths):
+                elif candidate.is_dir():
+                    actual_dirs.add(candidate.relative_to(destination).as_posix())
+            if actual_paths != set(relative_paths) or actual_dirs != expected_dirs:
                 raise RuntimeError(
                     "Execution handoff denied: existing OpenSpec materialization differs from the published manifest."
                 )
+            published_contents: dict[str, bytes] = {}
+            snapshot_contents: dict[str, bytes] = {}
             for relative_path in relative_paths:
                 expected_content = await self._git_show_bytes(
                     f"{ownership.published_sha}:{prefix}{relative_path}"
                 )
-                if (destination / relative_path).read_bytes() != expected_content:
-                    raise RuntimeError(
-                        "Execution handoff denied: existing OpenSpec materialization content differs from the published tree."
+                published_contents[relative_path] = expected_content
+                if recovery_snapshot_sha:
+                    snapshot_contents[relative_path] = await self._git_show_bytes(
+                        f"{recovery_snapshot_sha}:{prefix}{relative_path}"
                     )
+            current_contents = {
+                relative_path: (destination / relative_path).read_bytes()
+                for relative_path in relative_paths
+            }
+            repair_paths: list[str] = []
+            for relative_path, expected_content in published_contents.items():
+                current_content = current_contents[relative_path]
+                if not recovery_snapshot_sha:
+                    if current_content != expected_content:
+                        raise RuntimeError(
+                            "Execution handoff denied: existing OpenSpec materialization content differs from the published tree."
+                        )
+                    continue
+                snapshot_content = snapshot_contents[relative_path]
+                missing_final_lf = expected_content.endswith(b"\n") and (
+                    snapshot_content == expected_content[:-1]
+                )
+                if snapshot_content != expected_content and not missing_final_lf:
+                    raise RuntimeError(
+                        "Execution handoff denied: recovery snapshot differs from published artifacts beyond one omitted final LF."
+                    )
+                if current_content not in {
+                    expected_content,
+                    expected_content[:-1] if missing_final_lf else expected_content,
+                }:
+                    raise RuntimeError(
+                        "Execution handoff denied: existing OpenSpec materialization contains unauthorized content."
+                    )
+                if missing_final_lf:
+                    repair_paths.append(relative_path)
+
+            if repair_paths:
+                ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None)
+                recovery_ownership = (
+                    ownership_repo.get_by_job_id(job_id) if ownership_repo else None
+                )
+                if (
+                    not recovery_ownership
+                    or recovery_ownership.creation_state != WorktreeCreationState.CREATED
+                    or recovery_ownership.project_id != project_id
+                    or recovery_ownership.job_id != job_id
+                    or recovery_ownership.change_name != change_name
+                    or not recovery_ownership.source_base_sha
+                ):
+                    raise RuntimeError(
+                        "Execution handoff denied: legacy LF repair lacks canonical CREATED recovery ownership."
+                    )
+                run_repo = getattr(self.uow, "orchestration_runs", None)
+                linked_job = (
+                    self.uow.jobs.get_by_id(job_id) if getattr(self.uow, "jobs", None) else None
+                )
+                linked_run = run_repo.get_by_id(recovery_ownership.run_id) if run_repo else None
+                if (
+                    not linked_job
+                    or not linked_run
+                    or linked_job.project_id != project_id
+                    or linked_job.change_name != change_name
+                    or linked_job.base_sha != recovery_ownership.source_base_sha
+                    or linked_job.candidate_sha
+                    or linked_run.project_id != project_id
+                    or linked_run.change_name != change_name
+                    or linked_run.active_job_id != job_id
+                    or linked_run.base_sha != recovery_ownership.source_base_sha
+                    or linked_run.current_candidate_sha
+                ):
+                    raise RuntimeError(
+                        "Execution handoff denied: legacy LF repair conflicts with durable Run/Job identity or candidate evidence."
+                    )
+                events_repo = getattr(self.uow, "events", None)
+                if not events_repo or not callable(getattr(events_repo, "save", None)):
+                    raise RuntimeError(
+                        "Execution handoff denied: durable repair evidence authority is unavailable."
+                    )
+                for relative_path in repair_paths:
+                    artifact_path = destination / relative_path
+                    if artifact_path.is_symlink() or not artifact_path.is_file():
+                        raise RuntimeError(
+                            "Execution handoff denied: a repair target is not a regular file."
+                        )
+                identity = {
+                    "worktree_id": recovery_ownership.worktree_id,
+                    "run_id": recovery_ownership.run_id,
+                    "job_id": job_id,
+                    "source_base_sha": recovery_ownership.source_base_sha,
+                    "recovery_snapshot_sha": recovery_snapshot_sha,
+                    "published_ref": ownership.published_ref,
+                    "published_sha": ownership.published_sha,
+                }
+                recovery_events = events_repo.list_events(
+                    project_id=project_id, change_id=change_name, limit=10000
+                )
+                matching_events = [
+                    event
+                    for event in recovery_events
+                    if event.event_type == EventType.INTAKE_ARTIFACT_HANDOFF_RECONCILED
+                    and event.operation_id == job_id
+                ]
+                if any(
+                    any(event.payload.get(key) != value for key, value in identity.items())
+                    for event in matching_events
+                ):
+                    raise RuntimeError(
+                        "Execution handoff denied: prior repair evidence conflicts with current durable identity."
+                    )
+                try:
+                    final_observation = await self._git(
+                        ["ls-remote", binding.remote_name, ownership.published_ref],
+                        cwd=self.project_root,
+                        job_id=job_id,
+                        project_id=project_id,
+                        operation_type="published_intake_ref_reobserve",
+                        managed_worktree_path=destination_worktree,
+                    )
+                except Exception as exc:
+                    raise RuntimeError(
+                        "Execution handoff denied: published ref could not be re-observed before repair."
+                    ) from exc
+                final_parts = final_observation.split()
+                if (
+                    len(final_parts) != 2
+                    or final_parts[0] != ownership.published_sha
+                    or final_parts[1] != ownership.published_ref
+                ):
+                    raise RuntimeError(
+                        "Execution handoff denied: published ref changed during artifact verification."
+                    )
+                before_digests = {
+                    relative_path: hashlib.sha256(snapshot_contents[relative_path]).hexdigest()
+                    for relative_path in repair_paths
+                }
+                published_digests = {
+                    relative_path: hashlib.sha256(published_contents[relative_path]).hexdigest()
+                    for relative_path in repair_paths
+                }
+                if any(
+                    event.payload.get("reconciled_paths") != repair_paths
+                    or event.payload.get("prior_sha256") != before_digests
+                    or event.payload.get("published_blob_sha256") != published_digests
+                    for event in matching_events
+                ):
+                    raise RuntimeError(
+                        "Execution handoff denied: prior repair evidence conflicts with the verified artifact manifest."
+                    )
+                # All files and snapshot differences are preflighted above. Each
+                # authorized mutation is a single-byte append, so interruption
+                # leaves either the historical bytes or the exact published blob.
+                for relative_path in repair_paths:
+                    artifact_path = destination / relative_path
+                    current_content = artifact_path.read_bytes()
+                    published_content = published_contents[relative_path]
+                    if current_content == published_content:
+                        continue
+                    if current_content != published_content[:-1] or not published_content.endswith(
+                        b"\n"
+                    ):
+                        raise RuntimeError(
+                            "Execution handoff denied: repair target changed after validation."
+                        )
+                    flags = os.O_WRONLY | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+                    descriptor = os.open(artifact_path, flags)
+                    try:
+                        if (
+                            not stat.S_ISREG(os.fstat(descriptor).st_mode)
+                            or os.write(descriptor, b"\n") != 1
+                        ):
+                            raise RuntimeError(
+                                "Execution handoff denied: unable to append the single verified LF byte."
+                            )
+                        os.fsync(descriptor)
+                    finally:
+                        os.close(descriptor)
+                if any(
+                    (destination / relative_path).read_bytes() != expected
+                    for relative_path, expected in published_contents.items()
+                ):
+                    raise RuntimeError(
+                        "Execution handoff denied: post-repair artifact verification failed."
+                    )
+                if not matching_events:
+                    events_repo.save(
+                        Event(
+                            event_type=EventType.INTAKE_ARTIFACT_HANDOFF_RECONCILED,
+                            project_id=project_id,
+                            change_id=change_name,
+                            operation_id=job_id,
+                            payload={
+                                **identity,
+                                "reconciled_paths": repair_paths,
+                                "prior_sha256": before_digests,
+                                "published_blob_sha256": published_digests,
+                            },
+                        )
+                    )
+                    self._flush_uow()
             return True
         for relative_path in relative_paths:
             content = await self._git_show_bytes(
@@ -1591,14 +1850,21 @@ class WorktreeManager:
         """Prove a DELETED worktree's exact recovery branch before reactivation."""
         ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None)
         ownership = ownership_repo.get_by_job_id(job_id) if ownership_repo else None
-        if not ownership or ownership.creation_state != WorktreeCreationState.DELETED:
+        if not ownership or ownership.creation_state not in {
+            WorktreeCreationState.DELETED,
+            WorktreeCreationState.CREATED,
+        }:
             return None
+        is_created_recovery = ownership.creation_state == WorktreeCreationState.CREATED
 
         def refuse(reason: str) -> None:
             raise RuntimeError(f"Deleted worktree recreation denied: {reason}")
 
-        if path.exists() or path.is_symlink():
-            refuse("the durably owned worktree path is not absent.")
+        if is_created_recovery:
+            if not path.is_dir() or path.is_symlink():
+                refuse("the durably CREATED recovery worktree path is missing or unsafe.")
+        elif path.exists() or path.is_symlink():
+            refuse("the durably DELETED worktree path is not absent.")
         if str(Path(ownership.canonical_worktree_path).resolve()) != str(path.resolve()):
             refuse("durable canonical path does not match the derived job path.")
         if (
@@ -1738,6 +2004,7 @@ class WorktreeManager:
                 JobStatus.RUNNING,
                 JobStatus.NEEDS_HUMAN,
                 JobStatus.WAITING_CAPACITY,
+                JobStatus.FAILED,
             }
         ):
             refuse("the linked job identity or resumable status is inconsistent.")
@@ -1783,8 +2050,53 @@ class WorktreeManager:
             refuse(f"persisted recovery branch is not observable: {exc}")
         if not branch_sha:
             refuse("persisted recovery branch has no observable commit.")
+        if is_created_recovery:
+            try:
+                worktrees = await self._git(
+                    ["worktree", "list", "--porcelain"], cwd=self.project_root
+                )
+                registered_paths = {
+                    str(Path(line.removeprefix("worktree ").strip()).resolve())
+                    for line in worktrees.splitlines()
+                    if line.startswith("worktree ")
+                }
+                if str(path.resolve()) not in registered_paths:
+                    refuse("the CREATED path is not registered by the canonical Git worktree.")
+                self._verify_ownership_marker(path, ownership, worktree_kind="recovery worktree")
+                actual_branch = (await self._git(["branch", "--show-current"], cwd=path)).strip()
+                actual_head = (await self.current_sha(path)).strip()
+                if actual_branch != branch or actual_head != branch_sha:
+                    refuse(
+                        "the CREATED worktree branch or snapshot HEAD conflicts with durable Git evidence."
+                    )
+                git_ok, git_reason = guard.verify_git_repository_identity(
+                    str(path.resolve()), binding.canonical_repository_identity, binding.remote_name
+                )
+                if not git_ok:
+                    refuse(f"CREATED worktree Git identity could not be verified: {git_reason}")
+                status_output = await self._git(
+                    ["status", "--porcelain=v1", "-z", "--untracked-files=all"], cwd=path
+                )
+                artifact_prefix = f"openspec/changes/{change_name}/"
+                for record in (entry for entry in status_output.split("\0") if entry):
+                    if len(record) < 4:
+                        refuse("CREATED recovery worktree status is malformed.")
+                    index_status, worktree_status = record[0], record[1]
+                    changed_path = record[3:]
+                    if (
+                        index_status != " "
+                        or worktree_status not in {" ", "M"}
+                        or not changed_path.startswith(artifact_prefix)
+                    ):
+                        refuse(
+                            "CREATED recovery worktree contains changes outside the historical artifact tree."
+                        )
+            except RuntimeError:
+                raise
+            except Exception:
+                refuse("CREATED recovery worktree registration or marker is unobservable.")
         if branch_sha == source_base:
-            return branch_sha
+            refuse("recovery branch has no distinct durable snapshot commit.")
 
         try:
             parent_sha = (
@@ -1924,20 +2236,44 @@ class WorktreeManager:
             worktree_ownership_repo.get_by_job_id(job_id) if worktree_ownership_repo else None
         )
         recreation_source_base = None
-        if (
-            historical_ownership
-            and historical_ownership.creation_state == WorktreeCreationState.DELETED
-        ):
+        recovery_snapshot_sha = None
+        recovery_event_candidate = False
+        if historical_ownership and historical_ownership.creation_state in {
+            WorktreeCreationState.DELETED,
+            WorktreeCreationState.CREATED,
+        }:
+            if historical_ownership.creation_state == WorktreeCreationState.CREATED:
+                events_repo = getattr(self.uow, "events", None)
+                prior_events = (
+                    events_repo.list_events(
+                        project_id=eff_project_id, change_id=eff_change_name, limit=1000
+                    )
+                    if events_repo
+                    else []
+                )
+                recovery_event_candidate = any(
+                    event.event_type == EventType.WORKTREE_RECOVERY_SNAPSHOT
+                    and event.payload.get("job_id") == job_id
+                    for event in prior_events
+                )
+            should_verify_recovery = (
+                historical_ownership.creation_state == WorktreeCreationState.DELETED
+                or recovery_event_candidate
+            )
+        else:
+            should_verify_recovery = False
+
+        if should_verify_recovery:
             if requested_branch_name and requested_branch_name != historical_ownership.branch:
                 raise RuntimeError(
-                    "Deleted worktree recreation denied: caller branch differs from persisted branch identity."
+                    "Recovery worktree adoption denied: caller branch differs from persisted branch identity."
                 )
             branch_name = historical_ownership.branch
             if not eff_project_id or not eff_run_id:
                 raise RuntimeError(
-                    "Deleted worktree recreation denied: durable project/run identity is unavailable."
+                    "Recovery worktree adoption denied: durable project/run identity is unavailable."
                 )
-            recovered_head_sha = await self._verify_deleted_worktree_recreation(
+            recovery_snapshot_sha = await self._verify_deleted_worktree_recreation(
                 job_id=job_id,
                 project_id=eff_project_id,
                 run_id=eff_run_id,
@@ -1947,6 +2283,7 @@ class WorktreeManager:
                 base_branch=base_branch,
                 current_base_sha=base_sha,
             )
+            recovered_head_sha = recovery_snapshot_sha
             recreation_source_base = historical_ownership.source_base_sha
         else:
             branch_name = requested_branch_name or f"minime/{eff_change_name}-{job_id}"
@@ -1956,6 +2293,23 @@ class WorktreeManager:
                 if any(path.iterdir()):
                     raise ValueError(f"Worktree path already exists and is not empty: {path}")
             else:
+                if recovery_snapshot_sha:
+                    if not recovery_event_candidate:
+                        raise RuntimeError(
+                            "Recovery worktree adoption denied: existing CREATED path lacks a durable recovery snapshot event."
+                        )
+                    await self._materialize_verified_published_intake_artifacts(
+                        destination_worktree=path,
+                        project_id=eff_project_id,
+                        change_name=eff_change_name,
+                        job_id=job_id,
+                        recovery_snapshot_sha=recovery_snapshot_sha,
+                    )
+                    return WorktreeInfo(
+                        path=path,
+                        branch_name=branch_name,
+                        base_sha=recreation_source_base or base_sha,
+                    )
                 await self._verify_worktree_adoption_proof(
                     path=path,
                     job_id=job_id,
@@ -2023,6 +2377,7 @@ class WorktreeManager:
             project_id=eff_project_id,
             change_name=change_name,
             job_id=job_id,
+            recovery_snapshot_sha=recovery_snapshot_sha,
         )
 
         return WorktreeInfo(
@@ -2182,6 +2537,12 @@ class WorktreeManager:
         state = await self.inspect_worktree_state(path)
         if not state.dirty:
             return None
+        if await self._only_published_intake_repair_is_pending(path, job_id, project_id):
+            # The exact published artifacts are an authoritative handoff view,
+            # not implementation progress. Keep the original recovery commit
+            # and branch untouched; the dirty CREATED worktree remains available
+            # for a later authorized continuation.
+            return None
         await self._git(
             ["add", "-A"],
             cwd=path,
@@ -2207,6 +2568,85 @@ class WorktreeManager:
             managed_worktree_path=path,
         )
         return await self.current_sha(path)
+
+    async def _only_published_intake_repair_is_pending(
+        self, path: Path, job_id: str, project_id: str | None
+    ) -> bool:
+        """Recognize only a cleanly isolated, event-proven OpenSpec byte repair."""
+        if not project_id or not self.uow:
+            return False
+        ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None)
+        events_repo = getattr(self.uow, "events", None)
+        jobs_repo = getattr(self.uow, "jobs", None)
+        runs_repo = getattr(self.uow, "orchestration_runs", None)
+        if not all((ownership_repo, events_repo, jobs_repo, runs_repo)):
+            return False
+        ownership = ownership_repo.get_by_job_id(job_id)
+        job = jobs_repo.get_by_id(job_id)
+        run = runs_repo.get_by_id(ownership.run_id) if ownership else None
+        if (
+            not ownership
+            or ownership.creation_state != WorktreeCreationState.CREATED
+            or ownership.project_id != project_id
+            or ownership.job_id != job_id
+            or str(Path(ownership.canonical_worktree_path).resolve()) != str(path.resolve())
+            or not job
+            or job.candidate_sha
+            or not run
+            or run.active_job_id != job_id
+            or run.current_candidate_sha
+        ):
+            return False
+        try:
+            if (
+                await self._git(["branch", "--show-current"], cwd=path)
+            ).strip() != ownership.branch:
+                return False
+            head_sha = (await self.current_sha(path)).strip()
+            artifact_prefix = f"openspec/changes/{ownership.change_name}/"
+            status = await self._git(
+                ["status", "--porcelain=v1", "-z", "--untracked-files=all"], cwd=path
+            )
+            changed_paths: set[str] = set()
+            for record in (entry for entry in status.split("\0") if entry):
+                if len(record) < 4 or record[:2] != " M":
+                    return False
+                changed_path = record[3:]
+                if not changed_path.startswith(artifact_prefix):
+                    return False
+                changed_paths.add(changed_path[len(artifact_prefix) :])
+        except Exception:
+            return False
+        if not changed_paths:
+            return False
+        events = events_repo.list_events(
+            project_id=project_id, change_id=ownership.change_name, limit=10000
+        )
+        for event in events:
+            if (
+                event.event_type != EventType.INTAKE_ARTIFACT_HANDOFF_RECONCILED
+                or event.operation_id != job_id
+                or event.payload.get("worktree_id") != ownership.worktree_id
+                or event.payload.get("recovery_snapshot_sha") != head_sha
+                or event.payload.get("source_base_sha") != ownership.source_base_sha
+            ):
+                continue
+            reconciled_paths = set(event.payload.get("reconciled_paths", []))
+            published_digests = event.payload.get("published_blob_sha256", {})
+            if not reconciled_paths or changed_paths != reconciled_paths:
+                continue
+            if set(published_digests) != reconciled_paths:
+                continue
+            try:
+                if all(
+                    hashlib.sha256((path / artifact_prefix / relative).read_bytes()).hexdigest()
+                    == published_digests[relative]
+                    for relative in reconciled_paths
+                ):
+                    return True
+            except OSError:
+                return False
+        return False
 
     async def finalize_candidate_commit(
         self,
