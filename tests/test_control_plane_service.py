@@ -18,6 +18,8 @@ from minime.domain.enums import (
 from minime.domain.models import (
     Change,
     Job,
+    JobAttempt,
+    JobHandoff,
     OperatorActionRequest,
     OrchestrationRun,
     OrchestrationWorktreeOwnership,
@@ -25,6 +27,7 @@ from minime.domain.models import (
     generate_uuid,
 )
 from minime.services.control_plane_service import ControlPlaneService
+from minime.services.operator_executor_selection import effective_job_executor
 
 
 @pytest.fixture
@@ -560,3 +563,208 @@ def test_continue_preserves_reassignment_counters(in_memory_uow, seeded_project_
     updated_job = in_memory_uow.jobs.get_by_id("job-c-1")
     assert updated_job.reassignment_count == 2
     assert updated_job.attempt_count == 3
+
+
+def test_human_reassign_is_fenced_durable_and_precedes_older_handoff(
+    in_memory_uow, seeded_project_and_run
+):
+    from datetime import timedelta
+
+    from minime.domain.enums import ExecutionOutcome, ProgressClassification
+    from minime.domain.models import utc_now
+
+    project, change, run = seeded_project_and_run
+    run.current_stage = OrchestrationStage.IMPLEMENTING
+    run.stop_outcome = OrchestrationStopOutcome.NEEDS_HUMAN
+    run.human_gate = HumanGate.NEEDS_HUMAN
+    run.is_active = False
+    job = Job(
+        job_id="job-n01-reassign",
+        project_id=project.project_id,
+        change_name=change.name,
+        implementer_role="antigravity",
+        current_executor="antigravity",
+        status=JobStatus.NEEDS_HUMAN,
+        attempt_count=3,
+        reassignment_count=1,
+    )
+    run.active_job_id = job.job_id
+    in_memory_uow.jobs.save(job)
+    in_memory_uow.orchestration_runs.save(run)
+    for number in range(1, 4):
+        in_memory_uow.job_attempts.save(
+            JobAttempt(
+                attempt_id=f"attempt-n01-{number}",
+                job_id=job.job_id,
+                attempt_number=number,
+                executor_role="antigravity",
+                model_identity="antigravity:model",
+                normalized_outcome=ExecutionOutcome.PREMATURE_STOP.value,
+                progress_classification=ProgressClassification.NO_PROGRESS,
+                is_same_sha_duplicate=number == 3,
+                error_details={
+                    "continuation_reason": (
+                        "SAME_SHA_RETRY_SUPPRESSED" if number == 3 else "historical failure"
+                    )
+                },
+            )
+        )
+    stale_handoff = JobHandoff(
+        job_id=job.job_id,
+        from_attempt_id="attempt-n01-2",
+        from_executor="codex",
+        to_executor="antigravity",
+        worktree_path="/managed/worktree",
+        base_sha="base-sha",
+        candidate_sha="candidate-sha",
+        is_consumed=False,
+        created_at=utc_now() - timedelta(days=1),
+    )
+    in_memory_uow.job_handoffs.save(stale_handoff)
+    in_memory_uow.commit()
+
+    service = ControlPlaneService(in_memory_uow)
+    service.recovery_convergence_service.request_run_continuation = lambda *a, **k: pytest.fail(
+        "REASSIGN must not invoke execution"
+    )
+    request = OperatorActionRequest(
+        action_request_id="operator-reassign-n01-codex",
+        project_id=project.project_id,
+        change_name=change.name,
+        run_id=run.run_id,
+        action_type=OperatorActionType.REASSIGN,
+        parameters={"target_executor": "codex"},
+        actor_identity="human-operator",
+        source_interface="cli",
+        expected_stage=OrchestrationStage.IMPLEMENTING,
+        expected_generation=run.current_generation,
+    )
+    result = service.execute_action(request)
+    replay = service.execute_action(request)
+
+    assert result.status == OperatorActionStatus.COMPLETED
+    assert replay.status == OperatorActionStatus.COMPLETED
+    assert result.payload["executor_assignment_applied"] is True
+    assert result.payload["execution_started"] is False
+    updated = in_memory_uow.jobs.get_by_id(job.job_id)
+    assert updated.current_executor == "codex"
+    assert updated.attempt_count == 3
+    assert updated.reassignment_count == 2
+    assert in_memory_uow.job_handoffs.get_by_id(stale_handoff.handoff_id).is_consumed is False
+    action = in_memory_uow.operator_actions.get_by_request_id(request.action_request_id)
+    assert action.status == OperatorActionStatus.COMPLETED
+    assert action.job_id == job.job_id
+    effective_executor, applicable_handoff, operator_selected = effective_job_executor(
+        in_memory_uow, in_memory_uow.orchestration_runs.get_by_id(run.run_id), updated
+    )
+    assert effective_executor == "codex"
+    assert applicable_handoff is None
+    assert operator_selected is True
+    assert len(in_memory_uow.job_attempts.list_by_job(job.job_id)) == 3
+
+
+def test_reassign_fails_closed_when_fenced_executor_write_fails(
+    in_memory_uow, seeded_project_and_run, monkeypatch
+):
+    project, change, run = seeded_project_and_run
+    run.current_stage = OrchestrationStage.IMPLEMENTING
+    run.is_active = False
+    run.active_job_id = "job-reassign-write-failure"
+    job = Job(
+        job_id=run.active_job_id,
+        project_id=project.project_id,
+        change_name=change.name,
+        implementer_role="antigravity",
+        current_executor="antigravity",
+        status=JobStatus.NEEDS_HUMAN,
+        attempt_count=3,
+        reassignment_count=1,
+    )
+    in_memory_uow.jobs.save(job)
+    in_memory_uow.orchestration_runs.save(run)
+    in_memory_uow.commit()
+
+    def fail_fenced_write(*_args, **_kwargs):
+        raise RuntimeError("fenced executor update rejected")
+
+    monkeypatch.setattr(in_memory_uow.jobs, "update_executor_fenced", fail_fenced_write)
+    result = ControlPlaneService(in_memory_uow).execute_action(
+        OperatorActionRequest(
+            project_id=project.project_id,
+            change_name=change.name,
+            run_id=run.run_id,
+            action_type=OperatorActionType.REASSIGN,
+            parameters={"target_executor": "codex"},
+            actor_identity="human-operator",
+            source_interface="cli",
+        )
+    )
+
+    assert result.status == OperatorActionStatus.FAILED
+    assert "durably applied" not in result.summary
+    updated = in_memory_uow.jobs.get_by_id(job.job_id)
+    assert updated.current_executor == "antigravity"
+    assert updated.reassignment_count == 1
+
+
+def test_human_reassign_rejects_unavailable_provider_and_reassignment_ceiling(
+    in_memory_uow, seeded_project_and_run
+):
+    from minime.domain.enums import ProviderHealthStatus
+    from minime.domain.models import ProviderHealth
+
+    project, change, run = seeded_project_and_run
+    run.current_stage = OrchestrationStage.IMPLEMENTING
+    run.is_active = False
+    run.active_job_id = "job-reassign-guard"
+    job = Job(
+        job_id=run.active_job_id,
+        project_id=project.project_id,
+        change_name=change.name,
+        implementer_role="antigravity",
+        current_executor="antigravity",
+        status=JobStatus.NEEDS_HUMAN,
+        reassignment_count=1,
+        attempt_count=3,
+    )
+    in_memory_uow.jobs.save(job)
+    in_memory_uow.orchestration_runs.save(run)
+    in_memory_uow.provider_health.save(
+        ProviderHealth(provider="codex", status=ProviderHealthStatus.EXHAUSTED)
+    )
+    in_memory_uow.commit()
+    service = ControlPlaneService(in_memory_uow)
+
+    unavailable = service.execute_action(
+        OperatorActionRequest(
+            project_id=project.project_id,
+            change_name=change.name,
+            run_id=run.run_id,
+            action_type=OperatorActionType.REASSIGN,
+            parameters={"target_executor": "codex"},
+            actor_identity="human-operator",
+            source_interface="cli",
+        )
+    )
+    assert unavailable.status == OperatorActionStatus.REJECTED
+    assert in_memory_uow.jobs.get_by_id(job.job_id).current_executor == "antigravity"
+
+    in_memory_uow.provider_health.save(
+        ProviderHealth(provider="codex", status=ProviderHealthStatus.AVAILABLE)
+    )
+    job.reassignment_count = 2
+    in_memory_uow.jobs.save(job)
+    in_memory_uow.commit()
+    exhausted = service.execute_action(
+        OperatorActionRequest(
+            project_id=project.project_id,
+            change_name=change.name,
+            run_id=run.run_id,
+            action_type=OperatorActionType.REASSIGN,
+            parameters={"target_executor": "codex"},
+            actor_identity="human-operator",
+            source_interface="cli",
+        )
+    )
+    assert exhausted.status == OperatorActionStatus.REJECTED
+    assert in_memory_uow.jobs.get_by_id(job.job_id).current_executor == "antigravity"

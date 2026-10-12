@@ -117,6 +117,11 @@ class CliReviewerRunner(ReviewerRunnerInterface):
                     if self.profile is not None and self.profile.provider.lower() == "codex"
                     else None
                 ),
+                antigravity_auth_source=(
+                    confinement.antigravity_auth_source()
+                    if self.profile is not None and self.profile.provider.lower() == "antigravity"
+                    else None
+                ),
             )
         except AgentConfinementError as err:
             return ReviewerResult(
@@ -126,21 +131,26 @@ class CliReviewerRunner(ReviewerRunnerInterface):
                 stderr=[redact_secrets(str(err))],
                 duration_ms=int((asyncio.get_running_loop().time() - start) * 1000),
                 preflight_error=(
-                    "CODEX_CREDENTIAL_UNAVAILABLE"
+                    "PROVIDER_CREDENTIAL_UNAVAILABLE"
                     if not err.environment_unavailable
                     else "AGENT_RUNTIME_UNAVAILABLE"
                 ),
                 environment_error=err.environment_unavailable,
             )
         duration_ms = int((asyncio.get_running_loop().time() - start) * 1000)
-        rotation_error = process_result.credential_rotation_detected
+        rotation_error = (
+            process_result.credential_rotation_detected
+            and not process_result.credential_access_refresh_only
+        )
         return ReviewerResult(
             exit_code=process_result.returncode,
             timed_out=process_result.timed_out,
             stdout=self._sanitize_output(process_result.stdout),
             stderr=self._sanitize_output(process_result.stderr),
             duration_ms=duration_ms,
-            preflight_error=("CODEX_CREDENTIAL_ROTATION_NOT_PERSISTED" if rotation_error else None),
+            preflight_error=(
+                "PROVIDER_CREDENTIAL_ROTATION_NOT_PERSISTED" if rotation_error else None
+            ),
             environment_error=rotation_error,
         )
 

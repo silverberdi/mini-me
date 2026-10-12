@@ -321,14 +321,15 @@ class ExecutionPipelineService:
 
         try:
             # Continuation loop initialization & state reconstruction from durable PostgreSQL truth
-            pending_handoff = next(
-                (h for h in self.uow.job_handoffs.list_by_job(job.job_id) if not h.is_consumed),
-                None,
+            from minime.services.operator_executor_selection import effective_job_executor
+
+            run_identity = self.uow.orchestration_runs.get_active_run(
+                job.project_id, job.change_name
             )
-            if pending_handoff:
-                current_executor = pending_handoff.to_executor
-            else:
-                current_executor = job.current_executor or project.implementer
+            current_executor, pending_handoff, operator_reassigned = effective_job_executor(
+                self.uow, run_identity, job
+            )
+            current_executor = current_executor or project.implementer
             job.current_executor = current_executor
 
             past_attempts = self.uow.job_attempts.list_by_job(job.job_id)
@@ -337,6 +338,7 @@ class ExecutionPipelineService:
             # If resuming an episode that reached non-convergence / false human gate, transition to Antigravity recovery
             if (
                 current_executor == PrimaryProvider.CODEX.value
+                and not operator_reassigned
                 and self.provider_policy._verify_codex_non_convergence(past_attempts)
                 and (
                     job.reassignment_count >= 1
@@ -547,7 +549,7 @@ class ExecutionPipelineService:
                 attempt_id = f"att-{job.job_id}-{attempt_number}"
 
                 # Consume pending handoff if available
-                latest_handoff = self.uow.job_handoffs.get_latest_handoff(job.job_id)
+                latest_handoff = pending_handoff
                 handoff_prompt = ""
                 if latest_handoff and not latest_handoff.is_consumed:
                     self.handoff_manager.consume_handoff(
