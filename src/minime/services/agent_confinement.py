@@ -43,6 +43,7 @@ class AgentProcessResult:
     stderr: bytes
     timed_out: bool = False
     credential_rotation_detected: bool = False
+    credential_access_refresh_only: bool = False
 
 
 @dataclass
@@ -56,11 +57,58 @@ class AgentRuntimeState:
     initial_auth_digest: str | None = None
     antigravity_auth_copy: Path | None = None
     initial_antigravity_auth_digest: str | None = None
+    initial_antigravity_auth_bytes: bytes | None = field(default=None, repr=False)
     credential_rotation_detected: bool = False
+    credential_access_refresh_only: bool = False
     sensitive_values: tuple[str, ...] = field(default=(), repr=False)
 
+    @staticmethod
+    def _is_access_refresh_only(before: bytes, after: bytes) -> bool:
+        """Accept only an access-token/expiry update; never a change of refresh authority."""
+        try:
+            previous = json.loads(before)
+            updated = json.loads(after)
+        except (ValueError, UnicodeDecodeError, TypeError):
+            return False
+        if not isinstance(previous, dict) or not isinstance(updated, dict):
+            return False
+        if previous.keys() != updated.keys() or "token" not in previous:
+            return False
+        if any(previous[key] != updated[key] for key in previous if key != "token"):
+            return False
+
+        old_token = previous["token"]
+        new_token = updated["token"]
+        if not isinstance(old_token, dict) or not isinstance(new_token, dict):
+            return False
+        if old_token.keys() != new_token.keys():
+            return False
+        required = {"access_token", "refresh_token", "expiry"}
+        if not required.issubset(old_token):
+            return False
+        refresh = old_token["refresh_token"]
+        access = new_token["access_token"]
+        if not isinstance(refresh, str) or not refresh:
+            return False
+        if not isinstance(access, str) or not access:
+            return False
+        if refresh != new_token["refresh_token"]:
+            return False
+        if any(
+            old_token[key] != new_token[key]
+            for key in old_token
+            if key not in {"access_token", "expiry"}
+        ):
+            return False
+        return (
+            old_token["access_token"] != new_token["access_token"]
+            or old_token["expiry"] != new_token["expiry"]
+        )
+
     def observe_credential_state(self) -> bool:
-        """Detect a private auth-file rewrite without exposing its contents or digest."""
+        """Classify any private auth rewrite without exposing secret values or digests."""
+        self.credential_rotation_detected = False
+        self.credential_access_refresh_only = False
         for path, expected in (
             (self.auth_copy, self.initial_auth_digest),
             (self.antigravity_auth_copy, self.initial_antigravity_auth_digest),
@@ -68,15 +116,21 @@ class AgentRuntimeState:
             if path is None or expected is None:
                 continue
             try:
-                current_digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                current_bytes = path.read_bytes()
             except OSError:
                 self.credential_rotation_detected = True
                 return True
-            if current_digest != expected:
+            if hashlib.sha256(current_bytes).hexdigest() != expected:
                 self.credential_rotation_detected = True
+                if (
+                    path == self.antigravity_auth_copy
+                    and self.initial_antigravity_auth_bytes is not None
+                ):
+                    self.credential_access_refresh_only = self._is_access_refresh_only(
+                        self.initial_antigravity_auth_bytes, current_bytes
+                    )
                 return True
-        self.credential_rotation_detected = False
-        return self.credential_rotation_detected
+        return False
 
 
 class AgentProcessConfinement:
@@ -275,6 +329,7 @@ class AgentProcessConfinement:
             initial_auth_digest: str | None = None
             antigravity_auth_copy: Path | None = None
             initial_antigravity_auth_digest: str | None = None
+            initial_antigravity_auth_bytes: bytes | None = None
             sensitive_values: tuple[str, ...] = ()
             if codex_auth_source is not None:
                 auth_copy = subdirs["codex"] / "auth.json"
@@ -294,8 +349,9 @@ class AgentProcessConfinement:
                 os.chmod(antigravity_cli_dir, 0o700)
                 antigravity_auth_copy = antigravity_cli_dir / "antigravity-oauth-token"
                 self._copy_authorized_auth_file(antigravity_auth_source, antigravity_auth_copy)
+                initial_antigravity_auth_bytes = antigravity_auth_copy.read_bytes()
                 initial_antigravity_auth_digest = hashlib.sha256(
-                    antigravity_auth_copy.read_bytes()
+                    initial_antigravity_auth_bytes
                 ).hexdigest()
                 sensitive_values = tuple(
                     sorted(
@@ -314,6 +370,7 @@ class AgentProcessConfinement:
                 initial_auth_digest=initial_auth_digest,
                 antigravity_auth_copy=antigravity_auth_copy,
                 initial_antigravity_auth_digest=initial_antigravity_auth_digest,
+                initial_antigravity_auth_bytes=initial_antigravity_auth_bytes,
                 sensitive_values=sensitive_values,
             )
             try:
@@ -723,10 +780,26 @@ class AgentProcessConfinement:
                             task.cancel()
                     raise
                 rotation = runtime_state.observe_credential_state()
-                if rotation:
-                    # A refreshed credential is deliberately not persisted. Drop all
-                    # child output too: it may contain the newly rotated secret, which
-                    # was not present in the initial redaction set.
+                access_refresh_only = rotation and runtime_state.credential_access_refresh_only
+                if access_refresh_only:
+                    # Include newly issued access credentials in redaction; they stay
+                    # private to this attempt and are never copied back to the host.
+                    try:
+                        new_values = self._read_opaque_credential_values(
+                            runtime_state.antigravity_auth_copy
+                        )
+                        runtime_state.sensitive_values = tuple(
+                            sorted(
+                                set(runtime_state.sensitive_values) | set(new_values),
+                                key=len,
+                                reverse=True,
+                            )
+                        )
+                    except AgentCredentialError:
+                        access_refresh_only = False
+                if rotation and not access_refresh_only:
+                    # Unknown changes or refresh-token rotation must fail closed;
+                    # new secrets might be present in child output.
                     stdout = b""
                     stderr = b"Provider credential rotation was not persisted."
                 return AgentProcessResult(
@@ -735,6 +808,7 @@ class AgentProcessConfinement:
                     stderr=self._scrub_credential_values(stderr, runtime_state.sensitive_values),
                     timed_out=timed_out,
                     credential_rotation_detected=rotation,
+                    credential_access_refresh_only=access_refresh_only,
                 )
         except asyncio.CancelledError:
             raise
