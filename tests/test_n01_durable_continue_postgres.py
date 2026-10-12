@@ -82,6 +82,10 @@ def _git(repo: Path, *args: str) -> str:
     ).stdout.strip()
 
 
+def _git_bytes(repo: Path, *args: str) -> bytes:
+    return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True).stdout
+
+
 def test_postgres_control_plane_continue_rebuilds_same_run_job_and_worktree(
     isolated_pg_session_factory, tmp_path: Path, monkeypatch
 ):
@@ -640,3 +644,469 @@ def test_postgres_control_plane_continue_rebuilds_same_run_job_and_worktree(
                     current_base_sha=base_sha,
                 )
             )
+
+
+def test_postgres_continue_adopts_created_recovery_worktree_and_repairs_only_final_lf(
+    isolated_pg_session_factory, tmp_path: Path, monkeypatch
+):
+    """Recover the exact CREATED production shape without rewriting its snapshot lineage."""
+    from conftest import publish_verified_intake_workspace, setup_managed_repository_fixture
+
+    project_id = f"n01-created-{uuid.uuid4().hex[:8]}"
+    change_name = "operational-blocker-visibility"
+    run_id = "627adcf0-ee2a-4e3b-8211-1972c7dbec00"
+    job_id = "7c6c20dd-cf8f-486d-ad3e-e0e5de1b19e0"
+    recovery_branch = f"minime/{change_name}-{job_id}"
+    managed_root = tmp_path / "managed"
+    worktree_parent = tmp_path / "worktrees"
+    remote = tmp_path / "managed.origin.git"
+
+    with isolated_pg_session_factory() as session:
+        uow = PostgresPersistenceUnitOfWork(session)
+        project = Project(
+            project_id=project_id,
+            display_name="N01 CREATED recovery regression",
+            repository=str(remote),
+            base_branch="main",
+            openspec_path="openspec",
+            implementer="codex",
+        )
+        uow.projects.save(project)
+        binding = setup_managed_repository_fixture(
+            uow,
+            project_id=project_id,
+            repo_root=managed_root,
+            worktree_parent_dir=worktree_parent,
+            canonical_repository_identity=str(remote),
+            remote_url=str(remote),
+        )
+        assert project.repository == binding.canonical_repository_identity
+        _git(managed_root, "push", "origin", "main")
+        base_sha = _git(managed_root, "rev-parse", "main")
+        published = publish_verified_intake_workspace(uow, project, managed_root, change_name)
+        published_sha = published.published_sha
+        assert published_sha and published.published_ref == f"refs/minime/intake/{change_name}"
+
+        uow.jobs.save(
+            Job(
+                job_id=job_id,
+                project_id=project_id,
+                change_name=change_name,
+                implementer_role="codex",
+                current_executor="codex",
+                status=JobStatus.NEEDS_HUMAN,
+                base_sha=base_sha,
+                attempt_count=1,
+            )
+        )
+        uow.orchestration_runs.save(
+            OrchestrationRun(
+                run_id=run_id,
+                project_id=project_id,
+                change_name=change_name,
+                base_sha=base_sha,
+                current_stage=OrchestrationStage.IMPLEMENTING,
+                resumable_stage=OrchestrationStage.IMPLEMENTING,
+                active_job_id=job_id,
+                current_candidate_sha=None,
+                is_active=False,
+                stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+                human_gate=HumanGate.NEEDS_HUMAN,
+            )
+        )
+        uow.provider_health.save(
+            ProviderHealth(provider="codex", status=ProviderHealthStatus.AVAILABLE)
+        )
+        uow.job_attempts.save(
+            JobAttempt(
+                job_id=job_id,
+                attempt_number=1,
+                executor_role="codex",
+                model_identity="codex",
+                normalized_outcome=ExecutionOutcome.ENVIRONMENT_UNAVAILABLE,
+            )
+        )
+        uow.commit()
+
+        manager = WorktreeManager(managed_root, uow)
+        original = asyncio.run(
+            manager.create_worktree(
+                job_id,
+                change_name,
+                base_branch="main",
+                project_id=project_id,
+                branch_name=recovery_branch,
+                run_id=run_id,
+            )
+        )
+        assert original.base_sha == base_sha
+        worktree_path = original.path
+        artifact_root = worktree_path / "openspec" / "changes" / change_name
+        artifact_files = sorted(path for path in artifact_root.rglob("*") if path.is_file())
+        assert len(artifact_files) == 4
+        historical_contents: dict[str, bytes] = {}
+        for artifact_path in artifact_files:
+            relative = artifact_path.relative_to(artifact_root).as_posix()
+            contents = artifact_path.read_bytes()
+            assert contents.endswith(b"\n")
+            artifact_path.write_bytes(contents[:-1])
+            historical_contents[relative] = contents[:-1]
+
+        snapshot_sha = asyncio.run(manager.create_recovery_snapshot(job_id, project_id))
+        assert snapshot_sha and snapshot_sha != base_sha
+        ownership_id = uow.orchestration_worktree_ownerships.get_by_job_id(job_id).worktree_id
+        uow.events.save(
+            Event(
+                event_type=EventType.WORKTREE_RECOVERY_SNAPSHOT,
+                project_id=project_id,
+                change_id=change_name,
+                operation_id=job_id,
+                payload={
+                    "job_id": job_id,
+                    "branch": recovery_branch,
+                    "recovery_sha": snapshot_sha,
+                    "worktree_path": str(worktree_path.resolve()),
+                    "authoritative_candidate": False,
+                },
+            )
+        )
+        uow.commit()
+        assert (
+            asyncio.run(manager.remove_clean_worktree(job_id, project_id)).outcome
+            == ExternalOutcome.SUCCESS
+        )
+        assert not worktree_path.exists()
+        assert _git(managed_root, "rev-parse", f"refs/heads/{recovery_branch}") == snapshot_sha
+
+        clone = tmp_path / "advancing-clone"
+        subprocess.run(["git", "clone", str(remote), str(clone)], check=True, capture_output=True)
+        _git(clone, "config", "user.name", "Remote Main Advance")
+        _git(clone, "config", "user.email", "advance@localhost")
+        (clone / "unrelated-main-advance.txt").write_text("unrelated\n")
+        _git(clone, "add", "unrelated-main-advance.txt")
+        _git(clone, "commit", "-m", "unrelated main advance")
+        _git(clone, "push", "origin", "main")
+        current_main_sha = _git(clone, "rev-parse", "main")
+        assert _git(managed_root, "rev-parse", "main") == base_sha
+        _git(clone, "merge-base", "--is-ancestor", base_sha, current_main_sha)
+
+        runtime_root = tmp_path / "runtime"
+        runtime_root.mkdir()
+        monkeypatch.setenv("MINIME_RUNTIME_ROOT", str(runtime_root))
+        diagnostic_cli = tmp_path / "diagnostic-cli"
+        diagnostic_cli.write_text(
+            "#!/usr/bin/env python3\nimport sys\n"
+            "if '--help' in sys.argv:\n    print('diagnostic cli help')\n"
+            "else:\n"
+            f"    assert __import__('pathlib').Path('openspec/changes/{change_name}/proposal.md').is_file()\n"
+            "    print('EROFS: test-only local environment stop', file=sys.stderr)\n",
+            encoding="utf-8",
+        )
+        diagnostic_cli.chmod(0o700)
+        profile = CliInvocationProfile(
+            provider="diagnostic-cli",
+            role="implementer",
+            executable=str(diagnostic_cli),
+            args=(),
+            prompt_transport="stdin",
+        )
+
+        class RecordingRunner:
+            def __init__(self):
+                self.delegate = CliImplementerRunner(profile)
+                self.result = None
+                self.head_sha = None
+                self.branch = None
+                self.marker_base_sha = None
+                self.ownership_base_sha = None
+                self.artifact_bytes: dict[str, bytes] = {}
+                self.repair_only_pending = None
+
+            async def run(self, candidate_path, prompt_context, timeout_seconds):
+                candidate_path = Path(candidate_path)
+                self.head_sha = _git(candidate_path, "rev-parse", "HEAD")
+                self.branch = _git(candidate_path, "branch", "--show-current")
+                marker = json.loads(
+                    (candidate_path / ".minime_worktree_ownership.json").read_text()
+                )
+                self.marker_base_sha = marker["source_base_sha"]
+                self.ownership_base_sha = uow.orchestration_worktree_ownerships.get_by_job_id(
+                    job_id
+                ).source_base_sha
+                candidate_artifacts = candidate_path / "openspec" / "changes" / change_name
+                self.artifact_bytes = {
+                    path.relative_to(candidate_artifacts).as_posix(): path.read_bytes()
+                    for path in candidate_artifacts.rglob("*")
+                    if path.is_file()
+                }
+                self.repair_only_pending = await manager._only_published_intake_repair_is_pending(
+                    candidate_path, job_id, project_id
+                )
+                self.result = await self.delegate.run(
+                    candidate_path, prompt_context, timeout_seconds
+                )
+                return self.result
+
+        runner = RecordingRunner()
+        monkeypatch.setattr(execution_pipeline, "runner_for_implementer", lambda _provider: runner)
+        original_materialize = WorktreeManager._materialize_verified_published_intake_artifacts
+
+        async def fail_first_materialization(self, **kwargs):
+            raise RuntimeError(
+                "Execution handoff denied: existing OpenSpec materialization content differs from the published tree."
+            )
+
+        monkeypatch.setattr(
+            WorktreeManager,
+            "_materialize_verified_published_intake_artifacts",
+            fail_first_materialization,
+        )
+
+        def make_request(action_request_id: str) -> OperatorActionRequest:
+            current_run = uow.orchestration_runs.get_by_id(run_id)
+            return OperatorActionRequest(
+                action_request_id=action_request_id,
+                project_id=project_id,
+                change_name=change_name,
+                run_id=run_id,
+                action_type=OperatorActionType.CONTINUE,
+                actor_identity="test-operator-legacy-artifact-recovery",
+                source_interface="cli",
+                expected_stage=current_run.current_stage,
+                expected_generation=current_run.current_generation,
+                expected_candidate_sha=current_run.current_candidate_sha,
+            )
+
+        first_result = ControlPlaneService(uow, project_root=managed_root).execute_action(
+            make_request(str(uuid.uuid4()))
+        )
+        created_ownership = uow.orchestration_worktree_ownerships.get_by_job_id(job_id)
+        assert created_ownership.creation_state == WorktreeCreationState.CREATED
+        assert worktree_path.exists()
+        assert _git(worktree_path, "rev-parse", "HEAD") == snapshot_sha
+        assert _git(managed_root, "rev-parse", f"refs/heads/{recovery_branch}") == snapshot_sha
+        assert runner.result is None
+        assert first_result.status in {OperatorActionStatus.COMPLETED, OperatorActionStatus.FAILED}
+
+        staged_artifact = Path("openspec/changes") / change_name / "design.md"
+        staged_file = worktree_path / staged_artifact
+        original_staged_bytes = staged_file.read_bytes()
+        staged_file.write_bytes(original_staged_bytes + b"unauthorized staged change")
+        _git(worktree_path, "add", str(staged_artifact))
+        staged_file.write_bytes(original_staged_bytes)
+        with pytest.raises(RuntimeError, match="changes outside the historical artifact tree"):
+            asyncio.run(
+                manager._verify_deleted_worktree_recreation(
+                    job_id=job_id,
+                    project_id=project_id,
+                    run_id=run_id,
+                    change_name=change_name,
+                    path=worktree_path.resolve(),
+                    branch=recovery_branch,
+                    base_branch="main",
+                    current_base_sha=base_sha,
+                )
+            )
+        _git(worktree_path, "reset", "HEAD", "--", str(staged_artifact))
+        failed_job = uow.jobs.get_by_id(job_id)
+        failed_run = uow.orchestration_runs.get_by_id(run_id)
+        assert failed_job.status == JobStatus.FAILED
+        assert failed_job.attempt_count == 1
+        assert failed_run.is_active is False
+        assert failed_run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
+        assert first_result.payload["run_active"] is False
+        assert first_result.payload["execution_active"] is False
+        assert first_result.payload["linked_job_status"] == JobStatus.FAILED.value
+        assert "resumed successfully" not in first_result.summary.lower()
+
+        artifact_root = worktree_path / "openspec" / "changes" / change_name
+
+        async def materialize_recovery() -> None:
+            await original_materialize(
+                manager,
+                destination_worktree=worktree_path,
+                project_id=project_id,
+                change_name=change_name,
+                job_id=job_id,
+                recovery_snapshot_sha=snapshot_sha,
+            )
+
+        # A non-LF byte mutation, extra/missing path, symlink and contradictory
+        # persisted publication all fail before any eligible file is repaired.
+        proposal_path = artifact_root / "proposal.md"
+        proposal_bytes = proposal_path.read_bytes()
+        proposal_path.write_bytes(b"X" + proposal_bytes[1:])
+        with pytest.raises(RuntimeError, match="unauthorized content"):
+            asyncio.run(materialize_recovery())
+        proposal_path.write_bytes(proposal_bytes)
+
+        unexpected_path = artifact_root / "unexpected.md"
+        unexpected_path.write_text("not in published manifest\n", encoding="utf-8")
+        with pytest.raises(RuntimeError, match="manifest"):
+            asyncio.run(materialize_recovery())
+        unexpected_path.unlink()
+
+        tasks_path = artifact_root / "tasks.md"
+        tasks_bytes = tasks_path.read_bytes()
+        tasks_path.unlink()
+        with pytest.raises(RuntimeError, match="manifest"):
+            asyncio.run(materialize_recovery())
+        tasks_path.write_bytes(tasks_bytes)
+
+        design_path = artifact_root / "design.md"
+        design_bytes = design_path.read_bytes()
+        design_path.unlink()
+        design_path.symlink_to(tmp_path / "outside-design.md")
+        with pytest.raises(RuntimeError, match="symlink"):
+            asyncio.run(materialize_recovery())
+        design_path.unlink()
+        design_path.write_bytes(design_bytes)
+
+        persisted_ownership = uow.intake_workspace_ownerships.get_by_item_key(
+            project_id, change_name
+        )
+        valid_published_sha = persisted_ownership.published_sha
+        persisted_ownership.published_sha = "0" * len(valid_published_sha)
+        uow.intake_workspace_ownerships.save(persisted_ownership)
+        uow.commit()
+        with pytest.raises(RuntimeError, match="ref drifted or is unobservable"):
+            asyncio.run(materialize_recovery())
+        persisted_ownership.published_sha = valid_published_sha
+        uow.intake_workspace_ownerships.save(persisted_ownership)
+        uow.commit()
+
+        # Simulate interruption after one atomic LF append. A subsequent
+        # canonical CONTINUE must recognize the exact published/snapshot mix.
+        real_write = os.write
+        writes = 0
+
+        def interrupt_after_one_write(fd: int, data: bytes) -> int:
+            nonlocal writes
+            writes += 1
+            if writes == 2:
+                raise OSError("test-only interruption after one verified repair")
+            return real_write(fd, data)
+
+        with monkeypatch.context() as patcher:
+            patcher.setattr(os, "write", interrupt_after_one_write)
+            with pytest.raises(OSError, match="test-only interruption"):
+                asyncio.run(materialize_recovery())
+        assert writes == 2
+
+        monkeypatch.setattr(
+            WorktreeManager,
+            "_materialize_verified_published_intake_artifacts",
+            original_materialize,
+        )
+        second_result = ControlPlaneService(uow, project_root=managed_root).execute_action(
+            make_request(str(uuid.uuid4()))
+        )
+        assert second_result.status == OperatorActionStatus.COMPLETED, second_result.summary
+        assert second_result.payload["execution_active"] is False
+        assert second_result.payload["linked_job_status"] == JobStatus.WAITING_CAPACITY.value
+        assert "resumed successfully" not in second_result.summary.lower()
+        assert runner.result is not None
+        assert runner.head_sha == snapshot_sha
+        assert runner.branch == recovery_branch
+        assert runner.marker_base_sha == base_sha
+        assert runner.ownership_base_sha == base_sha
+        assert runner.repair_only_pending is True
+        assert runner.artifact_bytes == {
+            relative: _git_bytes(
+                managed_root,
+                "show",
+                f"{published_sha}:openspec/changes/{change_name}/{relative}",
+            )
+            for relative in historical_contents
+        }
+        assert runner.result.stderr == ["EROFS: test-only local environment stop"]
+
+        repaired_stats = {
+            relative: (artifact_root / relative).stat().st_mtime_ns
+            for relative in historical_contents
+        }
+        asyncio.run(materialize_recovery())
+        assert {
+            relative: (artifact_root / relative).stat().st_mtime_ns
+            for relative in historical_contents
+        } == repaired_stats
+        assert (
+            len(
+                [
+                    event
+                    for event in uow.events.list_events(
+                        project_id=project_id, change_id=change_name, limit=10000
+                    )
+                    if event.event_type == EventType.INTAKE_ARTIFACT_HANDOFF_RECONCILED
+                ]
+            )
+            == 1
+        )
+
+        snapshot_event = next(
+            event
+            for event in uow.events.list_events(
+                project_id=project_id, change_id=change_name, limit=10000
+            )
+            if event.event_type == EventType.WORKTREE_RECOVERY_SNAPSHOT
+        )
+        persisted_snapshot_event = session.get(EventModel, snapshot_event.event_id)
+        original_snapshot_payload = dict(persisted_snapshot_event.payload)
+        persisted_snapshot_event.payload = {
+            **original_snapshot_payload,
+            "recovery_sha": "contradictory-created-snapshot",
+        }
+        uow.commit()
+        with pytest.raises(RuntimeError, match="snapshot event"):
+            asyncio.run(
+                manager._verify_deleted_worktree_recreation(
+                    job_id=job_id,
+                    project_id=project_id,
+                    run_id=run_id,
+                    change_name=change_name,
+                    path=worktree_path.resolve(),
+                    branch=recovery_branch,
+                    base_branch="main",
+                    current_base_sha=base_sha,
+                )
+            )
+        persisted_snapshot_event.payload = original_snapshot_payload
+        uow.commit()
+
+        persisted_job = uow.jobs.get_by_id(job_id)
+        persisted_run = uow.orchestration_runs.get_by_id(run_id)
+        persisted_ownership = uow.orchestration_worktree_ownerships.get_by_job_id(job_id)
+        assert persisted_job.job_id == job_id and persisted_job.base_sha == base_sha
+        assert persisted_run.run_id == run_id and persisted_run.base_sha == base_sha
+        assert persisted_run.active_job_id == job_id and persisted_run.current_candidate_sha is None
+        assert persisted_job.candidate_sha is None
+        assert persisted_ownership.worktree_id == ownership_id
+        assert persisted_ownership.source_base_sha == base_sha
+        assert _git(managed_root, "rev-parse", "main") == base_sha
+        assert _git(managed_root, "rev-parse", f"refs/heads/{recovery_branch}") == snapshot_sha
+        assert len(uow.job_attempts.list_by_job(job_id)) == 2
+        assert len(uow.operator_actions.list_by_run(run_id)) == 2
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(OrchestrationRunModel)
+                .where(OrchestrationRunModel.project_id == project_id)
+            )
+            == 1
+        )
+        assert (
+            session.scalar(
+                select(func.count()).select_from(JobModel).where(JobModel.project_id == project_id)
+            )
+            == 1
+        )
+        reconciliation_events = [
+            event
+            for event in uow.events.list_events(
+                project_id=project_id, change_id=change_name, limit=10000
+            )
+            if event.event_type == EventType.INTAKE_ARTIFACT_HANDOFF_RECONCILED
+        ]
+        assert len(reconciliation_events) == 1
+        assert set(reconciliation_events[0].payload["reconciled_paths"]) == set(historical_contents)
+        assert set(reconciliation_events[0].payload["prior_sha256"]) == set(historical_contents)
