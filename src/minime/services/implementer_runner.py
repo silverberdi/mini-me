@@ -142,7 +142,10 @@ class CliImplementerRunner(ImplementerRunnerInterface):
                 environment_error=err.environment_unavailable,
             )
         duration_ms = int((asyncio.get_running_loop().time() - start) * 1000)
-        rotation_error = process_result.credential_rotation_detected
+        rotation_error = (
+            process_result.credential_rotation_detected
+            and not process_result.credential_access_refresh_only
+        )
         return ImplementerResult(
             exit_code=process_result.returncode,
             timed_out=process_result.timed_out,
