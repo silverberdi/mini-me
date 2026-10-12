@@ -15,4 +15,4 @@
 ## 3. Validation and delivery
 
 - [x] 3.1 Run focused and adjacent tests, Ruff, strict OpenSpec validation, and `git diff --check`; record baseline-equivalent macOS sandbox failures and Linux-only skips.
-- [ ] 3.2 Create one hotfix PR and document the exact human CONTINUE procedure for the existing N01 Run/Job.
+- [x] 3.2 Create one hotfix PR and document the exact human CONTINUE procedure for the existing N01 Run/Job. (Draft PR #149; merge remains human-controlled.)
