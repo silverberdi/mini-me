@@ -12,7 +12,7 @@ import stat
 import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from minime.adapters.github import GitHubAdapter
 
@@ -2029,12 +2029,38 @@ class WorktreeManager:
 
         attempts_repo = getattr(self.uow, "job_attempts", None)
         attempts = attempts_repo.list_by_job(job_id) if attempts_repo else []
-        if not attempts or attempts[-1].normalized_outcome not in {
+        if not attempts:
+            refuse(
+                "the latest durable attempt does not prove a recoverable initialization failure."
+            )
+        # Preserve the pre-existing ordering/acceptance behavior for ordinary
+        # environment/provider initialization failures. The new exceptional
+        # PREMATURE_STOP route requires a unique latest attempt identity.
+        latest_attempt = attempts[-1]
+        ordinary_recovery_outcome = latest_attempt.normalized_outcome in {
             ExecutionOutcome.ENVIRONMENT_UNAVAILABLE,
             ExecutionOutcome.PROVIDER_FAILURE,
-        }:
+        }
+        latest_attempt_number = max(attempt.attempt_number for attempt in attempts)
+        latest_attempts = [
+            attempt for attempt in attempts if attempt.attempt_number == latest_attempt_number
+        ]
+        crash_interrupted_recovery = (
+            is_created_recovery
+            and len(latest_attempts) == 1
+            and latest_attempt.attempt_number == latest_attempt_number
+            and self._has_durable_crash_interruption_recovery(
+                latest_attempt=latest_attempt,
+                job=job,
+                run=run,
+                source_base=source_base,
+                project_id=project_id,
+                change_name=change_name,
+            )
+        )
+        if not ordinary_recovery_outcome and not crash_interrupted_recovery:
             refuse(
-                "the latest durable attempt does not prove an environment/provider initialization failure."
+                "the latest durable attempt does not prove an environment/provider initialization failure or an evidenced crash-interrupted CREATED recovery."
             )
 
         if (
@@ -2184,6 +2210,106 @@ class WorktreeManager:
         ):
             refuse("canonical remote base changed during recreation validation.")
         return branch_sha
+
+    def _has_durable_crash_interruption_recovery(
+        self,
+        *,
+        latest_attempt: Any,
+        job: Any,
+        run: Any,
+        source_base: str,
+        project_id: str,
+        change_name: str,
+    ) -> bool:
+        """Recognize only an unfinished attempt followed by durable restart recovery for this Job/Run."""
+        if (
+            latest_attempt.normalized_outcome != ExecutionOutcome.PREMATURE_STOP
+            or latest_attempt.completed_at is not None
+            or latest_attempt.duration_ms is not None
+            or latest_attempt.attempt_number != job.attempt_count + 1
+            or job.project_id != project_id
+            or job.change_name != change_name
+            or job.candidate_sha is not None
+            or run.project_id != project_id
+            or run.change_name != change_name
+            or run.active_job_id != job.job_id
+            or run.current_candidate_sha is not None
+            or run.base_sha != source_base
+            or (job.base_sha and job.base_sha != source_base)
+        ):
+            return False
+
+        events_repo = getattr(self.uow, "events", None)
+        if not events_repo:
+            return False
+        events = events_repo.list_events(project_id=project_id, change_id=change_name, limit=10000)
+        post_attempt_events = [
+            event for event in events if event.timestamp > latest_attempt.started_at
+        ]
+        interrupted = [
+            event
+            for event in post_attempt_events
+            if event.event_type == EventType.JOB_INTERRUPTED and event.operation_id == job.job_id
+        ]
+        recovered_jobs = [
+            event
+            for event in post_attempt_events
+            if event.event_type == EventType.JOB_RECOVERED and event.operation_id == job.job_id
+        ]
+        recovered_runs = [
+            event
+            for event in post_attempt_events
+            if event.event_type == EventType.ORCHESTRATION_RECOVERED
+            and event.operation_id == run.run_id
+        ]
+        if not interrupted or not recovered_jobs or not recovered_runs:
+            return False
+
+        valid_interruption = all(
+            event.project_id == project_id
+            and event.change_id == change_name
+            and event.payload.get("job_id") == job.job_id
+            and event.payload.get("project_id") == project_id
+            and event.payload.get("change_id") == change_name
+            and event.payload.get("previous_status") == JobStatus.RUNNING.value
+            and event.payload.get("interrupted_stage") == "implementer"
+            and event.payload.get("candidate_sha") is None
+            and event.payload.get("base_sha") == source_base
+            and event.payload.get("recovery_cycle_id")
+            for event in interrupted
+        )
+        valid_job_recovery = all(
+            event.project_id == project_id
+            and event.change_id == change_name
+            and event.payload.get("job_id") == job.job_id
+            and event.payload.get("recovered_status")
+            in {
+                JobStatus.QUEUED.value,
+                JobStatus.RUNNING.value,
+                JobStatus.NEEDS_HUMAN.value,
+                JobStatus.WAITING_CAPACITY.value,
+            }
+            and event.payload.get("recovery_cycle_id")
+            for event in recovered_jobs
+        )
+        valid_run_recovery = all(
+            event.project_id == project_id
+            and event.change_id == change_name
+            and event.payload.get("run_id") == run.run_id
+            and event.payload.get("stage") == OrchestrationStage.IMPLEMENTING.value
+            and event.payload.get("recovery_cycle_id")
+            for event in recovered_runs
+        )
+        if not (valid_interruption and valid_job_recovery and valid_run_recovery):
+            return False
+
+        return any(
+            interrupted_event.timestamp < job_event.timestamp
+            and interrupted_event.timestamp < run_event.timestamp
+            for interrupted_event in interrupted
+            for job_event in recovered_jobs
+            for run_event in recovered_runs
+        )
 
     async def create_worktree(
         self,
