@@ -10,7 +10,8 @@
 - [x] 2.1 Add private, exact-file Antigravity credential projection using the existing confinement lifecycle.
 - [x] 2.2 Use the same safe projection in implementer and reviewer runners; detect rotation and redact outputs.
 - [x] 2.3 Add real Bubblewrap tests for auth projection, mount isolation, cleanup, and fail-closed behavior. (Added; Linux-only tests are not executable in this macOS environment.)
-- [ ] 2.4 Prove `agy models` authentication in Bubblewrap without inference, or document the environment as an explicit blocker.
+- [ ] 2.4 Prove real `agy models` authentication and safe access-token-refresh classification in Linux Bubblewrap without inference (release gate pending on updated SHA).
+- [x] 2.5 Add synthetic positive/negative classifier tests plus Linux confinement tests for redaction of refreshed access secrets and suppression of refresh-token rotations (execution pending).
 
 ## 3. Validation and delivery
 
