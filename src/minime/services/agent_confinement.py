@@ -289,7 +289,10 @@ class AgentProcessConfinement:
                 gemini_home = subdirs["home"] / ".gemini"
                 gemini_home.mkdir(mode=0o700)
                 os.chmod(gemini_home, 0o700)
-                antigravity_auth_copy = gemini_home / "jetski-standalone-oauth-token"
+                antigravity_cli_dir = gemini_home / "antigravity-cli"
+                antigravity_cli_dir.mkdir(mode=0o700)
+                os.chmod(antigravity_cli_dir, 0o700)
+                antigravity_auth_copy = antigravity_cli_dir / "antigravity-oauth-token"
                 self._copy_authorized_auth_file(antigravity_auth_source, antigravity_auth_copy)
                 initial_antigravity_auth_digest = hashlib.sha256(
                     antigravity_auth_copy.read_bytes()
@@ -466,7 +469,7 @@ class AgentProcessConfinement:
         env = base_env or os.environ
         home = env.get("HOME")
         root = Path(home).expanduser() if home else Path.home()
-        return str(root / ".gemini" / "jetski-standalone-oauth-token")
+        return str(root / ".gemini" / "antigravity-cli" / "antigravity-oauth-token")
 
     @staticmethod
     def _build_darwin_sandbox_profile(
