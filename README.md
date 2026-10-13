@@ -6,8 +6,10 @@
 1. `docs/BUSINESS_INTENT.md`
 2. `docs/CANONICAL_DECISIONS.md`
 3. `docs/PRODUCT.md`
-4. `docs/CHANGE_DELIVERY_CONTRACT.md`
-5. `docs/ARCHITECTURE.md`
+4. `docs/ENGINEERING_DISCIPLINE.md`
+5. `docs/CHANGE_DELIVERY_CONTRACT.md`
+6. `docs/agent-capabilities/V1_MANIFEST.md` (and linked hook/harness/retirement contracts)
+7. `docs/ARCHITECTURE.md`
 6. `docs/PROVIDER_POLICY.md`
 7. `docs/DOR_DOD.md`
 8. `docs/ROADMAP.md` and `docs/BACKLOG.md`
