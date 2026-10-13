@@ -27,6 +27,8 @@ DeepSeek/OpenRouter/Qwen availability at that instant does not by itself block R
 ## Definition of Done
 DONE requires all applicable conditions:
 - implementation complete;
+- applicable Removal Ledger completed: old writers/entrypoints migrated/retired, no active duplicate behavior, consumers/config/docs/tests reconciled, justified historical assets retained; exceptions require explicit human authorization;
+- E2E and regression repeated **after retirement**, not only before migration;
 - final deterministic checks pass;
 - real stage-level E2E and end-to-end delivery tests pass using real agent/CLI, OpenSpec, Git and GitHub as required; no fake-runner evidence is accepted as a product gate;
 - complementary authoritative review complete;
