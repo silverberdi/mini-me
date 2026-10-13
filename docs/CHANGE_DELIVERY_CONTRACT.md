@@ -49,7 +49,7 @@ Cada Change debe contener las specs necesarias para ofrecer **una capacidad util
 | G1 — Propose | Artefactos agent-led coherentes, specs de valor, DoR/anti-drift | no apply |
 | G2 — Preflight | Git/WT seguros, herramientas/skills instalados, cuenta/auth, capacidad/budget, restore path | no inference |
 | G3 — Apply | Workflow real de agente, source diff dentro de scope, lineage de attempts | preserve and wait |
-| G4 — Verify/review | Checks, workflow verify y revisión por identidad independiente; riesgos resueltos | no PR-ready |
+| G4 — Verify/review & Removal | Checks, workflow verify y revisión independiente; disciplina de ingeniería, Removal Ledger cerrado, código obsoleto retirado y E2E **posterior** al retiro | no PR-ready |
 | G5 — PR/human | Candidate SHA, escenarios E2E ejecutados, human merge authority | no merge |
 | G6 — Closure | Merge observado, specs nativas sincronizadas/archivadas, despliegue y E2E productivo | no DONE |
 
