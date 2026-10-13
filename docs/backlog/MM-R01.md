@@ -20,13 +20,13 @@ SHALL aceptar un change READY vinculado duraderamente a (project_id, repo remoto
 SHALL verificar herramientas, versión/perfil de OpenSpec, skills/comandos instalados, permisos del worktree, base/head y acceso del agente; detectar auth/capacity con señales no inferentes. SHALL rechazar despacho si falta una condición de seguridad.
 
 ### R01-S03 — Workflow real de agente
-SHALL lanzar la sintaxis de workflow apropiada dentro del CLI de Codex o Antigravity (skill/command instalado), no un ejecutable inexistente \`opsx\`. SHALL registrar transcript/handoff seguro, versión, invocation, tiempos y artefactos observados. El CLI \`openspec\` solamente valida/apoya artefactos según sus contratos.
+SHALL lanzar la sintaxis de workflow apropiada dentro del CLI de Codex o Antigravity (skill/command instalado), no un ejecutable inexistente `opsx`. SHALL registrar transcript/handoff seguro, versión, invocation, tiempos y artefactos observados. El CLI `openspec` solamente valida/apoya artefactos según sus contratos.
 
 ### R01-S04 — Workspace/candidato
 SHALL mantener trabajo dentro del worktree propio, registrar commit SHA y diff material, preservar side effects y exigir evidencia de autoría real; prohibido fake implementation/prompt de programador fuera de OpenSpec.
 
 ### R01-S05 — Verificación y revisión independiente
-SHALL ejecutar checks del repo y workflow \`verify\` cuando esté disponible, exigir revisión por agente/modelo distinto del autor sustancial y aplicar correcciones con \`apply\` sobre el mismo Change cuando se autoricen. Fallos no generan PASS.
+SHALL ejecutar checks del repo y workflow `verify` cuando esté disponible, exigir revisión por agente/modelo distinto del autor sustancial y aplicar correcciones con `apply` sobre el mismo Change cuando se autoricen. Fallos no generan PASS.
 
 ### R01-S06 — PR y autoridad humana
 SHALL crear PR real desde candidate seguro con evidencia, enlace Issue/OpenSpec y checks. SHALL NOT hacer merge ni cerrar el trabajo por existencia del PR.
@@ -38,10 +38,10 @@ SHALL preservar Run/Job original de N01, 4 attempts históricos, modificaciones 
 Los escenarios marcados E0x son la evidencia de producto requerida, nunca pruebas mock-only. **Dado** el entorno descrito; **cuando** se ejecuta el estímulo; **entonces** se observan el resultado y side effects correspondientes.
 
 ### R01-E01 — Ruta verde real
-Dado repo fixture aislado + Change READY válidos, al admitir por la API real, mini me invoca un agente real con el workflow \`apply\`, modifica código dentro del WT, registra SHA, ejecuta checks, invoca revisor independiente y publica un PR inspeccionable en GitHub. Verificar deltas del código contra escenarios OpenSpec, no solo metadata.
+Dado repo fixture aislado + Change READY válidos, al admitir por la API real, mini me invoca un agente real con el workflow `apply`, modifica código dentro del WT, registra SHA, ejecuta checks, invoca revisor independiente y publica un PR inspeccionable en GitHub. Verificar deltas del código contra escenarios OpenSpec, no solo metadata.
 
 ### R01-E02 — Invocación nativa
-Con perfil Codex y luego Antigravity en fixture autorizada, observar en los traces que se cargó el skill/workflow correcto. Una instrucción textual genérica o \`openspec validate\` **no** cuentan como ejecución \`apply\`.
+Con perfil Codex y luego Antigravity en fixture autorizada, observar en los traces que se cargó el skill/workflow correcto. Una instrucción textual genérica o `openspec validate` **no** cuentan como ejecución `apply`.
 
 ### R01-E03 — Denegación previa
 Inducir skill ausente, CLI desinstalado, auth inválida, cuota insuficiente, path escape y remote distinto; ninguna inferencia ni mutación externa ocurre y la UI/API informa motivo.
