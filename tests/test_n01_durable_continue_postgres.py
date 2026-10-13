@@ -388,7 +388,9 @@ def test_postgres_continue_reuses_created_worktree_after_auth_required_history(
             implementer_role="codex",
             current_executor="codex",
             reassignment_count=1,
-            status=JobStatus.FAILED,
+            status=JobStatus.WAITING_CAPACITY,
+            waiting_provider="openrouter",
+            capacity_block_reason="OpenRouter fallback ineligible: Scheduler is not in DRAIN mode",
             base_sha=base_sha,
             attempt_count=4,
         )
@@ -401,14 +403,20 @@ def test_postgres_continue_reuses_created_worktree_after_auth_required_history(
             resumable_stage=OrchestrationStage.IMPLEMENTING,
             active_job_id=job_id,
             current_candidate_sha=None,
-            is_active=False,
-            stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
-            human_gate=HumanGate.NEEDS_HUMAN,
+            is_active=True,
+            stop_outcome=OrchestrationStopOutcome.WAITING_CAPACITY,
+            stop_reason="OpenRouter fallback ineligible: Scheduler is not in DRAIN mode",
+            stop_details={
+                "provider": "openrouter",
+                "waiting_since": utc_now().isoformat(),
+            },
         )
         uow.jobs.save(job)
         uow.orchestration_runs.save(run)
+        codex_health = ProviderHealth(provider="codex", status=ProviderHealthStatus.AUTH_REQUIRED)
+        uow.provider_health.save(codex_health)
         uow.provider_health.save(
-            ProviderHealth(provider="codex", status=ProviderHealthStatus.AVAILABLE)
+            ProviderHealth(provider="antigravity", status=ProviderHealthStatus.AUTH_REQUIRED)
         )
         uow.commit()
 
@@ -622,50 +630,72 @@ def test_postgres_continue_reuses_created_worktree_after_auth_required_history(
             .where(DurableSagaModel.project_id == project_id)
         )
 
-        runtime_root = tmp_path / "runtime"
-        runtime_root.mkdir()
-        monkeypatch.setenv("MINIME_RUNTIME_ROOT", str(runtime_root))
-        diagnostic_cli = tmp_path / "diagnostic-cli"
-        diagnostic_cli.write_text(
-            "#!/usr/bin/env python3\nimport sys\n"
-            "if '--help' in sys.argv:\n    print('diagnostic cli help')\n"
-            "else:\n    print('diagnostic runner reached; no inference')\n",
-            encoding="utf-8",
-        )
-        diagnostic_cli.chmod(0o700)
-        profile = CliInvocationProfile(
-            provider="diagnostic-cli",
-            role="implementer",
-            executable=str(diagnostic_cli),
-            args=(),
-            prompt_transport="stdin",
-        )
-
         class RecordingRunner:
             def __init__(self):
-                self.delegate = CliImplementerRunner(profile)
                 self.reached = False
                 self.head_sha = None
                 self.branch = None
                 self.worktree_path = None
                 self.ownership_id = None
                 self.ownership_state = None
+                self.calls = 0
 
             async def run(self, candidate_path, prompt_context, timeout_seconds):
+                from minime.services.implementer_runner import ImplementerResult
+
+                del prompt_context, timeout_seconds
                 self.reached = True
+                self.calls += 1
                 self.head_sha = _git(Path(candidate_path), "rev-parse", "HEAD")
                 self.branch = _git(Path(candidate_path), "branch", "--show-current")
                 self.worktree_path = Path(candidate_path).resolve()
                 ownership = uow.orchestration_worktree_ownerships.get_by_job_id(job_id)
                 self.ownership_id = ownership.worktree_id
                 self.ownership_state = ownership.creation_state
-                return await self.delegate.run(candidate_path, prompt_context, timeout_seconds)
+                tasks_path = self.worktree_path / "openspec" / "changes" / change_name / "tasks.md"
+                tasks = tasks_path.read_text(encoding="utf-8")
+                tasks_path.write_text(tasks.replace("- [ ]", "- [x]"), encoding="utf-8")
+                (self.worktree_path / "n01_implementation.py").write_text(
+                    "def simulated_n01_change():\n    return 'candidate'\n",
+                    encoding="utf-8",
+                )
+                return ImplementerResult(
+                    exit_code=0,
+                    timed_out=False,
+                    stdout=["simulated provider success; no remote inference"],
+                    stderr=[],
+                    duration_ms=5,
+                )
 
         runner = RecordingRunner()
         monkeypatch.setattr(execution_pipeline, "runner_for_implementer", lambda _provider: runner)
-        result = ControlPlaneService(uow, project_root=managed_root).execute_action(
-            OperatorActionRequest(
-                action_request_id=str(uuid.uuid4()),
+        reviewer_calls = 0
+
+        def reviewer_must_not_run(_provider):
+            nonlocal reviewer_calls
+            reviewer_calls += 1
+            raise AssertionError("Unavailable Antigravity reviewer must not be invoked.")
+
+        monkeypatch.setattr(execution_pipeline, "runner_for_reviewer", reviewer_must_not_run)
+        control_plane = ControlPlaneService(uow, project_root=managed_root)
+        available_continue = next(
+            action
+            for action in control_plane.get_available_actions(run_id)
+            if action.action == OperatorActionType.CONTINUE
+        )
+        assert available_continue.enabled is True
+        assert available_continue.requires_confirmation is True
+
+        def make_request(action_request_id: str) -> OperatorActionRequest:
+            current_descriptor = next(
+                action
+                for action in ControlPlaneService(
+                    uow, project_root=managed_root
+                ).get_available_actions(run_id)
+                if action.action == OperatorActionType.CONTINUE
+            )
+            return OperatorActionRequest(
+                action_request_id=action_request_id,
                 project_id=project_id,
                 change_name=change_name,
                 run_id=run_id,
@@ -675,11 +705,88 @@ def test_postgres_continue_reuses_created_worktree_after_auth_required_history(
                 expected_stage=OrchestrationStage.IMPLEMENTING,
                 expected_generation=1,
                 expected_candidate_sha=None,
+                parameters={
+                    "provider_reauthentication_confirmed": True,
+                    "expected_provider_health_updated_at": current_descriptor.parameters_schema[
+                        "properties"
+                    ]["expected_provider_health_updated_at"]["const"],
+                },
+            )
+
+        from minime.services.orchestration_service import OrchestrationService
+
+        real_resume = OrchestrationService.resume
+
+        def fail_before_resume(self, **kwargs):
+            claim_context = kwargs["claim_context"]
+            # Reproduce OrchestrationService.resume's persisted clear of the
+            # waiting marker, then fail before it can enter the pipeline.
+            self.uow.orchestration_runs.update_stop_outcome(
+                run_id=run_id,
+                stop_outcome=None,
+                stop_reason=None,
+                is_active=True,
+                claim_context=claim_context,
+            )
+            self.uow.commit()
+            raise RuntimeError("injected failure after resume checkpoint clear, before pipeline")
+
+        monkeypatch.setattr(OrchestrationService, "resume", fail_before_resume)
+        failed_result = control_plane.execute_action(make_request("auth-recovery-failure-1"))
+        assert failed_result.status == OperatorActionStatus.REJECTED
+        assert any(
+            action.action_request_id == "auth-recovery-failure-1"
+            and action.status == OperatorActionStatus.REJECTED
+            for action in uow.operator_actions.list_by_run(run_id)
+        )
+        assert runner.calls == 0
+        assert len(uow.job_attempts.list_by_job(job_id)) == 4
+        failed_run = uow.orchestration_runs.get_by_id(run_id)
+        failed_job = uow.jobs.get_by_id(job_id)
+        assert failed_run.is_active is True
+        assert failed_run.stop_outcome == OrchestrationStopOutcome.WAITING_CAPACITY
+        assert failed_job.status == JobStatus.WAITING_CAPACITY
+        assert failed_job.attempt_count == 4
+        failed_decision = next(
+            decision
+            for decision in uow.recovery_decisions.list_by_claim_key(f"run:{run_id}")
+            if (decision.observation_refs or {})
+            .get("provider_auth_recovery", {})
+            .get("action_request_id")
+            == "auth-recovery-failure-1"
+        )
+        assert failed_decision.status.value == "BLOCKED"
+        assert failed_decision.reason_code == "AUTH_RECOVERY_FAILED_BEFORE_DISPATCH"
+        assert any(
+            event.event_type == EventType.ORCHESTRATION_STOPPED
+            and event.payload.get("action_request_id") == "auth-recovery-failure-1"
+            and event.payload.get("reason_code") == "AUTH_RECOVERY_PRE_DISPATCH_FAILED"
+            for event in uow.events.list_events(
+                project_id=project_id, change_id=change_name, limit=10000
             )
         )
+        assert (
+            next(
+                action
+                for action in ControlPlaneService(
+                    uow, project_root=managed_root
+                ).get_available_actions(run_id)
+                if action.action == OperatorActionType.CONTINUE
+            ).enabled
+            is True
+        )
+
+        monkeypatch.setattr(OrchestrationService, "resume", real_resume)
+        result = control_plane.execute_action(make_request("auth-recovery-success-2"))
 
         assert result.status == OperatorActionStatus.COMPLETED, result.summary
+        assert any(
+            action.action_request_id == "auth-recovery-success-2"
+            and action.status == OperatorActionStatus.COMPLETED
+            for action in uow.operator_actions.list_by_run(run_id)
+        )
         assert runner.reached is True
+        assert runner.calls == 1
         assert runner.head_sha == snapshot_sha
         assert runner.branch == recovery_branch
         assert runner.worktree_path == worktree.path.resolve()
@@ -688,7 +795,7 @@ def test_postgres_continue_reuses_created_worktree_after_auth_required_history(
         assert uow.jobs.get_by_id(job_id).current_executor == "codex"
         attempts_after = uow.job_attempts.list_by_job(job_id)
         assert uow.jobs.get_by_id(job_id).attempt_count == len(attempts_after)
-        assert len(attempts_after) > 4
+        assert len(attempts_after) == 5
         assert [attempt.attempt_id for attempt in attempts_after[:4]] == [
             attempt.attempt_id for attempt in original_attempts
         ]
@@ -719,6 +826,31 @@ def test_postgres_continue_reuses_created_worktree_after_auth_required_history(
         assert [attempt.attempt_number for attempt in attempts_after] == list(
             range(1, len(attempts_after) + 1)
         )
+        assert attempts_after[-1].normalized_outcome == ExecutionOutcome.COMPLETED
+        assert (
+            attempts_after[-1].error_details["provider_auth_recovery"]["action_request_id"]
+            == "auth-recovery-success-2"
+        )
+        persisted_job = uow.jobs.get_by_id(job_id)
+        persisted_run = uow.orchestration_runs.get_by_id(run_id)
+        assert persisted_job.candidate_sha
+        candidate_manifest = uow.candidate_manifests.get_by_candidate_sha(
+            job_id, persisted_job.candidate_sha
+        )
+        assert candidate_manifest is not None
+        assert (
+            _git(managed_root, "rev-parse", f"refs/heads/{recovery_branch}")
+            == persisted_job.candidate_sha
+        )
+        assert persisted_job.status == JobStatus.WAITING_CAPACITY
+        assert persisted_job.waiting_provider == "antigravity"
+        assert persisted_run.stop_outcome == OrchestrationStopOutcome.WAITING_CAPACITY
+        assert uow.provider_health.get_by_provider("codex").status == ProviderHealthStatus.AVAILABLE
+        assert (
+            uow.provider_health.get_by_provider("antigravity").status
+            == ProviderHealthStatus.AUTH_REQUIRED
+        )
+        assert reviewer_calls == 0
         assert uow.orchestration_runs.get_by_id(run_id).run_id == run_id
         assert (
             uow.orchestration_worktree_ownerships.get_by_job_id(job_id).worktree_id
@@ -727,7 +859,20 @@ def test_postgres_continue_reuses_created_worktree_after_auth_required_history(
         assert (
             uow.orchestration_worktree_ownerships.get_by_job_id(job_id).source_base_sha == base_sha
         )
-        assert _git(managed_root, "rev-parse", f"refs/heads/{recovery_branch}") == snapshot_sha
+        assert (
+            _git(managed_root, "rev-parse", f"refs/heads/{recovery_branch}")
+            == persisted_job.candidate_sha
+        )
+        assert _git(managed_root, "cat-file", "-e", f"{snapshot_sha}^{{commit}}") == ""
+        snapshot_evidence = [
+            event
+            for event in uow.events.list_events(
+                project_id=project_id, change_id=change_name, limit=10000
+            )
+            if event.event_type == EventType.WORKTREE_RECOVERY_SNAPSHOT
+        ]
+        assert len(snapshot_evidence) == 1
+        assert snapshot_evidence[0].payload["recovery_sha"] == snapshot_sha
         assert (
             session.scalar(
                 select(func.count())
@@ -1200,7 +1345,7 @@ def test_postgres_control_plane_continue_rebuilds_same_run_job_and_worktree(
         assert attempts[-1].continuation_decision == ContinuationDecision.WAIT_EXTERNAL
         assert attempts[-1].corrective_retries_count == 0
         assert uow.provider_health.get_by_provider("codex").status == ProviderHealthStatus.AVAILABLE
-        assert len(uow.operator_actions.list_by_run(run_id)) == 1
+        assert len(uow.operator_actions.list_by_run(run_id)) == 2
         assert (
             uow.operator_actions.list_by_run(run_id)[0].action_type == OperatorActionType.CONTINUE
         )

@@ -312,12 +312,18 @@ def test_active_waiting_capacity_reconciles_under_claim_without_force(in_memory_
         drive_admitted=True,
     )
 
-    assert decision.status == RecoveryDecisionStatus.COMPLETED
+    assert decision.status == RecoveryDecisionStatus.BLOCKED
+    assert decision.reason_code == "AUTH_RECOVERY_FAILED_BEFORE_DISPATCH"
     assert decision.observation_refs["provider_auth_recovery"] == authorization
     assert captured["force"] is False
     assert captured["auth_recovery_decision_id"] == decision.decision_id
     assert in_memory_uow.orchestration_runs.get_by_id(run.run_id).is_active is True
-    assert in_memory_uow.orchestration_runs.get_by_id(run.run_id).stop_outcome is None
+    assert (
+        in_memory_uow.orchestration_runs.get_by_id(run.run_id).stop_outcome
+        == OrchestrationStopOutcome.WAITING_CAPACITY
+    )
+    assert in_memory_uow.jobs.get_by_id(job.job_id).status == JobStatus.WAITING_CAPACITY
+    assert in_memory_uow.job_attempts.list_by_job(job.job_id) == []
     assert (
         in_memory_uow.provider_health.get_by_provider("codex").status
         == ProviderHealthStatus.AUTH_REQUIRED

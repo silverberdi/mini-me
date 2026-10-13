@@ -1429,13 +1429,6 @@ class RecoveryConvergenceService:
                 self.release_claim(context)
                 return decision
             else:
-                self.uow.orchestration_runs.update_stop_outcome(
-                    run_id=run.run_id,
-                    stop_outcome=None,
-                    stop_reason=None,
-                    is_active=True,
-                    claim_context=context,
-                )
                 if auth_recovery_valid and auth_recovery_authorization:
                     auth_recovery_decision = RecoveryDecision(
                         cycle_id=cycle_id,
@@ -1454,7 +1447,18 @@ class RecoveryConvergenceService:
                         },
                     )
                     self._create_decision(auth_recovery_decision)
-                self.uow.commit()
+                    # Do not clear the durable waiting checkpoint before resume
+                    # has revalidated the permit under this claim.
+                    self.uow.commit()
+                else:
+                    self.uow.orchestration_runs.update_stop_outcome(
+                        run_id=run.run_id,
+                        stop_outcome=None,
+                        stop_reason=None,
+                        is_active=True,
+                        claim_context=context,
+                    )
+                    self.uow.commit()
 
                 if not drive_admitted:
                     decision = RecoveryDecision(
@@ -1639,15 +1643,128 @@ class RecoveryConvergenceService:
                 claim_context=context,
                 auth_recovery_decision_id=(decision.decision_id if auth_recovery_valid else None),
             )
-            decision.status = RecoveryDecisionStatus.COMPLETED
+            if auth_recovery_valid and auth_recovery_authorization:
+                if self._auth_recovery_attempt_recorded(
+                    auth_recovery_authorization["job_id"],
+                    auth_recovery_authorization["action_request_id"],
+                ):
+                    decision.status = RecoveryDecisionStatus.COMPLETED
+                else:
+                    self._restore_unconsumed_auth_recovery_wait(
+                        run_id=run.run_id,
+                        authorization=auth_recovery_authorization,
+                        claim_context=context,
+                        decision=decision,
+                    )
+                    decision.status = RecoveryDecisionStatus.BLOCKED
+                    decision.reason_code = "AUTH_RECOVERY_FAILED_BEFORE_DISPATCH"
+            else:
+                decision.status = RecoveryDecisionStatus.COMPLETED
         except Exception as exc:
             logger.error("Run continuation failed for '%s': %s", run.run_id, exc)
             decision.status = RecoveryDecisionStatus.BLOCKED
-            decision.reason_code = str(exc)
+            decision.reason_code = (
+                "AUTH_RECOVERY_FAILED_BEFORE_DISPATCH" if auth_recovery_valid else str(exc)
+            )
+            if auth_recovery_valid and auth_recovery_authorization:
+                self._restore_unconsumed_auth_recovery_wait(
+                    run_id=run.run_id,
+                    authorization=auth_recovery_authorization,
+                    claim_context=context,
+                    decision=decision,
+                )
 
         self._update_decision(decision)
         self.release_claim(context)
         return decision
+
+    def _auth_recovery_attempt_recorded(self, job_id: str, action_request_id: str) -> bool:
+        """Return whether a one-shot auth permit crossed the durable attempt boundary."""
+        return any(
+            (attempt.error_details or {}).get("provider_auth_recovery", {}).get("action_request_id")
+            == action_request_id
+            for attempt in self.uow.job_attempts.list_by_job(job_id)
+        )
+
+    def _restore_unconsumed_auth_recovery_wait(
+        self,
+        *,
+        run_id: str,
+        authorization: dict[str, Any],
+        claim_context: RecoveryClaimContext,
+        decision: RecoveryDecision,
+    ) -> bool:
+        """Restore the active waiting checkpoint only when no provider attempt was recorded."""
+        if self._auth_recovery_attempt_recorded(
+            authorization["job_id"], authorization["action_request_id"]
+        ):
+            return False
+        run = self.uow.orchestration_runs.get_by_id(run_id)
+        job = self.uow.jobs.get_by_id(authorization["job_id"])
+        if (
+            not run
+            or not job
+            or run.run_id != authorization["run_id"]
+            or run.project_id != authorization["project_id"]
+            or run.change_name != authorization["change_name"]
+            or run.active_job_id != job.job_id
+            or run.current_generation != authorization["generation"]
+            or run.current_stage != OrchestrationStage.IMPLEMENTING
+            or not run.is_active
+            or run.stop_outcome not in {None, OrchestrationStopOutcome.WAITING_CAPACITY}
+            or run.current_candidate_sha
+            or job.project_id != run.project_id
+            or job.change_name != run.change_name
+            or job.current_executor != authorization["provider"]
+            or job.candidate_sha
+            or job.status not in {JobStatus.WAITING_CAPACITY, JobStatus.RUNNING}
+        ):
+            return False
+
+        reason = (
+            "Authorized provider-auth continuation did not reach the runner; "
+            "a fresh explicit CONTINUE is required."
+        )
+        if job.status != JobStatus.WAITING_CAPACITY:
+            self.uow.jobs.set_waiting_capacity(
+                job_id=job.job_id,
+                waiting_provider=authorization["provider"],
+                reason=reason,
+                claim_context=claim_context,
+            )
+        waiting_since = (run.stop_details or {}).get("waiting_since") or utc_now().isoformat()
+        self.uow.orchestration_runs.update_stop_outcome(
+            run_id=run.run_id,
+            stop_outcome=OrchestrationStopOutcome.WAITING_CAPACITY,
+            human_gate=None,
+            stop_reason=reason,
+            stop_details={
+                "provider": authorization["provider"],
+                "code": "AUTH_RECOVERY_PRE_DISPATCH_FAILED",
+                "action_request_id": authorization["action_request_id"],
+                "recovery_decision_id": decision.decision_id,
+                "waiting_since": waiting_since,
+            },
+            is_active=True,
+            claim_context=claim_context,
+        )
+        self.uow.events.save(
+            Event(
+                event_type=EventType.ORCHESTRATION_STOPPED,
+                project_id=run.project_id,
+                change_id=run.change_name,
+                operation_id=run.run_id,
+                payload={
+                    "run_id": run.run_id,
+                    "stop_outcome": OrchestrationStopOutcome.WAITING_CAPACITY.value,
+                    "reason_code": "AUTH_RECOVERY_PRE_DISPATCH_FAILED",
+                    "action_request_id": authorization["action_request_id"],
+                    "recovery_decision_id": decision.decision_id,
+                },
+                timestamp=utc_now(),
+            )
+        )
+        return True
 
     def _validate_auth_recovery_authorization(
         self,

@@ -316,6 +316,8 @@ class ExecutionPipelineService:
         project = self._require_project(job.project_id)
         worktree_created = False
         readonly_view_created = False
+        auth_recovery_pre_dispatch_failure = False
+        auth_recovery_refs: dict[str, Any] | None = None
         phase_started = utc_now()
         check_run_results = []
         implementer_fallback_used = False
@@ -336,7 +338,6 @@ class ExecutionPipelineService:
 
             past_attempts = self.uow.job_attempts.list_by_job(job.job_id)
             past_attempts.sort(key=lambda a: a.attempt_number)
-            auth_recovery_refs: dict[str, Any] | None = None
             if auth_recovery_decision_id:
                 auth_recovery_refs = self._validate_auth_recovery_dispatch(
                     decision_id=auth_recovery_decision_id,
@@ -2251,7 +2252,55 @@ class ExecutionPipelineService:
         except Exception as exc:
             logger.exception(f"Exception in execute_queued_job: {exc}")
             latest = self._require_job(job.job_id)
-            if latest.status not in {
+            action_request_id = (
+                auth_recovery_refs.get("action_request_id") if auth_recovery_refs else None
+            )
+            action_attempt_recorded = bool(
+                action_request_id
+                and any(
+                    (attempt.error_details or {})
+                    .get("provider_auth_recovery", {})
+                    .get("action_request_id")
+                    == action_request_id
+                    for attempt in self.uow.job_attempts.list_by_job(job.job_id)
+                )
+            )
+            if (
+                auth_recovery_refs
+                and not action_attempt_recorded
+                and latest.status in {JobStatus.RUNNING, JobStatus.WAITING_CAPACITY}
+                and latest.project_id == auth_recovery_refs.get("project_id")
+                and latest.change_name == auth_recovery_refs.get("change_name")
+                and latest.current_executor == auth_recovery_refs.get("provider")
+                and not latest.candidate_sha
+            ):
+                reason = (
+                    "AUTH_RECOVERY_PRE_DISPATCH_FAILED: continuation stopped before a durable "
+                    "provider attempt; a fresh explicit CONTINUE is required."
+                )
+                if latest.status != JobStatus.WAITING_CAPACITY:
+                    latest = self.uow.jobs.set_waiting_capacity(
+                        job_id=latest.job_id,
+                        waiting_provider=auth_recovery_refs["provider"],
+                        reason=reason,
+                        claim_context=claim_context,
+                    )
+                else:
+                    latest.waiting_provider = auth_recovery_refs["provider"]
+                    latest.capacity_block_reason = reason
+                    self.uow.jobs.save(latest)
+                self._save_event(
+                    EventType.JOB_WAITING_CAPACITY,
+                    latest,
+                    {
+                        "waiting_provider": auth_recovery_refs["provider"],
+                        "reason_code": "AUTH_RECOVERY_PRE_DISPATCH_FAILED",
+                        "action_request_id": action_request_id,
+                    },
+                )
+                self.uow.commit()
+                auth_recovery_pre_dispatch_failure = True
+            elif latest.status not in {
                 JobStatus.CHECKS_FAILED,
                 JobStatus.READY_TO_MERGE,
                 JobStatus.AUDIT_BLOCKED,
@@ -2274,7 +2323,7 @@ class ExecutionPipelineService:
                         f"Failed to clean up review worktree at '{readonly_view}': {clean_err}"
                     )
 
-            if worktree_created:
+            if worktree_created and not auth_recovery_pre_dispatch_failure:
                 try:
                     await self._preserve_and_cleanup_worktree(job, worktree)
                 except Exception as cleanup_error:

@@ -459,6 +459,7 @@ class OrchestrationService:
         if not run:
             raise ValueError(f"Orchestration run '{run_id}' not found.")
 
+        auth_recovery_refs: dict[str, Any] = {}
         if auth_recovery_decision_id:
             decision = self.uow.recovery_decisions.get_by_id(auth_recovery_decision_id)
             refs = (
@@ -466,6 +467,7 @@ class OrchestrationService:
                 if decision
                 else {}
             )
+            auth_recovery_refs = refs
             job = self.uow.jobs.get_by_id(run.active_job_id) if run.active_job_id else None
             project = self.uow.projects.get_by_id(run.project_id)
             provider = refs.get("provider")
@@ -510,7 +512,8 @@ class OrchestrationService:
             project = self.uow.projects.get_by_id(run.project_id)
             if project:
                 provider = (
-                    (run.stop_details.get("provider") if run.stop_details else None)
+                    auth_recovery_refs.get("provider")
+                    or (run.stop_details.get("provider") if run.stop_details else None)
                     or project.implementer
                     or "codex"
                 )
@@ -552,7 +555,11 @@ class OrchestrationService:
                     run.stop_details = {}
                     if run.active_job_id:
                         job = self.uow.jobs.get_by_id(run.active_job_id)
-                        if job and job.status == JobStatus.WAITING_CAPACITY:
+                        if (
+                            job
+                            and job.status == JobStatus.WAITING_CAPACITY
+                            and not auth_recovery_valid
+                        ):
                             job.status = JobStatus.RUNNING
                             job.capacity_block_reason = None
                             job.waiting_provider = None

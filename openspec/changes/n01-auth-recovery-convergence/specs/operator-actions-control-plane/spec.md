@@ -18,6 +18,15 @@ The system SHALL expose a confirmation-bound `CONTINUE` action for an active Run
 - **AND** the recovery decision and JobAttempt SHALL durably identify the authorization request
 - **AND** replay of the same action request SHALL not create another attempt.
 
+#### Scenario: Failed resume before dispatch preserves the waiting checkpoint
+- **GIVEN** an authorized auth-recovery CONTINUE has persisted its fenced recovery decision
+- **AND** orchestration resume fails or returns before a JobAttempt records that exact action request ID
+- **WHEN** the Control Plane records the failed action
+- **THEN** the same Run and linked Job SHALL remain active and `WAITING_CAPACITY` with no candidate or new attempt
+- **AND** the recovery decision SHALL be `BLOCKED` with a pre-dispatch failure reason
+- **AND** the workspace and prior attempts SHALL be preserved
+- **AND** only a fresh operator CONTINUE request with a new action request ID and current health evidence MAY try again.
+
 #### Scenario: Reject missing, stale, or mismatched reauthentication authority
 - **GIVEN** an active waiting Run where the provider is not `AUTH_REQUIRED`, the health timestamp changed, the Job/provider identity differs, a candidate exists, or the explicit acknowledgment is absent
 - **WHEN** an operator submits the reauthentication continuation
