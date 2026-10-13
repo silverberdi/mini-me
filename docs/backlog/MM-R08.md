@@ -23,7 +23,7 @@ SHALL aislar worktrees, secretos, runtime settings, paths, estados y cuota por p
 SHALL seleccionar los roles de agentes y etapas permitidos por proyecto; con independencia reviewer, budget per project y concurrencia compatible con scheduler.
 
 ### R08-S05 — Pipeline replicable
-SHALL obtener Issue→OpenSpec→apply→review→PR real en segundo repo y preservar el primero; no introducir condicionales `if project==mini-me\` salvo comportamiento de autodesarrollo explícito.
+SHALL obtener Issue→OpenSpec→apply→review→PR real en segundo repo y preservar el primero; no introducir condicionales `if project==mini-me` salvo comportamiento de autodesarrollo explícito.
 
 ### R08-S06 — Conflicto de repositorios
 SHALL bloquear bindings provisionales, remote alterado, ramas inesperadas, chequeos ausentes, worktree fuera de /opt/minime/repos; nunca reparar cambiando de repo silenciosamente.
