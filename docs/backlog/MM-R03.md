@@ -5,7 +5,7 @@
 ## Problema y resultado usable
 Existe lógica de scheduler/orquestación y numerosos estados, pero falta demostración de autodrain de una cola con agente OpenSpec real y entregable PR.
 
-**Después del despliegue:** Un Issue preparado y READY avanza por selección, \`apply\`, \`verify\`, review independiente y PR sin clics manuales Prepare/Start/Continue; solo pausa por política/cuota/autoridad humana legítima.
+**Después del despliegue:** Un Issue preparado y READY avanza por selección, `apply`, `verify`, review independiente y PR sin clics manuales Prepare/Start/Continue; solo pausa por política/cuota/autoridad humana legítima.
 
 ## Contexto y contratos que debe leer el agente
 docs/STATE_MACHINE.md; docs/DOR_DOD.md; docs/GITHUB_WORK_MANAGEMENT.md; docs/CHANGE_DELIVERY_CONTRACT.md; tests/postgres scheduler; issues #133/#135.. `docs/CHANGE_DELIVERY_CONTRACT.md` obliga a G0–G6, matriz de trazabilidad y gates E2E. El agente debe inspeccionar implementación actual, documentos, schema y skills instalados **antes de** proponer arquitectura; hechos heredados de ROADMAP “DELIVERED” deben verificarse.
@@ -20,7 +20,7 @@ SHALL descubrir/ordenar work items READY de GitHub y DB con prioridades y DAG, c
 SHALL pasar de Issue preparado a Job admitido sin botones manuales cuando DoR, permisos, provider y presupuesto lo permiten. No fabricar contexto ni sobrescribir worktrees ajenos.
 
 ### R03-S03 — Stages OpenSpec
-SHALL asignar \`propose/update/continue/apply/verify\` al agente compatible por etapa y comprobar salida real; no usar prompts libres como sustituto de workflows. Reviewer no puede compartir identidad de autoría.
+SHALL asignar `propose/update/continue/apply/verify` al agente compatible por etapa y comprobar salida real; no usar prompts libres como sustituto de workflows. Reviewer no puede compartir identidad de autoría.
 
 ### R03-S04 — Durabilidad
 SHALL preservar eventos, claim, generation y side effects de etapa; toda reanudación inspecciona estado remoto/local antes de reenviar. Como mínimo una ejecución activa por repositorio según política.
@@ -50,7 +50,7 @@ Con uno de los agentes no disponible, implementar únicamente rutas/revisiones p
 Interrumpir daemon entre stage/side effect y persistencia: no Issues, PRs, branches, Jobs ni dispatch duplicados; el trabajo preservado converge al estado verificable.
 
 ### R03-E05 — Revisión rechazada
-Inyectar un defecto en la implementación; revisor lo detecta, la remediación por \`apply\` corrige y \`verify\` real valida, o queda bloqueado con hallazgos sin PR-ready.
+Inyectar un defecto en la implementación; revisor lo detecta, la remediación por `apply` corrige y `verify` real valida, o queda bloqueado con hallazgos sin PR-ready.
 
 ### R03-E06 — Postdeploy
 Scheduler habilitado SOLO en ventana autorizada de QA: captura de selección desde cola real hasta PR, estado observable por aplicación y no side effects no autorizados.
