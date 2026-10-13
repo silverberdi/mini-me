@@ -56,7 +56,7 @@ Ejecutar change con capacidad seleccionada que produce prueba verificable (por e
 Ejecutar por la API productiva/QA los mecanismos de selección y comprobar en logs del host qué skill/hook se invocó por etapa; no solo registry en BD.
 
 ## Trabajo que debe quedar dentro del mismo Change
-- Integrar catálogo mínimo y resolver existing .agent/.agents/OpenSpec config, no reescribir OpenSpec init.
+- Incorporar directamente el `V1_MANIFEST` y schemas/skills/wrappers ya provistos, enlazar con .agent/.agents y OpenSpec instalados. Resolver diferencias de compatibilidad con evidencia; no rediseñar el catálogo desde cero ni reescribir OpenSpec init.
 - Introducir lineage de capability version/hash, policy check y evidencia de uso real por agente.
 - Revisar #140 con matriz contra Change Delivery Contract y aceptar únicamente la porción que pase E2E.
 
