@@ -1,7 +1,10 @@
 # System Acceptance
 
 ## Golden functional path
-Registered project → valid GitHub/OpenSpec binding → READY → isolated implementation → checks → complementary review → bounded correction → final checks → DeepSeek audit → UI preview/guided validation when required → human approval → draft PR ready → human merge → production deployment/verification → OpenSpec/GitHub closure → DONE.
+Registered project → GitHub Issue/intake or existing native OpenSpec READY → agent-side OpenSpec propose/update as needed → verified durable binding → capacity/tool/workspace preflight → agent-side OpenSpec apply and real code diff → checks + agent-side verify → complementary independent real-agent review → bounded agent-led correction → end-to-end tests → UI preview/guided validation when required → draft PR with verified head SHA → human approval/merge → native OpenSpec sync/archive under Git authority + authorized deployment → **functional postdeployment E2E** → GitHub closure → DONE. DeepSeek/OR only when explicitly authorized after both primaries cannot cover the stage.
+
+## Acceptance classification
+TECHNICAL_PASS (unit+integration) != E2E_PASS (real agents/tools/outcome) != DEPLOYED_VERIFIED (functional behavior on the deployed environment). A Change is not DONE until DEPLOYED_VERIFIED and all applicable human/closure gates are satisfied. No fake runners/mocks/200-OK smoke can replace a real agent OpenSpec execution proof.
 
 ## Required fault injection over MVP evolution
 - provider non-zero exit/hang/timeout/quota/auth/malformed output;
@@ -21,6 +24,8 @@ Registered project → valid GitHub/OpenSpec binding → READY → isolated impl
 ## Security acceptance
 - no real secrets committed;
 - DeepSeek credential never appears in OpenRouter configuration/request evidence;
+- no mandatory routine DeepSeek audit; no DeepSeek/OpenRouter inference without dual-primary exhaustion, explicit authorization, compatible tools and budget;
+- no own OpenSpec proposal generator, spec synchronizer or archive emulator as authoritative path;
 - project external-provider allowlists enforced server-side;
 - paid fallback deny/no-spend unless explicitly enabled;
 - no autonomous merge;
