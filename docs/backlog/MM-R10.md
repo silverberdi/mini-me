@@ -14,16 +14,16 @@ Los Sxx son mínimos normativos. En `propose`, el agente clasifica las specs por
 SHALL seleccionar su repositorio y Issue desde binding durable, evitar self-override de políticas, proteger production worktree/runtime/DB y prohibir escribir directamente al proceso en ejecución.
 
 ### R10-S02 — Queue self-service
-SHALL seleccionar un backlog item apto, verificar dependencias/DoR/capacidad y crear OpenSpec mediante agent-led `propose\` con contexto Business Intent; no inventar funcionalidades ni ejecutar Changes fuera del backlog.
+SHALL seleccionar un backlog item apto, verificar dependencias/DoR/capacidad y crear OpenSpec mediante agent-led `propose` con contexto Business Intent; no inventar funcionalidades ni ejecutar Changes fuera del backlog.
 
 ### R10-S03 — Desarrollo completo
-SHALL recorrer `apply/verify/review/remediation\` con Codex/Antigravity según políticas de etapa y roles separados, producir PR real con pruebas E2E; ningún agente autoaprueba su propio cambio.
+SHALL recorrer `apply/verify/review/remediation` con Codex/Antigravity según políticas de etapa y roles separados, producir PR real con pruebas E2E; ningún agente autoaprueba su propio cambio.
 
 ### R10-S04 — Aprendizaje verificable
 SHALL medir primera pasada, regresiones, fallos/cuota, recuperación, tiempo a PR, E2E productivo y causas reales; solo proponer mejoras a políticas con cambios OpenSpec/human gate, no autooptimización opaca.
 
 ### R10-S05 — Cierre protegido
-SHALL observar merge humano, ejecutar workflows nativos de \`sync/archive\`, despliegue inmutable/rollback y pruebas funcionales en servidor real; al reiniciar, self-service sigue en estado consistente.
+SHALL observar merge humano, ejecutar workflows nativos de `sync/archive`, despliegue inmutable/rollback y pruebas funcionales en servidor real; al reiniciar, self-service sigue en estado consistente.
 
 ### R10-S06 — Autonomía real
 SHALL pasar automáticamente a siguiente trabajo sin clics innecesarios, con cancel/pausa humana, backpressure por cuotas y visibilidad móvil/tablet/web; bloquear si no hay capacidad o una decisión legítima.
