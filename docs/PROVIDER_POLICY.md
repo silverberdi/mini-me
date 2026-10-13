@@ -1,29 +1,27 @@
 # Provider and Capacity Policy
 
-## Normal primary pairing
-Each project configures exactly one primary implementer and the complementary reviewer:
-- Codex implements → Antigravity reviews.
-- Antigravity implements → Codex reviews.
+## Primary agents by OpenSpec stage
+Each project configures permitted Codex/Antigravity roles and preferences **per stage** (proposer, implementer, verifier, reviewer, closer). Both are coding agents using installed OpenSpec workflows, not fixed lifetime roles. A candidate's substantive implementer may **not** be its authoritative reviewer. Prefer existing subscription capacity with cost-aware reservations and safe checkpoint boundaries.
 
-## DeepSeek Direct
-- Role: independent read-only auditor.
-- Direct API configuration only.
-- `DEEPSEEK_API_KEY` must never be exposed to OpenRouter.
-- Auditor reports findings/risk; it does not modify the repo or approve closure.
+## DeepSeek Direct — authorized exception
+- **Not a mandatory routine audit stage.** Allowed as optional explicitly authorized analysis/review/fallback only when both primaries cannot serve the required stage and its tool capabilities satisfy the request.
+- Direct API configuration only; `DEEPSEEK_API_KEY` never goes to OpenRouter.
+- Plain API inference does **not** provide coding-tool/skills/write capability. Never treat a text response as proof of native OpenSpec `apply` or `verify`.
+- It does not modify the repo, approve PR/closure or bypass independent review/human gates.
 
 ## Qwen local
 Optional advisory helper for mechanical tasks such as log triage, context compaction and summaries. It cannot satisfy implementation review, audit, budget or human gates merely because it is local.
 
 ## OpenRouter drain fallback
 - Disabled/no-spend unless explicitly configured.
-- Used only when both primary subscription providers are exhausted/unavailable under the configured capacity policy.
+- Used only after both primary subscription agents are exhausted/unavailable for the required stage, with **explicit operator authorization** and budget for each fallback policy episode.
 - Does not admit new READY work.
 - May finish eligible in-flight substantive work.
 - If OpenRouter performs implementation and review in the same candidate flow, the authoritative reviewer model must differ from the latest substantive implementer model.
 - If no distinct allowed reviewer model is available, wait for capacity rather than self-review.
-- DeepSeek Direct remains the independent audit layer.
+- No mandatory DeepSeek Direct layer. The authoritative review is an eligible distinct agent/model with verifiable evidence; if absent, wait.
 ## Antigravity Routine vs Premium Recovery Policy
-- **Routine implementation**: Antigravity is strictly forbidden as a routine implementer for projects where Codex is the designated primary implementer.
+- **Routine implementation**: Stage/provider selection is constrained by approved per-project policy and cost/capacity, but Antigravity is not globally banned from proposing, implementing or reviewing a distinct stage. Fixed project preferences are not permanent global roles.
 - **Bounded Premium Recovery (`PREMIUM_RECOVERY_NON_CONVERGENCE`)**:
   Antigravity may be assigned as a bounded premium recovery executor only when an explicit canonical premium reason is satisfied:
   1. Material candidate progress already exists (`is_material_execution_started` is True / candidate SHA exists).
@@ -46,9 +44,9 @@ Normalize at least: `success`, `transient_error`, `quota_limit`, `rate_limit`, `
 - malformed structured output: one repair retry, then escalate/block per policy.
 - auth/config/security/repository mismatch: no blind retry.
 - quota: wait/cooldown; never hammer in a retry loop.
-- review correction loop: max 2 rounds by default, then human escalation.
+- review correction loop: bounded attempts by **current candidate/generation/failure episode** with material-progress checks; exceeding limits yields a machine-operable blocked/wait/recovery diagnosis, not automatically a fake human decision.
 
 Retry only operations known to be safe to repeat. GitHub/deployment side effects require idempotent lookup/reconciliation rather than blind re-execution.
 
 ## Capacity metadata
-Persist provider capacity state, signal source, observed/reset/retry timestamps and confidence. Codex may expose preflight usage signals; adapters should consume them when reliably available. If reset is unknown, re-probe conservatively.
+Persist provider capacity state, signal source, observed/reset/retry timestamps and confidence. Preflight before expensive agent stages, estimate conservatively only when grounded, reserve checkpoints, and never invent remaining tokens or reset times. Codex may expose preflight usage signals; adapters should consume them when reliably available. If reset is unknown, re-probe conservatively.
