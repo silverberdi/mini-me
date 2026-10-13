@@ -44,6 +44,13 @@ Estas fichas son **contratos de backlog**, no `proposal.md` ni `specs/` artifici
 
 Los nombres e invocaciones son **específicos por agente**: Codex usa el skill **efectivamente instalado** (por ejemplo, `$openspec-propose` y `$openspec-apply-change` en este repositorio); otros agentes pueden usar `/opsx-propose` o `/opsx:propose`. Resolver el nombre real desde archivos/versiones del runner en preflight; no hardcodear un nombre que la instalación no registra. Son invocaciones en el **agente**, no binarios de shell `opsx`. El CLI `openspec` puede proporcionar `new`, `status`, `instructions`, `validate` y `archive` conforme a versión instalada. mini me jamás simulará una llamada al workflow invocando un script Python que replique su semántica.
 
+## Ingeniería y capacidades precargadas
+
+- `docs/ENGINEERING_DISCIPLINE.md` establece diseño/seguridad/mantenibilidad/UX, inventario de servicios/callers, controles de drift, migración y eliminación de código muerto **en el mismo Change**, seguido de pruebas/E2E después del retiro.
+- `docs/agent-capabilities/V1_MANIFEST.md` y sus contratos `HOOK_CONTRACTS.md`, `HARNESS_CONTRACT.md`, `RETIREMENT_MAP.md` aportan decisiones, interfaces y candidatos ya definidos; no se solicita a Codex/AGY que los infieran desde cero.
+- `.agent/skills/` y `.agents/skills/` contienen v1 de `minime-engineering-discipline`, `minime-safe-retirement` y `minime-real-e2e-proof`. `.agent/workflows/minime-{propose,apply,verify}-vertical.md` son adaptadores de orientación hacia los **workflows OpenSpec oficiales**, nunca sustitutos.
+- PR #140 sigue pendiente de revisión para hooks ejecutables. **Los nuevos archivos de skills son instrucciones, no pruebas de ejecución ni hooks técnicos activos.**
+
 ## Primera admisión
 
 1. Scheduler productivo permanece **disabled/inactive** hasta E2E autorizado, capacidad verificable y release gate cumplido.
