@@ -64,7 +64,7 @@ The implementation SHALL remain within the exact authorized worktree and be boun
 - **AND** neither discards material work nor creates a duplicate execution identity.
 
 ### Requirement: R01-S05 Checks and independent review govern candidate progression
-Mini me SHALL run the repository's configured deterministic checks and applicable installed OpenSpec verification workflow against the exact candidate. Authoritative review SHALL be read-only, bound to the frozen candidate SHA/base/generation and performed by an identity distinct from every substantive author whose changes survive in that candidate. An unavailable reviewer SHALL leave the candidate preserved in a truthful waiting state; it SHALL NOT be self-reviewed or falsely accepted. DeepSeek Direct SHALL NOT be a mandatory routine audit; it may be used only as an explicitly authorized compatible fallback when both primary agents cannot serve the required stage.
+Mini me SHALL run the repository's configured deterministic checks and applicable installed OpenSpec verification workflow against the exact candidate. Authoritative review SHALL be read-only, bound to the frozen repository identity, candidate SHA, base SHA, generation, manifest, and surviving authorship, and performed by an identity distinct from every substantive author whose changes survive in that candidate. An eligible complementary primary is the normal reviewer. When no primary reviewer is eligible, DeepSeek Direct MAY satisfy the authoritative review gate only under an explicitly authorized, compatible, distinct read-only reviewer contract that receives sufficient candidate-bound input and returns a structured response accepted by deterministic validation. The existing DeepSeek audit runner or audit result SHALL NOT be converted into review evidence. If neither reviewer path is available and authorized, the candidate SHALL remain preserved in a truthful waiting state; no review result SHALL authorize human merge.
 
 #### Scenario: Checks and distinct review authorize progression
 - **GIVEN** a frozen candidate whose deterministic checks pass and whose required native verification evidence is valid
@@ -77,6 +77,17 @@ Mini me SHALL run the repository's configured deterministic checks and applicabl
 - **WHEN** the pipeline attempts to advance
 - **THEN** it waits or requires fresh checks/review for the new candidate
 - **AND** does not reuse stale evidence, self-review, or mark the candidate PR-ready.
+
+#### Scenario: DeepSeek review fallback is explicitly authorized and independently validated
+- **GIVEN** no eligible primary reviewer can serve the frozen candidate and a compatible DeepSeek read-only review integration, sufficient review input, exact candidate binding, and explicit per-stage provider and budget authorization are verified
+- **WHEN** DeepSeek Direct reviews the candidate under the distinct reviewer contract
+- **THEN** the system validates a structured response deterministically, records review evidence bound to repository/base/head/generation/manifest and reviewer identity, and may satisfy the review gate only if the reviewer is distinct from all surviving substantive authors
+- **AND** it does not derive approval from an audit record, omit required candidate context, or authorize human merge.
+
+#### Scenario: DeepSeek review fallback is unavailable, incompatible, or unauthorized
+- **GIVEN** no eligible primary reviewer can serve and DeepSeek compatibility, sufficient input, explicit provider authorization, or stage budget is absent or uncertain
+- **WHEN** the pipeline evaluates review eligibility
+- **THEN** it does not invoke DeepSeek, does not treat audit evidence as review, preserves the candidate, and remains in a truthful waiting or blocked state.
 
 #### Scenario: Optional audit is not silently required or invoked
 - **GIVEN** primary review and all required checks pass, with no explicit policy or human authorization requiring an independent fallback audit
@@ -130,13 +141,18 @@ R01 acceptance SHALL include an externally observable, bounded end-to-end run us
 - **AND** checks pass, the distinct reviewer evaluates the frozen candidate, and a real Draft PR is observable at the exact candidate SHA.
 
 ### Requirement: R01-E02 Provider workflow identity is proven
-R01 SHALL demonstrate actual native workflow loading for the compatible Codex path and the compatible Antigravity path used by the Change; provider-specific workflow syntax and versions SHALL be observed, not assumed interchangeable.
+R01 SHALL demonstrate actual native workflow loading for the compatible Codex path used to implement the fixture; provider-specific workflow syntax and versions SHALL be observed, not assumed interchangeable. Antigravity execution is not a prerequisite for proving the Codex implementation path.
 
-#### Scenario: Provider-specific native workflow proof
-- **GIVEN** an authorized provider fixture and its installed supported workflow
-- **WHEN** each configured provider executes its assigned stage
-- **THEN** process/tool evidence proves that provider loaded the correct native OpenSpec workflow for the exact change
+#### Scenario: Codex native workflow proof
+- **GIVEN** the authorized R01 fixture and the installed supported Codex workflow
+- **WHEN** Codex executes the APPLY stage
+- **THEN** process/tool evidence proves Codex loaded the correct native OpenSpec workflow for the exact change
 - **AND** generic text instructions, shell-only validation, or another provider's trace do not satisfy the proof.
+
+#### Scenario: Antigravity is not a Codex acceptance prerequisite
+- **GIVEN** the Codex native workflow and its evidence are compatible and verified
+- **WHEN** R01 evaluates implementation-workflow acceptance
+- **THEN** absence of Antigravity execution does not fail the Codex workflow proof or prevent that proof from passing.
 
 ### Requirement: R01-E03 Adversarial preflight is tested before paid inference
 The integrated path SHALL have real or boundary-faithful tests for missing workflow/tool, invalid authentication, unavailable capacity, remote mismatch, path escape, and missing authorization, proving each applicable refusal occurs before inference or external mutation.
