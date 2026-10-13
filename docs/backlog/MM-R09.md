@@ -56,7 +56,7 @@ Publicar versión con incompatibilidad deliberada: no reemplazar automáticament
 Hacer una ejecución de producción/QA autorizada usando capability publicada y confirmar que evita un bloqueo real; no basta un JSON schema PASS.
 
 ## Paquetes de trabajo transversales a incluir dentro del mismo Change
-- Catalogar metadatos mínimos, fuente y versiones como extensión de R06; no construir marketplace.
+- Reutilizar manifiesto, workflows, skills y contratos v1 definidos en `docs/agent-capabilities/` y evolucionados en R06; ampliar únicamente metadatos, pruebas y código imprescindible identificado por evidencia. No construir marketplace.
 - Rutas agent-led OpenSpec específicas para nuevas capabilities, templates únicamente para metadata determinística.
 - Agregar pruebas de seguridad de tool invocation y rollback de capacidades sin desactivar policies.
 
