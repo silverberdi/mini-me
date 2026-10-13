@@ -50,7 +50,7 @@ Skill de proyecto solicita escritura fuera de workspace, filtración de secreto 
 Skill requerido no instalado o versión incompatible: BLOCKED con indicación precisa de remediación, sin silently downgrade a prompt genérico.
 
 ### R06-E05 — Outcome sustancial
-Ejecutar change con capacidad seleccionada que produce prueba verificable (por ejemplo un hook detecta una inconsistencia y obliga \`update\`/reverify). Demostrar diferencia versus control.
+Ejecutar change con capacidad seleccionada que produce prueba verificable (por ejemplo un hook detecta una inconsistencia y obliga `update`/reverify). Demostrar diferencia versus control.
 
 ### R06-E06 — Postdeploy
 Ejecutar por la API productiva/QA los mecanismos de selección y comprobar en logs del host qué skill/hook se invocó por etapa; no solo registry en BD.
