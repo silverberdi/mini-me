@@ -55,5 +55,5 @@ Los nombres e invocaciones son **específicos por agente**: Codex usa el skill *
 
 1. Scheduler productivo permanece **disabled/inactive** hasta E2E autorizado, capacidad verificable y release gate cumplido.
 2. Obtener baseline `main`, estado real de PR #140/#152 y del N01, binding exacto, política de cuota, configuración de OpenSpec y compatibilidad CLI/harness.
-3. Abrir con un agente autorizado `propose real-openspec-agent-execution` usando solo esta ficha y contexto canónico. Exigir a OpenSpec la propuesta multi-spec y pruebas E2E; no implementar por prompt libre.
+3. Abrir con Codex (cuando esté disponible) el workflow instalado `$openspec-propose real-openspec-agent-execution` usando la ficha `docs/backlog/MM-R01.md` y **`docs/agent-capabilities/R01_IMPLEMENTATION_STARTER.md`**. No inventar prompt largo: este archivo ya suministra inspección, interfaces, E2E y retiro. El workflow propone; **no ejecuta apply en la misma solicitud**. Exigir a OpenSpec la propuesta multi-spec y pruebas E2E; no implementar por prompt libre.
 4. No se autoriza `apply` hasta revisión de propuesta, riesgos y ruta real de prueba. Mantener merge humano y presupuesto explícito para pruebas de inferencia.
