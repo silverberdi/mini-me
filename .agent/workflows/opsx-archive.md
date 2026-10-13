@@ -119,6 +119,16 @@ Archive a completed change in the experimental workflow.
 
    If the sync failed, or any capability does not match, report what differs and stop — do not archive. Nothing has moved and `changeRoot` is intact, so the user can fix the mismatch or re-run the sync and start the archive again.
 
+   **ARCHIVE Quality Hook Gate (Delivery Integrity)**:
+   Execute the ARCHIVE quality hook gate, which queries GitHub for the PR, merge identity, and current review records:
+   ```bash
+   python -m minime.quality_hooks.cli evaluate-archive --change "<name>" --base-sha "$(git merge-base origin/main HEAD)" --candidate-sha "$(git rev-parse HEAD)" --pull-request-number <number> --target-branch main
+   ```
+   - Local JSON claims are not accepted. GitHub must report a human merge of the exact candidate and a human approval on that exact head SHA.
+   - The gate currently remains `BLOCKED` because no canonical aggregate Definition-of-Done authority is connected. Do not archive or call the change DONE based on merge/approval alone.
+   - All blocking CRITICAL/HIGH findings must be resolved.
+   - If the hook fails or is blocked, do NOT archive.
+
 5. **Perform the archive**
 
    Create an `archive` directory under `planningHome.changesDir` if it doesn't exist:

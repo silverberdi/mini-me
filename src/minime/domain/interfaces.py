@@ -1090,6 +1090,16 @@ class GitHubAdapterInterface(ABC):
             reason_code=ExternalReasonCode.UNSUPPORTED,
         )
 
+    def get_pull_request_reviews(
+        self, repository: str, pr_number: int
+    ) -> ExternalActionResult[list[dict[str, Any]]]:
+        return ExternalActionResult[list[dict[str, Any]]](
+            outcome=ExternalOutcome.UNKNOWN,
+            data=None,
+            source_adapter="interface",
+            reason_code=ExternalReasonCode.UNSUPPORTED,
+        )
+
     def get_issue(
         self, repository: str, issue_number: int
     ) -> ExternalActionResult[dict[str, Any]]:

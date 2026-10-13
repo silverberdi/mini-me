@@ -21,6 +21,7 @@ from minime.domain.enums import (
 )
 from minime.domain.models import OperatorActionRequest
 from minime.logging import configure_logging, get_logger
+from minime.quality_hooks.cli import cli_app as quality_hooks_app
 from minime.services.budget_service import BudgetService
 from minime.services.control_plane_service import ControlPlaneService
 from minime.services.orchestration_service import OrchestrationService
@@ -56,6 +57,7 @@ app.add_typer(providers_app, name="providers")
 app.add_typer(budget_app, name="budget")
 app.add_typer(orchestrate_app, name="orchestrate")
 app.add_typer(action_app, name="action")
+app.add_typer(quality_hooks_app, name="quality-hooks")
 
 logger = get_logger("cli")
 
