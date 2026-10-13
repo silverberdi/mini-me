@@ -19,7 +19,11 @@ from minime.domain.enums import (
     OrchestrationStage,
     OrchestrationStopOutcome,
     ProgressClassification,
+    ProviderHealthStatus,
     ReadinessState,
+    RecoveryClassification,
+    RecoveryDecisionStatus,
+    RecoverySource,
 )
 from minime.domain.models import (
     Change,
@@ -29,7 +33,9 @@ from minime.domain.models import (
     OperatorActionRequest,
     OrchestrationRun,
     Project,
+    ProviderHealth,
     RecoveryClaimContext,
+    RecoveryDecision,
     utc_now,
 )
 from minime.services.control_plane_service import ControlPlaneService
@@ -654,3 +660,134 @@ async def test_execution_pipeline_incomplete_tasks_block_checks(in_memory_uow, t
         project_id="mini-me", change_id="synthetic-pipeline-change"
     )
     assert any(event.event_type == EventType.INCOMPLETE_TASKS for event in events)
+
+
+@pytest.mark.asyncio
+async def test_auth_recovery_attempt_updates_real_health_and_preserves_candidate_for_reviewer(
+    in_memory_uow, tmp_path
+):
+    change_name = "auth-recovery-candidate"
+    seed_ready_change(
+        in_memory_uow,
+        tmp_path,
+        "# Tasks\n\n## 1. Work\n- [x] 1.1 Done\n",
+        checks=[],
+        change_name=change_name,
+    )
+    project = in_memory_uow.projects.get_by_id("mini-me")
+    run = OrchestrationRun(
+        run_id="run-auth-recovery-candidate",
+        project_id=project.project_id,
+        change_name=change_name,
+        base_sha="base-auth-recovery",
+        current_stage=OrchestrationStage.IMPLEMENTING,
+        resumable_stage=OrchestrationStage.IMPLEMENTING,
+        active_job_id="job-auth-recovery-candidate",
+        is_active=True,
+    )
+    job = Job(
+        job_id=run.active_job_id,
+        project_id=run.project_id,
+        change_name=run.change_name,
+        implementer_role="codex",
+        current_executor="codex",
+        status=JobStatus.WAITING_CAPACITY,
+        waiting_provider="openrouter",
+        capacity_block_reason="OpenRouter fallback ineligible: Scheduler is not in DRAIN mode.",
+        attempt_count=4,
+    )
+    health_time = utc_now()
+    in_memory_uow.provider_health.save(
+        ProviderHealth(
+            health_id="ph-codex",
+            provider="codex",
+            status=ProviderHealthStatus.AUTH_REQUIRED,
+            updated_at=health_time,
+        )
+    )
+    in_memory_uow.provider_health.save(
+        ProviderHealth(
+            health_id="ph-antigravity",
+            provider="antigravity",
+            status=ProviderHealthStatus.AUTH_REQUIRED,
+            updated_at=health_time,
+        )
+    )
+    in_memory_uow.orchestration_runs.save(run)
+    in_memory_uow.jobs.save(job)
+    claim = _dummy_claim_context(in_memory_uow, f"run:{run.run_id}")
+    action_evidence = {
+        "action_request_id": "operator-auth-recovery-once",
+        "action_type": "CONTINUE",
+        "reauthentication_confirmed": True,
+        "provider": "codex",
+        "expected_health_updated_at": health_time.isoformat(),
+        "project_id": run.project_id,
+        "change_name": run.change_name,
+        "run_id": run.run_id,
+        "job_id": job.job_id,
+        "generation": run.current_generation,
+    }
+    decision = RecoveryDecision(
+        cycle_id="auth-recovery-cycle",
+        claim_key=claim.claim_key,
+        identity_type="RUN",
+        identity_id=run.run_id,
+        project_id=run.project_id,
+        change_name=run.change_name,
+        source=RecoverySource.CONTROL_PLANE,
+        fence_token=claim.fence_token,
+        classification=RecoveryClassification.RESUME_SAFE_CHECKPOINT,
+        planned_action="DRIVE_AUTH_RECOVERY_CONTINUATION",
+        status=RecoveryDecisionStatus.EXECUTING,
+        observation_refs={"provider_auth_recovery": action_evidence},
+    )
+    in_memory_uow.recovery_decisions.create_decision(decision)
+    in_memory_uow.commit()
+
+    class CountingImplementer(MockImplementerRunner):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        async def run(self, worktree_path, prompt_context, timeout_seconds):
+            self.calls += 1
+            return await super().run(worktree_path, prompt_context, timeout_seconds)
+
+    runner = CountingImplementer()
+    service = ExecutionPipelineService(
+        in_memory_uow,
+        project_root=tmp_path,
+        implementer_runner=runner,
+        reviewer_runner=MockReviewerRunner(),
+        worktree_manager=FakeWorktreeManager(tmp_path),
+    )
+    from minime.services.checks_runner import ChecksRunResult
+
+    async def checks_passed(*args, **kwargs):
+        del args, kwargs
+        return ChecksRunResult(passed=True, results=[])
+
+    service.checks_runner.run = checks_passed
+
+    result = await service.execute_queued_job(
+        job.job_id,
+        candidate_generation=run.current_generation,
+        claim_context=claim,
+        auth_recovery_decision_id=decision.decision_id,
+    )
+
+    assert runner.calls == 1
+    assert result.status == JobStatus.WAITING_CAPACITY
+    assert result.waiting_provider == "antigravity"
+    assert result.candidate_sha
+    assert (
+        in_memory_uow.provider_health.get_by_provider("codex").status
+        == ProviderHealthStatus.AVAILABLE
+    )
+    attempts = in_memory_uow.job_attempts.list_by_job(job.job_id)
+    assert len(attempts) == 1
+    assert (
+        attempts[0].error_details["provider_auth_recovery"]["action_request_id"]
+        == action_evidence["action_request_id"]
+    )

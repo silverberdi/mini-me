@@ -57,6 +57,7 @@ class ActionObservationOutcome(str, Enum):
     UNOBSERVABLE = "UNOBSERVABLE"
     CONTRADICTORY = "CONTRADICTORY"
 
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_LEASE_SECONDS = 60
@@ -95,7 +96,11 @@ class OperationalHeartbeat:
                         success = self.renew_claim(self.claim_context, self.lease_seconds)
                     elif self.recovery_service is not None:
                         success = self.recovery_service.heartbeat(self.claim_context)
-                    elif self.uow is not None and hasattr(self.uow, "claims") and self.uow.claims is not None:
+                    elif (
+                        self.uow is not None
+                        and hasattr(self.uow, "claims")
+                        and self.uow.claims is not None
+                    ):
                         success = self.uow.claims.renew_heartbeat(
                             claim_key=self.claim_context.claim_key,
                             owner_instance_id=self.claim_context.owner_instance_id,
@@ -113,7 +118,11 @@ class OperationalHeartbeat:
                         break
                 except Exception as exc:
                     self.heartbeat_failed = True
-                    logger.warning("Heartbeat error for claim '%s': %s", getattr(self.claim_context, "claim_key", "unknown"), exc)
+                    logger.warning(
+                        "Heartbeat error for claim '%s': %s",
+                        getattr(self.claim_context, "claim_key", "unknown"),
+                        exc,
+                    )
                     break
 
         self._thread = threading.Thread(target=_run, daemon=True)
@@ -171,7 +180,11 @@ class RecoveryConvergenceService:
 
         # 1. Record event
         active_jobs = self.uow.jobs.list_active_jobs()
-        event_type = EventType.DAEMON_RESTARTED if source == RecoverySource.STARTUP else EventType.STATUS_CHECKED
+        event_type = (
+            EventType.DAEMON_RESTARTED
+            if source == RecoverySource.STARTUP
+            else EventType.STATUS_CHECKED
+        )
         payload = {
             "cycle_id": cycle_id,
             "source": source.value,
@@ -276,7 +289,11 @@ class RecoveryConvergenceService:
         if project_id:
             active_jobs = [j for j in active_jobs if j.project_id == project_id]
         for job in active_jobs:
-            run = self.uow.orchestration_runs.get_active_run(job.project_id, job.change_name) if hasattr(self.uow.orchestration_runs, "get_active_run") else None
+            run = (
+                self.uow.orchestration_runs.get_active_run(job.project_id, job.change_name)
+                if hasattr(self.uow.orchestration_runs, "get_active_run")
+                else None
+            )
             # A run owns its active Job's lifecycle. It was already converged above
             # under run:<run_id>; never compete with a second job claim.
             if run:
@@ -439,7 +456,12 @@ class RecoveryConvergenceService:
             and getattr(a, "candidate_generation", None) == candidate_generation
             and a.status == AuditStatus.AUDIT_COMPLETED
             and not any(
-                f.severity in (AuditFindingSeverity.CRITICAL, AuditFindingSeverity.HIGH, AuditFindingSeverity.BLOCKER)
+                f.severity
+                in (
+                    AuditFindingSeverity.CRITICAL,
+                    AuditFindingSeverity.HIGH,
+                    AuditFindingSeverity.BLOCKER,
+                )
                 for f in getattr(a, "findings", [])
             )
             for a in audits
@@ -485,9 +507,7 @@ class RecoveryConvergenceService:
             from minime.services.operator_executor_selection import effective_job_executor
 
             run = self.uow.orchestration_runs.get_active_run(job.project_id, job.change_name)
-            selected_executor, _, _operator_selected = effective_job_executor(
-                self.uow, run, job
-            )
+            selected_executor, _, _operator_selected = effective_job_executor(self.uow, run, job)
             if selected_executor and selected_executor != job.current_executor:
                 self.uow.jobs.update_executor_fenced(
                     job.job_id,
@@ -572,6 +592,8 @@ class RecoveryConvergenceService:
         requested_action: str | None = None,
         drain_mode: bool = False,
         force: bool = False,
+        auth_recovery_authorization: dict[str, Any] | None = None,
+        drive_admitted: bool = False,
     ) -> RecoveryDecision:
         """Drive direct run continuation through canonical claim acquisition and classification."""
         cycle_id = generate_uuid()
@@ -584,6 +606,8 @@ class RecoveryConvergenceService:
             requested_action=requested_action,
             drain_mode=drain_mode,
             force=force,
+            auth_recovery_authorization=auth_recovery_authorization,
+            drive_admitted=drive_admitted,
         )
 
     def reconcile_saga(self, saga_id: str, source: RecoverySource) -> RecoveryDecision:
@@ -623,7 +647,9 @@ class RecoveryConvergenceService:
             else:
                 claim_key = f"closure:{action.saga_id}"
         else:
-            raise ValueError(f"Action '{action_key}' lacks parent run_id and saga_id for claim derivation.")
+            raise ValueError(
+                f"Action '{action_key}' lacks parent run_id and saga_id for claim derivation."
+            )
 
         cycle_id = generate_uuid()
         return self._converge_action_identity(
@@ -641,7 +667,10 @@ class RecoveryConvergenceService:
     def acquire_claim(self, claim_key: str, lease_seconds: int = 60) -> RecoveryClaimContext | None:
         """Acquire or re-acquire a claim for this owner instance."""
         if not hasattr(self.uow, "claims") or self.uow.claims is None:
-            logger.error("Durable recovery claims are unavailable; refusing continuation for '%s'.", claim_key)
+            logger.error(
+                "Durable recovery claims are unavailable; refusing continuation for '%s'.",
+                claim_key,
+            )
             return None
         try:
             claim = self.uow.claims.acquire_or_reacquire(
@@ -657,9 +686,17 @@ class RecoveryConvergenceService:
             return None
         if isinstance(claim, RecoveryClaimContext):
             return claim
-        claim_key_val = claim.claim_key if isinstance(getattr(claim, "claim_key", None), str) else claim_key
-        owner_id_val = claim.owner_instance_id if isinstance(getattr(claim, "owner_instance_id", None), str) else self.owner_instance_id
-        fence_token_val = claim.fence_token if isinstance(getattr(claim, "fence_token", None), int) else 1
+        claim_key_val = (
+            claim.claim_key if isinstance(getattr(claim, "claim_key", None), str) else claim_key
+        )
+        owner_id_val = (
+            claim.owner_instance_id
+            if isinstance(getattr(claim, "owner_instance_id", None), str)
+            else self.owner_instance_id
+        )
+        fence_token_val = (
+            claim.fence_token if isinstance(getattr(claim, "fence_token", None), int) else 1
+        )
         lease_expires_val = (
             claim.lease_expires_at
             if isinstance(getattr(claim, "lease_expires_at", None), datetime)
@@ -773,7 +810,10 @@ class RecoveryConvergenceService:
             return ActionObservationOutcome.OBSERVED_PRESENT
 
         obs = self.classify_external_action_observation(action)
-        if obs == ExternalActionObservation.PROVEN_NEVER_DISPATCHED and action.status == ExternalActionStatus.RESERVED:
+        if (
+            obs == ExternalActionObservation.PROVEN_NEVER_DISPATCHED
+            and action.status == ExternalActionStatus.RESERVED
+        ):
             return ActionObservationOutcome.OBSERVED_ABSENT
 
         try:
@@ -803,7 +843,9 @@ class RecoveryConvergenceService:
         atype = action.action_type
 
         if atype == ExternalActionType.BRANCH_PUSH:
-            target_ref = action.target_identity or (f"refs/heads/candidate-{action.candidate_sha[:8]}" if action.candidate_sha else None)
+            target_ref = action.target_identity or (
+                f"refs/heads/candidate-{action.candidate_sha[:8]}" if action.candidate_sha else None
+            )
             if not target_ref or not action.candidate_sha:
                 return ActionObservationOutcome.UNOBSERVABLE
             try:
@@ -831,6 +873,7 @@ class RecoveryConvergenceService:
 
         elif atype == ExternalActionType.PR_CREATE:
             from minime.services.status_service import PullRequestLookupService
+
             pr_svc = PullRequestLookupService(self.uow, self.project_root)
             run = self.uow.orchestration_runs.get_by_id(action.run_id) if action.run_id else None
             if run:
@@ -863,9 +906,16 @@ class RecoveryConvergenceService:
                 binding = self.uow.bindings.get_by_project_and_change(project_id, change_name)
                 if binding and binding.github_issue_number:
                     project = self.uow.projects.get_by_id(project_id)
-                    if project and project.repository and getattr(self, "github_adapter", None) and hasattr(self.github_adapter, "get_issue"):
+                    if (
+                        project
+                        and project.repository
+                        and getattr(self, "github_adapter", None)
+                        and hasattr(self.github_adapter, "get_issue")
+                    ):
                         try:
-                            issue_result = self.github_adapter.get_issue(project.repository, binding.github_issue_number)
+                            issue_result = self.github_adapter.get_issue(
+                                project.repository, binding.github_issue_number
+                            )
                             issue = getattr(issue_result, "data", None)
                             if (
                                 getattr(issue_result, "outcome", None) == ExternalOutcome.SUCCESS
@@ -875,7 +925,8 @@ class RecoveryConvergenceService:
                                 return ActionObservationOutcome.OBSERVED_PRESENT
                             if (
                                 getattr(issue_result, "outcome", None) == ExternalOutcome.FAILURE
-                                and getattr(issue_result, "reason_code", None) == ExternalReasonCode.NOT_FOUND
+                                and getattr(issue_result, "reason_code", None)
+                                == ExternalReasonCode.NOT_FOUND
                             ):
                                 return ActionObservationOutcome.OBSERVED_ABSENT
                             return ActionObservationOutcome.UNOBSERVABLE
@@ -905,8 +956,15 @@ class RecoveryConvergenceService:
                 if binding and binding.github_issue_number:
                     try:
                         project = self.uow.projects.get_by_id(project_id)
-                        if project and project.repository and getattr(self, "github_adapter", None) and hasattr(self.github_adapter, "get_issue"):
-                            issue_result = self.github_adapter.get_issue(project.repository, binding.github_issue_number)
+                        if (
+                            project
+                            and project.repository
+                            and getattr(self, "github_adapter", None)
+                            and hasattr(self.github_adapter, "get_issue")
+                        ):
+                            issue_result = self.github_adapter.get_issue(
+                                project.repository, binding.github_issue_number
+                            )
                             issue = getattr(issue_result, "data", None)
                             if (
                                 getattr(issue_result, "outcome", None) == ExternalOutcome.SUCCESS
@@ -973,7 +1031,9 @@ class RecoveryConvergenceService:
             return ActionObservationOutcome.UNOBSERVABLE
 
         elif atype == ExternalActionType.BRANCH_DELETE:
-            branch_name = action.target_identity or (f"minime/{action.request_fingerprint}" if action.request_fingerprint else None)
+            branch_name = action.target_identity or (
+                f"minime/{action.request_fingerprint}" if action.request_fingerprint else None
+            )
             if branch_name:
                 try:
                     loc_res = subprocess.run(
@@ -1022,6 +1082,7 @@ class RecoveryConvergenceService:
         elif atype in (ExternalActionType.OPENSPEC_SYNC, ExternalActionType.OPENSPEC_ARCHIVE):
             if action.target_identity:
                 from minime.adapters.openspec import OpenSpecAdapter
+
                 adapter = OpenSpecAdapter()
                 res = adapter.get_change_status(self.project_root, action.target_identity)
                 if atype == ExternalActionType.OPENSPEC_ARCHIVE:
@@ -1052,6 +1113,7 @@ class RecoveryConvergenceService:
         force: bool = False,
         drive_admitted: bool = False,
         timeout_hours: float = 2.0,
+        auth_recovery_authorization: dict[str, Any] | None = None,
     ) -> RecoveryDecision:
         claim = self.acquire_claim(claim_key=claim_key, lease_seconds=self.lease_seconds)
         if not claim:
@@ -1095,6 +1157,32 @@ class RecoveryConvergenceService:
             self.uow.commit()
             self.release_claim(context)
             return decision
+
+        auth_recovery_valid = False
+        auth_recovery_decision: RecoveryDecision | None = None
+        if auth_recovery_authorization is not None:
+            auth_recovery_valid = self._validate_auth_recovery_authorization(
+                run, source, context, auth_recovery_authorization
+            )
+            if not auth_recovery_valid:
+                decision = RecoveryDecision(
+                    cycle_id=cycle_id,
+                    claim_key=claim_key,
+                    identity_type="RUN",
+                    identity_id=run_id,
+                    project_id=run.project_id,
+                    change_name=run.change_name,
+                    source=source,
+                    fence_token=context.fence_token,
+                    classification=RecoveryClassification.NEEDS_HUMAN,
+                    planned_action="NO_ACTION",
+                    status=RecoveryDecisionStatus.NO_ACTION,
+                    reason_code="AUTH_RECOVERY_AUTHORIZATION_STALE_OR_MISMATCHED",
+                )
+                self._create_decision(decision)
+                self.uow.commit()
+                self.release_claim(context)
+                return decision
         if run.active_job_id:
             job = self.uow.jobs.get_by_id(run.active_job_id)
             if job:
@@ -1168,7 +1256,8 @@ class RecoveryConvergenceService:
         if (
             not run.is_active
             or run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
-            or run.current_stage in (OrchestrationStage.PR_PREPARED, OrchestrationStage.POST_MERGE_RECONCILING)
+            or run.current_stage
+            in (OrchestrationStage.PR_PREPARED, OrchestrationStage.POST_MERGE_RECONCILING)
         ):
             from minime.services.post_merge_service import PostMergeReconciliationService
             from minime.services.saga_engine import SagaEngine
@@ -1178,7 +1267,12 @@ class RecoveryConvergenceService:
                 for s in self.uow.durable_sagas.list_active()
                 if s.run_id == run.run_id and s.saga_type == SagaType.CLOSURE
             ]
-            if closure_sagas or run.current_stage in (OrchestrationStage.PR_PREPARED, OrchestrationStage.POST_MERGE_RECONCILING) or run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE:
+            if (
+                closure_sagas
+                or run.current_stage
+                in (OrchestrationStage.PR_PREPARED, OrchestrationStage.POST_MERGE_RECONCILING)
+                or run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
+            ):
                 decision = RecoveryDecision(
                     cycle_id=cycle_id,
                     claim_key=claim_key,
@@ -1250,16 +1344,20 @@ class RecoveryConvergenceService:
             self.release_claim(context)
             return decision
 
-        if run.stop_outcome in (OrchestrationStopOutcome.WAITING_CAPACITY, OrchestrationStopOutcome.WAITING_EXTERNAL):
+        if run.stop_outcome in (
+            OrchestrationStopOutcome.WAITING_CAPACITY,
+            OrchestrationStopOutcome.WAITING_EXTERNAL,
+        ):
             waiting_since_str = (run.stop_details or {}).get("waiting_since")
             if waiting_since_str:
                 try:
                     from datetime import datetime, timezone
+
                     ws = datetime.fromisoformat(waiting_since_str)
                     if ws.tzinfo is None:
                         ws = ws.replace(tzinfo=timezone.utc)
                     elapsed_hours = (utc_now() - ws).total_seconds() / 3600.0
-                    if elapsed_hours >= timeout_hours:
+                    if elapsed_hours >= timeout_hours and not auth_recovery_valid:
                         reason = f"Waiting capacity timeout exceeded ({elapsed_hours:.1f}h > {timeout_hours:.1f}h)"
                         self.uow.orchestration_runs.update_stop_outcome(
                             run_id=run.run_id,
@@ -1302,14 +1400,16 @@ class RecoveryConvergenceService:
         if run.stop_outcome == OrchestrationStopOutcome.WAITING_CAPACITY:
             project = self.uow.projects.get_by_id(run.project_id)
             provider = (
-                (run.stop_details.get("provider") if run.stop_details else None)
-                or (project.implementer if project else "codex")
-            )
+                auth_recovery_authorization.get("provider")
+                if auth_recovery_valid and auth_recovery_authorization
+                else (run.stop_details.get("provider") if run.stop_details else None)
+            ) or (project.implementer if project else "codex")
             health = self.health_service.get_health(provider)
             if (
                 health.status not in (ProviderHealthStatus.AVAILABLE, ProviderHealthStatus.DEGRADED)
                 and not force
                 and not drain_mode
+                and not auth_recovery_valid
             ):
                 decision = RecoveryDecision(
                     cycle_id=cycle_id,
@@ -1336,6 +1436,24 @@ class RecoveryConvergenceService:
                     is_active=True,
                     claim_context=context,
                 )
+                if auth_recovery_valid and auth_recovery_authorization:
+                    auth_recovery_decision = RecoveryDecision(
+                        cycle_id=cycle_id,
+                        claim_key=claim_key,
+                        identity_type="RUN",
+                        identity_id=run_id,
+                        project_id=run.project_id,
+                        change_name=run.change_name,
+                        source=source,
+                        fence_token=context.fence_token,
+                        classification=RecoveryClassification.RESUME_SAFE_CHECKPOINT,
+                        planned_action="DRIVE_AUTH_RECOVERY_CONTINUATION",
+                        status=RecoveryDecisionStatus.EXECUTING,
+                        observation_refs={
+                            "provider_auth_recovery": dict(auth_recovery_authorization)
+                        },
+                    )
+                    self._create_decision(auth_recovery_decision)
                 self.uow.commit()
 
                 if not drive_admitted:
@@ -1371,11 +1489,17 @@ class RecoveryConvergenceService:
                 ExternalActionStatus.FAILED,
             ):
                 outcome = self.observe_external_action(action)
-                if outcome == ActionObservationOutcome.OBSERVED_PRESENT or action.status == ExternalActionStatus.COMPLETED:
+                if (
+                    outcome == ActionObservationOutcome.OBSERVED_PRESENT
+                    or action.status == ExternalActionStatus.COMPLETED
+                ):
                     has_adoptable = True
                 elif outcome == ActionObservationOutcome.OBSERVED_ABSENT:
                     continue
-                elif outcome == ActionObservationOutcome.CONTRADICTORY or action.status == ExternalActionStatus.AMBIGUOUS:
+                elif (
+                    outcome == ActionObservationOutcome.CONTRADICTORY
+                    or action.status == ExternalActionStatus.AMBIGUOUS
+                ):
                     has_ambiguous = True
                 elif outcome == ActionObservationOutcome.UNOBSERVABLE:
                     has_unobservable = True
@@ -1464,7 +1588,7 @@ class RecoveryConvergenceService:
             self.release_claim(context)
             return decision
 
-        decision = RecoveryDecision(
+        decision = auth_recovery_decision or RecoveryDecision(
             cycle_id=cycle_id,
             claim_key=claim_key,
             identity_type="RUN",
@@ -1476,8 +1600,14 @@ class RecoveryConvergenceService:
             classification=RecoveryClassification.RESUME_SAFE_CHECKPOINT,
             planned_action="DRIVE_CONTINUATION",
             status=RecoveryDecisionStatus.EXECUTING,
+            observation_refs=(
+                {"provider_auth_recovery": dict(auth_recovery_authorization)}
+                if auth_recovery_valid and auth_recovery_authorization
+                else {}
+            ),
         )
-        self._create_decision(decision)
+        if auth_recovery_decision is None:
+            self._create_decision(decision)
         if source == RecoverySource.STARTUP:
             self.uow.events.save(
                 Event(
@@ -1488,7 +1618,9 @@ class RecoveryConvergenceService:
                     payload={
                         "run_id": run.run_id,
                         "stage": run.current_stage.value,
-                        "resumable_stage": run.resumable_stage.value if run.resumable_stage else None,
+                        "resumable_stage": run.resumable_stage.value
+                        if run.resumable_stage
+                        else None,
                         "recovery_cycle_id": cycle_id,
                     },
                     timestamp=utc_now(),
@@ -1501,7 +1633,11 @@ class RecoveryConvergenceService:
         orchestration_svc = OrchestrationService(self.uow, project_root=self.project_root)
         try:
             orchestration_svc.resume(
-                run_id=run.run_id, drain_mode=drain_mode, force=force, claim_context=context
+                run_id=run.run_id,
+                drain_mode=drain_mode,
+                force=force,
+                claim_context=context,
+                auth_recovery_decision_id=(decision.decision_id if auth_recovery_valid else None),
             )
             decision.status = RecoveryDecisionStatus.COMPLETED
         except Exception as exc:
@@ -1512,6 +1648,96 @@ class RecoveryConvergenceService:
         self._update_decision(decision)
         self.release_claim(context)
         return decision
+
+    def _validate_auth_recovery_authorization(
+        self,
+        run: Any,
+        source: RecoverySource,
+        claim_context: Any,
+        authorization: dict[str, Any],
+    ) -> bool:
+        """Validate an explicit, single-use auth recovery permit under the run fence."""
+        if source != RecoverySource.CONTROL_PLANE or not run.active_job_id:
+            return False
+        required = {
+            "action_request_id",
+            "action_type",
+            "reauthentication_confirmed",
+            "provider",
+            "expected_health_updated_at",
+            "project_id",
+            "change_name",
+            "run_id",
+            "job_id",
+            "generation",
+        }
+        if not required.issubset(authorization):
+            return False
+        if (
+            authorization["action_type"] != "CONTINUE"
+            or authorization["reauthentication_confirmed"] is not True
+            or authorization["run_id"] != run.run_id
+            or authorization["project_id"] != run.project_id
+            or authorization["change_name"] != run.change_name
+            or authorization["job_id"] != run.active_job_id
+            or authorization["generation"] != run.current_generation
+            or run.current_stage != OrchestrationStage.IMPLEMENTING
+            or run.stop_outcome != OrchestrationStopOutcome.WAITING_CAPACITY
+            or run.current_candidate_sha
+            or claim_context.claim_key != f"run:{run.run_id}"
+        ):
+            return False
+        project = self.uow.projects.get_by_id(run.project_id)
+        job = self.uow.jobs.get_by_id(run.active_job_id)
+        provider = authorization["provider"]
+        waiting_matches_auth_provider = bool(
+            job
+            and (
+                job.waiting_provider == provider
+                or (
+                    job.waiting_provider == "openrouter"
+                    and (job.capacity_block_reason or "").startswith(
+                        "OpenRouter fallback ineligible:"
+                    )
+                )
+            )
+        )
+        if (
+            not project
+            or not job
+            or project.implementer != provider
+            or job.project_id != run.project_id
+            or job.change_name != run.change_name
+            or job.status != JobStatus.WAITING_CAPACITY
+            or not waiting_matches_auth_provider
+            or job.current_executor != provider
+            or job.candidate_sha
+            or provider not in {"codex", "antigravity"}
+        ):
+            return False
+        health = self.health_service.get_existing_health(provider)
+        if (
+            not health
+            or health.status != ProviderHealthStatus.AUTH_REQUIRED
+            or health.updated_at.isoformat() != authorization["expected_health_updated_at"]
+        ):
+            return False
+        if run.current_candidate_sha or self.uow.orchestration_candidates.get_latest_for_run(
+            run.run_id
+        ):
+            return False
+        for action in self.uow.orchestration_external_actions.list_by_run(run.run_id):
+            if action.status != ExternalActionStatus.COMPLETED:
+                return False
+        decisions_repo = getattr(self.uow, "recovery_decisions", None)
+        if not decisions_repo:
+            return False
+        for prior in decisions_repo.list_by_claim_key(f"run:{run.run_id}"):
+            if (prior.observation_refs or {}).get("provider_auth_recovery", {}).get(
+                "action_request_id"
+            ) == authorization["action_request_id"]:
+                return False
+        return True
 
     def _converge_saga_identity(
         self,
@@ -1561,9 +1787,7 @@ class RecoveryConvergenceService:
             self.release_claim(context)
             return decision
 
-        item = self.uow.backlog_items.get_by_project_and_key(
-            saga.project_id, saga.work_item_key
-        )
+        item = self.uow.backlog_items.get_by_project_and_key(saga.project_id, saga.work_item_key)
         change = self.uow.changes.get_by_name(
             saga.project_id, saga.change_name or saga.work_item_key
         )
@@ -1580,7 +1804,9 @@ class RecoveryConvergenceService:
             heartbeat_interval_seconds=self.heartbeat_seconds,
             lease_seconds=self.lease_seconds,
         )
-        intake_svc = IntakeService(self.uow, project_root=self.project_root, github_adapter=self.github_adapter)
+        intake_svc = IntakeService(
+            self.uow, project_root=self.project_root, github_adapter=self.github_adapter
+        )
         post_merge_svc = self.post_merge_service or PostMergeReconciliationService(
             self.uow,
             project_root=self.project_root,
@@ -1594,7 +1820,9 @@ class RecoveryConvergenceService:
 
         if is_terminal and saga.saga_type == SagaType.INTAKE:
             saga_engine.cancel_saga(
-                saga, cancellation_reason="Parent backlog item or change is terminal.", claim_context=context
+                saga,
+                cancellation_reason="Parent backlog item or change is terminal.",
+                claim_context=context,
             )
             decision = RecoveryDecision(
                 cycle_id=cycle_id,
@@ -1685,7 +1913,10 @@ class RecoveryConvergenceService:
 
         outcome = self.observe_external_action(action)
 
-        if outcome == ActionObservationOutcome.OBSERVED_PRESENT or action.status == ExternalActionStatus.COMPLETED:
+        if (
+            outcome == ActionObservationOutcome.OBSERVED_PRESENT
+            or action.status == ExternalActionStatus.COMPLETED
+        ):
             classification = RecoveryClassification.ADOPT_OBSERVED_EFFECT
             planned_action = "ADOPT_COMPLETED"
         elif outcome == ActionObservationOutcome.OBSERVED_ABSENT:
@@ -1699,7 +1930,10 @@ class RecoveryConvergenceService:
             else:
                 classification = RecoveryClassification.WAITING_EXTERNAL
                 planned_action = "OBSERVE_BEFORE_REPEAT"
-        elif outcome == ActionObservationOutcome.CONTRADICTORY or action.status == ExternalActionStatus.AMBIGUOUS:
+        elif (
+            outcome == ActionObservationOutcome.CONTRADICTORY
+            or action.status == ExternalActionStatus.AMBIGUOUS
+        ):
             classification = RecoveryClassification.NEEDS_HUMAN
             planned_action = "ESCALATE_NEEDS_HUMAN"
         else:

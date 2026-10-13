@@ -9,6 +9,7 @@ import re
 import subprocess
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 from minime.adapters.openrouter_adapter import OpenRouterAdapter, OpenRouterRequest
 from minime.domain.enums import (
@@ -305,6 +306,7 @@ class ExecutionPipelineService:
         job_id: str,
         candidate_generation: int = 1,
         claim_context: RecoveryClaimContext | None = None,
+        auth_recovery_decision_id: str | None = None,
     ) -> Job:
         from minime.domain.models import validate_claim_context_authoritative
 
@@ -334,10 +336,22 @@ class ExecutionPipelineService:
 
             past_attempts = self.uow.job_attempts.list_by_job(job.job_id)
             past_attempts.sort(key=lambda a: a.attempt_number)
+            auth_recovery_refs: dict[str, Any] | None = None
+            if auth_recovery_decision_id:
+                auth_recovery_refs = self._validate_auth_recovery_dispatch(
+                    decision_id=auth_recovery_decision_id,
+                    run=run_identity,
+                    job=job,
+                    project=project,
+                    current_executor=current_executor,
+                    claim_context=claim_context,
+                    attempts=past_attempts,
+                )
 
             # If resuming an episode that reached non-convergence / false human gate, transition to Antigravity recovery
             if (
-                current_executor == PrimaryProvider.CODEX.value
+                not auth_recovery_decision_id
+                and current_executor == PrimaryProvider.CODEX.value
                 and not operator_reassigned
                 and self.provider_policy._verify_codex_non_convergence(past_attempts)
                 and (
@@ -402,7 +416,17 @@ class ExecutionPipelineService:
             imp_health = self.health_service.get_health(effective_implementer)
             is_primary_imp_available = imp_health.status == ProviderHealthStatus.AVAILABLE
 
-            if not is_primary_imp_available:
+            if not is_primary_imp_available and auth_recovery_refs:
+                # The explicitly authorized attempt is the sole remote auth check.
+                # Do not invoke OpenRouter fallback or mutate health here.
+                if imp_health.status != ProviderHealthStatus.AUTH_REQUIRED:
+                    raise RuntimeError("Provider-auth recovery health changed before dispatch.")
+                if job.waiting_provider is not None:
+                    job.waiting_provider = None
+                    job.capacity_block_reason = None
+                    self.uow.jobs.save(job)
+                    self.uow.commit()
+            elif not is_primary_imp_available:
                 # Primary implementer is exhausted / unavailable. Check for OpenRouter fallback eligibility.
                 dual_exhausted = self._is_dual_primary_exhausted(project)
                 if not dual_exhausted:
@@ -643,6 +667,9 @@ class ExecutionPipelineService:
                     corrective_prompt=corrective_prompt,
                     task_class=task_class_result.task_class,
                     premium_reason_code=premium_reason,
+                    error_details=(
+                        {"provider_auth_recovery": auth_recovery_refs} if auth_recovery_refs else {}
+                    ),
                 )
                 self.uow.job_attempts.save(active_attempt)
                 self.uow.commit()
@@ -1231,6 +1258,16 @@ class ExecutionPipelineService:
                     can_lightweight_reconcile=can_reconcile,
                 )
                 decision_res = self.continuation_engine.decide(ctx)
+                if auth_recovery_refs and decision_res.decision in {
+                    ContinuationDecision.CONTINUE_SAME_AGENT,
+                    ContinuationDecision.CORRECT_AND_RETRY,
+                    ContinuationDecision.REASSIGN_AGENT,
+                }:
+                    decision_res.decision = ContinuationDecision.NEEDS_HUMAN
+                    decision_res.escalation_reason = (
+                        "The one-shot provider reauthentication attempt was consumed; "
+                        "a new explicit operator CONTINUE is required before another provider call."
+                    )
                 job.continuation_decision = decision_res.decision
                 active_attempt.continuation_decision = decision_res.decision
                 self.uow.job_attempts.save(active_attempt)
@@ -2548,6 +2585,80 @@ class ExecutionPipelineService:
         if not project:
             raise ValueError(f"Project '{project_id}' not found.")
         return project
+
+    def _validate_auth_recovery_dispatch(
+        self,
+        *,
+        decision_id: str,
+        run: Any,
+        job: Job,
+        project: Any,
+        current_executor: str,
+        claim_context: RecoveryClaimContext | None,
+        attempts: list[JobAttempt],
+    ) -> dict[str, Any]:
+        """Revalidate the fenced one-shot permit immediately before dispatch."""
+        from minime.domain.enums import OrchestrationStage, OrchestrationStopOutcome, RecoverySource
+
+        decision = self.uow.recovery_decisions.get_by_id(decision_id)
+        refs = (
+            (decision.observation_refs or {}).get("provider_auth_recovery", {}) if decision else {}
+        )
+        waiting_matches_auth_provider = bool(
+            job.waiting_provider == current_executor
+            or (
+                job.waiting_provider == "openrouter"
+                and (job.capacity_block_reason or "").startswith("OpenRouter fallback ineligible:")
+            )
+        )
+        if (
+            not decision
+            or decision.status.value != "EXECUTING"
+            or decision.source != RecoverySource.CONTROL_PLANE
+            or not run
+            or not claim_context
+            or decision.identity_id != run.run_id
+            or decision.project_id != run.project_id
+            or decision.change_name != run.change_name
+            or decision.claim_key != f"run:{run.run_id}"
+            or decision.fence_token != claim_context.fence_token
+            or claim_context.claim_key != decision.claim_key
+            or refs.get("run_id") != run.run_id
+            or refs.get("project_id") != run.project_id
+            or refs.get("change_name") != run.change_name
+            or refs.get("job_id") != job.job_id
+            or refs.get("generation") != run.current_generation
+            or refs.get("action_type") != "CONTINUE"
+            or refs.get("reauthentication_confirmed") is not True
+            or run.current_stage != OrchestrationStage.IMPLEMENTING
+            or run.stop_outcome not in {None, OrchestrationStopOutcome.WAITING_CAPACITY}
+            or not run.is_active
+            or run.active_job_id != job.job_id
+            or run.current_candidate_sha
+            or job.candidate_sha
+            or job.project_id != run.project_id
+            or job.change_name != run.change_name
+            or project.implementer != current_executor
+            or job.current_executor != current_executor
+            or not waiting_matches_auth_provider
+            or refs.get("provider") != current_executor
+        ):
+            raise RuntimeError("Provider-auth recovery permit identity/fence validation failed.")
+        health = self.health_service.get_existing_health(current_executor)
+        if (
+            not health
+            or health.status != ProviderHealthStatus.AUTH_REQUIRED
+            or health.updated_at.isoformat() != refs.get("expected_health_updated_at")
+        ):
+            raise RuntimeError("Provider-auth recovery permit is stale or provider health changed.")
+        action_request_id = refs.get("action_request_id")
+        if not action_request_id or any(
+            (attempt.error_details or {}).get("provider_auth_recovery", {}).get("action_request_id")
+            == action_request_id
+            for attempt in attempts
+        ):
+            raise RuntimeError("Provider-auth recovery authorization was already consumed.")
+        return dict(refs)
 
     def _require_job(self, job_id: str) -> Job:
         job = self.uow.jobs.get_by_id(job_id)
