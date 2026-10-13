@@ -2,6 +2,13 @@
 
 These decisions supersede the previous AgentFlow context pack.
 
+## Effective product delivery contract (2026-10-13)
+- Governing details for the recovery backlog: [BACKLOG](BACKLOG.md), [ROADMAP](ROADMAP.md), [CHANGE_DELIVERY_CONTRACT](CHANGE_DELIVERY_CONTRACT.md) and its 10 vertical MM-R01–MM-R10 dossiers. Historical delivery claims are not accepted E2E proof.
+- mini me is **control plane**, not the author/implementer of OpenSpec planning or application. Codex/Antigravity operate native OpenSpec agent workflows: propose, update, continue when installed, apply, verify when installed, sync, archive. Do not replace these with Python templates, custom prompt-driven implementations or custom semantic merges.
+- Every Change bundles all required specs to deliver real, deployed, E2E-demonstrated user/operator value. Unit/integration PASS alone cannot close a Change; retain fail-closed human merge and explicit permission for agent inference. No auto-merge.
+- These decisions override older requirements making a DeepSeek audit mandatory or assigning immutable Codex/Antigravity roles across all stages. DeepSeek/OpenRouter are authorized fallback **only after both primaries cannot supply the stage**, and only with explicit budget/provider approval and capability verification. A subscription provider may author or review different stages, but not authoritatively review its own substantive candidate.
+- No automatic scheduler re-enablement, quota consumption, GitHub Issue mass closure or production migrations when approving backlog documents.
+
 ## Identity and installation
 - Product name: **mini me**.
 - Technical naming: repo `mini-me`, Python package/CLI namespace `minime` unless an implementation constraint requires otherwise.
@@ -27,19 +34,19 @@ These decisions supersede the previous AgentFlow context pack.
 - Human merge is mandatory in MVP.
 
 ## Agent roles
-- Normal path: Codex implementer / Antigravity reviewer, or the reverse, configured per project.
-- Routine implementation: Antigravity is strictly forbidden as routine implementer for Codex-designated projects.
+- Normal path: Codex and Antigravity alternate proposer, implementer, verifier and independent reviewer **by stage**, respecting project policy and resource budgets; the implementer and authoritative reviewer for a given candidate must differ.
+- Primary provider preference (e.g. Codex workhorse / Antigravity premium) is configurable per project/stage, not a permanent agent identity or ban across all workflows.
 - Bounded Premium Recovery (`PREMIUM_RECOVERY_NON_CONVERGENCE`): When material candidate progress exists but the primary executor exhibits non-convergence (repeated malformed results, failing checks, retries/reassignments exhausted), Antigravity may be engaged for a strictly bounded recovery attempt (max 1 attempt per failure episode; anti-ping-pong enforced).
 - Reviewer independence: The same primary agent / model identity cannot implement and review the same candidate. If Antigravity performs recovery implementation, Antigravity must NOT review that candidate; review role must reassign to Codex or an independent model.
-- DeepSeek Direct: independent read-only auditor.
+- DeepSeek Direct: optional explicitly authorized read-only analysis/fallback, not a mandatory audit before every PR.
 - Qwen local: optional advisory helper only.
-- OpenRouter: optional paid drain fallback only.
+- OpenRouter: optional paid alternative only after dual-primary exhaustion and explicit authorization, subject to actual agent/tool capabilities and budget.
 - In OpenRouter drain fallback, substantive implementer model and authoritative reviewer model must differ. Qwen does not review Qwen.
 - Human Gate Semantics: `NEEDS_HUMAN` is reserved strictly for genuine human-only decisions (product ambiguity, credentials/secrets, irreversible operator decisions, merge gates, business policy decisions). Deterministic executor recovery and non-convergence must use machine-operable state/reason semantics (`EXECUTOR_RECOVERY_REQUIRED`, `WAITING_CAPACITY`) without triggering false human gates.
 
 ## Capacity policy
 - When both primary subscription agents are exhausted, scheduler stops admitting new READY changes.
-- Scheduler enters DRAIN and may use permitted OpenRouter models/budget only to finish eligible in-flight stages.
+- Scheduler enters DRAIN; an explicitly authorized compatible DeepSeek/OpenRouter alternative may serve eligible in-flight stages only when budget, independence and tools support the requested role. Otherwise wait.
 - When no drainable work remains, scheduler waits for primary capacity recovery.
 - Provider reset time should use provider signals when available; do not assume midnight without evidence.
 
@@ -73,7 +80,7 @@ Checks
         ↓
 Complementary Review
         ↓
-DeepSeek Audit
+Independent agent review / authorized optional audit
         ↓
 Preview / Guided Validation (when required)
         ↓
@@ -83,6 +90,8 @@ Merge gate
         ↓
 Archive / cleanup
 ```
+
+All planning and code changes must be executed through the proper **agent-side OpenSpec workflow**, not an emulation by the mini me daemon. The daemon handles durable authority, tools, sandbox, quotas, lifecycle and evidence.
 
 The operator SHOULD NOT manually create:
 - worktrees;
