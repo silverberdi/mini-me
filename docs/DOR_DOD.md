@@ -10,6 +10,8 @@ A change may enter READY only when code-verifiable checks confirm:
 - observable acceptance criteria;
 - no unresolved ambiguity that materially changes behavior, architecture, scope, security or cost;
 - dependencies identified;
+- engineering inventory of existing capabilities and explicit reuse/replace/retire decisions using `docs/ENGINEERING_DISCIPLINE.md`;
+- seeded agent skills/hooks/harness contracts inventoried; compatibilities/changes recorded rather than reinvented;
 - base branch defined;
 - implementer + complementary reviewer configured;
 - deterministic project checks configured and a testable **E2E scenario for the promised value** plus postdeploy proof plan linked to specs;
