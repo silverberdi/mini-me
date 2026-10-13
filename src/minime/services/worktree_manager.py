@@ -20,6 +20,8 @@ if TYPE_CHECKING:
     from minime.services.workspace_guard import ManagedWorkspaceGuard
 
 from minime.domain.enums import (
+    AttemptProductivityClass,
+    ContinuationDecision,
     EventType,
     ExecutionOutcome,
     ExternalOutcome,
@@ -28,6 +30,7 @@ from minime.domain.enums import (
     JobStatus,
     OrchestrationStage,
     OrchestrationStopOutcome,
+    ProgressClassification,
     WorkspaceOperation,
     WorktreeCreationState,
 )
@@ -1847,7 +1850,7 @@ class WorktreeManager:
         base_branch: str,
         current_base_sha: str,
     ) -> str | None:
-        """Prove a DELETED worktree's exact recovery branch before reactivation."""
+        """Prove an owned worktree's exact recovery branch before reactivation."""
         ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None)
         ownership = ownership_repo.get_by_job_id(job_id) if ownership_repo else None
         if not ownership or ownership.creation_state not in {
@@ -1858,7 +1861,12 @@ class WorktreeManager:
         is_created_recovery = ownership.creation_state == WorktreeCreationState.CREATED
 
         def refuse(reason: str) -> None:
-            raise RuntimeError(f"Deleted worktree recreation denied: {reason}")
+            recovery_kind = (
+                "Existing CREATED worktree reuse"
+                if is_created_recovery
+                else "Deleted worktree recreation"
+            )
+            raise RuntimeError(f"{recovery_kind} denied: {reason}")
 
         if is_created_recovery:
             if not path.is_dir() or path.is_symlink():
@@ -2058,9 +2066,26 @@ class WorktreeManager:
                 change_name=change_name,
             )
         )
-        if not ordinary_recovery_outcome and not crash_interrupted_recovery:
+        auth_required_created_recovery = (
+            is_created_recovery
+            and self._has_durable_auth_required_created_recovery(
+                attempts=attempts,
+                latest_attempt=latest_attempt,
+                job=job,
+                run=run,
+                creation_state=ownership.creation_state,
+                source_base=source_base,
+                project_id=project_id,
+                change_name=change_name,
+            )
+        )
+        if not (
+            ordinary_recovery_outcome
+            or crash_interrupted_recovery
+            or auth_required_created_recovery
+        ):
             refuse(
-                "the latest durable attempt does not prove an environment/provider initialization failure or an evidenced crash-interrupted CREATED recovery."
+                "the latest durable attempt does not prove an environment/provider initialization failure, an evidenced crash-interrupted CREATED recovery, or a fully evidenced AUTH_REQUIRED CREATED-worktree continuation."
             )
 
         if (
@@ -2210,6 +2235,179 @@ class WorktreeManager:
         ):
             refuse("canonical remote base changed during recreation validation.")
         return branch_sha
+
+    def _has_durable_auth_required_created_recovery(
+        self,
+        *,
+        attempts: list[Any],
+        latest_attempt: Any,
+        job: Any,
+        run: Any,
+        creation_state: WorktreeCreationState,
+        source_base: str,
+        project_id: str,
+        change_name: str,
+    ) -> bool:
+        """Allow only a fenced CONTINUE to reuse an intact CREATED workspace after auth failures.
+
+        AUTH_REQUIRED is not evidence of no progress by itself. This predicate
+        requires a complete, contiguous history of initialization/provider
+        failures, no-progress classifications, no candidate, and the live
+        Control Plane continuation decision. The caller still performs the
+        normal ownership, remote ancestry, snapshot, Git cleanliness, action,
+        and published-artifact checks; this exception never applies to DELETED.
+        """
+        ordered = sorted(attempts, key=lambda attempt: attempt.attempt_number)
+        expected_count = job.attempt_count
+        if (
+            creation_state != WorktreeCreationState.CREATED
+            or latest_attempt.normalized_outcome != ExecutionOutcome.AUTH_REQUIRED
+            or latest_attempt.completed_at is None
+            or latest_attempt.duration_ms is None
+            or len(ordered) != expected_count
+            or [attempt.attempt_number for attempt in ordered] != list(range(1, expected_count + 1))
+            or ordered[-1].attempt_id != latest_attempt.attempt_id
+            or latest_attempt.attempt_number != expected_count
+            or job.project_id != project_id
+            or job.change_name != change_name
+            or job.candidate_sha is not None
+            or run.project_id != project_id
+            or run.change_name != change_name
+            or run.active_job_id != job.job_id
+            or run.current_stage != OrchestrationStage.IMPLEMENTING
+            or run.current_generation < 1
+            or run.current_candidate_sha is not None
+            or run.base_sha != source_base
+            or (job.base_sha and job.base_sha != source_base)
+        ):
+            return False
+
+        allowed_outcomes = {ExecutionOutcome.PROVIDER_FAILURE, ExecutionOutcome.AUTH_REQUIRED}
+        duplicate_attempts = [attempt for attempt in ordered if attempt.is_same_sha_duplicate]
+        same_sha_human_suppression = False
+        if duplicate_attempts:
+            previous_attempt = ordered[-2] if len(ordered) >= 2 else None
+            same_sha_human_suppression = bool(
+                len(duplicate_attempts) == 1
+                and duplicate_attempts[0].attempt_id == latest_attempt.attempt_id
+                and latest_attempt.normalized_outcome == ExecutionOutcome.AUTH_REQUIRED
+                and latest_attempt.productivity_class
+                == AttemptProductivityClass.SAME_SHA_NO_PROGRESS
+                and latest_attempt.progress_classification == ProgressClassification.NO_PROGRESS
+                and latest_attempt.continuation_decision == ContinuationDecision.NEEDS_HUMAN
+                and previous_attempt is not None
+                and previous_attempt.normalized_outcome == ExecutionOutcome.AUTH_REQUIRED
+                and previous_attempt.productivity_class
+                == AttemptProductivityClass.PROVIDER_PREFLIGHT_FAILURE
+                and previous_attempt.progress_classification == ProgressClassification.NO_PROGRESS
+                and not previous_attempt.is_same_sha_duplicate
+                and previous_attempt.end_sha is not None
+                and latest_attempt.start_sha == previous_attempt.end_sha
+                and latest_attempt.end_sha == previous_attempt.end_sha
+            )
+            if same_sha_human_suppression:
+                events_repo = getattr(self.uow, "events", None)
+                if not events_repo or not callable(getattr(events_repo, "list_events", None)):
+                    return False
+                suppression_events = [
+                    event
+                    for event in events_repo.list_events(
+                        project_id=project_id, change_id=change_name, limit=10000
+                    )
+                    if event.event_type == EventType.SAME_SHA_RETRY_SUPPRESSED
+                    and event.operation_id == job.job_id
+                ]
+                same_attempt_events = [
+                    event
+                    for event in suppression_events
+                    if event.payload.get("attempt") == latest_attempt.attempt_number
+                    and event.payload.get("candidate_sha") == latest_attempt.end_sha
+                    and str(event.payload.get("reason", "")).startswith(
+                        "SAME_SHA_RETRY_SUPPRESSED:"
+                    )
+                    and event.timestamp >= latest_attempt.completed_at
+                ]
+                if len(suppression_events) != 1 or len(same_attempt_events) != 1:
+                    return False
+
+        for attempt in ordered:
+            expected_productivity = (
+                AttemptProductivityClass.PROVIDER_FAILURE
+                if attempt.normalized_outcome == ExecutionOutcome.PROVIDER_FAILURE
+                else AttemptProductivityClass.PROVIDER_PREFLIGHT_FAILURE
+            )
+            if attempt.is_same_sha_duplicate:
+                if (
+                    not same_sha_human_suppression
+                    or attempt.attempt_id != latest_attempt.attempt_id
+                ):
+                    return False
+            elif attempt.productivity_class != expected_productivity:
+                return False
+            if (
+                attempt.normalized_outcome not in allowed_outcomes
+                or attempt.progress_classification not in {None, ProgressClassification.NO_PROGRESS}
+                or (attempt.start_sha and attempt.end_sha and attempt.start_sha != attempt.end_sha)
+                or attempt.completed_at is None
+                or attempt.duration_ms is None
+                or attempt.completed_at < attempt.started_at
+            ):
+                return False
+        if any(
+            earlier.completed_at > later.started_at
+            for earlier, later in zip(ordered, ordered[1:], strict=False)
+        ):
+            return False
+
+        if latest_attempt.progress_classification not in {
+            None,
+            ProgressClassification.NO_PROGRESS,
+        }:
+            return False
+
+        decisions_repo = getattr(self.uow, "recovery_decisions", None)
+        claims_repo = getattr(self.uow, "claims", None)
+        if not decisions_repo or not claims_repo:
+            return False
+        list_by_claim = getattr(decisions_repo, "list_by_claim_key", None)
+        get_claim = getattr(claims_repo, "get_by_key", None)
+        validate_cas = getattr(claims_repo, "validate_cas", None)
+        if not callable(list_by_claim) or not callable(get_claim) or not callable(validate_cas):
+            return False
+
+        claim_key = f"run:{run.run_id}"
+        decisions = list_by_claim(claim_key)
+        if not decisions:
+            return False
+        decision = max(decisions, key=lambda item: item.created_at)
+        if (
+            decision.claim_key != claim_key
+            or decision.identity_type != "RUN"
+            or decision.identity_id != run.run_id
+            or decision.project_id != project_id
+            or decision.change_name != change_name
+            or getattr(decision.source, "value", decision.source) != "CONTROL_PLANE"
+            or decision.planned_action != "DRIVE_CONTINUATION"
+            or getattr(decision.status, "value", decision.status) != "EXECUTING"
+            or not decision.fence_token
+            or decision.created_at <= latest_attempt.completed_at
+        ):
+            return False
+
+        cycle_decisions = decisions_repo.list_by_cycle(decision.cycle_id)
+        if len(cycle_decisions) != 1 or cycle_decisions[0].decision_id != decision.decision_id:
+            return False
+        claim = get_claim(claim_key)
+        return bool(
+            claim
+            and claim.is_active
+            and claim.fence_token == decision.fence_token
+            and validate_cas(
+                claim_key=claim_key,
+                owner_instance_id=claim.owner_instance_id,
+                fence_token=decision.fence_token,
+            )
+        )
 
     def _has_durable_crash_interruption_recovery(
         self,

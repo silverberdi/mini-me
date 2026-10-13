@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import uuid
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -26,6 +27,7 @@ from minime.db.models import (
 )
 from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.domain.enums import (
+    AttemptProductivityClass,
     ContinuationDecision,
     EventType,
     ExecutionOutcome,
@@ -37,6 +39,7 @@ from minime.domain.enums import (
     OperatorActionType,
     OrchestrationStage,
     OrchestrationStopOutcome,
+    ProgressClassification,
     ProviderHealthStatus,
     WorktreeCreationState,
 )
@@ -94,6 +97,525 @@ def _git(repo: Path, *args: str) -> str:
 
 def _git_bytes(repo: Path, *args: str) -> bytes:
     return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True).stdout
+
+
+@pytest.mark.parametrize(
+    "contradiction",
+    [
+        "progress",
+        "same_sha_suppression",
+        "candidate",
+        "attempt_gap",
+        "duplicate_attempt",
+        "stale_claim",
+        "expired_claim",
+        "wrong_decision_source",
+        "completed_decision",
+        "decision_predates_attempt",
+        "deleted_ownership",
+        "missing_decision",
+        "invalid_productivity",
+        "job_candidate",
+        "attempt_sha_drift",
+        "identity_mismatch",
+        "same_sha_progress",
+        "same_sha_without_event",
+    ],
+)
+def test_auth_required_created_recovery_predicate_fails_closed(contradiction, tmp_path: Path):
+    """The narrow AUTH_REQUIRED exception rejects contradictory durable evidence."""
+    now = utc_now()
+    started = now - timedelta(minutes=10)
+    attempts = [
+        SimpleNamespace(
+            attempt_id=f"attempt-{number}",
+            attempt_number=number,
+            normalized_outcome=(
+                ExecutionOutcome.PROVIDER_FAILURE if number == 1 else ExecutionOutcome.AUTH_REQUIRED
+            ),
+            productivity_class=(
+                AttemptProductivityClass.PROVIDER_FAILURE
+                if number == 1
+                else AttemptProductivityClass.PROVIDER_PREFLIGHT_FAILURE
+            ),
+            progress_classification=ProgressClassification.NO_PROGRESS,
+            continuation_decision=(
+                ContinuationDecision.NEEDS_HUMAN
+                if number == 1
+                else ContinuationDecision.CORRECT_AND_RETRY
+                if number == 2
+                else ContinuationDecision.NEEDS_HUMAN
+            ),
+            is_same_sha_duplicate=False,
+            start_sha="base-sha",
+            end_sha="base-sha",
+            started_at=started + timedelta(minutes=2 * (number - 1)),
+            completed_at=started + timedelta(minutes=2 * (number - 1), seconds=1),
+            duration_ms=1000,
+        )
+        for number in (1, 2, 3)
+    ]
+    job = SimpleNamespace(
+        job_id="job-test",
+        project_id="project-test",
+        change_name="change-test",
+        candidate_sha=None,
+        attempt_count=3,
+        base_sha="base-sha",
+    )
+    run = SimpleNamespace(
+        run_id="run-test",
+        project_id="project-test",
+        change_name="change-test",
+        active_job_id="job-test",
+        current_stage=OrchestrationStage.IMPLEMENTING,
+        current_generation=1,
+        current_candidate_sha=None,
+        base_sha="base-sha",
+    )
+    decision = SimpleNamespace(
+        decision_id="decision-test",
+        cycle_id="cycle-test",
+        claim_key="run:run-test",
+        identity_type="RUN",
+        identity_id="run-test",
+        project_id="project-test",
+        change_name="change-test",
+        source="CONTROL_PLANE",
+        planned_action="DRIVE_CONTINUATION",
+        status="EXECUTING",
+        fence_token=7,
+        created_at=now - timedelta(minutes=1),
+    )
+    claim = SimpleNamespace(owner_instance_id="owner-test", fence_token=7, is_active=True)
+    cas_valid = True
+    decision_present = True
+
+    if contradiction == "progress":
+        attempts[-1].progress_classification = ProgressClassification.GOOD_PROGRESS
+    elif contradiction == "same_sha_suppression":
+        attempts[-1].is_same_sha_duplicate = True
+    elif contradiction == "candidate":
+        run.current_candidate_sha = "candidate-sha"
+    elif contradiction == "attempt_gap":
+        attempts[-1].attempt_number = 4
+    elif contradiction == "duplicate_attempt":
+        attempts.append(SimpleNamespace(**vars(attempts[-1])))
+    elif contradiction == "stale_claim":
+        cas_valid = False
+    elif contradiction == "expired_claim":
+        claim.is_active = False
+    elif contradiction == "wrong_decision_source":
+        decision.source = "API"
+    elif contradiction == "completed_decision":
+        decision.status = "COMPLETED"
+    elif contradiction == "decision_predates_attempt":
+        decision.created_at = attempts[-1].completed_at - timedelta(minutes=1)
+    elif contradiction == "missing_decision":
+        decision_present = False
+    elif contradiction == "invalid_productivity":
+        attempts[-1].productivity_class = AttemptProductivityClass.OTHER
+    elif contradiction == "job_candidate":
+        job.candidate_sha = "candidate-sha"
+    elif contradiction == "attempt_sha_drift":
+        attempts[-1].end_sha = "different-sha"
+    elif contradiction == "identity_mismatch":
+        job.project_id = "another-project"
+    elif contradiction in {"same_sha_progress", "same_sha_without_event"}:
+        attempts[-2].normalized_outcome = ExecutionOutcome.AUTH_REQUIRED
+        attempts[-1].is_same_sha_duplicate = True
+        attempts[-1].productivity_class = AttemptProductivityClass.SAME_SHA_NO_PROGRESS
+        attempts[-1].continuation_decision = ContinuationDecision.NEEDS_HUMAN
+        attempts[-1].progress_classification = (
+            ProgressClassification.GOOD_PROGRESS
+            if contradiction == "same_sha_progress"
+            else ProgressClassification.NO_PROGRESS
+        )
+    creation_state = WorktreeCreationState.CREATED
+    if contradiction == "deleted_ownership":
+        creation_state = WorktreeCreationState.DELETED
+
+    class Decisions:
+        def list_by_claim_key(self, _claim_key):
+            return [decision] if decision_present else []
+
+        def list_by_cycle(self, _cycle_id):
+            return [decision]
+
+    class Claims:
+        def get_by_key(self, _claim_key):
+            return claim
+
+        def validate_cas(self, **_kwargs):
+            return cas_valid
+
+    manager = WorktreeManager(
+        tmp_path, SimpleNamespace(recovery_decisions=Decisions(), claims=Claims())
+    )
+    assert not manager._has_durable_auth_required_created_recovery(
+        attempts=attempts,
+        latest_attempt=attempts[-1],
+        job=job,
+        run=run,
+        creation_state=creation_state,
+        source_base="base-sha",
+        project_id="project-test",
+        change_name="change-test",
+    )
+
+
+def test_postgres_continue_reuses_created_worktree_after_auth_required_history(
+    isolated_pg_session_factory, tmp_path: Path, monkeypatch
+):
+    """A fenced real CONTINUE may reuse only the exact intact CREATED auth-failure workspace."""
+    from conftest import publish_verified_intake_workspace, setup_managed_repository_fixture
+
+    project_id = f"n01-auth-{uuid.uuid4().hex[:8]}"
+    change_name = "operational-blocker-visibility"
+    run_id = str(uuid.uuid4())
+    job_id = str(uuid.uuid4())
+    recovery_branch = f"minime/{change_name}-{job_id}"
+    managed_root = tmp_path / "managed"
+    worktree_parent = tmp_path / "worktrees"
+    remote = tmp_path / "managed.origin.git"
+
+    with isolated_pg_session_factory() as session:
+        uow = PostgresPersistenceUnitOfWork(session)
+        project = Project(
+            project_id=project_id,
+            display_name="N01 AUTH_REQUIRED recovery regression",
+            repository=str(remote),
+            base_branch="main",
+            openspec_path="openspec",
+            implementer="codex",
+        )
+        uow.projects.save(project)
+        setup_managed_repository_fixture(
+            uow,
+            project_id=project_id,
+            repo_root=managed_root,
+            worktree_parent_dir=worktree_parent,
+            canonical_repository_identity=str(remote),
+            remote_url=str(remote),
+        )
+        _git(managed_root, "push", "origin", "main")
+        base_sha = _git(managed_root, "rev-parse", "main")
+        publish = publish_verified_intake_workspace(uow, project, managed_root, change_name)
+        assert publish.published_sha
+
+        job = Job(
+            job_id=job_id,
+            project_id=project_id,
+            change_name=change_name,
+            implementer_role="codex",
+            current_executor="codex",
+            reassignment_count=1,
+            status=JobStatus.FAILED,
+            base_sha=base_sha,
+            attempt_count=3,
+        )
+        run = OrchestrationRun(
+            run_id=run_id,
+            project_id=project_id,
+            change_name=change_name,
+            base_sha=base_sha,
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            resumable_stage=OrchestrationStage.IMPLEMENTING,
+            active_job_id=job_id,
+            current_candidate_sha=None,
+            is_active=False,
+            stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+            human_gate=HumanGate.NEEDS_HUMAN,
+        )
+        uow.jobs.save(job)
+        uow.orchestration_runs.save(run)
+        uow.provider_health.save(
+            ProviderHealth(provider="codex", status=ProviderHealthStatus.AVAILABLE)
+        )
+        uow.commit()
+
+        manager = WorktreeManager(managed_root, uow)
+        worktree = asyncio.run(
+            manager.create_worktree(
+                job_id,
+                change_name,
+                base_branch="main",
+                project_id=project_id,
+                branch_name=recovery_branch,
+                run_id=run_id,
+            )
+        )
+        snapshot_sha = asyncio.run(manager.create_recovery_snapshot(job_id, project_id))
+        assert snapshot_sha and snapshot_sha != base_sha
+        attempt_one_started = utc_now() - timedelta(hours=16)
+        attempt_one_completed = attempt_one_started + timedelta(milliseconds=967)
+        attempt_two_started = attempt_one_completed + timedelta(hours=14, minutes=13)
+        attempt_two_completed = attempt_two_started + timedelta(milliseconds=2591)
+        attempt_three_started = attempt_two_completed + timedelta(milliseconds=66)
+        attempt_three_completed = attempt_three_started + timedelta(milliseconds=747)
+        historical_attempts = [
+            JobAttempt(
+                attempt_id=f"att-{job_id}-1",
+                job_id=job_id,
+                attempt_number=1,
+                executor_role="codex",
+                model_identity="codex",
+                start_sha=base_sha,
+                end_sha=base_sha,
+                normalized_outcome=ExecutionOutcome.PROVIDER_FAILURE,
+                progress_classification=ProgressClassification.NO_PROGRESS,
+                continuation_decision=ContinuationDecision.NEEDS_HUMAN,
+                productivity_class=AttemptProductivityClass.PROVIDER_FAILURE,
+                is_same_sha_duplicate=False,
+                started_at=attempt_one_started,
+                completed_at=attempt_one_completed,
+                duration_ms=960,
+            ),
+            JobAttempt(
+                attempt_id=f"att-{job_id}-2",
+                job_id=job_id,
+                attempt_number=2,
+                executor_role="codex",
+                model_identity="codex",
+                start_sha=snapshot_sha,
+                end_sha=snapshot_sha,
+                normalized_outcome=ExecutionOutcome.AUTH_REQUIRED,
+                progress_classification=ProgressClassification.NO_PROGRESS,
+                continuation_decision=ContinuationDecision.CORRECT_AND_RETRY,
+                productivity_class=AttemptProductivityClass.PROVIDER_PREFLIGHT_FAILURE,
+                is_same_sha_duplicate=False,
+                started_at=attempt_two_started,
+                completed_at=attempt_two_completed,
+                duration_ms=2591,
+            ),
+            JobAttempt(
+                attempt_id=f"att-{job_id}-3",
+                job_id=job_id,
+                attempt_number=3,
+                executor_role="antigravity",
+                model_identity="antigravity",
+                start_sha=snapshot_sha,
+                end_sha=snapshot_sha,
+                normalized_outcome=ExecutionOutcome.AUTH_REQUIRED,
+                progress_classification=ProgressClassification.NO_PROGRESS,
+                continuation_decision=ContinuationDecision.NEEDS_HUMAN,
+                productivity_class=AttemptProductivityClass.SAME_SHA_NO_PROGRESS,
+                is_same_sha_duplicate=True,
+                started_at=attempt_three_started,
+                completed_at=attempt_three_completed,
+                duration_ms=741,
+            ),
+        ]
+        for attempt in historical_attempts:
+            uow.job_attempts.save(attempt)
+        uow.events.save(
+            Event(
+                event_type=EventType.SAME_SHA_RETRY_SUPPRESSED,
+                project_id=project_id,
+                change_id=change_name,
+                operation_id=job_id,
+                payload={
+                    "attempt": 3,
+                    "candidate_sha": snapshot_sha,
+                    "reason": (
+                        "SAME_SHA_RETRY_SUPPRESSED: Candidate SHA is unchanged from previous attempt "
+                        "with identical failure reason and no new material evidence. Duplicate full-provider retry suppressed."
+                    ),
+                },
+                timestamp=attempt_three_completed + timedelta(milliseconds=7),
+            )
+        )
+        ownership_before = uow.orchestration_worktree_ownerships.get_by_job_id(job_id)
+        assert ownership_before.creation_state == WorktreeCreationState.CREATED
+        uow.events.save(
+            Event(
+                event_type=EventType.WORKTREE_RECOVERY_SNAPSHOT,
+                project_id=project_id,
+                change_id=change_name,
+                operation_id=job_id,
+                payload={
+                    "job_id": job_id,
+                    "branch": recovery_branch,
+                    "recovery_sha": snapshot_sha,
+                    "worktree_path": str(worktree.path.resolve()),
+                    "authoritative_candidate": False,
+                },
+            )
+        )
+        uow.commit()
+        assert _git(worktree.path, "status", "--porcelain=v1", "--untracked-files=all") == ""
+        assert not any(
+            event.event_type
+            in {
+                EventType.JOB_INTERRUPTED,
+                EventType.JOB_RECOVERED,
+                EventType.ORCHESTRATION_RECOVERED,
+            }
+            for event in uow.events.list_events(
+                project_id=project_id, change_id=change_name, limit=10000
+            )
+        )
+        original_attempts = uow.job_attempts.list_by_job(job_id)
+        assert [
+            (
+                attempt.executor_role,
+                attempt.normalized_outcome,
+                attempt.productivity_class,
+                attempt.progress_classification,
+                attempt.is_same_sha_duplicate,
+                attempt.start_sha,
+                attempt.end_sha,
+                attempt.duration_ms,
+                attempt.continuation_decision,
+            )
+            for attempt in original_attempts
+        ] == [
+            (
+                "codex",
+                ExecutionOutcome.PROVIDER_FAILURE,
+                AttemptProductivityClass.PROVIDER_FAILURE,
+                ProgressClassification.NO_PROGRESS,
+                False,
+                base_sha,
+                base_sha,
+                960,
+                ContinuationDecision.NEEDS_HUMAN,
+            ),
+            (
+                "codex",
+                ExecutionOutcome.AUTH_REQUIRED,
+                AttemptProductivityClass.PROVIDER_PREFLIGHT_FAILURE,
+                ProgressClassification.NO_PROGRESS,
+                False,
+                snapshot_sha,
+                snapshot_sha,
+                2591,
+                ContinuationDecision.CORRECT_AND_RETRY,
+            ),
+            (
+                "antigravity",
+                ExecutionOutcome.AUTH_REQUIRED,
+                AttemptProductivityClass.SAME_SHA_NO_PROGRESS,
+                ProgressClassification.NO_PROGRESS,
+                True,
+                snapshot_sha,
+                snapshot_sha,
+                741,
+                ContinuationDecision.NEEDS_HUMAN,
+            ),
+        ]
+        saga_count_before = session.scalar(
+            select(func.count())
+            .select_from(DurableSagaModel)
+            .where(DurableSagaModel.project_id == project_id)
+        )
+
+        runtime_root = tmp_path / "runtime"
+        runtime_root.mkdir()
+        monkeypatch.setenv("MINIME_RUNTIME_ROOT", str(runtime_root))
+        diagnostic_cli = tmp_path / "diagnostic-cli"
+        diagnostic_cli.write_text(
+            "#!/usr/bin/env python3\nimport sys\n"
+            "if '--help' in sys.argv:\n    print('diagnostic cli help')\n"
+            "else:\n    print('diagnostic runner reached; no inference')\n",
+            encoding="utf-8",
+        )
+        diagnostic_cli.chmod(0o700)
+        profile = CliInvocationProfile(
+            provider="diagnostic-cli",
+            role="implementer",
+            executable=str(diagnostic_cli),
+            args=(),
+            prompt_transport="stdin",
+        )
+
+        class RecordingRunner:
+            def __init__(self):
+                self.delegate = CliImplementerRunner(profile)
+                self.reached = False
+                self.head_sha = None
+                self.branch = None
+                self.ownership_id = None
+                self.ownership_state = None
+
+            async def run(self, candidate_path, prompt_context, timeout_seconds):
+                self.reached = True
+                self.head_sha = _git(Path(candidate_path), "rev-parse", "HEAD")
+                self.branch = _git(Path(candidate_path), "branch", "--show-current")
+                ownership = uow.orchestration_worktree_ownerships.get_by_job_id(job_id)
+                self.ownership_id = ownership.worktree_id
+                self.ownership_state = ownership.creation_state
+                return await self.delegate.run(candidate_path, prompt_context, timeout_seconds)
+
+        runner = RecordingRunner()
+        monkeypatch.setattr(execution_pipeline, "runner_for_implementer", lambda _provider: runner)
+        result = ControlPlaneService(uow, project_root=managed_root).execute_action(
+            OperatorActionRequest(
+                action_request_id=str(uuid.uuid4()),
+                project_id=project_id,
+                change_name=change_name,
+                run_id=run_id,
+                action_type=OperatorActionType.CONTINUE,
+                actor_identity="test-operator-auth-required-recovery",
+                source_interface="cli",
+                expected_stage=OrchestrationStage.IMPLEMENTING,
+                expected_generation=1,
+                expected_candidate_sha=None,
+            )
+        )
+
+        assert result.status == OperatorActionStatus.COMPLETED, result.summary
+        assert runner.reached is True
+        assert runner.head_sha == snapshot_sha
+        assert runner.branch == recovery_branch
+        assert runner.ownership_state == WorktreeCreationState.CREATED
+        assert runner.ownership_id == ownership_before.worktree_id
+        assert uow.jobs.get_by_id(job_id).current_executor == "codex"
+        attempts_after = uow.job_attempts.list_by_job(job_id)
+        assert uow.jobs.get_by_id(job_id).attempt_count == len(attempts_after)
+        assert len(attempts_after) > 3
+        assert [attempt.attempt_id for attempt in attempts_after[:3]] == [
+            attempt.attempt_id for attempt in original_attempts
+        ]
+        assert [attempt.normalized_outcome for attempt in attempts_after[:3]] == [
+            ExecutionOutcome.PROVIDER_FAILURE,
+            ExecutionOutcome.AUTH_REQUIRED,
+            ExecutionOutcome.AUTH_REQUIRED,
+        ]
+        assert [attempt.attempt_number for attempt in attempts_after] == list(
+            range(1, len(attempts_after) + 1)
+        )
+        assert uow.orchestration_runs.get_by_id(run_id).run_id == run_id
+        assert (
+            uow.orchestration_worktree_ownerships.get_by_job_id(job_id).worktree_id
+            == ownership_before.worktree_id
+        )
+        assert (
+            uow.orchestration_worktree_ownerships.get_by_job_id(job_id).source_base_sha == base_sha
+        )
+        assert _git(managed_root, "rev-parse", f"refs/heads/{recovery_branch}") == snapshot_sha
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(OrchestrationRunModel)
+                .where(OrchestrationRunModel.project_id == project_id)
+            )
+            == 1
+        )
+        assert (
+            session.scalar(
+                select(func.count()).select_from(JobModel).where(JobModel.project_id == project_id)
+            )
+            == 1
+        )
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(DurableSagaModel)
+                .where(DurableSagaModel.project_id == project_id)
+            )
+            == saga_count_before
+        )
 
 
 def test_postgres_control_plane_continue_rebuilds_same_run_job_and_worktree(
@@ -1627,9 +2149,7 @@ def test_crash_recovery_predicate_accepts_valid_and_rejects_contradictory_eviden
 
         def validate_cas(self, *, claim_key, owner_instance_id, fence_token):
             return (
-                claim_key == f"run:{run_id}"
-                and owner_instance_id == "worker"
-                and fence_token == 7
+                claim_key == f"run:{run_id}" and owner_instance_id == "worker" and fence_token == 7
             )
 
     manager = WorktreeManager(
