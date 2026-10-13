@@ -15,7 +15,7 @@ context: |
 rules:
   proposal:
     - State the independently verifiable user/operator value and why this stage is now.
-    - Load corresponding docs/backlog/MM-Rxx.md, docs/ENGINEERING_DISCIPLINE.md and docs/agent-capabilities/V1_MANIFEST.md. Trace every Sxx/E0x to proposal/design/specs/tasks; stop for material ambiguity, don't invent scope.
+    - Load corresponding docs/backlog/MM-Rxx.md, docs/ENGINEERING_DISCIPLINE.md and docs/agent-capabilities/V1_MANIFEST.md. For MM-R01 load docs/agent-capabilities/R01_IMPLEMENTATION_STARTER.md and verify its preliminary code census against actual repository. Trace every Sxx/E0x to proposal/design/specs/tasks; stop for material ambiguity, don't invent scope.
     - Declare the smallest usable vertical slice, not technical sub-stages; include backend/DB/UI/hooks/harness and E2E in the **same Change** when required for value.
     - Declare dependencies and explicitly identify non-goals/future stages to prevent scope creep.
     - Identify whether the change affects UI and therefore requires human validation scenarios.
