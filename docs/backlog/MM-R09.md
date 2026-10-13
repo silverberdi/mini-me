@@ -16,8 +16,8 @@ SHALL registrar por evidencia la capacidad faltante, su efecto en la tarea, cat�
 ### R09-S02 — OpenSpec de capacidad
 SHALL abrir work item/Issue con proposal/specs/design/tasks de la capacidad por workflow agent-led `propose`, usando criterios de actor, seguridad y aceptación E2E.
 
-### R09-S03 — Implementación por agente
-SHALL asignar agente que codifica skill/hook/harness en repo autorizado, empaqueta versión + schema de entradas/salidas, requisitos y permisos; mini me no crea el código o prompt libre.
+### R09-S03 — Evolución de artefactos precargados por agente
+SHALL partir del Capability Pack v1 ya versionado (skills, wrappers, contratos de hook/harness, mapa de retiro y PR #140), evaluar si la función no existe, y encargar al agente **solo complementar/modificar** ese artefacto o escribir la mínima pieza faltante mediante OpenSpec apply. No reconstruir desde cero por defecto. Empaquetar versiones + esquemas de entradas/salidas, permisos y E2E; mini me no crea el código a través de prompts libres.
 
 ### R09-S04 — Aislamiento y privilegios
 SHALL evaluar comandos, side effects, secretos, networking, rutas y hooks para evitar escalamiento. Un hook de proyecto no puede conceder permisos ni superar guards canónicos.
