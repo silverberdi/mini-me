@@ -77,6 +77,10 @@ Scheduler productivo permanece desactivado; ejecución deliberadamente acotada e
 Después de reconciliar contexto, activar SOLO este Change con el workflow `propose real-openspec-agent-execution` del **agente configurado** (sintaxis depende del proveedor); el agente debe crear todos los artefactos OpenSpec y confirmar escenarios E0x antes de `apply`. Las revisiones/ajustes son `update`, implementación `apply`, verificación `verify`; `sync/archive` cuando proceda. mini me coordina **etapas**, no emula las órdenes.
 
 
+## Handoff preconstruido específico de R01
+
+**Antes de `propose` leer `docs/agent-capabilities/R01_IMPLEMENTATION_STARTER.md`.** Contiene censo inicial de los entrypoints del repositorio, responsabilidades que no se pueden cambiar, diseño de interfaces de etapa, fixture E2E real, política de N01 y plan de retiro; el agente valida estas hipótesis contra el código y solo complementa diferencias verificadas, dentro de OpenSpec.
+
 ## Capabilities seed v1 y decisiones ya tomadas (no inferir desde cero)
 Este Change **MUST** leer `docs/ENGINEERING_DISCIPLINE.md` y el material de referencia preconstruido en `docs/agent-capabilities/V1_MANIFEST.md`, `HOOK_CONTRACTS.md`, `HARNESS_CONTRACT.md` y `RETIREMENT_MAP.md`. Son baseline contractual del proyecto, no una invitación a diseñar otro framework. Usar directamente las skills `minime-engineering-discipline`, `minime-real-e2e-proof` y `minime-safe-retirement` (ubicadas en `.agent/skills` y `.agents/skills`) y el workflow oficial de OpenSpec instalado; wrappers de etapa `minime-propose-vertical`, `minime-apply-vertical`, `minime-verify-vertical` solo lo complementan. Revisar PR #140 antes de proponer hooks alternativos: no está integrado todavía. El agente SOLO debe inspeccionar compatibilidad y complementar diferencias necesarias para el valor de este Change, mediante `propose/update`, nunca inferir totalmente el stack ni modificar prioridades/autoridad.
 
