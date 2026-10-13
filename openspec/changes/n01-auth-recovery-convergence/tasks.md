@@ -13,4 +13,4 @@
 ## 3. Validation and handoff
 
 - [x] 3.1 Run focused provider-health, Control Plane, recovery, and execution pipeline tests; run Ruff and strict OpenSpec validation. Evidence: 100 focused tests PASS; Ruff check PASS; changed production modules/new test Ruff format check PASS; OpenSpec change strict PASS; `git diff --check` PASS. The full existing execution-pipeline module has Linux-confinement-dependent failures on this macOS host (exit 126), separately confirmed as `AgentProcessConfinement` unavailable; the targeted integration test passes.
-- [ ] 3.2 Verify no schema/production/provider side effects, update task evidence, and prepare a Draft PR. Pending branch push and Draft PR creation.
+- [x] 3.2 Verify no schema/production/provider side effects, update task evidence, and prepare a Draft PR. Evidence: no migration/schema changes or production/provider calls; isolated branch pushed at `029ce61cf795c23444092d8fb6f08ae460e0d091`; Draft PR #152 created.
