@@ -1,21 +1,21 @@
 # mini me — canonical implementation context
 
-`mini me` is a personal, single-installation orchestration system for spec-driven software development. It coordinates OpenSpec-ready work across repositories, uses Codex and Antigravity as complementary implementer/reviewer agents, runs deterministic checks, adds an independent DeepSeek Direct audit, presents UI candidates for guided human validation when required, and automates the mechanical GitHub/deployment/closure work around the human gates.
+`mini me` is a personal, single-installation **control plane for AI agents using native OpenSpec workflows** across software repositories. It coordinates GitHub needs, agent-led OpenSpec proposals and changes, assigns Codex/Antigravity by stage with independent review, enforces deterministic and real E2E checks, survives interruptions/quotas, and automates PR/deployment/closure mechanics around human merge. It **never programs or semantically generates/merges/archives OpenSpec artifacts instead of the agents**. DeepSeek/OpenRouter are opt-in compatible fallback only after both primary agents cannot serve a stage.
 
 ## Canonical reading order
 1. `docs/BUSINESS_INTENT.md`
-2. `docs/PRODUCT.md`
-3. `docs/CANONICAL_DECISIONS.md`
-4. `docs/ARCHITECTURE.md`
-5. `docs/STATE_MACHINE.md`
+2. `docs/CANONICAL_DECISIONS.md`
+3. `docs/PRODUCT.md`
+4. `docs/ENGINEERING_DISCIPLINE.md`
+5. `docs/CHANGE_DELIVERY_CONTRACT.md`
+6. `docs/agent-capabilities/V1_MANIFEST.md` (and linked hook/harness/retirement contracts)
+7. `docs/ARCHITECTURE.md`
 6. `docs/PROVIDER_POLICY.md`
-7. `docs/GITHUB_WORK_MANAGEMENT.md`
-8. `docs/DEPLOYMENT_AND_VALIDATION.md`
-9. `docs/DOR_DOD.md`
-10. `docs/ROADMAP.md`
-11. `docs/BACKLOG.md`
-12. `docs/AGENT_CONTRACTS.md`
-13. active change under `openspec/changes/`
+7. `docs/DOR_DOD.md`
+8. `docs/ROADMAP.md` and `docs/BACKLOG.md`
+9. `docs/backlog/MM-Rxx.md` for the one authorized value increment
+10. `docs/AGENT_CONTRACTS.md` and `openspec/config.yaml`
+11. single active change under `openspec/changes/`
 
 ## Source-of-truth boundaries
 - **GitHub Projects / Issues:** work portfolio, visible planning and progress.
@@ -26,7 +26,7 @@
 - **Host secret files/environment:** credentials; never the repository.
 
 ## Primary path
-`READY → implementation → checks → complementary review → bounded corrections → final checks → DeepSeek audit → UI preview when required → guided human validation/review → draft PR ready → human merge → production deployment/verification → OpenSpec/GitHub closure → DONE`
+`GitHub need / READY OpenSpec → agent-side propose/update (when needed) → safe preflight → native agent apply → checks/native verify → complementary independent review → real E2E → draft PR → human merge → native OpenSpec sync/archive with Git authority → authorized deployment + functional postdeploy E2E → GitHub closure → DONE`
 
 ## Important constraint
-Only `openspec/changes/001-foundation/` is scaffolded as active work. Future roadmap stages are intentionally **not** pre-created as active OpenSpec changes. This prevents agents from implementing future stages early.
+Only **one explicitly authorized OpenSpec change** is active at a time. The ten MM-R01–MM-R10 backlog dossiers are planning contracts, **not** ten active `openspec/changes/` directories. Do not start change apply by copying their text into prompts; use the actual agent-side OpenSpec workflow.
