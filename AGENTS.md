@@ -1,6 +1,6 @@
 # mini me — agent instructions
 
-Read `README.md`, `docs/BUSINESS_INTENT.md`, `docs/CANONICAL_DECISIONS.md`, `docs/PRODUCT.md`, `docs/CHANGE_DELIVERY_CONTRACT.md`, `docs/BACKLOG.md`, `docs/ARCHITECTURE.md`, `docs/DOR_DOD.md`, `docs/AGENT_CONTRACTS.md`, the MM-Rxx dossier of the change (if applicable), and the single active folder under `openspec/changes/` before changing code.
+Read `README.md`, `docs/BUSINESS_INTENT.md`, `docs/CANONICAL_DECISIONS.md`, `docs/PRODUCT.md`, **`docs/ENGINEERING_DISCIPLINE.md`**, `docs/CHANGE_DELIVERY_CONTRACT.md`, `docs/BACKLOG.md`, `docs/ARCHITECTURE.md`, `docs/UX.md`, `docs/DOR_DOD.md`, `docs/AGENT_CONTRACTS.md`, `docs/agent-capabilities/V1_MANIFEST.md` and its contracts, the MM-Rxx dossier of the change (if applicable), and the single active folder under `openspec/changes/` before changing code.
 
 ## Non-negotiable rules
 - Implement only the active OpenSpec change. Do not implement future roadmap work opportunistically.
