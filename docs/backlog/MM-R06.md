@@ -31,8 +31,8 @@ SHALL comprobar PRE-PROPOSE/APPROVE, PRE-APPLY, POST-APPLY, VERIFY, ARCHIVE cuan
 ### R06-S07 — Racionalizar PR #140
 SHALL evaluar PR #140 por seguridad/scope/no false pass, reutilizar cambios compatibles o registrar rechazo; sin copiar framework alternativo paralelo.
 
-### R06-S08 — Sin nueva biblioteca obligatoria
-SHALL preservar capacidad fallback de componentes existentes y reusar primero skill OpenSpec oficial; ningún registro complejo previo a demostrar el run.
+### R06-S08 — Integrar el Capability Pack v1 existente; no rediseñarlo
+SHALL adoptar como entrada obligatoria `docs/agent-capabilities/V1_MANIFEST.md`, `HOOK_CONTRACTS.md`, `HARNESS_CONTRACT.md`, `RETIREMENT_MAP.md`, las tres skills nuevas y los wrappers de etapa. El agente SHALL verificar compatibilidad con versiones instaladas y corregir exclusivamente diferencias justificadas mediante el Change OpenSpec. SHALL NOT inventar otra biblioteca o un hook engine paralelo al PR #140.
 
 ## E2E obligatorios de etapa y de valor
 Cada E0x debe describirse en OpenSpec como Given/When/Then con setup, salida y evidence path. Fake providers/mocks pueden servir a integration, **no** a la demostración de capacidad real. Además ejecutar regresión de R01–R05 y verificar en entorno desplegado.
