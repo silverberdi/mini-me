@@ -14,7 +14,7 @@ Cada Sxx se convierte en requisitos SHALL/SHALL NOT con al menos un escenario ob
 SHALL comprobar GitHub PR merged y candidato entregado a la rama base, con tratamiento fail-closed de squash/merge, sin false positive por nombres de branch.
 
 ### R04-S02 — Workflow OpenSpec
-SHALL delegar semántica de \`sync\`/\`archive\` a workflows OpenSpec soportados por el agente (CLI nativo cuando sea la ruta válida), con versión, diff de spec, corroboración y cumplimiento de completion. Retirar código propio solo al tener paridad demostrada.
+SHALL delegar semántica de `sync`/`archive` a workflows OpenSpec soportados por el agente (CLI nativo cuando sea la ruta válida), con versión, diff de spec, corroboración y cumplimiento de completion. Retirar código propio solo al tener paridad demostrada.
 
 ### R04-S03 — Autoridad Git posmerge
 SHALL resolver explícitamente dónde se escriben los artefactos luego del merge: los cambios de código/spec que requieran Git NO se pushean directamente a rama protegida sin revisión/merge humano. Preferir incorporación al PR original cuando política/orden lo permitan; de lo contrario rama/PR de cierre con autorización. SHALL NOT simular DONE ignorando git remoto.
@@ -61,7 +61,7 @@ Validación desde endpoint/dominio de destino del cambio entregado, no solo GET 
 - Incluir migración compatible que no mueva specs históricos irreversiblemente hasta completar dry run y E2E.
 
 ## No-goals y guardrails
-NO rediseñar scheduler ni añadir optimizaciones de UX generales. No usar \`openspec archive -y\` para saltarse validación o aceptar tareas incompletas; autorización debe provenir del gate humano/política.
+NO rediseñar scheduler ni añadir optimizaciones de UX generales. No usar `openspec archive -y` para saltarse validación o aceptar tareas incompletas; autorización debe provenir del gate humano/política.
 
 ## Prueba de aceptación verificable
 URLs PR/merge + SHA, transcript sync/archive nativos, comparación requisitos antes/después, ref de archivo, deployment digest + escenario funcional postdeploy, Issue/Project y evidencias de saga/rollback.
