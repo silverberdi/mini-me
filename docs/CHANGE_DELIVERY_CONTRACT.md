@@ -25,7 +25,9 @@ Cada Change debe contener las specs necesarias para ofrecer **una capacidad util
 4. `tasks.md`: implementación + unit/integration + E2E de etapas + E2E de valor + E2E postdeploy + revalidación/regresión + evidencia + clausura. Cada tarea con evidencia verificable, sin checkboxes decorativos.
 5. Matriz trazable `business intent → capability/spec → scenario → test → evidencia → entregable`. Cambios de spec revalidan esta matriz.
 6. Regla **anti-drift**: revisión de contradicción con `BUSINESS_INTENT`, `PRODUCT`, `CANONICAL_DECISIONS`, contrato presente y specs activas. Anomalía material = BLOCKED hasta reconciliación formal del Change; ningún auditor reemplaza esta comprobación determinística.
-7. Revisión de OpenSpec/agent capabilities instaladas, su versión y compatibilidad; decidir explícitamente reuse o deprecación, con prueba de las invocaciones reales por proveedor. No inventar binarios `opsx`.
+7. Revisión de OpenSpec/agent capabilities instaladas, su versión y compatibilidad; decidir explícitamente reuse o deprecación, con prueba de las invocaciones reales por proveedor.
+8. **Engineering Discipline G1**: aplicar `docs/ENGINEERING_DISCIPLINE.md` para arquitectura, diseño, mantenimiento, seguridad, UX y censo de código existente; utilizar artefactos v1 de `docs/agent-capabilities/` y skills provisionadas en `.agent/.agents` antes de inventar elementos. Declarar cualquier incompatibilidad de versión en `design.md`.
+9. **Removal Ledger obligatorio**: por cada comportamiento sustituido, identificar writers/callers, migraciones/config/tests/docs, acción REMOVE/MIGRATE/RETAIN-WITH-REASON y evidencia post-retiro. El retiro se hace en el mismo Change y se reejecuta E2E **después**, salvo excepción documentada aprobada. No inventar binarios `opsx`.
 
 ## 3. Pruebas obligatorias: sin falso E2E
 
