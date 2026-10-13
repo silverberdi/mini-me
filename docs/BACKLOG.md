@@ -1,135 +1,52 @@
-# Product Backlog
+# mini me — backlog de recuperación orientado a valor (propuesto)
 
-## Delivered Items (Stages 001 – 015)
+> **Estado:** plan propuesto; NO equivale a código implementado ni prueba productiva. Aprobación de este PR actualiza la **planificación**, no autoriza por sí sola consumo de agentes, migraciones, merge de otros PR, despliegue ni activación del scheduler.
+>
+> **Autoridad:** `docs/BUSINESS_INTENT.md` → `docs/CANONICAL_DECISIONS.md` → `docs/PRODUCT.md` → `docs/CHANGE_DELIVERY_CONTRACT.md` → OpenSpec vigente por Change. Ante contradicción, detener `propose`/`apply`, documentar discrepancia y resolverla en el Change; jamás inventar reglas alternativas.
 
-| ID | Stage | Outcome | Verification idea |
-|---|---|---|---|
-| MM-001 | 001 | PostgreSQL config + versioned schema | migrate/restart tests |
-| MM-002 | 001 | Durable event/current-state core | transactional transition tests |
-| MM-003 | 001 | Register projects with immutable repo binding | mismatch denial tests |
-| MM-004 | 001 | Discover OpenSpec and enforce DoR | fixtures + invalid bindings |
-| MM-005 | 001 | GitHub Issue/Project durable mapping foundation | mocked API + reconciliation |
-| MM-006 | 001 | Status/health API/CLI | contract tests |
-| MM-010 | 002 | Isolated Git worktree lifecycle | integration tests |
-| MM-011 | 002 | Codex implementer adapter | fake + opt-in CLI smoke |
-| MM-012 | 002 | Antigravity implementer adapter | fake + opt-in CLI smoke |
-| MM-013 | 002 | Deterministic checks runner and diagnostics | pass/fail/timeout/redaction |
-| MM-020 | 003 | Complementary review pipeline | seeded defect test |
-| MM-021 | 003 | Bounded review correction loop | max-round tests |
-| MM-030 | 004 | DeepSeek Direct independent audit | mock + opt-in live audit |
-| MM-040 | 005 | Provider resilience, restart recovery & health | kill/restart E2E, fault injection |
-| MM-041 | 005 | RUN/DRAIN/WAIT scheduler modes | scheduler simulations |
-| MM-042 | 006 | OpenRouter drain fallback with model independence | distinct-model & budget tests |
-| MM-043 | 007 | Agent continuation and handoff governance | ping-pong denial & handoff tests |
-| MM-044 | 008 | Autonomous multi-stage orchestration coordinator | stage transition & gate tests |
-| MM-045 | 009 | GitHub App runtime integration & PR preparation | GitHub App authentication tests |
-| MM-046 | 010 | Governance and recovery hardening | transition key & identity tests |
-| MM-047 | 011 | Preserved candidate remediation generations | generation increment & drift tests |
-| MM-048 | 012 | Execution operations dashboard | API projections & UI visual tests |
-| MM-050 | 013 | Container preview lifecycle (build/start/probe/teardown) | real Docker build & health probe test |
-| MM-051 | 013 | Candidate authority binding `(head_sha, base_sha, image_digest)` | image digest authority & mutation tests |
-| MM-052 | 013 | Guided UI validation workflow & scenarios | scenario runner & PASS/FAIL state tests |
-| MM-053 | 013 | Stale validation invalidation & historical evidence | candidate drift / stale PASS tests |
-| MM-054 | 013 | Preview restart/orphan reconciliation & isolation | restart recovery & foreign container guard |
-| MM-055 | 013 | Dashboard integration for guided scenario validation | UI component & browser acceptance tests |
-| MM-060 | 014 | TUI operator console (Textual) | interactive terminal navigation tests |
-| MM-070 | 015 | Operator actions / control plane (retry/resume/reassign/gates) | mutation authority & auditability tests |
+## Objetivo y definición del valor
 
----
+mini me coordina **agentes de IA que usan OpenSpec**; no es una IA programadora, un generador propio de artefactos SDD ni un reemplazo de los workflows OpenSpec. El valor es que el dueño registre trabajo y mini me seleccione agentes y capacidades, prepare contexto autorizado, gobierne etapas/cuotas/seguridad, preserve progreso y produzca software revisado hasta PR y cierre tras merge humano. GitHub conserva la cartera; OpenSpec es autoridad sobre comportamiento y planificación; PostgreSQL sobre ejecución y evidencia; Git sobre código e identidades de candidatos.
 
-## Canonical Active & Future Roadmap Items (Stages 016 – 018)
+Cada Change agrupa **todas** las specs backend/frontend/persistencia/CLI/harness/seguridad necesarias para entregar una capacidad operativa completa. Está prohibido dividir una capacidad en fases técnicas que no entreguen utilidad. Todas las comprobaciones pasan por E2E real de la etapa y del resultado desplegado, según `docs/CHANGE_DELIVERY_CONTRACT.md`.
 
-| ID | Stage | Outcome | Verification idea |
-|---|---|---|---|
-| MM-080 | 016 (NEXT) | Autonomous queue & work selection (readiness/budget/capacity) | multi-change autonomous scheduling tests |
-| MM-090 | 017 | PWA control center (rich web operator experience) | responsive web app & PWA acceptance |
-| MM-100 | 018 | End-to-end self-operating development loop & SDLC metrics | full-cycle autonomous delivery & metrics |
+## Orden de entrega aprobado para elaboración (dependencias por capacidad)
 
-### Adaptive AI Execution & Continuity Requirements (Planning Reconciliation)
-Future capabilities `adaptive-provider-model-routing` and `autonomous-degraded-mode-work-continuity` must explicitly model the following concepts as distinct operational domains:
-1. **Routine Provider Selection**: Baseline assignment governed by project-level configuration (e.g. Codex implementer / Antigravity reviewer).
-2. **Bounded Premium Recovery**: Specialized single-attempt escalation (`PREMIUM_RECOVERY_NON_CONVERGENCE`) triggered only when material candidate progress exists and primary executor exhibits non-convergence under exhausted budgets.
-3. **Drain Fallback**: Paid secondary provider fallback (OpenRouter) activated strictly during dual-primary exhaustion for in-flight changes, never for routine execution or new change admission.
-4. **Executor Non-Convergence**: Algorithmic classification of repetitive malformed output, premature stops, failing checks, or stagnant streaks distinct from provider unavailability.
-5. **Reviewer Independence**: Enforced structural separation guaranteeing that an implementer/recovery model identity never reviews its own candidate.
-6. **Genuine Human Gates**: Reserving `NEEDS_HUMAN` strictly for true operator decisions (product ambiguity, secret provisioning, irreversible operations, merge approval, policy changes), replacing deterministic executor non-convergence transitions with machine-operable states (`WAITING_CAPACITY`, `EXECUTOR_RECOVERY_REQUIRED`).
+| ID | Change OpenSpec (slug) | Entrega observable | Depende de | Ficha |
+|---|---|---|---|---|
+| MM-R01 | `real-openspec-agent-execution` | Un OpenSpec READY es implementado mediante el workflow de un agente real, revisado por otro y entregado en PR | Baseline segura | [Ficha](backlog/MM-R01.md) |
+| MM-R02 | `intelligent-github-to-openspec-intake` | Issue real → propuesta OpenSpec coherente creada por IA, con trazabilidad y DoR | R01 | [Ficha](backlog/MM-R02.md) |
+| MM-R03 | `autonomous-backlog-to-reviewed-pr` | Work item admitido → propuesta, ejecución y PR revisado sin handoffs manuales | R01–R02 | [Ficha](backlog/MM-R03.md) |
+| MM-R04 | `native-openspec-delivery-and-closure` | Merge humano → workflows nativos `sync/archive`, despliegue autorizado y DONE íntegro | R03 | [Ficha](backlog/MM-R04.md) |
+| MM-R05 | `quota-safe-execution-and-recovery` | Espera/reanudación automática segura ante cuota, autenticación, reinicio o fallo | R03–R04; garantías mínimas desde R01 | [Ficha](backlog/MM-R05.md) |
+| MM-R06 | `project-aware-agent-capabilities` | Agentes usan skills/hooks/commands/guards/harnesses adecuados en un cambio real | R05; capacidades esenciales desde R01 | [Ficha](backlog/MM-R06.md) |
+| MM-R07 | `operational-control-and-human-attention` | UI explica estado/causas/siguiente paso y resuelve gates humanos reales | R03–R06 | [Ficha](backlog/MM-R07.md) |
+| MM-R08 | `multi-repository-sdd-execution` | Un segundo repo completa E2E respetando su propia metodología y bindings | R01–R07 | [Ficha](backlog/MM-R08.md) |
+| MM-R09 | `governed-agent-capability-evolution` | Skills/hooks/harnesses faltantes evolucionan vía OpenSpec y revisión humana | R06–R08 | [Ficha](backlog/MM-R09.md) |
+| MM-R10 | `autonomous-self-development` | mini me selecciona y desarrolla una mejora de mini me con PR/merge/closure verificable | R01–R09 | [Ficha](backlog/MM-R10.md) |
 
-### Execution Stall Watchdog & Qwen Second-Level Recovery Requirements (`shared-skill-execution-harness-framework` & `autonomous-degraded-mode-work-continuity`)
+**Política de dependencias:** no hay prerrequisito de “terminar todos los mecanismos técnicos” antes de obtener el valor del primer Change. Cada Change debe implementar la porción vertical mínima completa, incluyendo seguridad, preflight, E2E, observabilidad y rollback aplicables. Cambios futuros amplían sin dejar rotas las garantías existentes. Reordenar únicamente por decisión explícita que preserve dichas garantías.
 
-#### 1. Execution Stall Watchdog (`autonomous-degraded-mode-work-continuity`)
-- **Deterministic Normal Path**: mini me continues using deterministic lifecycle and provider policies as the normal execution path. Do NOT invoke an LLM for routine scheduler or lifecycle decisions.
-- **State-Aware Stall Detection**: Detects when a material execution has stopped making meaningful progress using state-specific signals:
-  - No stage transition for longer than the state-specific threshold.
-  - No new execution evidence for longer than threshold.
-  - Repeated identical failure.
-  - Same candidate SHA + same failure + no new evidence.
-  - Provider available but job not progressing.
-  - Retry/reassignment activity without convergence.
-  - Run / Job / Backlog projection inconsistency.
-  - Provider capacity recovered but waiting work did not resume.
-  - Long-lived intermediate execution state with no legitimate wait reason.
-- **Legitimate Wait Preservation**: Do NOT classify legitimate waits as stalls:
-  - `WAITING_FOR_PROVIDER` / `WAITING_CAPACITY`: Not stalled while provider wait is still valid.
-  - `READY_FOR_HUMAN_MERGE`: Not stalled; genuine human governance gate.
-  - `NEEDS_HUMAN`: Not stalled when a genuine product/authority/secret decision is outstanding.
-  - `IMPLEMENTING` with no activity: Potentially stalled after configured threshold.
-  - `CHECKS_RUNNING`: Evaluated against checks-specific threshold.
-- **Configurable Thresholds**: Thresholds must be configurable by execution state and task class rather than a single global timeout.
+## Reconciliación conservadora del backlog anterior
 
-#### 2. Qwen Second-Level Recovery Diagnosis (`shared-skill-execution-harness-framework`)
-- **Constrained Recovery Analyst**: When a stall is detected, mini me may invoke a local Qwen model as a constrained second-level recovery analyst. Qwen must NOT replace canonical policy.
-- **Bounded Diagnostic Snapshot**: Qwen receives a bounded recovery snapshot containing only relevant evidence:
-  - Run state, Job state, and Backlog state.
-  - Current stage and last state transitions.
-  - Recent failures and retry/reassignment counters.
-  - Candidate SHA and latest execution evidence.
-  - Provider availability/health and relevant policy constraints.
-  - Current execution role and elapsed time since progress.
-  - No entire repository dumps unless explicitly required by a later authorized diagnostic step.
-- **Reusable Diagnostic Harness/Skill**: Provide a reusable skill and execution harness `execution-stall-diagnosis` producing structured output:
-  - `stall_classification`: `PROVIDER_CAPACITY_WAIT`, `EXECUTOR_NON_CONVERGENCE`, `MALFORMED_EXECUTION_RESULT`, `CHECKS_STALLED`, `PLATFORM_PROCESS_FAILURE`, `STATE_RECONCILIATION_DEFECT`, `PROVIDER_RECOVERY_NOT_PROPAGATED`, `GENUINE_HUMAN_GATE`, or `UNKNOWN`.
-  - `probable_root_cause`: Causal diagnostic explanation.
-  - `material_progress`: Boolean indicating whether meaningful code/spec progress was achieved.
-  - `recommended_action`: `CONTINUE_WAITING`, `RETRY_DETERMINISTIC_STEP`, `PREMIUM_RECOVERY`, `DRAIN_CONTINUATION`, `RECONCILE_STATE`, `RESTART_FAILED_PROCESS`, `ESCALATE_PROVIDER`, or `NEEDS_HUMAN`.
-  - `recommended_execution_role`: Role recommendation for next step.
-  - `human_required`: Boolean flag for true human intervention.
-  - `confidence`: Calibrated float score.
-  - `evidence_summary`: Concise summary of diagnostic evidence.
-  - `policy_constraints_considered`: List of evaluated canonical constraints.
+- `docs/ROADMAP.md` anterior declaraba 001–021/018.* “DELIVERED”. Son **hitos históricos de implementación**, no evidencias suficientes del objetivo final. Se conserva su historial Git/PR/OpenSpec; su funcionalidad debe ser revalidada como parte de los E2E verticales.
+- Issues activos [#133](https://github.com/silverberdi/mini-me/issues/133) y [#138](https://github.com/silverberdi/mini-me/issues/138): ambas entradas refieren a N01; no crear otro N01. Mantener identidades/historial; decidir canon y retiro del duplicado mediante reconciliación idempotente antes de cambiar Issues/DB.
+- N01 no se puede recrear ni borrar: conservar Run/Job, workspace CREATED, intentos, modificados, eventos, ownership y acciones externas. [PR #152](https://github.com/silverberdi/mini-me/pull/152) permanece Draft y debe evaluarse como posible insumo R01/R05, no declararse cierre.
+- Issues [#134](https://github.com/silverberdi/mini-me/issues/134), [#135](https://github.com/silverberdi/mini-me/issues/135), [#136](https://github.com/silverberdi/mini-me/issues/136), [#137](https://github.com/silverberdi/mini-me/issues/137): conservar alcance útil como escenarios de R07 (N02/N04/N05) y gobernanza de reconciliación de R02/R03 (N03). No ejecutar los cinco como un roadmap paralelo.
+- [PR #140](https://github.com/silverberdi/mini-me/pull/140): hooks de calidad todavía no fusionados. Auditar integración/invariantes con R01/R06/R09 antes de reutilizarlos, sin duplicar su trabajo.
+- Issues históricos ya cerrados sobre routing local, Qwen, telemetry, grafos, UX y harnesses: **no reabrir automáticamente**; reutilizar únicamente lo demostrado necesario por el Change vigente. Prohibido introducir benchmarking/analítica/estética como prerequisito de una primera entrega real.
+- OpenSpec `changes/archive/`, documentación pasada y eventos de producción son **historial inmutable**, no “basura” para limpiar. Nunca migrar o declarar DONE artificialmente para cuadrar métricas.
+- La herramienta GitHub conectada no expone aquí una API de GitHub Projects v2; la reconciliación de campos/cards del Project requiere un ejecutor autorizado capaz de verificarla. **No suponer que cambiar estos archivos sincroniza el Project ni PostgreSQL.**
 
-#### 3. Policy Authority & Recovery Flow
-- **Authority Boundary**: Qwen recommends; canonical deterministic policy authorizes.
-- **Strict Invariants**: A Qwen recommendation must NEVER directly bypass retry budgets, reassignment budgets, reviewer independence, provider-role restrictions, OpenRouter drain policy, security gates, human merge authorization, or destructive-action policy. If Qwen recommends an action forbidden by policy, the action must not execute.
-- **Durable Persistence**: Persist diagnosis model, diagnosis skill/harness, structured recommendation, confidence score, policy validation result, accepted/rejected action, and eventual recovery outcome.
-- **Recovery Lifecycle Flow**:
-  `Normal deterministic execution` -> `no progress beyond state-specific threshold` -> `watchdog marks STALLED / recovery analysis required` -> `Qwen local diagnosis` -> `deterministic policy validation` -> `permitted autonomous recovery` -> `lifecycle resumes`.
-- **Escalation Constraint**: Only escalate to `NEEDS_HUMAN` when the remaining blocker genuinely requires human intent, authority, secrets, irreversible-risk approval, or mandatory governance. "No currently usable executor" by itself is not automatically a human decision.
+## Regla de planificación OpenSpec
 
-#### 4. Local Model Policy
-- **Quota & Cost Protection**: Prefer local Qwen for this diagnostic role because it does not consume scarce frontier quota, the task is classification/recovery analysis rather than unrestricted coding, and the output is constrained and policy-validated.
-- **Model Tiers**: Initially prefer `qwen2.5-coder:7b-instruct-q4_K_M` for ambiguous recovery analysis; evaluate `qwen2.5-coder:3b` later for simpler stall classifications.
-- **Dynamic Routing**: Do not make this model mapping immutable; it must resolve dynamically via the provider/model capability registry and routing policy.
+Estas fichas son **contratos de backlog**, no `proposal.md` ni `specs/` artificiales. Solamente un Change activo se convierte mediante el workflow `propose` del **agente** en `openspec/changes/<slug>/`. En la propuesta se materializan todas las specs funcionales y escenarios de la ficha, con verificación de consistencia. `apply` y `verify` ocurren mediante los workflows instalados en el agente correspondiente, bajo los guards del proyecto. No emitir prompts libres fuera de ese circuito.
 
-#### 5. Telemetry Requirements
-- **Effectiveness Telemetry**: Extend effectiveness telemetry requirements to support:
-  - `stall_count`
-  - `stall_duration`
-  - `stall_classification`
-  - `qwen_recovery_diagnosis_count`
-  - `diagnosis_confidence`
-  - `policy_accept_rate`
-  - `automatic_recovery_success`
-  - `escalation_rate`
-  - `false_positive_stall`
-  - `human_required_after_recovery_analysis`
-  - `mean_time_to_recovery`
-- **Dashboard Observability**: These metrics should eventually appear in AI Operations / Model Performance.
+Los nombres e invocaciones son **específicos por agente**: Codex usa skills `$openspec-propose` / `$openspec-apply` si están instalados; otros agentes pueden usar `/opsx-propose` o `/opsx:propose`. Son invocaciones en el **agente**, no binarios de shell `opsx`. El CLI `openspec` puede proporcionar `new`, `status`, `instructions`, `validate` y `archive` conforme a versión instalada. mini me jamás simulará una llamada al workflow invocando un script Python que replique su semántica.
 
-#### 6. Success Criteria
-- Normal lifecycle remains deterministic; no LLM is invoked for routine scheduler transitions.
-- Genuine stalls are detected automatically; legitimate waits are not misclassified as stalls.
-- Qwen can diagnose stalled executions locally without bypassing canonical policy.
-- Permitted recovery occurs without human intervention, decreasing false `NEEDS_HUMAN` gates while keeping recovery behavior measurable.
+## Primera admisión
 
-Backlog items are planning units. OpenSpec `tasks.md` remains the implementation checklist for the active change; do not duplicate every task into GitHub Issues.
-
+1. Scheduler productivo permanece **disabled/inactive** hasta E2E autorizado, capacidad verificable y release gate cumplido.
+2. Obtener baseline `main`, estado real de PR #140/#152 y del N01, binding exacto, política de cuota, configuración de OpenSpec y compatibilidad CLI/harness.
+3. Abrir con un agente autorizado `propose real-openspec-agent-execution` usando solo esta ficha y contexto canónico. Exigir a OpenSpec la propuesta multi-spec y pruebas E2E; no implementar por prompt libre.
+4. No se autoriza `apply` hasta revisión de propuesta, riesgos y ruta real de prueba. Mantener merge humano y presupuesto explícito para pruebas de inferencia.
