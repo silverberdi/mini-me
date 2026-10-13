@@ -118,6 +118,8 @@ def _git_bytes(repo: Path, *args: str) -> bytes:
         "job_candidate",
         "attempt_sha_drift",
         "identity_mismatch",
+        "same_sha_progress",
+        "same_sha_without_event",
     ],
 )
 def test_auth_required_created_recovery_predicate_fails_closed(contradiction, tmp_path: Path):
@@ -137,6 +139,13 @@ def test_auth_required_created_recovery_predicate_fails_closed(contradiction, tm
                 else AttemptProductivityClass.PROVIDER_PREFLIGHT_FAILURE
             ),
             progress_classification=ProgressClassification.NO_PROGRESS,
+            continuation_decision=(
+                ContinuationDecision.NEEDS_HUMAN
+                if number == 1
+                else ContinuationDecision.CORRECT_AND_RETRY
+                if number == 2
+                else ContinuationDecision.NEEDS_HUMAN
+            ),
             is_same_sha_duplicate=False,
             start_sha="base-sha",
             end_sha="base-sha",
@@ -212,6 +221,16 @@ def test_auth_required_created_recovery_predicate_fails_closed(contradiction, tm
         attempts[-1].end_sha = "different-sha"
     elif contradiction == "identity_mismatch":
         job.project_id = "another-project"
+    elif contradiction in {"same_sha_progress", "same_sha_without_event"}:
+        attempts[-2].normalized_outcome = ExecutionOutcome.AUTH_REQUIRED
+        attempts[-1].is_same_sha_duplicate = True
+        attempts[-1].productivity_class = AttemptProductivityClass.SAME_SHA_NO_PROGRESS
+        attempts[-1].continuation_decision = ContinuationDecision.NEEDS_HUMAN
+        attempts[-1].progress_classification = (
+            ProgressClassification.GOOD_PROGRESS
+            if contradiction == "same_sha_progress"
+            else ProgressClassification.NO_PROGRESS
+        )
     creation_state = WorktreeCreationState.CREATED
     if contradiction == "deleted_ownership":
         creation_state = WorktreeCreationState.DELETED
@@ -313,36 +332,6 @@ def test_postgres_continue_reuses_created_worktree_after_auth_required_history(
         uow.provider_health.save(
             ProviderHealth(provider="codex", status=ProviderHealthStatus.AVAILABLE)
         )
-        attempt_time = utc_now() - timedelta(minutes=3)
-        for attempt_number, outcome in enumerate(
-            [
-                ExecutionOutcome.PROVIDER_FAILURE,
-                ExecutionOutcome.AUTH_REQUIRED,
-                ExecutionOutcome.AUTH_REQUIRED,
-            ],
-            start=1,
-        ):
-            started_at = attempt_time + timedelta(minutes=attempt_number - 1)
-            uow.job_attempts.save(
-                JobAttempt(
-                    job_id=job_id,
-                    attempt_number=attempt_number,
-                    executor_role="codex",
-                    model_identity="codex",
-                    start_sha=base_sha,
-                    end_sha=base_sha,
-                    normalized_outcome=outcome,
-                    progress_classification=ProgressClassification.NO_PROGRESS,
-                    productivity_class=(
-                        AttemptProductivityClass.PROVIDER_FAILURE
-                        if outcome == ExecutionOutcome.PROVIDER_FAILURE
-                        else AttemptProductivityClass.PROVIDER_PREFLIGHT_FAILURE
-                    ),
-                    started_at=started_at,
-                    completed_at=started_at + timedelta(seconds=2),
-                    duration_ms=2000,
-                )
-            )
         uow.commit()
 
         manager = WorktreeManager(managed_root, uow)
@@ -358,6 +347,84 @@ def test_postgres_continue_reuses_created_worktree_after_auth_required_history(
         )
         snapshot_sha = asyncio.run(manager.create_recovery_snapshot(job_id, project_id))
         assert snapshot_sha and snapshot_sha != base_sha
+        attempt_one_started = utc_now() - timedelta(hours=16)
+        attempt_one_completed = attempt_one_started + timedelta(milliseconds=967)
+        attempt_two_started = attempt_one_completed + timedelta(hours=14, minutes=13)
+        attempt_two_completed = attempt_two_started + timedelta(milliseconds=2591)
+        attempt_three_started = attempt_two_completed + timedelta(milliseconds=66)
+        attempt_three_completed = attempt_three_started + timedelta(milliseconds=747)
+        historical_attempts = [
+            JobAttempt(
+                attempt_id=f"att-{job_id}-1",
+                job_id=job_id,
+                attempt_number=1,
+                executor_role="codex",
+                model_identity="codex",
+                start_sha=base_sha,
+                end_sha=base_sha,
+                normalized_outcome=ExecutionOutcome.PROVIDER_FAILURE,
+                progress_classification=ProgressClassification.NO_PROGRESS,
+                continuation_decision=ContinuationDecision.NEEDS_HUMAN,
+                productivity_class=AttemptProductivityClass.PROVIDER_FAILURE,
+                is_same_sha_duplicate=False,
+                started_at=attempt_one_started,
+                completed_at=attempt_one_completed,
+                duration_ms=960,
+            ),
+            JobAttempt(
+                attempt_id=f"att-{job_id}-2",
+                job_id=job_id,
+                attempt_number=2,
+                executor_role="codex",
+                model_identity="codex",
+                start_sha=snapshot_sha,
+                end_sha=snapshot_sha,
+                normalized_outcome=ExecutionOutcome.AUTH_REQUIRED,
+                progress_classification=ProgressClassification.NO_PROGRESS,
+                continuation_decision=ContinuationDecision.CORRECT_AND_RETRY,
+                productivity_class=AttemptProductivityClass.PROVIDER_PREFLIGHT_FAILURE,
+                is_same_sha_duplicate=False,
+                started_at=attempt_two_started,
+                completed_at=attempt_two_completed,
+                duration_ms=2591,
+            ),
+            JobAttempt(
+                attempt_id=f"att-{job_id}-3",
+                job_id=job_id,
+                attempt_number=3,
+                executor_role="antigravity",
+                model_identity="antigravity",
+                start_sha=snapshot_sha,
+                end_sha=snapshot_sha,
+                normalized_outcome=ExecutionOutcome.AUTH_REQUIRED,
+                progress_classification=ProgressClassification.NO_PROGRESS,
+                continuation_decision=ContinuationDecision.NEEDS_HUMAN,
+                productivity_class=AttemptProductivityClass.SAME_SHA_NO_PROGRESS,
+                is_same_sha_duplicate=True,
+                started_at=attempt_three_started,
+                completed_at=attempt_three_completed,
+                duration_ms=741,
+            ),
+        ]
+        for attempt in historical_attempts:
+            uow.job_attempts.save(attempt)
+        uow.events.save(
+            Event(
+                event_type=EventType.SAME_SHA_RETRY_SUPPRESSED,
+                project_id=project_id,
+                change_id=change_name,
+                operation_id=job_id,
+                payload={
+                    "attempt": 3,
+                    "candidate_sha": snapshot_sha,
+                    "reason": (
+                        "SAME_SHA_RETRY_SUPPRESSED: Candidate SHA is unchanged from previous attempt "
+                        "with identical failure reason and no new material evidence. Duplicate full-provider retry suppressed."
+                    ),
+                },
+                timestamp=attempt_three_completed + timedelta(milliseconds=7),
+            )
+        )
         ownership_before = uow.orchestration_worktree_ownerships.get_by_job_id(job_id)
         assert ownership_before.creation_state == WorktreeCreationState.CREATED
         uow.events.save(
@@ -389,6 +456,54 @@ def test_postgres_continue_reuses_created_worktree_after_auth_required_history(
             )
         )
         original_attempts = uow.job_attempts.list_by_job(job_id)
+        assert [
+            (
+                attempt.executor_role,
+                attempt.normalized_outcome,
+                attempt.productivity_class,
+                attempt.progress_classification,
+                attempt.is_same_sha_duplicate,
+                attempt.start_sha,
+                attempt.end_sha,
+                attempt.duration_ms,
+                attempt.continuation_decision,
+            )
+            for attempt in original_attempts
+        ] == [
+            (
+                "codex",
+                ExecutionOutcome.PROVIDER_FAILURE,
+                AttemptProductivityClass.PROVIDER_FAILURE,
+                ProgressClassification.NO_PROGRESS,
+                False,
+                base_sha,
+                base_sha,
+                960,
+                ContinuationDecision.NEEDS_HUMAN,
+            ),
+            (
+                "codex",
+                ExecutionOutcome.AUTH_REQUIRED,
+                AttemptProductivityClass.PROVIDER_PREFLIGHT_FAILURE,
+                ProgressClassification.NO_PROGRESS,
+                False,
+                snapshot_sha,
+                snapshot_sha,
+                2591,
+                ContinuationDecision.CORRECT_AND_RETRY,
+            ),
+            (
+                "antigravity",
+                ExecutionOutcome.AUTH_REQUIRED,
+                AttemptProductivityClass.SAME_SHA_NO_PROGRESS,
+                ProgressClassification.NO_PROGRESS,
+                True,
+                snapshot_sha,
+                snapshot_sha,
+                741,
+                ContinuationDecision.NEEDS_HUMAN,
+            ),
+        ]
         saga_count_before = session.scalar(
             select(func.count())
             .select_from(DurableSagaModel)
@@ -2034,9 +2149,7 @@ def test_crash_recovery_predicate_accepts_valid_and_rejects_contradictory_eviden
 
         def validate_cas(self, *, claim_key, owner_instance_id, fence_token):
             return (
-                claim_key == f"run:{run_id}"
-                and owner_instance_id == "worker"
-                and fence_token == 7
+                claim_key == f"run:{run_id}" and owner_instance_id == "worker" and fence_token == 7
             )
 
     manager = WorktreeManager(

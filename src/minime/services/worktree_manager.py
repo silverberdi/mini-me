@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
 from minime.domain.enums import (
     AttemptProductivityClass,
+    ContinuationDecision,
     EventType,
     ExecutionOutcome,
     ExternalOutcome,
@@ -2282,16 +2283,70 @@ class WorktreeManager:
             return False
 
         allowed_outcomes = {ExecutionOutcome.PROVIDER_FAILURE, ExecutionOutcome.AUTH_REQUIRED}
-        allowed_productivity = {
-            AttemptProductivityClass.PROVIDER_FAILURE,
-            AttemptProductivityClass.PROVIDER_PREFLIGHT_FAILURE,
-        }
+        duplicate_attempts = [attempt for attempt in ordered if attempt.is_same_sha_duplicate]
+        same_sha_human_suppression = False
+        if duplicate_attempts:
+            previous_attempt = ordered[-2] if len(ordered) >= 2 else None
+            same_sha_human_suppression = bool(
+                len(duplicate_attempts) == 1
+                and duplicate_attempts[0].attempt_id == latest_attempt.attempt_id
+                and latest_attempt.normalized_outcome == ExecutionOutcome.AUTH_REQUIRED
+                and latest_attempt.productivity_class
+                == AttemptProductivityClass.SAME_SHA_NO_PROGRESS
+                and latest_attempt.progress_classification == ProgressClassification.NO_PROGRESS
+                and latest_attempt.continuation_decision == ContinuationDecision.NEEDS_HUMAN
+                and previous_attempt is not None
+                and previous_attempt.normalized_outcome == ExecutionOutcome.AUTH_REQUIRED
+                and previous_attempt.productivity_class
+                == AttemptProductivityClass.PROVIDER_PREFLIGHT_FAILURE
+                and previous_attempt.progress_classification == ProgressClassification.NO_PROGRESS
+                and not previous_attempt.is_same_sha_duplicate
+                and previous_attempt.end_sha is not None
+                and latest_attempt.start_sha == previous_attempt.end_sha
+                and latest_attempt.end_sha == previous_attempt.end_sha
+            )
+            if same_sha_human_suppression:
+                events_repo = getattr(self.uow, "events", None)
+                if not events_repo or not callable(getattr(events_repo, "list_events", None)):
+                    return False
+                suppression_events = [
+                    event
+                    for event in events_repo.list_events(
+                        project_id=project_id, change_id=change_name, limit=10000
+                    )
+                    if event.event_type == EventType.SAME_SHA_RETRY_SUPPRESSED
+                    and event.operation_id == job.job_id
+                ]
+                same_attempt_events = [
+                    event
+                    for event in suppression_events
+                    if event.payload.get("attempt") == latest_attempt.attempt_number
+                    and event.payload.get("candidate_sha") == latest_attempt.end_sha
+                    and str(event.payload.get("reason", "")).startswith(
+                        "SAME_SHA_RETRY_SUPPRESSED:"
+                    )
+                    and event.timestamp >= latest_attempt.completed_at
+                ]
+                if len(suppression_events) != 1 or len(same_attempt_events) != 1:
+                    return False
+
         for attempt in ordered:
+            expected_productivity = (
+                AttemptProductivityClass.PROVIDER_FAILURE
+                if attempt.normalized_outcome == ExecutionOutcome.PROVIDER_FAILURE
+                else AttemptProductivityClass.PROVIDER_PREFLIGHT_FAILURE
+            )
+            if attempt.is_same_sha_duplicate:
+                if (
+                    not same_sha_human_suppression
+                    or attempt.attempt_id != latest_attempt.attempt_id
+                ):
+                    return False
+            elif attempt.productivity_class != expected_productivity:
+                return False
             if (
                 attempt.normalized_outcome not in allowed_outcomes
-                or attempt.productivity_class not in allowed_productivity
                 or attempt.progress_classification not in {None, ProgressClassification.NO_PROGRESS}
-                or attempt.is_same_sha_duplicate
                 or (attempt.start_sha and attempt.end_sha and attempt.start_sha != attempt.end_sha)
                 or attempt.completed_at is None
                 or attempt.duration_ms is None
