@@ -120,6 +120,13 @@ def _git_bytes(repo: Path, *args: str) -> bytes:
         "identity_mismatch",
         "same_sha_progress",
         "same_sha_without_event",
+        "same_sha_duplicate_event",
+        "same_sha_wrong_job_event",
+        "duplicate_non_auth",
+        "duplicate_sha_mismatch",
+        "suppression_number_mismatch",
+        "suppression_before_completion",
+        "suppression_after_next_attempt_started",
     ],
 )
 def test_auth_required_created_recovery_predicate_fails_closed(contradiction, tmp_path: Path):
@@ -190,6 +197,7 @@ def test_auth_required_created_recovery_predicate_fails_closed(contradiction, tm
     claim = SimpleNamespace(owner_instance_id="owner-test", fence_token=7, is_active=True)
     cas_valid = True
     decision_present = True
+    suppression_events = []
 
     if contradiction == "progress":
         attempts[-1].progress_classification = ProgressClassification.GOOD_PROGRESS
@@ -231,6 +239,71 @@ def test_auth_required_created_recovery_predicate_fails_closed(contradiction, tm
             if contradiction == "same_sha_progress"
             else ProgressClassification.NO_PROGRESS
         )
+    elif contradiction in {
+        "same_sha_duplicate_event",
+        "same_sha_wrong_job_event",
+        "duplicate_non_auth",
+        "duplicate_sha_mismatch",
+        "suppression_number_mismatch",
+        "suppression_before_completion",
+        "suppression_after_next_attempt_started",
+    }:
+        duplicate = attempts[-1]
+        duplicate.is_same_sha_duplicate = True
+        duplicate.productivity_class = AttemptProductivityClass.SAME_SHA_NO_PROGRESS
+        duplicate.continuation_decision = ContinuationDecision.NEEDS_HUMAN
+        duplicate.progress_classification = ProgressClassification.NO_PROGRESS
+        duplicate.start_sha = duplicate.end_sha = attempts[-2].end_sha
+        event_attempt = duplicate.attempt_number
+        event_job = job.job_id
+        event_time = duplicate.completed_at + timedelta(milliseconds=1)
+        if contradiction == "duplicate_non_auth":
+            duplicate.normalized_outcome = ExecutionOutcome.PROVIDER_FAILURE
+        elif contradiction == "duplicate_sha_mismatch":
+            duplicate.start_sha = duplicate.end_sha = "different-sha"
+        elif contradiction == "suppression_number_mismatch":
+            event_attempt += 1
+        elif contradiction == "suppression_before_completion":
+            event_time = duplicate.completed_at - timedelta(milliseconds=1)
+        elif contradiction == "suppression_after_next_attempt_started":
+            next_started = duplicate.completed_at + timedelta(seconds=2)
+            event_time = next_started + timedelta(milliseconds=1)
+            attempts.append(
+                SimpleNamespace(
+                    attempt_id="attempt-4",
+                    job_id=job.job_id,
+                    attempt_number=4,
+                    normalized_outcome=ExecutionOutcome.AUTH_REQUIRED,
+                    productivity_class=AttemptProductivityClass.PROVIDER_PREFLIGHT_FAILURE,
+                    progress_classification=ProgressClassification.NO_PROGRESS,
+                    continuation_decision=ContinuationDecision.NEEDS_HUMAN,
+                    is_same_sha_duplicate=False,
+                    start_sha=duplicate.end_sha,
+                    end_sha=duplicate.end_sha,
+                    started_at=next_started,
+                    completed_at=next_started + timedelta(seconds=1),
+                    duration_ms=1000,
+                )
+            )
+            job.attempt_count = 4
+        elif contradiction == "same_sha_wrong_job_event":
+            event_job = "another-job"
+        event = SimpleNamespace(
+            event_id="suppression-1",
+            event_type=EventType.SAME_SHA_RETRY_SUPPRESSED,
+            operation_id=event_job,
+            timestamp=event_time,
+            payload={
+                "attempt": event_attempt,
+                "candidate_sha": duplicate.end_sha,
+                "reason": "SAME_SHA_RETRY_SUPPRESSED: no progress",
+            },
+        )
+        suppression_events.append(event)
+        if contradiction == "same_sha_duplicate_event":
+            duplicate_event = SimpleNamespace(**vars(event))
+            duplicate_event.event_id = "suppression-2"
+            suppression_events.append(duplicate_event)
     creation_state = WorktreeCreationState.CREATED
     if contradiction == "deleted_ownership":
         creation_state = WorktreeCreationState.DELETED
@@ -249,8 +322,13 @@ def test_auth_required_created_recovery_predicate_fails_closed(contradiction, tm
         def validate_cas(self, **_kwargs):
             return cas_valid
 
+    class Events:
+        def list_events(self, **_kwargs):
+            return suppression_events
+
     manager = WorktreeManager(
-        tmp_path, SimpleNamespace(recovery_decisions=Decisions(), claims=Claims())
+        tmp_path,
+        SimpleNamespace(recovery_decisions=Decisions(), claims=Claims(), events=Events()),
     )
     assert not manager._has_durable_auth_required_created_recovery(
         attempts=attempts,
@@ -312,7 +390,7 @@ def test_postgres_continue_reuses_created_worktree_after_auth_required_history(
             reassignment_count=1,
             status=JobStatus.FAILED,
             base_sha=base_sha,
-            attempt_count=3,
+            attempt_count=4,
         )
         run = OrchestrationRun(
             run_id=run_id,
@@ -353,6 +431,8 @@ def test_postgres_continue_reuses_created_worktree_after_auth_required_history(
         attempt_two_completed = attempt_two_started + timedelta(milliseconds=2591)
         attempt_three_started = attempt_two_completed + timedelta(milliseconds=66)
         attempt_three_completed = attempt_three_started + timedelta(milliseconds=747)
+        attempt_four_started = attempt_three_completed + timedelta(milliseconds=72)
+        attempt_four_completed = attempt_four_started + timedelta(milliseconds=6418)
         historical_attempts = [
             JobAttempt(
                 attempt_id=f"att-{job_id}-1",
@@ -405,26 +485,47 @@ def test_postgres_continue_reuses_created_worktree_after_auth_required_history(
                 completed_at=attempt_three_completed,
                 duration_ms=741,
             ),
+            JobAttempt(
+                attempt_id=f"att-{job_id}-4",
+                job_id=job_id,
+                attempt_number=4,
+                executor_role="codex",
+                model_identity="codex",
+                start_sha=snapshot_sha,
+                end_sha=snapshot_sha,
+                normalized_outcome=ExecutionOutcome.AUTH_REQUIRED,
+                progress_classification=ProgressClassification.NO_PROGRESS,
+                continuation_decision=ContinuationDecision.NEEDS_HUMAN,
+                productivity_class=AttemptProductivityClass.SAME_SHA_NO_PROGRESS,
+                is_same_sha_duplicate=True,
+                started_at=attempt_four_started,
+                completed_at=attempt_four_completed,
+                duration_ms=6418,
+            ),
         ]
         for attempt in historical_attempts:
             uow.job_attempts.save(attempt)
-        uow.events.save(
-            Event(
-                event_type=EventType.SAME_SHA_RETRY_SUPPRESSED,
-                project_id=project_id,
-                change_id=change_name,
-                operation_id=job_id,
-                payload={
-                    "attempt": 3,
-                    "candidate_sha": snapshot_sha,
-                    "reason": (
-                        "SAME_SHA_RETRY_SUPPRESSED: Candidate SHA is unchanged from previous attempt "
-                        "with identical failure reason and no new material evidence. Duplicate full-provider retry suppressed."
-                    ),
-                },
-                timestamp=attempt_three_completed + timedelta(milliseconds=7),
+        for attempt_number, attempt_completed in (
+            (3, attempt_three_completed),
+            (4, attempt_four_completed),
+        ):
+            uow.events.save(
+                Event(
+                    event_type=EventType.SAME_SHA_RETRY_SUPPRESSED,
+                    project_id=project_id,
+                    change_id=change_name,
+                    operation_id=job_id,
+                    payload={
+                        "attempt": attempt_number,
+                        "candidate_sha": snapshot_sha,
+                        "reason": (
+                            "SAME_SHA_RETRY_SUPPRESSED: Candidate SHA is unchanged from previous attempt "
+                            "with identical failure reason and no new material evidence. Duplicate full-provider retry suppressed."
+                        ),
+                    },
+                    timestamp=attempt_completed + timedelta(milliseconds=7),
+                )
             )
-        )
         ownership_before = uow.orchestration_worktree_ownerships.get_by_job_id(job_id)
         assert ownership_before.creation_state == WorktreeCreationState.CREATED
         uow.events.save(
@@ -503,6 +604,17 @@ def test_postgres_continue_reuses_created_worktree_after_auth_required_history(
                 741,
                 ContinuationDecision.NEEDS_HUMAN,
             ),
+            (
+                "codex",
+                ExecutionOutcome.AUTH_REQUIRED,
+                AttemptProductivityClass.SAME_SHA_NO_PROGRESS,
+                ProgressClassification.NO_PROGRESS,
+                True,
+                snapshot_sha,
+                snapshot_sha,
+                6418,
+                ContinuationDecision.NEEDS_HUMAN,
+            ),
         ]
         saga_count_before = session.scalar(
             select(func.count())
@@ -535,6 +647,7 @@ def test_postgres_continue_reuses_created_worktree_after_auth_required_history(
                 self.reached = False
                 self.head_sha = None
                 self.branch = None
+                self.worktree_path = None
                 self.ownership_id = None
                 self.ownership_state = None
 
@@ -542,6 +655,7 @@ def test_postgres_continue_reuses_created_worktree_after_auth_required_history(
                 self.reached = True
                 self.head_sha = _git(Path(candidate_path), "rev-parse", "HEAD")
                 self.branch = _git(Path(candidate_path), "branch", "--show-current")
+                self.worktree_path = Path(candidate_path).resolve()
                 ownership = uow.orchestration_worktree_ownerships.get_by_job_id(job_id)
                 self.ownership_id = ownership.worktree_id
                 self.ownership_state = ownership.creation_state
@@ -568,17 +682,37 @@ def test_postgres_continue_reuses_created_worktree_after_auth_required_history(
         assert runner.reached is True
         assert runner.head_sha == snapshot_sha
         assert runner.branch == recovery_branch
+        assert runner.worktree_path == worktree.path.resolve()
         assert runner.ownership_state == WorktreeCreationState.CREATED
         assert runner.ownership_id == ownership_before.worktree_id
         assert uow.jobs.get_by_id(job_id).current_executor == "codex"
         attempts_after = uow.job_attempts.list_by_job(job_id)
         assert uow.jobs.get_by_id(job_id).attempt_count == len(attempts_after)
-        assert len(attempts_after) > 3
-        assert [attempt.attempt_id for attempt in attempts_after[:3]] == [
+        assert len(attempts_after) > 4
+        assert [attempt.attempt_id for attempt in attempts_after[:4]] == [
             attempt.attempt_id for attempt in original_attempts
         ]
-        assert [attempt.normalized_outcome for attempt in attempts_after[:3]] == [
+        history_fields = (
+            "executor_role",
+            "normalized_outcome",
+            "productivity_class",
+            "progress_classification",
+            "is_same_sha_duplicate",
+            "start_sha",
+            "end_sha",
+            "duration_ms",
+            "continuation_decision",
+        )
+        assert [
+            tuple(getattr(attempt, field) for field in history_fields)
+            for attempt in attempts_after[:4]
+        ] == [
+            tuple(getattr(attempt, field) for field in history_fields)
+            for attempt in original_attempts
+        ]
+        assert [attempt.normalized_outcome for attempt in attempts_after[:4]] == [
             ExecutionOutcome.PROVIDER_FAILURE,
+            ExecutionOutcome.AUTH_REQUIRED,
             ExecutionOutcome.AUTH_REQUIRED,
             ExecutionOutcome.AUTH_REQUIRED,
         ]

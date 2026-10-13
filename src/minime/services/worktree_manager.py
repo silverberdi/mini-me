@@ -2283,76 +2283,110 @@ class WorktreeManager:
             return False
 
         allowed_outcomes = {ExecutionOutcome.PROVIDER_FAILURE, ExecutionOutcome.AUTH_REQUIRED}
-        duplicate_attempts = [attempt for attempt in ordered if attempt.is_same_sha_duplicate]
-        same_sha_human_suppression = False
-        if duplicate_attempts:
-            previous_attempt = ordered[-2] if len(ordered) >= 2 else None
-            same_sha_human_suppression = bool(
-                len(duplicate_attempts) == 1
-                and duplicate_attempts[0].attempt_id == latest_attempt.attempt_id
-                and latest_attempt.normalized_outcome == ExecutionOutcome.AUTH_REQUIRED
-                and latest_attempt.productivity_class
-                == AttemptProductivityClass.SAME_SHA_NO_PROGRESS
-                and latest_attempt.progress_classification == ProgressClassification.NO_PROGRESS
-                and latest_attempt.continuation_decision == ContinuationDecision.NEEDS_HUMAN
-                and previous_attempt is not None
-                and previous_attempt.normalized_outcome == ExecutionOutcome.AUTH_REQUIRED
-                and previous_attempt.productivity_class
+        if (
+            len({attempt.attempt_id for attempt in ordered}) != len(ordered)
+            or not ordered
+            or not (
+                ordered[0].normalized_outcome == ExecutionOutcome.PROVIDER_FAILURE
+                and ordered[0].productivity_class == AttemptProductivityClass.PROVIDER_FAILURE
+                or ordered[0].normalized_outcome == ExecutionOutcome.AUTH_REQUIRED
+                and ordered[0].productivity_class
                 == AttemptProductivityClass.PROVIDER_PREFLIGHT_FAILURE
-                and previous_attempt.progress_classification == ProgressClassification.NO_PROGRESS
-                and not previous_attempt.is_same_sha_duplicate
-                and previous_attempt.end_sha is not None
-                and latest_attempt.start_sha == previous_attempt.end_sha
-                and latest_attempt.end_sha == previous_attempt.end_sha
             )
-            if same_sha_human_suppression:
-                events_repo = getattr(self.uow, "events", None)
-                if not events_repo or not callable(getattr(events_repo, "list_events", None)):
-                    return False
-                suppression_events = [
-                    event
-                    for event in events_repo.list_events(
-                        project_id=project_id, change_id=change_name, limit=10000
-                    )
-                    if event.event_type == EventType.SAME_SHA_RETRY_SUPPRESSED
-                    and event.operation_id == job.job_id
-                ]
-                same_attempt_events = [
-                    event
-                    for event in suppression_events
-                    if event.payload.get("attempt") == latest_attempt.attempt_number
-                    and event.payload.get("candidate_sha") == latest_attempt.end_sha
-                    and str(event.payload.get("reason", "")).startswith(
-                        "SAME_SHA_RETRY_SUPPRESSED:"
-                    )
-                    and event.timestamp >= latest_attempt.completed_at
-                ]
-                if len(suppression_events) != 1 or len(same_attempt_events) != 1:
-                    return False
+        ):
+            return False
 
-        for attempt in ordered:
-            expected_productivity = (
-                AttemptProductivityClass.PROVIDER_FAILURE
-                if attempt.normalized_outcome == ExecutionOutcome.PROVIDER_FAILURE
-                else AttemptProductivityClass.PROVIDER_PREFLIGHT_FAILURE
-            )
+        duplicate_attempts = [attempt for attempt in ordered if attempt.is_same_sha_duplicate]
+        duplicate_numbers: set[int] = set()
+        for index, attempt in enumerate(ordered):
+            if getattr(attempt, "job_id", job.job_id) != job.job_id:
+                return False
             if attempt.is_same_sha_duplicate:
+                predecessor = ordered[index - 1] if index > 0 else None
                 if (
-                    not same_sha_human_suppression
-                    or attempt.attempt_id != latest_attempt.attempt_id
+                    attempt.normalized_outcome != ExecutionOutcome.AUTH_REQUIRED
+                    or attempt.productivity_class != AttemptProductivityClass.SAME_SHA_NO_PROGRESS
+                    or attempt.progress_classification != ProgressClassification.NO_PROGRESS
+                    or attempt.continuation_decision != ContinuationDecision.NEEDS_HUMAN
+                    or attempt.start_sha is None
+                    or attempt.end_sha is None
+                    or attempt.start_sha != attempt.end_sha
+                    or predecessor is None
+                    or predecessor.normalized_outcome != ExecutionOutcome.AUTH_REQUIRED
+                    or predecessor.productivity_class
+                    not in {
+                        AttemptProductivityClass.PROVIDER_PREFLIGHT_FAILURE,
+                        AttemptProductivityClass.SAME_SHA_NO_PROGRESS,
+                    }
+                    or predecessor.progress_classification != ProgressClassification.NO_PROGRESS
+                    or predecessor.end_sha != attempt.start_sha
                 ):
                     return False
-            elif attempt.productivity_class != expected_productivity:
-                return False
+                duplicate_numbers.add(attempt.attempt_number)
+            else:
+                expected_productivity = (
+                    AttemptProductivityClass.PROVIDER_FAILURE
+                    if attempt.normalized_outcome == ExecutionOutcome.PROVIDER_FAILURE
+                    else AttemptProductivityClass.PROVIDER_PREFLIGHT_FAILURE
+                )
+                if attempt.productivity_class != expected_productivity:
+                    return False
             if (
                 attempt.normalized_outcome not in allowed_outcomes
-                or attempt.progress_classification not in {None, ProgressClassification.NO_PROGRESS}
-                or (attempt.start_sha and attempt.end_sha and attempt.start_sha != attempt.end_sha)
+                or attempt.progress_classification != ProgressClassification.NO_PROGRESS
+                or attempt.start_sha is None
+                or attempt.end_sha is None
+                or attempt.start_sha != attempt.end_sha
                 or attempt.completed_at is None
                 or attempt.duration_ms is None
+                or attempt.duration_ms < 0
                 or attempt.completed_at < attempt.started_at
             ):
                 return False
+
+        if duplicate_attempts:
+            events_repo = getattr(self.uow, "events", None)
+            if not events_repo or not callable(getattr(events_repo, "list_events", None)):
+                return False
+            event_limit = max(10000, expected_count + 1)
+            all_events = events_repo.list_events(
+                project_id=project_id, change_id=change_name, limit=event_limit
+            )
+            # A saturated read cannot prove that the durable suppression history is complete.
+            if len(all_events) >= event_limit:
+                return False
+            suppression_events = [
+                event
+                for event in all_events
+                if event.event_type == EventType.SAME_SHA_RETRY_SUPPRESSED
+            ]
+            if len(suppression_events) != len(duplicate_attempts):
+                return False
+            events_by_attempt: dict[int, list[Any]] = {}
+            for event in suppression_events:
+                if event.operation_id != job.job_id:
+                    return False
+                attempt_number = event.payload.get("attempt")
+                if not isinstance(attempt_number, int) or isinstance(attempt_number, bool):
+                    return False
+                events_by_attempt.setdefault(attempt_number, []).append(event)
+            if set(events_by_attempt) != duplicate_numbers or any(
+                len(events) != 1 for events in events_by_attempt.values()
+            ):
+                return False
+            attempts_by_number = {attempt.attempt_number: attempt for attempt in ordered}
+            for attempt_number, events in events_by_attempt.items():
+                attempt = attempts_by_number[attempt_number]
+                event = events[0]
+                next_attempt = ordered[attempt_number] if attempt_number < len(ordered) else None
+                if (
+                    event.payload.get("candidate_sha") != attempt.end_sha
+                    or not isinstance(event.payload.get("reason"), str)
+                    or not event.payload["reason"].startswith("SAME_SHA_RETRY_SUPPRESSED:")
+                    or event.timestamp < attempt.completed_at
+                    or (next_attempt is not None and event.timestamp >= next_attempt.started_at)
+                ):
+                    return False
         if any(
             earlier.completed_at > later.started_at
             for earlier, later in zip(ordered, ordered[1:], strict=False)
