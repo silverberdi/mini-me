@@ -22,6 +22,8 @@ Read `README.md`, `docs/BUSINESS_INTENT.md`, `docs/CANONICAL_DECISIONS.md`, `doc
 - Human approval is bound to the candidate identity (head SHA + base SHA, and immutable image digest when deployed). Stale validation must not be silently reused.
 - Deterministic evidence beats agent self-claims.
 - Every completed OpenSpec task requires verifiable evidence, plus stage E2E, complete-value E2E and postdeploy functional E2E for Change acceptance. An agent's own PASS claim is not evidence.
+- **Engineering Removal Gate:** inventory current implementation/callers, reuse existing code/capabilities, and retire superseded implementations within the same Change after E2E parity; migrate references, rerun tests/E2E **after removal**, preserve history and obtain explicit human approval for justified exceptions.
+- **Prebuilt Capability Pack:** use the seed skills `minime-engineering-discipline`, `minime-safe-retirement`, `minime-real-e2e-proof`, the existing canonical/scope/repository guards, documented harness/hooks baseline and native OpenSpec commands. Do not invent replacements from scratch; verify any proposed variation with OpenSpec update and E2E. PR #140 hooks are pending, not installed by fiat.
 
 ## Git safety
 Never change `origin`, the registered repository, assigned base branch, or assigned worktree. Before push/PR, revalidate repository identity and candidate SHA.
