@@ -9,12 +9,13 @@ context: |
   Human authority: final product judgment, UI validation, merge, material ambiguity, policy/budget override and rollback.
   Repository identity: execution derives only from validated durable project binding; never infer repo from titles/labels/Project fields.
   Deployment: container-first. Human validation is for UI and must be guided by explicit scenarios. Validation is bound to candidate head SHA + base SHA and immutable image digest where applicable.
+  Engineering rule: docs/ENGINEERING_DISCIPLINE.md (founding discipline plus same-change code retirement) is mandatory. Capability seed: docs/agent-capabilities/V1_MANIFEST.md, HOOK_CONTRACTS.md, HARNESS_CONTRACT.md, RETIREMENT_MAP.md and skills in .agent/.agents are prebuilt inputs, not instructions to infer from scratch. PR #140 hooks are pending, not assumed installed.
   Delivery rule: only the active OpenSpec change may be implemented; docs/BACKLOG.md MM-R01..R10 and docs/backlog/MM-Rxx.md define backlog value increments, not active changes. Each Change must include *all* functional specs necessary for real deployed value, stage E2E, full E2E, and functional postdeploy verification. docs/CHANGE_DELIVERY_CONTRACT.md is mandatory. Historical milestone DELIVERED labels do not prove product readiness.
 
 rules:
   proposal:
     - State the independently verifiable user/operator value and why this stage is now.
-    - Load corresponding docs/backlog/MM-Rxx.md and trace every listed Sxx and E0x to proposal/design/specs/tasks; stop for documented ambiguity, don't invent scope.
+    - Load corresponding docs/backlog/MM-Rxx.md, docs/ENGINEERING_DISCIPLINE.md and docs/agent-capabilities/V1_MANIFEST.md. Trace every Sxx/E0x to proposal/design/specs/tasks; stop for material ambiguity, don't invent scope.
     - Declare the smallest usable vertical slice, not technical sub-stages; include backend/DB/UI/hooks/harness and E2E in the **same Change** when required for value.
     - Declare dependencies and explicitly identify non-goals/future stages to prevent scope creep.
     - Identify whether the change affects UI and therefore requires human validation scenarios.
@@ -27,7 +28,8 @@ rules:
     - Include explicit safety requirements for repository identity, secrets, paid fallback, candidate identity or production data when affected.
   design:
     - Resolve implementation-shaping architecture decisions; do not leave the executor to invent them.
-    - Conduct preflight capability census: existing OpenSpec CLI/agent workflows, skills, hooks, commands, guards, harnesses and contracts; reuse them before inventing code. Do not emulate agent-side OpenSpec semantics.
+    - Reuse the pre-seeded .agent/.agents skills/workflow wrappers and docs/agent-capabilities/ contracts, checking actual installed versions; complement them only where the active Change demonstrates a gap. Prefer official OpenSpec CLI/agent workflows; never emulate their semantics.
+    - Include an explicit Removal Ledger of replaced writers/entrypoints/callers, migration of consumers/docs/tests, preservation of historical data, rollback and re-proving all E2E after retiring obsolete code in the same Change.
     - Preserve daemon/core ownership of orchestration; clients do not invoke providers/Git/deployment directly.
     - PostgreSQL is the only operational DB and schema changes use Alembic migrations.
     - Prefer idempotent/reconcilable external side effects and durable evidence before/after them.
@@ -36,9 +38,10 @@ rules:
     - Keep tasks small, ordered, testable and attributable to this change only.
     - Every task must have a verifiable completion signal; include acceptance/failure-injection tasks.
     - Explicit tasks required for stage E2E, real end-to-end value proof, postdeploy E2E and regression of earlier delivered capabilities; no mock-only acceptance.
+    - Include same-Change code retirement tasks when replacing behavior: census, parity proof, consumer migration, removal, post-removal E2E and deployment verification; RETAIN-WITH-REASON needs explicit human approval.
     - Do not add tasks from future roadmap stages merely because they are convenient.
   apply:
-    - Read AGENTS.md and all referenced canonical docs plus docs/CHANGE_DELIVERY_CONTRACT.md and the MM-Rxx backlog dossier before editing.
+    - Read AGENTS.md, docs/ENGINEERING_DISCIPLINE.md, docs/agent-capabilities/ contracts, seeded project agent skills, canonical docs and the MM-Rxx dossier before editing.
     - Execute **native installed agent-side OpenSpec workflows**, never free-form code implementation prompts or deterministic mini me-authored proposals/sync/archive.
     - Work only in the assigned repository/worktree and active change.
     - Stop on material ambiguity rather than inventing behavior, architecture, cost policy or repo identity.
@@ -48,6 +51,7 @@ rules:
     - Verify observable specs, deterministic tests/checks, denial/failure scenarios, scope discipline and canonical architecture constraints.
     - Block architecture drift against Business Intent/canonical decisions and agent-vs-mini-me ownership boundaries.
     - Separate TECHNICAL_PASS, E2E_PASS (real providers/side effects) and DEPLOYED_VERIFIED (functional behavior on target); a missing real result is BLOCKED, never PASS.
+    - Verify design/engineering compliance and all Removal Ledger actions after removal, including regression E2E on the cleaned candidate, rather than checking only tasks or mock-driven evidence.
     - Treat repository mismatch, same-model self-review, paid fallback policy violation, secret leakage and stale human validation as blocking defects.
     - Report evidence gaps explicitly; do not infer PASS from an agent claim.
 
