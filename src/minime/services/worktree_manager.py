@@ -31,6 +31,7 @@ from minime.domain.enums import (
     OrchestrationStage,
     OrchestrationStopOutcome,
     ProgressClassification,
+    ProviderHealthStatus,
     WorkspaceOperation,
     WorktreeCreationState,
 )
@@ -2414,6 +2415,30 @@ class WorktreeManager:
         if not decisions:
             return False
         decision = max(decisions, key=lambda item: item.created_at)
+        auth_recovery = (getattr(decision, "observation_refs", None) or {}).get(
+            "provider_auth_recovery", {}
+        )
+        auth_health = (
+            self.uow.provider_health.get_by_provider(auth_recovery.get("provider"))
+            if auth_recovery.get("provider") and getattr(self.uow, "provider_health", None)
+            else None
+        )
+        auth_recovery_decision = bool(
+            decision.planned_action == "DRIVE_AUTH_RECOVERY_CONTINUATION"
+            and auth_recovery.get("action_request_id")
+            and auth_recovery.get("action_type") == "CONTINUE"
+            and auth_recovery.get("reauthentication_confirmed") is True
+            and auth_recovery.get("run_id") == run.run_id
+            and auth_recovery.get("project_id") == project_id
+            and auth_recovery.get("change_name") == change_name
+            and auth_recovery.get("job_id") == job.job_id
+            and auth_recovery.get("generation") == run.current_generation
+            and auth_recovery.get("provider") == job.current_executor
+            and auth_health is not None
+            and auth_health.status == ProviderHealthStatus.AUTH_REQUIRED
+            and auth_health.updated_at.isoformat()
+            == auth_recovery.get("expected_health_updated_at")
+        )
         if (
             decision.claim_key != claim_key
             or decision.identity_type != "RUN"
@@ -2421,7 +2446,7 @@ class WorktreeManager:
             or decision.project_id != project_id
             or decision.change_name != change_name
             or getattr(decision.source, "value", decision.source) != "CONTROL_PLANE"
-            or decision.planned_action != "DRIVE_CONTINUATION"
+            or (decision.planned_action != "DRIVE_CONTINUATION" and not auth_recovery_decision)
             or getattr(decision.status, "value", decision.status) != "EXECUTING"
             or not decision.fence_token
             or decision.created_at <= latest_attempt.completed_at

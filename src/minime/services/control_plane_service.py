@@ -94,11 +94,23 @@ class ControlPlaneService:
 
         descriptors: list[ActionDescriptor] = []
 
+        auth_recovery_state = self._auth_recovery_state(run, project)
+
         # 1. CONTINUE / RESUME
         continue_enabled = False
         continue_reason: str | None = None
         if run.is_active:
-            continue_reason = "Run is already active"
+            if auth_recovery_state:
+                continue_enabled = True
+            else:
+                continue_reason = "Run is already active"
+        elif (
+            run.stop_outcome == OrchestrationStopOutcome.WAITING_CAPACITY
+            and project
+            and (health := self.provider_health_service.get_existing_health(project.implementer))
+            and health.status == ProviderHealthStatus.AUTH_REQUIRED
+        ):
+            continue_reason = "AUTH_REQUIRED recovery requires an active, identity-consistent Run/Job and explicit confirmation."
         elif run.current_stage == OrchestrationStage.PR_PREPARED:
             continue_reason = "Run has completed PR preparation"
         elif run.stop_outcome == OrchestrationStopOutcome.CANCELLED:
@@ -138,11 +150,41 @@ class ControlPlaneService:
             ActionDescriptor(
                 action=OperatorActionType.CONTINUE,
                 display_name="Continue / Resume",
-                description="Resume execution from persisted checkpoint using canonical orchestration semantics.",
+                description=(
+                    "Resume the persisted checkpoint. AUTH_REQUIRED recovery additionally requires current expected_stage and expected_generation preconditions."
+                    if auth_recovery_state
+                    else "Resume execution from persisted checkpoint using canonical orchestration semantics."
+                ),
                 enabled=continue_enabled,
                 disabled_reason=continue_reason,
-                requires_confirmation=False,
-                risk_level=ActionRiskLevel.LOW,
+                confirmation_prompt=(
+                    "Confirm Codex credentials were renewed. This authorizes exactly one remote implementation attempt."
+                    if auth_recovery_state
+                    else None
+                ),
+                parameters_schema=(
+                    {
+                        "type": "object",
+                        "required": [
+                            "provider_reauthentication_confirmed",
+                            "expected_provider_health_updated_at",
+                        ],
+                        "properties": {
+                            "provider_reauthentication_confirmed": {
+                                "type": "boolean",
+                                "const": True,
+                            },
+                            "expected_provider_health_updated_at": {
+                                "type": "string",
+                                "const": auth_recovery_state["health_updated_at"],
+                            },
+                        },
+                    }
+                    if auth_recovery_state
+                    else {}
+                ),
+                requires_confirmation=bool(auth_recovery_state),
+                risk_level=(ActionRiskLevel.HIGH if auth_recovery_state else ActionRiskLevel.LOW),
             )
         )
 
@@ -552,6 +594,54 @@ class ControlPlaneService:
                 resulting_gate=persisted_run.human_gate,
             )
 
+    def _auth_recovery_state(
+        self, run: OrchestrationRun, project: Any | None
+    ) -> dict[str, str] | None:
+        """Return the exact eligible AUTH_REQUIRED snapshot for a one-shot CONTINUE."""
+        if (
+            not project
+            or not run.is_active
+            or run.current_stage != OrchestrationStage.IMPLEMENTING
+            or run.stop_outcome != OrchestrationStopOutcome.WAITING_CAPACITY
+            or not run.active_job_id
+            or run.current_candidate_sha
+            or self.uow.orchestration_candidates.get_latest_for_run(run.run_id)
+        ):
+            return None
+        job = self.uow.jobs.get_by_id(run.active_job_id)
+        provider = project.implementer
+        if provider not in {"codex", "antigravity"}:
+            return None
+        waiting_matches_auth_provider = bool(
+            job
+            and (
+                job.waiting_provider == provider
+                or (
+                    job.waiting_provider == "openrouter"
+                    and (job.capacity_block_reason or "").startswith(
+                        "OpenRouter fallback ineligible:"
+                    )
+                )
+            )
+        )
+        if (
+            not job
+            or job.project_id != run.project_id
+            or job.change_name != run.change_name
+            or job.status != JobStatus.WAITING_CAPACITY
+            or not waiting_matches_auth_provider
+            or job.current_executor != provider
+            or job.candidate_sha
+        ):
+            return None
+        health = self.provider_health_service.get_existing_health(provider)
+        if not health or health.status != ProviderHealthStatus.AUTH_REQUIRED:
+            return None
+        actions = self.uow.orchestration_external_actions.list_by_run(run.run_id)
+        if any(action.status.value not in {"COMPLETED"} for action in actions):
+            return None
+        return {"provider": provider, "health_updated_at": health.updated_at.isoformat()}
+
     def _check_optimistic_concurrency(
         self, request: OperatorActionRequest, run: OrchestrationRun
     ) -> str | None:
@@ -629,7 +719,58 @@ class ControlPlaneService:
         run: OrchestrationRun,
         sanitized_params: dict[str, Any],
     ) -> OperatorActionResult:
-        if run.is_active and not sanitized_params.get("force"):
+        auth_state = self._auth_recovery_state(run, self.uow.projects.get_by_id(run.project_id))
+        project = self.uow.projects.get_by_id(run.project_id)
+        health = (
+            self.provider_health_service.get_existing_health(project.implementer)
+            if project
+            else None
+        )
+        auth_waiting_state = bool(
+            run.stop_outcome == OrchestrationStopOutcome.WAITING_CAPACITY
+            and health
+            and health.status == ProviderHealthStatus.AUTH_REQUIRED
+        )
+        if auth_waiting_state and not auth_state:
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.ACTION_NOT_ALLOWED,
+                summary="AUTH_REQUIRED continuation is not eligible: linked state, candidate, or external-action evidence is inconsistent.",
+                sanitized_params=sanitized_params,
+            )
+        auth_recovery_authorization = None
+        if auth_state:
+            if (
+                request.action_type != OperatorActionType.CONTINUE
+                or sanitized_params.get("force") is True
+                or sanitized_params.get("provider_reauthentication_confirmed") is not True
+                or sanitized_params.get("expected_provider_health_updated_at")
+                != auth_state["health_updated_at"]
+                or request.expected_stage != OrchestrationStage.IMPLEMENTING
+                or request.expected_generation != run.current_generation
+            ):
+                return self._record_and_return_rejection(
+                    request=request,
+                    run=run,
+                    error_code=OperatorActionErrorCode.STALE_OPERATOR_STATE,
+                    summary="Explicit reauthentication confirmation, current provider-health timestamp, and matching stage/generation preconditions are required.",
+                    sanitized_params=sanitized_params,
+                )
+            auth_recovery_authorization = {
+                "action_request_id": request.action_request_id,
+                "action_type": request.action_type.value,
+                "reauthentication_confirmed": True,
+                "provider": auth_state["provider"],
+                "expected_health_updated_at": auth_state["health_updated_at"],
+                "project_id": run.project_id,
+                "change_name": run.change_name,
+                "run_id": run.run_id,
+                "job_id": run.active_job_id,
+                "generation": run.current_generation,
+            }
+
+        if run.is_active and not sanitized_params.get("force") and not auth_recovery_authorization:
             return self._record_and_return_rejection(
                 request=request,
                 run=run,
@@ -638,7 +779,11 @@ class ControlPlaneService:
                 sanitized_params=sanitized_params,
             )
 
-        if (
+        if auth_recovery_authorization:
+            # The narrow auth-recovery path does not clear or rewrite state here;
+            # RecoveryConvergenceService validates it under the run claim.
+            pass
+        elif (
             run.current_stage == OrchestrationStage.PR_PREPARED
             or run.stop_outcome == OrchestrationStopOutcome.CANCELLED
         ):
@@ -681,9 +826,26 @@ class ControlPlaneService:
             self.uow.commit()
 
         # Drive run continuation through canonical RecoveryConvergenceService
-        self.recovery_convergence_service.request_run_continuation(
-            run.run_id, source=RecoverySource.CONTROL_PLANE, force=True
-        )
+        if auth_recovery_authorization:
+            decision = self.recovery_convergence_service.request_run_continuation(
+                run.run_id,
+                source=RecoverySource.CONTROL_PLANE,
+                force=False,
+                auth_recovery_authorization=auth_recovery_authorization,
+                drive_admitted=True,
+            )
+        else:
+            decision = self.recovery_convergence_service.request_run_continuation(
+                run.run_id, source=RecoverySource.CONTROL_PLANE, force=True
+            )
+        if auth_recovery_authorization and decision.status.value in {"NO_ACTION", "BLOCKED"}:
+            return self._record_and_return_rejection(
+                request=request,
+                run=self.uow.orchestration_runs.get_by_id(run.run_id) or run,
+                error_code=OperatorActionErrorCode.ACTION_NOT_ALLOWED,
+                summary=f"Provider reauthentication continuation was not dispatched: {decision.reason_code or decision.status.value}.",
+                sanitized_params=sanitized_params,
+            )
         resumed_run = self.uow.orchestration_runs.get_by_id(run.run_id) or run
         linked_job = (
             self.uow.jobs.get_by_id(resumed_run.active_job_id)
@@ -1179,7 +1341,10 @@ class ControlPlaneService:
                 )
 
             resumed_run = self.orchestration_service.remediate_preserved_candidate(
-                run.run_id, contract_path=contract, project_root=self.project_root, claim_context=claim_ctx
+                run.run_id,
+                contract_path=contract,
+                project_root=self.project_root,
+                claim_context=claim_ctx,
             )
             summary = f"Preserved candidate remediation started; generation is now {resumed_run.current_generation}."
             record = OperatorActionRecord(
@@ -1621,7 +1786,12 @@ class ControlPlaneService:
             RecoveryDecisionStatus,
             RecoverySource,
         )
-        gh_adapter = getattr(self.post_merge_service, "github_adapter", getattr(self.orchestration_service, "github_adapter", None))
+
+        gh_adapter = getattr(
+            self.post_merge_service,
+            "github_adapter",
+            getattr(self.orchestration_service, "github_adapter", None),
+        )
         rec_svc = RecoveryConvergenceService(
             self.uow,
             project_root=self.project_root,
