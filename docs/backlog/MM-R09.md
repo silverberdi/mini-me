@@ -14,7 +14,7 @@ Los Sxx son mínimos normativos. En `propose`, el agente clasifica las specs por
 SHALL registrar por evidencia la capacidad faltante, su efecto en la tarea, catálogo existente inspeccionado, alternativas evaluadas y decisión de construir; no autogeneración por curiosidad.
 
 ### R09-S02 — OpenSpec de capacidad
-SHALL abrir work item/Issue con proposal/specs/design/tasks de la capacidad por workflow agent-led `propose\`, usando criterios de actor, seguridad y aceptación E2E.
+SHALL abrir work item/Issue con proposal/specs/design/tasks de la capacidad por workflow agent-led `propose`, usando criterios de actor, seguridad y aceptación E2E.
 
 ### R09-S03 — Implementación por agente
 SHALL asignar agente que codifica skill/hook/harness en repo autorizado, empaqueta versión + schema de entradas/salidas, requisitos y permisos; mini me no crea el código o prompt libre.
