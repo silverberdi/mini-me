@@ -10,7 +10,7 @@ Exceptional/terminal paths: `BLOCKED`, `REJECTED`, `CANCELLED`.
 ## Job stages
 Typical path:
 
-`QUEUED → PREPARING → IMPLEMENTING → CHECKING_IMPLEMENTATION → REVIEWING → [CORRECTING loop] → CHECKING_FINAL → AUDITING → [DEPLOYING_PREVIEW → VERIFYING_PREVIEW → AWAITING_HUMAN_VALIDATION when required] → AWAITING_HUMAN → FINALIZING → PUSHING/PR_READY → AWAITING_MERGE → DEPLOYING_PRODUCTION → VERIFYING_PRODUCTION → POST_MERGE_CLOSING → COMPLETED`
+`QUEUED → PREPARING → IMPLEMENTING → CHECKING_IMPLEMENTATION → REVIEWING → [CORRECTING loop] → CHECKING_FINAL → [OPTIONAL_AUTHORIZED_AUDIT] → [DEPLOYING_PREVIEW → VERIFYING_PREVIEW → AWAITING_HUMAN_VALIDATION when required] → AWAITING_HUMAN → FINALIZING → PUSHING/PR_READY → AWAITING_MERGE → DEPLOYING_PRODUCTION → VERIFYING_PRODUCTION → POST_MERGE_CLOSING → COMPLETED`
 
 Temporary/error states include `RETRY_SCHEDULED`, `WAITING_CAPACITY`, `WAITING_DEPENDENCY`, `BLOCKED`, `FAILED`, `CANCELLED`.
 
@@ -27,4 +27,7 @@ Scheduler mode is not a change state.
 - No `READY → DONE`, `IMPLEMENTING → APPROVED`, or similar bypasses.
 - `FAILED` attempt does not automatically fail the change.
 - `WAITING` means mini me knows the recovery condition and does not currently require human judgment.
+- E2E_PASS and DEPLOYED_VERIFIED are **evidence gates**, not inferred merely from stage transition, mock runner response or successful HTTP /health.
+- Native OpenSpec workflow events and candidate/tool evidence precede advancing apply/verify/sync/archive stages; a custom Python emulation is not authoritative.
+- Tool/provider fallback requires both primary providers unable to cover the stage **and** explicit operator authorization. Unknown reset/remaining quota may not be reported as certain.
 - `BLOCKED` means safe progress requires human intervention or resolution.
