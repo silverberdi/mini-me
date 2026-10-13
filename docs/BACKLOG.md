@@ -42,7 +42,7 @@ Cada Change agrupa **todas** las specs backend/frontend/persistencia/CLI/harness
 
 Estas fichas son **contratos de backlog**, no `proposal.md` ni `specs/` artificiales. Solamente un Change activo se convierte mediante el workflow `propose` del **agente** en `openspec/changes/<slug>/`. En la propuesta se materializan todas las specs funcionales y escenarios de la ficha, con verificación de consistencia. `apply` y `verify` ocurren mediante los workflows instalados en el agente correspondiente, bajo los guards del proyecto. No emitir prompts libres fuera de ese circuito.
 
-Los nombres e invocaciones son **específicos por agente**: Codex usa skills `$openspec-propose` / `$openspec-apply` si están instalados; otros agentes pueden usar `/opsx-propose` o `/opsx:propose`. Son invocaciones en el **agente**, no binarios de shell `opsx`. El CLI `openspec` puede proporcionar `new`, `status`, `instructions`, `validate` y `archive` conforme a versión instalada. mini me jamás simulará una llamada al workflow invocando un script Python que replique su semántica.
+Los nombres e invocaciones son **específicos por agente**: Codex usa el skill **efectivamente instalado** (por ejemplo, `$openspec-propose` y `$openspec-apply-change` en este repositorio); otros agentes pueden usar `/opsx-propose` o `/opsx:propose`. Resolver el nombre real desde archivos/versiones del runner en preflight; no hardcodear un nombre que la instalación no registra. Son invocaciones en el **agente**, no binarios de shell `opsx`. El CLI `openspec` puede proporcionar `new`, `status`, `instructions`, `validate` y `archive` conforme a versión instalada. mini me jamás simulará una llamada al workflow invocando un script Python que replique su semántica.
 
 ## Primera admisión
 
