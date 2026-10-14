@@ -1378,7 +1378,15 @@ def orchestrate_retry_cmd(
                 typer.secho(f"Run '{run_id}' not found.", fg=typer.colors.RED)
                 raise typer.Exit(code=1)
 
-            cp_service = ControlPlaneService(uow)
+            root = None
+            if (
+                hasattr(uow, "project_managed_repository_bindings")
+                and uow.project_managed_repository_bindings is not None
+            ):
+                mb = uow.project_managed_repository_bindings.get_by_project_id(run.project_id)
+                if mb and mb.managed_repository_root:
+                    root = mb.managed_repository_root
+            cp_service = ControlPlaneService(uow, project_root=root or ".")
             req = OperatorActionRequest(
                 project_id=run.project_id,
                 change_name=run.change_name,
@@ -1423,7 +1431,15 @@ def orchestrate_reassign_cmd(
                 typer.secho(f"Run '{run_id}' not found.", fg=typer.colors.RED)
                 raise typer.Exit(code=1)
 
-            cp_service = ControlPlaneService(uow)
+            root = None
+            if (
+                hasattr(uow, "project_managed_repository_bindings")
+                and uow.project_managed_repository_bindings is not None
+            ):
+                mb = uow.project_managed_repository_bindings.get_by_project_id(run.project_id)
+                if mb and mb.managed_repository_root:
+                    root = mb.managed_repository_root
+            cp_service = ControlPlaneService(uow, project_root=root or ".")
             params = {}
             if target_executor:
                 params["target_executor"] = target_executor

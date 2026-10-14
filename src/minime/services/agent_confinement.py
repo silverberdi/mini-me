@@ -293,7 +293,7 @@ class AgentProcessConfinement:
         with tempfile.TemporaryDirectory(
             prefix="minime-agent-state-", dir=str(temp_parent)
         ) as raw_root:
-            host_root = Path(raw_root)
+            host_root = Path(raw_root).resolve()
             os.chmod(host_root, 0o700)
             subdirs = {
                 name: host_root / name
@@ -535,21 +535,38 @@ class AgentProcessConfinement:
         private_state_root: str | None = None,
     ) -> str:
         """Deny host writes except the assigned worktree and private session state."""
-        private_allow = (
-            f'(allow file-write* (subpath "{private_state_root}"))\n' if private_state_root else ""
-        )
+        private_allows: list[str] = []
+        if private_state_root:
+            private_allows.append(f'(allow file-write* (subpath "{private_state_root}"))\n')
+            resolved_private = str(Path(private_state_root).resolve())
+            if resolved_private != private_state_root:
+                private_allows.append(f'(allow file-write* (subpath "{resolved_private}"))\n')
+        private_allow = "".join(private_allows)
+
+        worktree_allows: list[str] = [f'(allow file-write* (subpath "{allowed_worktree_path}"))\n']
+        resolved_worktree = str(Path(allowed_worktree_path).resolve())
+        if resolved_worktree != allowed_worktree_path:
+            worktree_allows.append(f'(allow file-write* (subpath "{resolved_worktree}"))\n')
+        worktree_allow = "".join(worktree_allows)
+
+        runtime_denies: list[str] = [f'(deny file-write* (subpath "{runtime_root}"))\n']
+        resolved_runtime = str(Path(runtime_root).resolve())
+        if resolved_runtime != runtime_root:
+            runtime_denies.append(f'(deny file-write* (subpath "{resolved_runtime}"))\n')
+        runtime_deny = "".join(runtime_denies)
+
         return (
             "(version 1)\n"
             "(allow default)\n"
             "(deny file-write*)\n"
-            f'(allow file-write* (subpath "{allowed_worktree_path}"))\n'
+            + worktree_allow
             + private_allow
             + '(allow file-write* (literal "/dev/null"))\n'
             + '(allow file-write* (literal "/dev/zero"))\n'
             + '(allow file-write* (literal "/dev/tty"))\n'
             + '(allow file-write* (regex #"^/dev/fd/"))\n'
             + '(allow file-write* (regex #"^/dev/std(in|out|err)"))\n'
-            + f'(deny file-write* (subpath "{runtime_root}"))\n'
+            + runtime_deny
         )
 
     def _generate_profile(self, private_state_root: str | None = None) -> str:

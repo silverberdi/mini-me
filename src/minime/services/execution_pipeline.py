@@ -65,7 +65,10 @@ from minime.services.candidate_integrity import (
     verify_post_audit,
     verify_pre_audit,
 )
-from minime.services.candidate_manifest import CandidateManifestService
+from minime.services.candidate_manifest import (
+    CandidateArtifactRejectionError,
+    CandidateManifestService,
+)
 from minime.services.capacity_lifecycle_service import CapacityLifecycleService
 from minime.services.checks_runner import ChecksRunner
 from minime.services.complementary_policy import validate_complementary_pair
@@ -230,6 +233,22 @@ class ExecutionPipelineService:
             return current_sha
         result = method(worktree_path, job_id, project_id)
         return str(await result) if inspect.isawaitable(result) else current_sha
+
+    def _get_provider_health(self, provider: str):
+        getter = getattr(self.health_service, "get_health", None)
+        return getter(provider) if callable(getter) else None
+
+    async def _refresh_capacity_before_stage(self, provider: str):
+        """Refresh provider-owned capacity immediately before a stage is dispatched."""
+        refresh = getattr(self.health_service, "refresh_capacity_from_read_only_source", None)
+        if callable(refresh):
+            try:
+                result = refresh(provider)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                logger.info("JIT read-only capacity observation unavailable for %s", provider)
+        return self._get_provider_health(provider)
 
     async def _preserve_and_cleanup_worktree(self, job: Job, worktree) -> None:
         """Preserve active orchestration candidates for review/remediation resume."""
@@ -405,12 +424,16 @@ class ExecutionPipelineService:
                         }
                         for a in past_attempts
                     )
-                    or self.health_service.get_health(PrimaryProvider.CODEX.value).status
-                    != ProviderHealthStatus.AVAILABLE
+                    or (
+                        getattr(
+                            self._get_provider_health(PrimaryProvider.CODEX.value), "status", None
+                        )
+                        != ProviderHealthStatus.AVAILABLE
+                    )
                 )
             ):
-                ag_health = self.health_service.get_health(PrimaryProvider.ANTIGRAVITY.value)
-                if ag_health.status == ProviderHealthStatus.AVAILABLE:
+                ag_health = self._get_provider_health(PrimaryProvider.ANTIGRAVITY.value)
+                if ag_health is not None and ag_health.status == ProviderHealthStatus.AVAILABLE:
                     orig_executor = current_executor
                     current_executor = PrimaryProvider.ANTIGRAVITY.value
                     job.current_executor = current_executor
@@ -452,9 +475,10 @@ class ExecutionPipelineService:
                     )
                     self.uow.commit()
 
-            # Check effective executor capacity availability before creating worktree / starting implementer
+            # A pre-admission sample may expire while the job is queued. Refresh
+            # immediately before creating an attempt or dispatching the implementer.
             effective_implementer = current_executor
-            imp_health = self.health_service.get_health(effective_implementer)
+            imp_health = await self._refresh_capacity_before_stage(effective_implementer)
             is_primary_imp_available = imp_health.status == ProviderHealthStatus.AVAILABLE
 
             if not is_primary_imp_available:
@@ -684,10 +708,9 @@ class ExecutionPipelineService:
                         f"{workspace_context}\n\n{native_apply_workflow.dispatch_instruction()}"
                     )
                 else:
-                    task_context = worktree_task_tracker.format_prompt_context(
-                        project.openspec_path, job.change_name
+                    prompt_context = (
+                        f"{workspace_context}\n\nApply OpenSpec change '{job.change_name}'."
                     )
-                    prompt_context = f"{workspace_context}\n\n{task_context}"
                 if handoff_prompt:
                     prompt_context = f"{prompt_context}\n\n{handoff_prompt}"
                 if corrective_prompt:
@@ -1558,8 +1581,11 @@ class ExecutionPipelineService:
                     self.uow.commit()
 
                     # Check target executor capacity availability under canonical 005/006 lifecycle
-                    target_health = self.health_service.get_health(target_executor)
-                    if target_health.status != ProviderHealthStatus.AVAILABLE:
+                    target_health = self._get_provider_health(target_executor)
+                    if (
+                        target_health is not None
+                        and target_health.status != ProviderHealthStatus.AVAILABLE
+                    ):
                         dual_exhausted = self._is_dual_primary_exhausted(project)
                         if not dual_exhausted:
                             job = self.uow.jobs.set_waiting_capacity(
@@ -1628,12 +1654,36 @@ class ExecutionPipelineService:
                     continue
 
             # Candidate Manifest generation before checks and review
-            manifest = self.manifest_service.generate_manifest(
-                worktree.path,
-                job.candidate_sha or "",
-                job.job_id,
-                attempt_id=active_attempt.attempt_id if active_attempt else None,
-            )
+            try:
+                manifest = self.manifest_service.generate_manifest(
+                    worktree.path,
+                    job.candidate_sha or "",
+                    job.job_id,
+                    attempt_id=active_attempt.attempt_id if active_attempt else None,
+                )
+            except CandidateArtifactRejectionError as err:
+                logger.error("Candidate manifest rejected: %s", err)
+                diag = EvidenceDiagnostic(
+                    job_id=job.job_id,
+                    attempt_id=active_attempt.attempt_id if active_attempt else None,
+                    stage_type="CANDIDATE_FREEZE",
+                    check_name="candidate_artifact_exclusion",
+                    diagnostic_status=EvidenceDiagnosticStatus.FAIL,
+                    environment_identity=str(worktree.path),
+                    candidate_sha=job.candidate_sha or "",
+                    reason=str(err),
+                    evidence_reference={"violating_paths": err.violating_paths},
+                )
+                self.uow.evidence_diagnostics.save(diag)
+                self._save_event(
+                    EventType.COMPLETION_REJECTED,
+                    job,
+                    {"error": str(err), "violating_paths": err.violating_paths},
+                )
+                self.uow.commit()
+                self._transition(job, JobStatus.FAILED)
+                return self._require_job(job.job_id)
+
             self.uow.candidate_manifests.save(manifest)
             self._save_event(
                 EventType.CANDIDATE_MANIFEST_CREATED,
@@ -1701,7 +1751,9 @@ class ExecutionPipelineService:
             effective_reviewer = (
                 project.implementer if current_executor == project.reviewer else project.reviewer
             )
-            rev_health = self.health_service.get_health(effective_reviewer)
+            # Checks may take minutes; admission-time reviewer capacity is not
+            # reusable here. Refresh just before entering the review stage.
+            rev_health = await self._refresh_capacity_before_stage(effective_reviewer)
             is_primary_rev_available = rev_health.status == ProviderHealthStatus.AVAILABLE
             reviewer_fallback_used = False
             selected_reviewer_model: str | None = None
@@ -1831,6 +1883,25 @@ class ExecutionPipelineService:
                     else project.reviewer
                 )
             )
+
+            # Candidate verification and worktree preparation can outlive the
+            # earlier reviewer snapshot. Obtain one final observation immediately
+            # before materializing the review workspace / persisting REVIEW_RUNNING.
+            if not reviewer_fallback_used:
+                rev_health = await self._refresh_capacity_before_stage(effective_reviewer)
+                if rev_health.status != ProviderHealthStatus.AVAILABLE:
+                    job = self.uow.jobs.set_waiting_capacity(
+                        job.job_id,
+                        effective_reviewer,
+                        f"Primary reviewer '{effective_reviewer}' is {rev_health.status.value}",
+                    )
+                    self._save_event(
+                        EventType.JOB_WAITING_CAPACITY,
+                        job,
+                        {"waiting_provider": effective_reviewer, "status": rev_health.status.value},
+                    )
+                    self.uow.commit()
+                    return job
 
             # Create dedicated reviewer EXECUTION_WORKTREE
             review_wt_info = await self.worktree_manager.create_review_worktree(
@@ -2695,9 +2766,8 @@ class ExecutionPipelineService:
 
     def _is_dual_primary_exhausted(self, project: Project) -> bool:
         """Check if both primary providers (Codex and Antigravity) are exhausted / unavailable."""
-        all_health = self.health_service.list_all_health()
-        codex_h = next((h for h in all_health if h.provider == "codex"), None)
-        agy_h = next((h for h in all_health if h.provider == "antigravity"), None)
+        codex_h = self._get_provider_health("codex")
+        agy_h = self._get_provider_health("antigravity")
         codex_unavail = codex_h is not None and codex_h.status != ProviderHealthStatus.AVAILABLE
         agy_unavail = agy_h is not None and agy_h.status != ProviderHealthStatus.AVAILABLE
         return codex_unavail and agy_unavail

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from minime.adapters.provider_adapter import get_provider_adapter
+from minime.adapters.provider_adapter import CapacityObservation, get_provider_adapter
 from minime.config import ProbeConfig, load_config, probe_configs_from_app_config
 from minime.domain.enums import (
     PRIMARY_PROVIDERS,
@@ -25,6 +26,7 @@ from minime.domain.models import (
 )
 
 logger = logging.getLogger(__name__)
+CAPACITY_OBSERVATION_TTL = timedelta(seconds=60)
 
 
 class ProviderHealthService:
@@ -98,6 +100,204 @@ class ProviderHealthService:
         """
         self._validate_primary(provider)
         return self.uow.provider_health.get_by_provider(provider)
+
+    def has_fresh_capacity_evidence(self, provider: str, now: datetime | None = None) -> bool:
+        """Require a current persisted capacity observation before treating AVAILABLE as usable."""
+        self._validate_primary(provider)
+        current = now or utc_now()
+        for event in self.uow.events.list_events(limit=500):
+            if event.event_type != EventType.PROVIDER_CAPACITY_OBSERVED:
+                continue
+            payload = event.payload or {}
+            if payload.get("provider") != provider:
+                continue
+            try:
+                expires_at = datetime.fromisoformat(payload.get("expires_at", ""))
+                if expires_at.tzinfo is None:
+                    expires_at = expires_at.replace(tzinfo=UTC)
+            except (TypeError, ValueError):
+                return False
+            return payload.get("state") in {"AVAILABLE", "EXHAUSTED"} and expires_at > current
+        # A real successful execution is also a provider-owned capacity observation.
+        # It is accepted only while the existing health record's success timestamp
+        # remains inside the same short freshness window.
+        health = self.get_existing_health(provider)
+        if (
+            health is None
+            or health.status != ProviderHealthStatus.AVAILABLE
+            or health.last_result_class != ProviderResultClass.SUCCESS
+            or health.last_success_at is None
+        ):
+            return False
+        observed_at = health.last_success_at
+        if observed_at.tzinfo is None:
+            observed_at = observed_at.replace(tzinfo=UTC)
+        return current - CAPACITY_OBSERVATION_TTL <= observed_at <= current + timedelta(seconds=5)
+
+    def get_admission_health(self, provider: str) -> ProviderHealth | None:
+        """Return health for an admission decision, demoting unproven/stale AVAILABLE to UNKNOWN."""
+        health = self.get_existing_health(provider)
+        if health is None:
+            return ProviderHealth(
+                health_id=f"ph-{provider}",
+                provider=provider,
+                status=ProviderHealthStatus.UNKNOWN,
+                updated_at=utc_now(),
+            )
+        if (
+            health is not None
+            and health.status == ProviderHealthStatus.AVAILABLE
+            and not self.has_fresh_capacity_evidence(provider)
+        ):
+            return health.model_copy(
+                update={
+                    "status": ProviderHealthStatus.UNKNOWN,
+                    "last_error_summary": "Provider capacity evidence is absent or expired.",
+                }
+            )
+        return health
+
+    def record_capacity_observation(
+        self, provider: str, observation: CapacityObservation | None
+    ) -> bool:
+        """Persist provider-owned capacity evidence through existing health/event/window authorities."""
+        self._validate_primary(provider)
+        # Initialize/read the authoritative row before taking the observation
+        # persistence timestamp. On a new PostgreSQL row, ``get_health`` may
+        # create a slightly newer UNKNOWN row; capturing ``now`` first would
+        # make the first valid observation look like a stale writer and be lost.
+        health = self.get_health(provider)
+        now = utc_now()
+        adapter = get_provider_adapter(provider)
+        valid_sources = getattr(
+            adapter,
+            "valid_capacity_source_signals",
+            {getattr(adapter, "capacity_source_signal", CapacitySignalSource.UNKNOWN)},
+        )
+        valid = bool(
+            observation
+            and observation.provider == provider
+            and getattr(adapter, "supports_read_only_capacity_observation", False)
+            and observation.source_signal in valid_sources
+            and (
+                not getattr(adapter, "requires_account_identity_for_capacity", False)
+                or observation.account_id
+            )
+            and observation.ordinary_usage_allowed in (True, False)
+            and observation.observed_at.tzinfo is not None
+            and observation.expires_at.tzinfo is not None
+            and observation.observed_at <= now + timedelta(seconds=5)
+            and observation.expires_at > now
+            and observation.expires_at - observation.observed_at <= CAPACITY_OBSERVATION_TTL
+        )
+        state = (
+            "AVAILABLE"
+            if valid and observation and observation.ordinary_usage_allowed is True
+            else "EXHAUSTED"
+            if valid and observation and observation.ordinary_usage_allowed is False
+            else "UNKNOWN"
+        )
+        if state != "UNKNOWN" or health.status != ProviderHealthStatus.EXHAUSTED:
+            health.status = (
+                ProviderHealthStatus.AVAILABLE
+                if state == "AVAILABLE"
+                else ProviderHealthStatus.EXHAUSTED
+                if state == "EXHAUSTED"
+                else ProviderHealthStatus.UNKNOWN
+            )
+            health.last_result_class = (
+                ProviderResultClass.SUCCESS
+                if state == "AVAILABLE"
+                else ProviderResultClass.QUOTA_LIMIT
+                if state == "EXHAUSTED"
+                else ProviderResultClass.UNKNOWN_ERROR
+            )
+            health.last_error_summary = (
+                None
+                if state == "AVAILABLE"
+                else "Capacity unavailable or not authoritatively observable."
+            )
+            health.last_probe_at = observation.observed_at if valid and observation else now
+            health.updated_at = now
+            if valid and observation:
+                health.model = observation.model
+            if state == "AVAILABLE":
+                health.last_success_at = observation.observed_at if observation else now
+                health.consecutive_failures = 0
+            elif state == "EXHAUSTED":
+                health.last_failure_at = observation.observed_at if observation else now
+                health.consecutive_failures += 1
+        else:
+            # An unobservable refresh cannot erase a previously verified exhaustion.
+            health.last_error_summary = "Capacity refresh is currently unobservable."
+            health.updated_at = now
+            health.last_probe_at = now
+        if state == "EXHAUSTED":
+            assert observation is not None
+            self.uow.capacity_windows.save(
+                CapacityWindow(
+                    provider=provider,
+                    model=observation.model,
+                    quota_exhausted_at=observation.observed_at,
+                    capacity_reset_at=observation.capacity_reset_at,
+                    source_signal=observation.source_signal,
+                    created_at=now,
+                )
+            )
+        self.uow.provider_health.save(health)
+        account_fingerprint = None
+        if valid and observation and observation.account_id:
+            account_fingerprint = hashlib.sha256(observation.account_id.encode()).hexdigest()
+        source_session_fingerprint = None
+        if valid and observation and observation.source_session_id:
+            source_session_fingerprint = hashlib.sha256(
+                observation.source_session_id.encode()
+            ).hexdigest()
+        self.uow.events.save(
+            Event(
+                event_type=EventType.PROVIDER_CAPACITY_OBSERVED,
+                payload={
+                    "provider": provider,
+                    "model": observation.model if valid and observation else None,
+                    "account_fingerprint": account_fingerprint,
+                    "source_session_fingerprint": source_session_fingerprint,
+                    "observed_at": observation.observed_at.isoformat()
+                    if valid and observation
+                    else now.isoformat(),
+                    "expires_at": observation.expires_at.isoformat()
+                    if valid and observation
+                    else now.isoformat(),
+                    "source": observation.source_signal.value
+                    if valid and observation
+                    else CapacitySignalSource.UNKNOWN.value,
+                    "ordinary_usage_allowed": observation.ordinary_usage_allowed
+                    if valid and observation
+                    else None,
+                    "state": state,
+                },
+                timestamp=observation.observed_at if valid and observation else now,
+            )
+        )
+        self.uow.commit()
+        return state == "AVAILABLE"
+
+    async def refresh_capacity_from_read_only_source(self, provider: str) -> bool:
+        """Refresh capacity only from an adapter's explicit non-inference source."""
+        self._validate_primary(provider)
+        adapter = get_provider_adapter(provider)
+        reader = getattr(adapter, "read_capacity_observation", None)
+        if not getattr(adapter, "supports_read_only_capacity_observation", False) or not callable(
+            reader
+        ):
+            return False
+        if not await adapter.check_cli_present() or not await adapter.check_auth_ready():
+            return self.record_capacity_observation(provider, None)
+        try:
+            observation = await reader(timeout_seconds=10.0)
+        except Exception:
+            logger.info("Read-only capacity source unavailable for %s", provider)
+            observation = None
+        return self.record_capacity_observation(provider, observation)
 
     def list_existing_health(self) -> list[ProviderHealth]:
         """Pure query: List health for all tracked providers without inserting missing DB rows."""
@@ -190,6 +390,22 @@ class ProviderHealthService:
                         timestamp=now,
                     )
                 )
+            self.uow.events.save(
+                Event(
+                    event_type=EventType.PROVIDER_CAPACITY_OBSERVED,
+                    payload={
+                        "provider": outcome.provider,
+                        "model": outcome.model,
+                        "account_fingerprint": None,
+                        "observed_at": now.isoformat(),
+                        "expires_at": (now + CAPACITY_OBSERVATION_TTL).isoformat(),
+                        "source": CapacitySignalSource.PROVIDER_EXECUTION.value,
+                        "ordinary_usage_allowed": True,
+                        "state": "AVAILABLE",
+                    },
+                    timestamp=now,
+                )
+            )
             self.uow.commit()
             return new_health
 
@@ -469,7 +685,9 @@ class ProviderHealthService:
         self._validate_primary(provider)
         health = self.get_health(provider)
 
-        if health.status == ProviderHealthStatus.AVAILABLE:
+        if health.status == ProviderHealthStatus.AVAILABLE and self.has_fresh_capacity_evidence(
+            provider
+        ):
             return True
 
         if health.status == ProviderHealthStatus.AUTH_REQUIRED:
@@ -543,6 +761,14 @@ class ProviderHealthService:
                 )
                 self.uow.commit()
                 return False
+
+            if adapter.supports_read_only_capacity_observation:
+                try:
+                    observation = await adapter.read_capacity_observation(timeout_seconds=10.0)
+                except Exception:
+                    logger.info("Read-only capacity source unavailable for %s", provider)
+                    observation = None
+                return self.record_capacity_observation(provider, observation)
 
             expensive = bool(adapter.probe_is_expensive)
             verifies_capacity = bool(adapter.probe_verifies_capacity)
@@ -706,7 +932,9 @@ class ProviderHealthService:
         all_health = self.uow.provider_health.list_all()
         recovered: list[str] = []
         for h in all_health:
-            if h.status != ProviderHealthStatus.AVAILABLE:
+            if h.status != ProviderHealthStatus.AVAILABLE or not self.has_fresh_capacity_evidence(
+                h.provider
+            ):
                 success = await self.check_and_probe_provider(h.provider)
                 if success:
                     recovered.append(h.provider)

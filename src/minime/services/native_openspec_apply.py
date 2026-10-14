@@ -159,6 +159,25 @@ def workflow_unchanged(worktree_root: str | Path, workflow: NativeOpenSpecApplyW
     return current.workflow_sha256 == workflow.workflow_sha256
 
 
+def _tokenize_command(command: str) -> list[str]:
+    try:
+        raw_tokens = shlex.split(command)
+    except ValueError:
+        raw_tokens = command.split()
+    tokens: list[str] = []
+    for token in raw_tokens:
+        cleaned = token.replace("\\", "/")
+        if " " in cleaned:
+            try:
+                inner = [t.replace("\\", "/") for t in shlex.split(cleaned)]
+                tokens.extend(inner)
+                continue
+            except ValueError:
+                pass
+        tokens.append(cleaned)
+    return tokens
+
+
 def parse_codex_apply_jsonl(
     stdout_lines: list[str],
     *,
@@ -197,6 +216,11 @@ def parse_codex_apply_jsonl(
             message = item.get("text")
             if isinstance(message, str) and message.strip():
                 messages.append(message)
+                if (
+                    "openspec-apply-change" in message.casefold()
+                    or workflow_path.casefold() in message.casefold()
+                ):
+                    saw_skill_read = True
         if event.get("type") != "item.completed" or item.get("type") != "command_execution":
             continue
         if item.get("status") not in {"completed", None} or item.get("exit_code") not in {0, None}:
@@ -206,12 +230,16 @@ def parse_codex_apply_jsonl(
             continue
         completed_tool_events += 1
         try:
-            tokens = [token.replace("\\", "/") for token in shlex.split(command)]
-        except ValueError:
+            tokens = _tokenize_command(command)
+        except Exception:
             all_lines_valid = False
             continue
         normalized_tokens = [token.casefold() for token in tokens]
-        if workflow_path.casefold() in normalized_tokens:
+        if (
+            workflow_path.casefold() in normalized_tokens
+            or any(token.endswith(workflow_path.casefold()) for token in normalized_tokens)
+            or any("openspec-apply-change" in token for token in normalized_tokens)
+        ):
             saw_skill_read = True
         has_apply_command = any(
             normalized_tokens[index : index + 3] == ["openspec", "instructions", "apply"]
@@ -225,6 +253,7 @@ def parse_codex_apply_jsonl(
                 for index in range(len(normalized_tokens))
             )
             or f"--change={change_name.casefold()}" in normalized_tokens
+            or (change_name.casefold() in normalized_tokens and has_apply_command)
         )
         if has_apply_command and change_arg_matches and "--json" in normalized_tokens:
             saw_apply_instructions = True

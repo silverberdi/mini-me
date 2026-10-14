@@ -10,7 +10,13 @@ import pytest
 
 from minime.domain.enums import EvidenceDiagnosticStatus
 from minime.domain.models import CandidateManifest
-from minime.services.candidate_manifest import CandidateManifestService
+from minime.services.candidate_integrity import validate_pre_review_integrity
+from minime.services.candidate_manifest import (
+    CandidateArtifactRejectionError,
+    CandidateManifestService,
+    is_generated_runtime_artifact,
+    purge_transient_generated_artifacts,
+)
 from minime.services.checks_runner import ChecksRunner
 
 
@@ -349,3 +355,203 @@ async def test_checks_runner_aggregate_passed_is_true_when_all_checks_pass(tmp_p
 
     assert result.passed is True
     assert len(result.results) == len(result.diagnostics) == 2
+
+
+def test_candidate_manifest_rejects_tracked_pyc_files(tmp_path: Path):
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "app.py").write_text("print('app')")
+    pyc = src / "app.cpython-314.pyc"
+    pyc.write_bytes(b"\x00\x00\x00\x00bytecode")
+
+    subprocess.run(
+        ["git", "add", "src/app.py", "src/app.cpython-314.pyc"], cwd=tmp_path, check=True
+    )
+    subprocess.run(["git", "commit", "-m", "add pyc"], cwd=tmp_path, check=True)
+
+    service = CandidateManifestService()
+    with pytest.raises(CandidateArtifactRejectionError) as exc_info:
+        service.generate_manifest(
+            worktree_path=tmp_path,
+            candidate_sha="sha123",
+            job_id="job123",
+        )
+    assert any("app.cpython-314.pyc" in path for path in exc_info.value.violating_paths)
+
+
+def test_candidate_manifest_rejects_staged_pycache_artifacts(tmp_path: Path):
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+
+    (tmp_path / "base.py").write_text("print('base')")
+    subprocess.run(["git", "add", "base.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True)
+
+    cache_dir = tmp_path / "__pycache__"
+    cache_dir.mkdir()
+    (cache_dir / "base.cpython-314.pyc").write_bytes(b"\x00bytecode")
+    subprocess.run(
+        ["git", "add", "-f", "__pycache__/base.cpython-314.pyc"], cwd=tmp_path, check=True
+    )
+
+    service = CandidateManifestService()
+    with pytest.raises(CandidateArtifactRejectionError) as exc_info:
+        service.generate_manifest(
+            worktree_path=tmp_path,
+            candidate_sha="sha123",
+            job_id="job123",
+        )
+    assert any("__pycache__" in path for path in exc_info.value.violating_paths)
+
+
+def test_candidate_manifest_excludes_untracked_transient_bytecode(tmp_path: Path):
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+
+    (tmp_path / "module.py").write_text("print('clean')")
+    subprocess.run(["git", "add", "module.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "clean commit"], cwd=tmp_path, check=True)
+
+    # Pollute worktree with untracked bytecode
+    (tmp_path / "transient.pyc").write_bytes(b"\x00bytecode")
+    cache_dir = tmp_path / "__pycache__"
+    cache_dir.mkdir()
+    (cache_dir / "module.cpython-314.pyc").write_bytes(b"\x00bytecode")
+
+    service = CandidateManifestService()
+    manifest = service.generate_manifest(
+        worktree_path=tmp_path,
+        candidate_sha="sha123",
+        job_id="job123",
+    )
+    # Tracked files has only module.py
+    assert len(manifest.tracked_files) == 1
+    assert manifest.tracked_files[0]["path"] == "module.py"
+    # Untracked files strictly excludes transient bytecode
+    assert not any(is_generated_runtime_artifact(f["path"]) for f in manifest.untracked_files)
+    assert not any("pyc" in f["path"] for f in manifest.untracked_files)
+
+
+@pytest.mark.asyncio
+async def test_checks_runner_isolates_bytecode_via_pythonpycacheprefix(tmp_path: Path):
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+
+    script = tmp_path / "check_script.py"
+    script.write_text("import os; print('PREFIX=' + os.environ.get('PYTHONPYCACHEPREFIX', 'NONE'))")
+    subprocess.run(["git", "add", "check_script.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "add script"], cwd=tmp_path, check=True)
+
+    runner = ChecksRunner()
+    result = await runner.run(
+        job_id="job-cache-iso",
+        checks=[
+            {"name": "check_prefix", "command": f"{sys.executable} check_script.py"},
+        ],
+        worktree_path=tmp_path,
+    )
+
+    assert result.passed is True
+    assert "PREFIX=" in result.results[0].output_snippet
+    assert "NONE" not in result.results[0].output_snippet
+    assert "minime_pycache" in result.results[0].output_snippet
+    # Verify no __pycache__ was created inside tmp_path
+    assert not (tmp_path / "__pycache__").exists()
+
+
+def test_non_destructive_remediation_purges_untracked_transient_artifacts(tmp_path: Path):
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+
+    (tmp_path / "valid.py").write_text("x = 1\n")
+    subprocess.run(["git", "add", "valid.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True)
+
+    sha_before = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+    # Pollute with untracked pycache and pyc
+    cache = tmp_path / "__pycache__"
+    cache.mkdir()
+    (cache / "valid.cpython-314.pyc").write_bytes(b"byte")
+    (tmp_path / "extra.pyc").write_bytes(b"byte")
+
+    purged = purge_transient_generated_artifacts(tmp_path)
+    assert len(purged) >= 1
+    assert not cache.exists()
+    assert not (tmp_path / "extra.pyc").exists()
+
+    # Verify commit SHA and git status are pristine
+    sha_after = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    assert sha_before == sha_after
+
+    status_proc = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=tmp_path, capture_output=True, text=True, check=True
+    )
+    assert status_proc.stdout.strip() == ""
+
+
+def test_non_destructive_remediation_preserves_tracked_artifacts_for_rejection(tmp_path: Path):
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+
+    (tmp_path / "tracked.pyc").write_bytes(b"tracked bytecode")
+    subprocess.run(["git", "add", "tracked.pyc"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "committed pyc"], cwd=tmp_path, check=True)
+
+    # Purge must NOT delete tracked.pyc
+    purged = purge_transient_generated_artifacts(tmp_path)
+    assert "tracked.pyc" not in purged
+    assert (tmp_path / "tracked.pyc").exists()
+
+    # And CandidateManifestService must reject it
+    service = CandidateManifestService()
+    with pytest.raises(CandidateArtifactRejectionError):
+        service.generate_manifest(
+            worktree_path=tmp_path,
+            candidate_sha="sha123",
+            job_id="job123",
+        )
+
+
+def test_validate_pre_review_integrity_rejects_tracked_pyc(tmp_path: Path):
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+
+    (tmp_path / "app.py").write_text("print('app')")
+    (tmp_path / "app.pyc").write_bytes(b"byte")
+    subprocess.run(["git", "add", "app.py", "app.pyc"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "commit with pyc"], cwd=tmp_path, check=True)
+
+    head_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+    # Set up remote tracking ref origin/main
+    subprocess.run(["git", "branch", "-M", "main"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/main", head_sha], cwd=tmp_path, check=True
+    )
+
+    ok, err = validate_pre_review_integrity(
+        worktree_path=tmp_path,
+        expected_candidate_sha=head_sha,
+        expected_base_sha=head_sha,
+        base_branch="main",
+        checks_passed=True,
+    )
+    assert ok is False
+    assert "tracked generated compiler/runtime artifacts" in (err or "")

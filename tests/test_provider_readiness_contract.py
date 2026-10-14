@@ -72,8 +72,10 @@ async def test_codex_check_auth_ready_false_when_executable_missing():
         assert await adapter.check_auth_ready() is False
 
 
-def test_codex_capacity_probe_is_classified_expensive():
-    assert CodexProviderAdapter(executable="codex").probe_is_expensive is True
+def test_codex_capacity_probe_uses_read_only_app_server_source():
+    adapter = CodexProviderAdapter(executable="codex")
+    assert adapter.probe_is_expensive is False
+    assert adapter.supports_read_only_capacity_observation is True
 
 
 async def test_antigravity_check_cli_present_false_when_executable_missing():

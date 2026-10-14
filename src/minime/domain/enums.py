@@ -207,6 +207,11 @@ class CapacitySignalSource(str, Enum):
     RESPONSE_BODY_TIMESTAMP = "response_body_timestamp"
     AUTO_DISCOVERED = "auto_discovered"
     OPERATOR_REPORTED = "operator_reported"
+    CODEX_APP_SERVER = "codex_app_server_rate_limits_read"
+    AGY_STATUSLINE = "agy_statusline_quota"
+    AGY_PRINT_USAGE = "agy_print_usage"
+    PROVIDER_READ_ONLY_CAPACITY = "provider_read_only_capacity"
+    PROVIDER_EXECUTION = "provider_execution"
     UNKNOWN = "unknown"
 
 
@@ -326,6 +331,7 @@ class EventType(str, Enum):
     PRIMARY_CAPACITY_EXHAUSTED = "PRIMARY_CAPACITY_EXHAUSTED"
     PRIMARY_CAPACITY_RECOVERED = "PRIMARY_CAPACITY_RECOVERED"
     PROVIDER_HEALTH_UPDATED = "PROVIDER_HEALTH_UPDATED"
+    PROVIDER_CAPACITY_OBSERVED = "PROVIDER_CAPACITY_OBSERVED"
     PROVIDER_PROBE_FAILED = "PROVIDER_PROBE_FAILED"
     PROVIDER_PROBE_EXECUTED = "PROVIDER_PROBE_EXECUTED"
     PROVIDER_PROBE_SUPPRESSED = "PROVIDER_PROBE_SUPPRESSED"

@@ -165,15 +165,6 @@ class OpenSpecTaskTracker:
             return True, reconciled_ids
         return False, []
 
-    def format_prompt_context(self, openspec_path: str, change_name: str) -> str:
-        tasks = self.parse_tasks(openspec_path, change_name)
-        lines = [f"OpenSpec change: {change_name}", "Tasks:"]
-        for task in tasks:
-            status = "complete" if task.complete else "pending"
-            section = f" [{task.section}]" if task.section else ""
-            lines.append(f"- {task.task_id}{section}: {status}: {task.text}")
-        return "\n".join(lines)
-
 
 _VERIFICATION_PATTERNS = (
     re.compile(

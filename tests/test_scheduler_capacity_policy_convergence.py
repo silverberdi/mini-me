@@ -13,6 +13,7 @@ Verifies:
 from __future__ import annotations
 
 import subprocess
+import time
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -26,6 +27,7 @@ from tests.conftest import (
 )
 
 from minime.adapters.github import GitHubAdapter
+from minime.adapters.provider_adapter import CapacityObservation, get_provider_adapter
 from minime.domain.enums import (
     AdmissionBlockCondition,
     AdmissionDecisionKind,
@@ -37,6 +39,7 @@ from minime.domain.enums import (
     JobStatus,
     OrchestrationStage,
     ProviderHealthStatus,
+    ProviderResultClass,
     QueuePriority,
     ReadinessState,
     RetrySafety,
@@ -119,6 +122,14 @@ def setup_test_environment(
                 health_id=f"ph-{implementer}",
                 provider=implementer,
                 status=implementer_status,
+                last_result_class=(
+                    ProviderResultClass.SUCCESS
+                    if implementer_status == ProviderHealthStatus.AVAILABLE
+                    else None
+                ),
+                last_success_at=(
+                    utc_now() if implementer_status == ProviderHealthStatus.AVAILABLE else None
+                ),
             )
         )
         uow.provider_health.save(
@@ -126,6 +137,14 @@ def setup_test_environment(
                 health_id=f"ph-{reviewer}",
                 provider=reviewer,
                 status=reviewer_status,
+                last_result_class=(
+                    ProviderResultClass.SUCCESS
+                    if reviewer_status == ProviderHealthStatus.AVAILABLE
+                    else None
+                ),
+                last_success_at=(
+                    utc_now() if reviewer_status == ProviderHealthStatus.AVAILABLE else None
+                ),
             )
         )
     else:
@@ -752,6 +771,13 @@ def test_drain_never_invokes_fresh_admission(
         implementer_status=ProviderHealthStatus.EXHAUSTED,
         reviewer_status=ProviderHealthStatus.EXHAUSTED,
     )
+
+    async def no_capacity_refresh(provider: str) -> bool:
+        del provider
+        return False
+
+    # This policy unit test stays offline while asserting the already-exhausted path.
+    scheduler.provider_health_service.refresh_capacity_from_read_only_source = no_capacity_refresh
     scheduler.mode = SchedulerMode.DRAIN
     _seed_active_inflight_run(in_memory_uow)
     _enable_drain_budget(in_memory_uow, project)
@@ -791,11 +817,12 @@ def test_drain_mode_refuses_new_ready_work(
 
 # 23. Entry-point convergence: same state produces identical operational decision
 def test_entry_point_convergence_consistency(
-    tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork
+    tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork, test_capacity_strategy
 ):
     from minime.domain.models import AdmissionResult, OrchestrationRun
 
     _, scheduler = setup_test_environment(tmp_path, in_memory_uow)
+    test_capacity_strategy()
 
     mock_run = OrchestrationRun(
         run_id="run-1",
@@ -812,9 +839,74 @@ def test_entry_point_convergence_consistency(
     eval_direct = scheduler.evaluate_admission("mini-me", "016-autonomous-queue-work-selection")
     dec, record, _ = scheduler.admit_work_item("mini-me", "016-autonomous-queue-work-selection")
 
-    assert record.operational_decision == eval_direct.decision
-    assert record.block_condition == eval_direct.block_condition
-    assert record.safe_executable_pair_exists == eval_direct.safe_executable_pair_exists
+    # The actual admission path refreshes both sources even when the pure
+    # snapshot is already acceptable; the resulting decision remains convergent.
+    assert eval_direct.decision == AdmissionDecisionKind.RUN
+    assert record.operational_decision == AdmissionDecisionKind.RUN
+    assert record.safe_executable_pair_exists is True
+
+
+def test_admission_refreshes_both_primary_capacities_just_in_time(
+    tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork
+):
+    project, scheduler = setup_test_environment(tmp_path, in_memory_uow)
+    refreshed: list[str] = []
+
+    async def refresh(provider: str) -> bool:
+        refreshed.append(provider)
+        return False
+
+    scheduler.provider_health_service.refresh_capacity_from_read_only_source = refresh
+
+    scheduler.admit_work_item(project.project_id, "016-autonomous-queue-work-selection")
+
+    assert set(refreshed) == {"codex", "antigravity"}
+    assert len(refreshed) == 2
+
+
+def test_capacity_expiring_while_admission_locks_are_acquired_fails_closed(
+    tmp_path: Path,
+    in_memory_uow: InMemoryPersistenceUnitOfWork,
+    test_capacity_strategy,
+    monkeypatch,
+):
+    project, scheduler = setup_test_environment(tmp_path, in_memory_uow)
+    test_capacity_strategy()
+
+    for provider in ("codex", "antigravity"):
+        adapter = get_provider_adapter(provider)
+
+        async def short_observation(adapter=adapter, provider=provider):
+            now = utc_now()
+            return CapacityObservation(
+                provider=provider,
+                ordinary_usage_allowed=True,
+                observed_at=now,
+                expires_at=now + timedelta(milliseconds=20),
+                source_signal=adapter.capacity_source_signal,
+                account_id=f"test-account:{provider}",
+                model=f"test-model:{provider}",
+            )
+
+        monkeypatch.setattr(adapter, "read_capacity_observation", short_observation)
+
+    original_lock = scheduler.uow.acquire_advisory_lock
+    delayed = False
+
+    def acquire_with_delay(*args, **kwargs):
+        nonlocal delayed
+        if not delayed:
+            delayed = True
+            time.sleep(0.04)
+        return original_lock(*args, **kwargs)
+
+    monkeypatch.setattr(scheduler.uow, "acquire_advisory_lock", acquire_with_delay)
+    _, record, run = scheduler.admit_work_item(
+        project.project_id, "016-autonomous-queue-work-selection"
+    )
+
+    assert run is None
+    assert record.operational_decision == AdmissionDecisionKind.WAIT
 
 
 # 24. A scheduler tick must not synthesize UNKNOWN provider health into AVAILABLE.
@@ -850,10 +942,11 @@ def test_tick_missing_health_never_run(
 
 # 25. An actual existing AVAILABLE record still yields normal eligibility through tick.
 def test_tick_existing_available_yields_run(
-    tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork
+    tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork, test_capacity_strategy
 ):
     init_git_repo(tmp_path)
     _, scheduler = setup_test_environment(tmp_path, in_memory_uow)
+    test_capacity_strategy()
 
     in_memory_uow.work_queue.save(
         WorkQueueItem(

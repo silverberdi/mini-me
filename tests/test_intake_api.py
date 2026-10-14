@@ -99,8 +99,9 @@ def test_api_onboard_project(in_memory_uow: InMemoryPersistenceUnitOfWork, tmp_p
 
 
 def test_api_backlog_crud_and_lifecycle(
-    in_memory_uow: InMemoryPersistenceUnitOfWork, tmp_path: Path
+    in_memory_uow: InMemoryPersistenceUnitOfWork, tmp_path: Path, test_capacity_strategy
 ) -> None:
+    test_capacity_strategy()
     repo_dir = tmp_path / "api-repo"
     setup_managed_repository_fixture(in_memory_uow, "api-project", repo_dir, tmp_path / "worktrees")
     attach_local_bare_origin(repo_dir, uow=in_memory_uow, project_id="api-project")

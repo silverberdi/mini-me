@@ -109,7 +109,7 @@ def test_push_branch_verifies_remote_sha(tmp_path, monkeypatch):
     git_dir.mkdir()
 
     # Setup _run_git mocks
-    def mock_run_git(args, cwd, timeout, secrets=None):
+    def mock_run_git(args, cwd, timeout, secrets=None, **kwargs):
         cmd = " ".join(args)
         proc = MagicMock()
         proc.returncode = 0
@@ -122,7 +122,9 @@ def test_push_branch_verifies_remote_sha(tmp_path, monkeypatch):
         return proc
 
     monkeypatch.setattr(adapter, "_run_git", mock_run_git)
-    monkeypatch.setattr(adapter, "_git_auth_bundle", lambda r: MagicMock(args=(), secrets=()))
+    monkeypatch.setattr(
+        adapter, "_git_auth_bundle", lambda r: MagicMock(args=(), secrets=(), env={})
+    )
 
     # Case A: matching remote SHA -> SUCCESS
     monkeypatch.setattr(

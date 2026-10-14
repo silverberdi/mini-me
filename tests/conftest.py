@@ -17,6 +17,7 @@ from minime.domain.enums import (
     PRIMARY_PROVIDERS,
     AuditRiskLevel,
     AuditStatus,
+    CapacitySignalSource,
     ExternalActionStatus,
     ExternalOutcome,
     ExternalReasonCode,
@@ -138,6 +139,14 @@ from minime.domain.models import (
 
 class ReadinessGitHubStub:
     """Explicit offline double for legacy readiness tests; live validation is tested separately."""
+
+    def _git_auth_bundle(self, remote_url: str):
+        """Authorize local bare test remotes only; never pretend to auth GitHub."""
+        from types import SimpleNamespace
+
+        if remote_url.startswith(("http://", "https://", "git@", "ssh://")):
+            raise RuntimeError("offline GitHub stub cannot authorize a network Git remote")
+        return SimpleNamespace(args=(), secrets=(), env={})
 
     def validate_issue_binding(
         self, expected_repository, issue_number, github_repository=None
@@ -408,7 +417,9 @@ def _make_verifiable_intake_ownership(
         if mb_repo and hasattr(mb_repo, "get_by_project_id")
         else None
     )
-    managed_root = mb.managed_repository_root if mb and getattr(mb, "managed_repository_root", None) else None
+    managed_root = (
+        mb.managed_repository_root if mb and getattr(mb, "managed_repository_root", None) else None
+    )
     if (
         managed_root
         and os.path.isdir(managed_root)
@@ -2159,15 +2170,19 @@ class InMemoryIntakeWorkspaceOwnershipRepository:
                 if os.path.exists(ow.canonical_workspace_path)
                 else ow.canonical_workspace_path
             )
-            if norm_ow == norm_target or norm_target.startswith(norm_ow + os.sep) or ow.canonical_workspace_path == canonical_workspace_path:
+            if (
+                norm_ow == norm_target
+                or norm_target.startswith(norm_ow + os.sep)
+                or ow.canonical_workspace_path == canonical_workspace_path
+            ):
                 return ow.model_copy(deep=True)
         return None
 
-    def get_by_item_key(
-        self, project_id: str, item_key: str
-    ) -> IntakeWorkspaceOwnership | None:
+    def get_by_item_key(self, project_id: str, item_key: str) -> IntakeWorkspaceOwnership | None:
         for ow in self._store.values():
-            if ow.project_id == project_id and (ow.item_key == item_key or ow.change_name == item_key):
+            if ow.project_id == project_id and (
+                ow.item_key == item_key or ow.change_name == item_key
+            ):
                 return ow.model_copy(deep=True)
         return None
 
@@ -2178,7 +2193,8 @@ class InMemoryIntakeWorkspaceOwnershipRepository:
             if (
                 ow.project_id == project_id
                 and (ow.item_key == item_key or ow.change_name == item_key)
-                and ow.creation_state in (
+                and ow.creation_state
+                in (
                     IntakeWorkspaceCreationState.RESERVED,
                     IntakeWorkspaceCreationState.CREATING,
                     IntakeWorkspaceCreationState.ACTIVE,
@@ -2188,13 +2204,16 @@ class InMemoryIntakeWorkspaceOwnershipRepository:
         return None
 
     def list_by_project(self, project_id: str) -> list[IntakeWorkspaceOwnership]:
-        return [ow.model_copy(deep=True) for ow in self._store.values() if ow.project_id == project_id]
+        return [
+            ow.model_copy(deep=True) for ow in self._store.values() if ow.project_id == project_id
+        ]
 
     def list_active(self) -> list[IntakeWorkspaceOwnership]:
         return [
             ow.model_copy(deep=True)
             for ow in self._store.values()
-            if ow.creation_state in (
+            if ow.creation_state
+            in (
                 IntakeWorkspaceCreationState.RESERVED,
                 IntakeWorkspaceCreationState.CREATING,
                 IntakeWorkspaceCreationState.ACTIVE,
@@ -2430,7 +2449,10 @@ class InMemoryRecoveryClaimRepository(RecoveryClaimRepositoryInterface):
             action = uow.orchestration_external_actions.get_by_action_key(action_key)
             if action:
                 if authorization is not None:
-                    if not getattr(authorization, "is_authorized", False) or getattr(authorization, "action_key", None) != action_key:
+                    if (
+                        not getattr(authorization, "is_authorized", False)
+                        or getattr(authorization, "action_key", None) != action_key
+                    ):
                         raise ValueError(
                             f"Dispatch intent creation rejected for '{action_key}': Stage B/D authorization not proven."
                         )
@@ -2606,6 +2628,8 @@ def in_memory_uow() -> InMemoryPersistenceUnitOfWork:
                 health_id=f"ph-{prov}",
                 provider=prov,
                 status=ProviderHealthStatus.AVAILABLE,
+                last_result_class=ProviderResultClass.SUCCESS,
+                last_success_at=utc_now(),
                 updated_at=utc_now(),
             )
         )
@@ -2785,14 +2809,20 @@ def attach_local_bare_origin(
     )
     subprocess.run(
         ["git", "remote", "set-url", "origin", str(bare)],
-        cwd=repo_root, capture_output=True, text=True, check=False,
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     # Only proceed with the identity rewrite + ownership refresh when the remote URL
     # actually changed. When a test mocks git subprocesses, set-url is a no-op and we
     # must not corrupt the durable identity.
     get_url = subprocess.run(
         ["git", "remote", "get-url", "origin"],
-        cwd=repo_root, capture_output=True, text=True, check=False,
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     remote_actually_changed = get_url.returncode == 0 and get_url.stdout.strip() == str(bare)
     if not remote_actually_changed:
@@ -2835,12 +2865,22 @@ def attach_local_bare_origin(
         ["git", "rev-parse", "HEAD"], cwd=repo_root, capture_output=True, text=True, check=False
     )
     real_sha = head.stdout.strip() if head.returncode == 0 else None
-    if real_sha and uow is not None and project_id is not None and hasattr(uow, "intake_workspace_ownerships"):
+    if (
+        real_sha
+        and uow is not None
+        and project_id is not None
+        and hasattr(uow, "intake_workspace_ownerships")
+    ):
         for ow in list(uow.intake_workspace_ownerships.list_by_project(project_id)):
-            if getattr(ow, "published_sha", None) == "sha123" or getattr(ow, "published_sha", None) is None:
+            if (
+                getattr(ow, "published_sha", None) == "sha123"
+                or getattr(ow, "published_sha", None) is None
+            ):
                 subprocess.run(
                     ["git", "push", "origin", f"{real_sha}:refs/minime/intake/{ow.change_name}"],
-                    cwd=repo_root, check=False, capture_output=True,
+                    cwd=repo_root,
+                    check=False,
+                    capture_output=True,
                 )
                 ow.published_sha = real_sha
                 ow.canonical_repository_identity = str(bare)
@@ -2860,9 +2900,7 @@ def publish_local_intake_ref(root: Path, change_name: str) -> str:
 
     change_dir = Path(root) / "openspec" / "changes" / change_name
     if change_dir.exists():
-        subprocess.run(
-            ["git", "add", str(change_dir)], cwd=root, check=True, capture_output=True
-        )
+        subprocess.run(["git", "add", str(change_dir)], cwd=root, check=True, capture_output=True)
         # "nothing to commit" (exit 1) is tolerated: some tests commit separately.
         subprocess.run(
             ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "publish intake"],
@@ -3000,3 +3038,69 @@ def write_test_worktree_ownership_marker(
     }
     marker_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
     return marker_file
+
+
+@pytest.fixture
+def test_capacity_strategy(monkeypatch):
+    """Install explicit, deterministic read-only capacity adapters for local tests only."""
+    from minime.adapters import provider_adapter
+    from minime.adapters.provider_adapter import (
+        CapacityObservation,
+        ProviderAdapterInterface,
+    )
+
+    class DeterministicCapacityAdapter(ProviderAdapterInterface):
+        def __init__(self, provider: str, allowed: bool | None):
+            self._provider = provider
+            self.allowed = allowed
+
+        @property
+        def provider_name(self) -> str:
+            return self._provider
+
+        @property
+        def supported_roles(self) -> set[str]:
+            return {"implementer", "reviewer"}
+
+        @property
+        def supports_read_only_capacity_observation(self) -> bool:
+            return True
+
+        @property
+        def capacity_source_signal(self) -> CapacitySignalSource:
+            return CapacitySignalSource.PROVIDER_READ_ONLY_CAPACITY
+
+        @property
+        def requires_account_identity_for_capacity(self) -> bool:
+            return True
+
+        async def check_cli_present(self) -> bool:
+            return True
+
+        async def check_auth_ready(self, timeout_seconds: float = 10.0) -> bool:
+            del timeout_seconds
+            return True
+
+        async def probe_availability(self, timeout_seconds: float = 30.0) -> bool:
+            del timeout_seconds
+            raise AssertionError("capacity tests must not invoke provider inference")
+
+        async def read_capacity_observation(self, timeout_seconds: float = 10.0):
+            del timeout_seconds
+            now = utc_now()
+            return CapacityObservation(
+                provider=self._provider,
+                ordinary_usage_allowed=self.allowed,
+                observed_at=now,
+                expires_at=now + timedelta(seconds=30) if self.allowed is not None else now,
+                source_signal=self.capacity_source_signal,
+                account_id=f"test-account:{self._provider}",
+                model=f"test-model:{self._provider}",
+            )
+
+    def install(providers: tuple[str, ...] | list[str] = tuple(PRIMARY_PROVIDERS)):
+        for provider in providers:
+            adapter = DeterministicCapacityAdapter(provider, True)
+            monkeypatch.setitem(provider_adapter._ADAPTER_REGISTRY, provider, adapter)
+
+    return install

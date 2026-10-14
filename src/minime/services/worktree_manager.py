@@ -3294,6 +3294,9 @@ class WorktreeManager:
             require_created_ownership=True,
             job_id=job_id,
         )
+        from minime.services.candidate_manifest import purge_transient_generated_artifacts
+
+        purge_transient_generated_artifacts(path)
         state = await self.inspect_worktree_state(path)
         if state.dirty:
             await self._git(

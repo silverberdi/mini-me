@@ -14,6 +14,7 @@ from minime.domain.enums import (
     ExternalReasonCode,
     OrchestrationStage,
     ProviderHealthStatus,
+    ProviderResultClass,
     RetrySafety,
     SchedulerMode,
 )
@@ -25,6 +26,7 @@ from minime.domain.models import (
     ProjectBinding,
     ProviderHealth,
     WorkQueueItem,
+    utc_now,
 )
 from minime.services.readiness_service import ReadinessService
 from minime.services.scheduler_service import SchedulerService
@@ -70,6 +72,8 @@ def setup_test_project_and_change(
             health_id=f"ph-{implementer}",
             provider=implementer,
             status=ProviderHealthStatus.AVAILABLE,
+            last_result_class=ProviderResultClass.SUCCESS,
+            last_success_at=utc_now(),
         )
     )
     uow.provider_health.save(
@@ -77,6 +81,8 @@ def setup_test_project_and_change(
             health_id=f"ph-{reviewer}",
             provider=reviewer,
             status=ProviderHealthStatus.AVAILABLE,
+            last_result_class=ProviderResultClass.SUCCESS,
+            last_success_at=utc_now(),
         )
     )
 

@@ -23,6 +23,84 @@ def compute_file_sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+GENERATED_ARTIFACT_EXTENSIONS = (".pyc", ".pyo")
+GENERATED_ARTIFACT_DIRS = ("__pycache__", ".pytest_cache")
+
+
+def is_generated_runtime_artifact(rel_path: str) -> bool:
+    """Check if relative path points to a compiler or runtime generated artifact."""
+    p = Path(rel_path)
+    if any(part in GENERATED_ARTIFACT_DIRS for part in p.parts):
+        return True
+    if rel_path.endswith(GENERATED_ARTIFACT_EXTENSIONS):
+        return True
+    if p.name.startswith(".coverage") or any(part == ".coverage" for part in p.parts):
+        return True
+    return False
+
+
+class CandidateArtifactRejectionError(ValueError):
+    """Raised when tracked or staged files contain generated compiler or runtime artifacts."""
+
+    def __init__(self, message: str, violating_paths: list[str] | None = None):
+        super().__init__(message)
+        self.violating_paths = violating_paths or []
+
+
+def purge_transient_generated_artifacts(worktree_path: str | Path) -> list[str]:
+    """Non-destructively remove untracked compiler and runtime artifacts from worktree.
+
+    Tracked files are preserved so that CandidateManifestService can detect and reject them.
+    Only untracked/ignored bytecode, cache directories, and test artifacts are purged.
+    """
+    wt = Path(worktree_path).resolve()
+    if not wt.exists() or not wt.is_dir():
+        return []
+
+    tracked_proc = subprocess.run(
+        ["git", "ls-files"],
+        cwd=wt,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    tracked_set = set(tracked_proc.stdout.splitlines()) if tracked_proc.returncode == 0 else set()
+
+    purged: list[str] = []
+
+    # Target directories: __pycache__, .pytest_cache
+    for dir_name in GENERATED_ARTIFACT_DIRS:
+        for d in list(wt.rglob(dir_name)):
+            if not d.is_dir():
+                continue
+            rel = str(d.relative_to(wt))
+            if any(tf == rel or tf.startswith(f"{rel}/") for tf in tracked_set):
+                continue
+            try:
+                import shutil
+
+                shutil.rmtree(d, ignore_errors=True)
+                purged.append(rel)
+            except Exception:
+                pass
+
+    # Target file extensions: .pyc, .pyo, .coverage*
+    for pattern in ("*.pyc", "*.pyo", ".coverage*"):
+        for f in list(wt.rglob(pattern)):
+            if not f.is_file():
+                continue
+            rel = str(f.relative_to(wt))
+            if rel in tracked_set:
+                continue
+            try:
+                f.unlink(missing_ok=True)
+                purged.append(rel)
+            except Exception:
+                pass
+
+    return purged
+
+
 class CandidateManifestService:
     """Generates immutable candidate manifests and verifies reviewer visibility."""
 
@@ -126,6 +204,26 @@ class CandidateManifestService:
 
         except Exception as err:
             logger.warning("Error generating candidate manifest via git: %s", err)
+
+        # Check for tracked and staged generated compiler/runtime artifacts
+        violating: list[str] = []
+        for tf in tracked_files:
+            if is_generated_runtime_artifact(tf["path"]):
+                violating.append(tf["path"])
+        for sf in staged_files:
+            if is_generated_runtime_artifact(sf["path"]):
+                violating.append(sf["path"])
+        if violating:
+            violating_sorted = sorted(set(violating))
+            raise CandidateArtifactRejectionError(
+                f"Candidate rejected: tracked or staged generated compiler/runtime artifacts detected: {violating_sorted}",
+                violating_paths=violating_sorted,
+            )
+
+        # Strictly exclude untracked generated artifacts from candidate manifest
+        untracked_files = [
+            uf for uf in untracked_files if not is_generated_runtime_artifact(uf["path"])
+        ]
 
         # Compute deterministic manifest hash over all existing files
         all_manifest_entries: list[str] = []

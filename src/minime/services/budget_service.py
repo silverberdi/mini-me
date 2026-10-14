@@ -78,7 +78,10 @@ class BudgetService:
         self, project_id: str
     ) -> tuple[OpenRouterBudgetPolicy | None, BudgetHeadroom | None]:
         """Compute and return current headroom for a project."""
-        policy = self.uow.budget_policies.get_for_update(project_id)
+        repo = getattr(self.uow, "budget_policies", None)
+        if repo is None:
+            return None, None
+        policy = repo.get_for_update(project_id)
         if not policy:
             return None, None
         return policy, self._compute_headroom(project_id, policy)
@@ -188,11 +191,12 @@ class BudgetService:
     ) -> BudgetLedgerEntry | None:
         """Settle completed reservation against ledger and handle breach if actual > reserved."""
         reservation = getattr(
-            self.uow.budget_reservations, "get_by_id_for_update", self.uow.budget_reservations.get_by_id
+            self.uow.budget_reservations,
+            "get_by_id_for_update",
+            self.uow.budget_reservations.get_by_id,
         )(reservation_id)
         if not reservation or reservation.status != "RESERVED":
             return None
-
 
         actual_dec = (
             actual_cost_usd
@@ -313,11 +317,12 @@ class BudgetService:
         reservation is NOT settled as a successful completion.
         """
         reservation = getattr(
-            self.uow.budget_reservations, "get_by_id_for_update", self.uow.budget_reservations.get_by_id
+            self.uow.budget_reservations,
+            "get_by_id_for_update",
+            self.uow.budget_reservations.get_by_id,
         )(reservation_id)
         if not reservation or reservation.status != "RESERVED":
             return None
-
 
         actual_dec = (
             actual_cost_usd
@@ -371,7 +376,9 @@ class BudgetService:
     ) -> BudgetReservation | None:
         """Release a reservation before HTTP dispatch (e.g. pricing changed or cancelled)."""
         reservation = getattr(
-            self.uow.budget_reservations, "get_by_id_for_update", self.uow.budget_reservations.get_by_id
+            self.uow.budget_reservations,
+            "get_by_id_for_update",
+            self.uow.budget_reservations.get_by_id,
         )(reservation_id)
         if not reservation or reservation.status != "RESERVED":
             return None

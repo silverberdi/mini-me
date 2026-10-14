@@ -25,6 +25,7 @@ from minime.domain.enums import (
     OrchestrationStopOutcome,
     ProjectStatus,
     ProviderHealthStatus,
+    ProviderResultClass,
     PullRequestLookupState,
     ReadinessState,
     RetrySafety,
@@ -378,8 +379,9 @@ class StructuredLookupGitHubAdapter(FakeGitHubAdapter):
 
 
 @pytest.fixture
-def setup_orchestration_environment(tmp_path: Path, in_memory_uow):
+def setup_orchestration_environment(tmp_path: Path, in_memory_uow, test_capacity_strategy):
     """Sets up a fully configured test environment with projects, bindings, health, and changes."""
+    test_capacity_strategy()
     import subprocess
 
     from conftest import setup_managed_repository_fixture
@@ -425,10 +427,20 @@ def setup_orchestration_environment(tmp_path: Path, in_memory_uow):
 
     # Provider health
     in_memory_uow.provider_health.save(
-        ProviderHealth(provider="codex", status=ProviderHealthStatus.AVAILABLE)
+        ProviderHealth(
+            provider="codex",
+            status=ProviderHealthStatus.AVAILABLE,
+            last_result_class=ProviderResultClass.SUCCESS,
+            last_success_at=utc_now(),
+        )
     )
     in_memory_uow.provider_health.save(
-        ProviderHealth(provider="antigravity", status=ProviderHealthStatus.AVAILABLE)
+        ProviderHealth(
+            provider="antigravity",
+            status=ProviderHealthStatus.AVAILABLE,
+            last_result_class=ProviderResultClass.SUCCESS,
+            last_success_at=utc_now(),
+        )
     )
 
     # Create OpenSpec change directory with valid artifacts

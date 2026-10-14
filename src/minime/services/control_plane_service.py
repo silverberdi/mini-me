@@ -817,11 +817,28 @@ class ControlPlaneService:
 
         # Increment retry count and resume through RecoveryConvergenceService
         run.retry_count += 1
-        self.uow.orchestration_runs.save(run)
-        self.uow.commit()
+        with self.uow.orchestration_runs.session.begin_nested():
+            run.stop_outcome = None
+            run.human_gate = None
+            run.is_active = True
+            run.stop_reason = None
+            run.stop_details = {}
+            if run.active_job_id:
+                job = self.uow.jobs.get_by_id(run.active_job_id)
+                if job:
+                    if job.base_sha and job.base_sha != run.base_sha:
+                        run.base_sha = job.base_sha
+                    job.status = JobStatus.RUNNING
+                    job.continuation_decision = None
+                    job.escalation_reason = None
+                    self.uow.jobs.save(job)
+            run.resumable_stage = OrchestrationStage.IMPLEMENTING
+            run.current_stage = OrchestrationStage.IMPLEMENTING
+            self.uow.orchestration_runs.save(run)
+            self.uow.commit()
 
         self.recovery_convergence_service.request_run_continuation(
-            run.run_id, source=RecoverySource.CONTROL_PLANE
+            run.run_id, source=RecoverySource.CONTROL_PLANE, force=True
         )
         resumed_run = self.uow.orchestration_runs.get_by_id(run.run_id) or run
 
@@ -1179,7 +1196,10 @@ class ControlPlaneService:
                 )
 
             resumed_run = self.orchestration_service.remediate_preserved_candidate(
-                run.run_id, contract_path=contract, project_root=self.project_root, claim_context=claim_ctx
+                run.run_id,
+                contract_path=contract,
+                project_root=self.project_root,
+                claim_context=claim_ctx,
             )
             summary = f"Preserved candidate remediation started; generation is now {resumed_run.current_generation}."
             record = OperatorActionRecord(
@@ -1621,7 +1641,12 @@ class ControlPlaneService:
             RecoveryDecisionStatus,
             RecoverySource,
         )
-        gh_adapter = getattr(self.post_merge_service, "github_adapter", getattr(self.orchestration_service, "github_adapter", None))
+
+        gh_adapter = getattr(
+            self.post_merge_service,
+            "github_adapter",
+            getattr(self.orchestration_service, "github_adapter", None),
+        )
         rec_svc = RecoveryConvergenceService(
             self.uow,
             project_root=self.project_root,

@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from minime.adapters.provider_adapter import CapacityObservation, get_provider_adapter
 from minime.config import CliInvocationProfile
 from minime.domain.enums import (
     ChangeStatus,
@@ -21,6 +22,7 @@ from minime.domain.enums import (
     OrchestrationStopOutcome,
     ProgressClassification,
     ProviderHealthStatus,
+    ProviderResultClass,
     ReadinessState,
 )
 from minime.domain.models import (
@@ -80,8 +82,8 @@ def test_workspace_context_is_absolute_and_openspec_tracker_stays_task_focused(t
     assert "provider scratch directories" in context
 
     tracker = OpenSpecTaskTracker(tmp_path)
-    task_context = tracker.format_prompt_context("openspec", "missing-change")
-    assert "CANDIDATE WORKSPACE" not in task_context
+    tasks = tracker.parse_tasks("openspec", "missing-change")
+    assert tasks == []
 
 
 @pytest.mark.asyncio
@@ -151,16 +153,24 @@ async def test_auth_required_preflight_waits_without_worktree_or_runner_invocati
         project_root=tmp_path,
         worktree_manager=FakeWorktreeManager(tmp_path),
     )
-    pipeline.health_service.get_health = lambda provider: type(
-        "Health",
-        (),
-        {"status": ProviderHealthStatus.AUTH_REQUIRED},
-    )()
+    refresh_calls = []
+
+    async def no_capacity_refresh(provider):
+        refresh_calls.append(provider)
+        return False
+
+    monkeypatch.setattr(
+        pipeline.health_service, "refresh_capacity_from_read_only_source", no_capacity_refresh
+    )
     monkeypatch.setattr(
         "minime.services.execution_pipeline.runner_for_implementer",
         lambda executor: invoked.append(executor),
     )
     job = pipeline.queue_job("mini-me", change_name)
+    for provider in ("codex", "antigravity"):
+        health = pipeline.health_service.get_health(provider)
+        health.status = ProviderHealthStatus.AUTH_REQUIRED
+        pipeline.uow.provider_health.save(health)
 
     result = await pipeline.execute_queued_job(
         job.job_id, claim_context=_dummy_claim_context(in_memory_uow)
@@ -170,6 +180,7 @@ async def test_auth_required_preflight_waits_without_worktree_or_runner_invocati
     assert invoked == []
     assert pipeline.worktree_manager.created_paths == {}
     assert in_memory_uow.job_attempts.list_by_job(job.job_id) == []
+    assert "codex" in refresh_calls
 
 
 def test_handoff_prompt_normalizes_to_authoritative_workspace(tmp_path):
@@ -461,10 +472,20 @@ def test_control_plane_reassign_then_continue_reaches_codex_runner_over_old_hand
     )
     in_memory_uow.job_handoffs.save(old_handoff)
     in_memory_uow.provider_health.save(
-        ProviderHealth(provider="codex", status=ProviderHealthStatus.AVAILABLE)
+        ProviderHealth(
+            provider="codex",
+            status=ProviderHealthStatus.AVAILABLE,
+            last_result_class=ProviderResultClass.SUCCESS,
+            last_success_at=utc_now(),
+        )
     )
     in_memory_uow.provider_health.save(
-        ProviderHealth(provider="antigravity", status=ProviderHealthStatus.AVAILABLE)
+        ProviderHealth(
+            provider="antigravity",
+            status=ProviderHealthStatus.AVAILABLE,
+            last_result_class=ProviderResultClass.SUCCESS,
+            last_success_at=utc_now(),
+        )
     )
     in_memory_uow.commit()
 
@@ -552,8 +573,9 @@ def test_control_plane_reassign_then_continue_reaches_codex_runner_over_old_hand
 
 @pytest.mark.asyncio
 async def test_execution_pipeline_success_records_evidence_and_cleans_worktree(
-    in_memory_uow, tmp_path
+    in_memory_uow, tmp_path, test_capacity_strategy
 ):
+    test_capacity_strategy()
     seed_ready_change(
         in_memory_uow,
         tmp_path,
@@ -599,7 +621,62 @@ async def test_execution_pipeline_success_records_evidence_and_cleans_worktree(
 
 
 @pytest.mark.asyncio
-async def test_recovery_evidence_is_committed_before_worktree_removal(in_memory_uow, tmp_path):
+async def test_reviewer_capacity_is_refreshed_again_immediately_before_review(
+    in_memory_uow, tmp_path, test_capacity_strategy, monkeypatch
+):
+    test_capacity_strategy()
+    seed_ready_change(
+        in_memory_uow,
+        tmp_path,
+        "# Tasks\n\n## 1. Things\n- [x] 1.1 Done\n",
+    )
+    worktrees = FakeWorktreeManager(tmp_path)
+    service = ExecutionPipelineService(
+        in_memory_uow,
+        project_root=tmp_path,
+        implementer_runner=MockImplementerRunner(stdout=["candidate ready"]),
+        reviewer_runner=MockReviewerRunner(stdout=['{"verdict":"READY_TO_MERGE"}']),
+        auditor_runner=MockAuditorRunner(output=['{"risk":"low","findings":[]}']),
+        worktree_manager=worktrees,
+    )
+    adapter = get_provider_adapter("antigravity")
+    original_read = adapter.read_capacity_observation
+    reads = 0
+
+    async def expires_on_second_read(timeout_seconds=10.0):
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            return await original_read(timeout_seconds)
+        now = utc_now()
+        return CapacityObservation(
+            provider="antigravity",
+            ordinary_usage_allowed=None,
+            observed_at=now,
+            expires_at=now,
+            source_signal=adapter.capacity_source_signal,
+            account_id="test-account:antigravity",
+            model="test-model:antigravity",
+        )
+
+    monkeypatch.setattr(adapter, "read_capacity_observation", expires_on_second_read)
+    job = service.queue_job("mini-me", "synthetic-pipeline-change")
+
+    result = await service.execute_queued_job(
+        job.job_id, claim_context=_dummy_claim_context(in_memory_uow)
+    )
+
+    assert result.status == JobStatus.WAITING_CAPACITY
+    assert reads == 2
+    assert result.candidate_sha is not None
+    assert in_memory_uow.reviews.get_by_job_id(job.job_id) is None
+
+
+@pytest.mark.asyncio
+async def test_recovery_evidence_is_committed_before_worktree_removal(
+    in_memory_uow, tmp_path, test_capacity_strategy
+):
+    test_capacity_strategy()
     seed_ready_change(in_memory_uow, tmp_path, "# Tasks\n\n## 1. Things\n- [x] 1.1 Done\n")
     ordering: list[str] = []
     worktrees = RecoveryOrderingWorktreeManager(tmp_path, ordering)
@@ -646,7 +723,10 @@ async def test_recovery_evidence_is_committed_before_worktree_removal(in_memory_
 
 
 @pytest.mark.asyncio
-async def test_recovery_evidence_failure_blocks_without_removal(in_memory_uow, tmp_path):
+async def test_recovery_evidence_failure_blocks_without_removal(
+    in_memory_uow, tmp_path, test_capacity_strategy
+):
+    test_capacity_strategy()
     seed_ready_change(in_memory_uow, tmp_path, "# Tasks\n\n## 1. Things\n- [x] 1.1 Done\n")
     ordering: list[str] = []
     worktrees = RecoveryOrderingWorktreeManager(tmp_path, ordering)

@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
+import re
 import shutil
+import stat
+import sys
+import tempfile
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import httpx
 
@@ -17,6 +25,7 @@ from minime.config import AppConfig, load_config
 from minime.domain.enums import CapacitySignalSource, ProviderResultClass
 
 logger = logging.getLogger(__name__)
+_AGY_STATUSLINE_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -26,6 +35,22 @@ class CapacitySignal:
     retry_after_seconds: int | None = None
     source_signal: CapacitySignalSource = CapacitySignalSource.UNKNOWN
     summary: str = ""
+
+
+@dataclass(frozen=True)
+class CapacityObservation:
+    """A bounded provider-owned capacity snapshot; unknown is never permission."""
+
+    provider: str
+    ordinary_usage_allowed: bool | None
+    observed_at: datetime
+    expires_at: datetime
+    source_signal: CapacitySignalSource
+    account_id: str | None = None
+    model: str | None = None
+    capacity_reset_at: datetime | None = None
+    # Ephemeral source-session identity. Persistence stores only its fingerprint.
+    source_session_id: str | None = None
 
 
 class ProviderAdapterInterface(ABC):
@@ -78,8 +103,31 @@ class ProviderAdapterInterface(ABC):
         # do NOT prove capacity and must NOT promote a provider back to AVAILABLE.
         return False
 
+    @property
+    def supports_read_only_capacity_observation(self) -> bool:
+        return False
+
+    @property
+    def capacity_source_signal(self) -> CapacitySignalSource:
+        return CapacitySignalSource.UNKNOWN
+
+    @property
+    def valid_capacity_source_signals(self) -> set[CapacitySignalSource]:
+        return {self.capacity_source_signal}
+
+    @property
+    def requires_account_identity_for_capacity(self) -> bool:
+        return False
+
     def extract_capacity_signal(self, raw_output: str, exit_code: int = 0) -> CapacitySignal | None:
         """Extract capacity/quota signal from raw output or error if supported."""
+        return None
+
+    async def read_capacity_observation(
+        self, timeout_seconds: float = 10.0
+    ) -> CapacityObservation | None:
+        """Read quota without inference when the installed provider exposes a source."""
+        del timeout_seconds
         return None
 
 
@@ -91,13 +139,24 @@ class CodexProviderAdapter(ProviderAdapterInterface):
 
     @property
     def probe_is_expensive(self) -> bool:
-        # Codex capacity probes execute real Codex turns, so they are expensive.
-        return True
+        # Capacity uses the App Server rate-limit read, never a Codex turn.
+        return False
 
     @property
     def probe_verifies_capacity(self) -> bool:
-        # codex exec is a real inference turn; a clean exit is positive evidence
-        # that inference capacity has recovered.
+        # The App Server backend's ordinaryUsageAllowed field is authoritative.
+        return True
+
+    @property
+    def supports_read_only_capacity_observation(self) -> bool:
+        return True
+
+    @property
+    def capacity_source_signal(self) -> CapacitySignalSource:
+        return CapacitySignalSource.CODEX_APP_SERVER
+
+    @property
+    def requires_account_identity_for_capacity(self) -> bool:
         return True
 
     def _resolve_executable(self) -> str | None:
@@ -148,51 +207,173 @@ class CodexProviderAdapter(ProviderAdapterInterface):
         return {"implementer", "reviewer"}
 
     async def probe_availability(self, timeout_seconds: float = 30.0) -> bool:
-        search_path = f"{Path.home()}/.local/bin:/opt/homebrew/bin:/usr/local/bin:{os.environ.get('PATH', '')}"
+        observation = await self.read_capacity_observation(timeout_seconds=timeout_seconds)
+        return observation is not None and observation.ordinary_usage_allowed is True
+
+    async def read_capacity_observation(self, timeout_seconds: float = 10.0) -> CapacityObservation:
+        """Read the installed App Server's account rate-limit contract without a turn.
+
+        The response schema documents ``ordinaryUsageAllowed`` as backend permission
+        for ordinary included usage, validated against the active account. Missing or
+        null values remain UNKNOWN; percentages and reset timestamps never grant use.
+        """
+        observed_at = datetime.now(UTC)
+        expires_at = observed_at + timedelta(seconds=60)
+        unresolved = CapacityObservation(
+            provider=self.provider_name,
+            ordinary_usage_allowed=None,
+            observed_at=observed_at,
+            expires_at=expires_at,
+            source_signal=CapacitySignalSource.CODEX_APP_SERVER,
+        )
+        search_path = (
+            f"{Path.home()}/.local/bin:/opt/homebrew/bin:/usr/local/bin:"
+            f"{os.environ.get('PATH', '')}"
+        )
         resolved = shutil.which(self._executable, path=search_path)
         if not resolved:
-            self._last_probe_output = "Codex CLI executable not found in PATH"
-            self._last_exit_code = 127
-            return False
+            return unresolved
 
+        proc = None
         try:
-            # Lightweight ephemeral probe with --skip-git-repo-check
             proc = await asyncio.create_subprocess_exec(
                 resolved,
-                "exec",
-                "-",
-                "--ephemeral",
-                "--skip-git-repo-check",
+                "app-server",
+                "--stdio",
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
                 start_new_session=True,
             )
-            try:
-                stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(b"echo probe"),
-                    timeout=timeout_seconds,
-                )
-                self._last_probe_output = (
-                    stdout.decode("utf-8", errors="replace")
-                    + "\n"
-                    + stderr.decode("utf-8", errors="replace")
-                )
-                self._last_exit_code = proc.returncode
-                return proc.returncode == 0
-            except asyncio.TimeoutError:
-                self._last_probe_output = "Codex availability probe timed out after 30 seconds"
-                self._last_exit_code = 124
+            initialize = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "clientInfo": {
+                        "name": "mini-me-capacity-read",
+                        "title": "mini me capacity read",
+                        "version": "1.0",
+                    },
+                    "capabilities": {},
+                },
+            }
+            if proc.stdin is None or proc.stdout is None:
+                return unresolved
+            proc.stdin.write((json.dumps(initialize) + "\n").encode())
+            await proc.stdin.drain()
+            init_response = await self._read_app_server_response(
+                proc.stdout, response_id=1, timeout_seconds=timeout_seconds
+            )
+            if init_response is None or "error" in init_response:
+                return unresolved
+
+            proc.stdin.write(
+                (
+                    json.dumps({"jsonrpc": "2.0", "method": "initialized", "params": {}}) + "\n"
+                ).encode()
+            )
+            request = {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "account/rateLimits/read",
+                "params": {},
+            }
+            proc.stdin.write((json.dumps(request) + "\n").encode())
+            await proc.stdin.drain()
+            response = await self._read_app_server_response(
+                proc.stdout, response_id=2, timeout_seconds=timeout_seconds
+            )
+            if response is None or "error" in response:
+                return unresolved
+            result = response.get("result")
+            return self.parse_rate_limits_result(
+                result,
+                observed_at=observed_at,
+                expires_at=expires_at,
+            )
+        except (OSError, asyncio.TimeoutError, ValueError, json.JSONDecodeError):
+            return unresolved
+        finally:
+            if proc is not None:
                 try:
-                    proc.terminate()
-                except OSError:
+                    proc.kill()
+                except ProcessLookupError:
                     pass
-                return False
-        except Exception as exc:
-            self._last_probe_output = f"Codex availability probe failed with exception: {exc}"
-            self._last_exit_code = 1
-            logger.debug(f"Codex availability probe failed: {exc}")
-            return False
+                try:
+                    await proc.wait()
+                except Exception:
+                    pass
+
+    @staticmethod
+    def parse_rate_limits_result(
+        result: object, *, observed_at: datetime, expires_at: datetime
+    ) -> CapacityObservation:
+        """Parse only the installed App Server's authoritative permission field."""
+        unknown = CapacityObservation(
+            provider="codex",
+            ordinary_usage_allowed=None,
+            observed_at=observed_at,
+            expires_at=expires_at,
+            source_signal=CapacitySignalSource.CODEX_APP_SERVER,
+        )
+        if not isinstance(result, dict):
+            return unknown
+        account_id = result.get("accountId")
+        permission = result.get("ordinaryUsageAllowed")
+        buckets = result.get("rateLimitsByLimitId")
+        bucket = buckets.get("codex") if isinstance(buckets, dict) else None
+        if not isinstance(bucket, dict):
+            single = result.get("rateLimits")
+            bucket = (
+                single if isinstance(single, dict) and single.get("limitId") == "codex" else None
+            )
+        if (
+            not isinstance(account_id, str)
+            or not account_id.strip()
+            or permission not in (True, False)
+            or not isinstance(bucket, dict)
+            or bucket.get("limitId") != "codex"
+        ):
+            return unknown
+        reset_candidates = []
+        for window_name in ("primary", "secondary"):
+            window = bucket.get(window_name)
+            reset = window.get("resetsAt") if isinstance(window, dict) else None
+            if isinstance(reset, int) and reset > 0:
+                try:
+                    reset_candidates.append(datetime.fromtimestamp(reset, tz=UTC))
+                except (OverflowError, OSError, ValueError):
+                    pass
+        return CapacityObservation(
+            provider="codex",
+            ordinary_usage_allowed=permission,
+            observed_at=observed_at,
+            expires_at=expires_at,
+            source_signal=CapacitySignalSource.CODEX_APP_SERVER,
+            account_id=account_id,
+            model=bucket.get("normalModelSlug") or bucket.get("limitId"),
+            capacity_reset_at=min(reset_candidates) if reset_candidates else None,
+        )
+
+    @staticmethod
+    async def _read_app_server_response(
+        stdout: asyncio.StreamReader, response_id: int, timeout_seconds: float
+    ) -> dict | None:
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        while True:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return None
+            line = await asyncio.wait_for(stdout.readline(), timeout=remaining)
+            if not line:
+                return None
+            try:
+                response = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(response, dict) and response.get("id") == response_id:
+                return response
 
     def extract_capacity_signal(self, raw_output: str, exit_code: int = 0) -> CapacitySignal | None:
         lower_out = raw_output.lower()
@@ -221,6 +402,22 @@ class AntigravityProviderAdapter(ProviderAdapterInterface):
 
     def __init__(self, executable: str = "agy"):
         self._executable = executable
+
+    @property
+    def supports_read_only_capacity_observation(self) -> bool:
+        return True
+
+    @property
+    def capacity_source_signal(self) -> CapacitySignalSource:
+        return CapacitySignalSource.AGY_PRINT_USAGE
+
+    @property
+    def valid_capacity_source_signals(self) -> set[CapacitySignalSource]:
+        return {CapacitySignalSource.AGY_PRINT_USAGE, CapacitySignalSource.AGY_STATUSLINE}
+
+    @property
+    def requires_account_identity_for_capacity(self) -> bool:
+        return True
 
     def _resolve_executable(self) -> str | None:
         search_path = (
@@ -290,6 +487,538 @@ class AntigravityProviderAdapter(ProviderAdapterInterface):
         except Exception as exc:
             logger.debug(f"Antigravity availability probe failed: {exc}")
             return False
+
+    async def read_capacity_observation(self, timeout_seconds: float = 10.0) -> CapacityObservation:
+        """Read the authenticated headless /usage quota snapshot without sending a turn.
+
+        The CLI in headless print mode exposes the read-only /usage slash command, which
+        returns model quota buckets without executing an agent turn or spending tokens.
+        """
+        observed_at = datetime.now(UTC)
+        unknown = CapacityObservation(
+            provider=self.provider_name,
+            ordinary_usage_allowed=None,
+            observed_at=observed_at,
+            expires_at=observed_at,
+            source_signal=self.capacity_source_signal,
+        )
+        resolved = self._resolve_executable()
+        if not resolved or not await self.check_cli_present():
+            logger.debug("AGY /usage capacity source unavailable: CLI not found")
+            return unknown
+        if not _AGY_STATUSLINE_LOCK.acquire(blocking=False):
+            logger.debug("AGY capacity observation busy")
+            return unknown
+        try:
+            return await self._read_print_usage_snapshot(resolved, timeout_seconds)
+        except Exception as exc:
+            logger.info(
+                "Antigravity /usage capacity observation unavailable (%s)",
+                type(exc).__name__,
+            )
+            return unknown
+        finally:
+            _AGY_STATUSLINE_LOCK.release()
+
+    async def _read_print_usage_snapshot(
+        self, executable: str, timeout_seconds: float
+    ) -> CapacityObservation:
+        observed_at = datetime.now(UTC)
+        unknown = CapacityObservation(
+            provider=self.provider_name,
+            ordinary_usage_allowed=None,
+            observed_at=observed_at,
+            expires_at=observed_at,
+            source_signal=self.capacity_source_signal,
+        )
+        with tempfile.TemporaryDirectory(prefix="minime-agy-usage-") as private_dir:
+            private = Path(private_dir)
+            os.chmod(private, 0o700)
+            log_path = private / "cli.log"
+            cmd = [
+                executable,
+                "--log-file",
+                str(log_path),
+                "--output-format",
+                "json",
+                "-p",
+                "/usage",
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(private.resolve()),
+                start_new_session=True,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(),
+                    timeout=timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                try:
+                    proc.terminate()
+                    await asyncio.wait_for(proc.wait(), timeout=1.0)
+                except (OSError, asyncio.TimeoutError):
+                    try:
+                        proc.kill()
+                        await proc.wait()
+                    except OSError:
+                        pass
+                logger.debug("AGY /usage timed out")
+                return unknown
+
+            if proc.returncode != 0:
+                logger.debug(
+                    "AGY /usage exited %d: %s",
+                    proc.returncode,
+                    stderr.decode("utf-8", errors="replace"),
+                )
+                return unknown
+
+            try:
+                payload = json.loads(stdout.decode("utf-8", errors="replace"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return unknown
+
+            account_fingerprint = None
+            if log_path.exists():
+                try:
+                    log_text = log_path.read_text(encoding="utf-8", errors="replace")
+                    match = re.search(r"applyAuthResult:\s*email=([^,\s]+)", log_text)
+                    if match:
+                        raw_email = match.group(1).strip().lower()
+                        if raw_email:
+                            account_fingerprint = hashlib.sha256(raw_email.encode()).hexdigest()
+                except OSError:
+                    pass
+
+            return self.parse_print_usage_payload(
+                payload, observed_at=observed_at, account_fingerprint=account_fingerprint
+            )
+
+    async def _read_statusline_snapshot(
+        self, executable: str, timeout_seconds: float
+    ) -> CapacityObservation:
+        import fcntl
+        import pty
+        import struct
+        import termios
+
+        observed_at = datetime.now(UTC)
+        unknown = CapacityObservation(
+            provider=self.provider_name,
+            ordinary_usage_allowed=None,
+            observed_at=observed_at,
+            expires_at=observed_at,
+            source_signal=self.capacity_source_signal,
+        )
+        home = Path.home().resolve(strict=True)
+        settings_path = home / ".gemini" / "antigravity-cli" / "settings.json"
+        settings_dir = settings_path.parent
+        if (
+            settings_path.is_symlink()
+            or settings_dir.is_symlink()
+            or (home / ".gemini").is_symlink()
+            or settings_path.resolve(strict=True) != settings_path
+            or settings_dir.stat().st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        ):
+            logger.debug("AGY statusLine capacity source rejected unsafe settings path")
+            return unknown
+        mode = settings_path.stat().st_mode
+        if mode & (stat.S_IRWXG | stat.S_IRWXO):
+            logger.debug("AGY statusLine capacity source rejected non-private settings")
+            return unknown
+        original_bytes = settings_path.read_bytes()
+        settings = json.loads(original_bytes)
+        if not isinstance(settings, dict) or settings.get("statusLine") is not None:
+            # Do not override or race an operator-managed statusLine hook.
+            logger.debug("AGY statusLine capacity source rejected existing statusLine setting")
+            return unknown
+
+        with tempfile.TemporaryDirectory(prefix="minime-agy-capacity-") as private_dir:
+            private = Path(private_dir)
+            os.chmod(private, 0o700)
+            snapshot_path = private / "snapshot.json"
+            script_path = private / "capture.py"
+            script = (
+                "#!/usr/bin/env python3\n"
+                "import datetime, hashlib, json, os, sys\n"
+                "p=json.load(sys.stdin)\n"
+                "email=p.get('email')\n"
+                "o={'observed_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),"
+                "'version':p.get('version'),'product':p.get('product'),"
+                "'account_fingerprint':hashlib.sha256(email.encode()).hexdigest() "
+                "if isinstance(email,str) and email else None,"
+                "'session_id':p.get('session_id'),"
+                "'conversation_id':p.get('conversation_id'),"
+                "'callback_pid':os.getpid(),'callback_parent_pid':os.getppid(),"
+                "'cwd':p.get('cwd'),'workspace':p.get('workspace'),"
+                "'model':p.get('model'),'quota':p.get('quota'),"
+                "'agent_state':p.get('agent_state')}\n"
+                f"open({str(snapshot_path)!r}+'-'+str(o['callback_pid']),'w').write(json.dumps(o))\n"
+            )
+            script_path.write_text(script)
+            os.chmod(script_path, 0o700)
+            temporary_settings = dict(settings)
+            temporary_settings["statusLine"] = {
+                "type": "command",
+                "command": str(script_path),
+                "enabled": True,
+            }
+            installed_bytes = json.dumps(temporary_settings, indent=2).encode() + b"\n"
+            lock_fd = os.open(settings_path, os.O_RDONLY)
+            master_fd = slave_fd = None
+            proc = None
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self._atomic_replace_settings(settings_path, installed_bytes, stat.S_IMODE(mode))
+                master_fd, slave_fd = pty.openpty()
+                fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
+                proc = await asyncio.create_subprocess_exec(
+                    executable,
+                    stdin=slave_fd,
+                    stdout=slave_fd,
+                    stderr=asyncio.subprocess.DEVNULL,
+                    start_new_session=True,
+                    cwd=str(private.resolve()),
+                )
+                os.close(slave_fd)
+                slave_fd = None
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + timeout_seconds
+                payload: dict[str, Any] | None = None
+                callback_count = 0
+                correlated_count = 0
+                seen_callbacks: dict[Path, bytes] = {}
+
+                def drain_pty() -> None:
+                    try:
+                        while os.read(master_fd, 8192):
+                            pass
+                    except (BlockingIOError, OSError):
+                        pass
+
+                os.set_blocking(master_fd, False)
+                loop.add_reader(master_fd, drain_pty)
+                try:
+                    while loop.time() < deadline:
+                        for callback_path in private.glob("snapshot.json-*"):
+                            try:
+                                raw_callback = callback_path.read_bytes()
+                                if seen_callbacks.get(callback_path) == raw_callback:
+                                    continue
+                                seen_callbacks[callback_path] = raw_callback
+                                candidate = json.loads(raw_callback)
+                                callback_count += 1
+                                if self._statusline_callback_matches_observer(
+                                    candidate, proc.pid, str(private.resolve())
+                                ):
+                                    correlated_count += 1
+                                    payload = candidate
+                                    payload["observer_process_pid"] = proc.pid
+                                    if candidate.get("agent_state") == "idle":
+                                        break
+                            except (OSError, json.JSONDecodeError):
+                                continue
+                        if payload is not None and payload.get("agent_state") == "idle":
+                            break
+                        if proc.returncode is not None:
+                            break
+                        await asyncio.sleep(0.05)
+                finally:
+                    loop.remove_reader(master_fd)
+                observation = self.parse_statusline_payload(payload)
+                logger.debug(
+                    "AGY statusLine callback_count=%d correlated_count=%d cli_returncode=%s accepted=%s",
+                    callback_count,
+                    correlated_count,
+                    proc.returncode,
+                    observation.ordinary_usage_allowed is not None,
+                )
+                return observation
+            finally:
+                if proc is not None and proc.returncode is None:
+                    proc.terminate()
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        proc.kill()
+                        await proc.wait()
+                if master_fd is not None:
+                    os.close(master_fd)
+                if slave_fd is not None:
+                    os.close(slave_fd)
+                try:
+                    current = json.loads(settings_path.read_bytes())
+                    # Preserve concurrent unrelated preferences and never overwrite
+                    # a statusLine the operator changed while the TUI was running.
+                    if settings_path.read_bytes() == installed_bytes:
+                        self._atomic_replace_settings(
+                            settings_path, original_bytes, stat.S_IMODE(mode)
+                        )
+                    elif current.get("statusLine") == temporary_settings["statusLine"]:
+                        current.pop("statusLine", None)
+                        self._atomic_replace_settings(
+                            settings_path,
+                            json.dumps(current, indent=2).encode() + b"\n",
+                            stat.S_IMODE(mode),
+                        )
+                finally:
+                    os.close(lock_fd)
+
+    @staticmethod
+    def _statusline_callback_matches_observer(
+        payload: object, observer_pid: int, observer_cwd: str
+    ) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        callback_pid = payload.get("callback_pid")
+        callback_parent_pid = payload.get("callback_parent_pid")
+        if (
+            not isinstance(callback_pid, int)
+            or isinstance(callback_pid, bool)
+            or callback_pid <= 1
+            or not isinstance(callback_parent_pid, int)
+            or isinstance(callback_parent_pid, bool)
+            or callback_parent_pid <= 1
+            or observer_pid <= 1
+            or callback_pid == observer_pid
+        ):
+            return False
+        workspace = payload.get("workspace")
+        if (
+            payload.get("cwd") != observer_cwd
+            or not isinstance(workspace, dict)
+            or workspace.get("current_dir") != observer_cwd
+            or (
+                workspace.get("project_dir") is not None
+                and workspace.get("project_dir") != observer_cwd
+            )
+        ):
+            return False
+        session_id = payload.get("session_id")
+        conversation_id = payload.get("conversation_id")
+        if not isinstance(session_id, str) or not session_id.strip() or len(session_id) > 256:
+            return False
+        if conversation_id is not None and conversation_id != session_id:
+            return False
+        return True
+
+    @staticmethod
+    def _atomic_replace_settings(path: Path, content: bytes, mode: int) -> None:
+        import tempfile
+
+        fd, temporary_name = tempfile.mkstemp(prefix=".minime-statusline-", dir=path.parent)
+        try:
+            os.fchmod(fd, mode)
+            with os.fdopen(fd, "wb", closefd=True) as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_name, path)
+        except Exception:
+            try:
+                os.unlink(temporary_name)
+            except FileNotFoundError:
+                pass
+            raise
+
+    @staticmethod
+    def parse_statusline_payload(payload: object) -> CapacityObservation:
+        observed = datetime.now(UTC)
+        unknown = CapacityObservation(
+            provider="antigravity",
+            ordinary_usage_allowed=None,
+            observed_at=observed,
+            expires_at=observed,
+            source_signal=CapacitySignalSource.AGY_STATUSLINE,
+        )
+        if not isinstance(payload, dict) or payload.get("product") != "antigravity":
+            return unknown
+        raw_observed = payload.get("observed_at")
+        try:
+            observed_at = datetime.fromisoformat(raw_observed)
+            if observed_at.tzinfo is None:
+                return unknown
+            observed_at = observed_at.astimezone(UTC)
+        except (TypeError, ValueError):
+            return unknown
+        now = datetime.now(UTC)
+        if observed_at > now + timedelta(seconds=5) or now - observed_at > timedelta(seconds=60):
+            return unknown
+        model = payload.get("model")
+        model_id = model.get("id") if isinstance(model, dict) else None
+        account_fingerprint = payload.get("account_fingerprint")
+        buckets = payload.get("quota")
+        if (
+            payload.get("agent_state") != "idle"
+            or not isinstance(model_id, str)
+            or not model_id.strip()
+            or not isinstance(account_fingerprint, str)
+            or len(account_fingerprint) != 64
+            or any(char not in "0123456789abcdef" for char in account_fingerprint)
+            or not isinstance(buckets, dict)
+            or not isinstance(payload.get("session_id"), str)
+            or not payload.get("session_id", "").strip()
+            or len(payload.get("session_id", "")) > 256
+            or (
+                payload.get("conversation_id") is not None
+                and payload.get("conversation_id") != payload.get("session_id")
+            )
+        ):
+            return unknown
+        family = "gemini" if "gemini" in model_id.lower() else None
+        if family is None:
+            return unknown
+        relevant = {
+            key: value for key, value in buckets.items() if key in {"gemini-5h", "gemini-weekly"}
+        }
+        if set(relevant) != {"gemini-5h", "gemini-weekly"}:
+            return unknown
+        remaining = []
+        for bucket in relevant.values():
+            if not isinstance(bucket, dict):
+                return unknown
+            fraction = bucket.get("remaining_fraction")
+            reset_text = bucket.get("reset_time")
+            reset_seconds = bucket.get("reset_in_seconds")
+            if (
+                not isinstance(fraction, (int, float))
+                or isinstance(fraction, bool)
+                or not 0 <= fraction <= 1
+                or not isinstance(reset_text, str)
+                or not isinstance(reset_seconds, (int, float))
+                or reset_seconds < 0
+            ):
+                return unknown
+            try:
+                reset_at = datetime.fromisoformat(reset_text.replace("Z", "+00:00"))
+            except ValueError:
+                return unknown
+            if reset_at.tzinfo is None:
+                return unknown
+            delta = (reset_at.astimezone(UTC) - observed_at).total_seconds()
+            if abs(delta - float(reset_seconds)) > 60:
+                return unknown
+            remaining.append(float(fraction))
+        return CapacityObservation(
+            provider="antigravity",
+            ordinary_usage_allowed=all(value > 0 for value in remaining),
+            observed_at=observed_at,
+            expires_at=observed_at + timedelta(seconds=60),
+            source_signal=CapacitySignalSource.AGY_STATUSLINE,
+            account_id=account_fingerprint,
+            model=model_id,
+            source_session_id=payload["session_id"],
+            capacity_reset_at=min(
+                datetime.fromisoformat(b["reset_time"].replace("Z", "+00:00")).astimezone(UTC)
+                for b in relevant.values()
+            ),
+        )
+
+    @staticmethod
+    def parse_print_usage_payload(
+        payload: object,
+        observed_at: datetime | None = None,
+        account_fingerprint: str | None = None,
+    ) -> CapacityObservation:
+        observed = observed_at or datetime.now(UTC)
+        if observed.tzinfo is None:
+            observed = observed.replace(tzinfo=UTC)
+        else:
+            observed = observed.astimezone(UTC)
+        unknown = CapacityObservation(
+            provider="antigravity",
+            ordinary_usage_allowed=None,
+            observed_at=observed,
+            expires_at=observed,
+            source_signal=CapacitySignalSource.AGY_PRINT_USAGE,
+        )
+        if not isinstance(payload, dict):
+            return unknown
+        if payload.get("status") != "SUCCESS":
+            return unknown
+        if payload.get("num_turns", 0) != 0:
+            return unknown
+        usage_meta = payload.get("usage")
+        if isinstance(usage_meta, dict):
+            if usage_meta.get("total_tokens", 0) != 0 or usage_meta.get("input_tokens", 0) != 0:
+                return unknown
+        command = payload.get("command")
+        if not isinstance(command, dict) or command.get("name") != "usage":
+            return unknown
+        cmd_data = command.get("data")
+        if not isinstance(cmd_data, dict):
+            return unknown
+        groups = cmd_data.get("groups")
+        if not isinstance(groups, list):
+            return unknown
+
+        if (
+            not isinstance(account_fingerprint, str)
+            or len(account_fingerprint) != 64
+            or any(c not in "0123456789abcdef" for c in account_fingerprint)
+        ):
+            return unknown
+
+        gemini_group = next(
+            (
+                g
+                for g in groups
+                if isinstance(g, dict) and "gemini" in str(g.get("name", "")).lower()
+            ),
+            None,
+        )
+        if gemini_group is None:
+            return unknown
+
+        buckets = gemini_group.get("buckets")
+        if not isinstance(buckets, list):
+            return unknown
+
+        bucket_map = {
+            b.get("id"): b for b in buckets if isinstance(b, dict) and isinstance(b.get("id"), str)
+        }
+        if not {"gemini-5h", "gemini-weekly"}.issubset(bucket_map.keys()):
+            return unknown
+
+        remaining_fractions = []
+        reset_datetimes = []
+        for bucket_id in ("gemini-5h", "gemini-weekly"):
+            b = bucket_map[bucket_id]
+            fraction = b.get("remaining_fraction")
+            if (
+                not isinstance(fraction, (int, float))
+                or isinstance(fraction, bool)
+                or not 0 <= fraction <= 1
+            ):
+                return unknown
+            reset_text = b.get("reset_time")
+            if not isinstance(reset_text, str):
+                return unknown
+            try:
+                reset_at = datetime.fromisoformat(reset_text.replace("Z", "+00:00"))
+            except ValueError:
+                return unknown
+            if reset_at.tzinfo is None:
+                return unknown
+            reset_datetimes.append(reset_at.astimezone(UTC))
+            remaining_fractions.append(float(fraction))
+
+        model_name = gemini_group.get("name") or "Gemini Models"
+        allowed = all(f > 0 for f in remaining_fractions)
+        return CapacityObservation(
+            provider="antigravity",
+            ordinary_usage_allowed=allowed,
+            observed_at=observed,
+            expires_at=observed + timedelta(seconds=60),
+            source_signal=CapacitySignalSource.AGY_PRINT_USAGE,
+            account_id=account_fingerprint,
+            model=model_name,
+            capacity_reset_at=min(reset_datetimes),
+        )
 
 
 class OpenRouterProviderAdapter(ProviderAdapterInterface):
@@ -375,7 +1104,7 @@ class DeepSeekProviderAdapter(ProviderAdapterInterface):
 
 
 class FakeProviderAdapter(ProviderAdapterInterface):
-    """Test / Future provider adapter (e.g. proving Cursor integration without scheduler rewrite)."""
+    """Test-only provider double. Never selected by the operational adapter registry."""
 
     def __init__(
         self,
@@ -412,6 +1141,8 @@ _ADAPTER_REGISTRY: dict[str, ProviderAdapterInterface] = {}
 
 def register_provider_adapter(adapter: ProviderAdapterInterface) -> None:
     """Register or override a provider adapter."""
+    if isinstance(adapter, FakeProviderAdapter) and "pytest" not in sys.modules:
+        raise RuntimeError("FakeProviderAdapter is restricted to test processes.")
     _ADAPTER_REGISTRY[adapter.provider_name] = adapter
 
 
@@ -420,7 +1151,10 @@ def get_provider_adapter(
 ) -> ProviderAdapterInterface:
     """Get the registered provider adapter or construct a default instance."""
     if provider in _ADAPTER_REGISTRY:
-        return _ADAPTER_REGISTRY[provider]
+        adapter = _ADAPTER_REGISTRY[provider]
+        if isinstance(adapter, FakeProviderAdapter) and "pytest" not in sys.modules:
+            raise RuntimeError("FakeProviderAdapter is restricted to test processes.")
+        return adapter
 
     app_config = config or load_config()
     p_config = app_config.providers.get(provider)
@@ -444,9 +1178,9 @@ def get_provider_adapter(
         key_env = p_config.api_key_env if p_config and p_config.api_key_env else "DEEPSEEK_API_KEY"
         adapter = DeepSeekProviderAdapter(base_url=url, api_key_env=key_env)
     else:
-        # Generic fallback / custom provider
-        cmd = p_config.command if p_config and p_config.command else provider
-        adapter = FakeProviderAdapter(name=provider)
+        raise ValueError(
+            f"No operational provider adapter registered for unknown provider '{provider}'."
+        )
 
     _ADAPTER_REGISTRY[provider] = adapter
     return adapter

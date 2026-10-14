@@ -333,7 +333,7 @@ class SchedulerService:
 
     def _safe_lookup_provider_health(self, provider: str) -> ProviderHealth | None:
         try:
-            return self.provider_health_service.get_existing_health(provider)
+            return self.provider_health_service.get_admission_health(provider)
         except Exception as exc:
             logger.warning("Provider health lookup failed for '%s': %s", provider, exc)
             return None
@@ -1318,6 +1318,7 @@ class SchedulerService:
         require_published_ref: bool = False,
     ) -> tuple[AdmissionDecision, SchedulerDecisionRecord, OrchestrationRun | None]:
         """Atomically evaluate admission and start native candidate execution if eligible under advisory lock."""
+        self._admission_health_truth = None
         from minime.db.concurrency import (
             derive_global_admission_lock_key,
             derive_project_admission_lock_key,
@@ -1364,6 +1365,46 @@ class SchedulerService:
             else self.prepare_admission_evidence(project_id, change_name)
         )
 
+        # Admission is synchronous and obtains a just-in-time read-only capacity
+        # observation for both primary roles before entering the advisory-lock /
+        # transaction phase. External reads must not run while holding admission
+        # locks; the bounded persisted observation is re-evaluated by the normal
+        # admission predicate once the locks are held.
+        if evidence.binding_valid and evidence.project_exists:
+            project = self.uow.projects.get_by_id(project_id)
+            if project:
+                providers = {
+                    getattr(project, "implementer", None) or "codex",
+                    getattr(project, "reviewer", None) or "antigravity",
+                }
+                import asyncio
+
+                try:
+                    asyncio.get_running_loop()
+                except RuntimeError:
+
+                    async def _refresh_capacity() -> None:
+                        import asyncio
+
+                        await asyncio.gather(
+                            *(
+                                self.provider_health_service.refresh_capacity_from_read_only_source(
+                                    provider
+                                )
+                                for provider in sorted(providers)
+                            )
+                        )
+
+                    asyncio.run(_refresh_capacity())
+                else:
+                    # A sync admission invoked from an active loop cannot safely
+                    # block on provider I/O. The fresh evidence lookup below fails closed.
+                    logger.info("Read-only capacity refresh skipped in active event loop")
+                self._admission_health_truth = {
+                    provider: self.provider_health_service.get_admission_health(provider)
+                    for provider in PRIMARY_PROVIDERS
+                }
+
         # PHASE B: Serialized DB authority (under advisory locks, single atomic DB transaction with retry)
         from minime.db.retry import TransactionRetryWrapper
 
@@ -1375,6 +1416,14 @@ class SchedulerService:
 
             self.uow.acquire_advisory_lock(global_key, lock_timeout="2s")
             self.uow.acquire_advisory_lock(project_key, lock_timeout="2s")
+
+            # Re-read only the persisted, bounded evidence under the existing
+            # admission authority. If the external sample expired while locks
+            # were being acquired, the normal predicate sees UNKNOWN and waits.
+            self._admission_health_truth = {
+                provider: self.provider_health_service.get_admission_health(provider)
+                for provider in PRIMARY_PROVIDERS
+            }
 
             eval_result = (
                 self.evaluate_admission(
@@ -1666,6 +1715,7 @@ class SchedulerService:
                 run = self.orchestration_service.drive_coordinator(
                     run.run_id, project_root=self.project_root, claim_context=claim_ctx
                 )
+        self._admission_health_truth = None
         return decision, decision_record, run
 
     def reconcile_waiting_runs(

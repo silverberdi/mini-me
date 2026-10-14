@@ -262,7 +262,9 @@ async def test_implementer_quota_exhaustion_transitions_to_waiting_capacity(
         worktree_manager=FakeWorktreeManager(tmp_path),
     )
 
-    job = await pipeline.run_job("mini-me", change_name, claim_context=_make_test_claim_context(in_memory_uow))
+    job = await pipeline.run_job(
+        "mini-me", change_name, claim_context=_make_test_claim_context(in_memory_uow)
+    )
     assert job.status == JobStatus.WAITING_CAPACITY
     assert job.waiting_provider == "codex"
     assert job.expected_reset_at is not None
@@ -325,7 +327,9 @@ async def test_reviewer_rate_limit_transitions_to_waiting_capacity(in_memory_uow
         worktree_manager=FakeWorktreeManager(tmp_path),
     )
 
-    job = await pipeline.run_job("mini-me", change_name, claim_context=_make_test_claim_context(in_memory_uow))
+    job = await pipeline.run_job(
+        "mini-me", change_name, claim_context=_make_test_claim_context(in_memory_uow)
+    )
     assert job.status == JobStatus.WAITING_CAPACITY
     assert job.waiting_provider == "antigravity"
 
@@ -359,7 +363,9 @@ async def test_pairing_invariants_prevent_self_review_and_reviewer_replacement(
         worktree_manager=FakeWorktreeManager(tmp_path),
     )
 
-    job = await pipeline.run_job("mini-me", change_name, claim_context=_make_test_claim_context(in_memory_uow))
+    job = await pipeline.run_job(
+        "mini-me", change_name, claim_context=_make_test_claim_context(in_memory_uow)
+    )
     assert job.status == JobStatus.FAILED
 
     events = in_memory_uow.events.list_events()
@@ -367,7 +373,9 @@ async def test_pairing_invariants_prevent_self_review_and_reviewer_replacement(
     assert len(viol_events) == 1
 
 
-def test_scheduler_reconciles_and_resumes_waiting_capacity(in_memory_uow, tmp_path):
+def test_scheduler_reconciles_and_resumes_waiting_capacity(
+    in_memory_uow, tmp_path, test_capacity_strategy
+):
     """Verify that SchedulerService.tick / reconcile_waiting_runs auto-resumes WAITING_CAPACITY runs when provider is available."""
     from minime.domain.enums import (
         OrchestrationStopOutcome,
@@ -415,6 +423,8 @@ def test_scheduler_reconciles_and_resumes_waiting_capacity(in_memory_uow, tmp_pa
     from conftest import ReadinessGitHubStub, setup_managed_repository_fixture
     from minime.services.deepseek_auditor_runner import MockAuditorRunner
 
+    test_capacity_strategy()
+
     setup_managed_repository_fixture(
         uow=in_memory_uow,
         project_id=project_id,
@@ -456,6 +466,7 @@ def test_scheduler_reconciles_and_resumes_waiting_capacity(in_memory_uow, tmp_pa
         )
     )
     from minime.services.recovery_convergence_service import RecoveryConvergenceService
+
     conv_svc = RecoveryConvergenceService(in_memory_uow)
     ctx = conv_svc.acquire_claim(f"run:{admission.run.run_id}")
     run = orch_svc.drive_coordinator(admission.run.run_id, claim_context=ctx)

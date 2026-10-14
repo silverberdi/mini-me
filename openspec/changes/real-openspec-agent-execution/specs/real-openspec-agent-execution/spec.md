@@ -33,6 +33,56 @@ Before any paid or subscription-provider inference, mini me SHALL verify the sel
 - **THEN** it reports the specific blocking condition
 - **AND** no provider inference, GitHub mutation, or unauthorized filesystem write occurs.
 
+#### Scenario: Unknown or stale capacity is not execution permission
+- **GIVEN** provider capacity is absent, unknown, contradictory, or older than its bounded freshness lifetime
+- **WHEN** scheduler admission evaluates the required implementer/reviewer pair
+- **THEN** the affected provider remains unavailable for dispatch and the work is preserved in a truthful wait state
+- **AND** authentication status, model catalogs, reset estimates, or human execution authorization do not substitute for current capacity evidence.
+
+#### Scenario: Physical schema readiness follows the canonical Alembic graph
+- **GIVEN** the repository has one canonical Alembic head and the isolated PostgreSQL schema is at that head
+- **WHEN** readiness performs its physical schema preflight
+- **THEN** it accepts only that migration head and verifies all required model tables and columns
+- **AND** a database at an ancestor revision remains NOT_READY without stamping, downgrading, or repairing schema state.
+
+#### Scenario: Codex capacity is read without inference
+- **GIVEN** the installed Codex App Server exposes `account/rateLimits/read`
+- **WHEN** mini me reads provider capacity
+- **THEN** it accepts only an explicit boolean `ordinaryUsageAllowed` for the Codex limit bucket and a returned active account identity
+- **AND** null, missing, failed, or expired observations remain UNKNOWN without invoking a Codex turn.
+
+#### Scenario: Antigravity capacity is read via headless print-mode /usage without inference
+- **GIVEN** the installed Antigravity CLI exposes the read-only `/usage` command in headless print mode (`-p`)
+- **WHEN** mini me obtains a read-only capacity observation
+- **THEN** it accepts only a non-inference response (`num_turns: 0` and zero token consumption), bound to the authenticated account fingerprint (derived from private silent auth logs), the active Gemini model group, and all required Gemini quota buckets whose remaining fractions and reset fields are valid and consistent
+- **AND** it stores only the account fingerprint and normalized evidence, never the account email or credentials
+- **AND** it operates without mutating `settings.json`, without launching an interactive TUI, and without interfering with any concurrent or pre-existing AGY CLI sessions.
+
+#### Scenario: Antigravity /usage evidence is unavailable or ambiguous
+- **GIVEN** `/usage` data is absent, stale, malformed, indicates turn or token execution, is for another account/model group, has missing or inconsistent quota buckets, has non-zero exit code, or times out
+- **WHEN** mini me evaluates Antigravity capacity
+- **THEN** capacity remains UNKNOWN and the provider is not dispatched
+- **AND** the adapter does not infer capacity from authentication or model listing alone, or claim the quota is exhausted.
+
+#### Scenario: Unrelated AGY session does not prevent controlled observation
+- **GIVEN** one or more AGY CLI processes already exist (such as long-lived interactive sessions), and mini me executes its bounded headless `/usage` observer in a private isolated temporary directory
+- **WHEN** mini me evaluates the observation
+- **THEN** it accepts the fresh structured quota observation without signaling, terminating, or modifying existing processes, their terminals, or shared settings.
+
+#### Scenario: Admission refreshes both primary capacity strategies just in time
+- **GIVEN** a READY change requires an implementer/reviewer pair and either persisted capacity observation is stale or near expiry
+- **WHEN** the canonical admission command prepares its decision
+- **THEN** the registered provider strategies are queried for both required primary roles before admission locks are acquired
+- **AND** only normalized, unexpired observations are re-read under the admission locks
+- **AND** unknown, exhausted, failed, or expired observations produce WAIT without creating a Run or Job.
+
+#### Scenario: Dispatch and review require stage-local fresh capacity
+- **GIVEN** an APPLY or REVIEW stage is about to invoke its selected provider
+- **WHEN** the pipeline performs its final pre-dispatch check
+- **THEN** it obtains a fresh read-only observation for that stage's provider before creating an implementation attempt or transitioning to REVIEW_RUNNING
+- **AND** unavailable evidence preserves the same candidate/worktree and waits without invoking the provider
+- **AND** expiration after a stage has already passed this gate does not retroactively revoke that stage; the next provider stage obtains its own fresh observation.
+
 ### Requirement: R01-S03 Apply uses the installed native agent-side OpenSpec workflow
 The selected coding agent SHALL execute the installed, version-compatible agent-side OpenSpec `apply` workflow for the exact change. The workflow invocation SHALL use provider-supported syntax discovered from the installed capabilities; mini me SHALL NOT substitute a free-form programming prompt, invoke a guessed OpenSpec shell command, or treat `openspec validate` as agent workflow execution.
 
@@ -49,13 +99,37 @@ The selected coding agent SHALL execute the installed, version-compatible agent-
 - **AND** does not claim successful OpenSpec application or create a successful candidate record.
 
 ### Requirement: R01-S04 Candidate and source changes remain bound to the owned worktree
-The implementation SHALL remain within the exact authorized worktree and be bound to the original base SHA, current candidate SHA, generation, repository identity, and authoring attempt. Mini me SHALL observe real source changes and preserve uncommitted or committed candidate evidence across recoverable interruption; it SHALL NOT fabricate patches, commits, candidate files, task completion, or authorship.
+The implementation SHALL remain within the exact authorized worktree and be bound to the original base SHA, current candidate SHA, generation, repository identity, and authoring attempt. Mini me SHALL observe real source changes and preserve uncommitted or committed candidate evidence across recoverable interruption; it SHALL NOT fabricate patches, commits, candidate files, task completion, or authorship. The candidate commit, candidate manifest, and published PR SHALL verifiably exclude generated compiler and runtime artifacts (`__pycache__`, `*.pyc`, `*.pyo`, `.pytest_cache`); check executions SHALL NOT contaminate the candidate worktree with uncommitted or tracked bytecode.
 
 #### Scenario: Real candidate is observed
 - **GIVEN** a native APPLY run that changes fixture source files
 - **WHEN** the stage returns
 - **THEN** mini me records the actual diff/manifest and observed candidate SHA against the bound base
 - **AND** verifies all changed paths are inside the assigned worktree and within the approved change scope.
+
+#### Scenario: Generated compiler and runtime artifacts are strictly excluded
+- **GIVEN** a native APPLY execution completes and prepares a candidate manifest or candidate commit
+- **WHEN** mini me inspects candidate changes and computes the candidate manifest
+- **THEN** it strictly excludes bytecode and runtime caches (`__pycache__`, `*.pyc`, `*.pyo`, `.pytest_cache`) from the manifest and candidate ref
+- **AND** published branches and Draft PRs contain only approved source modifications without compiled Python bytecode.
+
+#### Scenario: Candidate with tracked or staged generated artifacts is rejected
+- **GIVEN** an implementer attempt or worktree mutation stages or commits `.pyc` or `__pycache__` artifacts into git tracking
+- **WHEN** candidate manifest verification or candidate freeze executes
+- **THEN** mini me rejects the candidate with a structured validation error
+- **AND** fails closed before checks, review, branch push, or PR creation.
+
+#### Scenario: Check execution regression prevents worktree contamination
+- **GIVEN** configured deterministic checks or test runners execute against the candidate worktree
+- **WHEN** the check runner runs test suites (such as pytest)
+- **THEN** bytecode generation is isolated (via `PYTHONPYCACHEPREFIX` or equivalent execution isolation) so no uncommitted or untracked cache diffs remain in the worktree
+- **AND** post-check git status confirms the working tree remains clean and byte-for-byte identical to the candidate manifest.
+
+#### Scenario: Non-destructive remediation of transient generated artifacts
+- **GIVEN** transient untracked bytecode or cache artifacts pollute a candidate worktree after diagnostic or check execution
+- **WHEN** candidate remediation or re-verification is performed for that worktree
+- **THEN** mini me safely purges the transient generated artifacts without modifying the frozen candidate commit, altering the base SHA, or invalidating durable attempt and event lineage
+- **AND** the verified clean worktree is matched against the durable candidate manifest.
 
 #### Scenario: Interrupted apply preserves candidate evidence
 - **GIVEN** an APPLY process is interrupted after a material diff but before stage acknowledgment
@@ -149,7 +223,7 @@ R01 acceptance SHALL include an externally observable, bounded end-to-end run us
 - **GIVEN** an authorized disposable repository with a bound READY change covering success, rejection, and regression behavior, configured checks, explicit budget, and compatible distinct implementer/reviewer capacity
 - **WHEN** the operator authorizes one bounded delivery run through the real API/CLI path
 - **THEN** the real agent uses native OpenSpec apply and creates a functional source change in the owned worktree
-- **AND** checks pass, the distinct reviewer evaluates the frozen candidate, and a real Draft PR is observable at the exact candidate SHA.
+- **AND** checks pass, the distinct reviewer evaluates the frozen candidate, and a real Draft PR is observable at the exact candidate SHA with zero committed bytecode or runtime cache artifacts.
 
 ### Requirement: R01-E02 Provider workflow identity is proven
 R01 SHALL demonstrate actual native workflow loading for the compatible Codex path used to implement the fixture; provider-specific workflow syntax and versions SHALL be observed, not assumed interchangeable. Antigravity execution is not a prerequisite for proving the Codex implementation path.
