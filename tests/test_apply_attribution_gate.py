@@ -5,7 +5,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from conftest import ReadinessGitHubStub, attach_local_bare_origin, create_isolated_openspec_change
+from conftest import ReadinessGitHubStub, create_isolated_openspec_change
 from minime.adapters.openspec import OpenSpecAdapter
 from minime.domain.models import Change, Project, ProjectBinding
 from minime.services.lifecycle_gates import ApplyAttributionGate, GateStatus
@@ -38,30 +38,6 @@ def _project(change_name: str, **overrides) -> Project:
     return Project(**kwargs)
 
 
-def _publish_local_ref(root: Path, change_name: str) -> str:
-    """Commit the on-disk change (if present) and publish HEAD as a local intake ref."""
-    change_dir = Path(root) / "openspec" / "changes" / change_name
-    if change_dir.exists():
-        subprocess.run(["git", "add", str(change_dir)], cwd=root, check=True, capture_output=True)
-        # "nothing to commit" (exit 1) is tolerated: some tests commit separately.
-        subprocess.run(
-            ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "publish intake"],
-            cwd=root,
-            check=False,
-            capture_output=True,
-        )
-    sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True, check=True
-    ).stdout.strip()
-    subprocess.run(
-        ["git", "push", "origin", f"{sha}:refs/minime/intake/{change_name}"],
-        cwd=root,
-        check=True,
-        capture_output=True,
-    )
-    return sha
-
-
 def _register(uow, project: Project, change_name: str, root: Path | None = None) -> None:
     uow.projects.save(project)
     uow.bindings.save(
@@ -73,42 +49,19 @@ def _register(uow, project: Project, change_name: str, root: Path | None = None)
         )
     )
     uow.changes.save(Change(project_id=project.project_id, name=change_name))
-    from minime.domain.enums import IntakeWorkspaceCreationState, IntakeWorkspacePublicationState
-    from minime.domain.models import IntakeWorkspaceOwnership
-
-    canonical_identity = "github.com/silverberdi/mini-me"
-    published_sha = "sha123"
     if root:
-        from conftest import setup_managed_repository_fixture
+        existing = uow.project_managed_repository_bindings.get_by_project_id(project.project_id)
+        if existing is None:
+            from conftest import setup_managed_repository_fixture
 
-        setup_managed_repository_fixture(
-            uow=uow,
-            project_id=project.project_id,
-            repo_root=root,
-            worktree_parent_dir=root / ".minime" / "worktrees",
-            canonical_repository_identity=canonical_identity,
-            remote_name="origin",
-        )
-        canonical_identity = attach_local_bare_origin(
-            root, uow=uow, project_id=project.project_id
-        )
-        published_sha = _publish_local_ref(root, change_name)
-
-    ow = IntakeWorkspaceOwnership(
-        workspace_id=f"ws-{change_name}",
-        project_id=project.project_id,
-        item_key=change_name,
-        saga_id=f"saga-{change_name}",
-        change_name=change_name,
-        canonical_workspace_path=str(root) if root else f"/tmp/{change_name}",
-        canonical_repository_identity=canonical_identity,
-        base_sha="base123",
-        creation_state=IntakeWorkspaceCreationState.ACTIVE,
-        publication_state=IntakeWorkspacePublicationState.PUBLISHED,
-        published_ref=f"refs/minime/intake/{change_name}",
-        published_sha=published_sha,
-    )
-    uow.intake_workspace_ownerships.save(ow)
+            setup_managed_repository_fixture(
+                uow=uow,
+                project_id=project.project_id,
+                repo_root=root,
+                worktree_parent_dir=root / ".minime" / "worktrees",
+                canonical_repository_identity="github.com/silverberdi/mini-me",
+                remote_name="origin",
+            )
 
 
 def _service(uow, root: Path) -> OrchestrationService:
@@ -255,6 +208,15 @@ def test_valid_admission_with_clean_worktree_allowed(in_memory_uow, tmp_path: Pa
 def test_admission_blocks_predating_implementation_commit(in_memory_uow, tmp_path: Path):
     """Phase B gate blocks admission when implementation predates the run boundary."""
     _init_git_repo(tmp_path)
+    from conftest import setup_managed_repository_fixture
+
+    setup_managed_repository_fixture(
+        uow=in_memory_uow,
+        project_id="mini-me",
+        repo_root=tmp_path,
+        worktree_parent_dir=tmp_path / ".minime" / "worktrees",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+    )
     create_isolated_openspec_change(tmp_path, "drift-admit")
     (tmp_path / "src").mkdir(parents=True, exist_ok=True)
     (tmp_path / "src" / "impl.py").write_text("x = 1\n", encoding="utf-8")
@@ -270,7 +232,6 @@ def test_admission_blocks_predating_implementation_commit(in_memory_uow, tmp_pat
 
     admission = _service(in_memory_uow, tmp_path).admit_change("mini-me", "drift-admit", tmp_path)
     assert admission.admitted is False
-
 
     assert admission.refusal_details["code"] == "LIFECYCLE_DRIFT"
     assert in_memory_uow.orchestration_runs.list_runs() == []

@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from minime.config import CliInvocationProfile
 from minime.domain.enums import (
     ChangeStatus,
     EventType,
@@ -19,6 +20,7 @@ from minime.domain.enums import (
     OrchestrationStage,
     OrchestrationStopOutcome,
     ProgressClassification,
+    ProviderHealthStatus,
     ReadinessState,
 )
 from minime.domain.models import (
@@ -39,7 +41,11 @@ from minime.services.execution_pipeline import (
     format_candidate_workspace_context,
 )
 from minime.services.handoff_manager import HandoffManager
-from minime.services.implementer_runner import ImplementerResult, MockImplementerRunner
+from minime.services.implementer_runner import (
+    CliImplementerRunner,
+    ImplementerResult,
+    MockImplementerRunner,
+)
 from minime.services.openspec_tasks import OpenSpecTaskTracker
 from minime.services.reviewer_runner import MockReviewerRunner
 from minime.services.worktree_manager import WorktreeInfo
@@ -76,6 +82,94 @@ def test_workspace_context_is_absolute_and_openspec_tracker_stays_task_focused(t
     tracker = OpenSpecTaskTracker(tmp_path)
     task_context = tracker.format_prompt_context("openspec", "missing-change")
     assert "CANDIDATE WORKSPACE" not in task_context
+
+
+@pytest.mark.asyncio
+async def test_missing_native_apply_skill_blocks_before_cli_invocation(
+    in_memory_uow, tmp_path, monkeypatch
+):
+    """A production-shaped CLI selection cannot run when the native skill is absent."""
+    change_name = "native-skill-missing"
+    seed_ready_change(
+        in_memory_uow,
+        tmp_path,
+        "# Tasks\n\n## 1. Work\n- [ ] 1.1 Implement the authorized task\n",
+        checks=[],
+        change_name=change_name,
+    )
+    invoked: list[str] = []
+
+    class InvocationMustNotRun(CliImplementerRunner):
+        async def run(self, worktree_path: Path, prompt_context: str, timeout_seconds: int):
+            del worktree_path, prompt_context, timeout_seconds
+            invoked.append("runner")
+            raise AssertionError("CLI must not be invoked without the installed native skill")
+
+    profile = CliInvocationProfile(
+        provider="codex",
+        role="implementer",
+        executable="codex",
+        args=("exec", "-", "--approve-for-me", "--ephemeral"),
+        prompt_transport="stdin",
+    )
+    monkeypatch.setattr(
+        "minime.services.execution_pipeline.runner_for_implementer",
+        lambda executor: InvocationMustNotRun(profile),
+    )
+    pipeline = ExecutionPipelineService(
+        in_memory_uow,
+        project_root=tmp_path,
+        worktree_manager=FakeWorktreeManager(tmp_path),
+    )
+    job = pipeline.queue_job("mini-me", change_name)
+
+    result = await pipeline.execute_queued_job(
+        job.job_id, claim_context=_dummy_claim_context(in_memory_uow)
+    )
+
+    assert result.status == JobStatus.NEEDS_HUMAN
+    assert "native openspec apply preflight blocked" in (result.error_message or "").lower()
+    assert invoked == []
+    assert in_memory_uow.job_attempts.list_by_job(job.job_id) == []
+
+
+@pytest.mark.asyncio
+async def test_auth_required_preflight_waits_without_worktree_or_runner_invocation(
+    in_memory_uow, tmp_path, monkeypatch
+):
+    change_name = "auth-required-preflight"
+    seed_ready_change(
+        in_memory_uow,
+        tmp_path,
+        "# Tasks\n\n## 1. Work\n- [ ] 1.1 Implement the authorized task\n",
+        checks=[],
+        change_name=change_name,
+    )
+    invoked: list[str] = []
+    pipeline = ExecutionPipelineService(
+        in_memory_uow,
+        project_root=tmp_path,
+        worktree_manager=FakeWorktreeManager(tmp_path),
+    )
+    pipeline.health_service.get_health = lambda provider: type(
+        "Health",
+        (),
+        {"status": ProviderHealthStatus.AUTH_REQUIRED},
+    )()
+    monkeypatch.setattr(
+        "minime.services.execution_pipeline.runner_for_implementer",
+        lambda executor: invoked.append(executor),
+    )
+    job = pipeline.queue_job("mini-me", change_name)
+
+    result = await pipeline.execute_queued_job(
+        job.job_id, claim_context=_dummy_claim_context(in_memory_uow)
+    )
+
+    assert result.status == JobStatus.WAITING_CAPACITY
+    assert invoked == []
+    assert pipeline.worktree_manager.created_paths == {}
+    assert in_memory_uow.job_attempts.list_by_job(job.job_id) == []
 
 
 def test_handoff_prompt_normalizes_to_authoritative_workspace(tmp_path):
@@ -481,7 +575,9 @@ async def test_execution_pipeline_success_records_evidence_and_cleans_worktree(
         worktree_manager=worktrees,
     )
 
-    job = await service.run_job("mini-me", "synthetic-pipeline-change", claim_context=_dummy_claim_context(in_memory_uow))
+    job = await service.run_job(
+        "mini-me", "synthetic-pipeline-change", claim_context=_dummy_claim_context(in_memory_uow)
+    )
 
     assert job.status == JobStatus.READY_TO_MERGE
     assert job.base_sha is not None
@@ -534,7 +630,9 @@ async def test_recovery_evidence_is_committed_before_worktree_removal(in_memory_
         worktree_manager=worktrees,
     )
 
-    job = await service.run_job("mini-me", "synthetic-pipeline-change", claim_context=_dummy_claim_context(in_memory_uow))
+    job = await service.run_job(
+        "mini-me", "synthetic-pipeline-change", claim_context=_dummy_claim_context(in_memory_uow)
+    )
 
     assert job.status == JobStatus.READY_TO_MERGE
     assert ordering == ["snapshot", "evidence", "remove"]
@@ -580,7 +678,9 @@ async def test_recovery_evidence_failure_blocks_without_removal(in_memory_uow, t
         worktree_manager=worktrees,
     )
 
-    job = await service.run_job("mini-me", "synthetic-pipeline-change", claim_context=_dummy_claim_context(in_memory_uow))
+    job = await service.run_job(
+        "mini-me", "synthetic-pipeline-change", claim_context=_dummy_claim_context(in_memory_uow)
+    )
 
     assert job.status == JobStatus.RECOVERY_BLOCKED
     assert ordering == ["snapshot"]
@@ -609,7 +709,9 @@ async def test_execution_pipeline_check_failure_halts_and_records_result(in_memo
         worktree_manager=FakeWorktreeManager(tmp_path),
     )
 
-    job = await service.run_job("mini-me", "synthetic-pipeline-change", claim_context=_dummy_claim_context(in_memory_uow))
+    job = await service.run_job(
+        "mini-me", "synthetic-pipeline-change", claim_context=_dummy_claim_context(in_memory_uow)
+    )
 
     assert job.status == JobStatus.CHECKS_FAILED
     checks = in_memory_uow.check_results.list_by_job(job.job_id)
@@ -627,7 +729,9 @@ async def test_execution_pipeline_timeout_fails_and_records_event(in_memory_uow,
         worktree_manager=FakeWorktreeManager(tmp_path),
     )
 
-    job = await service.run_job("mini-me", "synthetic-pipeline-change", claim_context=_dummy_claim_context(in_memory_uow))
+    job = await service.run_job(
+        "mini-me", "synthetic-pipeline-change", claim_context=_dummy_claim_context(in_memory_uow)
+    )
 
     assert job.status in (JobStatus.NEEDS_HUMAN, JobStatus.FAILED)
     events = in_memory_uow.events.list_events(
@@ -646,7 +750,9 @@ async def test_execution_pipeline_incomplete_tasks_block_checks(in_memory_uow, t
         worktree_manager=FakeWorktreeManager(tmp_path),
     )
 
-    job = await service.run_job("mini-me", "synthetic-pipeline-change", claim_context=_dummy_claim_context(in_memory_uow))
+    job = await service.run_job(
+        "mini-me", "synthetic-pipeline-change", claim_context=_dummy_claim_context(in_memory_uow)
+    )
 
     assert job.status in (JobStatus.NEEDS_HUMAN, JobStatus.FAILED)
     assert in_memory_uow.check_results.list_by_job(job.job_id) == []

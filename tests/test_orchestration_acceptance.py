@@ -227,6 +227,7 @@ def setup_acceptance_env(tmp_path: Path, in_memory_uow):
         openspec_path="openspec",
         implementer="codex",
         reviewer="antigravity",
+        independent_audit_required=True,
         status=ProjectStatus.ACTIVE,
         checks=[{"name": "pytest", "command": "pytest"}],
     )

@@ -12,6 +12,7 @@ Verifies:
 
 from __future__ import annotations
 
+import subprocess
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -281,6 +282,127 @@ def test_auth_missing_yields_needs_human(
 
     assert res.decision == AdmissionDecisionKind.NEEDS_HUMAN
     assert res.block_condition == AdmissionBlockCondition.AUTH_REQUIRED
+
+
+def test_configured_provider_pair_must_be_explicitly_permitted_before_admission(
+    tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork
+):
+    project, scheduler = setup_test_environment(
+        tmp_path, in_memory_uow, external_providers_allowed=["codex"]
+    )
+
+    result = scheduler.evaluate_admission(project.project_id, "016-autonomous-queue-work-selection")
+
+    assert result.decision == AdmissionDecisionKind.NEEDS_HUMAN
+    assert result.refusal_details["code"] == "PROVIDER_NOT_AUTHORIZED"
+    assert result.refusal_details["providers"] == ["antigravity"]
+    assert in_memory_uow.orchestration_runs.list_runs(is_active=True) == []
+    assert in_memory_uow.jobs.list_by_project(project.project_id) == []
+
+
+def test_managed_workspace_preflight_blocks_before_run_or_job_creation(
+    tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork
+):
+    project, scheduler = setup_test_environment(tmp_path, in_memory_uow)
+    scheduler.project_root = (tmp_path / "different-repository").resolve()
+
+    evidence = scheduler.prepare_admission_evidence(
+        project.project_id, "016-autonomous-queue-work-selection"
+    )
+    result = scheduler.evaluate_admission(
+        project.project_id,
+        "016-autonomous-queue-work-selection",
+        evidence=evidence,
+    )
+
+    assert evidence.workspace_preflight_error == (
+        "Scheduler project root does not match the durable managed repository root."
+    )
+    assert result.decision == AdmissionDecisionKind.NEEDS_HUMAN
+    assert result.block_condition == AdmissionBlockCondition.CONFIGURATION_INVALID
+    assert in_memory_uow.orchestration_runs.list_runs(is_active=True) == []
+    assert in_memory_uow.jobs.list_by_project(project.project_id) == []
+
+
+def test_missing_managed_workspace_authority_blocks_before_admission(
+    tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork
+):
+    project, scheduler = setup_test_environment(tmp_path, in_memory_uow)
+    binding = in_memory_uow.project_managed_repository_bindings.get_by_project_id(
+        project.project_id
+    )
+    in_memory_uow.project_managed_repository_bindings.save(
+        binding.model_copy(update={"is_valid": False, "mismatch_reasons": ["test invalidation"]})
+    )
+
+    error, _ = scheduler._evaluate_workspace_preflight(project.project_id)
+
+    assert error == "Managed repository binding is missing, invalid, or unverified."
+    assert in_memory_uow.orchestration_runs.list_runs(is_active=True) == []
+    assert in_memory_uow.jobs.list_by_project(project.project_id) == []
+
+
+def test_managed_workspace_preflight_accepts_exact_binding_and_denies_stale_binding(
+    tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork
+):
+    project, scheduler = setup_test_environment(tmp_path, in_memory_uow)
+    evidence = scheduler.prepare_admission_evidence(
+        project.project_id, "016-autonomous-queue-work-selection"
+    )
+    assert evidence.workspace_preflight_error is None
+    assert evidence.workspace_binding_id
+
+    binding = in_memory_uow.project_managed_repository_bindings.get_by_project_id(
+        project.project_id
+    )
+    in_memory_uow.project_managed_repository_bindings.save(
+        binding.model_copy(update={"canonical_repository_identity": "github.com/other/repo"})
+    )
+    result = scheduler.evaluate_admission(
+        project.project_id,
+        "016-autonomous-queue-work-selection",
+        evidence=evidence,
+    )
+
+    assert result.decision == AdmissionDecisionKind.NEEDS_HUMAN
+    assert result.refusal_details["code"] == "STALE_WORKSPACE_PREFLIGHT"
+    assert in_memory_uow.orchestration_runs.list_runs(is_active=True) == []
+    assert in_memory_uow.jobs.list_by_project(project.project_id) == []
+
+
+def test_managed_workspace_preflight_denies_wrong_remote_before_admission(
+    tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork
+):
+    project, scheduler = setup_test_environment(tmp_path, in_memory_uow)
+    subprocess.run(
+        ["git", "remote", "set-url", "origin", "https://github.com/other/repo.git"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+
+    error, _ = scheduler._evaluate_workspace_preflight(project.project_id)
+
+    assert error and "Git identity verification failed" in error
+    assert in_memory_uow.orchestration_runs.list_runs(is_active=True) == []
+    assert in_memory_uow.jobs.list_by_project(project.project_id) == []
+
+
+def test_managed_workspace_preflight_denies_symlinked_repository_escape(
+    tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork
+):
+    project, scheduler = setup_test_environment(tmp_path, in_memory_uow)
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside.mkdir()
+    linked_root = tmp_path.parent / f"{tmp_path.name}-linked"
+    linked_root.symlink_to(outside, target_is_directory=True)
+    scheduler.project_root = linked_root
+
+    error, _ = scheduler._evaluate_workspace_preflight(project.project_id)
+
+    assert error == "Scheduler project root does not match the durable managed repository root."
+    assert in_memory_uow.orchestration_runs.list_runs(is_active=True) == []
+    assert in_memory_uow.jobs.list_by_project(project.project_id) == []
 
 
 # 6. Invalid config → NEEDS_HUMAN
@@ -645,7 +767,9 @@ def test_drain_never_invokes_fresh_admission(
     scheduler.recovery_convergence_service = MagicMock()
     scheduler.recovery_convergence_service.request_run_continuation.return_value = mock_run
 
-    dec, record, run_res = scheduler.admit_work_item(project.project_id, "016-autonomous-queue-work-selection")
+    dec, record, run_res = scheduler.admit_work_item(
+        project.project_id, "016-autonomous-queue-work-selection"
+    )
 
     assert scheduler.orchestration_service.admit_change.call_count == 0
     assert record.operational_decision == AdmissionDecisionKind.DRAIN

@@ -63,6 +63,17 @@ The implementation SHALL remain within the exact authorized worktree and be boun
 - **THEN** mini me reconciles the existing worktree, diff, and checkpoint before any retry
 - **AND** neither discards material work nor creates a duplicate execution identity.
 
+#### Scenario: Frozen candidate remediation reuses its existing worktree
+- **GIVEN** the Run and Job reference the same frozen candidate SHA and generation, with a matching durable candidate manifest and a physically present worktree whose ownership is `CREATED`
+- **WHEN** the same Run/Job re-enters implementation for an authorized review or audit remediation
+- **THEN** mini me verifies the repository binding, ownership marker, branch, original base SHA, candidate ref/HEAD, generation, manifest, and clean observed worktree state before reusing that exact path
+- **AND** it preserves the worktree rather than routing the candidate through candidate-free recovery or removing it before remediation can resume.
+
+#### Scenario: Candidate worktree ownership is absent, deleted, or contradictory
+- **GIVEN** candidate evidence exists but the worktree is absent, ownership is not `CREATED`, or Run/Job/ownership/manifest/Git evidence disagrees
+- **WHEN** worktree reuse is requested
+- **THEN** mini me fails closed without recreating from the current base, overwriting local state, or changing candidate evidence.
+
 ### Requirement: R01-S05 Checks and independent review govern candidate progression
 Mini me SHALL run the repository's configured deterministic checks and applicable installed OpenSpec verification workflow against the exact candidate. Authoritative review SHALL be read-only, bound to the frozen repository identity, candidate SHA, base SHA, generation, manifest, and surviving authorship, and performed by an identity distinct from every substantive author whose changes survive in that candidate. An eligible complementary primary is the normal reviewer. When no primary reviewer is eligible, DeepSeek Direct MAY satisfy the authoritative review gate only under an explicitly authorized, compatible, distinct read-only reviewer contract that receives sufficient candidate-bound input and returns a structured response accepted by deterministic validation. The existing DeepSeek audit runner or audit result SHALL NOT be converted into review evidence. If neither reviewer path is available and authorized, the candidate SHALL remain preserved in a truthful waiting state; no review result SHALL authorize human merge.
 

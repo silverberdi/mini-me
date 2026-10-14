@@ -108,6 +108,7 @@ class Project(BaseModel):
         default_factory=lambda: ["codex", "antigravity", "deepseek"]
     )
     openrouter_drain_allowed: bool = False
+    independent_audit_required: bool = False
     strict_validation_required: bool = True
     verify_gate_required: bool = True
     sync_gate_required: bool = True

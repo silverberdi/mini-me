@@ -120,6 +120,7 @@ ALLOWED_STAGE_TRANSITIONS: dict[OrchestrationStage, set[OrchestrationStage]] = {
     OrchestrationStage.FREEZING_CANDIDATE: {OrchestrationStage.COMPLEMENTARY_REVIEW},
     OrchestrationStage.COMPLEMENTARY_REVIEW: {
         OrchestrationStage.INDEPENDENT_AUDIT,
+        OrchestrationStage.PREPARING_PR,
         OrchestrationStage.REVIEW_REMEDIATION,
     },
     OrchestrationStage.REVIEW_REMEDIATION: {OrchestrationStage.IMPLEMENTING},
@@ -1935,7 +1936,13 @@ class OrchestrationService:
 
                 valid, verdict, reason = self._validate_review_authority(run, job, current_cand)
                 if valid and verdict == ReviewVerdict.READY_TO_MERGE:
-                    self._advance_stage(run, OrchestrationStage.INDEPENDENT_AUDIT, claim_context=claim_context)
+                    project = self.uow.projects.get_by_id(run.project_id)
+                    target_stage = (
+                        OrchestrationStage.INDEPENDENT_AUDIT
+                        if project and project.independent_audit_required
+                        else OrchestrationStage.PREPARING_PR
+                    )
+                    self._advance_stage(run, target_stage, claim_context=claim_context)
                 else:
                     # Changes required or invalid/missing review authority -> route to review remediation
                     self._advance_stage(run, OrchestrationStage.REVIEW_REMEDIATION, claim_context=claim_context)
@@ -1977,6 +1984,13 @@ class OrchestrationService:
                 valid, is_passing, reason = self._validate_audit_authority(run, job, current_cand)
                 if valid and is_passing:
                     self._advance_stage(run, OrchestrationStage.PREPARING_PR, claim_context=claim_context)
+                elif not (
+                    (project := self.uow.projects.get_by_id(run.project_id))
+                    and project.independent_audit_required
+                ):
+                    self._advance_stage(
+                        run, OrchestrationStage.PREPARING_PR, claim_context=claim_context
+                    )
                 else:
                     # Audit failed or missing/invalid audit authority -> route to audit remediation
                     self._advance_stage(run, OrchestrationStage.AUDIT_REMEDIATION, claim_context=claim_context)
@@ -2020,10 +2034,13 @@ class OrchestrationService:
                     break
 
                 # STRICT AUDIT GATE: PR preparation requires an actual CURRENT authoritative DeepSeek Direct audit
-                audit_valid, audit_passing, audit_reason = self._validate_audit_authority(
-                    run=run, job=job, cand=current_cand
+                audit_required = bool(project and project.independent_audit_required)
+                audit_valid, audit_passing, audit_reason = (
+                    self._validate_audit_authority(run=run, job=job, cand=current_cand)
+                    if audit_required
+                    else (True, True, None)
                 )
-                if not audit_valid or not audit_passing:
+                if audit_required and (not audit_valid or not audit_passing):
                     logger.warning(
                         f"PR preparation blocked: no valid passing audit for candidate '{current_cand.candidate_sha}'. Reason: {audit_reason}"
                     )
@@ -2619,8 +2636,9 @@ class OrchestrationService:
         self,
         run: OrchestrationRun,
         candidate: OrchestrationCandidate | None,
+        candidate_root: str | Path,
     ) -> list[str] | None:
-        """Return candidate changed paths relative to base, or None when unverifiable."""
+        """Return the exact candidate tree's changed paths, or None when unverifiable."""
         import subprocess
 
         base_sha = run.base_sha
@@ -2630,7 +2648,7 @@ class OrchestrationService:
         try:
             result = subprocess.run(
                 ["git", "diff", "--name-only", f"{base_sha}..{candidate_sha}"],
-                cwd=str(self.project_root),
+                cwd=str(Path(candidate_root).resolve()),
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -2657,19 +2675,63 @@ class OrchestrationService:
             return None
 
         candidate_sha = candidate.candidate_sha if candidate else run.current_candidate_sha
-        changed_paths = self._candidate_changed_paths(run, candidate)
+        job = self.uow.jobs.get_by_id(run.active_job_id) if run.active_job_id else None
+        if not candidate or not job or not candidate_sha:
+            return GateResult(
+                "verify",
+                GateStatus.UNKNOWN,
+                GateReason(
+                    "VERIFY_UNVERIFIABLE",
+                    "Published candidate worktree and active job are required for authoritative verification.",
+                ),
+            )
+
+        manager = self.pipeline.worktree_manager
+        ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None)
+        ownership = ownership_repo.get_by_job_id(job.job_id) if ownership_repo else None
+        if ownership is None:
+            return GateResult(
+                "verify",
+                GateStatus.UNKNOWN,
+                GateReason(
+                    "VERIFY_UNVERIFIABLE",
+                    "Candidate worktree ownership is unavailable.",
+                ),
+            )
+        try:
+            candidate_root = manager.worktree_path(job.job_id, run.project_id).resolve()
+            run_coroutine_sync(
+                manager._verify_frozen_candidate_worktree_adoption(
+                    path=candidate_root,
+                    job_id=job.job_id,
+                    project_id=run.project_id,
+                    run_id=run.run_id,
+                    change_name=run.change_name,
+                    ownership=ownership,
+                )
+            )
+        except Exception as exc:
+            return GateResult(
+                "verify",
+                GateStatus.UNKNOWN,
+                GateReason(
+                    "VERIFY_UNVERIFIABLE",
+                    "Candidate worktree could not be authoritatively verified.",
+                    details={"error": str(exc)},
+                ),
+            )
+        changed_paths = self._candidate_changed_paths(run, candidate, candidate_root)
 
         verify_result = VerifyGate(self.openspec_adapter).evaluate(
             project=project,
             change_name=run.change_name,
-            project_root=str(self.project_root),
+            project_root=str(candidate_root),
             candidate_sha=candidate_sha,
             changed_paths=changed_paths,
         )
         if verify_result.is_blocking:
             return verify_result
 
-        job = self.uow.jobs.get_by_id(run.active_job_id) if run.active_job_id else None
         if not job or not candidate:
             return GateResult(
                 "verify",
@@ -2960,7 +3022,11 @@ class OrchestrationService:
         elif to_stage == OrchestrationStage.PREPARING_PR:
             if not job or not candidate:
                 return "Cannot prepare PR without current job and candidate evidence."
-            valid, passing, reason = self._validate_audit_authority(run, job, candidate)
+            project = self.uow.projects.get_by_id(run.project_id)
+            if project and project.independent_audit_required:
+                valid, passing, reason = self._validate_audit_authority(run, job, candidate)
+            else:
+                valid, passing, reason = True, True, None
             if not valid or not passing:
                 return reason or "Cannot prepare PR without current passing audit authority."
         elif to_stage == OrchestrationStage.PR_PREPARED:

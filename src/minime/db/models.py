@@ -48,6 +48,9 @@ class ProjectModel(Base):
         JSON, default=lambda: ["codex", "antigravity", "deepseek"], nullable=False
     )
     openrouter_drain_allowed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    independent_audit_required: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
     strict_validation_required: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default="true", nullable=False
     )

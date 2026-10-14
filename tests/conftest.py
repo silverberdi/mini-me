@@ -587,6 +587,7 @@ class InMemoryJobRepository(JobRepositoryInterface):
         JobStatus.CHECKS_FAILED: set(),
         JobStatus.REVIEW_RUNNING: {
             JobStatus.AUDIT_RUNNING,
+            JobStatus.READY_TO_MERGE,
             JobStatus.CHANGES_REQUIRED,
             JobStatus.CHECKS_PASSED,
             JobStatus.QUEUED,
@@ -2796,6 +2797,18 @@ def attach_local_bare_origin(
     remote_actually_changed = get_url.returncode == 0 and get_url.stdout.strip() == str(bare)
     if not remote_actually_changed:
         return str(bare)
+
+    # Main-advancement reconciliation observes the canonical base through the
+    # remote, not through a local tracking ref. Publish the real fixture branch
+    # to the disposable bare remote so intake admission tests exercise that
+    # authority instead of failing on an uninitialized remote.
+    subprocess.run(
+        ["git", "push", "origin", "HEAD:refs/heads/main"],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
     # Rewrite the ownership marker to the local identity so the Stage C marker fence
     # verifies against the same authoritative identity as the remote URL.

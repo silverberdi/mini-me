@@ -31,6 +31,7 @@ from minime.domain.enums import (
     ReadinessState,
     ReviewStatus,
     ReviewVerdict,
+    WorktreeCreationState,
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
@@ -80,11 +81,17 @@ from minime.services.deepseek_auditor_runner import (
 from minime.services.efficiency_telemetry_service import EfficiencyTelemetryService
 from minime.services.handoff_manager import HandoffManager
 from minime.services.implementer_runner import (
+    CliImplementerRunner,
     ImplementerRunnerInterface,
     runner_for_implementer,
 )
 from minime.services.lightweight_reconciliation_service import LightweightReconciliationService
 from minime.services.model_independence_policy import ModelIndependencePolicy
+from minime.services.native_openspec_apply import (
+    NativeOpenSpecWorkflowUnavailable,
+    resolve_codex_openspec_apply,
+    workflow_unchanged,
+)
 from minime.services.openrouter_eligibility import OpenRouterEligibilityEvaluator
 from minime.services.openspec_tasks import OpenSpecTaskTracker, is_verification_task
 from minime.services.outcome_governance import (
@@ -225,7 +232,55 @@ class ExecutionPipelineService:
         return str(await result) if inspect.isawaitable(result) else current_sha
 
     async def _preserve_and_cleanup_worktree(self, job: Job, worktree) -> None:
-        """Persist recovery authority before allowing managed cleanup."""
+        """Preserve active orchestration candidates for review/remediation resume."""
+        if job.candidate_sha:
+            runs_repo = getattr(self.uow, "orchestration_runs", None)
+            ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None)
+            ownership = ownership_repo.get_by_job_id(job.job_id) if ownership_repo else None
+            run = (
+                runs_repo.get_by_id(ownership.run_id)
+                if runs_repo and ownership and ownership.run_id
+                else None
+            )
+            if ownership is not None:
+                if run is None:
+                    raise RuntimeError(
+                        "Candidate worktree preservation denied: durable ownership has no matching Run."
+                    )
+                if (
+                    ownership.creation_state != WorktreeCreationState.CREATED
+                    or Path(ownership.canonical_worktree_path).is_symlink()
+                    or not Path(ownership.canonical_worktree_path).is_dir()
+                    or str(Path(ownership.canonical_worktree_path).resolve())
+                    != str(Path(worktree.path).resolve())
+                    or ownership.branch != worktree.branch_name
+                    or run.active_job_id != job.job_id
+                    or run.project_id != job.project_id
+                    or run.change_name != job.change_name
+                ):
+                    raise RuntimeError(
+                        "Candidate worktree preservation denied: active Run/Job identity conflicts."
+                    )
+                manifests = getattr(self.uow, "candidate_manifests", None)
+                manifest = (
+                    manifests.get_by_candidate_sha(job.job_id, job.candidate_sha)
+                    if manifests
+                    else None
+                )
+                if (
+                    not manifest
+                    or manifest.candidate_sha != job.candidate_sha
+                    or not manifest.manifest_hash
+                    or manifest.total_files_count <= 0
+                ):
+                    # Keep the physical worktree even when its candidate evidence is
+                    # incomplete. A later governed retry must fail closed, not lose it.
+                    raise RuntimeError(
+                        "Candidate worktree preservation denied: matching durable manifest is unavailable."
+                    )
+                return
+
+        # Candidate-free attempts retain the existing snapshot-then-cleanup path.
         create_snapshot = getattr(self.worktree_manager, "create_recovery_snapshot", None)
         remove_clean = getattr(self.worktree_manager, "remove_clean_worktree", None)
         if inspect.iscoroutinefunction(create_snapshot) and inspect.iscoroutinefunction(
@@ -548,6 +603,69 @@ class ExecutionPipelineService:
                 attempt_number = job.attempt_count
                 attempt_id = f"att-{job.job_id}-{attempt_number}"
 
+                attempt_runner: ImplementerRunnerInterface | None = None
+                native_apply_workflow = None
+                unverified_runner = False
+                if not implementer_fallback_used and self.implementer_runner is None:
+                    try:
+                        attempt_runner = runner_for_implementer(current_executor)
+                        if isinstance(attempt_runner, CliImplementerRunner):
+                            if (
+                                attempt_runner.profile is None
+                                or attempt_runner.profile.provider.lower() != "codex"
+                            ):
+                                raise NativeOpenSpecWorkflowUnavailable(
+                                    "R01 native APPLY evidence is currently verified only for Codex."
+                                )
+                            managed_binding = (
+                                self.uow.project_managed_repository_bindings.get_by_project_id(
+                                    job.project_id
+                                )
+                                if getattr(
+                                    self.uow,
+                                    "project_managed_repository_bindings",
+                                    None,
+                                )
+                                else None
+                            )
+                            if (
+                                not run_identity
+                                or run_identity.project_id != job.project_id
+                                or run_identity.change_name != job.change_name
+                                or run_identity.active_job_id != job.job_id
+                                or not managed_binding
+                                or not managed_binding.is_valid
+                                or not managed_binding.canonical_repository_identity
+                                or not job.base_sha
+                            ):
+                                raise NativeOpenSpecWorkflowUnavailable(
+                                    "Native APPLY requires an exact durable Run, Job, repository, and base binding."
+                                )
+                            native_apply_workflow = resolve_codex_openspec_apply(
+                                worktree.path,
+                                job.change_name,
+                                project_id=job.project_id,
+                                repository_identity=managed_binding.canonical_repository_identity,
+                                run_id=run_identity.run_id,
+                                job_id=job.job_id,
+                                attempt_id=attempt_id,
+                                generation=candidate_generation,
+                                base_sha=job.base_sha,
+                            )
+                        else:
+                            # A non-CLI injected/diagnostic boundary is not product evidence.
+                            # It may exercise failure handling in tests, but can never
+                            # authorize a candidate below.
+                            unverified_runner = True
+                    except (NativeOpenSpecWorkflowUnavailable, ValueError, OSError) as exc:
+                        reason = f"Native OpenSpec APPLY preflight blocked: {exc}"
+                        job = self._transition(job, JobStatus.NEEDS_HUMAN, reason)
+                        return job
+                elif self.implementer_runner is not None:
+                    # Explicitly injected runner dependencies are used by isolated unit/contract
+                    # tests; they do not constitute product acceptance or native workflow evidence.
+                    attempt_runner = self.implementer_runner
+
                 # Consume pending handoff if available
                 latest_handoff = pending_handoff
                 handoff_prompt = ""
@@ -561,10 +679,15 @@ class ExecutionPipelineService:
 
                 workspace_path = worktree.path.resolve()
                 workspace_context = format_candidate_workspace_context(workspace_path)
-                task_context = worktree_task_tracker.format_prompt_context(
-                    project.openspec_path, job.change_name
-                )
-                prompt_context = f"{workspace_context}\n\n{task_context}"
+                if native_apply_workflow is not None:
+                    prompt_context = (
+                        f"{workspace_context}\n\n{native_apply_workflow.dispatch_instruction()}"
+                    )
+                else:
+                    task_context = worktree_task_tracker.format_prompt_context(
+                        project.openspec_path, job.change_name
+                    )
+                    prompt_context = f"{workspace_context}\n\n{task_context}"
                 if handoff_prompt:
                     prompt_context = f"{prompt_context}\n\n{handoff_prompt}"
                 if corrective_prompt:
@@ -804,7 +927,11 @@ class ExecutionPipelineService:
                         imp_outcome = openrouter_res
                 else:
                     # Primary implementer runner execution
-                    runner = self.implementer_runner or runner_for_implementer(current_executor)
+                    runner = (
+                        attempt_runner
+                        or self.implementer_runner
+                        or runner_for_implementer(current_executor)
+                    )
                     result = await runner.run(
                         worktree.path,
                         prompt_context,
@@ -812,6 +939,35 @@ class ExecutionPipelineService:
                     )
                     runner_stdout = result.stdout
                     runner_stderr = result.stderr
+                    if native_apply_workflow is not None:
+                        workflow_evidence = dict(result.native_workflow_evidence or {})
+                        workflow_evidence["dispatch_identity"] = {
+                            "project_id": native_apply_workflow.project_id,
+                            "repository_identity": native_apply_workflow.repository_identity,
+                            "run_id": native_apply_workflow.run_id,
+                            "job_id": native_apply_workflow.job_id,
+                            "attempt_id": native_apply_workflow.attempt_id,
+                            "generation": native_apply_workflow.generation,
+                            "base_sha": native_apply_workflow.base_sha,
+                            "stage": "APPLY",
+                            "change_name": native_apply_workflow.change_name,
+                        }
+                        workflow_evidence["skill_source_unchanged"] = workflow_unchanged(
+                            worktree.path, native_apply_workflow
+                        )
+                        workflow_evidence["workflow_observed"] = (
+                            workflow_evidence.get("workflow_observed") is True
+                            and workflow_evidence["skill_source_unchanged"] is True
+                            and workflow_evidence.get("change_name") == job.change_name
+                            and workflow_evidence.get("workflow_sha256")
+                            == native_apply_workflow.workflow_sha256
+                        )
+                        active_attempt.error_details["native_openspec_apply"] = workflow_evidence
+                        if workflow_evidence["workflow_observed"] is not True:
+                            has_insufficient_evidence = True
+                        self.uow.job_attempts.save(active_attempt)
+                    elif unverified_runner:
+                        has_insufficient_evidence = True
                     if getattr(result, "environment_error", False):
                         has_environment_failure = True
                     elif getattr(result, "preflight_error", None):
@@ -2185,13 +2341,16 @@ class ExecutionPipelineService:
                     summary=verdict_payload.summary,
                 )
                 self.uow.commit()
-                job = await self._run_audit_stage(
-                    job=job,
-                    project=project,
-                    worktree_path=worktree.path,
-                    check_run_results=check_run_results,
-                    review_id=review.review_id,
-                )
+                if project.independent_audit_required:
+                    job = await self._run_audit_stage(
+                        job=job,
+                        project=project,
+                        worktree_path=worktree.path,
+                        check_run_results=check_run_results,
+                        review_id=review.review_id,
+                    )
+                else:
+                    job = self._transition(job, JobStatus.READY_TO_MERGE)
             elif verdict_payload.verdict == ReviewVerdict.CHANGES_REQUIRED:
                 self.uow.reviews.transition(
                     review.review_id,

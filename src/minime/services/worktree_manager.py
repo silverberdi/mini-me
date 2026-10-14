@@ -1838,6 +1838,197 @@ class WorktreeManager:
                 f"Refusing to adopt existing {worktree_kind} at '{path}': Adoption check failed: {err}"
             )
 
+    async def _verify_frozen_candidate_worktree_adoption(
+        self,
+        *,
+        path: Path,
+        job_id: str,
+        project_id: str,
+        run_id: str,
+        change_name: str,
+        ownership: OrchestrationWorktreeOwnership,
+    ) -> None:
+        """Adopt only the existing clean worktree for the exact frozen candidate."""
+        jobs_repo = getattr(self.uow, "jobs", None)
+        runs_repo = getattr(self.uow, "orchestration_runs", None)
+        candidates_repo = getattr(self.uow, "orchestration_candidates", None)
+        manifests_repo = getattr(self.uow, "candidate_manifests", None)
+        job = jobs_repo.get_by_id(job_id) if jobs_repo else None
+        run = runs_repo.get_by_id(run_id) if runs_repo else None
+        if (
+            not job
+            or not run
+            or job.job_id != job_id
+            or job.project_id != project_id
+            or job.change_name != change_name
+            or run.run_id != run_id
+            or run.project_id != project_id
+            or run.change_name != change_name
+            or run.active_job_id != job_id
+        ):
+            raise RuntimeError(
+                "Candidate worktree adoption denied: durable Run/Job identity is missing or contradictory."
+            )
+
+        if ownership.creation_state != WorktreeCreationState.CREATED:
+            raise RuntimeError(
+                "Candidate worktree adoption denied: candidate work may only adopt a physically existing CREATED ownership."
+            )
+        if path.is_symlink() or not path.is_dir():
+            raise RuntimeError(
+                "Candidate worktree adoption denied: CREATED candidate worktree is absent or unsafe."
+            )
+        if (
+            ownership.project_id != project_id
+            or ownership.job_id != job_id
+            or ownership.run_id != run_id
+            or ownership.change_name != change_name
+            or str(Path(ownership.canonical_worktree_path).resolve()) != str(path.resolve())
+            or ownership.source_base_sha != run.base_sha
+            or job.base_sha != run.base_sha
+        ):
+            raise RuntimeError(
+                "Candidate worktree adoption denied: ownership, path, or original base identity conflicts."
+            )
+
+        candidate_sha = job.candidate_sha
+        run_candidate_sha = run.current_candidate_sha
+        if not candidate_sha or run_candidate_sha != candidate_sha:
+            raise RuntimeError(
+                "Candidate worktree adoption denied: Run and Job candidate SHAs do not match."
+            )
+        latest = candidates_repo.get_latest_for_run(run_id) if candidates_repo else None
+        candidates = candidates_repo.list_by_run(run_id) if candidates_repo else []
+        current_candidates = [
+            candidate for candidate in candidates if not candidate.superseded_by_id
+        ]
+        if (
+            latest is None
+            or len(current_candidates) != 1
+            or current_candidates[0].candidate_id != latest.candidate_id
+            or not latest.is_frozen
+            or latest.run_id != run_id
+            or latest.generation != run.current_generation
+            or latest.candidate_sha != candidate_sha
+            or latest.base_sha != run.base_sha
+            or not latest.manifest_id
+            or not latest.manifest_hash
+        ):
+            raise RuntimeError(
+                "Candidate worktree adoption denied: no unique frozen candidate matches Run/Job generation and SHA."
+            )
+
+        expected_branch = (
+            latest.candidate_ref.removeprefix("refs/heads/") if latest.candidate_ref else ""
+        )
+        if not expected_branch or expected_branch != ownership.branch:
+            raise RuntimeError(
+                "Candidate worktree adoption denied: frozen candidate branch conflicts with ownership."
+            )
+
+        manifest = manifests_repo.get_by_id(latest.manifest_id) if manifests_repo else None
+        if (
+            not manifest
+            or manifest.job_id != job_id
+            or manifest.candidate_sha != candidate_sha
+            or manifest.manifest_hash != latest.manifest_hash
+            or manifest.total_files_count <= 0
+            or manifest.staged_files
+            or manifest.untracked_files
+            or manifest.deleted_files
+        ):
+            raise RuntimeError(
+                "Candidate worktree adoption denied: candidate manifest is missing, contradictory, or not a committed tree."
+            )
+        attempts_repo = getattr(self.uow, "job_attempts", None)
+        attempts = attempts_repo.list_by_job(job_id) if attempts_repo else []
+        manifest_attempts = [
+            attempt for attempt in attempts if attempt.attempt_id == manifest.attempt_id
+        ]
+        if (
+            not manifest.attempt_id
+            or len(manifest_attempts) != 1
+            or manifest_attempts[0].end_sha != candidate_sha
+            or manifest_attempts[0].completed_at is None
+        ):
+            raise RuntimeError(
+                "Candidate worktree adoption denied: candidate manifest is not bound to one completed durable attempt."
+            )
+
+        actions_repo = getattr(self.uow, "orchestration_external_actions", None)
+        if not actions_repo or not callable(getattr(actions_repo, "list_by_run", None)):
+            raise RuntimeError(
+                "Candidate worktree adoption denied: external-action state is unobservable."
+            )
+        for action in actions_repo.list_by_run(run_id):
+            action_status = getattr(action.status, "value", action.status)
+            if action_status in {"RESERVED", "EXECUTING", "UNKNOWN", "AMBIGUOUS"}:
+                raise RuntimeError(
+                    "Candidate worktree adoption denied: an external action is unresolved."
+                )
+
+        # A recovery-snapshot event means a different preservation route has
+        # already observed mutable state. It cannot be silently reinterpreted
+        # as the frozen candidate checkpoint.
+        events_repo = getattr(self.uow, "events", None)
+        events = (
+            events_repo.list_events(project_id=project_id, change_id=change_name, limit=10000)
+            if events_repo
+            else []
+        )
+        if any(
+            event.event_type == EventType.WORKTREE_RECOVERY_SNAPSHOT
+            and event.payload.get("job_id") == job_id
+            for event in events
+        ):
+            raise RuntimeError(
+                "Candidate worktree adoption denied: recovery-snapshot evidence conflicts with frozen candidate adoption."
+            )
+
+        await self._verify_worktree_adoption_proof(
+            path=path,
+            job_id=job_id,
+            eff_project_id=project_id,
+            eff_run_id=run_id,
+            eff_change_name=change_name,
+            expected_branch=expected_branch,
+            expected_base_sha=run.base_sha,
+            require_clean=True,
+            worktree_kind="frozen candidate worktree",
+        )
+        actual_head = (await self.current_sha(path)).strip()
+        branch_head = (
+            await self._git(
+                ["rev-parse", "--verify", f"refs/heads/{expected_branch}^{{commit}}"],
+                cwd=self.project_root,
+            )
+        ).strip()
+        if actual_head != candidate_sha or branch_head != candidate_sha:
+            raise RuntimeError(
+                "Candidate worktree adoption denied: worktree HEAD or persisted branch ref differs from the frozen SHA."
+            )
+        await self._git(
+            ["merge-base", "--is-ancestor", run.base_sha, candidate_sha],
+            cwd=self.project_root,
+        )
+
+        from minime.services.candidate_manifest import CandidateManifestService
+
+        observed_manifest = CandidateManifestService().generate_manifest(
+            path, candidate_sha, job_id
+        )
+        if (
+            observed_manifest.manifest_hash != manifest.manifest_hash
+            or observed_manifest.total_files_count != manifest.total_files_count
+            or observed_manifest.tracked_files != manifest.tracked_files
+            or observed_manifest.staged_files
+            or observed_manifest.untracked_files
+            or observed_manifest.deleted_files
+        ):
+            raise RuntimeError(
+                "Candidate worktree adoption denied: observed worktree files differ from the frozen manifest."
+            )
+
     async def _verify_deleted_worktree_recreation(
         self,
         *,
@@ -2579,7 +2770,10 @@ class WorktreeManager:
         reuse_existing: bool = False,
         run_id: str | None = None,
     ) -> WorktreeInfo:
-        path = self.worktree_path(job_id, project_id).resolve()
+        requested_path = self.worktree_path(job_id, project_id)
+        if requested_path.is_symlink():
+            raise ValueError(f"Worktree path may not be a symlink: {requested_path}")
+        path = requested_path.resolve()
         parent = self.resolve_worktree_parent_dir(project_id).resolve()
         if parent not in path.parents:
             raise ValueError(f"Worktree path escapes managed root: {path}")
@@ -2619,6 +2813,58 @@ class WorktreeManager:
         historical_ownership = (
             worktree_ownership_repo.get_by_job_id(job_id) if worktree_ownership_repo else None
         )
+        job_repo = getattr(self.uow, "jobs", None)
+        candidate_job = job_repo.get_by_id(job_id) if job_repo else None
+        runs_repo = getattr(self.uow, "orchestration_runs", None)
+        candidate_run = runs_repo.get_by_id(eff_run_id) if runs_repo and eff_run_id else None
+        candidates_repo = getattr(self.uow, "orchestration_candidates", None)
+        durable_candidate = (
+            candidates_repo.get_latest_for_run(eff_run_id)
+            if candidates_repo and eff_run_id
+            else None
+        )
+        candidate_evidence_present = bool(
+            (candidate_job and candidate_job.candidate_sha)
+            or (candidate_run and candidate_run.current_candidate_sha)
+            or durable_candidate
+        )
+
+        if candidate_evidence_present:
+            if not reuse_existing:
+                raise RuntimeError(
+                    "Candidate worktree adoption denied: a persisted candidate cannot create a replacement worktree."
+                )
+            if (
+                not historical_ownership
+                or historical_ownership.creation_state != WorktreeCreationState.CREATED
+                or not path.is_dir()
+                or path.is_symlink()
+            ):
+                raise RuntimeError(
+                    "Candidate worktree adoption denied: candidate work requires its exact physically existing CREATED ownership."
+                )
+            if requested_branch_name and requested_branch_name != historical_ownership.branch:
+                raise RuntimeError(
+                    "Candidate worktree adoption denied: requested branch conflicts with durable ownership."
+                )
+            if not eff_project_id or not eff_run_id:
+                raise RuntimeError(
+                    "Candidate worktree adoption denied: durable project/run identity is unavailable."
+                )
+            await self._verify_frozen_candidate_worktree_adoption(
+                path=path,
+                job_id=job_id,
+                project_id=eff_project_id,
+                run_id=eff_run_id,
+                change_name=eff_change_name,
+                ownership=historical_ownership,
+            )
+            return WorktreeInfo(
+                path=path,
+                branch_name=historical_ownership.branch,
+                base_sha=historical_ownership.source_base_sha,
+            )
+
         recreation_source_base = None
         recovery_snapshot_sha = None
         recovery_event_candidate = False

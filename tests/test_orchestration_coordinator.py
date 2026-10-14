@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import subprocess
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -28,6 +30,7 @@ from minime.domain.enums import (
     RetrySafety,
     ReviewStatus,
     ReviewVerdict,
+    WorktreeCreationState,
 )
 from minime.domain.interfaces import GitHubAdapterInterface
 from minime.domain.models import (
@@ -58,6 +61,7 @@ from minime.services.worktree_manager import WorktreeManager
 
 def _test_ctx(uow: Any, claim_key: str = "test-claim") -> RecoveryClaimContext:
     from minime.services.recovery_convergence_service import RecoveryConvergenceService
+
     rec_svc = RecoveryConvergenceService(uow)
     claim = rec_svc.acquire_claim(claim_key)
     if claim:
@@ -68,6 +72,50 @@ def _test_ctx(uow: Any, claim_key: str = "test-claim") -> RecoveryClaimContext:
         fence_token=1,
         lease_expires_at=utc_now() + timedelta(seconds=3600),
     )
+
+
+def _assert_frozen_candidate_worktree(uow: Any, run: OrchestrationRun):
+    job = uow.jobs.get_by_id(run.active_job_id)
+    candidate = uow.orchestration_candidates.get_latest_for_run(run.run_id)
+    ownership = uow.orchestration_worktree_ownerships.get_by_job_id(job.job_id)
+    path = Path(ownership.canonical_worktree_path)
+    assert ownership.creation_state == WorktreeCreationState.CREATED
+    assert path.is_dir()
+    assert ownership.project_id == run.project_id
+    assert ownership.job_id == job.job_id == run.active_job_id
+    assert ownership.run_id == run.run_id
+    assert ownership.change_name == run.change_name
+    assert run.current_generation == candidate.generation
+    assert run.current_candidate_sha == job.candidate_sha == candidate.candidate_sha
+    assert candidate.base_sha == run.base_sha == job.base_sha == ownership.source_base_sha
+    assert candidate.candidate_ref == f"refs/heads/{ownership.branch}"
+    assert (
+        subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=path,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        == ownership.branch
+    )
+    assert (
+        subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=path, capture_output=True, text=True, check=True
+        ).stdout.strip()
+        == candidate.candidate_sha
+    )
+    assert (
+        subprocess.run(
+            ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+            cwd=path,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        == ""
+    )
+    return job, candidate, ownership, path
 
 
 class FakeGitHubAdapter(GitHubAdapterInterface):
@@ -359,6 +407,7 @@ def setup_orchestration_environment(tmp_path: Path, in_memory_uow):
         openspec_path="openspec",
         implementer="codex",
         reviewer="antigravity",
+        independent_audit_required=True,
         status=ProjectStatus.ACTIVE,
         checks=[{"name": "pytest", "command": "pytest"}],
     )
@@ -392,6 +441,7 @@ def setup_orchestration_environment(tmp_path: Path, in_memory_uow):
     )
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-m", "Add OpenSpec change"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "push", "origin", "HEAD:refs/heads/main"], cwd=tmp_path, check=True)
     subprocess.run(
         ["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=tmp_path, check=True
     )
@@ -409,9 +459,23 @@ def setup_orchestration_environment(tmp_path: Path, in_memory_uow):
 
     orig_verify = WorktreeManager._verify_creation_postconditions
 
-    async def _safe_verify(self, path, ownership, expected_branch, expected_base_sha=None):
+    async def _safe_verify(
+        self,
+        path,
+        ownership,
+        expected_branch,
+        expected_base_sha=None,
+        expected_head_sha=None,
+    ):
         try:
-            await orig_verify(self, path, ownership, expected_branch, expected_base_sha)
+            await orig_verify(
+                self,
+                path,
+                ownership,
+                expected_branch,
+                expected_base_sha,
+                expected_head_sha,
+            )
         except RuntimeError as e:
             if "does not match expected SHA" in str(e):
                 await orig_verify(self, path, ownership, expected_branch, None)
@@ -797,7 +861,7 @@ def test_same_run_resume_uses_attached_job_without_creating_duplicate(
     assert len(in_memory_uow.jobs.list_by_project(env["project_id"])) == 1
 
 
-def test_orchestration_reuses_pipeline_evidence_after_production_worktree_cleanup(
+def test_orchestration_reuses_pipeline_evidence_and_preserves_candidate_worktree(
     setup_orchestration_environment, in_memory_uow
 ):
     """The coordinator must use persisted pipeline evidence, never a removed worktree."""
@@ -833,7 +897,12 @@ def test_orchestration_reuses_pipeline_evidence_after_production_worktree_cleanu
     assert run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
     job = in_memory_uow.jobs.get_by_id(run.active_job_id)
     assert job is not None and job.candidate_sha
-    assert not (env["project_root"] / ".minime" / "worktrees" / job.job_id).exists()
+    retained_job, candidate, ownership, retained_path = _assert_frozen_candidate_worktree(
+        in_memory_uow, run
+    )
+    assert retained_job.job_id == job.job_id
+    assert candidate.candidate_sha == job.candidate_sha
+    assert ownership.canonical_worktree_path == str(retained_path)
 
     checks = in_memory_uow.check_results.list_by_job(job.job_id)
     assert len(checks) == 1
@@ -973,10 +1042,11 @@ def test_review_remediation_loop_increments_candidate_generation(
             )
 
     fake_github = FakeGitHubAdapter()
+    implementer = DynamicImplementer()
     pipeline = ExecutionPipelineService(
         uow=in_memory_uow,
         project_root=env["project_root"],
-        implementer_runner=DynamicImplementer(),
+        implementer_runner=implementer,
         checks_runner=FakeChecksRunner(should_pass=True),
         reviewer_runner=DynamicReviewer(),
         auditor_runner=MockAuditorRunner(
@@ -990,6 +1060,11 @@ def test_review_remediation_loop_increments_candidate_generation(
         pipeline=pipeline,
         github_adapter=fake_github,
     )
+
+    async def reject_candidate_free_recovery(**kwargs):
+        raise AssertionError("frozen candidate must not enter candidate-free recovery")
+
+    pipeline.worktree_manager._verify_deleted_worktree_recreation = reject_candidate_free_recovery
 
     run = service.start(env["project_id"], env["change_name"])
 
@@ -1005,6 +1080,62 @@ def test_review_remediation_loop_increments_candidate_generation(
     assert candidates[0].superseded_by_id == candidates[1].candidate_id
     assert candidates[1].generation == 2
     assert candidates[1].superseded_by_id is None
+    assert implementer.calls == 2
+    job, candidate, ownership, worktree_path = _assert_frozen_candidate_worktree(in_memory_uow, run)
+
+    uncommitted = worktree_path / "uncommitted-progress.txt"
+    uncommitted.write_text("preserve this local progress\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="Existing integration worktree is dirty"):
+        asyncio.run(
+            pipeline.worktree_manager.create_worktree(
+                job.job_id,
+                run.change_name,
+                in_memory_uow.projects.get_by_id(run.project_id).base_branch,
+                project_id=run.project_id,
+                branch_name=candidate.candidate_ref.removeprefix("refs/heads/"),
+                run_id=run.run_id,
+                reuse_existing=True,
+            )
+        )
+    assert uncommitted.read_text(encoding="utf-8") == "preserve this local progress\n"
+    uncommitted.unlink()
+
+    # Contradictory Run/Job candidate identity is denied without touching the
+    # retained worktree; a DELETED candidate worktree is never reconstructed.
+    in_memory_uow.orchestration_runs.save(
+        run.model_copy(update={"current_candidate_sha": "contradictory-candidate-sha"})
+    )
+    with pytest.raises(RuntimeError, match="Run and Job candidate SHAs do not match"):
+        asyncio.run(
+            pipeline.worktree_manager.create_worktree(
+                job.job_id,
+                run.change_name,
+                in_memory_uow.projects.get_by_id(run.project_id).base_branch,
+                project_id=run.project_id,
+                branch_name=candidate.candidate_ref.removeprefix("refs/heads/"),
+                run_id=run.run_id,
+                reuse_existing=True,
+            )
+        )
+    assert worktree_path.is_dir()
+    in_memory_uow.orchestration_runs.save(run)
+    cleanup = asyncio.run(
+        pipeline.worktree_manager.remove_clean_worktree(job.job_id, project_id=run.project_id)
+    )
+    assert cleanup.outcome == ExternalOutcome.SUCCESS
+    assert not worktree_path.exists()
+    with pytest.raises(RuntimeError, match="physically existing CREATED ownership"):
+        asyncio.run(
+            pipeline.worktree_manager.create_worktree(
+                job.job_id,
+                run.change_name,
+                in_memory_uow.projects.get_by_id(run.project_id).base_branch,
+                project_id=run.project_id,
+                branch_name=candidate.candidate_ref.removeprefix("refs/heads/"),
+                run_id=run.run_id,
+                reuse_existing=True,
+            )
+        )
 
 
 def test_deepseek_audit_blocking_findings_trigger_remediation(
@@ -1062,10 +1193,11 @@ def test_deepseek_audit_blocking_findings_trigger_remediation(
             )
 
     fake_github = FakeGitHubAdapter()
+    implementer = DynamicImplementer()
     pipeline = ExecutionPipelineService(
         uow=in_memory_uow,
         project_root=env["project_root"],
-        implementer_runner=DynamicImplementer(),
+        implementer_runner=implementer,
         checks_runner=FakeChecksRunner(should_pass=True),
         reviewer_runner=MockReviewerRunner(
             stdout=[
@@ -1086,6 +1218,8 @@ def test_deepseek_audit_blocking_findings_trigger_remediation(
     assert run.current_generation == 2
     assert run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
     assert run.human_gate == HumanGate.READY_FOR_HUMAN_MERGE
+    assert implementer.calls == 2
+    _assert_frozen_candidate_worktree(in_memory_uow, run)
 
 
 def test_pr_head_mismatch_fails_closed_needs_human(setup_orchestration_environment, in_memory_uow):
@@ -1249,6 +1383,90 @@ def test_ready_to_merge_job_without_audit_cannot_prepare_pr(
     assert len(fake_github.pushed_branches) == 0
 
 
+def test_candidate_changed_paths_are_read_from_candidate_worktree(
+    setup_orchestration_environment, in_memory_uow, tmp_path
+):
+    """VERIFY must inspect the frozen candidate tree, not stale managed checkout files."""
+    env = setup_orchestration_environment
+    service = OrchestrationService(in_memory_uow, project_root=env["project_root"])
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=env["project_root"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    candidate_root = tmp_path / "candidate-verification-worktree"
+    branch = "test/verify-candidate-tree"
+    subprocess.run(
+        ["git", "worktree", "add", "-b", branch, str(candidate_root), base_sha],
+        cwd=env["project_root"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    try:
+        changed_file = candidate_root / "src" / "candidate_only.py"
+        changed_file.parent.mkdir(parents=True, exist_ok=True)
+        changed_file.write_text("candidate tree evidence = True\n", encoding="utf-8")
+        subprocess.run(["git", "add", "src/candidate_only.py"], cwd=candidate_root, check=True)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-m",
+                "candidate",
+            ],
+            cwd=candidate_root,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        candidate_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=candidate_root,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        run = OrchestrationRun(
+            run_id="run-verify-candidate-tree",
+            project_id=env["project_id"],
+            change_name=env["change_name"],
+            base_sha=base_sha,
+        )
+        candidate = OrchestrationCandidate(
+            run_id=run.run_id,
+            generation=1,
+            base_sha=base_sha,
+            candidate_sha=candidate_sha,
+            manifest_hash="test-manifest",
+            is_frozen=True,
+        )
+        assert service._candidate_changed_paths(run, candidate, candidate_root) == [
+            "src/candidate_only.py"
+        ]
+    finally:
+        subprocess.run(
+            ["git", "worktree", "remove", str(candidate_root)],
+            cwd=env["project_root"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        subprocess.run(
+            ["git", "branch", "-d", branch],
+            cwd=env["project_root"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+
 def test_review_authority_fail_closed_validation(setup_orchestration_environment, in_memory_uow):
     """
     HIGH Finding 2 Regression Test:
@@ -1293,6 +1511,27 @@ def test_review_authority_fail_closed_validation(setup_orchestration_environment
     assert valid is False
     assert "No review record exists" in reason
 
+    # A complete candidate-bound DeepSeek Audit is not a Review authority.
+    in_memory_uow.audits.save(
+        AuditRecord(
+            job_id=job.job_id,
+            project_id=env["project_id"],
+            change_name=env["change_name"],
+            provider="deepseek",
+            candidate_sha="cand-sha-1",
+            base_sha="base-sha-1",
+            orchestration_run_id=run.run_id,
+            candidate_generation=1,
+            manifest_id=cand.manifest_id,
+            manifest_hash=cand.manifest_hash,
+            is_full_candidate=True,
+            status=AuditStatus.AUDIT_COMPLETED,
+        )
+    )
+    valid, verdict, reason = service._validate_review_authority(run, job, cand)
+    assert valid is False
+    assert "No review record exists" in reason
+
     # 2. Review candidate_sha is empty -> fail closed (NULL must NEVER mean current)
     review = Review(
         job_id=job.job_id,
@@ -1308,6 +1547,16 @@ def test_review_authority_fail_closed_validation(setup_orchestration_environment
         status=ReviewStatus.REVIEW_COMPLETED,
         verdict=ReviewVerdict.READY_TO_MERGE,
     )
+    in_memory_uow.reviews.save(review)
+
+    # A structurally valid response from the implementer identity is not independent review.
+    review.reviewer_role = "codex"
+    in_memory_uow.reviews.save(review)
+    valid, verdict, reason = service._validate_review_authority(run, job, cand)
+    assert valid is False
+    assert "reviewer identity does not match" in reason
+
+    review.reviewer_role = "antigravity"
     in_memory_uow.reviews.save(review)
 
     valid, verdict, reason = service._validate_review_authority(run, job, cand)

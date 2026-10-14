@@ -78,6 +78,11 @@ class PreparedAdmissionEvidence:
     project_exists: bool = True
     change_exists: bool = True
     binding_valid: bool = True
+    workspace_preflight_error: str | None = None
+    workspace_binding_id: str | None = None
+    managed_repository_root: str | None = None
+    worktree_parent_dir: str | None = None
+    canonical_repository_identity: str | None = None
 
 
 PRIORITY_BASE_SCORES: dict[QueuePriority, float] = {
@@ -460,6 +465,8 @@ class SchedulerService:
                 binding_valid=False,
             )
 
+        workspace_preflight_error, managed_binding = self._evaluate_workspace_preflight(project_id)
+
         # 1. Pure Definition of Ready (DoR) evaluation — zero DB writes, zero commits
         readiness_eval = self.readiness_service.evaluate_change_readiness_pure(
             project_id=project_id,
@@ -515,7 +522,95 @@ class SchedulerService:
             project_exists=True,
             change_exists=True,
             binding_valid=True,
+            workspace_preflight_error=workspace_preflight_error,
+            workspace_binding_id=getattr(managed_binding, "binding_id", None),
+            managed_repository_root=(
+                str(Path(managed_binding.managed_repository_root).resolve())
+                if managed_binding
+                else None
+            ),
+            worktree_parent_dir=(
+                str(Path(managed_binding.worktree_parent_dir).resolve())
+                if managed_binding
+                else None
+            ),
+            canonical_repository_identity=getattr(
+                managed_binding, "canonical_repository_identity", None
+            ),
         )
+
+    def _evaluate_workspace_preflight(self, project_id: str) -> tuple[str | None, Any | None]:
+        """Purely prove managed-root identity and future WORKTREE_CREATE permission.
+
+        This runs in admission Phase A, before advisory locks and before Run/Job
+        creation. Actual filesystem mutation remains exclusively WorktreeManager's
+        responsibility, where the same guard is evaluated again against the exact
+        job-owned destination.
+        """
+        from minime.domain.enums import ExternalOutcome, WorkspaceOperation, WorkspaceRole
+        from minime.domain.models import WorkspaceMutationRequest
+        from minime.services.workspace_guard import (
+            ManagedWorkspaceGuard,
+            is_binding_fully_valid,
+        )
+
+        binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
+        managed_binding = binding_repo.get_by_project_id(project_id) if binding_repo else None
+        if not is_binding_fully_valid(managed_binding):
+            return "Managed repository binding is missing, invalid, or unverified.", managed_binding
+
+        managed_root = Path(managed_binding.managed_repository_root).resolve()
+        worktree_parent = Path(managed_binding.worktree_parent_dir).resolve()
+        if managed_root != self.project_root.resolve():
+            return (
+                "Scheduler project root does not match the durable managed repository root.",
+                managed_binding,
+            )
+        if not managed_root.is_dir() or not worktree_parent.is_dir():
+            return "Managed repository or durable worktree parent does not exist.", managed_binding
+
+        guard = ManagedWorkspaceGuard(self.uow)
+        marker_ok, marker_reason, _, _ = guard.verify_managed_repository_ownership_marker(
+            str(managed_root),
+            project_id,
+            managed_binding.canonical_repository_identity,
+            managed_binding.ownership_marker_filename,
+        )
+        if not marker_ok:
+            return (
+                f"Managed repository ownership marker verification failed: {marker_reason}",
+                managed_binding,
+            )
+        remote_ok, remote_reason = guard.verify_git_repository_identity(
+            str(managed_root),
+            managed_binding.canonical_repository_identity,
+            remote_name=managed_binding.remote_name,
+        )
+        if not remote_ok:
+            return (
+                f"Managed repository Git identity verification failed: {remote_reason}",
+                managed_binding,
+            )
+
+        decision = guard.evaluate_mutation_pure(
+            WorkspaceMutationRequest(
+                project_id=project_id,
+                target_path=str(worktree_parent),
+                requested_operation=WorkspaceOperation.WORKTREE_CREATE,
+                actor="scheduler-admission-preflight",
+            )
+        )
+        if (
+            not decision.allowed
+            or decision.outcome != ExternalOutcome.SUCCESS
+            or decision.workspace_role != WorkspaceRole.EXECUTION_WORKTREE
+        ):
+            return (
+                "ManagedWorkspaceGuard denied future WORKTREE_CREATE: "
+                f"{decision.provider_detail or decision.reason_code.value}",
+                managed_binding,
+            )
+        return None, managed_binding
 
     def evaluate_admission(
         self,
@@ -665,6 +760,48 @@ class SchedulerService:
                 legacy_refusal_code=AdmissionRefusalCode.INVALID_BINDING,
             )
 
+        if evidence.workspace_preflight_error:
+            return AdmissionEvaluationResult(
+                decision=AdmissionDecisionKind.NEEDS_HUMAN,
+                project_id=project_id,
+                change_name=change_name,
+                safe_executable_pair_exists=False,
+                block_condition=AdmissionBlockCondition.CONFIGURATION_INVALID,
+                rationale=(
+                    "Execution workspace preflight denied admission: "
+                    f"{evidence.workspace_preflight_error}"
+                ),
+                legacy_decision=AdmissionDecision.REFUSED,
+                legacy_refusal_code=AdmissionRefusalCode.INVALID_BINDING,
+                refusal_details={"code": "WORKSPACE_PREFLIGHT_FAILED"},
+            )
+
+        managed_binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
+        current_managed_binding = (
+            managed_binding_repo.get_by_project_id(project_id) if managed_binding_repo else None
+        )
+        if (
+            not current_managed_binding
+            or evidence.workspace_binding_id != current_managed_binding.binding_id
+            or evidence.managed_repository_root
+            != str(Path(current_managed_binding.managed_repository_root).resolve())
+            or evidence.worktree_parent_dir
+            != str(Path(current_managed_binding.worktree_parent_dir).resolve())
+            or evidence.canonical_repository_identity
+            != current_managed_binding.canonical_repository_identity
+        ):
+            return AdmissionEvaluationResult(
+                decision=AdmissionDecisionKind.NEEDS_HUMAN,
+                project_id=project_id,
+                change_name=change_name,
+                safe_executable_pair_exists=False,
+                block_condition=AdmissionBlockCondition.CONFIGURATION_INVALID,
+                rationale="Managed workspace authority changed after pre-lock admission observation.",
+                legacy_decision=AdmissionDecision.REFUSED,
+                legacy_refusal_code=AdmissionRefusalCode.INVALID_BINDING,
+                refusal_details={"code": "STALE_WORKSPACE_PREFLIGHT"},
+            )
+
         if evidence.apply_attribution_result and evidence.apply_attribution_result.is_blocking:
             code = evidence.apply_attribution_result.reason.code
             return AdmissionEvaluationResult(
@@ -689,6 +826,28 @@ class SchedulerService:
         # admission decision, never be reinterpreted as AVAILABLE.
         configured_implementer = getattr(project, "implementer", None) or "codex"
         configured_reviewer = getattr(project, "reviewer", None) or "antigravity"
+        allowed_providers = set(getattr(project, "external_providers_allowed", None) or [])
+        unauthorized_providers = sorted(
+            {configured_implementer, configured_reviewer} - allowed_providers
+        )
+        if unauthorized_providers:
+            return AdmissionEvaluationResult(
+                decision=AdmissionDecisionKind.NEEDS_HUMAN,
+                project_id=project_id,
+                change_name=change_name,
+                safe_executable_pair_exists=False,
+                block_condition=AdmissionBlockCondition.CONFIGURATION_INVALID,
+                rationale=(
+                    "Configured execution provider is not explicitly permitted by project policy: "
+                    + ", ".join(unauthorized_providers)
+                ),
+                legacy_decision=AdmissionDecision.REFUSED,
+                legacy_refusal_code=AdmissionRefusalCode.PROVIDER_UNAVAILABLE,
+                refusal_details={
+                    "code": "PROVIDER_NOT_AUTHORIZED",
+                    "providers": unauthorized_providers,
+                },
+            )
         impl_health = self._lookup_provider_health(configured_implementer)
         rev_health = self._lookup_provider_health(configured_reviewer)
 

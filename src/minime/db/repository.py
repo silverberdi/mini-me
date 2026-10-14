@@ -255,6 +255,7 @@ def project_model_to_domain(model: ProjectModel) -> Project:
         checks=model.checks or [],
         external_providers_allowed=model.external_providers_allowed or [],
         openrouter_drain_allowed=model.openrouter_drain_allowed,
+        independent_audit_required=getattr(model, "independent_audit_required", False),
         strict_validation_required=getattr(model, "strict_validation_required", True),
         verify_gate_required=getattr(model, "verify_gate_required", True),
         sync_gate_required=getattr(model, "sync_gate_required", True),
@@ -971,6 +972,7 @@ class PostgresProjectRepository(ProjectRepositoryInterface):
             existing.checks = project.checks
             existing.external_providers_allowed = project.external_providers_allowed
             existing.openrouter_drain_allowed = project.openrouter_drain_allowed
+            existing.independent_audit_required = project.independent_audit_required
             existing.strict_validation_required = project.strict_validation_required
             existing.verify_gate_required = project.verify_gate_required
             existing.sync_gate_required = project.sync_gate_required
@@ -1001,6 +1003,7 @@ class PostgresProjectRepository(ProjectRepositoryInterface):
                 checks=project.checks,
                 external_providers_allowed=project.external_providers_allowed,
                 openrouter_drain_allowed=project.openrouter_drain_allowed,
+                independent_audit_required=project.independent_audit_required,
                 strict_validation_required=project.strict_validation_required,
                 verify_gate_required=project.verify_gate_required,
                 sync_gate_required=project.sync_gate_required,
@@ -1351,6 +1354,7 @@ class PostgresJobRepository(JobRepositoryInterface):
         },
         JobStatus.REVIEW_RUNNING: {
             JobStatus.AUDIT_RUNNING,
+            JobStatus.READY_TO_MERGE,
             JobStatus.CHANGES_REQUIRED,
             JobStatus.CHECKS_PASSED,
             JobStatus.QUEUED,

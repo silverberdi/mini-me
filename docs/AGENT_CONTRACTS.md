@@ -8,8 +8,10 @@ Starts read-only. Receives same OpenSpec change, candidate diff and check eviden
 
 Normalized review shape is defined in `schemas/reviewer-result.schema.json`.
 
-## DeepSeek Direct optional authorized analyst
-Available **only as operator-authorized compatible fallback after dual-primary capacity exhaustion**, read-only unless an approved future agent-with-tools contract exists; no mandatory post-review audit. Focus: acceptance mismatch, edge cases, security/privacy, idempotency/concurrency and missing tests. Never proxied through OpenRouter. Schema: `schemas/audit-result.schema.json` when this optional role is used.
+## DeepSeek Direct optional authorized analyst or conditional reviewer
+DeepSeek Direct is an optional, paid, read-only API capability and is never a mandatory audit stage. It may be used as an analyst only under the applicable policy or explicit operator authorization; it is never proxied through OpenRouter. Analyst output uses `schemas/audit-result.schema.json` and cannot satisfy an independent review gate.
+
+R01 additionally permits DeepSeek Direct as an authoritative read-only reviewer **only** when no eligible primary reviewer can serve the stage and a separate reviewer contract is implemented and verified for the exact candidate. Before invocation, the system must verify complete candidate-bound input, compatible review capability, reviewer identity distinct from every surviving substantive author, a structured response validated deterministically against the candidate/repository/base/head/generation/manifest, and explicit per-stage provider and budget authorization. This is a distinct review result under `schemas/reviewer-result.schema.json`; audit records or audit responses must never be converted into review evidence. Missing, stale, incomplete, ambiguous, unauthorized, or incompatible evidence fails closed and preserves the candidate in a waiting/blocked state. A qualifying review satisfies only the review gate and never authorizes merge, closure, or deployment; human merge remains mandatory.
 
 ## OpenRouter authorized fallback executor
 May finish eligible in-flight work only after both primaries cannot serve the stage, explicit operator authorization, budget allowance, and proof the runner can actually invoke tools/workflows and write within the sandbox. API text generation alone is not OpenSpec implementation. It may not cause admission of a new READY change.
