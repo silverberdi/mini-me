@@ -11,6 +11,15 @@ from decimal import Decimal
 from pathlib import Path
 
 from minime.adapters.openrouter_adapter import OpenRouterAdapter, OpenRouterRequest
+from minime.config import (
+    AppConfig,
+    OpenSpecStage,
+    ProjectConfig,
+    ResolvedStageProfile,
+    StageProfileError,
+    load_config,
+    resolve_stage_profile,
+)
 from minime.domain.enums import (
     AttemptProductivityClass,
     AuditFindingSeverity,
@@ -71,6 +80,7 @@ from minime.services.candidate_manifest import (
 )
 from minime.services.capacity_lifecycle_service import CapacityLifecycleService
 from minime.services.checks_runner import ChecksRunner
+from minime.services.cli_preflight import preflight_cli_invocation
 from minime.services.complementary_policy import validate_complementary_pair
 from minime.services.continuation_engine import (
     ContinuationContext,
@@ -92,7 +102,7 @@ from minime.services.lightweight_reconciliation_service import LightweightReconc
 from minime.services.model_independence_policy import ModelIndependencePolicy
 from minime.services.native_openspec_apply import (
     NativeOpenSpecWorkflowUnavailable,
-    resolve_codex_openspec_apply,
+    resolve_native_openspec_apply,
     workflow_unchanged,
 )
 from minime.services.openrouter_eligibility import OpenRouterEligibilityEvaluator
@@ -107,6 +117,7 @@ from minime.services.provider_policy_service import ProviderPolicyService
 from minime.services.review_verdict_parser import parse_review_verdict
 from minime.services.reviewer_contract import build_reviewer_prompt
 from minime.services.reviewer_runner import (
+    CliReviewerRunner,
     ReviewerRunnerInterface,
     runner_for_reviewer,
 )
@@ -180,9 +191,11 @@ class ExecutionPipelineService:
         openrouter_api_key: str | None = None,
         implementer_timeout_seconds: int = 3600,
         reviewer_timeout_seconds: int = 3600,
+        app_config: AppConfig | None = None,
     ):
         self.uow = uow
         self.project_root = Path(project_root)
+        self.app_config = app_config or load_config()
         self.implementer_runner = implementer_runner
         self.reviewer_runner = reviewer_runner
         self.auditor_runner = auditor_runner
@@ -238,17 +251,56 @@ class ExecutionPipelineService:
         getter = getattr(self.health_service, "get_health", None)
         return getter(provider) if callable(getter) else None
 
-    async def _refresh_capacity_before_stage(self, provider: str):
+    async def _refresh_capacity_before_stage(self, provider: str, model: str | None = None):
         """Refresh provider-owned capacity immediately before a stage is dispatched."""
         refresh = getattr(self.health_service, "refresh_capacity_from_read_only_source", None)
         if callable(refresh):
             try:
-                result = refresh(provider)
+                sig = inspect.signature(refresh)
+                if "model" in sig.parameters:
+                    result = refresh(provider, model=model)
+                else:
+                    result = refresh(provider)
                 if inspect.isawaitable(result):
                     await result
             except Exception:
                 logger.info("JIT read-only capacity observation unavailable for %s", provider)
         return self._get_provider_health(provider)
+
+    def _get_project_config(self, project: Project) -> ProjectConfig:
+        if project.project_id in self.app_config.projects:
+            return self.app_config.projects[project.project_id]
+        return ProjectConfig(
+            repository=project.repository,
+            base_branch=project.base_branch,
+            openspec_path=project.openspec_path,
+            implementer=project.implementer,
+            reviewer=project.reviewer,
+            checks=project.checks,
+            external_providers_allowed=project.external_providers_allowed,
+            openrouter_drain_allowed=project.openrouter_drain_allowed,
+        )
+
+    def _resolve_stage_profile(
+        self,
+        project: Project,
+        stage: OpenSpecStage | str,
+        *,
+        requested_provider: str | None = None,
+        requested_model: str | None = None,
+        requested_effort: str | None = None,
+        implementer_provider: str | None = None,
+    ) -> ResolvedStageProfile:
+        project_config = self._get_project_config(project)
+        return resolve_stage_profile(
+            project_config,
+            stage,
+            app_config=self.app_config,
+            requested_provider=requested_provider,
+            requested_model=requested_model,
+            requested_effort=requested_effort,
+            implementer_provider=implementer_provider,
+        )
 
     async def _preserve_and_cleanup_worktree(self, job: Job, worktree) -> None:
         """Preserve active orchestration candidates for review/remediation resume."""
@@ -475,21 +527,53 @@ class ExecutionPipelineService:
                     )
                     self.uow.commit()
 
+            # Stage Profile Resolution for APPLY:
+            try:
+                apply_profile = self._resolve_stage_profile(
+                    project,
+                    OpenSpecStage.APPLY,
+                    requested_provider=current_executor,
+                )
+            except StageProfileError as exc:
+                reason = f"Stage profile resolution rejected for APPLY: {exc}"
+                job = self._transition(job, JobStatus.NEEDS_HUMAN, reason)
+                return job
+
             # A pre-admission sample may expire while the job is queued. Refresh
             # immediately before creating an attempt or dispatching the implementer.
-            effective_implementer = current_executor
-            imp_health = await self._refresh_capacity_before_stage(effective_implementer)
-            is_primary_imp_available = imp_health.status == ProviderHealthStatus.AVAILABLE
+            effective_implementer = apply_profile.provider
+            imp_health = await self._refresh_capacity_before_stage(
+                effective_implementer, model=apply_profile.model
+            )
+            is_primary_imp_available = (
+                imp_health is not None and imp_health.status == ProviderHealthStatus.AVAILABLE
+            )
+            if is_primary_imp_available and imp_health.model:
+                from minime.adapters.provider_adapter import AntigravityProviderAdapter
+
+                target_group = AntigravityProviderAdapter.map_model_to_quota_group(
+                    apply_profile.model
+                )
+                observed_group = AntigravityProviderAdapter.map_model_to_quota_group(
+                    imp_health.model
+                )
+                if (
+                    imp_health.model.lower() != apply_profile.model.lower()
+                    and target_group
+                    and observed_group != target_group
+                ):
+                    is_primary_imp_available = False
 
             if not is_primary_imp_available:
                 # Primary implementer is exhausted / unavailable. Check for OpenRouter fallback eligibility.
                 dual_exhausted = self._is_dual_primary_exhausted(project)
                 if not dual_exhausted:
                     # Single primary exhaustion: DRAIN rules prohibit fallback when other primary is available
+                    status_desc = imp_health.status.value if imp_health else "UNKNOWN"
                     job = self.uow.jobs.set_waiting_capacity(
                         job.job_id,
                         effective_implementer,
-                        f"Primary implementer '{effective_implementer}' is {imp_health.status.value}",
+                        f"Primary implementer '{effective_implementer}' is {status_desc}",
                     )
                     self._save_event(
                         EventType.JOB_WAITING_CAPACITY,
@@ -632,15 +716,36 @@ class ExecutionPipelineService:
                 unverified_runner = False
                 if not implementer_fallback_used and self.implementer_runner is None:
                     try:
-                        attempt_runner = runner_for_implementer(current_executor)
+                        apply_profile = self._resolve_stage_profile(
+                            project,
+                            OpenSpecStage.APPLY,
+                            requested_provider=current_executor,
+                        )
+                        try:
+                            attempt_runner = runner_for_implementer(
+                                apply_profile.provider,
+                                config=self.app_config,
+                                model=apply_profile.model,
+                                effort=apply_profile.effort,
+                            )
+                        except TypeError:
+                            attempt_runner = runner_for_implementer(apply_profile.provider)
                         if isinstance(attempt_runner, CliImplementerRunner):
                             if (
                                 attempt_runner.profile is None
-                                or attempt_runner.profile.provider.lower() != "codex"
+                                or attempt_runner.profile.provider.lower()
+                                not in {"codex", "antigravity", "agy"}
                             ):
                                 raise NativeOpenSpecWorkflowUnavailable(
-                                    "R01 native APPLY evidence is currently verified only for Codex."
+                                    f"R01 native APPLY evidence is verified for Codex and Antigravity, got: {attempt_runner.profile.provider if attempt_runner.profile else 'None'}."
                                 )
+                            preflight = preflight_cli_invocation(attempt_runner.profile)
+                            if inspect.isawaitable(preflight):
+                                preflight = await preflight
+                            if not preflight.ok:
+                                reason = f"Implementer CLI preflight failed: {preflight.reason}"
+                                job = self._transition(job, JobStatus.NEEDS_HUMAN, reason)
+                                return job
                             managed_binding = (
                                 self.uow.project_managed_repository_bindings.get_by_project_id(
                                     job.project_id
@@ -665,9 +770,11 @@ class ExecutionPipelineService:
                                 raise NativeOpenSpecWorkflowUnavailable(
                                     "Native APPLY requires an exact durable Run, Job, repository, and base binding."
                                 )
-                            native_apply_workflow = resolve_codex_openspec_apply(
+                            apply_provider = attempt_runner.profile.provider.lower()
+                            native_apply_workflow = resolve_native_openspec_apply(
                                 worktree.path,
                                 job.change_name,
+                                provider=apply_provider,
                                 project_id=job.project_id,
                                 repository_identity=managed_binding.canonical_repository_identity,
                                 run_id=run_identity.run_id,
@@ -681,6 +788,10 @@ class ExecutionPipelineService:
                             # It may exercise failure handling in tests, but can never
                             # authorize a candidate below.
                             unverified_runner = True
+                    except StageProfileError as exc:
+                        reason = f"Stage profile rejected for APPLY: {exc}"
+                        job = self._transition(job, JobStatus.NEEDS_HUMAN, reason)
+                        return job
                     except (NativeOpenSpecWorkflowUnavailable, ValueError, OSError) as exc:
                         reason = f"Native OpenSpec APPLY preflight blocked: {exc}"
                         job = self._transition(job, JobStatus.NEEDS_HUMAN, reason)
@@ -1751,10 +1862,36 @@ class ExecutionPipelineService:
             effective_reviewer = (
                 project.implementer if current_executor == project.reviewer else project.reviewer
             )
+            review_profile: ResolvedStageProfile | None = None
+            try:
+                review_profile = self._resolve_stage_profile(
+                    project,
+                    OpenSpecStage.REVIEW,
+                    requested_provider=effective_reviewer,
+                    implementer_provider=current_executor,
+                )
+            except StageProfileError as exc:
+                err_msg = f"Stage profile rejected for REVIEW: {exc}"
+                self._save_event(
+                    EventType.REVIEW_POLICY_VIOLATION,
+                    job,
+                    {
+                        "error": err_msg,
+                        "implementer": current_executor,
+                        "reviewer": effective_reviewer,
+                    },
+                )
+                job = self._transition(job, JobStatus.NEEDS_HUMAN, err_msg)
+                return job
+
             # Checks may take minutes; admission-time reviewer capacity is not
             # reusable here. Refresh just before entering the review stage.
-            rev_health = await self._refresh_capacity_before_stage(effective_reviewer)
-            is_primary_rev_available = rev_health.status == ProviderHealthStatus.AVAILABLE
+            rev_health = await self._refresh_capacity_before_stage(
+                effective_reviewer, model=review_profile.model if review_profile else None
+            )
+            is_primary_rev_available = (
+                rev_health is not None and rev_health.status == ProviderHealthStatus.AVAILABLE
+            )
             reviewer_fallback_used = False
             selected_reviewer_model: str | None = None
             rev_identity = None
@@ -2202,7 +2339,20 @@ class ExecutionPipelineService:
                     return job
             else:
                 # Primary reviewer runner execution
-                reviewer = self.reviewer_runner or runner_for_reviewer(effective_reviewer)
+                if self.reviewer_runner is not None:
+                    reviewer = self.reviewer_runner
+                elif review_profile and review_profile.cli_invocation is not None:
+                    reviewer = CliReviewerRunner(review_profile.cli_invocation)
+                else:
+                    try:
+                        reviewer = runner_for_reviewer(
+                            effective_reviewer,
+                            config=self.app_config,
+                            model=review_profile.model if review_profile else None,
+                            effort=review_profile.effort if review_profile else None,
+                        )
+                    except TypeError:
+                        reviewer = runner_for_reviewer(effective_reviewer)
                 review_result = await reviewer.run(
                     readonly_view,
                     review_prompt,

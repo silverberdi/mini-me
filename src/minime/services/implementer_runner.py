@@ -319,6 +319,12 @@ class MockImplementerRunner(ImplementerRunnerInterface):
 
 
 def runner_for_implementer(
-    implementer: str, config: AppConfig | None = None
+    implementer: str,
+    config: AppConfig | None = None,
+    *,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> ImplementerRunnerInterface:
-    return CliImplementerRunner(resolve_cli_invocation(implementer, "implementer", config))
+    return CliImplementerRunner(
+        resolve_cli_invocation(implementer, "implementer", config, model=model, effort=effort)
+    )

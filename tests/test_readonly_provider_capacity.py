@@ -15,7 +15,7 @@ from minime.adapters.provider_adapter import (
     ProviderAdapterInterface,
     get_provider_adapter,
 )
-from minime.domain.enums import CapacitySignalSource, ProviderHealthStatus
+from minime.domain.enums import CapacitySignalSource, EventType, ProviderHealthStatus
 from minime.domain.models import utc_now
 from minime.services.provider_health_service import ProviderHealthService
 
@@ -421,16 +421,29 @@ def test_capacity_event_persists_only_session_fingerprint(in_memory_uow):
         model="Gemini test model",
         source_session_id="controlled-session-id",
     )
-    assert service.record_capacity_observation("antigravity", observation)
+    # statusLine is demoted to informative telemetry: cannot authorize dispatch
+    assert not service.record_capacity_observation("antigravity", observation)
     event = in_memory_uow.events.list_events(limit=1)[0]
     assert (
         event.payload["source_session_fingerprint"]
         == hashlib.sha256(b"controlled-session-id").hexdigest()
     )
     assert "source_session_id" not in event.payload
+    assert event.payload["state"] == "UNKNOWN"
+    assert event.payload["source"] == CapacitySignalSource.AGY_STATUSLINE.value
 
 
-def _print_usage_data(remaining_5h=0.9, remaining_weekly=0.98, status="SUCCESS", num_turns=0):
+def _print_usage_data(
+    remaining_5h=0.9,
+    remaining_weekly=0.98,
+    status="SUCCESS",
+    num_turns=0,
+    reset_5h=None,
+    reset_weekly=None,
+):
+    now = utc_now()
+    r_5h_text = reset_5h or (now + timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    r_week_text = reset_weekly or (now + timedelta(days=6)).strftime("%Y-%m-%dT%H:%M:%SZ")
     return {
         "status": status,
         "num_turns": num_turns,
@@ -446,13 +459,13 @@ def _print_usage_data(remaining_5h=0.9, remaining_weekly=0.98, status="SUCCESS",
                                 "id": "gemini-5h",
                                 "name": "Five Hour Limit Remaining",
                                 "remaining_fraction": remaining_5h,
-                                "reset_time": "2026-10-14T20:18:26Z",
+                                "reset_time": r_5h_text,
                             },
                             {
                                 "id": "gemini-weekly",
                                 "name": "Weekly Limit Remaining",
                                 "remaining_fraction": remaining_weekly,
-                                "reset_time": "2026-10-21T15:06:49Z",
+                                "reset_time": r_week_text,
                             },
                         ],
                     }
@@ -524,7 +537,7 @@ async def test_read_print_usage_snapshot_mocked_success(monkeypatch):
         for i, a in enumerate(args):
             if a == "--log-file" and i + 1 < len(args):
                 Path(args[i + 1]).write_text(
-                    "I1014 14:20:00 server_oauth.go:204] applyAuthResult: email=tester@example.com\n"
+                    "I1014 14:20:00 server_oauth.go:204] applyAuthResult: email=tester@example.com, authMethod=consumer\n"
                 )
         return FakeProc()
 
@@ -556,3 +569,458 @@ async def test_read_print_usage_snapshot_nonzero_exit_returns_unknown(monkeypatc
     )
     obs = await adapter._read_print_usage_snapshot("/usr/bin/agy", timeout_seconds=2.0)
     assert obs.ordinary_usage_allowed is None
+
+
+# ==============================================================================
+# Mandatory 7-Vector Regressions for Antigravity Capacity and Bounded Dispatch
+# Vectors:
+#   1. incomplete_payload
+#   2. forged_or_contradictory_payload
+#   3. stale_payload
+#   4. unknown_provenance
+#   5. identity_and_scope_mismatch
+#   6. acquisition_to_dispatch
+#   7. valid_signal
+# ==============================================================================
+
+
+def test_agy_regression_vector_1_incomplete_payload():
+    """Vector 1: Absent or incomplete data never equates to zero consumption or capacity.
+
+    Without sufficient positive proof of non-inferential capacity, result must be UNKNOWN.
+    """
+    account = "a" * 64
+
+    # 1.1 Missing num_turns completely
+    p1 = _print_usage_data()
+    del p1["num_turns"]
+    obs1 = AntigravityProviderAdapter.parse_print_usage_payload(p1, account_fingerprint=account)
+    assert obs1.ordinary_usage_allowed is None
+
+    # 1.2 None num_turns
+    p2 = _print_usage_data()
+    p2["num_turns"] = None
+    obs2 = AntigravityProviderAdapter.parse_print_usage_payload(p2, account_fingerprint=account)
+    assert obs2.ordinary_usage_allowed is None
+
+    # 1.3 Missing usage dict completely
+    p3 = _print_usage_data()
+    del p3["usage"]
+    obs3 = AntigravityProviderAdapter.parse_print_usage_payload(p3, account_fingerprint=account)
+    assert obs3.ordinary_usage_allowed is None
+
+    # 1.4 Missing total_tokens in usage
+    p4 = _print_usage_data()
+    del p4["usage"]["total_tokens"]
+    obs4 = AntigravityProviderAdapter.parse_print_usage_payload(p4, account_fingerprint=account)
+    assert obs4.ordinary_usage_allowed is None
+
+    # 1.5 Missing input_tokens in usage
+    p5 = _print_usage_data()
+    del p5["usage"]["input_tokens"]
+    obs5 = AntigravityProviderAdapter.parse_print_usage_payload(p5, account_fingerprint=account)
+    assert obs5.ordinary_usage_allowed is None
+
+    # 1.6 Missing output_tokens in usage (mandatory non-defaulted field)
+    p6 = _print_usage_data()
+    del p6["usage"]["output_tokens"]
+    obs6 = AntigravityProviderAdapter.parse_print_usage_payload(p6, account_fingerprint=account)
+    assert obs6.ordinary_usage_allowed is None
+
+    # 1.7 None output_tokens
+    p7 = _print_usage_data()
+    p7["usage"]["output_tokens"] = None
+    obs7 = AntigravityProviderAdapter.parse_print_usage_payload(p7, account_fingerprint=account)
+    assert obs7.ordinary_usage_allowed is None
+
+    # 1.8 Missing command entirely
+    p8 = _print_usage_data()
+    del p8["command"]
+    obs8 = AntigravityProviderAdapter.parse_print_usage_payload(p8, account_fingerprint=account)
+    assert obs8.ordinary_usage_allowed is None
+
+    # 1.9 Empty groups
+    p9 = _print_usage_data()
+    p9["command"]["data"]["groups"] = []
+    obs9 = AntigravityProviderAdapter.parse_print_usage_payload(p9, account_fingerprint=account)
+    assert obs9.ordinary_usage_allowed is None
+
+    # 1.10 Missing gemini-weekly bucket
+    p10 = _print_usage_data()
+    p10["command"]["data"]["groups"][0]["buckets"] = [
+        b for b in p10["command"]["data"]["groups"][0]["buckets"] if b["id"] == "gemini-5h"
+    ]
+    obs10 = AntigravityProviderAdapter.parse_print_usage_payload(p10, account_fingerprint=account)
+    assert obs10.ordinary_usage_allowed is None
+
+    # 1.11 Missing remaining_fraction in bucket
+    p11 = _print_usage_data()
+    del p11["command"]["data"]["groups"][0]["buckets"][0]["remaining_fraction"]
+    obs11 = AntigravityProviderAdapter.parse_print_usage_payload(p11, account_fingerprint=account)
+    assert obs11.ordinary_usage_allowed is None
+
+    # 1.12 Missing reset_time in bucket
+    p12 = _print_usage_data()
+    del p12["command"]["data"]["groups"][0]["buckets"][0]["reset_time"]
+    obs12 = AntigravityProviderAdapter.parse_print_usage_payload(p12, account_fingerprint=account)
+    assert obs12.ordinary_usage_allowed is None
+
+
+def test_agy_regression_vector_2_forged_or_contradictory_payload():
+    """Vector 2: Forged, contradictory, or non-zero inferential payloads fail closed."""
+    account = "b" * 64
+
+    # 2.1 Non-zero turns (inferential run)
+    p1 = _print_usage_data(num_turns=1)
+    obs1 = AntigravityProviderAdapter.parse_print_usage_payload(p1, account_fingerprint=account)
+    assert obs1.ordinary_usage_allowed is None
+
+    # 2.2 Boolean num_turns (True/False should not be accepted as integer 0/1)
+    p2 = _print_usage_data()
+    p2["num_turns"] = False
+    obs2 = AntigravityProviderAdapter.parse_print_usage_payload(p2, account_fingerprint=account)
+    assert obs2.ordinary_usage_allowed is None
+
+    # 2.3 Non-zero total_tokens
+    p3 = _print_usage_data()
+    p3["usage"]["total_tokens"] = 100
+    obs3 = AntigravityProviderAdapter.parse_print_usage_payload(p3, account_fingerprint=account)
+    assert obs3.ordinary_usage_allowed is None
+
+    # 2.4 Non-zero input_tokens
+    p4 = _print_usage_data()
+    p4["usage"]["input_tokens"] = 50
+    obs4 = AntigravityProviderAdapter.parse_print_usage_payload(p4, account_fingerprint=account)
+    assert obs4.ordinary_usage_allowed is None
+
+    # 2.5 Non-zero output_tokens
+    p5 = _print_usage_data()
+    p5["usage"]["output_tokens"] = 25
+    obs5 = AntigravityProviderAdapter.parse_print_usage_payload(p5, account_fingerprint=account)
+    assert obs5.ordinary_usage_allowed is None
+
+    # 2.6 Boolean output_tokens
+    p6 = _print_usage_data()
+    p6["usage"]["output_tokens"] = False
+    obs6 = AntigravityProviderAdapter.parse_print_usage_payload(p6, account_fingerprint=account)
+    assert obs6.ordinary_usage_allowed is None
+
+    # 2.7 Non-zero optional thinking_tokens
+    p7 = _print_usage_data()
+    p7["usage"]["thinking_tokens"] = 10
+    obs7 = AntigravityProviderAdapter.parse_print_usage_payload(p7, account_fingerprint=account)
+    assert obs7.ordinary_usage_allowed is None
+
+    # 2.8 Non-zero optional cache_read_tokens
+    p8 = _print_usage_data()
+    p8["usage"]["cache_read_tokens"] = 5
+    obs8 = AntigravityProviderAdapter.parse_print_usage_payload(p8, account_fingerprint=account)
+    assert obs8.ordinary_usage_allowed is None
+
+    # 2.9 Out-of-bounds quota fraction (< 0)
+    p9 = _print_usage_data(remaining_5h=-0.5)
+    obs9 = AntigravityProviderAdapter.parse_print_usage_payload(p9, account_fingerprint=account)
+    assert obs9.ordinary_usage_allowed is None
+
+    # 2.10 Out-of-bounds quota fraction (> 1)
+    p10 = _print_usage_data(remaining_weekly=1.2)
+    obs10 = AntigravityProviderAdapter.parse_print_usage_payload(p10, account_fingerprint=account)
+    assert obs10.ordinary_usage_allowed is None
+
+    # 2.11 Boolean fraction (True evaluates to 1 in Python without strict type check)
+    p11 = _print_usage_data()
+    p11["command"]["data"]["groups"][0]["buckets"][0]["remaining_fraction"] = True
+    obs11 = AntigravityProviderAdapter.parse_print_usage_payload(p11, account_fingerprint=account)
+    assert obs11.ordinary_usage_allowed is None
+
+    # 2.12 Corrupted reset timestamp
+    p12 = _print_usage_data()
+    p12["command"]["data"]["groups"][0]["buckets"][0]["reset_time"] = "not-iso-8601"
+    obs12 = AntigravityProviderAdapter.parse_print_usage_payload(p12, account_fingerprint=account)
+    assert obs12.ordinary_usage_allowed is None
+
+    # 2.13 Duplicate bucket IDs in gemini group
+    p13 = _print_usage_data()
+    p13["command"]["data"]["groups"][0]["buckets"].append(
+        {
+            "id": "gemini-5h",
+            "name": "Duplicate Five Hour Limit",
+            "remaining_fraction": 0.5,
+            "reset_time": (utc_now() + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+    )
+    obs13 = AntigravityProviderAdapter.parse_print_usage_payload(p13, account_fingerprint=account)
+    assert obs13.ordinary_usage_allowed is None
+
+    # 2.14 Conflicting duplicate quota groups
+    p14 = _print_usage_data()
+    p14["command"]["data"]["groups"].append(
+        {
+            "name": "Gemini Models Conflicting",
+            "buckets": [],
+        }
+    )
+    obs14 = AntigravityProviderAdapter.parse_print_usage_payload(p14, account_fingerprint=account)
+    assert obs14.ordinary_usage_allowed is None
+
+
+def test_agy_regression_vector_3_stale_payload(in_memory_uow):
+    """Vector 3: Observation older than bounded TTL (>60s) or expired/past reset fails closed."""
+    service = ProviderHealthService(in_memory_uow)
+    now = utc_now()
+    account = "c" * 64
+
+    # 3.1 Observation already expired
+    stale_obs = CapacityObservation(
+        provider="antigravity",
+        ordinary_usage_allowed=True,
+        observed_at=now - timedelta(seconds=120),
+        expires_at=now - timedelta(seconds=60),
+        source_signal=CapacitySignalSource.AGY_PRINT_USAGE,
+        account_id=account,
+        model="Gemini Models",
+    )
+    assert not service.record_capacity_observation("antigravity", stale_obs)
+    health = service.get_admission_health("antigravity")
+    assert health.status == ProviderHealthStatus.UNKNOWN
+    assert not service.has_fresh_capacity_evidence("antigravity")
+
+    # 3.2 Observation lifetime exceeds max TTL (> 60s)
+    long_obs = CapacityObservation(
+        provider="antigravity",
+        ordinary_usage_allowed=True,
+        observed_at=now,
+        expires_at=now + timedelta(seconds=300),  # 5 min > 60s
+        source_signal=CapacitySignalSource.AGY_PRINT_USAGE,
+        account_id=account,
+        model="Gemini Models",
+    )
+    assert not service.record_capacity_observation("antigravity", long_obs)
+    assert service.get_admission_health("antigravity").status == ProviderHealthStatus.UNKNOWN
+
+    # 3.3 Reset time in the past relative to observation time
+    past_reset = (now - timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    p_past = _print_usage_data(reset_5h=past_reset)
+    obs_past = AntigravityProviderAdapter.parse_print_usage_payload(
+        p_past, observed_at=now, account_fingerprint=account
+    )
+    assert obs_past.ordinary_usage_allowed is None
+
+    # 3.4 Reset time equal to observation time
+    eq_reset = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    p_eq = _print_usage_data(reset_5h=eq_reset)
+    obs_eq = AntigravityProviderAdapter.parse_print_usage_payload(
+        p_eq, observed_at=now, account_fingerprint=account
+    )
+    assert obs_eq.ordinary_usage_allowed is None
+
+    # 3.5 Reset time missing timezone
+    naive_reset = (now + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S")
+    p_naive = _print_usage_data(reset_5h=naive_reset)
+    obs_naive = AntigravityProviderAdapter.parse_print_usage_payload(
+        p_naive, observed_at=now, account_fingerprint=account
+    )
+    assert obs_naive.ordinary_usage_allowed is None
+
+
+@pytest.mark.asyncio
+async def test_agy_regression_vector_4_unknown_provenance(in_memory_uow, monkeypatch):
+    """Vector 4: Unverified account identity, missing/contradictory auth, or statusLine cannot authorize dispatch."""
+    service = ProviderHealthService(in_memory_uow)
+    now = utc_now()
+    valid_payload = _print_usage_data()
+
+    # 4.1 Missing account fingerprint in /usage
+    obs_no_acc = AntigravityProviderAdapter.parse_print_usage_payload(
+        valid_payload, account_fingerprint=None
+    )
+    assert obs_no_acc.ordinary_usage_allowed is None
+
+    # 4.2 Malformed non-hex or wrong-length account fingerprint
+    for bad_fp in ("", "short", "z" * 64, "12345"):
+        obs_bad = AntigravityProviderAdapter.parse_print_usage_payload(
+            valid_payload, account_fingerprint=bad_fp
+        )
+        assert obs_bad.ordinary_usage_allowed is None
+
+    # 4.3 statusLine cannot authorize dispatch: demoted to informative telemetry
+    statusline_obs = CapacityObservation(
+        provider="antigravity",
+        ordinary_usage_allowed=True,
+        observed_at=now,
+        expires_at=now + timedelta(seconds=30),
+        source_signal=CapacitySignalSource.AGY_STATUSLINE,
+        account_id="d" * 64,
+        model="Gemini Models",
+        source_session_id="unverified-session-xyz",
+    )
+    assert not service.record_capacity_observation("antigravity", statusline_obs)
+    admission_health = service.get_admission_health("antigravity")
+    assert admission_health.status == ProviderHealthStatus.UNKNOWN
+    assert not service.has_fresh_capacity_evidence("antigravity")
+
+    # Informative telemetry event is recorded with state UNKNOWN and source agy_statusline_quota
+    events = [
+        e
+        for e in in_memory_uow.events.list_events()
+        if e.event_type == EventType.PROVIDER_CAPACITY_OBSERVED
+    ]
+    assert len(events) >= 1
+    latest = events[-1]
+    assert latest.payload["state"] == "UNKNOWN"
+    assert latest.payload["source"] == CapacitySignalSource.AGY_STATUSLINE.value
+
+    # 4.4 Subprocess: log file missing applyAuthResult event
+    class FakeProc:
+        returncode = 0
+
+        async def communicate(self):
+            return json.dumps(_print_usage_data()).encode(), b""
+
+    async def fake_exec_no_auth(*args, **kwargs):
+        for i, a in enumerate(args):
+            if a == "--log-file" and i + 1 < len(args):
+                Path(args[i + 1]).write_text("I1014 14:20:00 server.go:100] startup info\n")
+        return FakeProc()
+
+    adapter = AntigravityProviderAdapter()
+    monkeypatch.setattr(
+        "minime.adapters.provider_adapter.asyncio.create_subprocess_exec", fake_exec_no_auth
+    )
+    obs_no_auth = await adapter._read_print_usage_snapshot("/usr/bin/agy", timeout_seconds=2.0)
+    assert obs_no_auth.ordinary_usage_allowed is None
+
+    # 4.5 Subprocess: log file has conflicting emails
+    async def fake_exec_conflict(*args, **kwargs):
+        for i, a in enumerate(args):
+            if a == "--log-file" and i + 1 < len(args):
+                Path(args[i + 1]).write_text(
+                    "applyAuthResult: email=alice@example.com, authMethod=consumer\n"
+                    "applyAuthResult: email=bob@example.com, authMethod=consumer\n"
+                )
+        return FakeProc()
+
+    monkeypatch.setattr(
+        "minime.adapters.provider_adapter.asyncio.create_subprocess_exec", fake_exec_conflict
+    )
+    obs_conflict = await adapter._read_print_usage_snapshot("/usr/bin/agy", timeout_seconds=2.0)
+    assert obs_conflict.ordinary_usage_allowed is None
+
+    # 4.6 Subprocess: log file has non-consumer authMethod
+    async def fake_exec_wrong_method(*args, **kwargs):
+        for i, a in enumerate(args):
+            if a == "--log-file" and i + 1 < len(args):
+                Path(args[i + 1]).write_text(
+                    "applyAuthResult: email=alice@example.com, authMethod=service_account\n"
+                )
+        return FakeProc()
+
+    monkeypatch.setattr(
+        "minime.adapters.provider_adapter.asyncio.create_subprocess_exec", fake_exec_wrong_method
+    )
+    obs_wrong_method = await adapter._read_print_usage_snapshot("/usr/bin/agy", timeout_seconds=2.0)
+    assert obs_wrong_method.ordinary_usage_allowed is None
+
+    # 4.7 Subprocess: unsupported executable fails closed
+    obs_bad_exe = await adapter._read_print_usage_snapshot("/bin/sh", timeout_seconds=2.0)
+    assert obs_bad_exe.ordinary_usage_allowed is None
+
+
+def test_agy_regression_vector_5_identity_and_scope_mismatch():
+    """Vector 5: Unsupported selected model fails closed; supported models map to quota scope."""
+    account = "e" * 64
+    payload = _print_usage_data()
+
+    # 5.1 Unsupported selected model fails closed
+    for unsupported in ("claude-3-5-sonnet", "gpt-4o", "meta/llama-3", "unknown-model"):
+        obs = AntigravityProviderAdapter.parse_print_usage_payload(
+            payload, account_fingerprint=account, selected_model=unsupported
+        )
+        assert obs.ordinary_usage_allowed is None
+
+    # 5.2 Supported models map to Gemini Models quota scope and succeed
+    for supported in (
+        "gemini-1.5-pro",
+        "gemini-1.5-flash",
+        "gemini 3.8 flash (high)",
+        "google/gemini-1.5-pro",
+        "Gemini Models",
+    ):
+        obs = AntigravityProviderAdapter.parse_print_usage_payload(
+            payload, account_fingerprint=account, selected_model=supported
+        )
+        assert obs.ordinary_usage_allowed is True
+        assert obs.model == supported
+
+
+def test_agy_regression_vector_6_acquisition_to_dispatch(in_memory_uow):
+    """Vector 6: Persistence rejects direct/forged observations; JIT admission gate prevents dispatch."""
+    service = ProviderHealthService(in_memory_uow)
+    now = utc_now()
+    account = "f" * 64
+
+    # 6.1 Direct caller-created observation with invalid account format is rejected
+    forged_obs = CapacityObservation(
+        provider="antigravity",
+        ordinary_usage_allowed=True,
+        observed_at=now,
+        expires_at=now + timedelta(seconds=30),
+        source_signal=CapacitySignalSource.AGY_PRINT_USAGE,
+        account_id="not-a-valid-sha256-fingerprint",
+        model="Gemini Models",
+    )
+    assert not service.record_capacity_observation("antigravity", forged_obs)
+    assert service.get_admission_health("antigravity").status == ProviderHealthStatus.UNKNOWN
+
+    # 6.2 Observation with capacity_reset_at <= observed_at is rejected
+    past_reset_obs = CapacityObservation(
+        provider="antigravity",
+        ordinary_usage_allowed=True,
+        observed_at=now,
+        expires_at=now + timedelta(seconds=30),
+        source_signal=CapacitySignalSource.AGY_PRINT_USAGE,
+        account_id=account,
+        model="Gemini Models",
+        capacity_reset_at=now - timedelta(seconds=10),
+    )
+    assert not service.record_capacity_observation("antigravity", past_reset_obs)
+    assert service.get_admission_health("antigravity").status == ProviderHealthStatus.UNKNOWN
+
+    # 6.3 Admission health fails closed when capacity evidence is absent or UNKNOWN
+    assert not service.has_fresh_capacity_evidence("antigravity")
+    health = service.get_admission_health("antigravity")
+    assert health.status == ProviderHealthStatus.UNKNOWN
+
+
+def test_agy_regression_vector_7_valid_signal(in_memory_uow):
+    """Vector 7: Clean non-inferential /usage signal produces AVAILABLE; zero fraction produces EXHAUSTED."""
+    service = ProviderHealthService(in_memory_uow)
+    account = "7" * 64
+    valid_payload = _print_usage_data(remaining_5h=0.75, remaining_weekly=0.92)
+
+    # 7.1 Clean available signal
+    obs = AntigravityProviderAdapter.parse_print_usage_payload(
+        valid_payload, account_fingerprint=account
+    )
+    assert obs.ordinary_usage_allowed is True
+    assert obs.source_signal == CapacitySignalSource.AGY_PRINT_USAGE
+    assert obs.account_id == account
+    assert obs.model == "Gemini Models"
+    assert obs.capacity_reset_at is not None
+    assert obs.capacity_reset_at > obs.observed_at
+
+    # Authoritative recording in ProviderHealthService
+    assert service.record_capacity_observation("antigravity", obs)
+    admission_health = service.get_admission_health("antigravity")
+    assert admission_health.status == ProviderHealthStatus.AVAILABLE
+    assert service.has_fresh_capacity_evidence("antigravity")
+
+    # 7.2 Zero fraction produces EXHAUSTED with valid future reset
+    exhausted_payload = _print_usage_data(remaining_5h=0.0, remaining_weekly=0.92)
+    obs_ex = AntigravityProviderAdapter.parse_print_usage_payload(
+        exhausted_payload, account_fingerprint=account
+    )
+    assert obs_ex.ordinary_usage_allowed is False
+    assert not service.record_capacity_observation("antigravity", obs_ex)
+    ex_health = service.get_admission_health("antigravity")
+    assert ex_health.status == ProviderHealthStatus.EXHAUSTED

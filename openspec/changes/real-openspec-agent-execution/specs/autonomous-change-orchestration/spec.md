@@ -1,7 +1,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Durable deterministic orchestration lifecycle
-The system SHALL persist a finite, ordered orchestration stage and checkpoint for every run, SHALL advance it only after the required authoritative evidence for that stage is committed, and SHALL use deterministic logical transition keys (`{run_id}:RESUME:{resumable_stage}:{current_generation}`) for resume operations and stage events to prevent duplicate event evidence upon repeated reconciliation or restart. The normal human-gate path SHALL require deterministic checks and authoritative independent review from an eligible complementary primary or, only when no eligible primary reviewer can serve, an explicitly authorized, compatible, candidate-bound DeepSeek Direct read-only reviewer. An additional audit SHALL be required only when applicable policy or explicit human authorization requires it; audit evidence SHALL NOT substitute for review evidence.
+The system SHALL persist a finite, ordered orchestration stage and checkpoint for every run, SHALL advance it only after the required authoritative evidence for that stage is committed, and SHALL use deterministic logical transition keys (`{run_id}:RESUME:{resumable_stage}:{current_generation}`) for resume operations and stage events to prevent duplicate event evidence upon repeated reconciliation or restart. For R01, read-only CONTRACT REVIEW SHALL precede APPLY and remain distinct from final code REVIEW. DeepSeek Direct is preferred only for CONTRACT REVIEW when compatible, capacity-fresh, and explicitly authorized by stage/provider/budget; AGY is its alternative, and no eligible provider means wait without APPLY. Contract-review evidence SHALL NOT authorize APPLY, final review, or product decisions. The normal final human-gate path SHALL require deterministic checks and authoritative independent review from an eligible complementary primary or, only when no eligible primary reviewer can serve, an explicitly authorized, compatible, candidate-bound DeepSeek Direct read-only reviewer. An additional audit SHALL be required only when applicable policy or explicit human authorization requires it; audit evidence SHALL NOT substitute for contract-review or final-review evidence.
 
 #### Scenario: Successful path reaches the human gate
 - **WHEN** implementation/continuation completes, checks pass, the candidate is frozen, authoritative independent review is valid, and repository identity is valid
@@ -35,7 +35,7 @@ The system SHALL persist a finite, ordered orchestration stage and checkpoint fo
 - **THEN** it preserves the candidate in a truthful waiting/blocked state and does not treat audit or self-authored evidence as review.
 
 ### Requirement: Existing pipeline coordination
-The system SHALL invoke existing implementation, 007 continuation, deterministic-check, and independent-review authorities in their defined order and SHALL preserve their decisions and diagnostics. An eligible complementary primary SHALL be the normal reviewer. If no eligible primary reviewer can serve, a separately defined DeepSeek Direct read-only reviewer MAY satisfy the review gate only when compatibility, sufficient review input, identity independence, structured-output validation, exact candidate binding, and explicit per-stage provider/budget authorization are all proven. The existing DeepSeek audit authority SHALL remain distinct and its result SHALL NOT be converted into review evidence. An independent audit SHALL be invoked only when explicitly required by applicable policy or human authorization.
+The system SHALL invoke existing PLAN, read-only CONTRACT REVIEW, implementation APPLY, implementation TEST, VERIFY/E2E, final REVIEW, 007 continuation, and PR authorities in their configured order and SHALL preserve their decisions and diagnostics. For R01, the configured initial role assignment is Codex PLAN and VERIFY/E2E, DeepSeek-preferred CONTRACT REVIEW with AGY alternative under explicit compatible capacity/provider/stage/budget checks, and AGY APPLY plus implementation TEST. Contract review is a separate evidence type and cannot authorize APPLY or final review. For final review, an eligible independent complementary primary SHALL remain the normal reviewer. If no eligible primary reviewer can serve, a separately defined DeepSeek Direct read-only reviewer MAY satisfy final code review only when compatibility, sufficient review input, identity independence, structured-output validation, exact candidate binding, and explicit per-stage provider/budget authorization are all proven. The existing DeepSeek audit authority SHALL remain distinct and its result SHALL NOT be converted into contract-review or final-review evidence. An independent audit SHALL be invoked only when explicitly required by applicable policy or human authorization.
 
 #### Scenario: Corrective implementation is governed by 007
 - **WHEN** an implementation attempt is premature, falsely blocked, structurally blocked, or otherwise incomplete
@@ -60,6 +60,17 @@ The system SHALL invoke existing implementation, 007 continuation, deterministic
 - **WHEN** the structured DeepSeek review response passes deterministic validation and reviewer-independence checks
 - **THEN** it may satisfy the review evidence requirement for that candidate
 - **AND** no existing audit record or audit response is promoted to review evidence and human merge remains mandatory.
+
+#### Scenario: R01 contract review is preferred before implementation
+- **GIVEN** a READY R01 change and a compatible DeepSeek contract-review profile with fresh capacity and explicit provider/stage/budget authorization
+- **WHEN** the orchestration reaches CONTRACT REVIEW
+- **THEN** it performs the read-only contract review before APPLY and records separate contract-review evidence
+- **AND** it does not treat that result as authorization for APPLY, final code REVIEW, product decisions, or merge.
+
+#### Scenario: AGY alternative or wait for contract review
+- **GIVEN** DeepSeek is not eligible and AGY is eligible for read-only CONTRACT REVIEW, or neither provider is eligible
+- **WHEN** the orchestration reaches CONTRACT REVIEW
+- **THEN** it uses AGY only as the configured alternative, otherwise preserves the work in a waiting state without APPLY or inference.
 
 #### Scenario: No routine audit is invoked without authority
 - **GIVEN** required checks and authoritative independent review pass and no applicable policy or explicit human authorization requires an additional audit

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -564,9 +565,12 @@ class InMemoryJobRepository(JobRepositoryInterface):
     _valid_transitions: dict[JobStatus, set[JobStatus]] = {
         JobStatus.QUEUED: {
             JobStatus.RUNNING,
+            JobStatus.CHECKS_RUNNING,
+            JobStatus.CHECKS_PASSED,
             JobStatus.WAITING_CAPACITY,
-            JobStatus.CANCELLED,
+            JobStatus.NEEDS_HUMAN,
             JobStatus.FAILED,
+            JobStatus.CANCELLED,
         },
         JobStatus.RUNNING: {
             JobStatus.RUNNING,
@@ -3088,13 +3092,18 @@ def test_capacity_strategy(monkeypatch):
         async def read_capacity_observation(self, timeout_seconds: float = 10.0):
             del timeout_seconds
             now = utc_now()
+            account_id = (
+                hashlib.sha256(f"test-account:{self._provider}".encode()).hexdigest()
+                if self._provider == "antigravity"
+                else f"test-account:{self._provider}"
+            )
             return CapacityObservation(
                 provider=self._provider,
                 ordinary_usage_allowed=self.allowed,
                 observed_at=now,
                 expires_at=now + timedelta(seconds=30) if self.allowed is not None else now,
                 source_signal=self.capacity_source_signal,
-                account_id=f"test-account:{self._provider}",
+                account_id=account_id,
                 model=f"test-model:{self._provider}",
             )
 

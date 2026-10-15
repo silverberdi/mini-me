@@ -400,8 +400,32 @@ class CodexProviderAdapter(ProviderAdapterInterface):
 class AntigravityProviderAdapter(ProviderAdapterInterface):
     """Provider adapter for Antigravity (agy) CLI."""
 
-    def __init__(self, executable: str = "agy"):
+    SUPPORTED_GEMINI_MODELS: dict[str, str] = {
+        "gemini models": "Gemini Models",
+        "gemini flash": "Gemini Models",
+        "gemini pro": "Gemini Models",
+        "gemini-1.5-pro": "Gemini Models",
+        "gemini-1.5-flash": "Gemini Models",
+        "gemini-2.0-flash": "Gemini Models",
+        "gemini 3.8 flash (high)": "Gemini Models",
+        "google/gemini-1.5-pro": "Gemini Models",
+        "google/gemini-1.5-flash": "Gemini Models",
+        "google:gemini-1.5-pro": "Gemini Models",
+        "google:gemini-1.5-flash": "Gemini Models",
+    }
+
+    @classmethod
+    def map_model_to_quota_group(cls, model_name: str) -> str | None:
+        norm = model_name.strip().lower()
+        if norm in cls.SUPPORTED_GEMINI_MODELS:
+            return cls.SUPPORTED_GEMINI_MODELS[norm]
+        if norm.startswith("gemini-") or norm.startswith("gemini "):
+            return "Gemini Models"
+        return None
+
+    def __init__(self, executable: str = "agy", model: str | None = None):
         self._executable = executable
+        self._model = model
 
     @property
     def supports_read_only_capacity_observation(self) -> bool:
@@ -413,7 +437,9 @@ class AntigravityProviderAdapter(ProviderAdapterInterface):
 
     @property
     def valid_capacity_source_signals(self) -> set[CapacitySignalSource]:
-        return {CapacitySignalSource.AGY_PRINT_USAGE, CapacitySignalSource.AGY_STATUSLINE}
+        # statusLine is demoted to non-authoritative telemetry and cannot authorize dispatch.
+        # Only explicit headless print-mode /usage provides authoritative capacity evidence.
+        return {CapacitySignalSource.AGY_PRINT_USAGE}
 
     @property
     def requires_account_identity_for_capacity(self) -> bool:
@@ -488,7 +514,9 @@ class AntigravityProviderAdapter(ProviderAdapterInterface):
             logger.debug(f"Antigravity availability probe failed: {exc}")
             return False
 
-    async def read_capacity_observation(self, timeout_seconds: float = 10.0) -> CapacityObservation:
+    async def read_capacity_observation(
+        self, timeout_seconds: float = 10.0, selected_model: str | None = None
+    ) -> CapacityObservation:
         """Read the authenticated headless /usage quota snapshot without sending a turn.
 
         The CLI in headless print mode exposes the read-only /usage slash command, which
@@ -510,7 +538,9 @@ class AntigravityProviderAdapter(ProviderAdapterInterface):
             logger.debug("AGY capacity observation busy")
             return unknown
         try:
-            return await self._read_print_usage_snapshot(resolved, timeout_seconds)
+            return await self._read_print_usage_snapshot(
+                resolved, timeout_seconds, selected_model=selected_model or self._model
+            )
         except Exception as exc:
             logger.info(
                 "Antigravity /usage capacity observation unavailable (%s)",
@@ -521,7 +551,7 @@ class AntigravityProviderAdapter(ProviderAdapterInterface):
             _AGY_STATUSLINE_LOCK.release()
 
     async def _read_print_usage_snapshot(
-        self, executable: str, timeout_seconds: float
+        self, executable: str, timeout_seconds: float, selected_model: str | None = None
     ) -> CapacityObservation:
         observed_at = datetime.now(UTC)
         unknown = CapacityObservation(
@@ -531,6 +561,10 @@ class AntigravityProviderAdapter(ProviderAdapterInterface):
             expires_at=observed_at,
             source_signal=self.capacity_source_signal,
         )
+        if Path(executable).name not in ("agy", "antigravity"):
+            logger.debug("AGY /usage unsupported executable: %s", executable)
+            return unknown
+
         with tempfile.TemporaryDirectory(prefix="minime-agy-usage-") as private_dir:
             private = Path(private_dir)
             os.chmod(private, 0o700)
@@ -544,6 +578,7 @@ class AntigravityProviderAdapter(ProviderAdapterInterface):
                 "-p",
                 "/usage",
             ]
+            start_time = datetime.now(UTC)
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
@@ -569,6 +604,13 @@ class AntigravityProviderAdapter(ProviderAdapterInterface):
                 logger.debug("AGY /usage timed out")
                 return unknown
 
+            completion_time = datetime.now(UTC)
+            if completion_time < start_time or completion_time > start_time + timedelta(
+                seconds=timeout_seconds + 5
+            ):
+                return unknown
+            observed_at = completion_time
+
             if proc.returncode != 0:
                 logger.debug(
                     "AGY /usage exited %d: %s",
@@ -583,19 +625,49 @@ class AntigravityProviderAdapter(ProviderAdapterInterface):
                 return unknown
 
             account_fingerprint = None
-            if log_path.exists():
-                try:
-                    log_text = log_path.read_text(encoding="utf-8", errors="replace")
-                    match = re.search(r"applyAuthResult:\s*email=([^,\s]+)", log_text)
-                    if match:
-                        raw_email = match.group(1).strip().lower()
-                        if raw_email:
-                            account_fingerprint = hashlib.sha256(raw_email.encode()).hexdigest()
-                except OSError:
-                    pass
+            if not log_path.exists():
+                return unknown
+            try:
+                log_text = log_path.read_text(encoding="utf-8", errors="replace")
+                auth_events: list[tuple[str | None, str | None]] = []
+                for line in log_text.splitlines():
+                    if "applyAuthResult:" in line:
+                        email_match = re.search(r"email=([^,\s\)]+)", line)
+                        method_match = re.search(r"authMethod=([^,\s\)]+)", line)
+                        email = email_match.group(1).strip().lower() if email_match else None
+                        method = method_match.group(1).strip().lower() if method_match else None
+                        auth_events.append((email, method))
+
+                if not auth_events:
+                    logger.debug("AGY /usage log missing applyAuthResult event")
+                    return unknown
+
+                for email, method in auth_events:
+                    if not email or method != "consumer":
+                        logger.debug(
+                            "AGY /usage auth event not supported consumer: email=%s, method=%s",
+                            email,
+                            method,
+                        )
+                        return unknown
+
+                unique_emails = {email for email, _ in auth_events}
+                if len(unique_emails) != 1:
+                    logger.debug(
+                        "AGY /usage log contains conflicting account identities: %s",
+                        unique_emails,
+                    )
+                    return unknown
+
+                account_fingerprint = hashlib.sha256(list(unique_emails)[0].encode()).hexdigest()
+            except OSError:
+                return unknown
 
             return self.parse_print_usage_payload(
-                payload, observed_at=observed_at, account_fingerprint=account_fingerprint
+                payload,
+                observed_at=observed_at,
+                account_fingerprint=account_fingerprint,
+                selected_model=selected_model,
             )
 
     async def _read_statusline_snapshot(
@@ -918,11 +990,13 @@ class AntigravityProviderAdapter(ProviderAdapterInterface):
             ),
         )
 
-    @staticmethod
+    @classmethod
     def parse_print_usage_payload(
+        cls,
         payload: object,
         observed_at: datetime | None = None,
         account_fingerprint: str | None = None,
+        selected_model: str | None = None,
     ) -> CapacityObservation:
         observed = observed_at or datetime.now(UTC)
         if observed.tzinfo is None:
@@ -940,12 +1014,44 @@ class AntigravityProviderAdapter(ProviderAdapterInterface):
             return unknown
         if payload.get("status") != "SUCCESS":
             return unknown
-        if payload.get("num_turns", 0) != 0:
+
+        # Positive proof of non-inferential execution is mandatory.
+        # Absent or incomplete num_turns or usage data NEVER equates to zero consumption.
+        if "num_turns" not in payload:
             return unknown
-        usage_meta = payload.get("usage")
-        if isinstance(usage_meta, dict):
-            if usage_meta.get("total_tokens", 0) != 0 or usage_meta.get("input_tokens", 0) != 0:
+        num_turns = payload["num_turns"]
+        if (
+            num_turns is None
+            or not isinstance(num_turns, int)
+            or isinstance(num_turns, bool)
+            or num_turns != 0
+        ):
+            return unknown
+
+        if "usage" not in payload:
+            return unknown
+        usage_meta = payload["usage"]
+        if not isinstance(usage_meta, dict):
+            return unknown
+
+        for req_key in ("total_tokens", "input_tokens", "output_tokens"):
+            if req_key not in usage_meta:
                 return unknown
+            val = usage_meta[req_key]
+            if val is None or not isinstance(val, int) or isinstance(val, bool) or val != 0:
+                return unknown
+
+        for opt_key in ("thinking_tokens", "cache_read_tokens"):
+            if opt_key in usage_meta:
+                opt_val = usage_meta[opt_key]
+                if (
+                    opt_val is None
+                    or not isinstance(opt_val, int)
+                    or isinstance(opt_val, bool)
+                    or opt_val != 0
+                ):
+                    return unknown
+
         command = payload.get("command")
         if not isinstance(command, dict) or command.get("name") != "usage":
             return unknown
@@ -953,7 +1059,7 @@ class AntigravityProviderAdapter(ProviderAdapterInterface):
         if not isinstance(cmd_data, dict):
             return unknown
         groups = cmd_data.get("groups")
-        if not isinstance(groups, list):
+        if not isinstance(groups, list) or not groups:
             return unknown
 
         if (
@@ -963,24 +1069,37 @@ class AntigravityProviderAdapter(ProviderAdapterInterface):
         ):
             return unknown
 
-        gemini_group = next(
-            (
-                g
-                for g in groups
-                if isinstance(g, dict) and "gemini" in str(g.get("name", "")).lower()
-            ),
-            None,
-        )
-        if gemini_group is None:
+        target_model = selected_model or "Gemini Models"
+        mapped_group_name = cls.map_model_to_quota_group(target_model)
+        if mapped_group_name is None:
             return unknown
+
+        matching_groups = [
+            g
+            for g in groups
+            if isinstance(g, dict) and mapped_group_name.lower() in str(g.get("name", "")).lower()
+        ]
+        if len(matching_groups) != 1:
+            return unknown
+        gemini_group = matching_groups[0]
 
         buckets = gemini_group.get("buckets")
-        if not isinstance(buckets, list):
+        if not isinstance(buckets, list) or not buckets:
             return unknown
 
-        bucket_map = {
-            b.get("id"): b for b in buckets if isinstance(b, dict) and isinstance(b.get("id"), str)
-        }
+        seen_bucket_ids = set()
+        bucket_map = {}
+        for b in buckets:
+            if not isinstance(b, dict):
+                return unknown
+            b_id = b.get("id")
+            if not isinstance(b_id, str) or not b_id.strip():
+                return unknown
+            if b_id in seen_bucket_ids:
+                return unknown
+            seen_bucket_ids.add(b_id)
+            bucket_map[b_id] = b
+
         if not {"gemini-5h", "gemini-weekly"}.issubset(bucket_map.keys()):
             return unknown
 
@@ -988,15 +1107,18 @@ class AntigravityProviderAdapter(ProviderAdapterInterface):
         reset_datetimes = []
         for bucket_id in ("gemini-5h", "gemini-weekly"):
             b = bucket_map[bucket_id]
+            if "remaining_fraction" not in b:
+                return unknown
             fraction = b.get("remaining_fraction")
             if (
-                not isinstance(fraction, (int, float))
+                fraction is None
+                or not isinstance(fraction, (int, float))
                 or isinstance(fraction, bool)
                 or not 0 <= fraction <= 1
             ):
                 return unknown
             reset_text = b.get("reset_time")
-            if not isinstance(reset_text, str):
+            if not isinstance(reset_text, str) or not reset_text.strip():
                 return unknown
             try:
                 reset_at = datetime.fromisoformat(reset_text.replace("Z", "+00:00"))
@@ -1004,10 +1126,15 @@ class AntigravityProviderAdapter(ProviderAdapterInterface):
                 return unknown
             if reset_at.tzinfo is None:
                 return unknown
-            reset_datetimes.append(reset_at.astimezone(UTC))
+            reset_utc = reset_at.astimezone(UTC)
+            if reset_utc <= observed:
+                return unknown
+            reset_datetimes.append(reset_utc)
             remaining_fractions.append(float(fraction))
 
-        model_name = gemini_group.get("name") or "Gemini Models"
+        model_name = (
+            selected_model if selected_model else (gemini_group.get("name") or "Gemini Models")
+        )
         allowed = all(f > 0 for f in remaining_fractions)
         return CapacityObservation(
             provider="antigravity",

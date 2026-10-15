@@ -218,5 +218,48 @@ allowed, and no E2E_PASS is claimed.
   - `ProviderHealthService` accepts `valid_capacity_source_signals` from the adapter.
   - Regression suite `tests/test_readonly_provider_capacity.py`: **39 passed** (0.21s).
   - Live adapter call against PostgreSQL in-memory UoW verified `ordinary_usage_allowed=True` and updated health status to `ProviderHealthStatus.AVAILABLE`.
-- **Task 2.3 closed:** Provider capacity for both primary agents (Codex via App Server `account/rateLimits/read` and Antigravity via headless `agy --output-format json -p "/usage"`) is now fully integrated, non-inferential, deterministic, and proven live. Task 2.3 is marked complete.
+- **Historical note:** Preliminary resolution recorded at 39 tests. The full adversarial requirement suite is documented below.
+
+## 2026-10-15 AGY /usage adversarial verification and fail-closed dispatch gate
+
+Following explicit requirements for AGY `/usage` verification and stage-aware profile resolution, the capacity adapter, health service, and configuration resolvers were hardened to ensure incomplete, forged, stale, unauthenticated, or unmapped observations strictly fail closed without authoring inferences or mutating dispatch gates:
+
+1. **Deterministic 7-Vector Regression Suite (`tests/test_readonly_provider_capacity.py` — 46 tests passing):**
+   - **Vector 1: Incomplete Payload:** Missing or null `output_tokens`, missing required token counters (`total_tokens`, `input_tokens`), omitted quota buckets, or missing reset timestamps return `UNKNOWN`. Zero values must be explicit non-boolean integers.
+   - **Vector 2: Forged or Contradictory Payload:** Boolean values for counters, positive token usage in `/usage`, non-zero thinking/cache tokens, duplicate quota bucket IDs, or conflicting quota groups return `UNKNOWN`.
+   - **Vector 3: Stale Payload:** Observations exceeding the 60-second TTL, reset timestamps in the past or identical to observed time, or timezone-naive timestamps fail closed.
+   - **Vector 4: Unknown Provenance:** Missing startup auth event in `--log-file`, conflicting authenticated emails, non-consumer `authMethod`, unsupported executable names (must be `agy` or `antigravity`), non-zero CLI exit codes, and process timeouts fail closed with `UNKNOWN`.
+   - **Vector 5: Identity and Scope Mismatch:** Unsupported selected models (e.g., `gemini-pro-ultra`) fail closed; supported models are mapped to the exact authoritative quota group (`Gemini Models`).
+   - **Vector 6: Acquisition to Dispatch Integrity:** Unauthenticated direct observations are rejected by persistence, past resets are rejected, and JIT admission gates fail closed without creating Runs, Jobs, attempts, or provider inference calls.
+   - **Vector 7: Valid Signal & Exhaustion:** Clean available quota signal establishes `AVAILABLE`; zero remaining fraction with future reset establishes `EXHAUSTED` (never `AVAILABLE`).
+
+2. **Per-Stage Profile Resolution (`tests/test_stage_profiles.py` — 13 tests passing):**
+   - Independent static profiles for `PLAN`, `CONTRACT_REVIEW`, `APPLY`, `TEST`, `VERIFY`, and `REVIEW`.
+   - Non-premium defaults verified for all stages (`gpt-4o-mini`, `gemini-3.8-flash-medium`, `gemini-3.8-flash-low`, `deepseek-chat`).
+   - Premium models (`gpt-4o`, `o1`, `gemini-2.5-pro`, `gemini-pro`, `claude-opus-5-5-high`, `deepseek-reasoner`) and max effort (`max`, `xhigh`) strictly rejected by default without explicit escalation authorization, non-empty rationale, and budget approval.
+   - CLI preflight validated against real installed `agy` (1.3.5) and `codex` (0.161.0) binaries.
+   - Author-reviewer provider collision strictly prevented.
+   - Native OpenSpec apply resolution verified for Antigravity (`/opsx-apply`, `.agent/skills/openspec-apply-change/SKILL.md`) and Codex (`$openspec-apply-change`, `.agents/skills/openspec-apply-change/SKILL.md`).
+
+3. **Full Operational Dispatch Integration Suite (`tests/test_stage_dispatch_integration.py` — 8 tests passing):**
+   - Proves the complete operational flow:
+     `selección de etapa → perfil proveedor/modelo/esfuerzo → descubrimiento de capacidades reales de CLI/cuenta → validación de capacidad vinculada a cuenta/modelo → preflight JIT → argumentos efectivos del runner`.
+   - Intercepts subprocess dispatch without consuming provider inference tokens.
+   - Proves Antigravity APPLY effective arguments (`--model gemini-3.8-flash-medium`, `--effort medium`) and native `/opsx-apply` prompt instruction.
+   - Proves Codex APPLY effective arguments (`--model gpt-4o-mini`, `model_reasoning_effort="medium"`) and native `$openspec-apply-change` stdin instruction.
+   - Proves fail-closed rejections before runner invocation for:
+     - Unsupported/nonexistent models (`UNSUPPORTED_MODEL` -> `NEEDS_HUMAN`)
+     - Incompatible efforts (`UNSUPPORTED_EFFORT` -> `NEEDS_HUMAN`)
+     - Premium model defaults without escalation (`PREMIUM_MODEL_REJECTED` -> `NEEDS_HUMAN`)
+     - Fabricated/unauthenticated capacity observations (fails closed to `WAITING_CAPACITY`)
+     - JIT CLI preflight failure (`NEEDS_HUMAN`)
+     - Author-reviewer identity collisions (`REVIEWER_IDENTITY_COLLISION`).
+
+4. **Status:** Tasks 2.2, 2.3, and 2.4 completed and verified with 100% deterministic evidence:
+   - 8 operational dispatch integration tests in `tests/test_stage_dispatch_integration.py`
+   - 13 stage profile tests in `tests/test_stage_profiles.py`
+   - 46 capacity regression tests in `tests/test_readonly_provider_capacity.py`
+   - 12 execution pipeline tests in `tests/test_execution_pipeline.py`
+   Total: 79 passing tests across affected suites, 0 lint errors, clean Ruff format. Zero provider inference consumed. N01 preserved untouched.
+
 

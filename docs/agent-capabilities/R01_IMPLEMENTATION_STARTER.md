@@ -1,4 +1,4 @@
-# MM-R01 — Starting Package for Codex/OpenSpec (reviewable v1)
+# MM-R01 — Starting Package for Stage-Oriented OpenSpec Execution (reviewable v1)
 
 **Target Change:** `real-openspec-agent-execution` | **Status:** predesigned backlog input, not an active OpenSpec Change. This document shortens agent planning: **the agent must still inspect code and build the final `proposal/design/specs/tasks` using the installed OpenSpec propose workflow**, not copy this as executable code. No agent inference or deployment authorized merely because this file exists.
 
@@ -17,6 +17,9 @@
 - The specific shell executable for OpenSpec is `openspec`; `$openspec-apply-change` for Codex and `/opsx-apply` for the other compatible agent are **agent workflows**, not shell executables. Resolve installed names/versions at preflight. The agent side implements and uses tools; mini me dispatches and verifies.
 - Human merge approval remains mandatory. Never use DeepSeek or OpenRouter silently. No auto-start production scheduler. No changes to N01's Run/Job/attempts/worktree for the fixture.
 - All specs necessary for R01's own deployed value belong **inside R01**: preflight, native workflow dispatch, candidate, tests, review, PR, safety, quota, stage E2E, postdeploy E2E, and code retirement. Do not defer an essential piece to R02–R10.
+- **R01 stage ownership:** Codex PLAN; DeepSeek Direct preferred for read-only CONTRACT REVIEW only when model/workflow compatibility, fresh capacity, and explicit provider/stage/budget authorization are proven, otherwise AGY; AGY APPLY and implementation tests; Codex VERIFY/E2E; final REVIEW follows the independent candidate-review policy. Contract review cannot authorize APPLY, final review, product decisions, or merge.
+- Configure provider, model, and effort independently per stage. Validate each tuple against the exact installed CLI/version and its supported model, effort, role, and workflow capabilities; never infer CLI support. Start with the least-cost configured profile meeting documented complexity/risk and workflow requirements. Premium models/max effort are not defaults; escalation requires objective evidence, recorded rationale, finite bounds, and explicit budget authority. R01 needs static per-stage profiles and validation through existing config/adapter/capacity/budget authorities, not a second selector or dynamic optimizer.
+- Local AI is optional/non-blocking for preliminary complexity classification, context preparation/reduction, extraction, labeling, and auxiliary tasks only. It cannot diagnose failures, implement authoritatively, review security, or make binding decisions; absence or failure never blocks the pipeline.
 
 ## 2. Existing code surfaces to inspect and decision to make
 
@@ -41,8 +44,9 @@ The above are **inspection targets**, not confirmation that a module has no othe
 Use `docs/agent-capabilities/HARNESS_CONTRACT.md` for fields and classifications. R01 must establish at least:
 
 - `admit_work_item(project_id, change_slug)` or existing equivalent: explicit **durable validated binding**, reserved claim, exact worktree, auth/quota/tool preflight, no speculative new job.
-- Stage request = `(project, change, run, job, attempt, generation, stage=APPLY, provider=codex, role=implementer, installed-workflow, skill hashes, scope, policy snapshot, budget, idempotency key)`.
-- Agent invocation = Codex CLI **actually loads** `openspec-apply-change` skill, runs official OpenSpec instructions and edits **only** worktree. mini me must observe side effect/tool evidence; do not accept a transcript saying “I used OpenSpec” as proof.
+- Stage request = `(project, change, run, job, attempt, generation, stage, configured provider/model/effort, installed-workflow, skill hashes, scope, policy snapshot, capacity/budget authorization, idempotency key)`.
+- R01 flow assignment = Codex PLAN → authorized read-only CONTRACT REVIEW (DeepSeek preferred, AGY alternative) → AGY native OpenSpec APPLY → AGY implementation TEST → Codex read-only VERIFY/E2E → final independent REVIEW under the unchanged final-review policy. If Codex verification changes candidate content, that content is attributed as authorship and requires a new frozen candidate/independence evaluation; verifier claims never self-authorize review.
+- Agent invocation = selected CLI **actually loads** the installed native workflow for its assigned stage and edits only the worktree when write authority is granted. mini me must observe side effect/tool evidence; do not accept transcript-only claims.
 - Stage output = normalized result class + concrete diff/SHA/tests/artifacts + events/cost/capacity and tool trace; mark UNKNOWN/WAITING rather than fabricated SUCCESS.
 - Verification = project checks + native agent-side `verify` when installed + stage E2E; select distinct reviewer/model for authoritative review. A review on a code snapshot requires frozen candidate SHA.
 - Publication = Draft PR real with candidate SHA, Issue/OpenSpec binding and evidence. No auto-merge.
@@ -55,8 +59,8 @@ Use **existing** providers/worktree/saga/PR services. Only add new classes/schem
 Fixture design to materialize within R01:
 1. A small **authorized GitHub test repository** with actual working-tree remote, README, `AGENTS.md`, OpenSpec config, a minimal app/function (e.g. `normalize_label`) and a real failing behavior test, with a branch-protection-compatible PR path.
 2. A Change already created with **agent-side OpenSpec** and specs including successful behavior, invalid input/rejection and regression criteria; DoR READY, explicit owner and repo binding.
-3. A **single** authorized Codex dispatch with quota preflight and a strict upper bound. Capture CLI exit, native skill/tool trace, `openspec status`/validation, actual source modification and passing tests.
-4. A distinct reviewer. If Antigravity unavailable and DeepSeek lacks the tooling/authorization/independent reviewer contract, **stop at `AWAITING_INDEPENDENT_REVIEW` or equivalent** with code safely preserved; do not fabricate independent acceptance. DeepSeek may perform read-only critique after operator-approved budget only. No self-review by Codex.
+3. A bounded authorized sequence using fresh stage-specific preflight: Codex PLAN, approved read-only CONTRACT REVIEW (DeepSeek only under explicit budget/provider authorization, else AGY), one AGY APPLY, AGY implementation tests, Codex VERIFY/E2E, and independent final review under current policy. Capture CLI exit, native workflow/tool trace, `openspec status`/validation, actual source modification, checks, model/effort capability proof, and candidate identity.
+4. A distinct final reviewer. If no eligible reviewer exists, **stop at `AWAITING_INDEPENDENT_REVIEW` or equivalent** with code safely preserved; do not fabricate independent acceptance. Contract-review evidence is not final code-review evidence. No self-review.
 5. After genuine reviewer acceptance and final checks, publish a **Draft** PR with exact candidate and evidence. Human merge remains manual.
 6. R01-E03: assert missing native skill/auth, stale provider health, remote mismatch, symlink escape **block before paid inference**.
 7. R01-E04/E06: assert interrupted attempt and N01 data survive with same IDs/WT and no duplicate effects. R01-E07: verify behavior via actual deployed API/CLI and fixture delivery, not just process health.
@@ -79,4 +83,4 @@ Fixture design to materialize within R01:
 `tasks.md`: ordered code/integration + focused checks + actual E2E by stage + negative fault-injection + retirement + post-retirement regression + real postdeploy acceptance and source evidence.
 `verify`: present coherent/pass/fail/blocked report, *never* accept task checkbox, static existence or fake runner as real E2E.
 
-Codex is the available coding agent now; planning should finish before any expensive apply. No DeepSeek call is allowed by this document alone.
+Use the approved per-stage role assignment above; historical availability does not establish current capability or authorize a call. Finish planning before provider execution. No DeepSeek call is allowed by this document alone; CONTRACT REVIEW still requires fresh explicit per-run stage/provider/budget authorization.

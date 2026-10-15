@@ -1,5 +1,6 @@
 """Tests for implementation pipeline jobs, runners, checks, and observability."""
 
+import hashlib
 import shutil
 import subprocess
 import sys
@@ -655,7 +656,7 @@ async def test_reviewer_capacity_is_refreshed_again_immediately_before_review(
             observed_at=now,
             expires_at=now,
             source_signal=adapter.capacity_source_signal,
-            account_id="test-account:antigravity",
+            account_id=hashlib.sha256(b"test-account:antigravity").hexdigest(),
             model="test-model:antigravity",
         )
 

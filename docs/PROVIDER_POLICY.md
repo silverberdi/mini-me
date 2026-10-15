@@ -1,16 +1,28 @@
 # Provider and Capacity Policy
 
 ## Primary agents by OpenSpec stage
-Each project configures permitted Codex/Antigravity roles and preferences **per stage** (proposer, implementer, verifier, reviewer, closer). Both are coding agents using installed OpenSpec workflows, not fixed lifetime roles. A candidate's substantive implementer may **not** be its authoritative reviewer. Prefer existing subscription capacity with cost-aware reservations and safe checkpoint boundaries.
+Each project configures provider, model, and effort independently for PLAN, CONTRACT REVIEW, APPLY, TEST, VERIFY/E2E, and final REVIEW. These are initial stage profiles, not a second scheduler or a dynamic optimizer. The existing project configuration, provider-adapter registry, capacity authorities, and budget controls remain the source and enforcement path. Both Codex and Antigravity can serve different compatible stages; neither is a permanent lifetime role. A candidate's substantive implementer may **not** be its authoritative final reviewer.
+
+Before a stage is admitted, validate that the exact installed CLI/version supports the configured model, effort value, invocation syntax, and requested native workflow/role. A missing or unrecognized capability is incompatible, not permission to fall back to a guessed default. The complexity/risk floor comes from existing project policy, durable change requirements, or deterministic criteria; local-AI labels are advisory only. Select the least-cost configured profile that meets that floor and the tool requirements using a verified cost basis. Premium models and maximum effort are not defaults. Escalation requires objective evidence (for example, a measured failure class or deterministic complexity/risk threshold), a recorded reason, a finite per-stage limit, and explicit budget authorization. R01 implements only the static per-stage profile and validation required by its assigned flow; adaptive optimization, benchmarking, and automatic profile learning are deferred.
+
+### R01 initial stage assignment
+- PLAN: Codex.
+- CONTRACT REVIEW: DeepSeek Direct preferred only when read-only contract-review capability, compatible model, fresh capacity, and explicit provider/stage/budget authorization all pass; otherwise use the configured AGY alternative. If neither is eligible, wait without consuming inference.
+- APPLY and implementation TEST: Antigravity.
+- VERIFY/E2E: Codex, read-only against the frozen candidate; if any tracked candidate content changes, it is treated as substantive authorship and requires a new candidate plus refreshed independence evaluation.
+- Final REVIEW: the existing independent-review policy, resolved from actual surviving authorship, configured eligible reviewers, verified capabilities, and capacity. The CONTRACT REVIEW preference does not alter final code-review fallback policy. If no independent reviewer is eligible, wait.
+
+Every stage records the selected provider, model identity, effort, capability/version evidence, policy profile, capacity observation, budget authorization, verified cost basis/ranking, and escalation rationale when applicable. Cost ordering is explicit in existing policy/budget metadata; unknown cost is never treated as zero or as proof that a profile is least-cost. Local AI helpers are optional and non-blocking; their output cannot authorize a stage or replace deterministic evidence.
 
 ## DeepSeek Direct — authorized exception
-- **Not a mandatory routine audit stage.** Allowed as optional explicitly authorized analysis/review/fallback only when both primaries cannot serve the required stage and its tool capabilities satisfy the request.
+- **Never an implicitly required paid stage.** For R01 CONTRACT REVIEW only, DeepSeek Direct is the preferred read-only reviewer when the exact configured model is compatible, capacity is freshly proven, and explicit provider/stage/budget authorization is present. If any condition is missing or uncertain, use the configured AGY alternative; if AGY is also ineligible, wait. This stage-specific preference is not the final code-review policy and does not make a paid call mandatory.
+- Other DeepSeek analysis or final-review/fallback use remains optional and subject to its existing policy, including explicit authorization and any required primary unavailability.
 - Direct API configuration only; `DEEPSEEK_API_KEY` never goes to OpenRouter.
 - Plain API inference does **not** provide coding-tool/skills/write capability. Never treat a text response as proof of native OpenSpec `apply` or `verify`.
-- It does not modify the repo, approve PR/closure or bypass independent review/human gates.
+- CONTRACT REVIEW is strictly read-only and can only return structured contract findings. It cannot authorize APPLY, decide product policy, satisfy final code review, approve a PR, or bypass human merge/closure gates.
 
 ## Qwen local
-Optional advisory helper for mechanical tasks such as log triage, context compaction and summaries. It cannot satisfy implementation review, audit, budget or human gates merely because it is local.
+Optional and non-blocking for preliminary complexity classification, context preparation/reduction, extraction, labeling, and other auxiliary tasks. It must not diagnose failures, implement authoritatively, review security, or make binding decisions. Its absence or failure never stops the pipeline, and it cannot satisfy review, audit, budget, or human gates merely because it is local.
 
 ## OpenRouter drain fallback
 - Disabled/no-spend unless explicitly configured.

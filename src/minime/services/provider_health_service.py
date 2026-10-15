@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import logging
 from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime, timedelta
@@ -105,11 +106,22 @@ class ProviderHealthService:
         """Require a current persisted capacity observation before treating AVAILABLE as usable."""
         self._validate_primary(provider)
         current = now or utc_now()
+        adapter = get_provider_adapter(provider)
+        valid_sources = {
+            s.value
+            for s in getattr(
+                adapter,
+                "valid_capacity_source_signals",
+                {getattr(adapter, "capacity_source_signal", CapacitySignalSource.UNKNOWN)},
+            )
+        }
         for event in self.uow.events.list_events(limit=500):
             if event.event_type != EventType.PROVIDER_CAPACITY_OBSERVED:
                 continue
             payload = event.payload or {}
             if payload.get("provider") != provider:
+                continue
+            if payload.get("source") not in valid_sources:
                 continue
             try:
                 expires_at = datetime.fromisoformat(payload.get("expires_at", ""))
@@ -181,14 +193,32 @@ class ProviderHealthService:
             and observation.source_signal in valid_sources
             and (
                 not getattr(adapter, "requires_account_identity_for_capacity", False)
-                or observation.account_id
+                or (
+                    isinstance(observation.account_id, str)
+                    and bool(observation.account_id.strip())
+                    and (
+                        provider != "antigravity"
+                        or (
+                            len(observation.account_id) == 64
+                            and all(c in "0123456789abcdef" for c in observation.account_id)
+                        )
+                    )
+                )
             )
             and observation.ordinary_usage_allowed in (True, False)
             and observation.observed_at.tzinfo is not None
             and observation.expires_at.tzinfo is not None
             and observation.observed_at <= now + timedelta(seconds=5)
+            and (now - observation.observed_at) <= CAPACITY_OBSERVATION_TTL
             and observation.expires_at > now
             and observation.expires_at - observation.observed_at <= CAPACITY_OBSERVATION_TTL
+            and (
+                observation.capacity_reset_at is None
+                or (
+                    observation.capacity_reset_at.tzinfo is not None
+                    and observation.capacity_reset_at > observation.observed_at
+                )
+            )
         )
         state = (
             "AVAILABLE"
@@ -246,10 +276,15 @@ class ProviderHealthService:
             )
         self.uow.provider_health.save(health)
         account_fingerprint = None
-        if valid and observation and observation.account_id:
-            account_fingerprint = hashlib.sha256(observation.account_id.encode()).hexdigest()
+        if observation and observation.account_id:
+            raw_acc = observation.account_id
+            account_fingerprint = (
+                raw_acc
+                if len(raw_acc) == 64 and all(c in "0123456789abcdef" for c in raw_acc)
+                else hashlib.sha256(raw_acc.encode()).hexdigest()
+            )
         source_session_fingerprint = None
-        if valid and observation and observation.source_session_id:
+        if observation and observation.source_session_id:
             source_session_fingerprint = hashlib.sha256(
                 observation.source_session_id.encode()
             ).hexdigest()
@@ -258,17 +293,17 @@ class ProviderHealthService:
                 event_type=EventType.PROVIDER_CAPACITY_OBSERVED,
                 payload={
                     "provider": provider,
-                    "model": observation.model if valid and observation else None,
+                    "model": observation.model if observation else None,
                     "account_fingerprint": account_fingerprint,
                     "source_session_fingerprint": source_session_fingerprint,
                     "observed_at": observation.observed_at.isoformat()
-                    if valid and observation
+                    if observation
                     else now.isoformat(),
                     "expires_at": observation.expires_at.isoformat()
-                    if valid and observation
+                    if observation
                     else now.isoformat(),
                     "source": observation.source_signal.value
-                    if valid and observation
+                    if observation
                     else CapacitySignalSource.UNKNOWN.value,
                     "ordinary_usage_allowed": observation.ordinary_usage_allowed
                     if valid and observation
@@ -281,7 +316,9 @@ class ProviderHealthService:
         self.uow.commit()
         return state == "AVAILABLE"
 
-    async def refresh_capacity_from_read_only_source(self, provider: str) -> bool:
+    async def refresh_capacity_from_read_only_source(
+        self, provider: str, model: str | None = None
+    ) -> bool:
         """Refresh capacity only from an adapter's explicit non-inference source."""
         self._validate_primary(provider)
         adapter = get_provider_adapter(provider)
@@ -293,7 +330,11 @@ class ProviderHealthService:
         if not await adapter.check_cli_present() or not await adapter.check_auth_ready():
             return self.record_capacity_observation(provider, None)
         try:
-            observation = await reader(timeout_seconds=10.0)
+            reader_sig = inspect.signature(reader)
+            if "selected_model" in reader_sig.parameters:
+                observation = await reader(timeout_seconds=10.0, selected_model=model)
+            else:
+                observation = await reader(timeout_seconds=10.0)
         except Exception:
             logger.info("Read-only capacity source unavailable for %s", provider)
             observation = None

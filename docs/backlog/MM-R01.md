@@ -17,16 +17,16 @@ Las siguientes capacidades deben materializarse como `openspec/changes/real-open
 SHALL aceptar un change READY vinculado duraderamente a (project_id, repo remoto verificado, Issue, change, base SHA). SHALL NOT permitir otra raíz de escritura ni inferir repositorio de título/Project.
 
 ### R01-S02 — Preflight sin cuota
-SHALL verificar herramientas, versión/perfil de OpenSpec, skills/comandos instalados, permisos del worktree, base/head y acceso del agente; detectar auth/capacity con señales no inferentes. SHALL rechazar despacho si falta una condición de seguridad.
+SHALL verificar herramientas, versión/perfil de OpenSpec, skills/comandos instalados, permisos del worktree, base/head, acceso, autorización y capacidad del agente seleccionado. SHALL validar, por etapa (PLAN, CONTRACT REVIEW, APPLY, TEST, VERIFY/E2E y REVIEW), proveedor, modelo y esfuerzo configurados contra el CLI/version/workflow realmente instalado; compatibilidad ausente o desconocida bloquea el despacho. Seleccionará el perfil configurado de menor coste que satisfaga requisitos documentados de complejidad/riesgo y capacidad. Modelos premium y esfuerzo máximo no serán defaults. Cualquier escalamiento requerirá evidencia objetiva, razón persistida, límite finito y autorización de presupuesto. No habrá optimización dinámica ni selector/scheduler paralelo en R01.
 
 ### R01-S03 — Workflow real de agente
-SHALL lanzar la sintaxis de workflow apropiada dentro del CLI de Codex o Antigravity (skill/command instalado), no un ejecutable inexistente `opsx`. SHALL registrar transcript/handoff seguro, versión, invocation, tiempos y artefactos observados. El CLI `openspec` solamente valida/apoya artefactos según sus contratos.
+SHALL aplicar la asignación de R01: Codex PLAN; DeepSeek Direct preferente para CONTRACT REVIEW solo con capacidad read-only compatible, observación fresca y autorización explícita de proveedor/etapa/presupuesto, con AGY como alternativa; AGY APPLY y pruebas de implementación; Codex VERIFY/E2E. La selección de REVIEW final seguirá la política de independencia existente y las capacidades probadas. Cada agente ejecutará su workflow nativo instalado con sintaxis observada, no un ejecutable `opsx` supuesto. SHALL registrar identidad/modelo/esfuerzo, perfil, versión, invocación, tiempos y artefactos observados. El CLI `openspec` solo valida/apoya artefactos según sus contratos.
 
 ### R01-S04 — Workspace/candidato
 SHALL mantener trabajo dentro del worktree propio, registrar commit SHA y diff material, preservar side effects y exigir evidencia de autoría real; prohibido fake implementation/prompt de programador fuera de OpenSpec.
 
 ### R01-S05 — Verificación y revisión independiente
-SHALL ejecutar checks del repo y workflow `verify` cuando esté disponible, exigir revisión por agente/modelo distinto del autor sustancial y aplicar correcciones con `apply` sobre el mismo Change cuando se autoricen. Fallos no generan PASS.
+SHALL ejecutar las pruebas de implementación bajo el perfil TEST aprobado y VERIFY/E2E con Codex contra el candidato congelado. La ausencia/incompatibilidad/capacidad desconocida de Codex SHALL dejar el trabajo esperando, nunca omitir VERIFY. La revisión de contrato será read-only y no autorizará APPLY ni decisiones de producto. La revisión final del código exigirá identidad distinta de todo autor sustancial superviviente y seguirá la política final vigente. Fallos no generan PASS. IA local es opcional y auxiliar; nunca diagnostica fallos, implementa, revisa seguridad o decide de forma vinculante, y su ausencia no bloquea.
 
 ### R01-S06 — PR y autoridad humana
 SHALL crear PR real desde candidate seguro con evidencia, enlace Issue/OpenSpec y checks. SHALL NOT hacer merge ni cerrar el trabajo por existencia del PR.
@@ -38,10 +38,10 @@ SHALL preservar Run/Job original de N01, 4 attempts históricos, modificaciones 
 Los escenarios marcados E0x son la evidencia de producto requerida, nunca pruebas mock-only. **Dado** el entorno descrito; **cuando** se ejecuta el estímulo; **entonces** se observan el resultado y side effects correspondientes.
 
 ### R01-E01 — Ruta verde real
-Dado repo fixture aislado + Change READY válidos, al admitir por la API real, mini me invoca un agente real con el workflow `apply`, modifica código dentro del WT, registra SHA, ejecuta checks, invoca revisor independiente y publica un PR inspeccionable en GitHub. Verificar deltas del código contra escenarios OpenSpec, no solo metadata.
+Dado repo fixture aislado + Change READY válidos y perfiles stage válidos, al admitir por la API real mini me aplica PLAN/CONTRACT REVIEW/APPLY/TEST/VERIFY/E2E/REVIEW con los roles autorizados y realmente compatibles, modifica código solo en el WT, registra SHA, ejecuta checks, obtiene revisión final independiente y publica un PR inspeccionable. El gate de contrato no autoriza APPLY y la revisión final no autoriza merge. Verificar deltas del código contra escenarios OpenSpec, no solo metadata.
 
 ### R01-E02 — Invocación nativa
-Con perfil Codex y luego Antigravity en fixture autorizada, observar en los traces que se cargó el skill/workflow correcto. Una instrucción textual genérica o `openspec validate` **no** cuentan como ejecución `apply`.
+Con AGY en APPLY y Codex en PLAN/VERIFY-E2E sobre fixture autorizada, observar en trazas que cada CLI cargó el workflow nativo correcto y que modelo/esfuerzo son admitidos por esa versión. Una instrucción textual genérica o `openspec validate` **no** cuentan como ejecución `apply`.
 
 ### R01-E03 — Denegación previa
 Inducir skill ausente, CLI desinstalado, auth inválida, cuota insuficiente, path escape y remote distinto; ninguna inferencia ni mutación externa ocurre y la UI/API informa motivo.
@@ -60,12 +60,14 @@ En servidor QA/despliegue autorizado, repetir una ejecución de bajo costo por e
 
 ## Work packages incluidos en este mismo Change
 - Rastrear exactamente los puntos de entrada en execution_pipeline.py, orchestration_service.py, implementer_runner.py, adapter OpenSpec y manager de worktrees; especificar *qué se conserva* y *qué se redirige* al skill del agente.
-- Introducir contrato de invocación stage/workflow/proveedor, con manejo de salida normalizada, timeout, worktree, cancel/resume, versionado de tool y proof of tool use. Sin reimplementar apply.
+- Extender la configuración de etapa y el resolver/autoridades existentes para perfiles independientes de provider/model/effort; validar capacidades reales del CLI/version, registrar selección y autorización, aplicar menor coste suficiente y rechazar escalamiento sin evidencia, límite y presupuesto aprobados. No agregar selector/scheduler paralelo ni optimizador dinámico.
+- Introducir contrato de invocación stage/workflow/proveedor, con manejo de salida normalizada, timeout, worktree, cancel/resume, versionado de tool y proof of tool use. Codex planifica y verifica; AGY aplica y ejecuta pruebas de implementación. CONTRACT REVIEW DeepSeek-preferente con condiciones explícitas y alternativa AGY; final REVIEW sigue independencia existente. Sin reimplementar workflows.
+- Mantener IA local opcional y no bloqueante para clasificación preliminar de complejidad, preparación/reducción de contexto, extracción, etiquetas y tareas auxiliares; nunca diagnóstico, implementación autoritativa, revisión de seguridad o decisión vinculante.
 - Definir una fixture pequeña, no el repositorio mini me como primer experimento destructivo; generar PR real desde base real, human merge obligatorio.
 - Implementar verificaciones de regresión E2E desde el inicio y rollback sin pérdida de Run/Job.
 
 ## Exclusiones y guard de no-desviación
-NO rediseñar todavía intake GitHub→propose, cierre posmerge completo, routing dinámico, dashboard cosmético ni auto-merge. No bloquear el primer PR esperando una plataforma genérica de skills.
+NO rediseñar todavía intake GitHub→propose, cierre posmerge completo, optimización dinámica de selección, benchmarking/auto-aprendizaje de perfiles, plataforma genérica de skills, dashboard cosmético ni auto-merge. R01 incluye únicamente configuración estática por etapa, validación de capacidades reales, aplicación de la asignación aprobada y escalamiento gobernado por evidencia/presupuesto; los optimizadores, clasificación automática vinculante y selección predictiva quedan para Changes posteriores. No bloquear un flujo por la indisponibilidad de IA local.
 
 ## Evidencia exigida para marcar E2E_PASS y DEPLOYED_VERIFIED
 Un PR de fixture creado realmente por mini me, un commit de código funcional, run/job/attempt con identidad real del agente y workflow OpenSpec, reviewer distinto, checks y E2E verificables, URLs y digest de despliegue, evidencia de preservación N01.

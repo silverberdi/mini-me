@@ -37,14 +37,22 @@ class NativeOpenSpecApplyWorkflow:
 
     def dispatch_instruction(self) -> str:
         """Return a bounded request to invoke the installed native workflow."""
-        if self.provider != "codex":
+        if self.provider == "codex":
+            invocation_cmd = (
+                f"Invoke the installed Codex skill now: $openspec-apply-change {self.change_name}"
+            )
+        elif self.provider in ("antigravity", "agy"):
+            invocation_cmd = (
+                f"Invoke the installed Antigravity skill now: /opsx-apply {self.change_name}"
+            )
+        else:
             raise NativeOpenSpecWorkflowUnavailable(
                 f"Native apply invocation evidence is not implemented for provider '{self.provider}'."
             )
         return "\n".join(
             [
                 "NATIVE OPENSPEC APPLY DISPATCH",
-                f"Invoke the installed Codex skill now: $openspec-apply-change {self.change_name}",
+                invocation_cmd,
                 f"Installed skill path: {self.workflow_path}",
                 f"Installed skill SHA-256: {self.workflow_sha256}",
                 "AUTHORIZED APPLY IDENTITY (read-only context; durable binding remains authoritative):",
@@ -70,14 +78,16 @@ _CHANGE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 _SKILL_NAME_RE = re.compile(r"(?m)^name:\s*([A-Za-z0-9._-]+)\s*$")
 _SKILL_VERSION_RE = re.compile(r"(?m)^\s+version:\s*['\"]?([A-Za-z0-9._-]+)['\"]?\s*$")
 CODEX_APPLY_SKILL_PATH = ".agents/skills/openspec-apply-change/SKILL.md"
+AGY_APPLY_SKILL_PATH = ".agent/skills/openspec-apply-change/SKILL.md"
 NATIVE_APPLY_CHANGE_RE = re.compile(r"\$openspec-apply-change\s+([a-z0-9][a-z0-9._-]{0,127})")
 NATIVE_APPLY_SKILL_SHA_RE = re.compile(r"Installed skill SHA-256:\s*([0-9a-f]{64})")
 
 
-def resolve_codex_openspec_apply(
+def resolve_native_openspec_apply(
     worktree_root: str | Path,
     change_name: str,
     *,
+    provider: str = "antigravity",
     project_id: str | None = None,
     repository_identity: str | None = None,
     run_id: str | None = None,
@@ -86,21 +96,31 @@ def resolve_codex_openspec_apply(
     generation: int | None = None,
     base_sha: str | None = None,
 ) -> NativeOpenSpecApplyWorkflow:
-    """Resolve the exact repo-local Codex apply skill without following escapes."""
+    """Resolve the exact repo-local provider apply skill without following escapes."""
     if not _CHANGE_NAME_RE.fullmatch(change_name):
         raise NativeOpenSpecWorkflowUnavailable("OpenSpec change name is not a safe slug.")
 
     root = Path(worktree_root).resolve(strict=True)
-    relative_skill = Path(CODEX_APPLY_SKILL_PATH)
+    prov = provider.lower()
+    if prov == "codex":
+        relative_skill = Path(CODEX_APPLY_SKILL_PATH)
+        check_parts = (".agents", ".agents/skills", ".agents/skills/openspec-apply-change")
+        prov_label = "Codex"
+    elif prov in ("antigravity", "agy"):
+        relative_skill = Path(AGY_APPLY_SKILL_PATH)
+        check_parts = (".agent", ".agent/skills", ".agent/skills/openspec-apply-change")
+        prov_label = "Antigravity"
+    else:
+        raise NativeOpenSpecWorkflowUnavailable(
+            f"Native apply workflow is not supported for provider '{provider}'."
+        )
+
     skill_path = root / relative_skill
-    if any(
-        (root / part).is_symlink()
-        for part in (".agents", ".agents/skills", ".agents/skills/openspec-apply-change")
-    ):
+    if any((root / part).is_symlink() for part in check_parts):
         raise NativeOpenSpecWorkflowUnavailable("Installed OpenSpec skill path contains a symlink.")
     if skill_path.is_symlink() or not skill_path.is_file():
         raise NativeOpenSpecWorkflowUnavailable(
-            "Installed Codex OpenSpec apply skill is missing or not a regular file."
+            f"Installed {prov_label} OpenSpec apply skill is missing or not a regular file."
         )
 
     resolved_skill = skill_path.resolve(strict=True)
@@ -124,7 +144,7 @@ def resolve_codex_openspec_apply(
             "Installed OpenSpec apply skill has no version metadata."
         )
     return NativeOpenSpecApplyWorkflow(
-        provider="codex",
+        provider=prov,
         workflow_name=name_match.group(1),
         workflow_path=relative_skill.as_posix(),
         workflow_sha256=hashlib.sha256(content).hexdigest(),
@@ -140,12 +160,40 @@ def resolve_codex_openspec_apply(
     )
 
 
+def resolve_codex_openspec_apply(
+    worktree_root: str | Path,
+    change_name: str,
+    *,
+    project_id: str | None = None,
+    repository_identity: str | None = None,
+    run_id: str | None = None,
+    job_id: str | None = None,
+    attempt_id: str | None = None,
+    generation: int | None = None,
+    base_sha: str | None = None,
+) -> NativeOpenSpecApplyWorkflow:
+    """Resolve the exact repo-local Codex apply skill without following escapes."""
+    return resolve_native_openspec_apply(
+        worktree_root=worktree_root,
+        change_name=change_name,
+        provider="codex",
+        project_id=project_id,
+        repository_identity=repository_identity,
+        run_id=run_id,
+        job_id=job_id,
+        attempt_id=attempt_id,
+        generation=generation,
+        base_sha=base_sha,
+    )
+
+
 def workflow_unchanged(worktree_root: str | Path, workflow: NativeOpenSpecApplyWorkflow) -> bool:
     """Confirm the skill source used for preflight was not altered during APPLY."""
     try:
-        current = resolve_codex_openspec_apply(
+        current = resolve_native_openspec_apply(
             worktree_root,
             workflow.change_name,
+            provider=workflow.provider,
             project_id=workflow.project_id,
             repository_identity=workflow.repository_identity,
             run_id=workflow.run_id,
