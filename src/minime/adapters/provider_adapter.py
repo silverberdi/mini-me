@@ -130,12 +130,26 @@ class ProviderAdapterInterface(ABC):
         del timeout_seconds
         return None
 
+    async def discover_account_capabilities(self, timeout_seconds: float = 10.0) -> dict[str, Any]:
+        """Discover model and effort capabilities from installed CLI / account without inference."""
+        del timeout_seconds
+        return {}
+
+    async def check_model_supported(
+        self, model: str, effort: str | None = None, timeout_seconds: float = 10.0
+    ) -> tuple[bool, str | None]:
+        """Validate if model and effort are supported by the active account / installed CLI."""
+        del model, effort, timeout_seconds
+        return True, None
+
 
 class CodexProviderAdapter(ProviderAdapterInterface):
     """Provider adapter for OpenAI Codex CLI."""
 
     def __init__(self, executable: str = "codex"):
         self._executable = executable
+        self._cached_capabilities: dict[str, Any] | None = None
+        self._capabilities_expires_at: datetime | None = None
 
     @property
     def probe_is_expensive(self) -> bool:
@@ -210,6 +224,84 @@ class CodexProviderAdapter(ProviderAdapterInterface):
         observation = await self.read_capacity_observation(timeout_seconds=timeout_seconds)
         return observation is not None and observation.ordinary_usage_allowed is True
 
+    async def _call_app_server_method(
+        self, method: str, params: dict | None = None, timeout_seconds: float = 10.0
+    ) -> dict | None:
+        search_path = (
+            f"{Path.home()}/.local/bin:/opt/homebrew/bin:/usr/local/bin:"
+            f"{os.environ.get('PATH', '')}"
+        )
+        resolved = shutil.which(self._executable, path=search_path)
+        if not resolved:
+            return None
+
+        proc = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                resolved,
+                "app-server",
+                "--stdio",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            if proc.stdin is None or proc.stdout is None:
+                return None
+            initialize = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "clientInfo": {
+                        "name": "mini-me-app-server-client",
+                        "title": "mini me app server client",
+                        "version": "1.0",
+                    },
+                    "capabilities": {},
+                },
+            }
+            proc.stdin.write((json.dumps(initialize) + "\n").encode())
+            await proc.stdin.drain()
+            init_response = await self._read_app_server_response(
+                proc.stdout, response_id=1, timeout_seconds=timeout_seconds
+            )
+            if init_response is None or "error" in init_response:
+                return None
+
+            proc.stdin.write(
+                (
+                    json.dumps({"jsonrpc": "2.0", "method": "initialized", "params": {}}) + "\n"
+                ).encode()
+            )
+            await proc.stdin.drain()
+            request = {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": method,
+                "params": params or {},
+            }
+            proc.stdin.write((json.dumps(request) + "\n").encode())
+            await proc.stdin.drain()
+            response = await self._read_app_server_response(
+                proc.stdout, response_id=2, timeout_seconds=timeout_seconds
+            )
+            if response is None or "error" in response:
+                return None
+            return response.get("result")
+        except (OSError, asyncio.TimeoutError, ValueError, json.JSONDecodeError):
+            return None
+        finally:
+            if proc is not None:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                try:
+                    await proc.wait()
+                except Exception:
+                    pass
+
     async def read_capacity_observation(self, timeout_seconds: float = 10.0) -> CapacityObservation:
         """Read the installed App Server's account rate-limit contract without a turn.
 
@@ -226,84 +318,83 @@ class CodexProviderAdapter(ProviderAdapterInterface):
             expires_at=expires_at,
             source_signal=CapacitySignalSource.CODEX_APP_SERVER,
         )
-        search_path = (
-            f"{Path.home()}/.local/bin:/opt/homebrew/bin:/usr/local/bin:"
-            f"{os.environ.get('PATH', '')}"
+        result = await self._call_app_server_method(
+            "account/rateLimits/read", timeout_seconds=timeout_seconds
         )
-        resolved = shutil.which(self._executable, path=search_path)
-        if not resolved:
+        if result is None:
             return unresolved
+        return self.parse_rate_limits_result(
+            result,
+            observed_at=observed_at,
+            expires_at=expires_at,
+        )
 
-        proc = None
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                resolved,
-                "app-server",
-                "--stdio",
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-                start_new_session=True,
-            )
-            initialize = {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "clientInfo": {
-                        "name": "mini-me-capacity-read",
-                        "title": "mini me capacity read",
-                        "version": "1.0",
-                    },
-                    "capabilities": {},
-                },
-            }
-            if proc.stdin is None or proc.stdout is None:
-                return unresolved
-            proc.stdin.write((json.dumps(initialize) + "\n").encode())
-            await proc.stdin.drain()
-            init_response = await self._read_app_server_response(
-                proc.stdout, response_id=1, timeout_seconds=timeout_seconds
-            )
-            if init_response is None or "error" in init_response:
-                return unresolved
+    async def discover_account_capabilities(self, timeout_seconds: float = 10.0) -> dict[str, Any]:
+        """Query Codex App Server model/list via stdio (0 inference tokens)."""
+        now = datetime.now(UTC)
+        if (
+            self._cached_capabilities is not None
+            and self._capabilities_expires_at is not None
+            and now < self._capabilities_expires_at
+        ):
+            return self._cached_capabilities
 
-            proc.stdin.write(
-                (
-                    json.dumps({"jsonrpc": "2.0", "method": "initialized", "params": {}}) + "\n"
-                ).encode()
+        result = await self._call_app_server_method("model/list", timeout_seconds=timeout_seconds)
+        if not isinstance(result, dict):
+            return self._cached_capabilities or {}
+        data = result.get("data")
+        if not isinstance(data, list):
+            return self._cached_capabilities or {}
+
+        models: dict[str, list[str]] = {}
+        for item in data:
+            if isinstance(item, dict) and "id" in item:
+                m_id = str(item["id"]).strip().lower()
+                efforts_raw = item.get("supportedReasoningEfforts", [])
+                efforts: list[str] = []
+                if isinstance(efforts_raw, list):
+                    for e in efforts_raw:
+                        if isinstance(e, dict) and "reasoningEffort" in e:
+                            efforts.append(str(e["reasoningEffort"]).strip().lower())
+                        elif isinstance(e, str):
+                            efforts.append(e.strip().lower())
+                models[m_id] = efforts
+
+        caps = {"models": models}
+        self._cached_capabilities = caps
+        self._capabilities_expires_at = now + timedelta(seconds=60)
+        return caps
+
+    async def check_model_supported(
+        self, model: str, effort: str | None = None, timeout_seconds: float = 10.0
+    ) -> tuple[bool, str | None]:
+        """Validate model and effort against active Codex account models from model/list."""
+        caps = await self.discover_account_capabilities(timeout_seconds=timeout_seconds)
+        models = caps.get("models", {})
+        if not models:
+            if not await self.check_cli_present():
+                return False, "EXECUTABLE_MISSING: Codex executable not found"
+            return (
+                False,
+                "CAPABILITY_DISCOVERY_UNAVAILABLE: Unable to discover models from Codex app-server",
             )
-            request = {
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "account/rateLimits/read",
-                "params": {},
-            }
-            proc.stdin.write((json.dumps(request) + "\n").encode())
-            await proc.stdin.drain()
-            response = await self._read_app_server_response(
-                proc.stdout, response_id=2, timeout_seconds=timeout_seconds
+        norm_model = model.strip().lower()
+        if norm_model not in models:
+            return (
+                False,
+                f"MODEL_ABSENT_FROM_ACCOUNT: Model '{model}' is absent from active Codex account. "
+                f"Available: {sorted(models.keys())}",
             )
-            if response is None or "error" in response:
-                return unresolved
-            result = response.get("result")
-            return self.parse_rate_limits_result(
-                result,
-                observed_at=observed_at,
-                expires_at=expires_at,
-            )
-        except (OSError, asyncio.TimeoutError, ValueError, json.JSONDecodeError):
-            return unresolved
-        finally:
-            if proc is not None:
-                try:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
-                try:
-                    await proc.wait()
-                except Exception:
-                    pass
+        if effort:
+            norm_effort = effort.strip().lower()
+            supported_efforts = models[norm_model]
+            if supported_efforts and norm_effort not in supported_efforts:
+                return (
+                    False,
+                    f"EFFORT_UNSUPPORTED_FOR_MODEL: Effort '{effort}' is not supported for model '{model}'. "
+                    f"Supported efforts: {sorted(supported_efforts)}",
+                )
+        return True, None
 
     @staticmethod
     def parse_rate_limits_result(
@@ -426,6 +517,85 @@ class AntigravityProviderAdapter(ProviderAdapterInterface):
     def __init__(self, executable: str = "agy", model: str | None = None):
         self._executable = executable
         self._model = model
+        self._cached_capabilities: dict[str, Any] | None = None
+        self._capabilities_expires_at: datetime | None = None
+
+    async def discover_account_capabilities(self, timeout_seconds: float = 10.0) -> dict[str, Any]:
+        """Discover model and effort capabilities via agy models (0 inference tokens)."""
+        now = datetime.now(UTC)
+        if (
+            self._cached_capabilities is not None
+            and self._capabilities_expires_at is not None
+            and now < self._capabilities_expires_at
+        ):
+            return self._cached_capabilities
+
+        resolved = self._resolve_executable()
+        if not resolved:
+            return self._cached_capabilities or {}
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                resolved,
+                "models",
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
+            if proc.returncode != 0:
+                return self._cached_capabilities or {}
+            out_str = stdout.decode("utf-8", errors="replace")
+            models: list[str] = []
+            for line in out_str.splitlines():
+                line = line.strip()
+                if not line or "Fetching" in line or line.startswith("⠋"):
+                    continue
+                parts = line.split()
+                if parts:
+                    slug = parts[0].strip().lower()
+                    if slug and not slug.startswith("⠋"):
+                        models.append(slug)
+            efforts = ["low", "medium", "high", "xhigh", "max"]
+            caps_dict = {"models": models, "efforts": efforts}
+            self._cached_capabilities = caps_dict
+            self._capabilities_expires_at = now + timedelta(seconds=60)
+            return caps_dict
+        except Exception as exc:
+            logger.debug(f"Antigravity capability discovery failed: {exc}")
+            return self._cached_capabilities or {}
+
+    async def check_model_supported(
+        self, model: str, effort: str | None = None, timeout_seconds: float = 10.0
+    ) -> tuple[bool, str | None]:
+        """Validate model and effort against Antigravity models and CLI capabilities."""
+        caps = await self.discover_account_capabilities(timeout_seconds=timeout_seconds)
+        models = caps.get("models", [])
+        if not models:
+            if not await self.check_cli_present():
+                return False, "EXECUTABLE_MISSING: Antigravity executable not found"
+            return (
+                False,
+                "CAPABILITY_DISCOVERY_UNAVAILABLE: Unable to discover models from Antigravity CLI",
+            )
+        norm_model = model.strip().lower()
+        if norm_model not in models:
+            return (
+                False,
+                f"MODEL_ABSENT_FROM_ACCOUNT: Model '{model}' is absent from active Antigravity account catalog. "
+                f"Available: {sorted(models)}",
+            )
+        if effort:
+            norm_effort = effort.strip().lower()
+            efforts = caps.get("efforts", ["low", "medium", "high"])
+            if norm_effort not in efforts:
+                return (
+                    False,
+                    f"EFFORT_UNSUPPORTED_FOR_MODEL: Effort '{effort}' is not supported by Antigravity CLI. "
+                    f"Supported efforts: {sorted(efforts)}",
+                )
+        return True, None
 
     @property
     def supports_read_only_capacity_observation(self) -> bool:

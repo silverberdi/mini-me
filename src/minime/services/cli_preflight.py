@@ -64,6 +64,20 @@ async def preflight_cli_invocation(
         if provider_efforts is not None and profile.effort.lower() not in provider_efforts:
             return PreflightResult(ok=False, reason="UNSUPPORTED_EFFORT")
 
+    # Validate account/CLI non-inferential capabilities via provider adapter if model is specified
+    if profile.model:
+        try:
+            from minime.adapters.provider_adapter import get_provider_adapter
+
+            adapter = get_provider_adapter(profile.provider.lower())
+            supported, reason = await adapter.check_model_supported(
+                profile.model, effort=profile.effort, timeout_seconds=timeout
+            )
+            if not supported:
+                return PreflightResult(ok=False, reason=reason or "UNSUPPORTED_ACCOUNT_CAPABILITY")
+        except Exception:
+            pass
+
     flags = _flag_tokens(profile.args)
     subcommand = _subcommand(profile.args)
     if subcommand:

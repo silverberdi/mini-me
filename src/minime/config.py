@@ -56,6 +56,14 @@ SUPPORTED_PROVIDER_MODELS: dict[str, dict[str, bool]] = {
         "claude-opus-5-5-high": True,
     },
     "codex": {
+        "gpt-5.6-luna": False,
+        "gpt-6-luna": False,
+        "gpt-5.6-sol": True,
+        "gpt-5.6-terra": True,
+        "gpt-6-sol": True,
+        "gpt-6.1-sol": True,
+        "gpt-6-astra": True,
+        "gpt-5.5": False,
         "gpt-4o-mini": False,
         "o3-mini": False,
         "codex-mini": False,
@@ -72,14 +80,14 @@ SUPPORTED_PROVIDER_MODELS: dict[str, dict[str, bool]] = {
 
 SUPPORTED_PROVIDER_EFFORTS: dict[str, set[str]] = {
     "antigravity": {"low", "medium", "high", "xhigh", "max"},
-    "codex": {"low", "medium", "high"},
+    "codex": {"low", "medium", "high", "xhigh", "max"},
     "deepseek": {"low", "medium"},
 }
 
 DEFAULT_R01_STAGE_PROFILES: dict[str, StageProfileConfig] = {
     "PLAN": StageProfileConfig(
         provider="codex",
-        model="gpt-4o-mini",
+        model="gpt-5.6-luna",
         effort="medium",
         workflow="openspec-propose",
     ),
@@ -103,13 +111,13 @@ DEFAULT_R01_STAGE_PROFILES: dict[str, StageProfileConfig] = {
     ),
     "VERIFY": StageProfileConfig(
         provider="codex",
-        model="gpt-4o-mini",
+        model="gpt-5.6-luna",
         effort="medium",
         workflow="openspec-verify-change",
     ),
     "REVIEW": StageProfileConfig(
         provider="codex",
-        model="gpt-4o-mini",
+        model="gpt-5.6-luna",
         effort="medium",
         workflow="review",
     ),

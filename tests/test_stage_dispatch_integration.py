@@ -404,10 +404,13 @@ async def test_antigravity_apply_operational_dispatch_effective_arguments(
         mock_run_confined_async_subprocess,
     )
 
-    # Preflight JIT check against binary/flags should succeed
+    async def mock_capacity_refresh(provider, model=None):
+        return True
+
     monkeypatch.setattr(
-        "minime.services.execution_pipeline.preflight_cli_invocation",
-        lambda profile: PreflightResult(ok=True),
+        pipeline.health_service,
+        "refresh_capacity_from_read_only_source",
+        mock_capacity_refresh,
     )
 
     claim = _acquire_claim(in_memory_uow)
@@ -443,10 +446,10 @@ async def test_codex_apply_operational_dispatch_effective_arguments(
 ):
     """Prove the complete operational flow for Codex APPLY.
 
-    Validates: stage selection -> stage profile -> JIT preflight -> runner dispatch.
-    Intercepts subprocess execution without calling any external provider inference,
-    verifying effective arguments (--model gpt-4o-mini, model_reasoning_effort="medium")
-    and the native $openspec-apply-change instruction on stdin.
+    Validates: stage selection -> stage profile -> discovery of authentic account model ->
+    JIT preflight -> runner dispatch. Intercepts subprocess execution without calling any
+    external provider inference, verifying effective arguments (--model gpt-5.5,
+    model_reasoning_effort="medium") and the native $openspec-apply-change instruction on stdin.
     """
     workspace = tmp_path / "candidate-worktree"
     project, job, _ = _seed_operational_workspace(
@@ -454,6 +457,18 @@ async def test_codex_apply_operational_dispatch_effective_arguments(
     )
 
     app_cfg = _build_test_app_config()
+    app_cfg.projects["test-project"] = ProjectConfig(
+        repository="test-org/test-repo",
+        external_providers_allowed=["codex", "antigravity"],
+        stage_profiles={
+            "APPLY": StageProfileConfig(
+                provider="codex",
+                model="gpt-5.6-luna",
+                effort="medium",
+                workflow="openspec-apply-change",
+            )
+        },
+    )
     pipeline = ExecutionPipelineService(
         in_memory_uow,
         project_root=tmp_path,
@@ -485,9 +500,14 @@ async def test_codex_apply_operational_dispatch_effective_arguments(
         "run_confined_async_subprocess",
         mock_run_confined_async_subprocess,
     )
+
+    async def mock_capacity_refresh(provider, model=None):
+        return True
+
     monkeypatch.setattr(
-        "minime.services.execution_pipeline.preflight_cli_invocation",
-        lambda profile: PreflightResult(ok=True),
+        pipeline.health_service,
+        "refresh_capacity_from_read_only_source",
+        mock_capacity_refresh,
     )
 
     claim = _acquire_claim(in_memory_uow)
@@ -500,7 +520,7 @@ async def test_codex_apply_operational_dispatch_effective_arguments(
     cmd = call["cmd"]
     assert "--model" in cmd
     model_idx = cmd.index("--model")
-    assert cmd[model_idx + 1] == "gpt-4o-mini"
+    assert cmd[model_idx + 1] == "gpt-5.6-luna"
 
     # Check reasoning effort configuration
     cmd_str = " ".join(cmd)
@@ -510,6 +530,113 @@ async def test_codex_apply_operational_dispatch_effective_arguments(
     stdin_text = call["input_bytes"].decode("utf-8")
     assert "$openspec-apply-change test-operational-change" in stdin_text
     assert "CANDIDATE WORKSPACE" in stdin_text
+
+
+@pytest.mark.asyncio
+async def test_rejection_of_model_absent_from_codex_account_fails_closed_before_runner(
+    in_memory_uow, tmp_path, monkeypatch
+):
+    """Prove gpt-4o-mini is rejected before runner dispatch when absent from the active Codex account."""
+    workspace = tmp_path / "candidate-worktree"
+    project, job, _ = _seed_operational_workspace(
+        in_memory_uow, workspace, implementer="codex", reviewer="antigravity"
+    )
+
+    app_cfg = _build_test_app_config()
+    app_cfg.projects["test-project"] = ProjectConfig(
+        repository="test-org/test-repo",
+        external_providers_allowed=["codex", "antigravity"],
+        stage_profiles={
+            "APPLY": StageProfileConfig(
+                provider="codex",
+                model="gpt-4o-mini",
+                effort="medium",
+                workflow="openspec-apply-change",
+            )
+        },
+    )
+
+    pipeline = ExecutionPipelineService(
+        in_memory_uow,
+        project_root=tmp_path,
+        app_config=app_cfg,
+        worktree_manager=OperationalTestWorktreeManager(workspace),
+    )
+
+    intercepted: list[str] = []
+
+    async def mock_run_fail(self, *args, **kwargs):
+        intercepted.append("subprocess")
+        raise AssertionError("Subprocess must not be invoked when model is absent from account")
+
+    monkeypatch.setattr(
+        AgentProcessConfinement,
+        "run_confined_async_subprocess",
+        mock_run_fail,
+    )
+
+    claim = _acquire_claim(in_memory_uow)
+
+    result_job = await pipeline.execute_queued_job(job.job_id, claim_context=claim)
+
+    assert result_job.status == JobStatus.NEEDS_HUMAN
+    assert "MODEL_ABSENT_FROM_ACCOUNT" in (result_job.error_message or "")
+    assert "gpt-4o-mini" in (result_job.error_message or "")
+    assert intercepted == []
+
+
+@pytest.mark.asyncio
+async def test_rejection_of_effort_unsupported_by_codex_model_fails_closed_before_runner(
+    in_memory_uow, tmp_path, monkeypatch
+):
+    """Prove unsupported effort for a model fails closed before runner dispatch."""
+    workspace = tmp_path / "candidate-worktree"
+    project, job, _ = _seed_operational_workspace(
+        in_memory_uow, workspace, implementer="codex", reviewer="antigravity"
+    )
+
+    app_cfg = _build_test_app_config()
+    app_cfg.projects["test-project"] = ProjectConfig(
+        repository="test-org/test-repo",
+        external_providers_allowed=["codex", "antigravity"],
+        stage_profiles={
+            "APPLY": StageProfileConfig(
+                provider="codex",
+                model="gpt-5.5",
+                effort="invalid-effort",
+                workflow="openspec-apply-change",
+            )
+        },
+    )
+
+    pipeline = ExecutionPipelineService(
+        in_memory_uow,
+        project_root=tmp_path,
+        app_config=app_cfg,
+        worktree_manager=OperationalTestWorktreeManager(workspace),
+    )
+
+    intercepted: list[str] = []
+
+    async def mock_run_fail(self, *args, **kwargs):
+        intercepted.append("subprocess")
+        raise AssertionError("Subprocess must not be invoked when effort is unsupported")
+
+    monkeypatch.setattr(
+        AgentProcessConfinement,
+        "run_confined_async_subprocess",
+        mock_run_fail,
+    )
+
+    claim = _acquire_claim(in_memory_uow)
+
+    result_job = await pipeline.execute_queued_job(job.job_id, claim_context=claim)
+
+    assert result_job.status == JobStatus.NEEDS_HUMAN
+    assert "UNSUPPORTED_EFFORT" in (
+        result_job.error_message or ""
+    ) or "EFFORT_UNSUPPORTED_FOR_MODEL" in (result_job.error_message or "")
+    assert intercepted == []
 
 
 @pytest.mark.asyncio
@@ -754,10 +881,19 @@ async def test_rejection_of_jit_cli_preflight_failure_fails_closed_before_runner
         worktree_manager=OperationalTestWorktreeManager(workspace),
     )
 
-    # Simulate JIT preflight failure (e.g. executable missing)
+    async def mock_capacity_refresh(provider, model=None):
+        return True
+
+    monkeypatch.setattr(
+        pipeline.health_service,
+        "refresh_capacity_from_read_only_source",
+        mock_capacity_refresh,
+    )
+
+    # Simulate JIT preflight flag verification failure
     monkeypatch.setattr(
         "minime.services.execution_pipeline.preflight_cli_invocation",
-        lambda profile: PreflightResult(ok=False, reason="EXECUTABLE_MISSING"),
+        lambda profile: PreflightResult(ok=False, reason="FLAG_MISSING"),
     )
 
     intercepted: list[str] = []
@@ -777,9 +913,7 @@ async def test_rejection_of_jit_cli_preflight_failure_fails_closed_before_runner
     result_job = await pipeline.execute_queued_job(job.job_id, claim_context=claim)
 
     assert result_job.status == JobStatus.NEEDS_HUMAN
-    assert "Implementer CLI preflight failed: EXECUTABLE_MISSING" in (
-        result_job.error_message or ""
-    )
+    assert "Implementer CLI preflight failed: FLAG_MISSING" in (result_job.error_message or "")
     assert intercepted == []
 
 

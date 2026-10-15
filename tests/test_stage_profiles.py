@@ -50,7 +50,7 @@ def test_default_r01_stage_profiles_resolve_non_premium(default_project):
     # Specific role assignments from R01 spec:
     plan = resolve_stage_profile(default_project, OpenSpecStage.PLAN)
     assert plan.provider == "codex"
-    assert plan.model == "gpt-4o-mini"
+    assert plan.model == "gpt-5.6-luna"
     assert plan.workflow == "openspec-propose"
 
     apply_profile = resolve_stage_profile(default_project, OpenSpecStage.APPLY)
@@ -67,7 +67,7 @@ def test_default_r01_stage_profiles_resolve_non_premium(default_project):
     verify_profile = resolve_stage_profile(default_project, "VERIFY_E2E")
     assert verify_profile.stage == "VERIFY"
     assert verify_profile.provider == "codex"
-    assert verify_profile.model == "gpt-4o-mini"
+    assert verify_profile.model == "gpt-5.6-luna"
 
 
 def test_stage_profile_rejects_premium_model_by_default(default_project):
@@ -261,9 +261,9 @@ def test_cli_invocation_args_include_model_and_effort(default_project):
 
     resolved_codex = resolve_stage_profile(default_project, OpenSpecStage.PLAN)
     assert resolved_codex.cli_invocation is not None
-    assert resolved_codex.cli_invocation.model == "gpt-4o-mini"
+    assert resolved_codex.cli_invocation.model == "gpt-5.6-luna"
     assert "--model" in resolved_codex.cli_invocation.args
-    assert "gpt-4o-mini" in resolved_codex.cli_invocation.args
+    assert "gpt-5.6-luna" in resolved_codex.cli_invocation.args
 
 
 @pytest.mark.skipif(shutil.which("agy") is None, reason="agy CLI not installed")

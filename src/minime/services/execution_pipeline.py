@@ -539,6 +539,19 @@ class ExecutionPipelineService:
                 job = self._transition(job, JobStatus.NEEDS_HUMAN, reason)
                 return job
 
+            # Validate account and model capabilities before worktree creation or runner dispatch:
+            if self.implementer_runner is None:
+                from minime.adapters.provider_adapter import get_provider_adapter
+
+                adapter = get_provider_adapter(apply_profile.provider, self.app_config)
+                supported, check_reason = await adapter.check_model_supported(
+                    apply_profile.model, effort=apply_profile.effort
+                )
+                if not supported:
+                    reason = f"Account capability check rejected for APPLY: {check_reason}"
+                    job = self._transition(job, JobStatus.NEEDS_HUMAN, reason)
+                    return job
+
             # A pre-admission sample may expire while the job is queued. Refresh
             # immediately before creating an attempt or dispatching the implementer.
             effective_implementer = apply_profile.provider
@@ -1883,6 +1896,27 @@ class ExecutionPipelineService:
                 )
                 job = self._transition(job, JobStatus.NEEDS_HUMAN, err_msg)
                 return job
+
+            if review_profile and self.reviewer_runner is None:
+                from minime.adapters.provider_adapter import get_provider_adapter
+
+                rev_adapter = get_provider_adapter(review_profile.provider, self.app_config)
+                rev_supported, rev_reason = await rev_adapter.check_model_supported(
+                    review_profile.model, effort=review_profile.effort
+                )
+                if not rev_supported:
+                    err_msg = f"Account capability check rejected for REVIEW: {rev_reason}"
+                    self._save_event(
+                        EventType.REVIEW_POLICY_VIOLATION,
+                        job,
+                        {
+                            "error": err_msg,
+                            "implementer": current_executor,
+                            "reviewer": effective_reviewer,
+                        },
+                    )
+                    job = self._transition(job, JobStatus.NEEDS_HUMAN, err_msg)
+                    return job
 
             # Checks may take minutes; admission-time reviewer capacity is not
             # reusable here. Refresh just before entering the review stage.
