@@ -1,14 +1,25 @@
 """Tests for per-stage profile resolution, model/effort capability, and CLI compatibility."""
 
+import asyncio
 import shutil
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from minime.adapters.provider_adapter import (
+    AntigravityProviderAdapter,
+    CodexProviderAdapter,
+    OpenRouterProviderAdapter,
+)
 from minime.config import (
+    AppConfig,
+    CliInvocationConfig,
     OpenSpecStage,
     ProjectConfig,
+    ProviderConfig,
     StageProfileConfig,
     StageProfileError,
+    resolve_cli_invocation,
     resolve_stage_profile,
 )
 from minime.services.cli_preflight import preflight_cli_invocation
@@ -248,33 +259,326 @@ def test_stage_profile_rejects_same_author_reviewer_collision(default_project):
         )
 
 
-def test_cli_invocation_args_include_model_and_effort(default_project):
-    """Prove resolved CLI invocation includes validated model and effort arguments."""
+def test_cli_invocation_args_include_exact_model_variant_and_codex_effort(default_project):
+    """AGY gets its indivisible model variant; Codex gets explicit reasoning effort."""
     resolved_agy = resolve_stage_profile(default_project, OpenSpecStage.APPLY)
     assert resolved_agy.cli_invocation is not None
     assert resolved_agy.cli_invocation.model == "gemini-3.8-flash-medium"
     assert resolved_agy.cli_invocation.effort == "medium"
     assert "--model" in resolved_agy.cli_invocation.args
-    assert "gemini-3.8-flash-medium" in resolved_agy.cli_invocation.args
-    assert "--effort" in resolved_agy.cli_invocation.args
-    assert "medium" in resolved_agy.cli_invocation.args
+    model_index = resolved_agy.cli_invocation.args.index("--model")
+    assert resolved_agy.cli_invocation.args[model_index + 1] == "gemini-3.8-flash-medium"
+    assert "--effort" not in resolved_agy.cli_invocation.args
 
     resolved_codex = resolve_stage_profile(default_project, OpenSpecStage.PLAN)
     assert resolved_codex.cli_invocation is not None
     assert resolved_codex.cli_invocation.model == "gpt-5.6-luna"
     assert "--model" in resolved_codex.cli_invocation.args
     assert "gpt-5.6-luna" in resolved_codex.cli_invocation.args
+    assert 'model_reasoning_effort="medium"' in resolved_codex.cli_invocation.args
+
+
+def test_cli_invocation_rejects_embedded_model_or_effort_substitution():
+    """A base invocation cannot override the model/effort selected for a stage."""
+    agy_config = AppConfig(
+        providers={
+            "antigravity": ProviderConfig(
+                command="agy",
+                roles=["implementer"],
+                invocation={
+                    "implementer": CliInvocationConfig(
+                        args=[
+                            "--model",
+                            "gemini-3.8-flash-low",
+                            "--effort",
+                            "low",
+                            "--print={prompt}",
+                        ],
+                        prompt_transport="argument",
+                    )
+                },
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="refusing silent model/effort substitution"):
+        resolve_cli_invocation(
+            "antigravity",
+            "implementer",
+            agy_config,
+            model="gemini-3.8-flash-medium",
+            effort="medium",
+        )
+
+    codex_config = AppConfig(
+        providers={
+            "codex": ProviderConfig(
+                command="codex",
+                roles=["implementer"],
+                invocation={
+                    "implementer": CliInvocationConfig(
+                        args=[
+                            "exec",
+                            "-",
+                            "-c",
+                            'model="gpt-5.5"',
+                            "-c",
+                            'model_reasoning_effort="low"',
+                        ],
+                        prompt_transport="stdin",
+                    )
+                },
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="refusing silent model/effort substitution"):
+        resolve_cli_invocation(
+            "codex",
+            "implementer",
+            codex_config,
+            model="gpt-5.6-luna",
+            effort="medium",
+        )
+
+
+def test_agy_effort_variant_omits_effort_flag_and_rejects_contradictions():
+    config = AppConfig(
+        providers={
+            "antigravity": ProviderConfig(
+                command="agy",
+                roles=["implementer"],
+                invocation={
+                    "implementer": CliInvocationConfig(
+                        args=["--effort", "medium", "--print={prompt}"],
+                        prompt_transport="argument",
+                    )
+                },
+            )
+        }
+    )
+    resolved = resolve_cli_invocation(
+        "antigravity",
+        "implementer",
+        config,
+        model="gemini-3.8-flash-medium",
+        effort="medium",
+    )
+    assert resolved.model == "gemini-3.8-flash-medium"
+    assert resolved.effort == "medium"
+    assert resolved.args.count("--model") == 1
+    assert resolved.args[resolved.args.index("--model") + 1] == "gemini-3.8-flash-medium"
+    assert "--effort" not in resolved.args
+
+    with pytest.raises(ValueError, match="encodes effort 'medium'"):
+        resolve_cli_invocation(
+            "antigravity",
+            "implementer",
+            config,
+            model="gemini-3.8-flash-medium",
+            effort="low",
+        )
+
+
+def test_stage_profile_rejects_effort_conflicting_with_agy_model_variant():
+    project = ProjectConfig(
+        repository="test-org/test-repo",
+        external_providers_allowed=["antigravity"],
+        stage_profiles={
+            "APPLY": StageProfileConfig(
+                provider="antigravity",
+                model="gemini-3.8-flash-medium",
+                effort="low",
+            )
+        },
+    )
+    with pytest.raises(StageProfileError, match="encodes effort 'medium'"):
+        resolve_stage_profile(project, "APPLY")
 
 
 @pytest.mark.skipif(shutil.which("agy") is None, reason="agy CLI not installed")
 async def test_resolved_agy_profile_passes_real_cli_preflight(default_project):
-    """Prove the resolved Antigravity stage profile passes preflight against installed agy CLI."""
+    """The installed AGY catalog authorizes the exact effort-bearing model variant."""
     resolved = resolve_stage_profile(default_project, OpenSpecStage.APPLY)
     assert resolved.cli_invocation is not None
     preflight = await preflight_cli_invocation(resolved.cli_invocation)
-    assert preflight.ok is True, (
-        f"Preflight failed: {preflight.reason}, missing: {preflight.missing_flags}"
+    assert preflight.ok is True, preflight.reason
+
+
+@pytest.mark.asyncio
+async def test_agy_catalog_does_not_fabricate_model_effort_compatibility(monkeypatch):
+    adapter = AntigravityProviderAdapter()
+
+    async def listed_models(timeout_seconds=10.0):
+        del timeout_seconds
+        return {"models": ["gemini-3.8-flash-medium"], "model_efforts": {}}
+
+    monkeypatch.setattr(adapter, "discover_account_capabilities", listed_models)
+    supported, reason = await adapter.check_model_supported(
+        "gemini-3.8-flash-medium", effort="medium"
     )
+    assert supported is False
+    assert reason.startswith("EFFORT_CAPABILITY_UNOBSERVABLE")
+
+
+@pytest.mark.asyncio
+async def test_agy_variant_requires_exact_live_catalog_identity_and_effort(monkeypatch):
+    adapter = AntigravityProviderAdapter()
+
+    async def listed_models(timeout_seconds=10.0):
+        del timeout_seconds
+        return {
+            "models": ["gemini-3.8-flash-low", "gemini-3.8-flash-medium"],
+            "model_efforts": {
+                "gemini-3.8-flash-low": "low",
+                "gemini-3.8-flash-medium": "medium",
+            },
+        }
+
+    monkeypatch.setattr(adapter, "discover_account_capabilities", listed_models)
+    supported, reason = await adapter.check_model_supported(
+        "gemini-3.8-flash-medium", effort="medium"
+    )
+    wrong_effort, wrong_reason = await adapter.check_model_supported(
+        "gemini-3.8-flash-medium", effort="low"
+    )
+    absent_variant, absent_reason = await adapter.check_model_supported(
+        "gemini-3.8-flash-high", effort="high"
+    )
+
+    assert supported is True and reason is None
+    assert wrong_effort is False
+    assert wrong_reason.startswith("EFFORT_VARIANT_CONFLICT")
+    assert absent_variant is False
+    assert absent_reason.startswith("MODEL_ABSENT_FROM_ACCOUNT")
+
+
+@pytest.mark.asyncio
+async def test_agy_live_catalog_derives_effort_only_from_listed_model_variant(monkeypatch):
+    adapter = AntigravityProviderAdapter()
+
+    class CatalogProcess:
+        returncode = 0
+
+        async def communicate(self):
+            return (
+                b"Fetching available models...\n"
+                b"gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)\n"
+                b"gemini-3.8-flash-high\tGemini 3.8 Flash (High)\n"
+                b"claude-sonnet-5-5\tClaude Sonnet 5.5\n",
+                b"",
+            )
+
+    async def create_process(*args, **kwargs):
+        assert args[1] == "models"
+        assert kwargs["stdin"] is asyncio.subprocess.DEVNULL
+        return CatalogProcess()
+
+    monkeypatch.setattr(adapter, "_resolve_executable", lambda: "/usr/bin/agy")
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+
+    caps = await adapter.discover_account_capabilities()
+
+    assert caps["models"] == [
+        "gemini-3.8-flash-medium",
+        "gemini-3.8-flash-high",
+        "claude-sonnet-5-5",
+    ]
+    assert caps["model_efforts"] == {
+        "gemini-3.8-flash-medium": "medium",
+        "gemini-3.8-flash-high": "high",
+    }
+
+
+@pytest.mark.asyncio
+async def test_codex_model_list_without_effort_data_fails_closed(monkeypatch):
+    adapter = CodexProviderAdapter()
+
+    async def listed_models(timeout_seconds=10.0):
+        del timeout_seconds
+        return {"models": {"gpt-5.6-luna": None}}
+
+    monkeypatch.setattr(adapter, "discover_account_capabilities", listed_models)
+    supported, reason = await adapter.check_model_supported("gpt-5.6-luna", effort="medium")
+    assert supported is False
+    assert reason.startswith("EFFORT_CAPABILITY_UNOBSERVABLE")
+
+
+@pytest.mark.asyncio
+async def test_codex_model_list_efforts_are_bound_to_each_exact_model(monkeypatch):
+    adapter = CodexProviderAdapter()
+
+    async def model_list(method, params=None, timeout_seconds=10.0):
+        del params, timeout_seconds
+        assert method == "model/list"
+        return {
+            "data": [
+                {"id": "gpt-stage-a", "supportedReasoningEfforts": ["low", "medium"]},
+                {"id": "gpt-stage-b", "supportedReasoningEfforts": ["low"]},
+            ]
+        }
+
+    monkeypatch.setattr(adapter, "_call_app_server_method", model_list)
+    supported_a, reason_a = await adapter.check_model_supported("gpt-stage-a", effort="medium")
+    supported_b, reason_b = await adapter.check_model_supported("gpt-stage-b", effort="medium")
+
+    assert supported_a is True
+    assert reason_a is None
+    assert supported_b is False
+    assert reason_b.startswith("EFFORT_UNSUPPORTED_FOR_MODEL")
+
+
+@pytest.mark.asyncio
+async def test_codex_active_account_model_list_rejects_absent_model(monkeypatch):
+    adapter = CodexProviderAdapter()
+
+    async def listed_models(timeout_seconds=10.0):
+        del timeout_seconds
+        return {"models": {"gpt-5.6-luna": ["medium"]}}
+
+    monkeypatch.setattr(adapter, "discover_account_capabilities", listed_models)
+    supported, reason = await adapter.check_model_supported("gpt-4o-mini", effort="medium")
+    assert supported is False
+    assert reason.startswith("MODEL_ABSENT_FROM_ACCOUNT")
+
+
+@pytest.mark.asyncio
+async def test_adapter_without_capability_discovery_fails_closed():
+    supported, reason = await OpenRouterProviderAdapter().check_model_supported(
+        "unverified-model", effort="medium"
+    )
+    assert supported is False
+    assert reason.startswith("CAPABILITY_DISCOVERY_UNAVAILABLE")
+
+
+@pytest.mark.asyncio
+async def test_agy_failed_live_model_discovery_does_not_reuse_cached_catalog(monkeypatch):
+    adapter = AntigravityProviderAdapter()
+    adapter._cached_capabilities = {
+        "models": ["gemini-3.8-flash-medium"],
+        "model_efforts": {"gemini-3.8-flash-medium": ["medium"]},
+    }
+    adapter._capabilities_expires_at = datetime.now(UTC) + timedelta(minutes=1)
+    monkeypatch.setattr(adapter, "_resolve_executable", lambda: None)
+
+    supported, reason = await adapter.check_model_supported(
+        "gemini-3.8-flash-medium", effort="medium"
+    )
+    assert supported is False
+    assert reason.startswith("EXECUTABLE_MISSING")
+
+
+@pytest.mark.asyncio
+async def test_codex_failed_live_model_discovery_does_not_reuse_cached_catalog(monkeypatch):
+    adapter = CodexProviderAdapter()
+    adapter._cached_capabilities = {"models": {"gpt-5.6-luna": ["medium"]}}
+    adapter._capabilities_expires_at = datetime.now(UTC) + timedelta(minutes=1)
+
+    async def unavailable(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(adapter, "_call_app_server_method", unavailable)
+    supported, reason = await adapter.check_model_supported("gpt-5.6-luna", effort="medium")
+    assert supported is False
+    assert reason.startswith("CAPABILITY_DISCOVERY_UNAVAILABLE")
 
 
 @pytest.mark.skipif(shutil.which("codex") is None, reason="codex CLI not installed")

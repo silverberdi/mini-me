@@ -356,19 +356,20 @@ def _seed_operational_workspace(
 
 @pytest.mark.asyncio
 async def test_antigravity_apply_operational_dispatch_effective_arguments(
-    in_memory_uow, tmp_path, monkeypatch
+    in_memory_uow, tmp_path, monkeypatch, test_capacity_strategy
 ):
     """Prove the complete operational flow for Antigravity APPLY.
 
     Validates: stage selection -> stage profile -> JIT preflight -> runner dispatch.
     Intercepts subprocess execution without calling any external provider inference,
-    verifying effective arguments (--model gemini-3.8-flash-medium, --effort medium)
+    verifying the exact effort-bearing model variant, with no separate --effort override
     and the native /opsx-apply instruction in the prompt.
     """
     workspace = tmp_path / "candidate-worktree"
     project, job, _ = _seed_operational_workspace(
         in_memory_uow, workspace, implementer="antigravity", reviewer="codex"
     )
+    test_capacity_strategy(("codex", "antigravity"))
 
     app_cfg = _build_test_app_config()
     pipeline = ExecutionPipelineService(
@@ -404,15 +405,6 @@ async def test_antigravity_apply_operational_dispatch_effective_arguments(
         mock_run_confined_async_subprocess,
     )
 
-    async def mock_capacity_refresh(provider, model=None):
-        return True
-
-    monkeypatch.setattr(
-        pipeline.health_service,
-        "refresh_capacity_from_read_only_source",
-        mock_capacity_refresh,
-    )
-
     claim = _acquire_claim(in_memory_uow)
 
     # Execute queued job
@@ -427,10 +419,8 @@ async def test_antigravity_apply_operational_dispatch_effective_arguments(
     assert "--model" in cmd
     model_idx = cmd.index("--model")
     assert cmd[model_idx + 1] == "gemini-3.8-flash-medium"
-
-    assert "--effort" in cmd
-    effort_idx = cmd.index("--effort")
-    assert cmd[effort_idx + 1] == "medium"
+    assert cmd.count("--model") == 1
+    assert "--effort" not in cmd
 
     # Check that native /opsx-apply instruction was passed in the argument prompt
     print_arg = next((arg for arg in cmd if arg.startswith("--print=")), None)
@@ -441,8 +431,89 @@ async def test_antigravity_apply_operational_dispatch_effective_arguments(
 
 
 @pytest.mark.asyncio
+async def test_operational_apply_rejects_conflicting_base_model_before_runner(
+    in_memory_uow, tmp_path, monkeypatch, test_capacity_strategy
+):
+    """A stale base CLI model cannot override the exact APPLY stage profile."""
+    workspace = tmp_path / "candidate-worktree"
+    project, job, _ = _seed_operational_workspace(
+        in_memory_uow, workspace, implementer="antigravity", reviewer="codex"
+    )
+    test_capacity_strategy(("codex", "antigravity"))
+    app_cfg = _build_test_app_config()
+    app_cfg.providers["antigravity"].invocation["implementer"].args.append(
+        "--model=gemini-3.8-flash-low"
+    )
+    pipeline = ExecutionPipelineService(
+        in_memory_uow,
+        project_root=tmp_path,
+        app_config=app_cfg,
+        worktree_manager=OperationalTestWorktreeManager(workspace),
+    )
+    intercepted: list[list[str]] = []
+
+    async def capture_runner(self, cmd, **kwargs):
+        intercepted.append(list(cmd))
+        raise AssertionError("Runner must not launch with a conflicting model")
+
+    monkeypatch.setattr(AgentProcessConfinement, "run_confined_async_subprocess", capture_runner)
+    result = await pipeline.execute_queued_job(
+        job.job_id, claim_context=_acquire_claim(in_memory_uow)
+    )
+
+    assert result.status == JobStatus.NEEDS_HUMAN
+    assert "refusing silent model/effort substitution" in (result.error_message or "")
+    assert intercepted == []
+
+
+@pytest.mark.asyncio
+async def test_operational_apply_rejects_agy_variant_effort_conflict_before_runner(
+    in_memory_uow, tmp_path, monkeypatch, test_capacity_strategy
+):
+    """A mismatched effort cannot be dispatched for an effort-bearing AGY model id."""
+    workspace = tmp_path / "candidate-worktree"
+    project, job, _ = _seed_operational_workspace(
+        in_memory_uow, workspace, implementer="antigravity", reviewer="codex"
+    )
+    test_capacity_strategy(("codex", "antigravity"))
+    app_cfg = _build_test_app_config()
+    app_cfg.projects["test-project"] = ProjectConfig(
+        repository="test-org/test-repo",
+        external_providers_allowed=["codex", "antigravity"],
+        stage_profiles={
+            "APPLY": StageProfileConfig(
+                provider="antigravity",
+                model="gemini-3.8-flash-medium",
+                effort="low",
+                workflow="openspec-apply-change",
+            )
+        },
+    )
+    pipeline = ExecutionPipelineService(
+        in_memory_uow,
+        project_root=tmp_path,
+        app_config=app_cfg,
+        worktree_manager=OperationalTestWorktreeManager(workspace),
+    )
+    intercepted: list[list[str]] = []
+
+    async def capture_runner(self, cmd, **kwargs):
+        intercepted.append(list(cmd))
+        raise AssertionError("Runner must not launch with a contradictory AGY effort")
+
+    monkeypatch.setattr(AgentProcessConfinement, "run_confined_async_subprocess", capture_runner)
+    result = await pipeline.execute_queued_job(
+        job.job_id, claim_context=_acquire_claim(in_memory_uow)
+    )
+
+    assert result.status == JobStatus.NEEDS_HUMAN
+    assert "encodes effort 'medium'" in (result.error_message or "")
+    assert intercepted == []
+
+
+@pytest.mark.asyncio
 async def test_codex_apply_operational_dispatch_effective_arguments(
-    in_memory_uow, tmp_path, monkeypatch
+    in_memory_uow, tmp_path, monkeypatch, test_capacity_strategy
 ):
     """Prove the complete operational flow for Codex APPLY.
 
@@ -455,6 +526,7 @@ async def test_codex_apply_operational_dispatch_effective_arguments(
     project, job, _ = _seed_operational_workspace(
         in_memory_uow, workspace, implementer="codex", reviewer="antigravity"
     )
+    test_capacity_strategy(("codex", "antigravity"))
 
     app_cfg = _build_test_app_config()
     app_cfg.projects["test-project"] = ProjectConfig(
@@ -499,15 +571,6 @@ async def test_codex_apply_operational_dispatch_effective_arguments(
         AgentProcessConfinement,
         "run_confined_async_subprocess",
         mock_run_confined_async_subprocess,
-    )
-
-    async def mock_capacity_refresh(provider, model=None):
-        return True
-
-    monkeypatch.setattr(
-        pipeline.health_service,
-        "refresh_capacity_from_read_only_source",
-        mock_capacity_refresh,
     )
 
     claim = _acquire_claim(in_memory_uow)
@@ -795,13 +858,14 @@ async def test_rejection_of_premium_model_default_fails_closed_before_runner(
 
 @pytest.mark.asyncio
 async def test_rejection_of_fabricated_capacity_observation_fails_closed_to_waiting(
-    in_memory_uow, tmp_path, monkeypatch
+    in_memory_uow, tmp_path, monkeypatch, test_capacity_strategy
 ):
     """Prove fabricated capacity observations (e.g. positive output tokens) fail closed to WAITING_CAPACITY."""
     workspace = tmp_path / "candidate-worktree"
     project, job, _ = _seed_operational_workspace(
         in_memory_uow, workspace, implementer="antigravity", reviewer="codex"
     )
+    test_capacity_strategy(("codex", "antigravity"))
 
     # Simulate adapter returning invalid/unauthenticated/fabricated capacity observation
     now = utc_now()
@@ -811,8 +875,9 @@ async def test_rejection_of_fabricated_capacity_observation_fails_closed_to_wait
         observed_at=now,
         expires_at=now + timedelta(seconds=60),
         ordinary_usage_allowed=None,  # Invalid/unverified capacity result!
-        source_signal=CapacitySignalSource.AGY_PRINT_USAGE,
+        source_signal=CapacitySignalSource.PROVIDER_READ_ONLY_CAPACITY,
         account_id=hashlib.sha256(b"authentic-account").hexdigest(),
+        quota_scope="Gemini Models",
     )
 
     class FabricatingAdapter:
@@ -865,13 +930,14 @@ async def test_rejection_of_fabricated_capacity_observation_fails_closed_to_wait
 
 @pytest.mark.asyncio
 async def test_rejection_of_jit_cli_preflight_failure_fails_closed_before_runner(
-    in_memory_uow, tmp_path, monkeypatch
+    in_memory_uow, tmp_path, monkeypatch, test_capacity_strategy
 ):
     """Prove JIT preflight failure (e.g. missing CLI or flags) transitions to NEEDS_HUMAN before running."""
     workspace = tmp_path / "candidate-worktree"
     project, job, _ = _seed_operational_workspace(
         in_memory_uow, workspace, implementer="antigravity", reviewer="codex"
     )
+    test_capacity_strategy(("codex", "antigravity"))
 
     app_cfg = _build_test_app_config()
     pipeline = ExecutionPipelineService(
@@ -879,15 +945,6 @@ async def test_rejection_of_jit_cli_preflight_failure_fails_closed_before_runner
         project_root=tmp_path,
         app_config=app_cfg,
         worktree_manager=OperationalTestWorktreeManager(workspace),
-    )
-
-    async def mock_capacity_refresh(provider, model=None):
-        return True
-
-    monkeypatch.setattr(
-        pipeline.health_service,
-        "refresh_capacity_from_read_only_source",
-        mock_capacity_refresh,
     )
 
     # Simulate JIT preflight flag verification failure

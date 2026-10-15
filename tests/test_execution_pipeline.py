@@ -89,7 +89,7 @@ def test_workspace_context_is_absolute_and_openspec_tracker_stays_task_focused(t
 
 @pytest.mark.asyncio
 async def test_missing_native_apply_skill_blocks_before_cli_invocation(
-    in_memory_uow, tmp_path, monkeypatch
+    in_memory_uow, tmp_path, monkeypatch, test_capacity_strategy
 ):
     """A production-shaped CLI selection cannot run when the native skill is absent."""
     change_name = "native-skill-missing"
@@ -101,6 +101,7 @@ async def test_missing_native_apply_skill_blocks_before_cli_invocation(
         change_name=change_name,
     )
     invoked: list[str] = []
+    test_capacity_strategy(("codex", "antigravity"))
 
     class InvocationMustNotRun(CliImplementerRunner):
         async def run(self, worktree_path: Path, prompt_context: str, timeout_seconds: int):
@@ -117,7 +118,7 @@ async def test_missing_native_apply_skill_blocks_before_cli_invocation(
     )
     monkeypatch.setattr(
         "minime.services.execution_pipeline.runner_for_implementer",
-        lambda executor: InvocationMustNotRun(profile),
+        lambda executor, **kwargs: InvocationMustNotRun(profile),
     )
     pipeline = ExecutionPipelineService(
         in_memory_uow,
@@ -182,6 +183,57 @@ async def test_auth_required_preflight_waits_without_worktree_or_runner_invocati
     assert pipeline.worktree_manager.created_paths == {}
     assert in_memory_uow.job_attempts.list_by_job(job.job_id) == []
     assert "codex" in refresh_calls
+
+
+@pytest.mark.asyncio
+async def test_runner_factory_profile_error_fails_closed_without_unprofiled_retry(
+    in_memory_uow, tmp_path, monkeypatch, test_capacity_strategy
+):
+    change_name = "profile-construction-fails-closed"
+    seed_ready_change(
+        in_memory_uow,
+        tmp_path,
+        "# Tasks\n\n## 1. Work\n- [ ] 1.1 Implement the authorized task\n",
+        checks=[],
+        change_name=change_name,
+    )
+    test_capacity_strategy(("codex", "antigravity"))
+    factory_calls: list[tuple[tuple, dict]] = []
+    runner_calls: list[str] = []
+
+    def incompatible_factory(*args, **kwargs):
+        factory_calls.append((args, kwargs))
+        raise TypeError("profile arguments unsupported")
+
+    monkeypatch.setattr(
+        "minime.services.execution_pipeline.runner_for_implementer", incompatible_factory
+    )
+
+    async def preflight_ok(profile):
+        del profile
+        from minime.services.cli_preflight import PreflightResult
+
+        return PreflightResult(ok=True)
+
+    monkeypatch.setattr("minime.services.execution_pipeline.preflight_cli_invocation", preflight_ok)
+    pipeline = ExecutionPipelineService(
+        in_memory_uow,
+        project_root=tmp_path,
+        worktree_manager=FakeWorktreeManager(tmp_path),
+        implementer_runner=None,
+    )
+    pipeline.implementer_runner = None
+    job = pipeline.queue_job("mini-me", change_name)
+    result = await pipeline.execute_queued_job(
+        job.job_id, claim_context=_dummy_claim_context(in_memory_uow)
+    )
+
+    assert result.status == JobStatus.NEEDS_HUMAN
+    assert "refusing unprofiled dispatch" in (result.error_message or "").lower()
+    assert factory_calls
+    assert factory_calls[0][1].get("model")
+    assert factory_calls[0][1].get("effort")
+    assert runner_calls == []
 
 
 def test_handoff_prompt_normalizes_to_authoritative_workspace(tmp_path):
@@ -403,7 +455,7 @@ def seed_ready_change(
 
 
 def test_control_plane_reassign_then_continue_reaches_codex_runner_over_old_handoff(
-    in_memory_uow, tmp_path, monkeypatch
+    in_memory_uow, tmp_path, monkeypatch, test_capacity_strategy
 ):
     from minime.domain.enums import ProviderHealthStatus
     from minime.domain.models import ProviderHealth
@@ -419,6 +471,7 @@ def test_control_plane_reassign_then_continue_reaches_codex_runner_over_old_hand
     project = in_memory_uow.projects.get_by_id("mini-me")
     project.external_providers_allowed = ["codex", "antigravity"]
     in_memory_uow.projects.save(project)
+    test_capacity_strategy(("codex", "antigravity"))
     run = OrchestrationRun(
         run_id="run-n01-reassign-integration",
         project_id=project.project_id,
@@ -505,7 +558,7 @@ def test_control_plane_reassign_then_continue_reaches_codex_runner_over_old_hand
                 environment_error=True,
             )
 
-    def runner_for_selected_executor(executor: str):
+    def runner_for_selected_executor(executor: str, **kwargs):
         selected_runners.append(executor)
         assert executor == "codex"
         return DiagnosticRunner()
@@ -574,8 +627,21 @@ def test_control_plane_reassign_then_continue_reaches_codex_runner_over_old_hand
 
 @pytest.mark.asyncio
 async def test_execution_pipeline_success_records_evidence_and_cleans_worktree(
-    in_memory_uow, tmp_path, test_capacity_strategy
+    in_memory_uow, tmp_path, test_capacity_strategy, monkeypatch
 ):
+    import builtins
+
+    from minime.services.task_complexity_risk_classifier import TaskComplexityRiskClassifier
+
+    import_original = builtins.__import__
+
+    def reject_local_worker_import(name, *args, **kwargs):
+        if name.startswith("minime.local_worker"):
+            raise ImportError("optional local AI helper is unavailable")
+        return import_original(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", reject_local_worker_import)
+
     test_capacity_strategy()
     seed_ready_change(
         in_memory_uow,
@@ -596,6 +662,16 @@ async def test_execution_pipeline_success_records_evidence_and_cleans_worktree(
             output=['{"risk": "low", "summary": "No material risk.", "findings": []}']
         ),
         worktree_manager=worktrees,
+    )
+
+    def unavailable_optional_classifier(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("optional local classification helper unavailable")
+
+    monkeypatch.setattr(
+        TaskComplexityRiskClassifier,
+        "classify_post_materialization",
+        unavailable_optional_classifier,
     )
 
     job = await service.run_job(
@@ -619,6 +695,13 @@ async def test_execution_pipeline_success_records_evidence_and_cleans_worktree(
         "review_duration_ms",
         "total_duration_ms",
     }
+    events = in_memory_uow.events.list_events(project_id="mini-me", limit=500)
+    assert any(event.event_type == EventType.AUXILIARY_CLASSIFICATION_FAILED for event in events)
+    assert not any(
+        event.event_type == EventType.JOB_FAILED
+        and event.payload.get("stage") == "post_materialization"
+        for event in events
+    )
 
 
 @pytest.mark.asyncio
@@ -644,11 +727,11 @@ async def test_reviewer_capacity_is_refreshed_again_immediately_before_review(
     original_read = adapter.read_capacity_observation
     reads = 0
 
-    async def expires_on_second_read(timeout_seconds=10.0):
+    async def expires_on_second_read(timeout_seconds=10.0, selected_model=None):
         nonlocal reads
         reads += 1
         if reads == 1:
-            return await original_read(timeout_seconds)
+            return await original_read(timeout_seconds, selected_model=selected_model)
         now = utc_now()
         return CapacityObservation(
             provider="antigravity",
@@ -657,7 +740,8 @@ async def test_reviewer_capacity_is_refreshed_again_immediately_before_review(
             expires_at=now,
             source_signal=adapter.capacity_source_signal,
             account_id=hashlib.sha256(b"test-account:antigravity").hexdigest(),
-            model="test-model:antigravity",
+            model=selected_model,
+            quota_scope="test-quota-scope",
         )
 
     monkeypatch.setattr(adapter, "read_capacity_observation", expires_on_second_read)
@@ -770,7 +854,10 @@ async def test_recovery_evidence_failure_blocks_without_removal(
 
 
 @pytest.mark.asyncio
-async def test_execution_pipeline_check_failure_halts_and_records_result(in_memory_uow, tmp_path):
+async def test_execution_pipeline_check_failure_halts_and_records_result(
+    in_memory_uow, tmp_path, test_capacity_strategy
+):
+    test_capacity_strategy(("codex", "antigravity"))
     seed_ready_change(
         in_memory_uow,
         tmp_path,
@@ -801,7 +888,10 @@ async def test_execution_pipeline_check_failure_halts_and_records_result(in_memo
 
 
 @pytest.mark.asyncio
-async def test_execution_pipeline_timeout_fails_and_records_event(in_memory_uow, tmp_path):
+async def test_execution_pipeline_timeout_fails_and_records_event(
+    in_memory_uow, tmp_path, test_capacity_strategy
+):
+    test_capacity_strategy(("codex", "antigravity"))
     seed_ready_change(in_memory_uow, tmp_path, "# Tasks\n- [x] 1.1 Done\n")
     service = ExecutionPipelineService(
         in_memory_uow,
@@ -822,7 +912,10 @@ async def test_execution_pipeline_timeout_fails_and_records_event(in_memory_uow,
 
 
 @pytest.mark.asyncio
-async def test_execution_pipeline_incomplete_tasks_block_checks(in_memory_uow, tmp_path):
+async def test_execution_pipeline_incomplete_tasks_block_checks(
+    in_memory_uow, tmp_path, test_capacity_strategy
+):
+    test_capacity_strategy(("codex", "antigravity"))
     seed_ready_change(in_memory_uow, tmp_path, "# Tasks\n- [ ] 1.1 Not done\n")
     service = ExecutionPipelineService(
         in_memory_uow,

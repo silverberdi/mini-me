@@ -343,10 +343,12 @@ def test_auth_required_created_recovery_predicate_fails_closed(contradiction, tm
 
 
 def test_postgres_continue_reuses_created_worktree_after_auth_required_history(
-    isolated_pg_session_factory, tmp_path: Path, monkeypatch
+    isolated_pg_session_factory, tmp_path: Path, monkeypatch, test_capacity_strategy
 ):
     """A fenced real CONTINUE may reuse only the exact intact CREATED auth-failure workspace."""
     from conftest import publish_verified_intake_workspace, setup_managed_repository_fixture
+
+    test_capacity_strategy(("codex", "antigravity"))
 
     project_id = f"n01-auth-{uuid.uuid4().hex[:8]}"
     change_name = "operational-blocker-visibility"
@@ -662,7 +664,11 @@ def test_postgres_continue_reuses_created_worktree_after_auth_required_history(
                 return await self.delegate.run(candidate_path, prompt_context, timeout_seconds)
 
         runner = RecordingRunner()
-        monkeypatch.setattr(execution_pipeline, "runner_for_implementer", lambda _provider: runner)
+        monkeypatch.setattr(
+            execution_pipeline,
+            "runner_for_implementer",
+            lambda _provider, **kwargs: runner,
+        )
         result = ControlPlaneService(uow, project_root=managed_root).execute_action(
             OperatorActionRequest(
                 action_request_id=str(uuid.uuid4()),
@@ -753,10 +759,12 @@ def test_postgres_continue_reuses_created_worktree_after_auth_required_history(
 
 
 def test_postgres_control_plane_continue_rebuilds_same_run_job_and_worktree(
-    isolated_pg_session_factory, tmp_path: Path, monkeypatch
+    isolated_pg_session_factory, tmp_path: Path, monkeypatch, test_capacity_strategy
 ):
     """Exercise durable CP/claim/recovery and real Git worktree authorities; no provider is invoked."""
     from conftest import publish_verified_intake_workspace, setup_managed_repository_fixture
+
+    test_capacity_strategy(("codex", "antigravity"))
 
     project_id = f"n01-cont-{uuid.uuid4().hex[:8]}"
     change_name = "operational-blocker-visibility"
@@ -1133,7 +1141,7 @@ def test_postgres_control_plane_continue_rebuilds_same_run_job_and_worktree(
         monkeypatch.setattr(
             execution_pipeline,
             "runner_for_implementer",
-            lambda _provider: recording_runner,
+            lambda _provider, **kwargs: recording_runner,
         )
         request = OperatorActionRequest(
             action_request_id=str(uuid.uuid4()),
@@ -1313,10 +1321,12 @@ def test_postgres_control_plane_continue_rebuilds_same_run_job_and_worktree(
 
 
 def test_postgres_continue_adopts_created_recovery_worktree_and_repairs_only_final_lf(
-    isolated_pg_session_factory, tmp_path: Path, monkeypatch
+    isolated_pg_session_factory, tmp_path: Path, monkeypatch, test_capacity_strategy
 ):
     """Recover the exact CREATED production shape without rewriting its snapshot lineage."""
     from conftest import publish_verified_intake_workspace, setup_managed_repository_fixture
+
+    test_capacity_strategy(("codex", "antigravity"))
 
     project_id = f"n01-created-{uuid.uuid4().hex[:8]}"
     change_name = "operational-blocker-visibility"
@@ -1514,7 +1524,11 @@ def test_postgres_continue_adopts_created_recovery_worktree_and_repairs_only_fin
                 return self.result
 
         runner = RecordingRunner()
-        monkeypatch.setattr(execution_pipeline, "runner_for_implementer", lambda _provider: runner)
+        monkeypatch.setattr(
+            execution_pipeline,
+            "runner_for_implementer",
+            lambda _provider, **kwargs: runner,
+        )
         original_materialize = WorktreeManager._materialize_verified_published_intake_artifacts
 
         async def fail_first_materialization(self, **kwargs):
@@ -2111,7 +2125,11 @@ def test_postgres_continue_accepts_only_recovery_evidenced_incomplete_premature_
                 return self.result
 
         runner = RecordingRunner()
-        monkeypatch.setattr(execution_pipeline, "runner_for_implementer", lambda _provider: runner)
+        monkeypatch.setattr(
+            execution_pipeline,
+            "runner_for_implementer",
+            lambda _provider, **kwargs: runner,
+        )
         before_runs = session.scalar(
             select(func.count())
             .select_from(OrchestrationRunModel)

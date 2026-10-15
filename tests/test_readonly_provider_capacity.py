@@ -16,7 +16,7 @@ from minime.adapters.provider_adapter import (
     get_provider_adapter,
 )
 from minime.domain.enums import CapacitySignalSource, EventType, ProviderHealthStatus
-from minime.domain.models import utc_now
+from minime.domain.models import Event, utc_now
 from minime.services.provider_health_service import ProviderHealthService
 
 
@@ -86,24 +86,117 @@ def test_read_failure_records_unknown_not_permission(in_memory_uow):
     assert service.get_admission_health("codex").status == ProviderHealthStatus.UNKNOWN
 
 
-def test_first_valid_capacity_observation_upgrades_new_health_row(
+@pytest.mark.asyncio
+async def test_first_adapter_acquired_capacity_observation_upgrades_new_health_row(
     in_memory_uow, test_capacity_strategy
 ):
     test_capacity_strategy(("codex",))
     service = ProviderHealthService(in_memory_uow)
+    assert await service.refresh_capacity_from_read_only_source("codex") is True
+    assert service.get_admission_health("codex").status == ProviderHealthStatus.AVAILABLE
+    assert service.has_fresh_capacity_evidence("codex", model="test-model:codex")
+
+
+def test_plausible_caller_observation_cannot_authorize_capacity(in_memory_uow):
+    service = ProviderHealthService(in_memory_uow)
     now = utc_now()
-    observation = CapacityObservation(
+    plausible = CapacityObservation(
         provider="codex",
         ordinary_usage_allowed=True,
         observed_at=now,
         expires_at=now + timedelta(seconds=30),
-        source_signal=CapacitySignalSource.PROVIDER_READ_ONLY_CAPACITY,
-        account_id="test-account:codex",
-        model="test-model:codex",
+        source_signal=CapacitySignalSource.CODEX_APP_SERVER,
+        account_id="plausible-account",
+        model="gpt-5.6-luna",
+        quota_scope="codex",
     )
 
-    assert service.record_capacity_observation("codex", observation) is True
-    assert service.get_admission_health("codex").status == ProviderHealthStatus.AVAILABLE
+    assert service.record_capacity_observation("codex", plausible) is False
+    assert service.get_admission_health("codex").status == ProviderHealthStatus.UNKNOWN
+    assert not service.has_fresh_capacity_evidence("codex", model="gpt-5.6-luna")
+
+
+def test_fabricated_persisted_capacity_event_is_not_a_service_acquisition(in_memory_uow):
+    service = ProviderHealthService(in_memory_uow)
+    now = utc_now()
+    in_memory_uow.events.save(
+        Event(
+            event_type=EventType.PROVIDER_CAPACITY_OBSERVED,
+            payload={
+                "provider": "codex",
+                "source": CapacitySignalSource.CODEX_APP_SERVER.value,
+                "state": "AVAILABLE",
+                "ordinary_usage_allowed": True,
+                "model": "gpt-5.6-luna",
+                "quota_scope": "codex",
+                "account_fingerprint": "a" * 64,
+                "source_invocation_id": "fabricated-invocation",
+                "observed_at": now.isoformat(),
+                "expires_at": (now + timedelta(seconds=30)).isoformat(),
+            },
+            timestamp=now,
+        )
+    )
+    in_memory_uow.commit()
+
+    assert not service.has_fresh_capacity_evidence("codex", model="gpt-5.6-luna")
+
+
+@pytest.mark.asyncio
+async def test_capacity_evidence_is_bound_to_selected_model_and_scope(
+    in_memory_uow, test_capacity_strategy
+):
+    test_capacity_strategy(("codex",))
+    adapter = get_provider_adapter("codex")
+    service = ProviderHealthService(in_memory_uow)
+
+    assert await service.refresh_capacity_from_read_only_source("codex", model="selected-model")
+    assert service.has_fresh_capacity_evidence("codex", model="selected-model", quota_scope="codex")
+    restarted_service = ProviderHealthService(in_memory_uow)
+    assert not restarted_service.has_fresh_capacity_evidence(
+        "codex", model="selected-model", quota_scope="codex"
+    )
+    assert not service.has_fresh_capacity_evidence("codex", model="other-model")
+    assert not service.has_fresh_capacity_evidence(
+        "codex", model="selected-model", account_fingerprint="b" * 64
+    )
+    assert not service.has_fresh_capacity_evidence("codex", quota_scope="other-scope")
+
+    persisted = in_memory_uow.events.list_events(limit=1)[0]
+    persisted.payload["model"] = "other-model"
+    in_memory_uow.events.save(persisted)
+    in_memory_uow.commit()
+    assert not service.has_fresh_capacity_evidence("codex", model="other-model")
+
+    original_reader = adapter.read_capacity_observation
+
+    async def mismatched_reader(timeout_seconds=10.0, selected_model=None):
+        del timeout_seconds, selected_model
+        return await original_reader()
+
+    adapter.read_capacity_observation = mismatched_reader
+    assert not await service.refresh_capacity_from_read_only_source(
+        "codex", model="requested-model"
+    )
+    assert not service.has_fresh_capacity_evidence("codex", model="requested-model")
+
+
+@pytest.mark.asyncio
+async def test_capacity_reader_failure_cannot_reuse_previous_positive_evidence(
+    in_memory_uow, test_capacity_strategy
+):
+    test_capacity_strategy(("codex",))
+    adapter = get_provider_adapter("codex")
+    service = ProviderHealthService(in_memory_uow)
+    assert await service.refresh_capacity_from_read_only_source("codex", model="gpt-5.6-luna")
+
+    async def timeout(*args, **kwargs):
+        raise TimeoutError("read-only source timed out")
+
+    adapter.read_capacity_observation = timeout
+    assert not await service.refresh_capacity_from_read_only_source("codex", model="gpt-5.6-luna")
+    assert service.get_admission_health("codex").status == ProviderHealthStatus.UNKNOWN
+    assert not service.has_fresh_capacity_evidence("codex", model="gpt-5.6-luna")
 
 
 def test_capacity_identity_mismatch_records_unknown(in_memory_uow):
@@ -424,13 +517,10 @@ def test_capacity_event_persists_only_session_fingerprint(in_memory_uow):
     # statusLine is demoted to informative telemetry: cannot authorize dispatch
     assert not service.record_capacity_observation("antigravity", observation)
     event = in_memory_uow.events.list_events(limit=1)[0]
-    assert (
-        event.payload["source_session_fingerprint"]
-        == hashlib.sha256(b"controlled-session-id").hexdigest()
-    )
+    assert event.payload["source_session_fingerprint"] is None
     assert "source_session_id" not in event.payload
     assert event.payload["state"] == "UNKNOWN"
-    assert event.payload["source"] == CapacitySignalSource.AGY_STATUSLINE.value
+    assert event.payload["source"] == CapacitySignalSource.UNKNOWN.value
 
 
 def _print_usage_data(
@@ -868,7 +958,7 @@ async def test_agy_regression_vector_4_unknown_provenance(in_memory_uow, monkeyp
     assert len(events) >= 1
     latest = events[-1]
     assert latest.payload["state"] == "UNKNOWN"
-    assert latest.payload["source"] == CapacitySignalSource.AGY_STATUSLINE.value
+    assert latest.payload["source"] == CapacitySignalSource.UNKNOWN.value
 
     # 4.4 Subprocess: log file missing applyAuthResult event
     class FakeProc:
@@ -992,8 +1082,11 @@ def test_agy_regression_vector_6_acquisition_to_dispatch(in_memory_uow):
     assert health.status == ProviderHealthStatus.UNKNOWN
 
 
-def test_agy_regression_vector_7_valid_signal(in_memory_uow):
+@pytest.mark.asyncio
+async def test_agy_regression_vector_7_valid_signal(in_memory_uow, test_capacity_strategy):
     """Vector 7: Clean non-inferential /usage signal produces AVAILABLE; zero fraction produces EXHAUSTED."""
+    test_capacity_strategy(("antigravity",))
+    adapter = get_provider_adapter("antigravity")
     service = ProviderHealthService(in_memory_uow)
     account = "7" * 64
     valid_payload = _print_usage_data(remaining_5h=0.75, remaining_weekly=0.92)
@@ -1010,7 +1103,7 @@ def test_agy_regression_vector_7_valid_signal(in_memory_uow):
     assert obs.capacity_reset_at > obs.observed_at
 
     # Authoritative recording in ProviderHealthService
-    assert service.record_capacity_observation("antigravity", obs)
+    assert await service.refresh_capacity_from_read_only_source("antigravity")
     admission_health = service.get_admission_health("antigravity")
     assert admission_health.status == ProviderHealthStatus.AVAILABLE
     assert service.has_fresh_capacity_evidence("antigravity")
@@ -1021,6 +1114,7 @@ def test_agy_regression_vector_7_valid_signal(in_memory_uow):
         exhausted_payload, account_fingerprint=account
     )
     assert obs_ex.ordinary_usage_allowed is False
-    assert not service.record_capacity_observation("antigravity", obs_ex)
+    adapter.allowed = False
+    assert not await service.refresh_capacity_from_read_only_source("antigravity")
     ex_health = service.get_admission_health("antigravity")
     assert ex_health.status == ProviderHealthStatus.EXHAUSTED

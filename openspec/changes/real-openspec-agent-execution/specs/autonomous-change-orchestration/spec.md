@@ -1,7 +1,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Durable deterministic orchestration lifecycle
-The system SHALL persist a finite, ordered orchestration stage and checkpoint for every run, SHALL advance it only after the required authoritative evidence for that stage is committed, and SHALL use deterministic logical transition keys (`{run_id}:RESUME:{resumable_stage}:{current_generation}`) for resume operations and stage events to prevent duplicate event evidence upon repeated reconciliation or restart. For R01, read-only CONTRACT REVIEW SHALL precede APPLY and remain distinct from final code REVIEW. DeepSeek Direct is preferred only for CONTRACT REVIEW when compatible, capacity-fresh, and explicitly authorized by stage/provider/budget; AGY is its alternative, and no eligible provider means wait without APPLY. Contract-review evidence SHALL NOT authorize APPLY, final review, or product decisions. The normal final human-gate path SHALL require deterministic checks and authoritative independent review from an eligible complementary primary or, only when no eligible primary reviewer can serve, an explicitly authorized, compatible, candidate-bound DeepSeek Direct read-only reviewer. An additional audit SHALL be required only when applicable policy or explicit human authorization requires it; audit evidence SHALL NOT substitute for contract-review or final-review evidence.
+The system SHALL persist a finite, ordered orchestration stage and checkpoint for every run, SHALL advance it only after the required authoritative evidence for that stage is committed, and SHALL use deterministic logical transition keys (`{run_id}:RESUME:{resumable_stage}:{current_generation}`) for resume operations and stage events to prevent duplicate event evidence upon repeated reconciliation or restart. For R01, Codex and AGY SHALL be selectable primary planning/execution providers by validated stage profile and SHALL support safe handoff of compatible work while preserving durable identity, checkpoints, fencing, and idempotent side-effect reconciliation. Read-only CONTRACT REVIEW SHALL precede APPLY and remain distinct from code REVIEW; DeepSeek Direct SHALL perform both as separate reviewer stages using its own account/API and separate evidence/budget authority. If a required review is unavailable or unauthorized, wait without advancing through its gate. Neither review SHALL authorize APPLY, product decisions, or human merge. OpenRouter MAY rescue only already-started work after both primary providers are blocked by quota, with its own capacity and spend authority; it SHALL NOT review or start READY work. An additional audit SHALL be required only when applicable policy or explicit human authorization requires it; audit evidence SHALL NOT substitute for either review.
 
 #### Scenario: Successful path reaches the human gate
 - **WHEN** implementation/continuation completes, checks pass, the candidate is frozen, authoritative independent review is valid, and repository identity is valid
@@ -29,20 +29,20 @@ The system SHALL persist a finite, ordered orchestration stage and checkpoint fo
 - **WHEN** an orchestration run is resumed repeatedly across daemon restarts or recovery cycles without advancing stages
 - **THEN** the system SHALL record resume transitions using logical transition keys bound to the run ID, stage, and generation (`{run_id}:RESUME:{resumable_stage}:{current_generation}`), preventing duplicate logical stage events.
 
-#### Scenario: Review evidence is absent or unauthorized
-- **GIVEN** no eligible primary reviewer is available and DeepSeek reviewer compatibility, explicit provider/budget authorization, or candidate-bound evidence is absent or uncertain
+#### Scenario: Required DeepSeek review evidence is absent or unauthorized
+- **GIVEN** DeepSeek reviewer compatibility, account identity, fresh capacity/balance, explicit provider/budget authorization, or contract/candidate-bound evidence is absent or uncertain
 - **WHEN** the run evaluates advancement
 - **THEN** it preserves the candidate in a truthful waiting/blocked state and does not treat audit or self-authored evidence as review.
 
 ### Requirement: Existing pipeline coordination
-The system SHALL invoke existing PLAN, read-only CONTRACT REVIEW, implementation APPLY, implementation TEST, VERIFY/E2E, final REVIEW, 007 continuation, and PR authorities in their configured order and SHALL preserve their decisions and diagnostics. For R01, the configured initial role assignment is Codex PLAN and VERIFY/E2E, DeepSeek-preferred CONTRACT REVIEW with AGY alternative under explicit compatible capacity/provider/stage/budget checks, and AGY APPLY plus implementation TEST. Contract review is a separate evidence type and cannot authorize APPLY or final review. For final review, an eligible independent complementary primary SHALL remain the normal reviewer. If no eligible primary reviewer can serve, a separately defined DeepSeek Direct read-only reviewer MAY satisfy final code review only when compatibility, sufficient review input, identity independence, structured-output validation, exact candidate binding, and explicit per-stage provider/budget authorization are all proven. The existing DeepSeek audit authority SHALL remain distinct and its result SHALL NOT be converted into contract-review or final-review evidence. An independent audit SHALL be invoked only when explicitly required by applicable policy or human authorization.
+The system SHALL invoke existing PLAN, read-only CONTRACT REVIEW, implementation APPLY, implementation TEST, VERIFY/E2E, final REVIEW, 007 continuation, and PR authorities in their configured order and SHALL preserve their decisions and diagnostics. For R01, Codex and AGY SHALL be selected for compatible planning and execution stages by validated per-stage profiles and MAY hand off work under durable, fenced, idempotent authority. DeepSeek Direct SHALL perform separate read-only CONTRACT REVIEW and final code REVIEW using its own account/API and explicit stage-specific capacity and budget authority. Each review is distinct evidence and cannot authorize APPLY, product decisions, or merge, nor substitute for the other review. OpenRouter MAY rescue only already-started work after both primary providers are blocked by quota, with its own capacity and spend authority; it SHALL NOT review or start READY work. The existing DeepSeek audit authority SHALL remain distinct and its result SHALL NOT be converted into either review type. An independent audit SHALL be invoked only when explicitly required by applicable policy or human authorization.
 
 #### Scenario: Corrective implementation is governed by 007
 - **WHEN** an implementation attempt is premature, falsely blocked, structurally blocked, or otherwise incomplete
 - **THEN** the run delegates correction, reassignment, waiting, and escalation to the existing continuation governance and resumes from its persisted result.
 
 #### Scenario: Review changes require remediation
-- **WHEN** an authoritative primary or qualifying DeepSeek reviewer returns `CHANGES_REQUIRED`
+- **WHEN** the authoritative DeepSeek reviewer returns `CHANGES_REQUIRED`
 - **THEN** the run delegates remediation through continuation governance, freezes the resulting candidate as a new generation, and requires fresh authoritative review for that generation.
 
 #### Scenario: Audit failure requires a full fresh audit
@@ -55,22 +55,22 @@ The system SHALL invoke existing PLAN, read-only CONTRACT REVIEW, implementation
 - **WHEN** the current candidate's authorized audit contains one or more MEDIUM findings, regardless of any LOW findings or overall textual PASS claim
 - **THEN** the audit cannot authorize progression to `PR_PREPARED` or `READY_FOR_HUMAN_MERGE` and remediation follows existing continuation governance.
 
-#### Scenario: DeepSeek reviewer is authorized only as a distinct reviewer
-- **GIVEN** no eligible primary reviewer can serve and the DeepSeek reviewer contract, exact candidate input, compatible read-only capability, explicit authorization, and budget are verified
+#### Scenario: DeepSeek reviewer is authorized only through its direct review authority
+- **GIVEN** the DeepSeek reviewer contract, exact contract or candidate input, compatible read-only capability, authenticated direct account, fresh capacity/balance, explicit authorization, and budget are verified
 - **WHEN** the structured DeepSeek review response passes deterministic validation and reviewer-independence checks
 - **THEN** it may satisfy the review evidence requirement for that candidate
 - **AND** no existing audit record or audit response is promoted to review evidence and human merge remains mandatory.
 
-#### Scenario: R01 contract review is preferred before implementation
-- **GIVEN** a READY R01 change and a compatible DeepSeek contract-review profile with fresh capacity and explicit provider/stage/budget authorization
+#### Scenario: R01 contract review is completed before implementation
+- **GIVEN** a READY R01 change and a compatible DeepSeek contract-review profile with fresh direct-account capacity/balance and an explicit durable stage budget reservation
 - **WHEN** the orchestration reaches CONTRACT REVIEW
 - **THEN** it performs the read-only contract review before APPLY and records separate contract-review evidence
 - **AND** it does not treat that result as authorization for APPLY, final code REVIEW, product decisions, or merge.
 
-#### Scenario: AGY alternative or wait for contract review
-- **GIVEN** DeepSeek is not eligible and AGY is eligible for read-only CONTRACT REVIEW, or neither provider is eligible
+#### Scenario: Required contract review waits when DeepSeek is unavailable
+- **GIVEN** DeepSeek is not eligible for read-only CONTRACT REVIEW
 - **WHEN** the orchestration reaches CONTRACT REVIEW
-- **THEN** it uses AGY only as the configured alternative, otherwise preserves the work in a waiting state without APPLY or inference.
+- **THEN** it preserves the work in a waiting state without substituting Codex, AGY, OpenRouter, an audit, or unauthenticated findings, and without APPLY or review inference.
 
 #### Scenario: No routine audit is invoked without authority
 - **GIVEN** required checks and authoritative independent review pass and no applicable policy or explicit human authorization requires an additional audit
@@ -79,7 +79,7 @@ The system SHALL invoke existing PLAN, read-only CONTRACT REVIEW, implementation
 - **AND** the human gate remains governed by checks, review, and exact candidate evidence.
 
 ### Requirement: Candidate-bound evidence authority
-The system SHALL bind each candidate generation to the registered base SHA, actual managed-worktree candidate SHA, manifest identity/hash, authorship history, and the review records that evaluated it. Any audit evidence that is required and obtained SHALL also be bound to that candidate generation and identity. A DeepSeek reviewer record SHALL be distinct from an audit record and SHALL bind the repository identity, base SHA, candidate SHA, generation, manifest, reviewer identity, sufficient review input, authorization/budget reference, and validated structured result.
+The system SHALL bind each candidate generation to the registered base SHA, actual managed-worktree candidate SHA, manifest identity/hash, authorship history, and the code-review record that evaluated it. Contract-review evidence SHALL bind the exact OpenSpec contract revision and remain separate from candidate code-review evidence. Any audit evidence that is required and obtained SHALL also be bound to that candidate generation and identity. A DeepSeek reviewer record SHALL be distinct from an audit record and SHALL bind the repository identity, applicable contract revision or base/candidate SHA, generation, manifest when reviewing code, reviewer identity, sufficient review input, authorization/budget reference, and validated structured result.
 
 #### Scenario: Stale review cannot authorize a changed candidate
 - **WHEN** remediation changes the candidate HEAD SHA or manifest
@@ -95,6 +95,11 @@ The system SHALL bind each candidate generation to the registered base SHA, actu
 - **GIVEN** DeepSeek review evidence is missing required input, malformed, stale, ambiguous, unauthorized, or identity-conflicting
 - **WHEN** the pipeline evaluates the review gate
 - **THEN** it rejects that evidence, preserves the candidate, and waits or blocks without deriving approval from audit output.
+
+#### Scenario: Capacity or balance does not authorize spend
+- **GIVEN** a provider reports available quota or positive account balance but no durable spend authorization/reservation matches provider, protected account, model, stage, Run/Job, and billing origin
+- **WHEN** the orchestration prepares a paid stage
+- **THEN** it denies dispatch, preserves the checkpoint, and does not infer permission to spend from the capacity observation.
 
 ### Requirement: Idempotent human-gate preparation
 The system SHALL make branch push and GitHub PR creation/update idempotent, SHALL reserve and persist a durable external-action identity, target identity, and request fingerprint before every covered mutation, and SHALL never push or expose a candidate that lacks current required checks and authoritative independent review; any separately required audit SHALL also be current and candidate-bound.
@@ -116,7 +121,7 @@ The system SHALL make branch push and GitHub PR creation/update idempotent, SHAL
 - **THEN** the system reconciles remote state before any retry; temporary inability to observe remote state produces `WAITING_EXTERNAL`, while contradictory evidence produces `NEEDS_HUMAN`.
 
 ### Requirement: Human-gate contract
-The system SHALL stop at exactly one of `READY_FOR_HUMAN_MERGE`, `WAITING_CAPACITY`, `WAITING_EXTERNAL`, or `NEEDS_HUMAN` for the run's MVP lifecycle, and SHALL not merge, deploy, archive, or close the change automatically. `READY_FOR_HUMAN_MERGE` is only a human-gate outcome, not an orchestration stage. DeepSeek review, when used under the explicit fallback contract, can satisfy only the independent review gate and SHALL NOT satisfy or bypass human merge authorization.
+The system SHALL stop at exactly one of `READY_FOR_HUMAN_MERGE`, `WAITING_CAPACITY`, `WAITING_EXTERNAL`, or `NEEDS_HUMAN` for the run's MVP lifecycle, and SHALL not merge, deploy, archive, or close the change automatically. `READY_FOR_HUMAN_MERGE` is only a human-gate outcome, not an orchestration stage. DeepSeek Direct code review, when valid under its direct-account and explicit stage-budget authority, can satisfy only the independent code-review gate and SHALL NOT satisfy or bypass human merge authorization.
 
 #### Scenario: Operator resumes a waiting run
 - **WHEN** provider capacity or a recoverable external condition is independently verified as restored/observable
@@ -127,6 +132,6 @@ The system SHALL stop at exactly one of `READY_FOR_HUMAN_MERGE`, `WAITING_CAPACI
 - **THEN** the run uses `WAITING_EXTERNAL`, while `WAITING_CAPACITY` remains reserved for canonical 005/006 capacity evidence.
 
 #### Scenario: Human merge remains mandatory
-- **GIVEN** a run has current passing checks and authoritative review from an eligible primary or qualifying DeepSeek reviewer
+- **GIVEN** a run has current passing checks and authoritative independent DeepSeek code review
 - **WHEN** the run reaches `READY_FOR_HUMAN_MERGE`
 - **THEN** mini me exposes the exact PR, base SHA, candidate SHA, manifest/review evidence, any required audit evidence, and stop reason while taking no merge action.

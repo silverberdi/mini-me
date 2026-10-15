@@ -3085,11 +3085,19 @@ def test_capacity_strategy(monkeypatch):
             del timeout_seconds
             return True
 
+        async def check_model_supported(
+            self, model: str, effort: str | None = None, timeout_seconds: float = 10.0
+        ) -> tuple[bool, str | None]:
+            del model, effort, timeout_seconds
+            return True, None
+
         async def probe_availability(self, timeout_seconds: float = 30.0) -> bool:
             del timeout_seconds
             raise AssertionError("capacity tests must not invoke provider inference")
 
-        async def read_capacity_observation(self, timeout_seconds: float = 10.0):
+        async def read_capacity_observation(
+            self, timeout_seconds: float = 10.0, selected_model: str | None = None
+        ):
             del timeout_seconds
             now = utc_now()
             account_id = (
@@ -3097,6 +3105,17 @@ def test_capacity_strategy(monkeypatch):
                 if self._provider == "antigravity"
                 else f"test-account:{self._provider}"
             )
+            model = selected_model or f"test-model:{self._provider}"
+            if self._provider == "codex":
+                quota_scope = "codex"
+            elif self._provider == "antigravity":
+                from minime.adapters.provider_adapter import AntigravityProviderAdapter
+
+                quota_scope = (
+                    AntigravityProviderAdapter.map_model_to_quota_group(model) or "test-quota-scope"
+                )
+            else:
+                quota_scope = "test-quota-scope"
             return CapacityObservation(
                 provider=self._provider,
                 ordinary_usage_allowed=self.allowed,
@@ -3104,7 +3123,8 @@ def test_capacity_strategy(monkeypatch):
                 expires_at=now + timedelta(seconds=30) if self.allowed is not None else now,
                 source_signal=self.capacity_source_signal,
                 account_id=account_id,
-                model=f"test-model:{self._provider}",
+                model=model,
+                quota_scope=quota_scope,
             )
 
     def install(providers: tuple[str, ...] | list[str] = tuple(PRIMARY_PROVIDERS)):

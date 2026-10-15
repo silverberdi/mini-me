@@ -21,7 +21,7 @@ from typing import Any
 
 import httpx
 
-from minime.config import AppConfig, load_config
+from minime.config import AppConfig, agy_model_effort_variant, load_config
 from minime.domain.enums import CapacitySignalSource, ProviderResultClass
 
 logger = logging.getLogger(__name__)
@@ -51,6 +51,9 @@ class CapacityObservation:
     capacity_reset_at: datetime | None = None
     # Ephemeral source-session identity. Persistence stores only its fingerprint.
     source_session_id: str | None = None
+    # Assigned by ProviderHealthService after a bounded registered-adapter read.
+    source_invocation_id: str | None = None
+    quota_scope: str | None = None
 
 
 class ProviderAdapterInterface(ABC):
@@ -140,7 +143,10 @@ class ProviderAdapterInterface(ABC):
     ) -> tuple[bool, str | None]:
         """Validate if model and effort are supported by the active account / installed CLI."""
         del model, effort, timeout_seconds
-        return True, None
+        return (
+            False,
+            "CAPABILITY_DISCOVERY_UNAVAILABLE: adapter does not expose model/effort evidence",
+        )
 
 
 class CodexProviderAdapter(ProviderAdapterInterface):
@@ -302,7 +308,9 @@ class CodexProviderAdapter(ProviderAdapterInterface):
                 except Exception:
                     pass
 
-    async def read_capacity_observation(self, timeout_seconds: float = 10.0) -> CapacityObservation:
+    async def read_capacity_observation(
+        self, timeout_seconds: float = 10.0, selected_model: str | None = None
+    ) -> CapacityObservation:
         """Read the installed App Server's account rate-limit contract without a turn.
 
         The response schema documents ``ordinaryUsageAllowed`` as backend permission
@@ -327,38 +335,32 @@ class CodexProviderAdapter(ProviderAdapterInterface):
             result,
             observed_at=observed_at,
             expires_at=expires_at,
+            selected_model=selected_model,
         )
 
     async def discover_account_capabilities(self, timeout_seconds: float = 10.0) -> dict[str, Any]:
         """Query Codex App Server model/list via stdio (0 inference tokens)."""
         now = datetime.now(UTC)
-        if (
-            self._cached_capabilities is not None
-            and self._capabilities_expires_at is not None
-            and now < self._capabilities_expires_at
-        ):
-            return self._cached_capabilities
-
         result = await self._call_app_server_method("model/list", timeout_seconds=timeout_seconds)
         if not isinstance(result, dict):
-            return self._cached_capabilities or {}
+            return {}
         data = result.get("data")
         if not isinstance(data, list):
-            return self._cached_capabilities or {}
+            return {}
 
-        models: dict[str, list[str]] = {}
+        models: dict[str, list[str] | None] = {}
         for item in data:
             if isinstance(item, dict) and "id" in item:
                 m_id = str(item["id"]).strip().lower()
-                efforts_raw = item.get("supportedReasoningEfforts", [])
+                efforts_raw = item.get("supportedReasoningEfforts")
                 efforts: list[str] = []
-                if isinstance(efforts_raw, list):
+                if isinstance(efforts_raw, list) and efforts_raw:
                     for e in efforts_raw:
                         if isinstance(e, dict) and "reasoningEffort" in e:
                             efforts.append(str(e["reasoningEffort"]).strip().lower())
                         elif isinstance(e, str):
                             efforts.append(e.strip().lower())
-                models[m_id] = efforts
+                models[m_id] = efforts or None
 
         caps = {"models": models}
         self._cached_capabilities = caps
@@ -388,7 +390,12 @@ class CodexProviderAdapter(ProviderAdapterInterface):
         if effort:
             norm_effort = effort.strip().lower()
             supported_efforts = models[norm_model]
-            if supported_efforts and norm_effort not in supported_efforts:
+            if not supported_efforts:
+                return (
+                    False,
+                    f"EFFORT_CAPABILITY_UNOBSERVABLE: Codex model/list did not report supported efforts for '{model}'.",
+                )
+            if norm_effort not in supported_efforts:
                 return (
                     False,
                     f"EFFORT_UNSUPPORTED_FOR_MODEL: Effort '{effort}' is not supported for model '{model}'. "
@@ -398,7 +405,11 @@ class CodexProviderAdapter(ProviderAdapterInterface):
 
     @staticmethod
     def parse_rate_limits_result(
-        result: object, *, observed_at: datetime, expires_at: datetime
+        result: object,
+        *,
+        observed_at: datetime,
+        expires_at: datetime,
+        selected_model: str | None = None,
     ) -> CapacityObservation:
         """Parse only the installed App Server's authoritative permission field."""
         unknown = CapacityObservation(
@@ -427,6 +438,12 @@ class CodexProviderAdapter(ProviderAdapterInterface):
             or bucket.get("limitId") != "codex"
         ):
             return unknown
+        reported_model = bucket.get("normalModelSlug")
+        if selected_model and (
+            not isinstance(reported_model, str)
+            or reported_model.strip().lower() != selected_model.strip().lower()
+        ):
+            return unknown
         reset_candidates = []
         for window_name in ("primary", "secondary"):
             window = bucket.get(window_name)
@@ -443,8 +460,9 @@ class CodexProviderAdapter(ProviderAdapterInterface):
             expires_at=expires_at,
             source_signal=CapacitySignalSource.CODEX_APP_SERVER,
             account_id=account_id,
-            model=bucket.get("normalModelSlug") or bucket.get("limitId"),
+            model=reported_model or bucket.get("limitId"),
             capacity_reset_at=min(reset_candidates) if reset_candidates else None,
+            quota_scope=bucket.get("limitId"),
         )
 
     @staticmethod
@@ -523,16 +541,9 @@ class AntigravityProviderAdapter(ProviderAdapterInterface):
     async def discover_account_capabilities(self, timeout_seconds: float = 10.0) -> dict[str, Any]:
         """Discover model and effort capabilities via agy models (0 inference tokens)."""
         now = datetime.now(UTC)
-        if (
-            self._cached_capabilities is not None
-            and self._capabilities_expires_at is not None
-            and now < self._capabilities_expires_at
-        ):
-            return self._cached_capabilities
-
         resolved = self._resolve_executable()
         if not resolved:
-            return self._cached_capabilities or {}
+            return {}
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -545,7 +556,7 @@ class AntigravityProviderAdapter(ProviderAdapterInterface):
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
             if proc.returncode != 0:
-                return self._cached_capabilities or {}
+                return {}
             out_str = stdout.decode("utf-8", errors="replace")
             models: list[str] = []
             for line in out_str.splitlines():
@@ -557,14 +568,22 @@ class AntigravityProviderAdapter(ProviderAdapterInterface):
                     slug = parts[0].strip().lower()
                     if slug and not slug.startswith("⠋"):
                         models.append(slug)
-            efforts = ["low", "medium", "high", "xhigh", "max"]
-            caps_dict = {"models": models, "efforts": efforts}
+            # AGY's current catalog encodes selectable effort in distinct model
+            # identifiers (for example, `...-flash-medium`). Treat each listed
+            # identifier as indivisible; do not infer a separate `--effort`
+            # capability from the CLI's global flag list.
+            model_efforts = {
+                model: effort
+                for model in models
+                if (effort := agy_model_effort_variant(model)) is not None
+            }
+            caps_dict = {"models": models, "model_efforts": model_efforts}
             self._cached_capabilities = caps_dict
             self._capabilities_expires_at = now + timedelta(seconds=60)
             return caps_dict
         except Exception as exc:
             logger.debug(f"Antigravity capability discovery failed: {exc}")
-            return self._cached_capabilities or {}
+            return {}
 
     async def check_model_supported(
         self, model: str, effort: str | None = None, timeout_seconds: float = 10.0
@@ -588,12 +607,17 @@ class AntigravityProviderAdapter(ProviderAdapterInterface):
             )
         if effort:
             norm_effort = effort.strip().lower()
-            efforts = caps.get("efforts", ["low", "medium", "high"])
-            if norm_effort not in efforts:
+            variant_effort = caps.get("model_efforts", {}).get(norm_model)
+            if not isinstance(variant_effort, str):
                 return (
                     False,
-                    f"EFFORT_UNSUPPORTED_FOR_MODEL: Effort '{effort}' is not supported by Antigravity CLI. "
-                    f"Supported efforts: {sorted(efforts)}",
+                    "EFFORT_CAPABILITY_UNOBSERVABLE: AGY does not expose model-specific effort support.",
+                )
+            if norm_effort != variant_effort:
+                return (
+                    False,
+                    f"EFFORT_VARIANT_CONFLICT: AGY model '{model}' encodes effort "
+                    f"'{variant_effort}', not '{effort}'.",
                 )
         return True, None
 
@@ -1315,6 +1339,7 @@ class AntigravityProviderAdapter(ProviderAdapterInterface):
             account_id=account_fingerprint,
             model=model_name,
             capacity_reset_at=min(reset_datetimes),
+            quota_scope=mapped_group_name,
         )
 
 
@@ -1430,6 +1455,13 @@ class FakeProviderAdapter(ProviderAdapterInterface):
     async def probe_availability(self, timeout_seconds: float = 30.0) -> bool:
         self.probe_call_count += 1
         return self.available
+
+    async def check_model_supported(
+        self, model: str, effort: str | None = None, timeout_seconds: float = 10.0
+    ) -> tuple[bool, str | None]:
+        """Explicit deterministic capability behavior for test-only adapter doubles."""
+        del model, effort, timeout_seconds
+        return True, None
 
 
 # Global registry for pluggable provider adapters

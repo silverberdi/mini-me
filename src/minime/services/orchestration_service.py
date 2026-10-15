@@ -3531,7 +3531,7 @@ class OrchestrationService:
             )
             self.uow.events.save(
                 Event(
-                    event_type=EventType.JOB_FAILED,
+                    event_type=EventType.AUXILIARY_CLASSIFICATION_FAILED,
                     project_id=change.project_id,
                     change_id=change.name,
                     payload={

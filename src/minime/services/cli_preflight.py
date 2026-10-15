@@ -8,11 +8,7 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from minime.config import (
-    SUPPORTED_PROVIDER_EFFORTS,
-    SUPPORTED_PROVIDER_MODELS,
-    CliInvocationProfile,
-)
+from minime.config import CliInvocationProfile
 
 _SEARCH_PATH = (
     f"{Path.home()}/.local/bin:/opt/homebrew/bin:/usr/local/bin:{os.environ.get('PATH', '')}"
@@ -52,18 +48,6 @@ async def preflight_cli_invocation(
     if not resolved:
         return PreflightResult(ok=False, reason="EXECUTABLE_MISSING")
 
-    # Validate model capability if specified on the profile
-    if profile.model:
-        provider_models = SUPPORTED_PROVIDER_MODELS.get(profile.provider.lower())
-        if provider_models is not None and profile.model.lower() not in provider_models:
-            return PreflightResult(ok=False, reason="UNSUPPORTED_MODEL")
-
-    # Validate effort capability if specified on the profile
-    if profile.effort:
-        provider_efforts = SUPPORTED_PROVIDER_EFFORTS.get(profile.provider.lower())
-        if provider_efforts is not None and profile.effort.lower() not in provider_efforts:
-            return PreflightResult(ok=False, reason="UNSUPPORTED_EFFORT")
-
     # Validate account/CLI non-inferential capabilities via provider adapter if model is specified
     if profile.model:
         try:
@@ -75,8 +59,12 @@ async def preflight_cli_invocation(
             )
             if not supported:
                 return PreflightResult(ok=False, reason=reason or "UNSUPPORTED_ACCOUNT_CAPABILITY")
-        except Exception:
-            pass
+        except Exception as exc:
+            return PreflightResult(
+                ok=False, reason=f"CAPABILITY_DISCOVERY_UNAVAILABLE:{type(exc).__name__}"
+            )
+    elif profile.effort:
+        return PreflightResult(ok=False, reason="EFFORT_WITHOUT_MODEL")
 
     flags = _flag_tokens(profile.args)
     subcommand = _subcommand(profile.args)

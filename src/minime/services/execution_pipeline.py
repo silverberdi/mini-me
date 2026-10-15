@@ -251,6 +251,28 @@ class ExecutionPipelineService:
         getter = getattr(self.health_service, "get_health", None)
         return getter(provider) if callable(getter) else None
 
+    def _stage_capacity_evidence_matches(self, provider: str, model: str | None) -> bool:
+        """Bind JIT evidence to the model/scope selected for this exact stage."""
+        if not model:
+            return False
+        verifier = getattr(self.health_service, "has_fresh_capacity_evidence", None)
+        if not callable(verifier):
+            return False
+        quota_scope = None
+        if provider == "codex":
+            quota_scope = "codex"
+        elif provider in {"antigravity", "agy"}:
+            from minime.adapters.provider_adapter import AntigravityProviderAdapter
+
+            quota_scope = AntigravityProviderAdapter.map_model_to_quota_group(model)
+            if quota_scope is None:
+                return False
+        try:
+            return bool(verifier(provider, model=model, quota_scope=quota_scope))
+        except Exception:
+            logger.info("Stage-bound capacity evidence unavailable for %s", provider)
+            return False
+
     async def _refresh_capacity_before_stage(self, provider: str, model: str | None = None):
         """Refresh provider-owned capacity immediately before a stage is dispatched."""
         refresh = getattr(self.health_service, "refresh_capacity_from_read_only_source", None)
@@ -559,7 +581,11 @@ class ExecutionPipelineService:
                 effective_implementer, model=apply_profile.model
             )
             is_primary_imp_available = (
-                imp_health is not None and imp_health.status == ProviderHealthStatus.AVAILABLE
+                imp_health is not None
+                and imp_health.status == ProviderHealthStatus.AVAILABLE
+                and self._stage_capacity_evidence_matches(
+                    effective_implementer, apply_profile.model
+                )
             )
             if is_primary_imp_available and imp_health.model:
                 from minime.adapters.provider_adapter import AntigravityProviderAdapter
@@ -734,15 +760,12 @@ class ExecutionPipelineService:
                             OpenSpecStage.APPLY,
                             requested_provider=current_executor,
                         )
-                        try:
-                            attempt_runner = runner_for_implementer(
-                                apply_profile.provider,
-                                config=self.app_config,
-                                model=apply_profile.model,
-                                effort=apply_profile.effort,
-                            )
-                        except TypeError:
-                            attempt_runner = runner_for_implementer(apply_profile.provider)
+                        attempt_runner = runner_for_implementer(
+                            apply_profile.provider,
+                            config=self.app_config,
+                            model=apply_profile.model,
+                            effort=apply_profile.effort,
+                        )
                         if isinstance(attempt_runner, CliImplementerRunner):
                             if (
                                 attempt_runner.profile is None
@@ -807,6 +830,13 @@ class ExecutionPipelineService:
                         return job
                     except (NativeOpenSpecWorkflowUnavailable, ValueError, OSError) as exc:
                         reason = f"Native OpenSpec APPLY preflight blocked: {exc}"
+                        job = self._transition(job, JobStatus.NEEDS_HUMAN, reason)
+                        return job
+                    except Exception as exc:
+                        reason = (
+                            "Validated APPLY profile could not construct runner; "
+                            f"refusing unprofiled dispatch ({type(exc).__name__})."
+                        )
                         job = self._transition(job, JobStatus.NEEDS_HUMAN, reason)
                         return job
                 elif self.implementer_runner is not None:
@@ -1074,11 +1104,14 @@ class ExecutionPipelineService:
                         imp_outcome = openrouter_res
                 else:
                     # Primary implementer runner execution
-                    runner = (
-                        attempt_runner
-                        or self.implementer_runner
-                        or runner_for_implementer(current_executor)
-                    )
+                    runner = attempt_runner or self.implementer_runner
+                    if runner is None:
+                        job = self._transition(
+                            job,
+                            JobStatus.NEEDS_HUMAN,
+                            "Validated APPLY profile did not produce a runner; refusing unprofiled dispatch.",
+                        )
+                        return job
                     result = await runner.run(
                         worktree.path,
                         prompt_context,
@@ -1924,7 +1957,11 @@ class ExecutionPipelineService:
                 effective_reviewer, model=review_profile.model if review_profile else None
             )
             is_primary_rev_available = (
-                rev_health is not None and rev_health.status == ProviderHealthStatus.AVAILABLE
+                rev_health is not None
+                and rev_health.status == ProviderHealthStatus.AVAILABLE
+                and self._stage_capacity_evidence_matches(
+                    effective_reviewer, review_profile.model if review_profile else None
+                )
             )
             reviewer_fallback_used = False
             selected_reviewer_model: str | None = None
@@ -2059,8 +2096,17 @@ class ExecutionPipelineService:
             # earlier reviewer snapshot. Obtain one final observation immediately
             # before materializing the review workspace / persisting REVIEW_RUNNING.
             if not reviewer_fallback_used:
-                rev_health = await self._refresh_capacity_before_stage(effective_reviewer)
-                if rev_health.status != ProviderHealthStatus.AVAILABLE:
+                rev_health = await self._refresh_capacity_before_stage(
+                    effective_reviewer,
+                    model=review_profile.model if review_profile else None,
+                )
+                if (
+                    rev_health is None
+                    or rev_health.status != ProviderHealthStatus.AVAILABLE
+                    or not self._stage_capacity_evidence_matches(
+                        effective_reviewer, review_profile.model if review_profile else None
+                    )
+                ):
                     job = self.uow.jobs.set_waiting_capacity(
                         job.job_id,
                         effective_reviewer,
@@ -2379,14 +2425,26 @@ class ExecutionPipelineService:
                     reviewer = CliReviewerRunner(review_profile.cli_invocation)
                 else:
                     try:
+                        if review_profile is None:
+                            raise StageProfileError("REVIEW profile is unavailable")
                         reviewer = runner_for_reviewer(
                             effective_reviewer,
                             config=self.app_config,
-                            model=review_profile.model if review_profile else None,
-                            effort=review_profile.effort if review_profile else None,
+                            model=review_profile.model,
+                            effort=review_profile.effort,
                         )
-                    except TypeError:
-                        reviewer = runner_for_reviewer(effective_reviewer)
+                    except (TypeError, StageProfileError) as exc:
+                        self.uow.reviews.transition(
+                            review.review_id,
+                            ReviewStatus.REVIEW_FAILED.value,
+                            error_message=f"Validated REVIEW profile could not construct runner: {exc}",
+                        )
+                        self.uow.commit()
+                        return self._transition(
+                            job,
+                            JobStatus.NEEDS_HUMAN,
+                            "Validated REVIEW profile could not construct runner; refusing unprofiled dispatch.",
+                        )
                 review_result = await reviewer.run(
                     readonly_view,
                     review_prompt,
@@ -3059,7 +3117,7 @@ class ExecutionPipelineService:
             )
             self.uow.events.save(
                 Event(
-                    event_type=EventType.JOB_FAILED,
+                    event_type=EventType.AUXILIARY_CLASSIFICATION_FAILED,
                     project_id=job.project_id,
                     change_id=job.change_name,
                     payload={

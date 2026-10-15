@@ -3,10 +3,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import inspect
+import json
 import logging
 from collections.abc import Callable, Coroutine
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import uuid4
 
 from minime.adapters.provider_adapter import CapacityObservation, get_provider_adapter
 from minime.config import ProbeConfig, load_config, probe_configs_from_app_config
@@ -45,6 +48,7 @@ class ProviderHealthService:
         self.probe_config = probe_config
         self.probe_configs = self._resolve_probe_configs(probe_config, probe_configs)
         self._probe_locks: dict[str, asyncio.Lock] = {}
+        self._issued_capacity_evidence: dict[str, str] = {}
 
     @staticmethod
     def _resolve_probe_configs(
@@ -102,8 +106,16 @@ class ProviderHealthService:
         self._validate_primary(provider)
         return self.uow.provider_health.get_by_provider(provider)
 
-    def has_fresh_capacity_evidence(self, provider: str, now: datetime | None = None) -> bool:
-        """Require a current persisted capacity observation before treating AVAILABLE as usable."""
+    def has_fresh_capacity_evidence(
+        self,
+        provider: str,
+        now: datetime | None = None,
+        *,
+        model: str | None = None,
+        account_fingerprint: str | None = None,
+        quota_scope: str | None = None,
+    ) -> bool:
+        """Require fresh adapter-acquired evidence, optionally bound to a stage tuple."""
         self._validate_primary(provider)
         current = now or utc_now()
         adapter = get_provider_adapter(provider)
@@ -115,21 +127,54 @@ class ProviderHealthService:
                 {getattr(adapter, "capacity_source_signal", CapacitySignalSource.UNKNOWN)},
             )
         }
+        observations = []
         for event in self.uow.events.list_events(limit=500):
             if event.event_type != EventType.PROVIDER_CAPACITY_OBSERVED:
                 continue
             payload = event.payload or {}
             if payload.get("provider") != provider:
                 continue
+            observations.append((event, payload))
+        if observations:
+            event, payload = max(observations, key=lambda row: row[0].timestamp)
             if payload.get("source") not in valid_sources:
-                continue
+                return False
             try:
+                observed_at = datetime.fromisoformat(payload.get("observed_at", ""))
                 expires_at = datetime.fromisoformat(payload.get("expires_at", ""))
-                if expires_at.tzinfo is None:
-                    expires_at = expires_at.replace(tzinfo=UTC)
+                if observed_at.tzinfo is None or expires_at.tzinfo is None:
+                    return False
+                observed_at = observed_at.astimezone(UTC)
+                expires_at = expires_at.astimezone(UTC)
             except (TypeError, ValueError):
                 return False
-            return payload.get("state") in {"AVAILABLE", "EXHAUSTED"} and expires_at > current
+            fingerprint = payload.get("account_fingerprint")
+            invocation_id = payload.get("source_invocation_id")
+            expected_digest = self._issued_capacity_evidence.get(invocation_id)
+            payload_digest = hashlib.sha256(
+                json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            if (
+                not expected_digest
+                or payload_digest != expected_digest
+                or not isinstance(payload.get("model"), str)
+                or not payload["model"].strip()
+                or not isinstance(fingerprint, str)
+                or len(fingerprint) != 64
+                or any(char not in "0123456789abcdef" for char in fingerprint)
+                or not isinstance(payload.get("quota_scope"), str)
+                or not payload["quota_scope"].strip()
+                or observed_at > current + timedelta(seconds=5)
+                or current - observed_at > CAPACITY_OBSERVATION_TTL
+                or expires_at <= current
+                or (model and payload["model"].strip().lower() != model.strip().lower())
+                or (account_fingerprint and fingerprint != account_fingerprint)
+                or (quota_scope and payload["quota_scope"] != quota_scope)
+            ):
+                return False
+            return payload.get("state") in {"AVAILABLE", "EXHAUSTED"}
+        if model is not None or account_fingerprint is not None or quota_scope is not None:
+            return False
         # A real successful execution is also a provider-owned capacity observation.
         # It is accepted only while the existing health record's success timestamp
         # remains inside the same short freshness window.
@@ -172,7 +217,19 @@ class ProviderHealthService:
     def record_capacity_observation(
         self, provider: str, observation: CapacityObservation | None
     ) -> bool:
-        """Persist provider-owned capacity evidence through existing health/event/window authorities."""
+        """Persist no caller-supplied positive evidence; this API can only record UNKNOWN."""
+        del observation
+        return self._persist_capacity_observation(provider, None, acquisition_id=None)
+
+    def _persist_capacity_observation(
+        self,
+        provider: str,
+        observation: CapacityObservation | None,
+        *,
+        acquisition_id: str | None,
+        selected_model: str | None = None,
+    ) -> bool:
+        """Persist evidence only after this service acquired it from the registered adapter."""
         self._validate_primary(provider)
         # Initialize/read the authoritative row before taking the observation
         # persistence timestamp. On a new PostgreSQL row, ``get_health`` may
@@ -188,9 +245,18 @@ class ProviderHealthService:
         )
         valid = bool(
             observation
+            and acquisition_id
             and observation.provider == provider
             and getattr(adapter, "supports_read_only_capacity_observation", False)
             and observation.source_signal in valid_sources
+            and isinstance(observation.model, str)
+            and bool(observation.model.strip())
+            and isinstance(observation.quota_scope, str)
+            and bool(observation.quota_scope.strip())
+            and (
+                selected_model is None
+                or observation.model.strip().lower() == selected_model.strip().lower()
+            )
             and (
                 not getattr(adapter, "requires_account_identity_for_capacity", False)
                 or (
@@ -227,6 +293,8 @@ class ProviderHealthService:
             if valid and observation and observation.ordinary_usage_allowed is False
             else "UNKNOWN"
         )
+        if valid and observation:
+            observation = replace(observation, source_invocation_id=acquisition_id)
         if state != "UNKNOWN" or health.status != ProviderHealthStatus.EXHAUSTED:
             health.status = (
                 ProviderHealthStatus.AVAILABLE
@@ -288,28 +356,33 @@ class ProviderHealthService:
             source_session_fingerprint = hashlib.sha256(
                 observation.source_session_id.encode()
             ).hexdigest()
+        payload = {
+            "provider": provider,
+            "model": observation.model if observation else None,
+            "account_fingerprint": account_fingerprint,
+            "source_session_fingerprint": source_session_fingerprint,
+            "source_invocation_id": observation.source_invocation_id
+            if valid and observation
+            else None,
+            "quota_scope": observation.quota_scope if valid and observation else None,
+            "observed_at": observation.observed_at.isoformat() if observation else now.isoformat(),
+            "expires_at": observation.expires_at.isoformat() if observation else now.isoformat(),
+            "source": observation.source_signal.value
+            if observation
+            else CapacitySignalSource.UNKNOWN.value,
+            "ordinary_usage_allowed": observation.ordinary_usage_allowed
+            if valid and observation
+            else None,
+            "state": state,
+        }
+        if valid and observation and observation.source_invocation_id:
+            self._issued_capacity_evidence[observation.source_invocation_id] = hashlib.sha256(
+                json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
         self.uow.events.save(
             Event(
                 event_type=EventType.PROVIDER_CAPACITY_OBSERVED,
-                payload={
-                    "provider": provider,
-                    "model": observation.model if observation else None,
-                    "account_fingerprint": account_fingerprint,
-                    "source_session_fingerprint": source_session_fingerprint,
-                    "observed_at": observation.observed_at.isoformat()
-                    if observation
-                    else now.isoformat(),
-                    "expires_at": observation.expires_at.isoformat()
-                    if observation
-                    else now.isoformat(),
-                    "source": observation.source_signal.value
-                    if observation
-                    else CapacitySignalSource.UNKNOWN.value,
-                    "ordinary_usage_allowed": observation.ordinary_usage_allowed
-                    if valid and observation
-                    else None,
-                    "state": state,
-                },
+                payload=payload,
                 timestamp=observation.observed_at if valid and observation else now,
             )
         )
@@ -338,7 +411,12 @@ class ProviderHealthService:
         except Exception:
             logger.info("Read-only capacity source unavailable for %s", provider)
             observation = None
-        return self.record_capacity_observation(provider, observation)
+        return self._persist_capacity_observation(
+            provider,
+            observation,
+            acquisition_id=str(uuid4()) if observation is not None else None,
+            selected_model=model,
+        )
 
     def list_existing_health(self) -> list[ProviderHealth]:
         """Pure query: List health for all tracked providers without inserting missing DB rows."""
@@ -804,12 +882,7 @@ class ProviderHealthService:
                 return False
 
             if adapter.supports_read_only_capacity_observation:
-                try:
-                    observation = await adapter.read_capacity_observation(timeout_seconds=10.0)
-                except Exception:
-                    logger.info("Read-only capacity source unavailable for %s", provider)
-                    observation = None
-                return self.record_capacity_observation(provider, observation)
+                return await self.refresh_capacity_from_read_only_source(provider)
 
             expensive = bool(adapter.probe_is_expensive)
             verifies_capacity = bool(adapter.probe_verifies_capacity)

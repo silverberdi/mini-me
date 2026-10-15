@@ -35,11 +35,29 @@ class StageProfileError(ValueError):
     """Raised when stage profile resolution or capability validation fails."""
 
 
+_AGY_EFFORT_SUFFIXES = ("low", "medium", "high", "xhigh", "max")
+
+
+def agy_model_effort_variant(model: str | None) -> str | None:
+    """Return an effort encoded in the exact AGY model identifier, if present.
+
+    This recognizes identifier syntax only; compatibility is proven separately by
+    requiring that the exact identifier appears in the live account model catalog.
+    """
+    if not isinstance(model, str):
+        return None
+    normalized = model.strip().lower()
+    for effort in _AGY_EFFORT_SUFFIXES:
+        if normalized.endswith(f"-{effort}"):
+            return effort
+    return None
+
+
 SUPPORTED_PROVIDER_MODELS: dict[str, dict[str, bool]] = {
     # provider -> {model_name: is_premium}
     "antigravity": {
-        "gemini-3.8-flash-low": False,
         "gemini-3.8-flash-medium": False,
+        "gemini-3.8-flash-low": False,
         "gemini-3.8-flash-high": False,
         "gemini-2.5-flash": False,
         "gemini-2.0-flash": False,
@@ -381,23 +399,133 @@ def resolve_cli_invocation(
 
     effective_model = model or invocation.model
     effective_effort = effort or invocation.effort
+    agy_variant_effort = (
+        agy_model_effort_variant(effective_model)
+        if provider_key in {"antigravity", "agy"}
+        else None
+    )
+    if agy_variant_effort:
+        configured_efforts = [value for value in (effort, invocation.effort) if value]
+        if any(value.strip().lower() != agy_variant_effort for value in configured_efforts):
+            raise ValueError(
+                f"AGY model variant '{effective_model}' encodes effort "
+                f"'{agy_variant_effort}' and contradicts the configured effort."
+            )
+        effective_effort = agy_variant_effort
     args_list = list(invocation.args)
 
+    def option_values(flags: set[str]) -> list[str]:
+        """Return explicit values for a CLI option, including --name=value syntax."""
+        values: list[str] = []
+        index = 0
+        while index < len(args_list):
+            token = args_list[index]
+            if token in flags:
+                if index + 1 >= len(args_list) or args_list[index + 1].startswith("-"):
+                    raise ValueError(f"CLI option '{token}' has no explicit value.")
+                values.append(args_list[index + 1].strip().lower())
+                index += 2
+                continue
+            for flag in flags:
+                prefix = f"{flag}="
+                if token.startswith(prefix):
+                    values.append(token[len(prefix) :].strip().lower())
+                    break
+            else:
+                index += 1
+                continue
+            index += 1
+        return values
+
+    def ensure_exact_option(flags: set[str], expected: str | None, label: str) -> None:
+        values = option_values(flags)
+        normalized_expected = expected.strip().lower() if expected else None
+        if values and (
+            normalized_expected is None or len(values) != 1 or values[0] != normalized_expected
+        ):
+            raise ValueError(
+                f"Configured {label} option conflicts with the selected profile; "
+                "refusing silent model/effort substitution."
+            )
+
     if provider.lower() in ("antigravity", "agy"):
-        if effective_model and "--model" not in args_list:
+        ensure_exact_option({"--model"}, effective_model, "model")
+        configured_effort_args = option_values({"--effort"})
+        if agy_variant_effort:
+            if any(value != agy_variant_effort for value in configured_effort_args):
+                raise ValueError(
+                    f"AGY model variant '{effective_model}' encodes effort "
+                    f"'{agy_variant_effort}' and contradicts the CLI effort argument."
+                )
+            filtered_args: list[str] = []
+            index = 0
+            while index < len(args_list):
+                token = args_list[index]
+                if token == "--effort":
+                    index += 2
+                    continue
+                if token.startswith("--effort="):
+                    index += 1
+                    continue
+                filtered_args.append(token)
+                index += 1
+            args_list = filtered_args
+        else:
+            ensure_exact_option({"--effort"}, effective_effort, "effort")
+        if effective_model and not option_values({"--model"}):
             prompt_idx = next(
                 (i for i, a in enumerate(args_list) if "{prompt}" in a), len(args_list)
             )
             args_list[prompt_idx:prompt_idx] = ["--model", effective_model]
-        if effective_effort and "--effort" not in args_list:
+        if effective_effort and not agy_variant_effort and not option_values({"--effort"}):
             prompt_idx = next(
                 (i for i, a in enumerate(args_list) if "{prompt}" in a), len(args_list)
             )
             args_list[prompt_idx:prompt_idx] = ["--effort", effective_effort]
     elif provider.lower() == "codex":
-        if effective_model and "--model" not in args_list and "-m" not in args_list:
+        ensure_exact_option({"--model", "-m"}, effective_model, "model")
+        codex_model_values: list[str] = []
+        codex_effort_values: list[str] = []
+        for index, token in enumerate(args_list):
+            config_value = token
+            if token in {"-c", "--config"} and index + 1 < len(args_list):
+                config_value = args_list[index + 1]
+            elif token.startswith("--config="):
+                config_value = token[len("--config=") :]
+            if "=" in config_value:
+                key, value = config_value.split("=", 1)
+                values = {
+                    "model": codex_model_values,
+                    "model_reasoning_effort": codex_effort_values,
+                }.get(key.strip())
+                if values is not None:
+                    values.append(value.strip().strip("\"'").lower())
+            elif "model_reasoning_effort" in config_value or config_value.strip() == "model":
+                raise ValueError(
+                    "Configured Codex model/effort override is ambiguous; "
+                    "refusing silent model/effort substitution."
+                )
+        if codex_model_values and (
+            not effective_model
+            or len(codex_model_values) != 1
+            or codex_model_values[0] != effective_model.strip().lower()
+        ):
+            raise ValueError(
+                "Configured model conflicts with the selected profile; "
+                "refusing silent model/effort substitution."
+            )
+        if codex_effort_values and (
+            not effective_effort
+            or len(codex_effort_values) != 1
+            or codex_effort_values[0] != effective_effort.strip().lower()
+        ):
+            raise ValueError(
+                "Configured reasoning effort conflicts with the selected profile; "
+                "refusing silent model/effort substitution."
+            )
+        if effective_model and not option_values({"--model", "-m"}) and not codex_model_values:
             args_list.extend(["--model", effective_model])
-        if effective_effort and "model_reasoning_effort" not in " ".join(args_list):
+        if effective_effort and not codex_effort_values:
             args_list.extend(["-c", f'model_reasoning_effort="{effective_effort}"'])
 
     return CliInvocationProfile(
@@ -450,11 +578,13 @@ def resolve_stage_profile(
         req_m = requested_model or (
             raw_profile.model if raw_profile.provider.strip().lower() == req_p else None
         )
-        req_e = requested_effort or raw_profile.effort
+        req_e = requested_effort or (
+            raw_profile.effort if raw_profile.provider.strip().lower() == req_p else None
+        )
         raw_profile = StageProfileConfig(
             provider=req_p,
             model=req_m or "",
-            effort=req_e or "medium",
+            effort=req_e or "",
             workflow=raw_profile.workflow,
         )
     elif requested_model or requested_effort:
@@ -545,7 +675,12 @@ def resolve_stage_profile(
     supported_efforts = SUPPORTED_PROVIDER_EFFORTS.get(provider, {"low", "medium"})
     effort = raw_profile.effort
     if not effort:
-        effort = "medium" if "medium" in supported_efforts else "low"
+        if provider == "antigravity":
+            agy_variant = agy_model_effort_variant(model)
+            if agy_variant:
+                effort = agy_variant
+        if not effort:
+            effort = "medium" if "medium" in supported_efforts else "low"
 
     effort_norm = effort.strip().lower()
     if effort_norm not in supported_efforts:

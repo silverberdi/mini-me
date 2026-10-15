@@ -95,6 +95,34 @@ async def test_preflight_accepted_when_flags_present(monkeypatch):
     assert result.ok is True
 
 
+async def test_preflight_capability_discovery_exception_fails_closed(monkeypatch):
+    from minime.adapters import provider_adapter
+
+    monkeypatch.setattr(
+        "minime.services.cli_preflight.shutil.which", lambda *a, **k: "/usr/local/bin/codex"
+    )
+
+    class UnobservableAdapter:
+        async def check_model_supported(self, *args, **kwargs):
+            raise TimeoutError("capability source unavailable")
+
+    monkeypatch.setattr(
+        provider_adapter, "get_provider_adapter", lambda *a, **k: UnobservableAdapter()
+    )
+    profile = CliInvocationProfile(
+        "codex",
+        "implementer",
+        "codex",
+        ("exec", "-", "--model", "gpt-5.6-luna"),
+        "stdin",
+        model="gpt-5.6-luna",
+        effort="medium",
+    )
+    result = await preflight_cli_invocation(profile)
+    assert result.ok is False
+    assert result.reason == "CAPABILITY_DISCOVERY_UNAVAILABLE:TimeoutError"
+
+
 async def test_implementer_runner_fails_fast_on_preflight(tmp_path):
     profile = CliInvocationProfile(
         "codex", "implementer", "no-such-cli-xyz-123", ("exec", "-", "--approve-for-me"), "stdin"
