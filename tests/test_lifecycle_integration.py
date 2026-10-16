@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from decimal import Decimal
 from pathlib import Path
 
@@ -89,6 +90,9 @@ def test_lifecycle_gate_chain_end_to_end(in_memory_uow, tmp_path: Path):
         canonical_repository_identity="github.com/silverberdi/mini-me",
         remote_name="origin",
     )
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True
+    ).stdout.strip()
     published_sha = publish_local_intake_ref(tmp_path, "chain-change")
     managed_binding = in_memory_uow.project_managed_repository_bindings.get_by_project_id(
         "mini-me"
@@ -102,7 +106,7 @@ def test_lifecycle_gate_chain_end_to_end(in_memory_uow, tmp_path: Path):
             change_name="chain-change",
             canonical_workspace_path=str(tmp_path),
             canonical_repository_identity=managed_binding.canonical_repository_identity,
-            base_sha=published_sha,
+            base_sha=base_sha,
             head_sha=published_sha,
             creation_state=IntakeWorkspaceCreationState.ACTIVE,
             publication_state=IntakeWorkspacePublicationState.PUBLISHED,
