@@ -23,6 +23,7 @@ from minime.domain.enums import (
     ReviewVerdict,
 )
 from minime.domain.models import (
+    BudgetLedgerEntry,
     BudgetReservation,
     Change,
     Event,
@@ -63,8 +64,9 @@ def _record_event(uow, change_name: str, event_type: EventType) -> None:
     uow.events.save(Event(event_type=event_type, project_id="mini-me", change_id=change_name))
 
 
-def test_lifecycle_gate_chain_end_to_end(in_memory_uow, tmp_path: Path):
+def test_lifecycle_gate_chain_end_to_end(in_memory_uow, tmp_path: Path, test_capacity_strategy):
     """Strict-validity -> APPLY -> VERIFY -> sync -> archive -> integrity audit PASS."""
+    test_capacity_strategy(("codex", "antigravity"))
     init_git_repo(tmp_path)
     create_isolated_openspec_change(tmp_path, "chain-change", tasks_content="- [x] 1.1 Do thing\n")
     project = _project()
@@ -251,6 +253,23 @@ def test_review_authority_remains_functional_in_gate_chain(in_memory_uow):
             stage="REVIEW",
             billing_origin="deepseek_direct",
             authorization_id=review.budget_authorization_id,
+        )
+    )
+    in_memory_uow.budget_ledger.save(
+        BudgetLedgerEntry(
+            entry_id="gate-code-review-ledger",
+            reservation_id=review.budget_reservation_id,
+            project_id=job.project_id,
+            job_id=job.job_id,
+            change_id=job.change_name,
+            provider="deepseek",
+            account_fingerprint="a" * 64,
+            stage="REVIEW",
+            billing_origin="deepseek_direct",
+            role="reviewer",
+            canonical_model_identity="deepseek-chat",
+            amount_usd=Decimal("0.05"),
+            entry_type="SETTLEMENT",
         )
     )
 

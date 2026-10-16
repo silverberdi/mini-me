@@ -24,7 +24,7 @@ class SchemaInvariantResult:
     reason: str | None = None
 
 
-EXPECTED_ALEMBIC_HEAD = "025_independent_audit_policy"
+EXPECTED_ALEMBIC_HEAD = "r02_contract_review_budget_identity"
 
 
 def verify_physical_schema_invariants(engine: Engine) -> SchemaInvariantResult:

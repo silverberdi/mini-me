@@ -31,6 +31,7 @@ from minime.config import (
 from minime.domain.enums import (
     CapacitySignalSource,
     ChangeStatus,
+    EventType,
     JobStatus,
     OrchestrationStage,
     ProviderHealthStatus,
@@ -203,7 +204,7 @@ def _build_test_app_config() -> AppConfig:
 class _AcceptedContractReview:
     """Explicitly seed the prerequisite for tests whose subject is a later stage."""
 
-    async def review_before_apply(self, project, run, job, workspace_path):
+    async def review_before_apply(self, project, run, job, workspace_path, *, claim_context=None):
         del project, run, job, workspace_path
         from minime.services.contract_review_service import ContractReviewResult
 
@@ -218,7 +219,7 @@ class _WaitingContractReview:
     def __init__(self):
         self.calls = 0
 
-    async def review_before_apply(self, project, run, job, workspace_path):
+    async def review_before_apply(self, project, run, job, workspace_path, *, claim_context=None):
         del project, run, job, workspace_path
         from minime.services.contract_review_service import ContractReviewResult
 
@@ -236,7 +237,7 @@ class _RejectedContractReview:
     def __init__(self):
         self.calls = 0
 
-    async def review_before_apply(self, project, run, job, workspace_path):
+    async def review_before_apply(self, project, run, job, workspace_path, *, claim_context=None):
         del project, run, job, workspace_path
         from minime.services.contract_review_service import ContractReviewResult
 
@@ -416,7 +417,7 @@ async def test_antigravity_apply_operational_dispatch_effective_arguments(
     """
     workspace = tmp_path / "candidate-worktree"
     project, job, _ = _seed_operational_workspace(
-        in_memory_uow, workspace, implementer="antigravity", reviewer="codex"
+        in_memory_uow, workspace, implementer="codex", reviewer="antigravity"
     )
     test_capacity_strategy(("codex", "antigravity"))
 
@@ -461,7 +462,14 @@ async def test_antigravity_apply_operational_dispatch_effective_arguments(
     _ = await pipeline.execute_queued_job(job.job_id, claim_context=claim)
 
     # Verify that the runner was dispatched exactly once
-    assert len(intercepted_subprocesses) == 1
+    dispatch_events = [
+        (event.event_type.value, event.payload.get("result_class"), event.payload.get("reason"))
+        for event in in_memory_uow.events.list_events(project.project_id, job.change_name)
+    ]
+    assert len(intercepted_subprocesses) == 1, (
+        f"status={_.status} error={_.error_message} waiting={_.waiting_provider} "
+        f"capacity={_.capacity_block_reason} events={dispatch_events[:8]}"
+    )
     call = intercepted_subprocesses[0]
 
     cmd = call["cmd"]
@@ -471,6 +479,18 @@ async def test_antigravity_apply_operational_dispatch_effective_arguments(
     assert cmd[model_idx + 1] == "gemini-3.8-flash-medium"
     assert cmd.count("--model") == 1
     assert "--effort" not in cmd
+    # The new job's project-level default is Codex, while the configured APPLY
+    # stage profile is Antigravity. The profile, not the generic project role,
+    # must govern the actual runner and durable selected executor.
+    assert in_memory_uow.jobs.get_by_id(job.job_id).current_executor == "antigravity"
+    selected_events = [
+        event
+        for event in in_memory_uow.events.list_events(limit=1000)
+        if event.event_type == EventType.STAGE_PROFILE_SELECTED
+        and event.payload.get("stage") == "APPLY"
+        and event.payload.get("selected_provider") == "antigravity"
+    ]
+    assert len(selected_events) == 1
 
     # Check that native /opsx-apply instruction was passed in the argument prompt
     print_arg = next((arg for arg in cmd if arg.startswith("--print=")), None)
@@ -630,7 +650,14 @@ async def test_codex_apply_operational_dispatch_effective_arguments(
 
     _ = await pipeline.execute_queued_job(job.job_id, claim_context=claim)
 
-    assert len(intercepted_subprocesses) == 1
+    dispatch_events = [
+        (event.event_type.value, event.payload.get("result_class"), event.payload.get("reason"))
+        for event in in_memory_uow.events.list_events(project.project_id, job.change_name)
+    ]
+    assert len(intercepted_subprocesses) == 1, (
+        f"status={_.status} error={_.error_message} waiting={_.waiting_provider} "
+        f"capacity={_.capacity_block_reason} events={dispatch_events[:8]}"
+    )
     call = intercepted_subprocesses[0]
 
     cmd = call["cmd"]
@@ -1090,6 +1117,9 @@ async def test_missing_contract_review_blocks_before_apply(
     )
 
     assert result.status == JobStatus.WAITING_CAPACITY
+    # attempt_count starts at ordinal 1; JobAttempt is created only after the
+    # pre-APPLY review gate admits the actual runner.
+    assert result.attempt_count == 1
     assert review.calls == 1
     assert intercepted == []
     assert in_memory_uow.job_attempts.list_by_job(job.job_id) == []
@@ -1122,6 +1152,7 @@ async def test_failed_contract_review_blocks_before_apply(
     )
 
     assert result.status == JobStatus.NEEDS_HUMAN
+    assert result.attempt_count == 1
     assert review.calls == 1
     assert "Contract review returned CHANGES_REQUIRED" in (result.error_message or "")
     assert intercepted == []

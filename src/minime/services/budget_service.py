@@ -6,8 +6,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
+from uuid import NAMESPACE_URL, uuid5
 
-from minime.domain.enums import EventType, OperatorActionStatus, OperatorActionType
+from minime.domain.enums import EventType
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
     BudgetLedgerEntry,
@@ -38,6 +39,27 @@ class BudgetService:
 
     def __init__(self, uow: PersistenceUnitOfWork):
         self.uow = uow
+
+    def get_verified_review_price_snapshot(
+        self, *, provider: str, account_fingerprint: str, model: str, billing_origin: str
+    ):
+        """Resolve an exact direct-account pricing snapshot without OpenRouter fallback."""
+        snapshots = self.uow.pricing_snapshots.list_by_model(model)
+        now = utc_now()
+        eligible = [
+            item
+            for item in snapshots
+            if item.is_verified
+            and item.provider == provider
+            and item.account_fingerprint == account_fingerprint
+            and item.canonical_model_identity == model
+            and item.billing_origin == billing_origin
+            and item.currency == "USD"
+            and item.observed_at.tzinfo is not None
+            and item.observed_at <= now
+            and (now - item.observed_at).total_seconds() <= 30 * 86400
+        ]
+        return max(eligible, key=lambda item: item.observed_at, default=None)
 
     def sync_policy_from_config(
         self,
@@ -201,8 +223,15 @@ class BudgetService:
         candidate_generation: int | None = None,
         manifest_id: str | None = None,
         manifest_hash: str | None = None,
+        maximum_stage_usd: Decimal | str | None = None,
+        maximum_combined_usd: Decimal | str | None = None,
     ) -> tuple[BudgetReservation | None, str | None]:
-        """Reserve DeepSeek review spend only against a matching durable operator action."""
+        """Enforce optional owner-configured DeepSeek review limits.
+
+        A missing limit means ordinary owner-authorized autonomous operation, not
+        missing per-call approval.  When a limit is configured, this reserves its
+        conservative upper bound before dispatch.
+        """
         if provider != "deepseek" or stage not in {"CONTRACT_REVIEW", "REVIEW"}:
             return None, "REVIEW_PROVIDER_OR_STAGE_DENIED"
         existing = self.uow.budget_reservations.get_by_idempotency_key(idempotency_key)
@@ -221,54 +250,10 @@ class BudgetService:
                 return existing, None
             return None, "REVIEW_RESERVATION_ALREADY_CONSUMED_OR_CONFLICTING"
 
-        actions = self.uow.operator_actions.list_by_run(run_id)
-        authorization = next(
-            (
-                action
-                for action in actions
-                if action.action_type
-                == (
-                    OperatorActionType.AUTHORIZE_DEEPSEEK_REVIEW
-                    if stage == "CONTRACT_REVIEW"
-                    else OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW
-                )
-                and action.status == OperatorActionStatus.COMPLETED
-                and action.project_id == project_id
-                and action.change_name == change_id
-                and action.job_id == job_id
-            ),
-            None,
-        )
-        auth = authorization.result_payload_json.get("authorization", {}) if authorization else {}
-        if not authorization or not self._review_authorization_matches(
-            auth,
-            provider=provider,
-            account_fingerprint=account_fingerprint,
-            model=model,
-            stage=stage,
-            billing_origin=billing_origin,
-            pricing_snapshot_id=pricing_snapshot_id,
-            run_id=run_id,
-            job_id=job_id,
-            now=utc_now(),
-        ):
-            return None, "DURABLE_REVIEW_BUDGET_AUTHORIZATION_MISSING_OR_MISMATCHED"
         if stage == "REVIEW" and not (
-            candidate_sha
-            and manifest_id
-            and manifest_hash
-            and auth.get("candidate_sha") == candidate_sha
-            and auth.get("generation") == candidate_generation
-            and auth.get("manifest_id") == manifest_id
-            and auth.get("manifest_hash") == manifest_hash
+            candidate_sha and manifest_id and manifest_hash and candidate_generation is not None
         ):
-            return None, "CODE_REVIEW_AUTHORIZATION_CANDIDATE_MISMATCH"
-
-        if any(
-            reservation.authorization_id == authorization.action_request_id
-            for reservation in self.uow.budget_reservations.list_by_project(project_id)
-        ):
-            return None, "REVIEW_BUDGET_AUTHORIZATION_ALREADY_CONSUMED"
+            return None, "CODE_REVIEW_CANDIDATE_IDENTITY_MISSING"
 
         snapshot = self.uow.pricing_snapshots.get_by_id(pricing_snapshot_id)
         if (
@@ -292,12 +277,25 @@ class BudgetService:
             + Decimal(max_output_tokens) * snapshot.output_price_per_token
             + snapshot.additional_cost_per_request
         )
-        try:
-            authorized_max = Decimal(str(auth["max_spend_usd"]))
-        except Exception:
-            return None, "REVIEW_AUTHORIZED_MAX_INVALID"
-        if max_cost <= 0 or max_cost > authorized_max:
-            return None, "REVIEW_COST_EXCEEDS_AUTHORIZED_MAX"
+        stage_limit = self._optional_limit(maximum_stage_usd)
+        combined_limit = self._optional_limit(maximum_combined_usd)
+        if maximum_stage_usd is not None and stage_limit is None:
+            return None, "REVIEW_STAGE_LIMIT_INVALID"
+        if maximum_combined_usd is not None and combined_limit is None:
+            return None, "REVIEW_COMBINED_LIMIT_INVALID"
+        if max_cost <= 0:
+            return None, "REVIEW_COST_BOUND_INVALID"
+        if stage_limit is None and combined_limit is None:
+            return None, None
+
+        stage_exposure, combined_exposure = self._direct_review_exposure(
+            project_id=project_id,
+            stage=stage,
+        )
+        if stage_limit is not None and stage_exposure + max_cost > stage_limit:
+            return None, "REVIEW_STAGE_SPENDING_LIMIT_EXCEEDED"
+        if combined_limit is not None and combined_exposure + max_cost > combined_limit:
+            return None, "REVIEW_COMBINED_SPENDING_LIMIT_EXCEEDED"
 
         reservation = BudgetReservation(
             project_id=project_id,
@@ -318,7 +316,7 @@ class BudgetService:
             account_fingerprint=account_fingerprint,
             stage=stage,
             billing_origin=billing_origin,
-            authorization_id=authorization.action_request_id,
+            authorization_id=None,
             idempotency_key=idempotency_key,
             created_at=utc_now(),
             updated_at=utc_now(),
@@ -332,7 +330,7 @@ class BudgetService:
                 operation_id=job_id,
                 payload={
                     "reservation_id": reservation.reservation_id,
-                    "authorization_id": reservation.authorization_id,
+                    "authorization_id": None,
                     "provider": provider,
                     "account_fingerprint": account_fingerprint,
                     "model": model,
@@ -346,39 +344,144 @@ class BudgetService:
         return reservation, None
 
     @staticmethod
-    def _review_authorization_matches(
-        auth: dict[str, Any],
+    def _optional_limit(value: Decimal | str | None) -> Decimal | None:
+        if value is None:
+            return None
+        try:
+            amount = value if isinstance(value, Decimal) else Decimal(str(value))
+        except Exception:
+            return None
+        return amount if amount.is_finite() and amount > 0 else None
+
+    def _direct_review_exposure(self, *, project_id: str, stage: str) -> tuple[Decimal, Decimal]:
+        """Return project-wide direct-DeepSeek exposure, counting unresolved conservatively."""
+        reservations = [
+            item
+            for item in self.uow.budget_reservations.list_by_project(project_id)
+            if item.provider == "deepseek"
+            and item.billing_origin == "deepseek_direct"
+            and item.stage in {"CONTRACT_REVIEW", "REVIEW"}
+        ]
+        ledger = [
+            item
+            for item in self.uow.budget_ledger.list_by_project(project_id)
+            if item.provider == "deepseek"
+            and item.billing_origin == "deepseek_direct"
+            and item.stage in {"CONTRACT_REVIEW", "REVIEW"}
+        ]
+        ledger_by_reservation: dict[str, Decimal] = {}
+        unreserved = Decimal("0")
+        for entry in ledger:
+            if entry.reservation_id:
+                ledger_by_reservation[entry.reservation_id] = (
+                    ledger_by_reservation.get(entry.reservation_id, Decimal("0")) + entry.amount_usd
+                )
+            else:
+                unreserved += entry.amount_usd
+        stage_total = Decimal("0")
+        combined_total = unreserved
+        for item in reservations:
+            actual = ledger_by_reservation.get(item.reservation_id)
+            if item.status in {"RESERVED", "UNRESOLVED"}:
+                exposure = max(item.reserved_amount_usd, actual or Decimal("0"))
+            elif actual is not None:
+                exposure = actual
+            elif item.status in {"SETTLED", "SETTLEMENT_BREACH"}:
+                exposure = item.reserved_amount_usd
+            else:
+                exposure = Decimal("0")
+            combined_total += exposure
+            if item.stage == stage:
+                stage_total += exposure
+        for entry in ledger:
+            if not entry.reservation_id:
+                continue
+            if not any(item.reservation_id == entry.reservation_id for item in reservations):
+                combined_total += entry.amount_usd
+                if entry.stage == stage:
+                    stage_total += entry.amount_usd
+        return stage_total, combined_total
+
+    def record_unreserved_review_usage(
+        self,
         *,
+        project_id: str,
+        job_id: str,
+        change_id: str,
         provider: str,
         account_fingerprint: str,
         model: str,
         stage: str,
         billing_origin: str,
-        pricing_snapshot_id: str,
-        run_id: str,
-        job_id: str,
-        now: datetime,
-    ) -> bool:
-        from datetime import datetime as DateTime
-
-        try:
-            expires_at = DateTime.fromisoformat(str(auth["expires_at"]))
-            max_spend = Decimal(str(auth["max_spend_usd"]))
-        except Exception:
-            return False
-        return bool(
-            auth.get("provider") == provider
-            and auth.get("account_fingerprint") == account_fingerprint
-            and auth.get("model") == model
-            and auth.get("stage") == stage
-            and auth.get("billing_origin") == billing_origin
-            and auth.get("pricing_snapshot_id") == pricing_snapshot_id
-            and auth.get("run_id") == run_id
-            and auth.get("job_id") == job_id
-            and expires_at.tzinfo is not None
-            and expires_at > now
-            and max_spend > 0
+        review_id: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        actual_cost_usd: Decimal,
+    ) -> BudgetLedgerEntry:
+        """Idempotently account verified provider usage when no cap is configured."""
+        entry_id = str(uuid5(NAMESPACE_URL, f"minime:review-usage:v1:{review_id}"))
+        existing = next(
+            (
+                item
+                for item in self.uow.budget_ledger.list_by_project(project_id)
+                if item.entry_id == entry_id
+            ),
+            None,
         )
+        if existing:
+            if (
+                existing.job_id != job_id
+                or existing.provider != provider
+                or existing.account_fingerprint != account_fingerprint
+                or existing.canonical_model_identity != model
+                or existing.stage != stage
+                or existing.billing_origin != billing_origin
+                or existing.prompt_tokens != prompt_tokens
+                or existing.completion_tokens != completion_tokens
+                or existing.amount_usd != actual_cost_usd
+            ):
+                raise ValueError("review usage idempotency identity conflicts")
+            return existing
+        entry = BudgetLedgerEntry(
+            entry_id=entry_id,
+            project_id=project_id,
+            job_id=job_id,
+            change_id=change_id,
+            provider=provider,
+            account_fingerprint=account_fingerprint,
+            stage=stage,
+            billing_origin=billing_origin,
+            role="reviewer",
+            canonical_model_identity=model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+            amount_usd=actual_cost_usd,
+            entry_type="USAGE",
+        )
+        self.uow.budget_ledger.save(entry)
+        self.uow.events.save(
+            Event(
+                event_type=EventType.BUDGET_SETTLED,
+                project_id=project_id,
+                change_id=change_id,
+                operation_id=job_id,
+                payload={
+                    "review_id": review_id,
+                    "usage_entry_id": entry_id,
+                    "provider": provider,
+                    "account_fingerprint": account_fingerprint,
+                    "model": model,
+                    "stage": stage,
+                    "billing_origin": billing_origin,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "amount_usd": str(actual_cost_usd),
+                },
+                timestamp=utc_now(),
+            )
+        )
+        return entry
 
     def settle_reservation(
         self,

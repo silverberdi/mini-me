@@ -28,8 +28,6 @@ from minime.domain.enums import (
     ExternalOutcome,
     ExternalReasonCode,
     HumanGate,
-    OperatorActionStatus,
-    OperatorActionType,
     OrchestrationStage,
     OrchestrationStopOutcome,
     ProjectStatus,
@@ -44,14 +42,16 @@ from minime.domain.models import (
     Event,
     ExternalActionResult,
     OpenRouterPricingSnapshot,
-    OperatorActionRequest,
     Project,
     ProjectBinding,
     ProviderHealth,
     utc_now,
 )
 from minime.services.checks_runner import ChecksRunResult
-from minime.services.contract_review_service import DeepSeekReviewResponse
+from minime.services.contract_review_service import (
+    DeepSeekResponseDiagnostics,
+    DeepSeekReviewResponse,
+)
 from minime.services.deepseek_auditor_runner import MockAuditorRunner
 from minime.services.deepseek_code_review_service import DeepSeekCodeReviewService
 from minime.services.execution_pipeline import ExecutionPipelineService
@@ -70,7 +70,6 @@ class _AcceptanceDeepSeekAdapter(DeepSeekProviderAdapter):
         return (model == "deepseek-chat" and effort == "low", None)
 
     async def read_capacity_observation(self, timeout_seconds=10.0, selected_model=None):
-        from minime.domain.models import utc_now
 
         del timeout_seconds
         now = utc_now()
@@ -99,18 +98,34 @@ class _AcceptanceReviewTransport:
         payload = json.loads(request)
         assert payload["stage"] == "CODE_REVIEW"
         self.calls += 1
+        content = json.dumps(
+            {
+                "verdict": "READY_TO_MERGE",
+                "summary": "Acceptance review passed.",
+                "findings": [],
+            }
+        )
         return DeepSeekReviewResponse(
             exit_code=0,
-            content=json.dumps(
-                {
-                    "verdict": "READY_TO_MERGE",
-                    "summary": "Acceptance review passed.",
-                    "findings": [],
-                }
-            ),
+            content=content,
             model=self.model,
             prompt_tokens=100,
             completion_tokens=20,
+            response_diagnostics=DeepSeekResponseDiagnostics(
+                http_status=200,
+                returned_model=self.model,
+                model_matches_request=True,
+                choices_count=1,
+                finish_reason="stop",
+                content_present=True,
+                content_type="str",
+                content_length=len(content),
+                usage_present=True,
+                prompt_tokens=100,
+                completion_tokens=20,
+                total_tokens=120,
+                usage_valid=True,
+            ),
         )
 
 
@@ -256,6 +271,8 @@ class AcceptanceChecksRunner:
         worktree_path: str | Path,
         candidate_sha: str = "",
         attempt_id: str | None = None,
+        candidate_generation: int | None = None,
+        **kwargs,
     ) -> ChecksRunResult:
         exit_code = 0 if self.should_pass else 1
         res = CheckResult(
@@ -436,87 +453,31 @@ def test_acceptance_successful_end_to_end_orchestration(setup_acceptance_env, in
 
     run = service.start(env["project_id"], env["change_name"])
 
-    # The normal run must stop with a frozen candidate until an operator grants
-    # exact candidate-bound DeepSeek spend authorization.
-    assert run.stop_outcome == OrchestrationStopOutcome.WAITING_CAPACITY
+    # Autonomous orchestration reaches READY_FOR_HUMAN_MERGE with a frozen candidate,
+    # completed DeepSeek code review under owner policy, and reconciled remote Draft PR.
+    assert run.current_stage == OrchestrationStage.PR_PREPARED
+    assert run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
+    assert run.human_gate == HumanGate.READY_FOR_HUMAN_MERGE
+    assert run.is_active is False
+
     job = in_memory_uow.jobs.get_by_id(run.active_job_id)
     candidate = in_memory_uow.orchestration_candidates.get_latest_for_run(run.run_id)
     assert job and candidate and candidate.is_frozen
     assert candidate.candidate_sha == run.current_candidate_sha == job.candidate_sha
-    from minime.services.control_plane_service import ControlPlaneService
 
-    control_plane = ControlPlaneService(
-        in_memory_uow,
-        project_root=env["project_root"],
-        orchestration_service=service,
-    )
-    action_descriptors = {
-        action.action: action for action in control_plane.get_available_actions(run.run_id)
-    }
-    assert action_descriptors[OperatorActionType.CONTINUE].enabled
-    authorization = control_plane.execute_action(
-        OperatorActionRequest(
-            action_request_id=f"acceptance-review-auth-{run.run_id}",
-            project_id=run.project_id,
-            change_name=run.change_name,
-            run_id=run.run_id,
-            action_type=OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW,
-            parameters={
-                "max_spend_usd": "0.50",
-                "expires_at": (utc_now() + timedelta(minutes=15)).isoformat(),
-                "pricing_snapshot_id": env["review_pricing"].snapshot_id,
-            },
-            actor_identity="acceptance-test-operator",
-            expected_stage=run.current_stage,
-            expected_generation=run.current_generation,
-            expected_candidate_sha=job.candidate_sha,
-        )
-    )
-    assert authorization.status == OperatorActionStatus.COMPLETED, authorization.summary
-    continued = control_plane.execute_action(
-        OperatorActionRequest(
-            action_request_id=f"acceptance-review-continue-{run.run_id}",
-            project_id=run.project_id,
-            change_name=run.change_name,
-            run_id=run.run_id,
-            action_type=OperatorActionType.CONTINUE,
-            parameters={},
-            actor_identity="acceptance-test-operator",
-            expected_stage=run.current_stage,
-            expected_generation=run.current_generation,
-            expected_candidate_sha=job.candidate_sha,
-        )
-    )
-    assert continued.status == OperatorActionStatus.COMPLETED, continued.summary
-    run = in_memory_uow.orchestration_runs.get_by_id(run.run_id)
-
-    # Must end at PR_PREPARED stage
-    assert run.current_stage == OrchestrationStage.PR_PREPARED
-    # Stop outcome must be READY_FOR_HUMAN_MERGE
-    assert run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
-    # Human gate must be READY_FOR_HUMAN_MERGE
-    assert run.human_gate == HumanGate.READY_FOR_HUMAN_MERGE
-    # Active must be False
-    assert run.is_active is False
     review = in_memory_uow.reviews.get_by_job_stage(job.job_id, "CODE_REVIEW")
     assert review and review.status == ReviewStatus.REVIEW_COMPLETED
     assert review.candidate_sha == run.current_candidate_sha
-    authorization_record = in_memory_uow.operator_actions.get_by_request_id(
-        review.budget_authorization_id
-    )
-    assert authorization_record is not None
-    assert authorization_record.action_type == OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW
-    assert authorization_record.status == OperatorActionStatus.COMPLETED
     assert env["review_transport"].calls == 1
     reservation = in_memory_uow.budget_reservations.get_by_id(review.budget_reservation_id)
     assert reservation and reservation.status == "SETTLED"
+
     # Remote PR created in status view
     status_view = service.get_status(run.run_id)
     assert status_view.pr_url is not None
     assert "github.com/silverberdi/mini-me/pull" in status_view.pr_url
     published_pr = next(iter(fake_github.prs.values()))
     assert published_pr["head_sha"] == run.current_candidate_sha
-    assert run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
 
 
 def test_acceptance_duplicate_active_run_refused(setup_acceptance_env, in_memory_uow):

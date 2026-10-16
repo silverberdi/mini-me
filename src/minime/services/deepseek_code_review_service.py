@@ -38,6 +38,7 @@ from minime.services.candidate_manifest import CandidateManifestService
 from minime.services.contract_review_service import (
     DeepSeekContractReviewRunner,
     DeepSeekReviewResponse,
+    persist_deepseek_response_diagnostic,
 )
 from minime.services.provider_health_service import ProviderHealthService
 from minime.services.review_verdict_parser import parse_review_verdict
@@ -97,9 +98,13 @@ class DeepSeekCodeReviewService:
         authorship_evidence: dict[str, Any],
     ) -> CodeReviewResult:
         sha = candidate.candidate_sha
-        if not self._identity_matches(project, run, job, candidate, manifest):
+        identity_mismatches = self._identity_mismatches(project, run, job, candidate, manifest)
+        if identity_mismatches:
             return CodeReviewResult(
-                False, None, sha, reason="CODE_REVIEW_CANDIDATE_IDENTITY_MISMATCH"
+                False,
+                None,
+                sha,
+                reason=("CODE_REVIEW_CANDIDATE_IDENTITY_MISMATCH:" + ",".join(identity_mismatches)),
             )
         try:
             source_files = self._read_exact_candidate(candidate_worktree, candidate, manifest)
@@ -146,6 +151,15 @@ class DeepSeekCodeReviewService:
                 False, None, sha, reason=f"CODE_REVIEW_PROFILE_UNAVAILABLE:{exc}", waiting=True
             )
 
+        provider_config = self.app_config.providers.get("deepseek")
+        if (
+            not provider_config
+            or not provider_config.enabled
+            or "deepseek" not in project.external_providers_allowed
+        ):
+            return CodeReviewResult(
+                False, None, sha, reason="DEEPSEEK_OWNER_POLICY_DISABLED", waiting=True
+            )
         adapter = get_provider_adapter("deepseek", self.app_config)
         if profile.provider != "deepseek":
             return CodeReviewResult(
@@ -184,14 +198,18 @@ class DeepSeekCodeReviewService:
                 waiting=True,
             )
 
-        authorization = self._find_authorization(
-            run, job, candidate, manifest, profile.model, account
+        pricing = self.budget.get_verified_review_price_snapshot(
+            provider="deepseek",
+            account_fingerprint=account,
+            model=profile.model,
+            billing_origin="deepseek_direct",
         )
-        if not authorization:
+        if not pricing:
             return CodeReviewResult(
-                False, None, sha, reason="DEEPSEEK_CODE_REVIEW_BUDGET_NOT_AUTHORIZED", waiting=True
+                False, None, sha, reason="DEEPSEEK_DIRECT_PRICE_SNAPSHOT_UNAVAILABLE", waiting=True
             )
-        auth = authorization.result_payload_json["authorization"]
+        deepseek_config = self.app_config.providers.get("deepseek")
+        configured_budget = deepseek_config.budget if deepseek_config else {}
         request_json = json.dumps(
             {
                 "stage": "CODE_REVIEW",
@@ -302,7 +320,7 @@ class DeepSeekCodeReviewService:
             model=profile.model,
             stage="REVIEW",
             billing_origin="deepseek_direct",
-            pricing_snapshot_id=str(auth["pricing_snapshot_id"]),
+            pricing_snapshot_id=pricing.snapshot_id,
             prompt_token_upper_bound=input_size,
             max_output_tokens=MAX_REVIEW_OUTPUT_TOKENS,
             idempotency_key=_reservation_key(
@@ -312,8 +330,10 @@ class DeepSeekCodeReviewService:
             candidate_generation=candidate.generation,
             manifest_id=manifest.manifest_id,
             manifest_hash=manifest.manifest_hash,
+            maximum_stage_usd=configured_budget.get("maximum_code_review_usd"),
+            maximum_combined_usd=configured_budget.get("maximum_combined_review_usd"),
         )
-        if not reservation:
+        if denial:
             return CodeReviewResult(False, None, sha, reason=denial, waiting=True)
 
         review = (
@@ -322,8 +342,8 @@ class DeepSeekCodeReviewService:
                     "reviewer_model": profile.model,
                     "provider": "deepseek",
                     "account_fingerprint": account,
-                    "budget_authorization_id": authorization.action_request_id,
-                    "budget_reservation_id": reservation.reservation_id,
+                    "budget_authorization_id": None,
+                    "budget_reservation_id": reservation.reservation_id if reservation else None,
                     "billing_origin": "deepseek_direct",
                     "status": ReviewStatus.REVIEW_RUNNING,
                     "is_mixed_authorship": bool(canonical_authorship.get("is_mixed_authorship")),
@@ -340,8 +360,8 @@ class DeepSeekCodeReviewService:
                 review_stage="CODE_REVIEW",
                 provider="deepseek",
                 account_fingerprint=account,
-                budget_authorization_id=authorization.action_request_id,
-                budget_reservation_id=reservation.reservation_id,
+                budget_authorization_id=None,
+                budget_reservation_id=reservation.reservation_id if reservation else None,
                 billing_origin="deepseek_direct",
                 orchestration_run_id=run.run_id,
                 candidate_generation=candidate.generation,
@@ -373,7 +393,8 @@ class DeepSeekCodeReviewService:
             or getattr(runner, "effort", None) != profile.effort
             or getattr(runner, "review_stage", "CODE_REVIEW") != "CODE_REVIEW"
         ):
-            self.budget.mark_unresolved(reservation.reservation_id)
+            if reservation:
+                self.budget.release_reservation(reservation.reservation_id, "profile_mismatch")
             self.uow.reviews.transition(
                 review.review_id,
                 ReviewStatus.REVIEW_FAILED.value,
@@ -390,7 +411,8 @@ class DeepSeekCodeReviewService:
         except Exception as exc:
             # The request may have reached DeepSeek and been billed. Preserve the
             # running checkpoint and unresolved reservation; never replay blindly.
-            self.budget.mark_unresolved(reservation.reservation_id)
+            if reservation:
+                self.budget.mark_unresolved(reservation.reservation_id)
             self.uow.commit()
             return CodeReviewResult(
                 False,
@@ -398,19 +420,62 @@ class DeepSeekCodeReviewService:
                 sha,
                 reason=f"CODE_REVIEW_OUTCOME_AMBIGUOUS:{type(exc).__name__}",
             )
+        persist_deepseek_response_diagnostic(self.uow, review, response)
+        diagnostics = response.response_diagnostics
+        usage_verified = bool(
+            response.model == profile.model
+            and diagnostics
+            and diagnostics.http_status == 200
+            and diagnostics.model_matches_request is True
+            and diagnostics.usage_valid
+            and isinstance(response.prompt_tokens, int)
+            and isinstance(response.completion_tokens, int)
+            and response.prompt_tokens == diagnostics.prompt_tokens
+            and response.completion_tokens == diagnostics.completion_tokens
+        )
+        usage_settled = False
+        if usage_verified:
+            actual_cost = (
+                Decimal(response.prompt_tokens) * pricing.prompt_price_per_token
+                + Decimal(response.completion_tokens) * pricing.output_price_per_token
+                + pricing.additional_cost_per_request
+            )
+            if reservation:
+                usage_settled = bool(
+                    self.budget.settle_reservation(
+                        reservation_id=reservation.reservation_id,
+                        actual_cost_usd=actual_cost,
+                        prompt_tokens=response.prompt_tokens,
+                        completion_tokens=response.completion_tokens,
+                        total_tokens=response.prompt_tokens + response.completion_tokens,
+                    )
+                )
+            else:
+                self.budget.record_unreserved_review_usage(
+                    project_id=project.project_id,
+                    job_id=job.job_id,
+                    change_id=job.change_name,
+                    provider="deepseek",
+                    account_fingerprint=account,
+                    model=profile.model,
+                    stage="REVIEW",
+                    billing_origin="deepseek_direct",
+                    review_id=review.review_id,
+                    prompt_tokens=response.prompt_tokens,
+                    completion_tokens=response.completion_tokens,
+                    actual_cost_usd=actual_cost,
+                )
+                usage_settled = True
+        elif reservation:
+            self.budget.mark_unresolved(reservation.reservation_id)
+
         if (
             response.exit_code != 0
             or response.error
             or response.model != profile.model
             or not response.content
-            or not isinstance(response.prompt_tokens, int)
-            or isinstance(response.prompt_tokens, bool)
-            or response.prompt_tokens < 0
-            or not isinstance(response.completion_tokens, int)
-            or isinstance(response.completion_tokens, bool)
-            or response.completion_tokens < 0
+            or not usage_verified
         ):
-            self.budget.mark_unresolved(reservation.reservation_id)
             self.uow.reviews.transition(
                 review.review_id,
                 ReviewStatus.REVIEW_FAILED.value,
@@ -428,7 +493,6 @@ class DeepSeekCodeReviewService:
         try:
             verdict = parse_review_verdict(response.content)
         except (ValueError, TypeError):
-            self.budget.mark_unresolved(reservation.reservation_id)
             self.uow.reviews.transition(
                 review.review_id,
                 ReviewStatus.REVIEW_FAILED.value,
@@ -437,26 +501,7 @@ class DeepSeekCodeReviewService:
             self.uow.commit()
             return CodeReviewResult(False, review.review_id, sha, reason="CODE_REVIEW_MALFORMED")
 
-        snapshot = self.uow.pricing_snapshots.get_by_id(reservation.pricing_snapshot_id)
-        if not snapshot:
-            self.budget.mark_unresolved(reservation.reservation_id)
-            return CodeReviewResult(
-                False, review.review_id, sha, reason="CODE_REVIEW_PRICE_EVIDENCE_MISSING"
-            )
-        actual_cost = (
-            Decimal(response.prompt_tokens) * snapshot.prompt_price_per_token
-            + Decimal(response.completion_tokens) * snapshot.output_price_per_token
-            + snapshot.additional_cost_per_request
-        )
-        settled = self.budget.settle_reservation(
-            reservation_id=reservation.reservation_id,
-            actual_cost_usd=actual_cost,
-            prompt_tokens=response.prompt_tokens,
-            completion_tokens=response.completion_tokens,
-            total_tokens=response.prompt_tokens + response.completion_tokens,
-        )
-        if not settled:
-            self.budget.mark_unresolved(reservation.reservation_id)
+        if not usage_settled:
             self.uow.reviews.transition(
                 review.review_id,
                 ReviewStatus.REVIEW_FAILED.value,
@@ -488,22 +533,29 @@ class DeepSeekCodeReviewService:
 
     @staticmethod
     def _identity_matches(project, run, job, candidate, manifest) -> bool:
-        return bool(
-            run.project_id == project.project_id
-            and run.change_name == job.change_name
-            and job.project_id == project.project_id
-            and run.active_job_id == job.job_id
-            and run.current_candidate_sha == candidate.candidate_sha
-            and run.current_generation == candidate.generation
-            and candidate.run_id == run.run_id
-            and candidate.is_frozen
-            and candidate.base_sha == run.base_sha == job.base_sha
-            and candidate.candidate_sha == job.candidate_sha
-            and candidate.manifest_id == manifest.manifest_id
-            and candidate.manifest_hash == manifest.manifest_hash
-            and manifest.job_id == job.job_id
-            and manifest.candidate_sha == candidate.candidate_sha
+        return not DeepSeekCodeReviewService._identity_mismatches(
+            project, run, job, candidate, manifest
         )
+
+    @staticmethod
+    def _identity_mismatches(project, run, job, candidate, manifest) -> list[str]:
+        checks = {
+            "run_project": run.project_id == project.project_id,
+            "run_change": run.change_name == job.change_name,
+            "job_project": job.project_id == project.project_id,
+            "active_job": run.active_job_id == job.job_id,
+            "run_candidate": run.current_candidate_sha == candidate.candidate_sha,
+            "run_generation": run.current_generation == candidate.generation,
+            "candidate_run": candidate.run_id == run.run_id,
+            "candidate_frozen": candidate.is_frozen,
+            "base_sha": candidate.base_sha == run.base_sha == job.base_sha,
+            "job_candidate": candidate.candidate_sha == job.candidate_sha,
+            "manifest_id": candidate.manifest_id == manifest.manifest_id,
+            "manifest_hash": candidate.manifest_hash == manifest.manifest_hash,
+            "manifest_job": manifest.job_id == job.job_id,
+            "manifest_candidate": manifest.candidate_sha == candidate.candidate_sha,
+        }
+        return [name for name, matched in checks.items() if not matched]
 
     @staticmethod
     def _read_exact_candidate(
@@ -615,30 +667,6 @@ class DeepSeekCodeReviewService:
             for item in checks
         ]
 
-    def _find_authorization(self, run, job, candidate, manifest, model: str, account: str):
-        for action in self.uow.operator_actions.list_by_run(run.run_id):
-            auth = action.result_payload_json.get("authorization", {})
-            if (
-                action.action_type.value == "AUTHORIZE_DEEPSEEK_CODE_REVIEW"
-                and action.status.value == "COMPLETED"
-                and action.project_id == run.project_id
-                and action.change_name == job.change_name
-                and action.run_id == run.run_id
-                and action.job_id == job.job_id
-                and auth.get("stage") == "REVIEW"
-                and auth.get("provider") == "deepseek"
-                and auth.get("model") == model
-                and auth.get("account_fingerprint") == account
-                and auth.get("billing_origin") == "deepseek_direct"
-                and auth.get("candidate_sha") == candidate.candidate_sha
-                and auth.get("base_sha") == candidate.base_sha
-                and auth.get("generation") == candidate.generation
-                and auth.get("manifest_id") == manifest.manifest_id
-                and auth.get("manifest_hash") == manifest.manifest_hash
-            ):
-                return action
-        return None
-
     def _prior_checkpoint_matches(
         self, review, run, job, candidate, manifest, model, account
     ) -> bool:
@@ -647,12 +675,14 @@ class DeepSeekCodeReviewService:
             if review.budget_reservation_id
             else None
         )
-        authorization = (
-            self.uow.operator_actions.get_by_request_id(review.budget_authorization_id)
-            if review.budget_authorization_id
-            else None
+        usage_recorded = any(
+            event.event_type.value == "BUDGET_SETTLED"
+            and event.operation_id == job.job_id
+            and event.payload.get("review_id") == review.review_id
+            for event in self.uow.events.list_events(
+                project_id=run.project_id, change_id=job.change_name, limit=10000
+            )
         )
-        auth = authorization.result_payload_json.get("authorization", {}) if authorization else {}
         return bool(
             review.review_stage == "CODE_REVIEW"
             and review.project_id == run.project_id
@@ -669,16 +699,16 @@ class DeepSeekCodeReviewService:
             and review.reviewer_model == model
             and review.account_fingerprint == account
             and review.billing_origin == "deepseek_direct"
-            and reservation
-            and reservation.status == "SETTLED"
-            and reservation.stage == "REVIEW"
-            and reservation.provider == "deepseek"
-            and reservation.account_fingerprint == account
-            and reservation.canonical_model_identity == model
-            and reservation.authorization_id == review.budget_authorization_id
-            and authorization
-            and authorization.action_type.value == "AUTHORIZE_DEEPSEEK_CODE_REVIEW"
-            and authorization.status.value == "COMPLETED"
-            and auth.get("candidate_sha") == candidate.candidate_sha
-            and auth.get("manifest_hash") == manifest.manifest_hash
+            and (
+                bool(
+                    reservation
+                    and reservation.status == "SETTLED"
+                    and reservation.stage == "REVIEW"
+                    and reservation.provider == "deepseek"
+                    and reservation.account_fingerprint == account
+                    and reservation.canonical_model_identity == model
+                    and reservation.billing_origin == "deepseek_direct"
+                )
+                or (reservation is None and usage_recorded)
+            )
         )

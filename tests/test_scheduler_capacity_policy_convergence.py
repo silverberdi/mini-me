@@ -274,7 +274,9 @@ def test_fresh_intake_admission_creates_new_run_job_and_waits_for_contract_revie
     class WaitingContractReview:
         calls = 0
 
-        async def review_before_apply(self, project_arg, run_arg, job_arg, worktree_path):
+        async def review_before_apply(
+            self, project_arg, run_arg, job_arg, worktree_path, *, claim_context=None
+        ):
             del project_arg, run_arg, job_arg, worktree_path
             self.calls += 1
             return ContractReviewResult(

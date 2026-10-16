@@ -267,6 +267,7 @@ def test_adversarial_observe_before_repeat_read_safe_does_not_authorize_mutation
         original_mutation_retry_authorized=True,
     )
     assert reconciled_auth.status == ExternalActionStatus.EXECUTING
+    assert reconciled_auth.result_payload["retry_safety"] == "SAFE"
 
 
 def test_create_issue_pre_observation_unknown_blocks_post(monkeypatch):

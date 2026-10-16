@@ -116,6 +116,10 @@ class OperationalHeartbeat:
                             self.claim_context.claim_key,
                         )
                         break
+                    if self.claim_context is not None:
+                        self.claim_context.lease_expires_at = utc_now() + timedelta(
+                            seconds=self.lease_seconds
+                        )
                 except Exception as exc:
                     self.heartbeat_failed = True
                     logger.warning(
@@ -746,6 +750,16 @@ class RecoveryConvergenceService:
         if res:
             self.uow.commit()
         return res
+
+    @staticmethod
+    def _bounded_decision_failure_code(exc: Exception) -> str:
+        """Store stable bounded codes, never unbounded exception prose, in reason_code."""
+        message = str(exc).lower()
+        if "claim fence" in message or "claim context" in message:
+            return "CLAIM_FENCE_STALE_OR_EXPIRED"
+        if "heartbeat" in message:
+            return "CLAIM_HEARTBEAT_FAILED"
+        return f"CONTINUATION_FAILED_{type(exc).__name__.upper()}"[:120]
 
     def validate_claim(self, context: RecoveryClaimContext) -> bool:
         """Validate that current claim is still active and owned with matching fence."""
@@ -1591,14 +1605,36 @@ class RecoveryConvergenceService:
         else:
             orchestration_svc = self.orchestration_service
         try:
-            orchestration_svc.resume(
-                run_id=run.run_id, drain_mode=drain_mode, force=force, claim_context=context
-            )
+            renew_claim = getattr(self.uow, "renew_claim_heartbeat_isolated", None)
+            if renew_claim is None:
+
+                def renew_claim(claim_context: RecoveryClaimContext, lease_seconds: int) -> bool:
+                    renewed = self.uow.claims.renew_heartbeat(
+                        claim_key=claim_context.claim_key,
+                        owner_instance_id=claim_context.owner_instance_id,
+                        fence_token=claim_context.fence_token,
+                        lease_seconds=lease_seconds,
+                    )
+                    if renewed:
+                        self.uow.commit()
+                    return renewed
+
+            with OperationalHeartbeat(
+                claim_context=context,
+                interval_seconds=self.heartbeat_seconds,
+                lease_seconds=self.lease_seconds,
+                renew_claim=renew_claim,
+            ) as heartbeat:
+                orchestration_svc.resume(
+                    run_id=run.run_id, drain_mode=drain_mode, force=force, claim_context=context
+                )
+            if heartbeat.heartbeat_failed:
+                raise StaleClaimError("CLAIM_HEARTBEAT_RENEWAL_FAILED")
             decision.status = RecoveryDecisionStatus.COMPLETED
         except Exception as exc:
             logger.error("Run continuation failed for '%s': %s", run.run_id, exc)
             decision.status = RecoveryDecisionStatus.BLOCKED
-            decision.reason_code = str(exc)
+            decision.reason_code = self._bounded_decision_failure_code(exc)
 
         self._update_decision(decision)
         self.release_claim(context)

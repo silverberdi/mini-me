@@ -38,7 +38,10 @@ from minime.domain.models import (
 )
 from minime.services import control_plane_service
 from minime.services.candidate_manifest import CandidateManifestService
-from minime.services.contract_review_service import DeepSeekReviewResponse
+from minime.services.contract_review_service import (
+    DeepSeekResponseDiagnostics,
+    DeepSeekReviewResponse,
+)
 from minime.services.deepseek_code_review_service import DeepSeekCodeReviewService
 from minime.services.provider_health_service import ProviderHealthService
 
@@ -87,10 +90,33 @@ class _ReviewRunner:
         self.calls += 1
         self.request = request
         assert timeout_seconds > 0
-        return DeepSeekReviewResponse(0, self.content, self.model, 20, 9)
+        return DeepSeekReviewResponse(
+            0,
+            self.content,
+            self.model,
+            20,
+            9,
+            response_diagnostics=DeepSeekResponseDiagnostics(
+                http_status=200,
+                returned_model=self.model,
+                model_matches_request=True,
+                choices_count=1,
+                finish_reason="stop",
+                content_present=True,
+                content_type="str",
+                content_length=len(self.content),
+                usage_present=True,
+                prompt_tokens=20,
+                completion_tokens=9,
+                total_tokens=29,
+                usage_valid=True,
+            ),
+        )
 
 
-async def _fixture(tmp_path: Path, monkeypatch, uow, *, available: bool = True, runner=None):
+async def _fixture(
+    tmp_path: Path, monkeypatch, uow, *, available: bool = True, runner=None, authorize=True
+):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-only-direct-account-key")
     project_id = "code-review-project"
     change_name = "candidate-change"
@@ -106,6 +132,7 @@ async def _fixture(tmp_path: Path, monkeypatch, uow, *, available: bool = True, 
             "deepseek": ProviderConfig(
                 type="api",
                 enabled=True,
+                # Test-only owner policy exercising optional bounded reservations.
                 budget={
                     "maximum_contract_review_usd": "0.50",
                     "maximum_code_review_usd": "1.00",
@@ -220,9 +247,13 @@ async def _fixture(tmp_path: Path, monkeypatch, uow, *, available: bool = True, 
         expected_generation=run.current_generation,
         expected_candidate_sha=sha,
     )
-    authorization = await asyncio.to_thread(
-        control_plane_service.ControlPlaneService(uow, project_root=tmp_path).execute_action,
-        request,
+    authorization = (
+        await asyncio.to_thread(
+            control_plane_service.ControlPlaneService(uow, project_root=tmp_path).execute_action,
+            request,
+        )
+        if authorize
+        else None
     )
     service = DeepSeekCodeReviewService(
         uow,
@@ -234,14 +265,14 @@ async def _fixture(tmp_path: Path, monkeypatch, uow, *, available: bool = True, 
 
 
 @pytest.mark.asyncio
-async def test_code_review_control_plane_reserves_and_dispatches_bound_candidate(
+async def test_code_review_owner_policy_dispatches_bound_candidate_without_per_call_auth(
     in_memory_uow, monkeypatch, tmp_path
 ):
     runner = _ReviewRunner()
     project, run, job, candidate, manifest, repo, adapter, _, auth, service = await _fixture(
-        tmp_path, monkeypatch, in_memory_uow, runner=runner
+        tmp_path, monkeypatch, in_memory_uow, runner=runner, authorize=False
     )
-    assert auth.status == OperatorActionStatus.COMPLETED, auth.summary
+    assert auth is None
     result = await service.review_candidate(
         project=project,
         run=run,
@@ -264,13 +295,52 @@ async def test_code_review_control_plane_reserves_and_dispatches_bound_candidate
     assert review.candidate_sha == candidate.candidate_sha
     reservation = in_memory_uow.budget_reservations.get_by_id(review.budget_reservation_id)
     assert reservation and reservation.stage == "REVIEW" and reservation.status == "SETTLED"
-    assert reservation.authorization_id == auth.action_request_id
+    assert reservation.authorization_id is None
     assert reservation.provider == "deepseek" and reservation.billing_origin == "deepseek_direct"
     assert adapter.capacity_reads == 1
 
 
 @pytest.mark.asyncio
-async def test_contract_review_authorization_cannot_fund_code_review(
+async def test_code_review_without_optional_limit_records_idempotent_usage(
+    in_memory_uow, monkeypatch, tmp_path
+):
+    runner = _ReviewRunner()
+    project, run, job, candidate, manifest, repo, _, _, auth, service = await _fixture(
+        tmp_path, monkeypatch, in_memory_uow, runner=runner, authorize=False
+    )
+    service.app_config.providers["deepseek"].budget = {}
+    result = await service.review_candidate(
+        project=project,
+        run=run,
+        job=job,
+        candidate=candidate,
+        manifest=manifest,
+        candidate_worktree=repo,
+        authorship_evidence={},
+    )
+    assert auth is None and result.accepted and runner.calls == 1
+    review = in_memory_uow.reviews.get_by_id(result.review_id)
+    assert review.budget_reservation_id is None
+    assert review.budget_authorization_id is None
+    entries = in_memory_uow.budget_ledger.list_by_project(project.project_id)
+    assert len(entries) == 1 and entries[0].entry_type == "USAGE"
+    assert entries[0].stage == "REVIEW" and entries[0].billing_origin == "deepseek_direct"
+    replay = await service.review_candidate(
+        project=project,
+        run=run,
+        job=job,
+        candidate=candidate,
+        manifest=manifest,
+        candidate_worktree=repo,
+        authorship_evidence={},
+    )
+    assert replay.accepted and replay.review_id == result.review_id
+    assert runner.calls == 1
+    assert len(in_memory_uow.budget_ledger.list_by_project(project.project_id)) == 1
+
+
+@pytest.mark.asyncio
+async def test_contract_review_authorization_is_not_used_as_code_review_budget_authority(
     in_memory_uow, monkeypatch, tmp_path
 ):
     project, run, job, candidate, manifest, repo, _, _, auth, service = await _fixture(
@@ -290,10 +360,13 @@ async def test_contract_review_authorization_cannot_fund_code_review(
         candidate_worktree=repo,
         authorship_evidence={},
     )
-    assert not result.accepted and result.waiting
-    assert result.reason == "DEEPSEEK_CODE_REVIEW_BUDGET_NOT_AUTHORIZED"
-    assert service.runner.calls == 0
-    assert in_memory_uow.budget_reservations.list_by_project(project.project_id) == []
+    assert result.accepted
+    assert service.runner.calls == 1
+    review = in_memory_uow.reviews.get_by_id(result.review_id)
+    reservation = in_memory_uow.budget_reservations.get_by_id(review.budget_reservation_id)
+    assert review.review_stage == "CODE_REVIEW"
+    assert reservation.stage == "REVIEW"
+    assert reservation.authorization_id is None
 
 
 @pytest.mark.asyncio

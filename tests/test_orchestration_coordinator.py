@@ -46,6 +46,7 @@ from minime.domain.interfaces import GitHubAdapterInterface
 from minime.domain.models import (
     AuditFinding,
     AuditRecord,
+    BudgetLedgerEntry,
     BudgetReservation,
     CheckResult,
     Event,
@@ -53,7 +54,6 @@ from minime.domain.models import (
     Job,
     JobAttempt,
     OpenRouterPricingSnapshot,
-    OperatorActionRecord,
     OperatorActionRequest,
     OrchestrationCandidate,
     OrchestrationRun,
@@ -65,7 +65,10 @@ from minime.domain.models import (
     utc_now,
 )
 from minime.services.checks_runner import ChecksRunner, ChecksRunResult
-from minime.services.contract_review_service import DeepSeekReviewResponse
+from minime.services.contract_review_service import (
+    DeepSeekResponseDiagnostics,
+    DeepSeekReviewResponse,
+)
 from minime.services.deepseek_auditor_runner import MockAuditorRunner
 from minime.services.deepseek_code_review_service import DeepSeekCodeReviewService
 from minime.services.execution_pipeline import ExecutionPipelineService
@@ -130,12 +133,29 @@ class _DeterministicCodeReviewTransport:
                 "findings": [],
             }
         )
+        content = json.dumps(response)
         return DeepSeekReviewResponse(
             exit_code=0,
-            content=json.dumps(response),
+            content=content,
             model=self.model,
             prompt_tokens=100,
             completion_tokens=20,
+            response_diagnostics=DeepSeekResponseDiagnostics(
+                http_status=200,
+                response_object="chat.completion",
+                returned_model=self.model,
+                model_matches_request=True,
+                choices_count=1,
+                finish_reason="stop",
+                content_present=True,
+                content_type="string",
+                content_length=len(content),
+                usage_present=True,
+                prompt_tokens=100,
+                completion_tokens=20,
+                total_tokens=120,
+                usage_valid=True,
+            ),
         )
 
 
@@ -165,10 +185,10 @@ def _install_review_service(pipeline: ExecutionPipelineService, env: dict[str, A
         )
 
 
-def _authorize_and_continue_frozen_candidate(
+def _continue_frozen_candidate_under_owner_policy(
     service: OrchestrationService, env: dict[str, Any], run: OrchestrationRun
 ) -> OrchestrationRun:
-    """Use real Control Plane authorization and CONTINUE for one exact frozen candidate."""
+    """Resume a capacity wait under the configured owner policy, without per-call approval."""
     from minime.services.control_plane_service import ControlPlaneService
 
     uow = service.uow
@@ -193,27 +213,6 @@ def _authorize_and_continue_frozen_candidate(
         project_root=env["project_root"],
         orchestration_service=service,
     )
-    now = utc_now()
-    authorization = cp.execute_action(
-        OperatorActionRequest(
-            action_request_id=f"test-code-review-auth-{run.run_id}-{run.current_generation}",
-            project_id=run.project_id,
-            change_name=run.change_name,
-            run_id=run.run_id,
-            action_type=OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW,
-            parameters={
-                "max_spend_usd": "0.50",
-                "expires_at": (now + timedelta(minutes=15)).isoformat(),
-                "pricing_snapshot_id": env["review_pricing"].snapshot_id,
-            },
-            actor_identity="deterministic-test-operator",
-            expected_stage=run.current_stage,
-            expected_generation=run.current_generation,
-            expected_candidate_sha=job.candidate_sha,
-        )
-    )
-    assert authorization.status == OperatorActionStatus.COMPLETED, authorization.summary
-
     continued = cp.execute_action(
         OperatorActionRequest(
             action_request_id=f"test-code-review-continue-{run.run_id}-{run.current_generation}",
@@ -708,12 +707,12 @@ def setup_orchestration_environment(
     original_start = OrchestrationService.start
     original_resume = OrchestrationService.resume
 
-    def finish_authorized_review(service, run):
+    def finish_review_capacity_wait(service, run):
         if service.pipeline is not None:
             _install_review_service(service.pipeline, env)
         for _ in range(3):
             latest = service.uow.orchestration_runs.get_by_id(run.run_id) or run
-            updated = _authorize_and_continue_frozen_candidate(service, env, latest)
+            updated = _continue_frozen_candidate_under_owner_policy(service, env, latest)
             if (
                 updated.stop_outcome == latest.stop_outcome
                 and updated.updated_at == latest.updated_at
@@ -723,12 +722,18 @@ def setup_orchestration_environment(
         return service.uow.orchestration_runs.get_by_id(run.run_id) or run
 
     def start_with_authorized_review(service, *args, **kwargs):
+        if service.pipeline is not None:
+            _install_review_service(service.pipeline, env)
         result = original_start(service, *args, **kwargs)
-        return finish_authorized_review(service, result)
+        return finish_review_capacity_wait(service, result)
 
     def resume_with_authorized_review(service, *args, **kwargs):
-        result = original_resume(service, *args, **kwargs)
-        return finish_authorized_review(service, result)
+        if service.pipeline is not None:
+            _install_review_service(service.pipeline, env)
+        # A CONTROL_PLANE CONTINUE may call this method from the start wrapper's
+        # single capacity-recovery step. Do not recursively issue another
+        # continuation from inside that continuation.
+        return original_resume(service, *args, **kwargs)
 
     monkeypatch.setattr(OrchestrationService, "start", start_with_authorized_review)
     monkeypatch.setattr(OrchestrationService, "resume", resume_with_authorized_review)
@@ -779,7 +784,11 @@ def test_pr_lookup_authoritative_not_found_allows_one_creation(
     run = _service_for_pr_lookup(env, in_memory_uow, github).start(
         env["project_id"], env["change_name"]
     )
-    assert run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE, run.stop_reason
+    reservations = in_memory_uow.budget_reservations.list_by_project(env["project_id"])
+    assert run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE, (
+        f"{run.stop_reason}; reservations="
+        f"{[(item.stage, item.status, item.idempotency_key) for item in reservations]!r}"
+    )
     assert github.create_calls == 1
     job = in_memory_uow.jobs.get_by_id(run.active_job_id)
     review = in_memory_uow.reviews.get_by_job_stage(job.job_id, "CODE_REVIEW")
@@ -1169,7 +1178,9 @@ def test_orchestration_reuses_pipeline_evidence_and_preserves_candidate_worktree
     assert ownership.canonical_worktree_path == str(retained_path)
 
     checks = in_memory_uow.check_results.list_by_job(job.job_id)
-    assert len(checks) == 2  # original check plus exact-candidate resume verification
+    # Fresh reviewer capacity is present in this scenario, so the exact
+    # candidate needs one check pass rather than a synthetic wait/resume cycle.
+    assert len(checks) == 1
     assert all(check.check_name == "candidate-file" for check in checks)
     assert all(check.exit_code == 0 for check in checks)
     assert {check.candidate_sha for check in checks} == {job.candidate_sha}
@@ -1823,9 +1834,15 @@ def test_review_authority_fail_closed_validation(setup_orchestration_environment
         job_id=job.job_id,
         project_id=env["project_id"],
         change_name=env["change_name"],
-        reviewer_role="antigravity",
+        reviewer_role="deepseek",
         candidate_sha="",
         base_sha="base-sha-1",
+        reviewer_model="deepseek-chat",
+        provider="deepseek",
+        review_stage="CODE_REVIEW",
+        account_fingerprint="a" * 64,
+        billing_origin="deepseek_direct",
+        budget_reservation_id="code-review-reservation-test",
         orchestration_run_id="run-review-auth-test",
         candidate_generation=1,
         manifest_id="manifest-review-auth",
@@ -1834,77 +1851,6 @@ def test_review_authority_fail_closed_validation(setup_orchestration_environment
         verdict=ReviewVerdict.READY_TO_MERGE,
     )
     in_memory_uow.reviews.save(review)
-
-    # A legacy provider identity cannot become an authorized direct DeepSeek record.
-    review.reviewer_role = "codex"
-    in_memory_uow.reviews.save(review)
-    valid, verdict, reason = service._validate_review_authority(run, job, cand)
-    assert valid is False
-    assert "authorized direct DeepSeek CODE_REVIEW" in reason
-
-    review.reviewer_role = "antigravity"
-    in_memory_uow.reviews.save(review)
-
-    valid, verdict, reason = service._validate_review_authority(run, job, cand)
-    assert valid is False
-    assert "authorized direct DeepSeek CODE_REVIEW" in reason
-
-    # 3. Review candidate_sha mismatch (e.g. prior generation) -> fail closed
-    review.candidate_sha = "stale-prior-gen-sha"
-    in_memory_uow.reviews.save(review)
-    valid, verdict, reason = service._validate_review_authority(run, job, cand)
-    assert valid is False
-    assert "authorized direct DeepSeek CODE_REVIEW" in reason
-
-    # 4. Review base_sha mismatch -> fail closed
-    review.candidate_sha = "cand-sha-1"
-    review.base_sha = "wrong-base-sha"
-    in_memory_uow.reviews.save(review)
-    valid, verdict, reason = service._validate_review_authority(run, job, cand)
-    assert valid is False
-    assert "authorized direct DeepSeek CODE_REVIEW" in reason
-
-    # 5. Exact match -> valid READY_TO_MERGE
-    review.base_sha = "base-sha-1"
-    review.provider = "deepseek"
-    review.reviewer_role = "deepseek"
-    review.reviewer_model = "deepseek-chat"
-    review.review_stage = "CODE_REVIEW"
-    review.account_fingerprint = "a" * 64
-    review.budget_authorization_id = "code-review-auth-test"
-    review.budget_reservation_id = "code-review-reservation-test"
-    review.billing_origin = "deepseek_direct"
-    review.orchestration_run_id = run.run_id
-    review.candidate_generation = cand.generation
-    review.candidate_sha = cand.candidate_sha
-    review.manifest_id = cand.manifest_id
-    review.manifest_hash = cand.manifest_hash
-    in_memory_uow.reviews.save(review)
-    in_memory_uow.operator_actions.save(
-        OperatorActionRecord(
-            action_request_id=review.budget_authorization_id,
-            project_id=run.project_id,
-            change_name=run.change_name,
-            run_id=run.run_id,
-            job_id=job.job_id,
-            action_type=OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW,
-            status=OperatorActionStatus.COMPLETED,
-            result_payload_json={
-                "authorization": {
-                    "stage": "REVIEW",
-                    "provider": "deepseek",
-                    "model": "deepseek-chat",
-                    "account_fingerprint": "a" * 64,
-                    "billing_origin": "deepseek_direct",
-                    "candidate_sha": cand.candidate_sha,
-                    "base_sha": cand.base_sha,
-                    "generation": cand.generation,
-                    "manifest_id": cand.manifest_id,
-                    "manifest_hash": cand.manifest_hash,
-                }
-            },
-        )
-    )
     in_memory_uow.budget_reservations.save(
         BudgetReservation(
             reservation_id=review.budget_reservation_id,
@@ -1921,19 +1867,79 @@ def test_review_authority_fail_closed_validation(setup_orchestration_environment
             account_fingerprint="a" * 64,
             stage="REVIEW",
             billing_origin="deepseek_direct",
-            authorization_id=review.budget_authorization_id,
+            authorization_id=None,
+            idempotency_key="review:v1:code-review-auth-test",
         )
     )
+    in_memory_uow.budget_ledger.save(
+        BudgetLedgerEntry(
+            reservation_id=review.budget_reservation_id,
+            project_id=job.project_id,
+            job_id=job.job_id,
+            change_id=job.change_name,
+            provider="deepseek",
+            account_fingerprint="a" * 64,
+            stage="REVIEW",
+            billing_origin="deepseek_direct",
+            role="reviewer",
+            canonical_model_identity="deepseek-chat",
+            prompt_tokens=100,
+            completion_tokens=20,
+            total_tokens=120,
+            amount_usd=Decimal("0.000120"),
+            entry_type="USAGE",
+        )
+    )
+
+    # A legacy provider identity cannot become an authorized direct DeepSeek record.
+    review.reviewer_role = "codex"
+    in_memory_uow.reviews.save(review)
+    valid, verdict, reason = service._validate_review_authority(run, job, cand)
+    assert valid is False
+    assert "direct DeepSeek CODE_REVIEW" in reason
+
+    review.reviewer_role = "deepseek"
+    in_memory_uow.reviews.save(review)
+
+    valid, verdict, reason = service._validate_review_authority(run, job, cand)
+    assert valid is False
+    assert "candidate SHA" in reason
+
+    # 3. Review candidate_sha mismatch (e.g. prior generation) -> fail closed
+    review.candidate_sha = "stale-prior-gen-sha"
+    in_memory_uow.reviews.save(review)
+    valid, verdict, reason = service._validate_review_authority(run, job, cand)
+    assert valid is False
+    assert "candidate SHA" in reason
+
+    # 4. Review base_sha mismatch -> fail closed
+    review.candidate_sha = "cand-sha-1"
+    review.base_sha = "wrong-base-sha"
+    in_memory_uow.reviews.save(review)
+    valid, verdict, reason = service._validate_review_authority(run, job, cand)
+    assert valid is False
+    assert "base SHA" in reason
+
+    # 5. Exact match -> valid READY_TO_MERGE
+    review.base_sha = "base-sha-1"
+    review.provider = "deepseek"
+    review.reviewer_role = "deepseek"
+    review.reviewer_model = "deepseek-chat"
+    review.review_stage = "CODE_REVIEW"
+    review.account_fingerprint = "a" * 64
+    review.budget_authorization_id = None
+    review.budget_reservation_id = "code-review-reservation-test"
+    review.billing_origin = "deepseek_direct"
+    review.orchestration_run_id = run.run_id
+    review.candidate_generation = cand.generation
+    review.candidate_sha = cand.candidate_sha
+    review.manifest_id = cand.manifest_id
+    review.manifest_hash = cand.manifest_hash
+    in_memory_uow.reviews.save(review)
     saved_review = in_memory_uow.reviews.get_by_job_id(job.job_id)
-    saved_action = in_memory_uow.operator_actions.get_by_request_id(
-        review.budget_authorization_id
-    )
-    saved_reservation = in_memory_uow.budget_reservations.get_by_id(
-        review.budget_reservation_id
-    )
-    assert saved_review and saved_review.budget_authorization_id == "code-review-auth-test"
-    assert saved_action and saved_action.action_request_id == "code-review-auth-test"
-    assert saved_reservation and saved_reservation.authorization_id == "code-review-auth-test"
+    saved_reservation = in_memory_uow.budget_reservations.get_by_id(review.budget_reservation_id)
+    assert saved_review and saved_review.budget_authorization_id is None
+    assert saved_reservation and saved_reservation.authorization_id is None
     valid, verdict, reason = service._validate_review_authority(run, job, cand)
     assert valid is True, reason
     assert verdict == ReviewVerdict.READY_TO_MERGE

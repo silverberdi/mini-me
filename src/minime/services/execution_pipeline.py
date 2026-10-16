@@ -145,6 +145,41 @@ def format_candidate_workspace_context(worktree_path: str | Path) -> str:
     )
 
 
+def _classify_attempt_productivity(
+    outcome: ExecutionOutcome,
+    progress: ProgressClassification | None,
+    *,
+    is_same_sha_duplicate: bool,
+) -> AttemptProductivityClass:
+    """Classify provider completion from observed repository/task progress.
+
+    A zero-exit provider result is not itself evidence of productive work. This
+    keeps no-op completions from being recorded as substantive progress when
+    Git/task evidence says otherwise.
+    """
+    if is_same_sha_duplicate:
+        return AttemptProductivityClass.SAME_SHA_NO_PROGRESS
+    if outcome == ExecutionOutcome.COMPLETED:
+        if progress in {
+            ProgressClassification.GOOD_PROGRESS,
+            ProgressClassification.PARTIAL_PROGRESS,
+        }:
+            return AttemptProductivityClass.SUBSTANTIVE_PROGRESS
+        return AttemptProductivityClass.OTHER
+    if progress in {
+        ProgressClassification.GOOD_PROGRESS,
+        ProgressClassification.PARTIAL_PROGRESS,
+    }:
+        return AttemptProductivityClass.SUBSTANTIVE_PROGRESS
+    if outcome in {ExecutionOutcome.CHANGES_REQUIRED, ExecutionOutcome.FALSE_BLOCKER}:
+        return AttemptProductivityClass.VALID_CORRECTIVE_WORK
+    if outcome in {ExecutionOutcome.AUTH_REQUIRED, ExecutionOutcome.PROVIDER_PREFLIGHT_FAILURE}:
+        return AttemptProductivityClass.PROVIDER_PREFLIGHT_FAILURE
+    if outcome == ExecutionOutcome.PROVIDER_FAILURE:
+        return AttemptProductivityClass.PROVIDER_FAILURE
+    return AttemptProductivityClass.SAME_SHA_NO_PROGRESS
+
+
 EVENT_BY_STATUS = {
     JobStatus.QUEUED: EventType.JOB_QUEUED,
     JobStatus.RUNNING: EventType.JOB_RUNNING,
@@ -688,132 +723,10 @@ class ExecutionPipelineService:
                     )
                     self.uow.commit()
 
-            # Stage Profile Resolution for APPLY:
+            # APPLY capability and capacity are deliberately resolved only after
+            # CONTRACT_REVIEW. A later stage's provider must not prevent the
+            # earlier read-only contract gate from running.
             apply_profile: ResolvedStageProfile | None = None
-            if not resume_frozen_candidate:
-                try:
-                    apply_profile = self._resolve_stage_profile(
-                        project,
-                        OpenSpecStage.APPLY,
-                        requested_provider=current_executor,
-                    )
-                except StageProfileError as exc:
-                    reason = f"Stage profile resolution rejected for APPLY: {exc}"
-                    job = self._transition(job, JobStatus.NEEDS_HUMAN, reason)
-                    return job
-
-            # Validate account and model capabilities before worktree creation or runner dispatch:
-            if self.implementer_runner is None and not resume_frozen_candidate:
-                from minime.adapters.provider_adapter import get_provider_adapter
-
-                adapter = get_provider_adapter(apply_profile.provider, self.app_config)
-                supported, check_reason = await adapter.check_model_supported(
-                    apply_profile.model, effort=apply_profile.effort
-                )
-                if not supported:
-                    reason = f"Account capability check rejected for APPLY: {check_reason}"
-                    job = self._transition(job, JobStatus.NEEDS_HUMAN, reason)
-                    return job
-
-            # A pre-admission sample may expire while the job is queued. Refresh
-            # immediately before creating an attempt or dispatching the implementer.
-            effective_implementer = apply_profile.provider if apply_profile else current_executor
-            imp_health = None
-            is_primary_imp_available = resume_frozen_candidate
-            if not resume_frozen_candidate:
-                imp_health = await self._refresh_capacity_before_stage(
-                    effective_implementer, model=apply_profile.model
-                )
-                is_primary_imp_available = (
-                    imp_health is not None
-                    and imp_health.status == ProviderHealthStatus.AVAILABLE
-                    and self._stage_capacity_evidence_matches(
-                        effective_implementer, apply_profile.model
-                    )
-                )
-            if not resume_frozen_candidate and is_primary_imp_available and imp_health.model:
-                from minime.adapters.provider_adapter import AntigravityProviderAdapter
-
-                target_group = AntigravityProviderAdapter.map_model_to_quota_group(
-                    apply_profile.model
-                )
-                observed_group = AntigravityProviderAdapter.map_model_to_quota_group(
-                    imp_health.model
-                )
-                if (
-                    imp_health.model.lower() != apply_profile.model.lower()
-                    and target_group
-                    and observed_group != target_group
-                ):
-                    is_primary_imp_available = False
-
-            if not resume_frozen_candidate and not is_primary_imp_available:
-                # Primary implementer is exhausted / unavailable. Check for OpenRouter fallback eligibility.
-                dual_exhausted = self._is_dual_primary_exhausted(project)
-                if not dual_exhausted:
-                    # Single primary exhaustion: DRAIN rules prohibit fallback when other primary is available
-                    status_desc = imp_health.status.value if imp_health else "UNKNOWN"
-                    job = self.uow.jobs.set_waiting_capacity(
-                        job.job_id,
-                        effective_implementer,
-                        f"Primary implementer '{effective_implementer}' is {status_desc}",
-                    )
-                    self._save_event(
-                        EventType.JOB_WAITING_CAPACITY,
-                        job,
-                        {
-                            "waiting_provider": effective_implementer,
-                            "status": imp_health.status.value,
-                        },
-                    )
-                    self.uow.commit()
-                    return job
-
-                # Dual-primary exhaustion: Evaluate 10-point OpenRouter fallback eligibility
-                sched_status = self.lifecycle_service.get_scheduler_status(project.project_id)
-                policy, headroom = self.budget_service.get_headroom(project.project_id)
-                primary_health_records = self.health_service.list_all_health()
-
-                elig = self.eligibility_evaluator.evaluate_10_points(
-                    scheduler_mode=sched_status.mode,
-                    job=job,
-                    role="implementer",
-                    is_new_ready_change=False,
-                    primary_health_records=primary_health_records,
-                    project=project,
-                    policy=policy,
-                    headroom=headroom,
-                    model_identity_valid=True,
-                    candidate_integrity_valid=True,
-                    pipeline_invariants_valid=True,
-                )
-
-                if not elig.eligible:
-                    self._save_event(
-                        EventType.FALLBACK_DENIED,
-                        job,
-                        {
-                            "role": "implementer",
-                            "reason": elig.denial_reason,
-                            "reasons": elig.reasons,
-                        },
-                    )
-                    job = self.uow.jobs.set_waiting_capacity(
-                        job.job_id,
-                        "openrouter",
-                        f"OpenRouter fallback ineligible: {elig.denial_reason}",
-                    )
-                    self._save_event(
-                        EventType.JOB_WAITING_CAPACITY,
-                        job,
-                        {"waiting_provider": "openrouter", "status": "fallback_ineligible"},
-                    )
-                    self.uow.commit()
-                    return job
-
-                # Fallback is eligible for implementer!
-                implementer_fallback_used = True
-                fallback_implementer_model = self.default_implementer_model
 
             # Transition to RUNNING if not already in RUNNING status
             if job.status != JobStatus.RUNNING:
@@ -886,7 +799,11 @@ class ExecutionPipelineService:
                     app_config=self.app_config,
                 )
                 result = await contract_review.review_before_apply(
-                    project, run_identity, job, worktree.path
+                    project,
+                    run_identity,
+                    job,
+                    worktree.path,
+                    claim_context=claim_context,
                 )
                 if not result.accepted:
                     reason = (
@@ -906,6 +823,148 @@ class ExecutionPipelineService:
                         self.uow.commit()
                         return job
                     return self._transition(job, JobStatus.NEEDS_HUMAN, error_message=reason)
+
+            if not resume_frozen_candidate:
+                # A configured stage profile is authoritative for a new job.
+                # Only a durable operator reassignment, handoff, prior attempt,
+                # or already materialized non-default executor may override it.
+                profile_override = bool(
+                    operator_reassigned
+                    or pending_handoff
+                    or past_attempts
+                    or current_executor != project.implementer
+                )
+                try:
+                    apply_profile = self._resolve_stage_profile(
+                        project,
+                        OpenSpecStage.APPLY,
+                        requested_provider=current_executor if profile_override else None,
+                    )
+                except StageProfileError as exc:
+                    reason = f"Stage profile resolution rejected for APPLY: {exc}"
+                    return self._transition(job, JobStatus.NEEDS_HUMAN, reason)
+
+                if not profile_override and current_executor != apply_profile.provider:
+                    previous_executor = current_executor
+                    current_executor = apply_profile.provider
+                    job.current_executor = current_executor
+                    self.uow.jobs.save(job)
+                    self._save_event(
+                        EventType.STAGE_PROFILE_SELECTED,
+                        job,
+                        {
+                            "stage": OpenSpecStage.APPLY.value,
+                            "previous_executor": previous_executor,
+                            "selected_provider": apply_profile.provider,
+                            "model": apply_profile.model,
+                            "effort": apply_profile.effort,
+                            "workflow": apply_profile.workflow,
+                            "selection_source": "configured_stage_profile",
+                        },
+                    )
+                    self.uow.commit()
+
+                # Validate exact account/model/effort and stage-bound capacity
+                # only at the APPLY dispatch boundary, after contract review.
+                if self.implementer_runner is None:
+                    from minime.adapters.provider_adapter import get_provider_adapter
+
+                    adapter = get_provider_adapter(apply_profile.provider, self.app_config)
+                    supported, check_reason = await adapter.check_model_supported(
+                        apply_profile.model, effort=apply_profile.effort
+                    )
+                    if not supported:
+                        reason = f"Account capability check rejected for APPLY: {check_reason}"
+                        return self._transition(job, JobStatus.NEEDS_HUMAN, reason)
+
+                imp_health = await self._refresh_capacity_before_stage(
+                    apply_profile.provider, model=apply_profile.model
+                )
+                is_primary_imp_available = (
+                    imp_health is not None
+                    and imp_health.status == ProviderHealthStatus.AVAILABLE
+                    and self._stage_capacity_evidence_matches(
+                        apply_profile.provider, apply_profile.model
+                    )
+                )
+                if is_primary_imp_available and imp_health.model:
+                    from minime.adapters.provider_adapter import AntigravityProviderAdapter
+
+                    target_group = AntigravityProviderAdapter.map_model_to_quota_group(
+                        apply_profile.model
+                    )
+                    observed_group = AntigravityProviderAdapter.map_model_to_quota_group(
+                        imp_health.model
+                    )
+                    if (
+                        imp_health.model.lower() != apply_profile.model.lower()
+                        and target_group
+                        and observed_group != target_group
+                    ):
+                        is_primary_imp_available = False
+
+                if not is_primary_imp_available:
+                    dual_exhausted = self._is_dual_primary_exhausted(project)
+                    if not dual_exhausted:
+                        status_desc = imp_health.status.value if imp_health else "UNKNOWN"
+                        job = self.uow.jobs.set_waiting_capacity(
+                            job.job_id,
+                            apply_profile.provider,
+                            f"Stage APPLY provider '{apply_profile.provider}' is {status_desc}",
+                        )
+                        self._save_event(
+                            EventType.JOB_WAITING_CAPACITY,
+                            job,
+                            {
+                                "waiting_provider": apply_profile.provider,
+                                "status": status_desc,
+                                "stage": "APPLY",
+                                "model": apply_profile.model,
+                            },
+                        )
+                        self.uow.commit()
+                        return job
+
+                    sched_status = self.lifecycle_service.get_scheduler_status(project.project_id)
+                    policy, headroom = self.budget_service.get_headroom(project.project_id)
+                    primary_health_records = self.health_service.list_all_health()
+                    elig = self.eligibility_evaluator.evaluate_10_points(
+                        scheduler_mode=sched_status.mode,
+                        job=job,
+                        role="implementer",
+                        is_new_ready_change=False,
+                        primary_health_records=primary_health_records,
+                        project=project,
+                        policy=policy,
+                        headroom=headroom,
+                        model_identity_valid=True,
+                        candidate_integrity_valid=True,
+                        pipeline_invariants_valid=True,
+                    )
+                    if not elig.eligible:
+                        self._save_event(
+                            EventType.FALLBACK_DENIED,
+                            job,
+                            {
+                                "role": "implementer",
+                                "reason": elig.denial_reason,
+                                "reasons": elig.reasons,
+                            },
+                        )
+                        job = self.uow.jobs.set_waiting_capacity(
+                            job.job_id,
+                            "openrouter",
+                            f"OpenRouter fallback ineligible: {elig.denial_reason}",
+                        )
+                        self._save_event(
+                            EventType.JOB_WAITING_CAPACITY,
+                            job,
+                            {"waiting_provider": "openrouter", "status": "fallback_ineligible"},
+                        )
+                        self.uow.commit()
+                        return job
+                    implementer_fallback_used = True
+                    fallback_implementer_model = self.default_implementer_model
 
             if past_attempts:
                 last_att = past_attempts[-1]
@@ -1630,40 +1689,11 @@ class ExecutionPipelineService:
                     ):
                         is_same_sha = True
                 active_attempt.is_same_sha_duplicate = is_same_sha
-
-                if is_same_sha:
-                    active_attempt.productivity_class = (
-                        AttemptProductivityClass.SAME_SHA_NO_PROGRESS
-                    )
-                elif outcome == ExecutionOutcome.COMPLETED or progress in {
-                    ProgressClassification.GOOD_PROGRESS,
-                    ProgressClassification.PARTIAL_PROGRESS,
-                    "GOOD_PROGRESS",
-                    "PARTIAL_PROGRESS",
-                    "MADE_PROGRESS",
-                    "PARTIAL_COMPLETION",
-                    "FULL_COMPLETION",
-                }:
-                    active_attempt.productivity_class = (
-                        AttemptProductivityClass.SUBSTANTIVE_PROGRESS
-                    )
-                elif outcome in {ExecutionOutcome.CHANGES_REQUIRED, ExecutionOutcome.FALSE_BLOCKER}:
-                    active_attempt.productivity_class = (
-                        AttemptProductivityClass.VALID_CORRECTIVE_WORK
-                    )
-                elif outcome in {
-                    ExecutionOutcome.AUTH_REQUIRED,
-                    ExecutionOutcome.PROVIDER_PREFLIGHT_FAILURE,
-                }:
-                    active_attempt.productivity_class = (
-                        AttemptProductivityClass.PROVIDER_PREFLIGHT_FAILURE
-                    )
-                elif outcome == ExecutionOutcome.PROVIDER_FAILURE:
-                    active_attempt.productivity_class = AttemptProductivityClass.PROVIDER_FAILURE
-                else:
-                    active_attempt.productivity_class = (
-                        AttemptProductivityClass.SAME_SHA_NO_PROGRESS
-                    )
+                active_attempt.productivity_class = _classify_attempt_productivity(
+                    outcome,
+                    progress,
+                    is_same_sha_duplicate=is_same_sha,
+                )
 
                 duration_ms = int((utc_now() - exec_start).total_seconds() * 1000)
                 active_attempt.end_sha = current_sha
@@ -2159,6 +2189,29 @@ class ExecutionPipelineService:
                 check_run_results = rebound_results
                 self.uow.commit()
                 candidate_generation = frozen_candidate.generation
+
+            # The frozen candidate record is the authority for the manifest
+            # identity. A freshly generated in-memory manifest may have the
+            # same content hash but a different ID (for example after a retry
+            # that observed the same candidate SHA). Review must use the exact
+            # durable manifest referenced by the frozen candidate.
+            authoritative_manifest = self.uow.candidate_manifests.get_by_id(
+                frozen_candidate.manifest_id or ""
+            )
+            if (
+                authoritative_manifest is None
+                or authoritative_manifest.job_id != job.job_id
+                or authoritative_manifest.candidate_sha != frozen_candidate.candidate_sha
+                or authoritative_manifest.manifest_id != frozen_candidate.manifest_id
+                or authoritative_manifest.manifest_hash != frozen_candidate.manifest_hash
+                or authoritative_manifest.manifest_hash != manifest.manifest_hash
+            ):
+                return self._transition(
+                    job,
+                    JobStatus.NEEDS_HUMAN,
+                    "CODE_REVIEW_CANDIDATE_MANIFEST_IDENTITY_MISMATCH; candidate is preserved.",
+                )
+            manifest = authoritative_manifest
             run_identity = self.uow.orchestration_runs.get_by_id(run_identity.run_id)
 
             # R01 final code review is an independent DeepSeek Direct stage; no
@@ -2238,11 +2291,16 @@ class ExecutionPipelineService:
                 return job
 
             if review_profile is None or review_profile.provider != "deepseek":
-                reason = "R01 CODE_REVIEW requires DeepSeek Direct; reviewer substitution is forbidden."
+                reason = (
+                    "R01 CODE_REVIEW requires DeepSeek Direct; reviewer substitution is forbidden."
+                )
                 self._save_event(
                     EventType.REVIEW_POLICY_VIOLATION,
                     job,
-                    {"error": reason, "configured_provider": review_profile.provider if review_profile else None},
+                    {
+                        "error": reason,
+                        "configured_provider": review_profile.provider if review_profile else None,
+                    },
                 )
                 job = self._transition(job, JobStatus.NEEDS_HUMAN, reason)
                 return job

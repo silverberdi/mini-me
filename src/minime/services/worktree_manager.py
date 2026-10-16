@@ -2228,24 +2228,38 @@ class WorktreeManager:
 
         attempts_repo = getattr(self.uow, "job_attempts", None)
         attempts = attempts_repo.list_by_job(job_id) if attempts_repo else []
-        if not attempts:
+        review_only_recovery = self._has_durable_failed_contract_review_recovery(
+            job=job,
+            run=run,
+            ownership=ownership,
+            project_id=project_id,
+            run_id=run_id,
+            change_name=change_name,
+            path=path,
+            branch=branch,
+            source_base=source_base,
+            attempts=attempts,
+        )
+        if not attempts and not review_only_recovery:
             refuse(
                 "the latest durable attempt does not prove a recoverable initialization failure."
             )
         # Preserve the pre-existing ordering/acceptance behavior for ordinary
         # environment/provider initialization failures. The new exceptional
         # PREMATURE_STOP route requires a unique latest attempt identity.
-        latest_attempt = attempts[-1]
-        ordinary_recovery_outcome = latest_attempt.normalized_outcome in {
-            ExecutionOutcome.ENVIRONMENT_UNAVAILABLE,
-            ExecutionOutcome.PROVIDER_FAILURE,
-        }
-        latest_attempt_number = max(attempt.attempt_number for attempt in attempts)
+        latest_attempt = attempts[-1] if attempts else None
+        ordinary_recovery_outcome = bool(
+            latest_attempt
+            and latest_attempt.normalized_outcome
+            in {ExecutionOutcome.ENVIRONMENT_UNAVAILABLE, ExecutionOutcome.PROVIDER_FAILURE}
+        )
+        latest_attempt_number = max((attempt.attempt_number for attempt in attempts), default=0)
         latest_attempts = [
             attempt for attempt in attempts if attempt.attempt_number == latest_attempt_number
         ]
         crash_interrupted_recovery = (
             is_created_recovery
+            and latest_attempt is not None
             and len(latest_attempts) == 1
             and latest_attempt.attempt_number == latest_attempt_number
             and self._has_durable_crash_interruption_recovery(
@@ -2259,6 +2273,7 @@ class WorktreeManager:
         )
         auth_required_created_recovery = (
             is_created_recovery
+            and latest_attempt is not None
             and self._has_durable_auth_required_created_recovery(
                 attempts=attempts,
                 latest_attempt=latest_attempt,
@@ -2274,6 +2289,7 @@ class WorktreeManager:
             ordinary_recovery_outcome
             or crash_interrupted_recovery
             or auth_required_created_recovery
+            or review_only_recovery
         ):
             refuse(
                 "the latest durable attempt does not prove an environment/provider initialization failure, an evidenced crash-interrupted CREATED recovery, or a fully evidenced AUTH_REQUIRED CREATED-worktree continuation."
@@ -2426,6 +2442,156 @@ class WorktreeManager:
         ):
             refuse("canonical remote base changed during recreation validation.")
         return branch_sha
+
+    def _has_durable_failed_contract_review_recovery(
+        self,
+        *,
+        job: Any,
+        run: Any,
+        ownership: Any,
+        project_id: str,
+        run_id: str,
+        change_name: str,
+        path: Path,
+        branch: str,
+        source_base: str,
+        attempts: list[Any],
+    ) -> bool:
+        """Permit only a fenced, planning-only snapshot after failed read-only review.
+
+        This is intentionally distinct from implementation-attempt recovery: it is
+        limited to terminal failed CONTRACT_REVIEW history with no JobAttempt and
+        cannot authorize worktrees lacking the exact recovery event/snapshot.
+        """
+        if (
+            attempts
+            or ownership.creation_state != WorktreeCreationState.DELETED
+            or job.status != JobStatus.RUNNING
+            or not run.is_active
+            or run.current_stage != OrchestrationStage.IMPLEMENTING
+            or job.candidate_sha
+            or run.current_candidate_sha
+            or run.base_sha != source_base
+            or (job.base_sha and job.base_sha != source_base)
+        ):
+            return False
+
+        reviews_repo = getattr(self.uow, "reviews", None)
+        reservations_repo = getattr(self.uow, "budget_reservations", None)
+        if not reviews_repo or not reservations_repo or not hasattr(reviews_repo, "list_by_job"):
+            return False
+        reviews = reviews_repo.list_by_job(job.job_id)
+        if not reviews:
+            return False
+        for review in reviews:
+            if (
+                review.project_id != project_id
+                or review.job_id != job.job_id
+                or review.change_name != change_name
+                or review.orchestration_run_id != run_id
+                or review.candidate_generation != run.current_generation
+                or review.review_stage != "CONTRACT_REVIEW"
+                or review.status.value != "REVIEW_FAILED"
+                or not review.error_message
+                or not review.contract_hash
+                or review.candidate_sha != review.contract_hash
+                or review.base_sha != source_base
+                or review.provider != "deepseek"
+                or review.reviewer_role != "deepseek"
+                or not review.reviewer_model
+                or not review.account_fingerprint
+                or review.billing_origin != "deepseek_direct"
+                or not review.budget_reservation_id
+            ):
+                return False
+            reservation = reservations_repo.get_by_id(review.budget_reservation_id)
+            if not reservation or (
+                reservation.project_id != project_id
+                or reservation.run_id != run_id
+                or reservation.job_id != job.job_id
+                or reservation.change_id != change_name
+                or reservation.provider != "deepseek"
+                or reservation.account_fingerprint != review.account_fingerprint
+                or reservation.canonical_model_identity != review.reviewer_model
+                or reservation.stage != "CONTRACT_REVIEW"
+                or reservation.billing_origin != "deepseek_direct"
+                or reservation.status not in {"UNRESOLVED", "SETTLED"}
+            ):
+                return False
+
+        candidate_repo = getattr(self.uow, "orchestration_candidates", None)
+        if candidate_repo and candidate_repo.get_latest_for_run(run_id):
+            return False
+
+        events_repo = getattr(self.uow, "events", None)
+        claims_repo = getattr(self.uow, "claims", None)
+        decisions_repo = getattr(self.uow, "recovery_decisions", None)
+        action_repo = getattr(self.uow, "orchestration_external_actions", None)
+        if not all((events_repo, claims_repo, decisions_repo, action_repo)):
+            return False
+        events = events_repo.list_events(project_id=project_id, change_id=change_name, limit=1000)
+        recovery_events = [
+            event
+            for event in events
+            if event.event_type == EventType.WORKTREE_RECOVERY_SNAPSHOT
+            and event.operation_id == job.job_id
+            and event.payload.get("job_id") == job.job_id
+            and event.payload.get("branch") == branch
+            and event.payload.get("recovery_sha")
+            and event.payload.get("worktree_path")
+            and str(Path(event.payload["worktree_path"]).resolve()) == str(path.resolve())
+            and event.payload.get("authoritative_candidate") is False
+        ]
+        if len(recovery_events) != 1:
+            return False
+        recovery_event = recovery_events[0]
+        # The snapshot is immutable planning-only evidence. It must postdate the
+        # first failed read-only review that caused recovery, but later read-only
+        # review retries cannot invalidate it: they cannot write the worktree and
+        # the no-candidate/no-JobAttempt checks above remain mandatory.
+        if recovery_event.timestamp <= min(review.updated_at for review in reviews):
+            return False
+
+        claim_key = f"run:{run_id}"
+        claim = claims_repo.get_by_key(claim_key)
+        now = utc_now()
+        if (
+            not claim
+            or not claim.is_active
+            or claim.lease_expires_at <= now
+            or not claims_repo.validate_cas(
+                claim_key=claim_key,
+                owner_instance_id=claim.owner_instance_id,
+                fence_token=claim.fence_token,
+            )
+        ):
+            return False
+        decisions = decisions_repo.list_by_claim_key(claim_key)
+        if not decisions:
+            return False
+        decision = max(decisions, key=lambda item: item.created_at)
+        if (
+            decision.identity_type != "RUN"
+            or decision.identity_id != run_id
+            or decision.project_id != project_id
+            or decision.change_name != change_name
+            or decision.source.value != "CONTROL_PLANE"
+            or decision.planned_action != "DRIVE_CONTINUATION"
+            or decision.classification.value != "RESUME_SAFE_CHECKPOINT"
+            or decision.status.value != "EXECUTING"
+            or decision.fence_token != claim.fence_token
+            or decision.created_at <= max(review.updated_at for review in reviews)
+        ):
+            return False
+        cycle_decisions = decisions_repo.list_by_cycle(decision.cycle_id)
+        if len(cycle_decisions) != 1 or cycle_decisions[0].decision_id != decision.decision_id:
+            return False
+        unresolved_statuses = {"RESERVED", "EXECUTING", "UNKNOWN", "AMBIGUOUS"}
+        if any(
+            item.status.value in unresolved_statuses for item in action_repo.list_by_run(run_id)
+        ):
+            return False
+        return True
 
     def _has_durable_auth_required_created_recovery(
         self,

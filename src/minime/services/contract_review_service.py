@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -21,7 +22,17 @@ from minime.config import (
     load_config,
     resolve_stage_profile,
 )
-from minime.domain.enums import EventType, ProviderHealthStatus, ReviewStatus, ReviewVerdict
+from minime.domain.enums import (
+    EventType,
+    ExternalActionStatus,
+    OrchestrationStage,
+    ProviderHealthStatus,
+    RecoveryClassification,
+    RecoveryDecisionStatus,
+    RecoverySource,
+    ReviewStatus,
+    ReviewVerdict,
+)
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
     ContractReviewVerdictPayload,
@@ -29,22 +40,32 @@ from minime.domain.models import (
     Job,
     OrchestrationRun,
     Project,
+    RecoveryClaimContext,
     Review,
     ReviewFinding,
+    generate_uuid,
     utc_now,
+    validate_claim_context_authoritative,
 )
 from minime.services.budget_service import BudgetService
 from minime.services.provider_health_service import ProviderHealthService
 
 DIRECT_ENDPOINT = "https://api.deepseek.com/chat/completions"
+CONTRACT_REVIEW_MAX_OUTPUT_TOKENS = 65536
 
 
-def _review_reservation_key(*, run_id: str, job_id: str, stage: str, contract_hash: str) -> str:
+def _review_reservation_key(
+    *, run_id: str, job_id: str, stage: str, contract_hash: str, operation_id: str | None = None
+) -> str:
     """Return a bounded deterministic key for the persisted VARCHAR(128) column."""
-    identity = json.dumps([run_id, job_id, stage, contract_hash], separators=(",", ":")).encode(
-        "utf-8"
-    )
-    return f"review:v1:{hashlib.sha256(identity).hexdigest()}"
+    if operation_id is None:
+        identity = [run_id, job_id, stage, contract_hash]
+        version = "v1"
+    else:
+        identity = [run_id, job_id, stage, contract_hash, operation_id]
+        version = "v2"
+    payload = json.dumps(identity, separators=(",", ":")).encode("utf-8")
+    return f"review:{version}:{hashlib.sha256(payload).hexdigest()}"
 
 
 @dataclass(frozen=True)
@@ -64,6 +85,144 @@ class DeepSeekReviewResponse:
     prompt_tokens: int | None
     completion_tokens: int | None
     error: str | None = None
+    response_diagnostics: DeepSeekResponseDiagnostics | None = None
+
+
+@dataclass(frozen=True)
+class DeepSeekResponseDiagnostics:
+    """Allowlisted response metadata; never contains response or reasoning text."""
+
+    http_status: int
+    response_id: str | None = None
+    response_object: str | None = None
+    returned_model: str | None = None
+    model_matches_request: bool | None = None
+    choices_count: int | None = None
+    finish_reason: str | None = None
+    content_present: bool = False
+    content_type: str = "missing"
+    content_length: int | None = None
+    reasoning_content_present: bool = False
+    reasoning_content_type: str = "missing"
+    reasoning_content_length: int | None = None
+    usage_present: bool = False
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+    usage_valid: bool = False
+
+
+_SAFE_PROVIDER_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+_KNOWN_FINISH_REASONS = {
+    "stop",
+    "length",
+    "content_filter",
+    "tool_calls",
+    "insufficient_system_resource",
+    "aborted",
+}
+
+
+def _bounded_provider_id(value: object) -> str | None:
+    if isinstance(value, str) and _SAFE_PROVIDER_ID.fullmatch(value):
+        return value
+    return None
+
+
+def _response_diagnostics(
+    status_code: int, body: object, requested_model: str
+) -> DeepSeekResponseDiagnostics:
+    if not isinstance(body, dict):
+        return DeepSeekResponseDiagnostics(http_status=status_code)
+
+    returned_model = _bounded_provider_id(body.get("model"))
+    choices = body.get("choices")
+    choice = choices[0] if isinstance(choices, list) and choices else None
+    choice = choice if isinstance(choice, dict) else None
+    message = choice.get("message") if choice else None
+    message = message if isinstance(message, dict) else None
+    content = message.get("content") if message else None
+    reasoning = message.get("reasoning_content") if message else None
+    usage = body.get("usage")
+    usage = usage if isinstance(usage, dict) else None
+
+    def token_count(value: object) -> int | None:
+        return (
+            value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+        )
+
+    prompt_tokens = token_count(usage.get("prompt_tokens")) if usage else None
+    completion_tokens = token_count(usage.get("completion_tokens")) if usage else None
+    total_tokens = token_count(usage.get("total_tokens")) if usage else None
+    usage_valid = (
+        prompt_tokens is not None
+        and completion_tokens is not None
+        and total_tokens is not None
+        and total_tokens == prompt_tokens + completion_tokens
+    )
+    finish_reason = choice.get("finish_reason") if choice else None
+    if finish_reason not in _KNOWN_FINISH_REASONS:
+        finish_reason = None
+
+    return DeepSeekResponseDiagnostics(
+        http_status=status_code,
+        response_id=_bounded_provider_id(body.get("id")),
+        response_object=_bounded_provider_id(body.get("object")),
+        returned_model=returned_model,
+        model_matches_request=returned_model == requested_model if returned_model else False,
+        choices_count=len(choices) if isinstance(choices, list) else None,
+        finish_reason=finish_reason,
+        content_present=bool(message is not None and "content" in message),
+        content_type=type(content).__name__
+        if message is not None and "content" in message
+        else "missing",
+        content_length=len(content) if isinstance(content, str) else None,
+        reasoning_content_present=bool(message is not None and "reasoning_content" in message),
+        reasoning_content_type=(
+            type(reasoning).__name__
+            if message is not None and "reasoning_content" in message
+            else "missing"
+        ),
+        reasoning_content_length=len(reasoning) if isinstance(reasoning, str) else None,
+        usage_present=usage is not None,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+        usage_valid=usage_valid,
+    )
+
+
+def persist_deepseek_response_diagnostic(
+    uow: PersistenceUnitOfWork, review: Review, response: DeepSeekReviewResponse
+) -> None:
+    """Commit safe provider response metadata before validating reviewer output."""
+    diagnostic = response.response_diagnostics
+    if diagnostic is None:
+        return
+    payload = diagnostic.__dict__
+    uow.events.save(
+        Event(
+            event_type=EventType.EVIDENCE_DIAGNOSTIC_RECORDED,
+            project_id=review.project_id,
+            change_id=review.change_name,
+            operation_id=review.job_id,
+            payload={
+                "diagnostic_kind": "DEEPSEEK_REVIEW_HTTP_RESPONSE",
+                "review_id": review.review_id,
+                "review_stage": review.review_stage,
+                "run_id": review.orchestration_run_id,
+                "job_id": review.job_id,
+                "contract_hash": review.contract_hash,
+                "candidate_sha": review.candidate_sha,
+                "provider": "deepseek",
+                "model": review.reviewer_model,
+                "account_fingerprint": review.account_fingerprint,
+                "reservation_id": review.budget_reservation_id,
+                "response": payload,
+            },
+        )
+    )
+    uow.commit()
 
 
 class DeepSeekContractReviewRunner:
@@ -99,27 +258,17 @@ class DeepSeekContractReviewRunner:
             "messages": [
                 {
                     "role": "system",
-                    "content": (
-                        "You are an independent, read-only reviewer of an OpenSpec contract. "
-                        "Evaluate specification consistency only. Do not evaluate implementation, "
-                        "authorize APPLY, make product decisions, or approve merge. "
-                        "Return only the required JSON schema."
-                        if self.review_stage == "CONTRACT_REVIEW"
-                        else "You are an independent, read-only code reviewer. Evaluate the exact "
-                        "candidate source and deterministic execution evidence in the supplied "
-                        "payload. Do not modify files, authorize APPLY, make product decisions, "
-                        "or approve merge. A favorable review is not human merge authorization. "
-                        "Return only the required JSON schema."
-                    ),
+                    "content": self._system_prompt(),
                 },
                 {"role": "user", "content": contract_json},
             ],
             "temperature": 0,
-            "max_tokens": 2048,
+            "max_tokens": CONTRACT_REVIEW_MAX_OUTPUT_TOKENS,
             "response_format": {"type": "json_object"},
         }
         client = self.client or httpx.AsyncClient(timeout=timeout_seconds)
         owned = self.client is None
+        diagnostics = DeepSeekResponseDiagnostics(http_status=0)
         try:
             response = await client.post(
                 self.endpoint,
@@ -129,40 +278,106 @@ class DeepSeekContractReviewRunner:
                 },
                 json=payload,
             )
+            diagnostics = DeepSeekResponseDiagnostics(http_status=response.status_code)
             if response.status_code != 200:
                 return DeepSeekReviewResponse(
-                    response.status_code, None, None, None, None, f"HTTP {response.status_code}"
+                    response.status_code,
+                    None,
+                    None,
+                    None,
+                    None,
+                    f"HTTP {response.status_code}",
+                    DeepSeekResponseDiagnostics(http_status=response.status_code),
                 )
             body = response.json()
+            diagnostics = _response_diagnostics(response.status_code, body, self.model)
+            if not isinstance(body, dict):
+                return DeepSeekReviewResponse(
+                    0,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "malformed response body",
+                    diagnostics,
+                )
             choices = body.get("choices")
             if not isinstance(choices, list) or len(choices) != 1:
                 return DeepSeekReviewResponse(
-                    0, None, body.get("model"), None, None, "malformed choices"
+                    0,
+                    None,
+                    diagnostics.returned_model,
+                    None,
+                    None,
+                    "malformed choices",
+                    diagnostics,
                 )
-            content = choices[0].get("message", {}).get("content")
-            usage = body.get("usage") or {}
-            prompt_tokens = usage.get("prompt_tokens")
-            completion_tokens = usage.get("completion_tokens")
+            choice = choices[0]
+            if not isinstance(choice, dict):
+                return DeepSeekReviewResponse(
+                    0, None, diagnostics.returned_model, None, None, "malformed choice", diagnostics
+                )
+            message = choice.get("message")
+            if not isinstance(message, dict):
+                return DeepSeekReviewResponse(
+                    0,
+                    None,
+                    diagnostics.returned_model,
+                    None,
+                    None,
+                    "malformed message",
+                    diagnostics,
+                )
+            content = message.get("content")
+            prompt_tokens = diagnostics.prompt_tokens
+            completion_tokens = diagnostics.completion_tokens
+            response_error = None
+            if diagnostics.finish_reason != "stop":
+                response_error = f"incomplete generation ({diagnostics.finish_reason or 'unknown'})"
+            elif not diagnostics.usage_valid:
+                response_error = "provider token usage is missing or inconsistent"
             return DeepSeekReviewResponse(
                 0,
                 content if isinstance(content, str) else None,
-                body.get("model") if isinstance(body.get("model"), str) else None,
-                prompt_tokens
-                if isinstance(prompt_tokens, int)
-                and not isinstance(prompt_tokens, bool)
-                and prompt_tokens >= 0
-                else None,
-                completion_tokens
-                if isinstance(completion_tokens, int)
-                and not isinstance(completion_tokens, bool)
-                and completion_tokens >= 0
-                else None,
+                diagnostics.returned_model,
+                prompt_tokens,
+                completion_tokens,
+                response_error,
+                diagnostics,
             )
         except (httpx.HTTPError, ValueError, TypeError) as exc:
-            return DeepSeekReviewResponse(0, None, None, None, None, type(exc).__name__)
+            return DeepSeekReviewResponse(
+                0, None, None, None, None, type(exc).__name__, diagnostics
+            )
         finally:
             if owned:
                 await client.aclose()
+
+    def _system_prompt(self) -> str:
+        if self.review_stage == "CONTRACT_REVIEW":
+            purpose = (
+                "You are an independent, read-only reviewer of an OpenSpec contract. "
+                "Evaluate specification consistency only. Do not evaluate implementation, "
+                "authorize APPLY, make product decisions, or approve merge."
+            )
+            verdicts = "CONTRACT_ACCEPTED or CONTRACT_CHANGES_REQUIRED"
+        else:
+            purpose = (
+                "You are an independent, read-only code reviewer. Evaluate only the exact "
+                "candidate source and deterministic execution evidence in the supplied payload. "
+                "Do not modify files, authorize APPLY, make product decisions, or approve merge. "
+                "A favorable review is not human merge authorization."
+            )
+            verdicts = "READY_TO_MERGE or CHANGES_REQUIRED"
+        return (
+            f"{purpose} Return one valid json object and no surrounding prose. The object "
+            "must have exactly these keys: verdict, summary, findings. The verdict must be "
+            f"one of: {verdicts}. Each findings item must have exactly severity, location, "
+            "violated_requirement, expected_correction; severity is BLOCKER, MAJOR, or MINOR, "
+            "and location may be null. Example JSON: "
+            '{"verdict":"' + verdicts.split(" or ")[0] + '","summary":"Review summary",'
+            '"findings":[]}.'
+        )
 
 
 class ContractReviewService:
@@ -186,7 +401,13 @@ class ContractReviewService:
         self.timeout_seconds = timeout_seconds
 
     async def review_before_apply(
-        self, project: Project, run: OrchestrationRun, job: Job, worktree_path: str | Path
+        self,
+        project: Project,
+        run: OrchestrationRun,
+        job: Job,
+        worktree_path: str | Path,
+        *,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> ContractReviewResult:
         if (
             run.project_id != project.project_id
@@ -225,17 +446,68 @@ class ContractReviewService:
             )
 
         adapter = get_provider_adapter("deepseek", self.app_config)
-        previous = self.uow.reviews.get_by_job_stage(job.job_id, "CONTRACT_REVIEW")
+        provider_config = self.app_config.providers.get("deepseek")
+        if (
+            not provider_config
+            or not provider_config.enabled
+            or "deepseek" not in project.external_providers_allowed
+        ):
+            return ContractReviewResult(
+                False, None, contract_hash, "DEEPSEEK_OWNER_POLICY_DISABLED", waiting=True
+            )
+        prior_reviews = [
+            review
+            for review in self.uow.reviews.list_by_job(job.job_id)
+            if review.review_stage == "CONTRACT_REVIEW"
+        ]
+        previous = prior_reviews[0] if prior_reviews else None
         if previous:
+            history_identity_matches = all(
+                review.project_id == project.project_id
+                and review.job_id == job.job_id
+                and review.change_name == job.change_name
+                and review.orchestration_run_id == run.run_id
+                and review.candidate_generation == run.current_generation
+                and review.review_stage == "CONTRACT_REVIEW"
+                and review.contract_hash == contract_hash
+                and review.candidate_sha == contract_hash
+                and review.provider == "deepseek"
+                and review.reviewer_role == "deepseek"
+                and review.billing_origin == "deepseek_direct"
+                and bool(review.account_fingerprint)
+                and bool(review.reviewer_model)
+                for review in prior_reviews
+            )
+            if not history_identity_matches:
+                return ContractReviewResult(
+                    False,
+                    previous.review_id,
+                    contract_hash,
+                    "CONTRACT_REVIEW_RECOVERY_IDENTITY_CONTRADICTORY",
+                )
+            if any(
+                review.status == ReviewStatus.REVIEW_COMPLETED
+                and review.verdict == ReviewVerdict.CONTRACT_CHANGES_REQUIRED
+                for review in prior_reviews
+            ):
+                return ContractReviewResult(
+                    False,
+                    previous.review_id,
+                    contract_hash,
+                    "CONTRACT_REVIEW_CHANGES_REQUIRED_BLOCKS_RETRY",
+                )
             reservation = (
                 self.uow.budget_reservations.get_by_id(previous.budget_reservation_id)
                 if previous.budget_reservation_id
                 else None
             )
-            authorization = (
-                self.uow.operator_actions.get_by_request_id(previous.budget_authorization_id)
-                if previous.budget_authorization_id
-                else None
+            usage_recorded = any(
+                event.event_type == EventType.BUDGET_SETTLED
+                and event.operation_id == job.job_id
+                and event.payload.get("review_id") == previous.review_id
+                for event in self.uow.events.list_events(
+                    project_id=project.project_id, change_id=job.change_name, limit=10000
+                )
             )
             exact_accepted_checkpoint = bool(
                 previous.project_id == project.project_id
@@ -251,41 +523,18 @@ class ContractReviewService:
                 and previous.reviewer_model == profile.model
                 and previous.account_fingerprint
                 and previous.billing_origin == "deepseek_direct"
-                and reservation is not None
-                and reservation.provider == "deepseek"
-                and reservation.account_fingerprint == previous.account_fingerprint
-                and reservation.canonical_model_identity == profile.model
-                and reservation.stage == "CONTRACT_REVIEW"
-                and reservation.billing_origin == "deepseek_direct"
-                and reservation.authorization_id == previous.budget_authorization_id
-                and reservation.status == "SETTLED"
-                and authorization is not None
-                and authorization.job_id == job.job_id
-                and authorization.run_id == run.run_id
-                and authorization.status.value == "COMPLETED"
-                and authorization.action_type.value == "AUTHORIZE_DEEPSEEK_REVIEW"
-                and authorization.project_id == project.project_id
-                and authorization.change_name == job.change_name
-                and authorization.result_payload_json.get("authorization", {}).get("provider")
-                == "deepseek"
-                and authorization.result_payload_json.get("authorization", {}).get(
-                    "account_fingerprint"
+                and (
+                    bool(
+                        reservation
+                        and reservation.provider == "deepseek"
+                        and reservation.account_fingerprint == previous.account_fingerprint
+                        and reservation.canonical_model_identity == profile.model
+                        and reservation.stage == "CONTRACT_REVIEW"
+                        and reservation.billing_origin == "deepseek_direct"
+                        and reservation.status == "SETTLED"
+                    )
+                    or (reservation is None and usage_recorded)
                 )
-                == previous.account_fingerprint
-                and authorization.result_payload_json.get("authorization", {}).get("model")
-                == profile.model
-                and authorization.result_payload_json.get("authorization", {}).get("stage")
-                == "CONTRACT_REVIEW"
-                and authorization.result_payload_json.get("authorization", {}).get("billing_origin")
-                == "deepseek_direct"
-                and authorization.result_payload_json.get("authorization", {}).get(
-                    "pricing_snapshot_id"
-                )
-                == reservation.pricing_snapshot_id
-                and authorization.result_payload_json.get("authorization", {}).get("run_id")
-                == run.run_id
-                and authorization.result_payload_json.get("authorization", {}).get("job_id")
-                == job.job_id
             )
             if (
                 exact_accepted_checkpoint
@@ -293,13 +542,22 @@ class ContractReviewService:
                 and previous.verdict == ReviewVerdict.CONTRACT_ACCEPTED
             ):
                 return ContractReviewResult(True, previous.review_id, contract_hash)
-            return ContractReviewResult(
-                False,
-                previous.review_id,
-                contract_hash,
-                "CONTRACT_REVIEW_ALREADY_STARTED_OR_FAILED; refusing duplicate paid dispatch",
-                waiting=previous.status == ReviewStatus.REVIEW_RUNNING,
+            recovery_block = self._failed_review_recovery_block(
+                project=project,
+                run=run,
+                job=job,
+                contract_hash=contract_hash,
+                reviews=prior_reviews,
+                claim_context=claim_context,
             )
+            if recovery_block:
+                return ContractReviewResult(
+                    False,
+                    previous.review_id,
+                    contract_hash,
+                    recovery_block,
+                    waiting=True,
+                )
 
         supported, _ = await adapter.check_model_supported(profile.model, effort=profile.effort)
         account_fingerprint = getattr(adapter, "account_fingerprint", None)
@@ -326,19 +584,27 @@ class ContractReviewService:
                 False, None, contract_hash, "DEEPSEEK_CAPACITY_UNKNOWN_OR_EXHAUSTED", waiting=True
             )
 
-        authorization = self._find_authorization(run, job, profile.model, account_fingerprint)
-        if not authorization:
+        pricing = self.budget.get_verified_review_price_snapshot(
+            provider="deepseek",
+            account_fingerprint=account_fingerprint,
+            model=profile.model,
+            billing_origin="deepseek_direct",
+        )
+        if not pricing:
             return ContractReviewResult(
                 False,
                 None,
                 contract_hash,
-                "DEEPSEEK_CONTRACT_REVIEW_BUDGET_NOT_AUTHORIZED",
+                "DEEPSEEK_DIRECT_PRICE_SNAPSHOT_UNAVAILABLE",
                 waiting=True,
             )
-        auth = authorization.result_payload_json["authorization"]
+        review_limits = self.app_config.providers.get("deepseek")
+        configured_budget = review_limits.budget if review_limits else {}
+        review_operation_id = generate_uuid()
         prompt_json = json.dumps(
             {
                 "stage": "CONTRACT_REVIEW",
+                "review_operation_id": review_operation_id,
                 "project_id": project.project_id,
                 "change_name": job.change_name,
                 "run_id": run.run_id,
@@ -350,8 +616,7 @@ class ContractReviewService:
             sort_keys=True,
             separators=(",", ":"),
         )
-        # Bytes are a conservative upper bound on token count; if this makes the
-        # explicit authorization insufficient, no provider request is made.
+        # UTF-8 bytes conservatively bound prompt tokens before an optional cap.
         prompt_bound = len(prompt_json.encode("utf-8"))
         reservation, denial = self.budget.reserve_review_budget(
             project_id=project.project_id,
@@ -363,20 +628,24 @@ class ContractReviewService:
             model=profile.model,
             stage="CONTRACT_REVIEW",
             billing_origin="deepseek_direct",
-            pricing_snapshot_id=str(auth["pricing_snapshot_id"]),
+            pricing_snapshot_id=pricing.snapshot_id,
             prompt_token_upper_bound=prompt_bound,
-            max_output_tokens=2048,
+            max_output_tokens=CONTRACT_REVIEW_MAX_OUTPUT_TOKENS,
             idempotency_key=_review_reservation_key(
                 run_id=run.run_id,
                 job_id=job.job_id,
                 stage="CONTRACT_REVIEW",
                 contract_hash=contract_hash,
+                operation_id=review_operation_id,
             ),
+            maximum_stage_usd=configured_budget.get("maximum_contract_review_usd"),
+            maximum_combined_usd=configured_budget.get("maximum_combined_review_usd"),
         )
-        if not reservation:
+        if denial:
             return ContractReviewResult(False, None, contract_hash, denial, waiting=True)
 
         review = Review(
+            review_id=review_operation_id,
             job_id=job.job_id,
             project_id=project.project_id,
             change_name=job.change_name,
@@ -386,8 +655,8 @@ class ContractReviewService:
             contract_hash=contract_hash,
             provider="deepseek",
             account_fingerprint=account_fingerprint,
-            budget_authorization_id=authorization.action_request_id,
-            budget_reservation_id=reservation.reservation_id,
+            budget_authorization_id=None,
+            budget_reservation_id=reservation.reservation_id if reservation else None,
             billing_origin="deepseek_direct",
             orchestration_run_id=run.run_id,
             candidate_generation=run.current_generation,
@@ -398,6 +667,27 @@ class ContractReviewService:
             status=ReviewStatus.REVIEW_PENDING,
         )
         self.uow.reviews.save(review)
+        self.uow.events.save(
+            Event(
+                event_type=EventType.CONTRACT_REVIEW_OPERATION_STARTED,
+                project_id=project.project_id,
+                change_id=job.change_name,
+                operation_id=review.review_id,
+                payload={
+                    "review_operation_id": review.review_id,
+                    "review_stage": "CONTRACT_REVIEW",
+                    "contract_hash": contract_hash,
+                    "run_id": run.run_id,
+                    "job_id": job.job_id,
+                    "generation": run.current_generation,
+                    "attempt_number": len(prior_reviews) + 1,
+                    "supersedes_review_id": previous.review_id if previous else None,
+                    "reservation_id": reservation.reservation_id if reservation else None,
+                    "idempotency_key": reservation.idempotency_key if reservation else None,
+                },
+                timestamp=utc_now(),
+            )
+        )
         self.uow.commit()
         # A durable RUNNING state is a dispatch checkpoint. After interruption it
         # is never replayed blindly because the remote request may have been billed.
@@ -415,7 +705,8 @@ class ContractReviewService:
                 getattr(runner, "model", None) != profile.model
                 or getattr(runner, "effort", None) != profile.effort
             ):
-                self.budget.mark_unresolved(reservation.reservation_id)
+                if reservation:
+                    self.budget.release_reservation(reservation.reservation_id, "profile_mismatch")
                 self.uow.reviews.transition(
                     review.review_id,
                     ReviewStatus.REVIEW_FAILED.value,
@@ -425,7 +716,72 @@ class ContractReviewService:
                 return ContractReviewResult(
                     False, review.review_id, contract_hash, "REVIEW_PROFILE_MISMATCH"
                 )
-        result = await runner.review(prompt_json, self.timeout_seconds)
+        try:
+            result = await runner.review(prompt_json, self.timeout_seconds)
+        except Exception as exc:
+            if reservation:
+                self.budget.mark_unresolved(reservation.reservation_id)
+            self.uow.reviews.transition(
+                review.review_id,
+                ReviewStatus.REVIEW_FAILED.value,
+                error_message=f"DeepSeek review outcome is ambiguous ({type(exc).__name__}).",
+            )
+            self.uow.commit()
+            return ContractReviewResult(
+                False,
+                review.review_id,
+                contract_hash,
+                "DEEPSEEK_REVIEW_OUTCOME_AMBIGUOUS",
+                waiting=True,
+            )
+        persist_deepseek_response_diagnostic(self.uow, review, result)
+        diagnostics = result.response_diagnostics
+        usage_verified = bool(
+            result.model == profile.model
+            and diagnostics
+            and diagnostics.http_status == 200
+            and diagnostics.model_matches_request is True
+            and diagnostics.usage_valid
+            and isinstance(result.prompt_tokens, int)
+            and isinstance(result.completion_tokens, int)
+            and result.prompt_tokens == diagnostics.prompt_tokens
+            and result.completion_tokens == diagnostics.completion_tokens
+        )
+        usage_settled = False
+        if usage_verified:
+            actual_cost = (
+                Decimal(result.prompt_tokens) * pricing.prompt_price_per_token
+                + Decimal(result.completion_tokens) * pricing.output_price_per_token
+                + pricing.additional_cost_per_request
+            )
+            if reservation:
+                usage_settled = bool(
+                    self.budget.settle_reservation(
+                        reservation.reservation_id,
+                        actual_cost,
+                        prompt_tokens=result.prompt_tokens,
+                        completion_tokens=result.completion_tokens,
+                        total_tokens=result.prompt_tokens + result.completion_tokens,
+                    )
+                )
+            else:
+                self.budget.record_unreserved_review_usage(
+                    project_id=project.project_id,
+                    job_id=job.job_id,
+                    change_id=job.change_name,
+                    provider="deepseek",
+                    account_fingerprint=account_fingerprint,
+                    model=profile.model,
+                    stage="CONTRACT_REVIEW",
+                    billing_origin="deepseek_direct",
+                    review_id=review.review_id,
+                    prompt_tokens=result.prompt_tokens,
+                    completion_tokens=result.completion_tokens,
+                    actual_cost_usd=actual_cost,
+                )
+                usage_settled = True
+        elif reservation:
+            self.budget.mark_unresolved(reservation.reservation_id)
         if (
             result.exit_code != 0
             or result.error
@@ -438,7 +794,6 @@ class ContractReviewService:
             or isinstance(result.completion_tokens, bool)
             or result.completion_tokens < 0
         ):
-            self.budget.mark_unresolved(reservation.reservation_id)
             self.uow.reviews.transition(
                 review.review_id,
                 ReviewStatus.REVIEW_FAILED.value,
@@ -452,7 +807,6 @@ class ContractReviewService:
         try:
             parsed = ContractReviewVerdictPayload.model_validate_json(result.content)
         except (ValidationError, ValueError):
-            self.budget.mark_unresolved(reservation.reservation_id)
             self.uow.reviews.transition(
                 review.review_id,
                 ReviewStatus.REVIEW_FAILED.value,
@@ -466,7 +820,6 @@ class ContractReviewService:
             ReviewVerdict.CONTRACT_ACCEPTED,
             ReviewVerdict.CONTRACT_CHANGES_REQUIRED,
         }:
-            self.budget.mark_unresolved(reservation.reservation_id)
             self.uow.reviews.transition(
                 review.review_id,
                 ReviewStatus.REVIEW_FAILED.value,
@@ -476,20 +829,7 @@ class ContractReviewService:
             return ContractReviewResult(
                 False, review.review_id, contract_hash, "CROSS_STAGE_REVIEW_EVIDENCE_DENIED"
             )
-        snapshot = self.uow.pricing_snapshots.get_by_id(reservation.pricing_snapshot_id)
-        actual_cost = (
-            Decimal(result.prompt_tokens) * snapshot.prompt_price_per_token
-            + Decimal(result.completion_tokens) * snapshot.output_price_per_token
-            + snapshot.additional_cost_per_request
-        )
-        settled = self.budget.settle_reservation(
-            reservation.reservation_id,
-            actual_cost,
-            prompt_tokens=result.prompt_tokens,
-            completion_tokens=result.completion_tokens,
-            total_tokens=result.prompt_tokens + result.completion_tokens,
-        )
-        if settled is None:
+        if not usage_settled:
             return ContractReviewResult(
                 False, review.review_id, contract_hash, "REVIEW_COST_RECONCILIATION_FAILED"
             )
@@ -524,8 +864,8 @@ class ContractReviewService:
                     "provider": "deepseek",
                     "model": profile.model,
                     "account_fingerprint": account_fingerprint,
-                    "budget_authorization_id": authorization.action_request_id,
-                    "budget_reservation_id": reservation.reservation_id,
+                    "budget_authorization_id": None,
+                    "budget_reservation_id": reservation.reservation_id if reservation else None,
                     "verdict": parsed.verdict.value,
                 },
                 timestamp=utc_now(),
@@ -540,26 +880,143 @@ class ContractReviewService:
             None if accepted else "CONTRACT_CHANGES_REQUIRED",
         )
 
-    def _find_authorization(self, run: OrchestrationRun, job: Job, model: str, account: str):
-        actions = self.uow.operator_actions.list_by_run(run.run_id)
-        for action in actions:
-            auth = action.result_payload_json.get("authorization", {})
+    def _failed_review_recovery_block(
+        self,
+        *,
+        project: Project,
+        run: OrchestrationRun,
+        job: Job,
+        contract_hash: str,
+        reviews: list[Review],
+        claim_context: RecoveryClaimContext | None,
+    ) -> str | None:
+        """Authorize only a distinct review following a canonical fenced CONTINUE."""
+        if not reviews:
+            return "CONTRACT_REVIEW_RECOVERY_HISTORY_MISSING"
+        for review in reviews:
             if (
-                action.action_type.value == "AUTHORIZE_DEEPSEEK_REVIEW"
-                and action.status.value == "COMPLETED"
-                and action.project_id == run.project_id
-                and action.change_name == job.change_name
-                and action.run_id == run.run_id
-                and action.job_id == job.job_id
-                and auth.get("run_id") == run.run_id
-                and auth.get("job_id") == job.job_id
-                and auth.get("stage") == "CONTRACT_REVIEW"
-                and auth.get("provider") == "deepseek"
-                and auth.get("model") == model
-                and auth.get("account_fingerprint") == account
-                and auth.get("billing_origin") == "deepseek_direct"
+                review.project_id != project.project_id
+                or review.job_id != job.job_id
+                or review.change_name != job.change_name
+                or review.orchestration_run_id != run.run_id
+                or review.candidate_generation != run.current_generation
+                or review.review_stage != "CONTRACT_REVIEW"
+                or review.contract_hash != contract_hash
+                or review.candidate_sha != contract_hash
+                or review.provider != "deepseek"
+                or review.reviewer_role != "deepseek"
+                or review.billing_origin != "deepseek_direct"
+                or not review.account_fingerprint
+                or not review.reviewer_model
             ):
-                return action
+                return "CONTRACT_REVIEW_RECOVERY_IDENTITY_CONTRADICTORY"
+            if review.status != ReviewStatus.REVIEW_FAILED:
+                if review.status in {
+                    ReviewStatus.REVIEW_PENDING,
+                    ReviewStatus.REVIEW_RUNNING,
+                    ReviewStatus.REVIEW_TIMED_OUT,
+                }:
+                    return "CONTRACT_REVIEW_OPERATION_STILL_UNRESOLVED"
+                return "CONTRACT_REVIEW_COMPLETED_OR_NONFAILED_HISTORY_BLOCKS_RETRY"
+            if not review.error_message:
+                return "CONTRACT_REVIEW_FAILURE_EVIDENCE_MISSING"
+            if review.budget_reservation_id:
+                reservation = self.uow.budget_reservations.get_by_id(review.budget_reservation_id)
+                if not reservation or (
+                    reservation.project_id != project.project_id
+                    or reservation.run_id != run.run_id
+                    or reservation.job_id != job.job_id
+                    or reservation.change_id != job.change_name
+                    or reservation.provider != "deepseek"
+                    or reservation.account_fingerprint != review.account_fingerprint
+                    or reservation.canonical_model_identity != review.reviewer_model
+                    or reservation.stage != "CONTRACT_REVIEW"
+                    or reservation.billing_origin != "deepseek_direct"
+                    or reservation.status not in {"UNRESOLVED", "SETTLED"}
+                ):
+                    return "CONTRACT_REVIEW_PRIOR_USAGE_IDENTITY_UNVERIFIED"
+            else:
+                settled_events = [
+                    event
+                    for event in self.uow.events.list_events(
+                        project_id=project.project_id, change_id=job.change_name, limit=10000
+                    )
+                    if event.event_type == EventType.BUDGET_SETTLED
+                    and event.payload.get("review_id") == review.review_id
+                    and event.payload.get("provider") == "deepseek"
+                    and event.payload.get("account_fingerprint") == review.account_fingerprint
+                    and event.payload.get("model") == review.reviewer_model
+                    and event.payload.get("stage") == "CONTRACT_REVIEW"
+                    and event.payload.get("billing_origin") == "deepseek_direct"
+                ]
+                if not settled_events:
+                    return "CONTRACT_REVIEW_PRIOR_USAGE_EVIDENCE_MISSING"
+
+        if not run.is_active or run.active_job_id != job.job_id or job.status.value != "RUNNING":
+            return "CONTRACT_REVIEW_RECOVERY_RUN_NOT_ACTIVE"
+        if job.candidate_sha or run.current_candidate_sha:
+            return "CONTRACT_REVIEW_RECOVERY_CANDIDATE_EXISTS"
+        if run.current_stage not in {
+            OrchestrationStage.ADMITTED,
+            OrchestrationStage.PREPARING_EXECUTION,
+            OrchestrationStage.IMPLEMENTING,
+        }:
+            return "CONTRACT_REVIEW_RECOVERY_STAGE_INVALID"
+        if not claim_context or claim_context.claim_key != f"run:{run.run_id}":
+            return "CONTRACT_REVIEW_RECOVERY_CLAIM_REQUIRED"
+        try:
+            validate_claim_context_authoritative(self.uow, claim_context)
+        except Exception:
+            return "CONTRACT_REVIEW_RECOVERY_CLAIM_STALE"
+
+        decisions_repo = getattr(self.uow, "recovery_decisions", None)
+        claims_repo = getattr(self.uow, "claims", None)
+        if not decisions_repo or not claims_repo:
+            return "CONTRACT_REVIEW_RECOVERY_AUTHORITY_UNAVAILABLE"
+        decisions = decisions_repo.list_by_claim_key(claim_context.claim_key)
+        if not decisions:
+            return "CONTRACT_REVIEW_RECOVERY_DECISION_MISSING"
+        decision = max(decisions, key=lambda item: item.created_at)
+        latest_review_at = max(item.updated_at for item in reviews)
+        if (
+            decision.claim_key != claim_context.claim_key
+            or decision.identity_type != "RUN"
+            or decision.identity_id != run.run_id
+            or decision.project_id != project.project_id
+            or decision.change_name != job.change_name
+            or decision.source != RecoverySource.CONTROL_PLANE
+            or decision.planned_action != "DRIVE_CONTINUATION"
+            or decision.classification != RecoveryClassification.RESUME_SAFE_CHECKPOINT
+            or decision.status != RecoveryDecisionStatus.EXECUTING
+            or decision.fence_token != claim_context.fence_token
+            or decision.created_at <= latest_review_at
+        ):
+            return "CONTRACT_REVIEW_RECOVERY_DECISION_NOT_CURRENT_CONTINUE"
+        cycle_decisions = decisions_repo.list_by_cycle(decision.cycle_id)
+        if len(cycle_decisions) != 1 or cycle_decisions[0].decision_id != decision.decision_id:
+            return "CONTRACT_REVIEW_RECOVERY_DECISION_AMBIGUOUS"
+        claim = claims_repo.get_by_key(claim_context.claim_key)
+        if (
+            not claim
+            or not claim.is_active
+            or claim.owner_instance_id != claim_context.owner_instance_id
+            or claim.fence_token != claim_context.fence_token
+        ):
+            return "CONTRACT_REVIEW_RECOVERY_CLAIM_NOT_AUTHORITATIVE"
+
+        action_repo = getattr(self.uow, "orchestration_external_actions", None)
+        if not action_repo:
+            return "CONTRACT_REVIEW_RECOVERY_ACTION_AUTHORITY_UNAVAILABLE"
+        unresolved_statuses = {
+            ExternalActionStatus.RESERVED,
+            ExternalActionStatus.EXECUTING,
+            ExternalActionStatus.UNKNOWN,
+            ExternalActionStatus.AMBIGUOUS,
+        }
+        if any(
+            action.status in unresolved_statuses for action in action_repo.list_by_run(run.run_id)
+        ):
+            return "CONTRACT_REVIEW_RECOVERY_EXTERNAL_ACTION_UNRESOLVED"
         return None
 
     @staticmethod

@@ -56,10 +56,6 @@ providers:
     base_url: https://api.deepseek.com
     api_key_env: DEEPSEEK_API_KEY
     roles: [reviewer]
-    budget:
-      maximum_contract_review_usd: "0.50"
-      maximum_code_review_usd: "1.00"
-      maximum_combined_review_usd: "1.50"
   qwen-local:
     type: openai-compatible
     enabled: false

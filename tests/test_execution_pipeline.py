@@ -11,6 +11,7 @@ import pytest
 
 from minime.config import CliInvocationProfile
 from minime.domain.enums import (
+    AttemptProductivityClass,
     ChangeStatus,
     EventType,
     ExecutionOutcome,
@@ -41,6 +42,7 @@ from minime.services.control_plane_service import ControlPlaneService
 from minime.services.deepseek_auditor_runner import MockAuditorRunner
 from minime.services.execution_pipeline import (
     ExecutionPipelineService,
+    _classify_attempt_productivity,
     format_candidate_workspace_context,
 )
 from minime.services.handoff_manager import HandoffManager
@@ -52,6 +54,42 @@ from minime.services.implementer_runner import (
 from minime.services.openspec_tasks import OpenSpecTaskTracker
 from minime.services.reviewer_runner import MockReviewerRunner
 from minime.services.worktree_manager import WorktreeInfo
+
+
+@pytest.mark.parametrize(
+    ("outcome", "progress", "duplicate", "expected"),
+    [
+        (
+            ExecutionOutcome.COMPLETED,
+            ProgressClassification.NO_PROGRESS,
+            False,
+            AttemptProductivityClass.OTHER,
+        ),
+        (
+            ExecutionOutcome.COMPLETED,
+            ProgressClassification.GOOD_PROGRESS,
+            False,
+            AttemptProductivityClass.SUBSTANTIVE_PROGRESS,
+        ),
+        (
+            ExecutionOutcome.COMPLETED,
+            ProgressClassification.PARTIAL_PROGRESS,
+            True,
+            AttemptProductivityClass.SAME_SHA_NO_PROGRESS,
+        ),
+    ],
+)
+def test_completed_provider_result_is_not_progress_without_progress_evidence(
+    outcome, progress, duplicate, expected
+):
+    assert (
+        _classify_attempt_productivity(
+            outcome,
+            progress,
+            is_same_sha_duplicate=duplicate,
+        )
+        == expected
+    )
 
 
 def _dummy_claim_context(uow: Any, claim_key: str = "run:test-pipe") -> RecoveryClaimContext:
@@ -136,7 +174,8 @@ async def test_missing_native_apply_skill_blocks_before_cli_invocation(
     )
 
     class AcceptedContractReview:
-        async def review_before_apply(self, *args):
+        async def review_before_apply(self, *args, **kwargs):
+            del kwargs
             from minime.services.contract_review_service import ContractReviewResult
 
             return ContractReviewResult(True, "test-review", "test-contract-hash")
@@ -154,7 +193,7 @@ async def test_missing_native_apply_skill_blocks_before_cli_invocation(
 
 
 @pytest.mark.asyncio
-async def test_auth_required_preflight_waits_without_worktree_or_runner_invocation(
+async def test_contract_review_waits_before_apply_capacity_or_runner_invocation(
     in_memory_uow, tmp_path, monkeypatch
 ):
     change_name = "auth-required-preflight"
@@ -171,24 +210,49 @@ async def test_auth_required_preflight_waits_without_worktree_or_runner_invocati
         project_root=tmp_path,
         worktree_manager=FakeWorktreeManager(tmp_path),
     )
-    refresh_calls = []
-
-    async def no_capacity_refresh(provider):
-        refresh_calls.append(provider)
-        return False
-
-    monkeypatch.setattr(
-        pipeline.health_service, "refresh_capacity_from_read_only_source", no_capacity_refresh
-    )
     monkeypatch.setattr(
         "minime.services.execution_pipeline.runner_for_implementer",
         lambda executor: invoked.append(executor),
     )
     job = pipeline.queue_job("mini-me", change_name)
-    for provider in ("codex", "antigravity"):
-        health = pipeline.health_service.get_health(provider)
-        health.status = ProviderHealthStatus.AUTH_REQUIRED
-        pipeline.uow.provider_health.save(health)
+    run = OrchestrationRun(
+        run_id="run-contract-review-first",
+        project_id=job.project_id,
+        change_name=job.change_name,
+        base_sha="base-sha",
+        current_stage=OrchestrationStage.IMPLEMENTING,
+        resumable_stage=OrchestrationStage.IMPLEMENTING,
+        is_active=True,
+        active_job_id=job.job_id,
+    )
+    in_memory_uow.orchestration_runs.save(run)
+
+    class WaitingContractReview:
+        async def review_before_apply(
+            self, project, run, job, workspace_path, *, claim_context=None
+        ):
+            from minime.services.contract_review_service import ContractReviewResult
+
+            return ContractReviewResult(
+                accepted=False,
+                review_id=None,
+                contract_hash=None,
+                reason="DeepSeek capacity is unknown",
+                waiting=True,
+            )
+
+    pipeline.contract_review_service = WaitingContractReview()
+    apply_capacity_calls: list[str] = []
+
+    async def forbidden_apply_capacity_refresh(provider, model=None):
+        apply_capacity_calls.append(f"{provider}:{model}")
+        return False
+
+    monkeypatch.setattr(
+        pipeline.health_service,
+        "refresh_capacity_from_read_only_source",
+        forbidden_apply_capacity_refresh,
+    )
 
     result = await pipeline.execute_queued_job(
         job.job_id, claim_context=_dummy_claim_context(in_memory_uow)
@@ -196,9 +260,8 @@ async def test_auth_required_preflight_waits_without_worktree_or_runner_invocati
 
     assert result.status == JobStatus.WAITING_CAPACITY
     assert invoked == []
-    assert pipeline.worktree_manager.created_paths == {}
+    assert apply_capacity_calls == []
     assert in_memory_uow.job_attempts.list_by_job(job.job_id) == []
-    assert "codex" in refresh_calls
 
 
 @pytest.mark.asyncio
@@ -250,7 +313,8 @@ async def test_runner_factory_profile_error_fails_closed_without_unprofiled_retr
     )
 
     class AcceptedContractReview:
-        async def review_before_apply(self, *args):
+        async def review_before_apply(self, *args, **kwargs):
+            del kwargs
             from minime.services.contract_review_service import ContractReviewResult
 
             return ContractReviewResult(True, "test-review", "test-contract-hash")

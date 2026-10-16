@@ -1614,24 +1614,10 @@ class OrchestrationService:
                     )
                     break
 
-                # 1. Check provider capacity before execution
-                effective_executor = project.implementer
-                health = self.pipeline.health_service.get_health(effective_executor)
-                if health.status != ProviderHealthStatus.AVAILABLE:
-                    # Capacity shortage -> WAITING_CAPACITY (not a human gate)
-                    self._stop_run(
-                        run,
-                        stop_outcome=OrchestrationStopOutcome.WAITING_CAPACITY,
-                        human_gate=None,
-                        stop_reason=f"Primary implementer '{effective_executor}' is {health.status.value}.",
-                        stop_details={
-                            "provider": effective_executor,
-                            "status": health.status.value,
-                        },
-                    )
-                    break
-
-                # 2. Attach or queue Job
+                # The pipeline owns stage-specific JIT capacity. A project-level
+                # implementer health check here can incorrectly block CONTRACT_REVIEW
+                # before its own DeepSeek capacity/budget authority is reached.
+                # Attach or queue the Job; no provider dispatch occurs in this step.
                 if not run.active_job_id:
                     try:
                         job = self.pipeline.queue_job(run.project_id, run.change_name, commit=False)
@@ -1645,7 +1631,7 @@ class OrchestrationService:
                                 stop_outcome=OrchestrationStopOutcome.WAITING_CAPACITY,
                                 human_gate=None,
                                 stop_reason=str(exc),
-                                stop_details={"provider": effective_executor},
+                                stop_details={"provider": project.implementer},
                             )
                             break
                         raise
@@ -2966,13 +2952,18 @@ class OrchestrationService:
 
         def _sync_orig() -> None:
             if orig_run is not locked_run:
-                orig_run.current_stage = locked_run.current_stage
-                orig_run.resumable_stage = locked_run.resumable_stage
-                orig_run.stop_outcome = locked_run.stop_outcome
-                orig_run.human_gate = locked_run.human_gate
-                orig_run.stop_reason = locked_run.stop_reason
-                orig_run.stop_details = locked_run.stop_details
-                orig_run.is_active = locked_run.is_active
+                # Stop authority reloads and saves the latest durable record, so
+                # its mutations need not be reflected in the locked domain copy.
+                # Return the persisted truth to the caller rather than a stale
+                # pre-stop snapshot.
+                latest = self.uow.orchestration_runs.get_by_id(orig_run.run_id) or locked_run
+                orig_run.current_stage = latest.current_stage
+                orig_run.resumable_stage = latest.resumable_stage
+                orig_run.stop_outcome = latest.stop_outcome
+                orig_run.human_gate = latest.human_gate
+                orig_run.stop_reason = latest.stop_reason
+                orig_run.stop_details = latest.stop_details
+                orig_run.is_active = latest.is_active
 
         if from_stage == to_stage:
             _sync_orig()

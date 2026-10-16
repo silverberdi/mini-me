@@ -1,10 +1,10 @@
 ## MODIFIED Requirements
 
 ### Requirement: Strict complementary role pairing
-The system SHALL require DeepSeek Direct, acting through its own compatible read-only reviewer authority, to differ from every substantive author whose contributions survive in the contract under CONTRACT REVIEW or the frozen candidate under code REVIEW. The existing `_validate_review_authority` gate SHALL continue to deterministically enforce candidate-SHA, base-SHA, manifest, generation, and reviewer-identity binding for code review; contract review SHALL bind the exact OpenSpec contract revision. The integrity auditor SHALL detect and report stale or mismatched review evidence as part of the OpenSpec integrity audit. If an executor reassignment has occurred resulting in the assigned reviewer having authored contributions that survive in the CURRENT frozen candidate generation/SHA being reviewed, the Review record, reviewer prompt context payload, and review presentation SHALL explicitly disclose mixed authorship (`is_mixed_authorship = True`); that reviewer SHALL NOT be represented as independent. DeepSeek Direct SHALL perform separate read-only CONTRACT REVIEW and code REVIEW stages only with sufficient stage-specific input, structured response validation, identity independence, verified direct-account identity/capacity, and explicit per-stage budget authorization. It SHALL NOT use or convert an audit result as review approval. Contract-review evidence SHALL NOT satisfy code review, and code-review evidence SHALL NOT satisfy contract review. Historical attempts whose contributions do not survive in the current candidate SHALL NOT trigger mixed authorship. Neither review SHALL authorize APPLY, product decisions, or human merge.
+The system SHALL require DeepSeek Direct, acting through its own compatible read-only reviewer authority, to differ from every substantive author whose contributions survive in the contract under CONTRACT REVIEW or the frozen candidate under code REVIEW. The existing `_validate_review_authority` gate SHALL continue to deterministically enforce candidate-SHA, base-SHA, manifest, generation, and reviewer-identity binding for code review; contract review SHALL bind the exact OpenSpec contract revision. The integrity auditor SHALL detect and report stale or mismatched review evidence as part of the OpenSpec integrity audit. If an executor reassignment has occurred resulting in the assigned reviewer having authored contributions that survive in the CURRENT frozen candidate generation/SHA being reviewed, the Review record, reviewer prompt context payload, and review presentation SHALL explicitly disclose mixed authorship (`is_mixed_authorship = True`); that reviewer SHALL NOT be represented as independent. DeepSeek Direct SHALL perform separate read-only CONTRACT REVIEW and code REVIEW stages only with sufficient stage-specific input, structured response validation, identity independence, verified direct-account identity/capacity, and compliance with the owner's applicable spending policy. It SHALL record provider-reported usage independently for each review stage. Ordinary calls SHALL NOT require a new human approval or mandatory per-call maximum. It SHALL NOT use or convert an audit result as review approval. Contract-review evidence SHALL NOT satisfy code review, and code-review evidence SHALL NOT satisfy contract review. Historical attempts whose contributions do not survive in the current candidate SHALL NOT trigger mixed authorship. Neither review SHALL authorize APPLY, product decisions, or human merge.
 
 #### Scenario: Valid complementary pairing accepted
-- **WHEN** a job is submitted for code review with DeepSeek Direct, no surviving DeepSeek reviewer contributions exist in the candidate, direct-account and budget authority are valid, and current candidate-bound evidence is valid
+- **WHEN** a job is submitted for code review with DeepSeek Direct, no surviving DeepSeek reviewer contributions exist in the candidate, direct-account capacity and applicable spending policy are valid, and current candidate-bound evidence is valid
 - **THEN** the policy check passes, review execution proceeds, and `is_mixed_authorship = False` is recorded.
 
 #### Scenario: Self-review rejected
@@ -21,29 +21,29 @@ The system SHALL require DeepSeek Direct, acting through its own compatible read
 - **THEN** the system SHALL classify the current candidate as single-authored by the active implementer and record `is_mixed_authorship = False`.
 
 #### Scenario: DeepSeek Direct provides distinct read-only final code review
-- **GIVEN** DeepSeek review capability and sufficient review input are verified, the operator explicitly authorizes the provider and stage budget, and the reviewer identity is distinct from every surviving substantive author
+- **GIVEN** DeepSeek review capability and sufficient review input are verified, fresh capacity/balance and the owner's applicable spending policy permit the call, and the reviewer identity is distinct from every surviving substantive author
 - **WHEN** DeepSeek Direct returns a response through the separate review contract
 - **THEN** deterministic validation SHALL bind and validate the structured review against repository, base/head SHA, generation, manifest, and reviewer identity before it can satisfy the review gate
 - **AND** the existing audit runner or audit record SHALL NOT be converted into review evidence, and human merge remains a separate mandatory gate.
 
 #### Scenario: DeepSeek final review cannot be proven or authorized
-- **GIVEN** DeepSeek compatibility, complete review input, structured response validity, identity independence, or explicit provider/budget authorization is missing, stale, or ambiguous
+- **GIVEN** DeepSeek compatibility, complete review input, structured response validity, identity independence, fresh capacity/balance, or applicable spending policy is missing, stale, restrictive, or ambiguous
 - **WHEN** the system evaluates review eligibility
 - **THEN** it SHALL reject the fallback, preserve the candidate, and wait or block without invoking an unauthorized paid call or treating audit output as review.
 
 ## ADDED Requirements
 
 ### Requirement: R01 contract review is a distinct read-only stage
-For R01, CONTRACT REVIEW SHALL evaluate only the OpenSpec contract before APPLY. DeepSeek Direct SHALL be the contract reviewer only when its exact configured model and read-only capability are compatible, its own account identity and fresh capacity/balance are proven, and explicit provider/stage/budget authorization exists. If DeepSeek is not eligible, the work SHALL remain preserved and waiting; Codex, AGY, OpenRouter, or audit output SHALL NOT substitute. Contract-review evidence SHALL be distinct from audit and code-review evidence and SHALL NOT authorize APPLY, product decisions, or human merge.
+For R01, CONTRACT REVIEW SHALL evaluate only the OpenSpec contract before APPLY. DeepSeek Direct SHALL be the contract reviewer only when its exact configured model and read-only capability are compatible, its own account identity and fresh capacity/balance are proven, and the owner's applicable spending policy permits the operation. Ordinary calls SHALL NOT require a new human approval or mandatory per-call maximum. If DeepSeek is not eligible, the work SHALL remain preserved and waiting; Codex, AGY, OpenRouter, or audit output SHALL NOT substitute. Contract-review evidence SHALL be distinct from audit and code-review evidence and SHALL NOT authorize APPLY, product decisions, or human merge.
 
 #### Scenario: Authorized DeepSeek contract review is preferred
-- **GIVEN** DeepSeek has a compatible read-only contract-review profile, current capacity, and explicit budget/provider/stage authorization
+- **GIVEN** DeepSeek has a compatible read-only contract-review profile, current direct-account capacity/balance, and an applicable owner spending policy
 - **WHEN** the R01 workflow reaches CONTRACT REVIEW before APPLY
 - **THEN** mini me dispatches the candidate-bound read-only contract review through the separate review contract
 - **AND** records its result as contract-review evidence without granting APPLY, final-review, or merge authority.
 
 #### Scenario: No contract reviewer is eligible
-- **GIVEN** DeepSeek Direct has no compatible authorized read-only profile with current capacity/balance or explicit budget authority
+- **GIVEN** DeepSeek Direct has no compatible read-only profile, current capacity/balance, or applicable spending policy that permits the operation
 - **WHEN** the R01 workflow reaches CONTRACT REVIEW
 - **THEN** mini me preserves the change and waits without inference or proceeding to APPLY.
 
@@ -61,6 +61,6 @@ The system SHALL preserve a candidate in a durable, observable waiting or blocke
 - **THEN** it preserves the candidate, records an explicit diagnostic in durable state, and leaves the run waiting or blocked rather than manufacturing a successful review or PR-ready state.
 
 #### Scenario: Required DeepSeek reviewer unavailable
-- **GIVEN** DeepSeek compatibility, sufficient stage-specific input, explicit stage/provider/budget authorization, identity independence, or structured response validation is not proven
+- **GIVEN** DeepSeek compatibility, sufficient stage-specific input, applicable spending policy, fresh capacity/balance, identity independence, or structured response validation is not proven
 - **WHEN** review eligibility is evaluated
 - **THEN** the candidate remains preserved in a truthful waiting or blocked state and does not advance to PR-ready.

@@ -14,6 +14,7 @@ from minime.domain.enums import (
     ReviewVerdict,
 )
 from minime.domain.models import (
+    BudgetLedgerEntry,
     BudgetReservation,
     Job,
     OperatorActionRecord,
@@ -283,6 +284,23 @@ def test_review_evidence_report_passes(in_memory_uow):
             stage="REVIEW",
             billing_origin="deepseek_direct",
             authorization_id=review.budget_authorization_id,
+        )
+    )
+    in_memory_uow.budget_ledger.save(
+        BudgetLedgerEntry(
+            entry_id="verify-code-review-ledger",
+            reservation_id=review.budget_reservation_id,
+            project_id=project.project_id,
+            job_id=job.job_id,
+            change_id=job.change_name,
+            provider="deepseek",
+            account_fingerprint="a" * 64,
+            stage="REVIEW",
+            billing_origin="deepseek_direct",
+            role="reviewer",
+            canonical_model_identity="deepseek-chat",
+            amount_usd=Decimal("0.05"),
+            entry_type="SETTLEMENT",
         )
     )
     report = build_review_evidence_report(

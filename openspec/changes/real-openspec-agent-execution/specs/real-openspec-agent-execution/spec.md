@@ -35,10 +35,22 @@ Mini me SHALL admit execution only for one READY OpenSpec change bound by durabl
 - **WHEN** admission validates the base ref
 - **THEN** mini me rejects the stale candidate dispatch, marks the change NOT_READY for base divergence, and requires an explicit OpenSpec rebase or update.
 
-### Requirement: R01-S02 Preflight is authoritative and does not consume inference
-Before any paid or subscription-provider inference, mini me SHALL verify the selected provider CLI and compatible installed native OpenSpec workflow, worktree ownership and Git identity, authentication/capacity evidence, execution policy, required skills/capabilities, and bounded authorization. Each project SHALL configure provider, model, and effort independently by stage. Codex and AGY SHALL be selectable as primary planning/execution providers only when the exact installed CLI/workflow, model/effort, identity, capacity, cost, and budget evidence is valid; either MAY take over compatible work from the other through a durable, fenced, idempotent handoff. DeepSeek Direct SHALL be used only as the independent reviewer for separate CONTRACT REVIEW and code REVIEW stages, through its own official API/account. OpenRouter SHALL be limited to explicitly authorized rescue of already-started work after both primary providers are blocked by quota; it SHALL NOT review or start new READY work. Before dispatch, mini me SHALL verify that the exact installed CLI/version supports the configured provider/model/effort tuple, role, and native workflow; missing or ambiguous compatibility SHALL fail closed. It SHALL choose the least-cost configured profile meeting the stage's documented complexity/risk floor and workflow/tool needs using an explicit verified cost basis; unknown cost SHALL NOT be treated as zero or proof of least cost. Complexity/risk floors SHALL come from existing project policy, durable change requirements, or deterministic criteria; local-AI classifications MAY inform preparation but SHALL NOT bind or raise the required tier. Premium models and maximum effort SHALL NOT be defaults. Any escalation SHALL require objective evidence, recorded justification, finite stage/failure bounds, and explicit budget authorization. R01 SHALL reuse existing configuration, provider adapters/capabilities, capacity and budget authorities; it SHALL NOT add a second selector/scheduler or dynamic optimizer. A missing, stale, unknown, or contradictory prerequisite SHALL block dispatch without claiming provider failure or consuming an implementation attempt when the existing policy permits a preflight denial. Authentication, CLI presence, model catalogs, human authorization, or positive balance alone are not capacity or spend evidence. Optional local AI MAY assist with preliminary complexity classification, context preparation/reduction, extraction, labeling, and auxiliary tasks, but SHALL NOT diagnose failures, implement authoritatively, review security, or make binding decisions; its absence or failure SHALL NOT block the pipeline. A future independent local-inference progress watchdog is outside R01 and SHALL NOT impose a fixed total inference timeout.
+#### Scenario: Intake publishes an already-authored native OpenSpec change without regeneration
+- **GIVEN** a complete OpenSpec change exists in the durably bound managed repository and matches the canonical artifact manifest
+- **AND** its optional `.openspec.yaml` sidecar is either absent or valid `spec-driven` metadata and is not part of the canonical generated artifact manifest
+- **WHEN** the canonical intake flow prepares and publishes that change
+- **THEN** intake copies the existing artifact contents into its authorized workspace and publishes them through the existing ownership, Git CAS, Issue-binding, and readiness authorities
+- **AND** it does not regenerate or overwrite the authored proposal from backlog text.
 
-Provider capacity/balance and spend authorization SHALL remain separate. Capacity is an authentic, fresh provider/account/model observation; Budget Authority is a durable, bounded permission to spend; neither implies the other. Every spend authorization/reservation SHALL identify provider, protected account, model, stage, Run/Job, billing origin, verified cost basis, and maximum amount. Provider-specific acquisition MAY differ, but the core SHALL consume normalized evidence via registered adapters without provider-specific branches. Existing budget services/repositories SHALL be extended in place, not duplicated. Historical OpenRouter policies, pricing snapshots, reservations, and ledger semantics SHALL be preserved. DeepSeek Direct SHALL use only its own official account/API balance and authorization; DeepSeek and OpenRouter accounts, credits, prices, and reservations are never interchangeable. Required persistence changes SHALL use Alembic. Unknown or contradictory identity, billing origin, cost, capacity, or budget SHALL deny dispatch and preserve work.
+#### Scenario: Malformed pre-authored change is rejected before publication
+- **GIVEN** the requested change directory exists in the bound repository but contains a symlink, unexpected file, unreadable artifact, or lacks a required proposal, design, tasks, or spec artifact
+- **WHEN** intake validates the source tree
+- **THEN** it fails closed without replacing the source tree, publishing a partial manifest, or falling back to generated content.
+
+### Requirement: R01-S02 Preflight is authoritative and does not consume inference
+Before any paid or subscription-provider inference, mini me SHALL verify the selected provider CLI and compatible installed native OpenSpec workflow, worktree ownership and Git identity, authentication/capacity evidence, execution policy, required skills/capabilities, and the owner's applicable spending policy. Each project SHALL configure provider, model, and effort independently by stage. Codex and AGY SHALL be selectable as primary planning/execution providers only when the exact installed CLI/workflow, model/effort, identity, and capacity evidence is valid; either MAY take over compatible work from the other through a durable, fenced, idempotent handoff. DeepSeek Direct SHALL be used only as the independent reviewer for separate CONTRACT REVIEW and code REVIEW stages, through its own official API/account. OpenRouter SHALL be limited to rescue of already-started work after both primary providers are blocked by quota, under its own capacity evidence and applicable spending policy; it SHALL NOT review or start new READY work. Before dispatch, mini me SHALL verify that the exact installed CLI/version supports the configured provider/model/effort tuple, role, and native workflow; missing or ambiguous compatibility SHALL fail closed. It SHALL choose the least-cost configured profile meeting the stage's documented complexity/risk floor and workflow/tool needs using a verified cost basis; unknown cost SHALL NOT be treated as zero or proof of least cost. Complexity/risk floors SHALL come from existing project policy, durable change requirements, or deterministic criteria; local-AI classifications MAY inform preparation but SHALL NOT bind or raise the required tier. Premium models and maximum effort SHALL NOT be defaults. Any escalation SHALL require objective evidence, recorded justification, finite stage/failure bounds, and compliance with the spending policy. R01 SHALL reuse existing configuration, provider adapters/capabilities, capacity, spending-policy, and usage-accounting authorities; it SHALL NOT add a second selector/scheduler or dynamic optimizer. Ordinary allowed operations SHALL execute autonomously without a new human approval or mandatory maximum per call. Optional configured limits SHALL be enforced. Provider-reported usage SHALL be recorded durably and idempotently. A missing, stale, unknown, or contradictory prerequisite SHALL block the affected dispatch without claiming provider failure or consuming an implementation attempt when the existing policy permits a preflight denial. Authentication, CLI presence, model catalogs, human authorization, or positive balance alone are not capacity evidence or a guarantee of unlimited coverage. Optional local AI MAY assist with preliminary complexity classification, context preparation/reduction, extraction, labeling, and auxiliary tasks, but SHALL NOT diagnose failures, implement authoritatively, review security, or make binding decisions; its absence or failure SHALL NOT block the pipeline. A future independent local-inference progress watchdog is outside R01 and SHALL NOT impose a fixed total inference timeout.
+
+Provider capacity/balance, spending policy, and usage accounting SHALL remain distinct. Capacity is an authentic, fresh provider/account/model observation. The owner's configured spending policy governs autonomous spend; optional limits may be scoped by account, provider, operation, or period, and no mandatory per-call maximum or new human approval is required. A positive balance does not override configured policy or guarantee coverage for an arbitrary operation. Provider-reported actual usage SHALL be recorded durably and idempotently, bound to provider, protected account, model, stage, Run/Job, and billing origin. Per-operation reservations/bounds SHALL be used where provider semantics or configured policy require them, not universally. Provider-specific acquisition MAY differ, but the core SHALL consume normalized evidence via registered adapters without provider-specific branches. Existing spending-policy/usage services and repositories SHALL be extended in place, not duplicated. Historical OpenRouter policies, pricing snapshots, reservations, and ledger semantics SHALL be preserved. DeepSeek Direct SHALL use only its own official account/API capacity, balance, and usage; DeepSeek and OpenRouter accounts, credits, prices, reservations, and usage are never interchangeable. Required persistence changes SHALL use Alembic. Unknown or contradictory identity, billing origin, capacity, applicable policy, or actual usage SHALL block the affected operation; unknown cost SHALL remain unresolved exposure and SHALL NOT be fabricated.
 
 Model/effort capability evidence SHALL come from a fresh non-inferential query to the exact installed CLI and active account. A model's presence in an account catalog and a provider-wide list of effort names SHALL NOT, by themselves, prove that the selected model/effort pair is supported. Empty, missing, stale, cached-after-error, or ambiguous capability results SHALL fail closed. The operational entrypoint SHALL pass the exact validated stage profile to the runner; any profile-resolution or runner-construction error SHALL stop dispatch. It SHALL NOT retry construction with omitted model/effort or otherwise fall back to a different profile.
 
@@ -77,7 +89,7 @@ Antigravity `statusLine` telemetry SHALL NOT authorize dispatch under this contr
 - **AND** the system does not change the model, remove the selected profile, or fall back silently.
 
 #### Scenario: Cheapest competent configured profile is selected
-- **GIVEN** multiple authorized profiles for a stage pass actual CLI/workflow, capacity, and budget checks and meet the documented complexity/risk floor
+- **GIVEN** multiple authorized profiles for a stage pass actual CLI/workflow, capacity, and applicable spending-policy checks and meet the documented complexity/risk floor
 - **WHEN** mini me resolves the initial stage profile
 - **THEN** it selects the lowest-cost eligible configured profile and records the capability, model, effort, cost basis, and policy decision
 - **AND** it does not select a premium model or maximum effort merely as a default.
@@ -88,10 +100,10 @@ Antigravity `statusLine` telemetry SHALL NOT authorize dispatch under this contr
 - **THEN** it does not claim a cost-optimal selection or silently treat unknown cost as zero
 - **AND** it uses only an explicitly approved bounded profile if existing policy authorizes that selection, otherwise preserves the work and waits.
 
-#### Scenario: Escalation needs evidence and budget authority
+#### Scenario: Escalation needs evidence and spending-policy compliance
 - **GIVEN** an initial stage profile fails an objective documented criterion and a higher-cost profile is proposed
 - **WHEN** mini me evaluates escalation
-- **THEN** escalation proceeds only with a recorded objective reason, bounded limit, and explicit budget authorization
+- **THEN** escalation proceeds only with a recorded objective reason, bounded limit, and compliance with the owner's applicable spending policy
 - **AND** otherwise the work remains preserved in a waiting/blocked state.
 
 #### Scenario: Local AI assistance is non-authoritative and optional
@@ -221,7 +233,7 @@ Antigravity `statusLine` telemetry SHALL NOT authorize dispatch under this contr
 - **AND** records an explicit capacity wait event without creating a failed attempt or escalating to NEEDS_HUMAN.
 
 ### Requirement: R01-S03 Apply uses the installed native agent-side OpenSpec workflow
-Codex and AGY SHALL be selectable primary providers for compatible PLAN, APPLY, implementation TEST, and VERIFY/E2E stages according to independently validated profiles; no immutable provider-to-stage assignment is assumed. A handoff SHALL preserve durable Run/Job/worktree identity, checkpoints, claims/fencing, and idempotent side-effect reconciliation. DeepSeek Direct SHALL perform separate read-only CONTRACT REVIEW of the exact OpenSpec contract and independent code REVIEW of the frozen candidate; the stages SHALL have distinct inputs and evidence. OpenRouter MAY execute only quota rescue for already-started work when both primary providers are blocked by quota, and SHALL NOT review. Each selected agent SHALL execute only the installed, version-compatible native workflow appropriate to its exact stage and change. Invocation SHALL use syntax verified for that provider CLI/version; mini me SHALL NOT substitute a free-form programming prompt, invoke a guessed OpenSpec shell command, or treat `openspec validate` as agent workflow execution. Stage profiles SHALL be independent and capability-validated. CONTRACT REVIEW and code REVIEW SHALL be read-only and SHALL NOT authorize APPLY, product decisions, or merge. Any VERIFY/E2E mutation of tracked candidate content SHALL be treated as substantive authorship and require candidate refreezing plus renewed reviewer-independence evaluation.
+Codex and AGY SHALL be selectable primary providers for compatible PLAN, APPLY, implementation TEST, and VERIFY/E2E stages according to independently validated profiles; no immutable provider-to-stage assignment is assumed. A handoff SHALL preserve durable Run/Job/worktree identity, checkpoints, claims/fencing, and idempotent side-effect reconciliation. DeepSeek Direct SHALL perform separate read-only CONTRACT REVIEW of the exact OpenSpec contract and independent code REVIEW of the frozen candidate; the stages SHALL have distinct inputs and evidence. OpenRouter MAY execute only quota rescue for already-started work when both primary providers are blocked by quota, subject to its own account capacity and applicable spending policy, and SHALL NOT review. Each selected agent SHALL execute only the installed, version-compatible native workflow appropriate to its exact stage and change. Invocation SHALL use syntax verified for that provider CLI/version; mini me SHALL NOT substitute a free-form programming prompt, invoke a guessed OpenSpec shell command, or treat `openspec validate` as agent workflow execution. Stage profiles SHALL be independent and capability-validated. CONTRACT REVIEW and code REVIEW SHALL be read-only and SHALL NOT authorize APPLY, product decisions, or merge. Any VERIFY/E2E mutation of tracked candidate content SHALL be treated as substantive authorship and require candidate refreezing plus renewed reviewer-independence evaluation.
 
 #### Scenario: Native workflow invocation is observed
 - **GIVEN** an authorized APPLY dispatch with an installed compatible provider workflow
@@ -236,7 +248,7 @@ Codex and AGY SHALL be selectable primary providers for compatible PLAN, APPLY, 
 - **AND** neither review result authorizes APPLY, product decisions, or human merge, and OpenRouter does not review.
 
 #### Scenario: Contract review has no eligible authorized provider
-- **GIVEN** DeepSeek is unavailable, incompatible, has unknown/stale/exhausted capacity/balance, or lacks explicit stage/budget authorization
+- **GIVEN** DeepSeek is unavailable, incompatible, has unknown/stale/exhausted capacity/balance, or the owner's applicable spending policy does not permit the operation
 - **WHEN** the run reaches CONTRACT REVIEW
 - **THEN** mini me preserves the Change and waits without inference or proceeding to APPLY.
 
@@ -247,14 +259,20 @@ Codex and AGY SHALL be selectable primary providers for compatible PLAN, APPLY, 
 - **AND** reconciles external effects before retry so no stage action is duplicated.
 
 #### Scenario: OpenRouter quota rescue is restricted to in-flight work
-- **GIVEN** work is already in flight and both Codex and AGY are blocked by verified quota exhaustion, while OpenRouter has compatible capability, its own verified account capacity, explicit authorization, and budget reservation
+- **GIVEN** work is already in flight and both Codex and AGY are blocked by verified quota exhaustion, while OpenRouter has compatible capability, its own verified account capacity, and an applicable owner spending policy
 - **WHEN** the existing rescue policy evaluates continuation
 - **THEN** OpenRouter may execute only the eligible rescue stage
 - **AND** it does not admit new READY work, perform either review stage, or bypass any security, integrity, authorization, or review gate.
 
-#### Scenario: Balance does not authorize spend
-- **GIVEN** a provider account reports positive balance or quota but no matching durable budget authorization/reservation exists for the provider, account, model, stage, Run/Job, and billing origin
-- **WHEN** stage dispatch evaluates spend eligibility
+#### Scenario: Owner spending policy governs autonomous dispatch
+- **GIVEN** a provider account has fresh capacity/balance evidence and the owner's spending policy permits the exact provider/account operation
+- **WHEN** stage dispatch evaluates eligibility
+- **THEN** dispatch may proceed autonomously without per-call human approval
+- **AND** the system records provider-reported consumption when available without treating positive balance as unlimited coverage.
+
+#### Scenario: Missing or exceeded optional spending limit blocks dispatch
+- **GIVEN** capacity is available but there is no applicable owner spending policy, or an optional configured limit would be exceeded
+- **WHEN** stage dispatch evaluates eligibility
 - **THEN** dispatch is denied and the work remains preserved without inference.
 
 #### Scenario: Native workflow is unavailable or unproven
@@ -343,7 +361,7 @@ The implementation SHALL remain within the exact authorized worktree and be boun
 - **THEN** mini me validates the fence token and worktree state, rejects the poisoned or stale token, and reconciles observed uncommitted progress safely without duplicate stage execution or lost work.
 
 ### Requirement: R01-S05 Checks and independent review govern candidate progression
-Mini me SHALL run the repository's configured deterministic implementation tests and applicable installed OpenSpec verification workflow against the exact candidate using validated stage profiles. Codex or AGY MAY perform compatible implementation/verification stages under those profiles. Authoritative CONTRACT REVIEW and final code REVIEW SHALL both be read-only DeepSeek Direct stages, separately bound to the exact contract or frozen repository/base/head/generation/manifest and reviewer identity; code reviewer identity SHALL differ from every substantive author whose changes survive in the candidate. Each paid review requires fresh direct-account capacity/balance and an explicit durable budget reservation. Contract findings cannot satisfy code review and code findings cannot satisfy contract review. The existing DeepSeek audit runner/result and OpenRouter SHALL NOT be converted into review evidence. If a required DeepSeek reviewer path is unavailable or unauthorized, preserve the candidate in a truthful waiting state. No review result authorizes APPLY, product decisions, or human merge.
+Mini me SHALL run the repository's configured deterministic implementation tests and applicable installed OpenSpec verification workflow against the exact candidate using validated stage profiles. Codex or AGY MAY perform compatible implementation/verification stages under those profiles. Authoritative CONTRACT REVIEW and final code REVIEW SHALL both be read-only DeepSeek Direct stages, separately bound to the exact contract or frozen repository/base/head/generation/manifest and reviewer identity; code reviewer identity SHALL differ from every substantive author whose changes survive in the candidate. Each paid review requires fresh direct-account capacity/balance and compliance with the owner's applicable spending policy; ordinary calls SHALL NOT require a new human approval or mandatory per-call maximum. Provider-reported usage SHALL be recorded durably and idempotently. Contract findings cannot satisfy code review and code findings cannot satisfy contract review. The existing DeepSeek audit runner/result and OpenRouter SHALL NOT be converted into review evidence. If a required DeepSeek reviewer path is unavailable or disallowed by policy, preserve the candidate in a truthful waiting state. No review result authorizes APPLY, product decisions, or human merge.
 
 #### Scenario: Checks and distinct review authorize progression
 - **GIVEN** a frozen candidate whose deterministic checks pass and whose required native verification evidence is valid
@@ -357,14 +375,14 @@ Mini me SHALL run the repository's configured deterministic implementation tests
 - **THEN** it waits or requires fresh checks/review for the new candidate
 - **AND** does not reuse stale evidence, self-review, or mark the candidate PR-ready.
 
-#### Scenario: DeepSeek code review is candidate-bound and independently authorized
-- **GIVEN** the exact candidate input, DeepSeek Direct capability and account identity, fresh capacity/balance, explicit stage authorization, and durable budget reservation are valid, and the reviewer is distinct from all surviving substantive authors
+#### Scenario: DeepSeek code review is candidate-bound and follows spending policy
+- **GIVEN** the exact candidate input, DeepSeek Direct capability and account identity, fresh capacity/balance, applicable owner spending policy, and reviewer independence are valid
 - **WHEN** DeepSeek Direct performs read-only code REVIEW
-- **THEN** the system validates the structured response deterministically and records evidence bound to repository/base/head/generation/manifest, reviewer identity, and budget reservation
+- **THEN** the system validates the structured response deterministically and records evidence bound to repository/base/head/generation/manifest and reviewer identity, with provider-reported usage accounted for separately
 - **AND** the review satisfies only the code-review gate, never APPLY or human merge.
 
 #### Scenario: Required DeepSeek code review is unavailable, incompatible, or unauthorized
-- **GIVEN** DeepSeek compatibility, sufficient input, account identity, fresh capacity/balance, explicit provider authorization, or stage budget is absent or uncertain
+- **GIVEN** DeepSeek compatibility, sufficient input, account identity, fresh capacity/balance, or applicable owner spending policy is absent, restrictive, or uncertain
 - **WHEN** the pipeline evaluates review eligibility
 - **THEN** it does not invoke DeepSeek, does not treat audit evidence as review, preserves the candidate, and remains in a truthful waiting or blocked state.
 
@@ -378,7 +396,7 @@ Mini me SHALL run the repository's configured deterministic implementation tests
 - **GIVEN** primary review and all required checks pass, with no explicit policy or human authorization requiring an independent fallback audit
 - **WHEN** the candidate approaches the human PR gate
 - **THEN** mini me does not require or silently invoke an independent audit or OpenRouter rescue
-- **AND** any fallback audit is dispatched only after dual-primary unavailability, compatible tool capability, explicit authorization, and applicable budget approval.
+- **AND** any fallback audit is dispatched only after dual-primary unavailability, compatible tool capability, an applicable owner spending policy, and any separate audit authorization required by policy.
 
 #### Scenario: Adversarial review: self-review attempt via alias, altered author metadata, or surviving contributions
 - **GIVEN** an author attempts to review their own candidate changes using an alternate model identifier, pseudonym, or alias, or a candidate where their contributions survive from a prior attempt
@@ -456,7 +474,7 @@ The R01 fixture workflow SHALL preserve the original N01 Run, Job, attempts, Ope
 R01 acceptance SHALL include an externally observable, bounded end-to-end run using a small authorized disposable GitHub repository, a real READY OpenSpec change created through agent-side OpenSpec, the approved stage profiles and compatible real agents, real Git operations, deterministic checks, separate DeepSeek Direct contract and code review evidence, and a real Draft PR. Test doubles MAY cover isolated contracts only and SHALL NOT satisfy this product acceptance scenario.
 
 #### Scenario: Real fixture change reaches a reviewable PR
-- **GIVEN** an authorized disposable repository with a bound READY change covering success, rejection, and regression behavior, configured checks, independently validated stage profiles, explicit per-stage budget, and capacity for the next required stage
+- **GIVEN** an authorized disposable repository with a bound READY change covering success, rejection, and regression behavior, configured checks, independently validated stage profiles, owner-approved applicable spending policy, and capacity for the next required stage
 - **WHEN** the operator authorizes one bounded delivery run through the real API/CLI path
 - **THEN** compatible validated Codex/AGY profiles execute authorized planning and implementation/test/verification workflows, with safe durable handoff if needed; DeepSeek Direct performs separate authorized read-only CONTRACT REVIEW and candidate-bound code REVIEW, and creates a functional source change only in the owned worktree
 - **AND** review evidence does not authorize APPLY or merge, checks pass, the final review is independent of all surviving authors, and a real Draft PR is observable at the exact candidate SHA with zero committed bytecode or runtime cache artifacts.

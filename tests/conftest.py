@@ -854,6 +854,11 @@ class InMemoryReviewRepository(ReviewRepositoryInterface):
         reviews.sort(key=lambda r: (r.updated_at, r.created_at), reverse=True)
         return reviews[0].model_copy(deep=True) if reviews else None
 
+    def list_by_job(self, job_id: str) -> list[Review]:
+        reviews = [r.model_copy(deep=True) for r in self._store.values() if r.job_id == job_id]
+        reviews.sort(key=lambda r: r.created_at, reverse=True)
+        return reviews
+
     def list_by_project(self, project_id: str, limit: int = 100) -> list[Review]:
         reviews = [r for r in self._store.values() if r.project_id == project_id]
         reviews.sort(key=lambda r: (r.updated_at, r.created_at), reverse=True)
@@ -1338,10 +1343,15 @@ class InMemoryCandidateManifestRepository(CandidateManifestRepositoryInterface):
         return manifests[0].model_copy(deep=True)
 
     def get_by_candidate_sha(self, job_id: str, candidate_sha: str) -> CandidateManifest | None:
-        for m in self._store.values():
-            if m.job_id == job_id and m.candidate_sha == candidate_sha:
-                return m.model_copy(deep=True)
-        return None
+        matches = [
+            manifest
+            for manifest in self._store.values()
+            if manifest.job_id == job_id and manifest.candidate_sha == candidate_sha
+        ]
+        if not matches:
+            return None
+        matches.sort(key=lambda manifest: (manifest.created_at, manifest.manifest_id))
+        return matches[-1].model_copy(deep=True)
 
 
 class InMemoryCandidateAuthorshipRepository(CandidateAuthorshipRepositoryInterface):
@@ -1640,6 +1650,7 @@ class InMemoryOrchestrationExternalActionRepository(OrchestrationExternalActionR
         elif outcome == ExternalOutcome.FAILURE and original_mutation_retry_authorized is True:
             target.status = ExternalActionStatus.EXECUTING
             target.error_message = getattr(observed_result, "error_message", None)
+            target.result_payload = {**target.result_payload, "retry_safety": "SAFE"}
         else:
             target.status = ExternalActionStatus.AMBIGUOUS
             target.error_message = (

@@ -21,6 +21,7 @@ from minime.config import (
 from minime.domain.enums import (
     ActionRiskLevel,
     EventType,
+    ExternalActionStatus,
     HumanGate,
     JobStatus,
     OperatorActionErrorCode,
@@ -30,6 +31,8 @@ from minime.domain.enums import (
     OrchestrationStopOutcome,
     PreviewStatus,
     ProviderHealthStatus,
+    RecoveryClassification,
+    RecoveryDecisionStatus,
     RecoverySource,
     ReviewStatus,
     ValidationVerdict,
@@ -126,16 +129,13 @@ class ControlPlaneService:
             total += amount
         return total
 
-    def _deepseek_combined_review_limit(self, budget: dict[str, Any]) -> Decimal:
-        """Use an explicit pilot limit, defaulting to the sum of stage ceilings."""
+    def _deepseek_combined_review_limit(self, budget: dict[str, Any]) -> Decimal | None:
+        """Return only an owner-configured combined limit; no value means uncapped."""
         try:
             configured = budget.get("maximum_combined_review_usd")
-            if configured is not None:
-                limit = Decimal(str(configured))
-            else:
-                contract = Decimal(str(budget.get("maximum_contract_review_usd", "0")))
-                code = Decimal(str(budget.get("maximum_code_review_usd", "0")))
-                limit = contract + code
+            if configured is None:
+                return None
+            limit = Decimal(str(configured))
         except Exception:
             return Decimal("0")
         return limit if limit.is_finite() and limit > 0 else Decimal("0")
@@ -143,8 +143,10 @@ class ControlPlaneService:
     def _deepseek_review_total_within_limit(
         self, run: OrchestrationRun, budget: dict[str, Any], requested: Decimal
     ) -> bool:
-        prior_total = self._deepseek_review_authorized_total(run)
         limit = self._deepseek_combined_review_limit(budget)
+        if limit is None:
+            return True
+        prior_total = self._deepseek_review_authorized_total(run)
         return prior_total is not None and limit > 0 and prior_total + requested <= limit
 
     def get_available_actions(self, run_id: str) -> list[ActionDescriptor]:
@@ -163,8 +165,15 @@ class ControlPlaneService:
         # 1. CONTINUE / RESUME
         continue_enabled = False
         continue_reason: str | None = None
-        if run.is_active and run.stop_outcome != OrchestrationStopOutcome.WAITING_CAPACITY:
+        stale_checkpoint = self._has_stale_active_checkpoint(run) if run.is_active else False
+        if (
+            run.is_active
+            and run.stop_outcome != OrchestrationStopOutcome.WAITING_CAPACITY
+            and not stale_checkpoint
+        ):
             continue_reason = "Run is already active"
+        elif stale_checkpoint:
+            continue_enabled = True
         elif run.current_stage == OrchestrationStage.PR_PREPARED:
             continue_reason = "Run has completed PR preparation"
         elif run.stop_outcome == OrchestrationStopOutcome.CANCELLED:
@@ -532,9 +541,7 @@ class ControlPlaneService:
         )
 
         code_candidate = (
-            self.uow.orchestration_candidates.get_by_generation(
-                run.run_id, run.current_generation
-            )
+            self.uow.orchestration_candidates.get_by_generation(run.run_id, run.current_generation)
             if job
             else None
         )
@@ -619,6 +626,134 @@ class ControlPlaneService:
         )
 
         return descriptors
+
+    def _has_stale_active_checkpoint(self, run: OrchestrationRun) -> bool:
+        """Prove a narrow orphaned CONTINUE checkpoint is safe to resume.
+
+        An active flag alone cannot authorize a second execution. This exception
+        requires a completed attempt, a failed canonical CONTINUE action, and
+        its matching still-EXECUTING recovery decision under an expired/released
+        fence. Any live claim, active Job state, frozen candidate, pending review,
+        or unresolved external action keeps CONTINUE disabled.
+        """
+        if (
+            not run.is_active
+            or run.stop_outcome is not None
+            or run.current_stage
+            not in {
+                OrchestrationStage.IMPLEMENTING,
+                OrchestrationStage.EVALUATING_ATTEMPT,
+                OrchestrationStage.RUNNING_CHECKS,
+            }
+            or not run.active_job_id
+        ):
+            return False
+
+        job = self.uow.jobs.get_by_id(run.active_job_id)
+        if (
+            not job
+            or job.job_id != run.active_job_id
+            or job.project_id != run.project_id
+            or job.change_name != run.change_name
+            or job.status != JobStatus.CHECKS_FAILED
+        ):
+            return False
+
+        attempts = self.uow.job_attempts.list_by_job(job.job_id)
+        attempts.sort(key=lambda attempt: attempt.attempt_number)
+        if not attempts:
+            return False
+        latest_attempt = attempts[-1]
+        if (
+            sum(item.attempt_number == latest_attempt.attempt_number for item in attempts) != 1
+            or latest_attempt.completed_at is None
+            or latest_attempt.attempt_number != job.attempt_count
+            or not job.candidate_sha
+            or latest_attempt.end_sha != job.candidate_sha
+            or run.current_candidate_sha is not None
+        ):
+            return False
+
+        claim_key = f"run:{run.run_id}"
+        claim_repo = getattr(self.uow, "claims", None)
+        decisions_repo = getattr(self.uow, "recovery_decisions", None)
+        if not claim_repo or not decisions_repo:
+            return False
+        claim = claim_repo.get_by_key(claim_key)
+        if not claim or (claim.released_at is None and claim.lease_expires_at > utc_now()):
+            return False
+
+        decisions = decisions_repo.list_by_claim_key(claim_key)
+        if not decisions:
+            return False
+        decision = max(decisions, key=lambda item: item.created_at)
+        if (
+            decision.identity_type != "RUN"
+            or decision.identity_id != run.run_id
+            or decision.project_id != run.project_id
+            or decision.change_name != run.change_name
+            or decision.source != RecoverySource.CONTROL_PLANE
+            or decision.classification != RecoveryClassification.RESUME_SAFE_CHECKPOINT
+            or decision.planned_action != "DRIVE_CONTINUATION"
+            or decision.status != RecoveryDecisionStatus.EXECUTING
+            or decision.fence_token != claim.fence_token
+            or latest_attempt.started_at < decision.created_at
+        ):
+            return False
+
+        action_records = self.uow.operator_actions.list_by_run(run.run_id)
+        if not action_records:
+            return False
+        latest_action = max(action_records, key=lambda item: item.created_at)
+        action_error = (latest_action.result_payload_json or {}).get("error")
+        stale_fence_ack_failure = isinstance(action_error, str) and (
+            "claim fence is stale, expired, or superseded" in action_error.lower()
+        )
+        if (
+            latest_action.action_type != OperatorActionType.CONTINUE
+            or latest_action.status != OperatorActionStatus.FAILED
+            or latest_action.error_code != OperatorActionErrorCode.ACTION_EXECUTION_FAILED
+            or latest_action.project_id != run.project_id
+            or latest_action.change_name != run.change_name
+            or latest_action.run_id != run.run_id
+            # Older Control Plane versions persisted CONTINUE against the Run
+            # only (job_id=NULL). The Run's authoritative active_job_id above,
+            # the decision identity, and the attempt interval still bind that
+            # action to exactly one Job. A contradictory non-null Job identity
+            # is never accepted.
+            or latest_action.job_id not in {None, job.job_id}
+            or latest_action.precondition_stage != run.current_stage.value
+            or latest_action.created_at <= decision.created_at
+            or not stale_fence_ack_failure
+        ):
+            return False
+
+        latest_candidate = self.uow.orchestration_candidates.get_latest_for_run(run.run_id)
+        if latest_candidate:
+            return False
+
+        reviews_repo = getattr(self.uow, "reviews", None)
+        if reviews_repo:
+            for review in reviews_repo.list_by_job(job.job_id):
+                if review.status in {
+                    ReviewStatus.REVIEW_PENDING,
+                    ReviewStatus.REVIEW_RUNNING,
+                    ReviewStatus.REVIEW_TIMED_OUT,
+                }:
+                    return False
+
+        external_repo = getattr(self.uow, "orchestration_external_actions", None)
+        if external_repo:
+            unresolved = {
+                ExternalActionStatus.RESERVED,
+                ExternalActionStatus.EXECUTING,
+                ExternalActionStatus.FAILED,
+                ExternalActionStatus.UNKNOWN,
+                ExternalActionStatus.AMBIGUOUS,
+            }
+            if any(action.status in unresolved for action in external_repo.list_by_run(run.run_id)):
+                return False
+        return True
 
     def execute_action(self, request: OperatorActionRequest) -> OperatorActionResult:
         """Governed execution of an operator action with optimistic concurrency and idempotency."""
@@ -849,7 +984,13 @@ class ControlPlaneService:
         sanitized_params: dict[str, Any],
     ) -> OperatorActionResult:
         waiting_capacity_checkpoint = run.stop_outcome == OrchestrationStopOutcome.WAITING_CAPACITY
-        if run.is_active and not sanitized_params.get("force") and not waiting_capacity_checkpoint:
+        stale_checkpoint = self._has_stale_active_checkpoint(run)
+        if (
+            run.is_active
+            and not sanitized_params.get("force")
+            and not waiting_capacity_checkpoint
+            and not stale_checkpoint
+        ):
             return self._record_and_return_rejection(
                 request=request,
                 run=run,
@@ -1101,16 +1242,17 @@ class ControlPlaneService:
             if provider_config and isinstance(provider_config.budget, dict)
             else None
         )
-        try:
-            configured_max = Decimal(str(configured_max))
-        except Exception:
-            configured_max = Decimal("0")
-        if max_spend > configured_max:
+        if configured_max is not None:
+            try:
+                configured_max = Decimal(str(configured_max))
+            except Exception:
+                configured_max = Decimal("0")
+        if configured_max is not None and max_spend > configured_max:
             return self._record_and_return_rejection(
                 request=request,
                 run=run,
                 error_code=OperatorActionErrorCode.BUDGET_BLOCKED,
-                summary="Requested spend exceeds the configured contract-review ceiling or no ceiling exists.",
+                summary="Requested spend exceeds the configured contract-review ceiling.",
                 sanitized_params=sanitized_params,
             )
         review_budget = provider_config.budget if provider_config else {}
@@ -1119,7 +1261,7 @@ class ControlPlaneService:
                 request=request,
                 run=run,
                 error_code=OperatorActionErrorCode.BUDGET_BLOCKED,
-                summary="Combined DeepSeek review authorizations exceed the configured pilot ceiling or are ambiguous.",
+                summary="Combined DeepSeek review authorizations exceed the configured owner limit or are ambiguous.",
                 sanitized_params=sanitized_params,
             )
         try:
@@ -1235,9 +1377,7 @@ class ControlPlaneService:
         """Authorize one bounded review for a specific frozen candidate only."""
         job = self.uow.jobs.get_by_id(run.active_job_id) if run.active_job_id else None
         candidate = (
-            self.uow.orchestration_candidates.get_by_generation(
-                run.run_id, run.current_generation
-            )
+            self.uow.orchestration_candidates.get_by_generation(run.run_id, run.current_generation)
             if job
             else None
         )
@@ -1367,16 +1507,17 @@ class ControlPlaneService:
             if provider_config and isinstance(provider_config.budget, dict)
             else None
         )
-        try:
-            configured_max = Decimal(str(configured_max))
-        except Exception:
-            configured_max = Decimal("0")
-        if max_spend > configured_max:
+        if configured_max is not None:
+            try:
+                configured_max = Decimal(str(configured_max))
+            except Exception:
+                configured_max = Decimal("0")
+        if configured_max is not None and max_spend > configured_max:
             return self._record_and_return_rejection(
                 request=request,
                 run=run,
                 error_code=OperatorActionErrorCode.BUDGET_BLOCKED,
-                summary="Requested spend exceeds the configured code-review ceiling or no ceiling exists.",
+                summary="Requested spend exceeds the configured code-review ceiling.",
                 sanitized_params=sanitized_params,
             )
         review_budget = provider_config.budget if provider_config else {}
@@ -1385,7 +1526,7 @@ class ControlPlaneService:
                 request=request,
                 run=run,
                 error_code=OperatorActionErrorCode.BUDGET_BLOCKED,
-                summary="Combined DeepSeek review authorizations exceed the configured pilot ceiling or are ambiguous.",
+                summary="Combined DeepSeek review authorizations exceed the configured owner limit or are ambiguous.",
                 sanitized_params=sanitized_params,
             )
         try:
