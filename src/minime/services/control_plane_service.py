@@ -93,6 +93,60 @@ class ControlPlaneService:
             uow, project_root=self.project_root, github_adapter=gh_adapter
         )
 
+    def _deepseek_review_authorized_total(self, run: OrchestrationRun) -> Decimal | None:
+        """Return prior DeepSeek review authorizations for this Run, or None if ambiguous."""
+        total = Decimal("0")
+        review_actions = {
+            OperatorActionType.AUTHORIZE_DEEPSEEK_REVIEW: "CONTRACT_REVIEW",
+            OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW: "REVIEW",
+        }
+        for action in self.uow.operator_actions.list_by_run(run.run_id):
+            expected_stage = review_actions.get(action.action_type)
+            if not expected_stage or action.status != OperatorActionStatus.COMPLETED:
+                continue
+            auth = action.result_payload_json.get("authorization", {})
+            if (
+                action.project_id != run.project_id
+                or action.change_name != run.change_name
+                or action.run_id != run.run_id
+                or not action.job_id
+                or auth.get("provider") != "deepseek"
+                or auth.get("billing_origin") != "deepseek_direct"
+                or auth.get("stage") != expected_stage
+                or auth.get("run_id") != run.run_id
+                or auth.get("job_id") != action.job_id
+            ):
+                return None
+            try:
+                amount = Decimal(str(auth["max_spend_usd"]))
+            except Exception:
+                return None
+            if not amount.is_finite() or amount <= 0:
+                return None
+            total += amount
+        return total
+
+    def _deepseek_combined_review_limit(self, budget: dict[str, Any]) -> Decimal:
+        """Use an explicit pilot limit, defaulting to the sum of stage ceilings."""
+        try:
+            configured = budget.get("maximum_combined_review_usd")
+            if configured is not None:
+                limit = Decimal(str(configured))
+            else:
+                contract = Decimal(str(budget.get("maximum_contract_review_usd", "0")))
+                code = Decimal(str(budget.get("maximum_code_review_usd", "0")))
+                limit = contract + code
+        except Exception:
+            return Decimal("0")
+        return limit if limit.is_finite() and limit > 0 else Decimal("0")
+
+    def _deepseek_review_total_within_limit(
+        self, run: OrchestrationRun, budget: dict[str, Any], requested: Decimal
+    ) -> bool:
+        prior_total = self._deepseek_review_authorized_total(run)
+        limit = self._deepseek_combined_review_limit(budget)
+        return prior_total is not None and limit > 0 and prior_total + requested <= limit
+
     def get_available_actions(self, run_id: str) -> list[ActionDescriptor]:
         """Discover all supported operator actions for a run and their current eligibility."""
         run = self.uow.orchestration_runs.get_by_id(run_id)
@@ -597,7 +651,21 @@ class ControlPlaneService:
             )
 
         # 2. Authority & Run Lookup
-        run = self.uow.orchestration_runs.get_by_id(request.run_id)
+        run_repo = self.uow.orchestration_runs
+        if request.action_type in {
+            OperatorActionType.AUTHORIZE_DEEPSEEK_REVIEW,
+            OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW,
+        }:
+            # Serialize the combined per-Run review ceiling check with its
+            # durable authorization insert. Without this row lock, simultaneous
+            # CONTRACT_REVIEW and CODE_REVIEW authorizations could each observe
+            # stale totals and exceed the pilot cap.
+            get_for_update = getattr(run_repo, "get_for_update", None)
+            run = get_for_update(request.run_id) if callable(get_for_update) else None
+            if run is None:
+                run = run_repo.get_by_id(request.run_id)
+        else:
+            run = run_repo.get_by_id(request.run_id)
         if not run:
             return self._record_and_return_rejection(
                 request=request,
@@ -650,9 +718,7 @@ class ControlPlaneService:
             elif request.action_type == OperatorActionType.AUTHORIZE_DEEPSEEK_REVIEW:
                 return self._execute_authorize_deepseek_review(request, run, sanitized_params)
             elif request.action_type == OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW:
-                return self._execute_authorize_deepseek_code_review(
-                    request, run, sanitized_params
-                )
+                return self._execute_authorize_deepseek_code_review(request, run, sanitized_params)
             else:
                 return self._record_and_return_rejection(
                     request=request,
@@ -1047,6 +1113,15 @@ class ControlPlaneService:
                 summary="Requested spend exceeds the configured contract-review ceiling or no ceiling exists.",
                 sanitized_params=sanitized_params,
             )
+        review_budget = provider_config.budget if provider_config else {}
+        if not self._deepseek_review_total_within_limit(run, review_budget, max_spend):
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.BUDGET_BLOCKED,
+                summary="Combined DeepSeek review authorizations exceed the configured pilot ceiling or are ambiguous.",
+                sanitized_params=sanitized_params,
+            )
         try:
             profile = resolve_stage_profile(
                 project_config, OpenSpecStage.CONTRACT_REVIEW, app_config=app_config
@@ -1302,6 +1377,15 @@ class ControlPlaneService:
                 run=run,
                 error_code=OperatorActionErrorCode.BUDGET_BLOCKED,
                 summary="Requested spend exceeds the configured code-review ceiling or no ceiling exists.",
+                sanitized_params=sanitized_params,
+            )
+        review_budget = provider_config.budget if provider_config else {}
+        if not self._deepseek_review_total_within_limit(run, review_budget, max_spend):
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.BUDGET_BLOCKED,
+                summary="Combined DeepSeek review authorizations exceed the configured pilot ceiling or are ambiguous.",
                 sanitized_params=sanitized_params,
             )
         try:

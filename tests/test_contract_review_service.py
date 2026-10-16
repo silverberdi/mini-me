@@ -60,7 +60,7 @@ class _InterceptedDeepSeekAdapter(DeepSeekProviderAdapter):
         self, model: str, effort: str | None = None, timeout_seconds: float = 10.0
     ):
         self.model_checks.append((model, effort))
-        return (model == "deepseek-chat" and effort == "low", None)
+        return (model == "deepseek-flash" and effort == "low", None)
 
     async def read_capacity_observation(
         self, timeout_seconds: float = 10.0, selected_model: str | None = None
@@ -80,7 +80,7 @@ class _InterceptedDeepSeekAdapter(DeepSeekProviderAdapter):
 
 
 class _DeterministicReviewer:
-    model = "deepseek-chat"
+    model = "deepseek-flash"
     effort = "low"
 
     def __init__(self, content: str | None = None):
@@ -118,7 +118,7 @@ async def _configure(monkeypatch, uow, tmp_path: Path, *, capacity: bool = True,
         stage_profiles={
             "CONTRACT_REVIEW": StageProfileConfig(
                 provider="deepseek",
-                model="deepseek-chat",
+                model="deepseek-flash",
                 effort="low",
                 workflow="openspec-explore",
             )
@@ -127,7 +127,13 @@ async def _configure(monkeypatch, uow, tmp_path: Path, *, capacity: bool = True,
     app_config = AppConfig(
         providers={
             "deepseek": ProviderConfig(
-                type="api", enabled=True, budget={"maximum_contract_review_usd": "1.00"}
+                type="api",
+                enabled=True,
+                budget={
+                    "maximum_contract_review_usd": "0.50",
+                    "maximum_code_review_usd": "1.00",
+                    "maximum_combined_review_usd": "1.50",
+                },
             )
         },
         projects={project_id: project_config},
@@ -160,8 +166,8 @@ async def _configure(monkeypatch, uow, tmp_path: Path, *, capacity: bool = True,
     monkeypatch.setitem(provider_adapter._ADAPTER_REGISTRY, "deepseek", adapter)
     pricing = OpenRouterPricingSnapshot(
         id="deepseek-price",
-        canonical_model_identity="deepseek-chat",
-        routed_model_identity="deepseek-chat",
+        canonical_model_identity="deepseek-flash",
+        routed_model_identity="deepseek-flash",
         prompt_price_per_token=Decimal("0.000001"),
         output_price_per_token=Decimal("0.000001"),
         additional_cost_per_request=Decimal("0"),
@@ -177,9 +183,9 @@ async def _configure(monkeypatch, uow, tmp_path: Path, *, capacity: bool = True,
         resolve_stage_profile(
             project_config, OpenSpecStage.CONTRACT_REVIEW, app_config=app_config
         ).model
-        == "deepseek-chat"
+        == "deepseek-flash"
     )
-    assert await adapter.check_model_supported("deepseek-chat", effort="low") == (True, None)
+    assert await adapter.check_model_supported("deepseek-flash", effort="low") == (True, None)
     assert (
         pricing.is_verified
         and pricing.provider == "deepseek"
@@ -236,7 +242,7 @@ async def test_contract_review_operational_path_authorizes_reserves_dispatches_a
     assert first.accepted
     assert first.contract_hash and first.review_id
     assert adapter.capacity_reads == 1
-    assert adapter.model_checks == [("deepseek-chat", "low")] * 3
+    assert adapter.model_checks == [("deepseek-flash", "low")] * 3
     assert reviewer.calls == 1
 
     review = in_memory_uow.reviews.get_by_job_stage(job.job_id, "CONTRACT_REVIEW")
@@ -259,7 +265,7 @@ async def test_contract_review_operational_path_authorizes_reserves_dispatches_a
         change_id=job.change_name,
         provider="deepseek",
         account_fingerprint=adapter.account_fingerprint,
-        model="deepseek-chat",
+        model="deepseek-flash",
         stage="CONTRACT_REVIEW",
         billing_origin="deepseek_direct",
         pricing_snapshot_id=reservation.pricing_snapshot_id,
@@ -399,7 +405,7 @@ def test_deepseek_review_cannot_reuse_openrouter_price_snapshot(in_memory_uow):
         change_id="c",
         provider="deepseek",
         account_fingerprint="a" * 64,
-        model="deepseek-chat",
+        model="deepseek-flash",
         stage="CONTRACT_REVIEW",
         billing_origin="deepseek_direct",
         pricing_snapshot_id="missing-openrouter-snapshot",

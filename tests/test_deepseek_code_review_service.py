@@ -50,7 +50,7 @@ class _AccountAdapter(DeepSeekProviderAdapter):
         self.capacity_reads = 0
 
     async def check_model_supported(self, model: str, effort=None, timeout_seconds=10.0):
-        return (model == "deepseek-chat" and effort == "low", None)
+        return (model == "deepseek-flash" and effort == "low", None)
 
     async def read_capacity_observation(self, timeout_seconds=10.0, selected_model=None):
         self.capacity_reads += 1
@@ -68,7 +68,7 @@ class _AccountAdapter(DeepSeekProviderAdapter):
 
 
 class _ReviewRunner:
-    model = "deepseek-chat"
+    model = "deepseek-flash"
     effort = "low"
     review_stage = "CODE_REVIEW"
 
@@ -106,7 +106,11 @@ async def _fixture(tmp_path: Path, monkeypatch, uow, *, available: bool = True, 
             "deepseek": ProviderConfig(
                 type="api",
                 enabled=True,
-                budget={"maximum_code_review_usd": "1.00"},
+                budget={
+                    "maximum_contract_review_usd": "0.50",
+                    "maximum_code_review_usd": "1.00",
+                    "maximum_combined_review_usd": "1.50",
+                },
             )
         },
         projects={
@@ -186,8 +190,8 @@ async def _fixture(tmp_path: Path, monkeypatch, uow, *, available: bool = True, 
     monkeypatch.setitem(provider_adapter._ADAPTER_REGISTRY, "deepseek", adapter)
     pricing = OpenRouterPricingSnapshot(
         id="deepseek-code-review-price",
-        canonical_model_identity="deepseek-chat",
-        routed_model_identity="deepseek-chat",
+        canonical_model_identity="deepseek-flash",
+        routed_model_identity="deepseek-flash",
         prompt_price_per_token=Decimal("0.000001"),
         output_price_per_token=Decimal("0.000001"),
         additional_cost_per_request=Decimal("0"),
@@ -405,7 +409,7 @@ async def test_incomplete_manifest_and_reviewer_authorship_are_rejected_before_r
         CandidateAuthorship(
             job_id=job.job_id,
             agent_role="deepseek",
-            model_identity="deepseek-chat",
+            model_identity="deepseek-flash",
             attempt_number=1,
             files_touched=["slug.py"],
             is_primary_author=False,

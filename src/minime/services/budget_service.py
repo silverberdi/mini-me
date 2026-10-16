@@ -309,11 +309,11 @@ class BudgetService:
             reserved_amount_usd=max_cost,
             status="RESERVED",
             pricing_snapshot_id=snapshot.snapshot_id,
-            correlation_id=(
-                f"{run_id}:{stage}:{candidate_sha}:{manifest_hash}"
-                if stage == "REVIEW"
-                else f"{run_id}:{stage}"
-            ),
+            # The idempotency key is already a bounded digest over the exact
+            # Run/Job/stage/candidate/manifest identity. Reuse it as the durable
+            # correlation ID so CODE_REVIEW cannot exceed the VARCHAR(128)
+            # schema bound with raw SHA and manifest values.
+            correlation_id=idempotency_key,
             provider=provider,
             account_fingerprint=account_fingerprint,
             stage=stage,

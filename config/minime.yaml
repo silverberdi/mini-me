@@ -55,7 +55,11 @@ providers:
     type: openai-compatible-direct
     base_url: https://api.deepseek.com
     api_key_env: DEEPSEEK_API_KEY
-    roles: [auditor]
+    roles: [reviewer]
+    budget:
+      maximum_contract_review_usd: "0.50"
+      maximum_code_review_usd: "1.00"
+      maximum_combined_review_usd: "1.50"
   qwen-local:
     type: openai-compatible
     enabled: false
@@ -106,6 +110,17 @@ projects:
         command: pytest
     external_providers_allowed: [codex, antigravity, deepseek]
     openrouter_drain_allowed: false
+    stage_profiles:
+      CONTRACT_REVIEW:
+        provider: deepseek
+        model: deepseek-flash
+        effort: low
+        workflow: openspec-explore
+      REVIEW:
+        provider: deepseek
+        model: deepseek-flash
+        effort: low
+        workflow: review
     deployment:
       preview:
         required_for_ui_changes: true

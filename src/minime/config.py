@@ -93,13 +93,17 @@ SUPPORTED_PROVIDER_MODELS: dict[str, dict[str, bool]] = {
     "deepseek": {
         "deepseek-chat": False,
         "deepseek-reasoner": True,
+        "deepseek-flash": False,
     },
 }
 
 SUPPORTED_PROVIDER_EFFORTS: dict[str, set[str]] = {
     "antigravity": {"low", "medium", "high", "xhigh", "max"},
     "codex": {"low", "medium", "high", "xhigh", "max"},
-    "deepseek": {"low", "medium"},
+    # This list is only the local validation vocabulary. The DeepSeek adapter
+    # must still prove the selected level against the authenticated account's
+    # live /models catalog before any review is authorized or dispatched.
+    "deepseek": {"low", "medium", "high", "max"},
 }
 
 DEFAULT_R01_STAGE_PROFILES: dict[str, StageProfileConfig] = {
@@ -111,7 +115,7 @@ DEFAULT_R01_STAGE_PROFILES: dict[str, StageProfileConfig] = {
     ),
     "CONTRACT_REVIEW": StageProfileConfig(
         provider="deepseek",
-        model="deepseek-chat",
+        model="deepseek-flash",
         effort="low",
         workflow="openspec-explore",
     ),
@@ -135,7 +139,7 @@ DEFAULT_R01_STAGE_PROFILES: dict[str, StageProfileConfig] = {
     ),
     "REVIEW": StageProfileConfig(
         provider="deepseek",
-        model="deepseek-chat",
+        model="deepseek-flash",
         effort="low",
         workflow="review",
     ),
