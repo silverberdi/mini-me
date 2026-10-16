@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -1405,11 +1406,182 @@ class DeepSeekProviderAdapter(ProviderAdapterInterface):
 
     @property
     def supported_roles(self) -> set[str]:
-        return {"auditor"}
+        return {"reviewer"}
+
+    @property
+    def supports_read_only_capacity_observation(self) -> bool:
+        return True
+
+    @property
+    def capacity_source_signal(self) -> CapacitySignalSource:
+        return CapacitySignalSource.DEEPSEEK_ACCOUNT_BALANCE
+
+    @property
+    def valid_capacity_source_signals(self) -> set[CapacitySignalSource]:
+        return {CapacitySignalSource.DEEPSEEK_ACCOUNT_BALANCE}
+
+    @property
+    def requires_account_identity_for_capacity(self) -> bool:
+        return True
+
+    def _api_key(self) -> str:
+        return os.environ.get(self._api_key_env, "").strip()
+
+    @property
+    def authenticated_api_key(self) -> str | None:
+        """Return the configured direct-account key for an in-process request only."""
+        key = self._api_key()
+        return key or None
+
+    def _direct_endpoint_valid(self) -> bool:
+        parsed = urlparse(self._base_url)
+        return (
+            parsed.scheme == "https"
+            and parsed.hostname == "api.deepseek.com"
+            and parsed.port in (None, 443)
+            and parsed.path in ("", "/")
+            and parsed.username is None
+            and parsed.password is None
+        )
+
+    @property
+    def account_fingerprint(self) -> str | None:
+        key = self._api_key()
+        return hashlib.sha256(key.encode()).hexdigest() if key else None
+
+    async def discover_account_capabilities(self, timeout_seconds: float = 10.0) -> dict[str, Any]:
+        """Read the authenticated model catalog; this endpoint does not create model output."""
+        key = self._api_key()
+        if not key or not self._direct_endpoint_valid():
+            return {}
+        try:
+            async with httpx.AsyncClient(
+                base_url=self._base_url, timeout=timeout_seconds
+            ) as client:
+                response = await client.get("/models", headers={"Authorization": f"Bearer {key}"})
+            if response.status_code != 200:
+                return {}
+            data = response.json().get("data")
+            if not isinstance(data, list):
+                return {}
+            models: set[str] = set()
+            efforts: dict[str, set[str]] = {}
+            for item in data:
+                if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+                    continue
+                model = item["id"].strip().lower()
+                if not model:
+                    continue
+                models.add(model)
+                effort_payload = item.get("effort")
+                levels = (
+                    effort_payload.get("supported_levels")
+                    if isinstance(effort_payload, dict)
+                    else None
+                )
+                if isinstance(levels, list) and all(
+                    isinstance(level, str) and level.strip() for level in levels
+                ):
+                    efforts[model] = {level.strip().lower() for level in levels}
+            return {
+                "provider": self.provider_name,
+                "account_fingerprint": self.account_fingerprint,
+                "models": models,
+                "supported_efforts": efforts,
+            }
+        except (httpx.HTTPError, ValueError, TypeError):
+            return {}
+
+    async def check_model_supported(
+        self, model: str, effort: str | None = None, timeout_seconds: float = 10.0
+    ) -> tuple[bool, str | None]:
+        catalog = await self.discover_account_capabilities(timeout_seconds)
+        if not catalog or not catalog.get("account_fingerprint"):
+            return False, "DeepSeek authenticated model catalog is unavailable."
+        canonical_model = model.strip().lower()
+        if canonical_model not in catalog["models"]:
+            return (
+                False,
+                f"Model '{model}' is absent from the authenticated DeepSeek account catalog.",
+            )
+        supported_efforts = catalog.get("supported_efforts", {}).get(canonical_model)
+        if not isinstance(effort, str) or not effort.strip() or not supported_efforts:
+            return (
+                False,
+                "DeepSeek account catalog does not expose model-specific effort capability.",
+            )
+        if effort.strip().lower() not in supported_efforts:
+            return False, f"Effort '{effort}' is not supported by DeepSeek model '{model}'."
+        return True, None
+
+    async def read_capacity_observation(
+        self, timeout_seconds: float = 10.0, selected_model: str | None = None
+    ) -> CapacityObservation:
+        """Read DeepSeek's documented GET /user/balance endpoint, never a generation endpoint."""
+        observed_at = datetime.now(UTC)
+        expires_at = observed_at + timedelta(seconds=60)
+        model = selected_model.strip().lower() if selected_model else None
+        unknown = CapacityObservation(
+            provider=self.provider_name,
+            ordinary_usage_allowed=None,
+            observed_at=observed_at,
+            expires_at=observed_at,
+            source_signal=self.capacity_source_signal,
+            account_id=self.account_fingerprint,
+            model=model,
+            quota_scope="deepseek_direct_account_balance",
+        )
+        key = self._api_key()
+        if not key or not model or not self._direct_endpoint_valid():
+            return unknown
+        try:
+            async with httpx.AsyncClient(
+                base_url=self._base_url, timeout=timeout_seconds
+            ) as client:
+                response = await client.get(
+                    "/user/balance", headers={"Authorization": f"Bearer {key}"}
+                )
+            if response.status_code != 200:
+                return unknown
+            payload = response.json()
+            balances = payload.get("balance_infos")
+            if (
+                not isinstance(balances, list)
+                or not balances
+                or not isinstance(payload.get("is_available"), bool)
+            ):
+                return unknown
+            currencies = {row.get("currency") for row in balances if isinstance(row, dict)}
+            if not currencies or not currencies <= {"USD", "CNY"}:
+                return unknown
+            # Preserve DeepSeek's documented sufficient-balance boolean. Amounts are
+            # validated as non-negative decimal strings, but never used as spend permission.
+            from decimal import Decimal, InvalidOperation
+
+            for row in balances:
+                if not isinstance(row, dict):
+                    return unknown
+                try:
+                    if Decimal(str(row["total_balance"])) < 0:
+                        return unknown
+                except (KeyError, InvalidOperation, ValueError):
+                    return unknown
+            return CapacityObservation(
+                provider=self.provider_name,
+                ordinary_usage_allowed=payload["is_available"],
+                observed_at=observed_at,
+                expires_at=expires_at,
+                source_signal=self.capacity_source_signal,
+                account_id=self.account_fingerprint,
+                model=model,
+                quota_scope="deepseek_direct_account_balance",
+            )
+        except (httpx.HTTPError, ValueError, TypeError):
+            return unknown
 
     async def probe_availability(self, timeout_seconds: float = 30.0) -> bool:
         api_key = os.environ.get(self._api_key_env, "").strip()
-        if not api_key:
+        if not api_key or not self._direct_endpoint_valid():
             return False
         try:
             async with httpx.AsyncClient(

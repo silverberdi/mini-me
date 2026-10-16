@@ -154,6 +154,7 @@ class RecoveryConvergenceService:
         heartbeat_seconds: int = DEFAULT_HEARTBEAT_SECONDS,
         post_merge_service: Any | None = None,
         github_adapter: Any | None = None,
+        orchestration_service: Any | None = None,
     ):
         if heartbeat_seconds >= lease_seconds / 3:
             raise ValueError(
@@ -167,6 +168,10 @@ class RecoveryConvergenceService:
         self.heartbeat_seconds = heartbeat_seconds
         self.post_merge_service = post_merge_service
         self.github_adapter = github_adapter
+        # Reuse the coordinator already composed by the caller when one is
+        # available. This preserves its configured runner/adapter boundaries
+        # across canonical CONTINUE without changing claim/fencing authority.
+        self.orchestration_service = orchestration_service
 
     def reconcile_cycle(
         self,
@@ -599,6 +604,7 @@ class RecoveryConvergenceService:
         requested_action: str | None = None,
         drain_mode: bool = False,
         force: bool = False,
+        drive_admitted: bool = False,
     ) -> RecoveryDecision:
         """Drive direct run continuation through canonical claim acquisition and classification."""
         cycle_id = generate_uuid()
@@ -611,6 +617,7 @@ class RecoveryConvergenceService:
             requested_action=requested_action,
             drain_mode=drain_mode,
             force=force,
+            drive_admitted=drive_admitted,
         )
 
     def reconcile_saga(self, saga_id: str, source: RecoverySource) -> RecoveryDecision:
@@ -1577,9 +1584,12 @@ class RecoveryConvergenceService:
             )
         self.uow.commit()
 
-        from minime.services.orchestration_service import OrchestrationService
+        if self.orchestration_service is None:
+            from minime.services.orchestration_service import OrchestrationService
 
-        orchestration_svc = OrchestrationService(self.uow, project_root=self.project_root)
+            orchestration_svc = OrchestrationService(self.uow, project_root=self.project_root)
+        else:
+            orchestration_svc = self.orchestration_service
         try:
             orchestration_svc.resume(
                 run_id=run.run_id, drain_mode=drain_mode, force=force, claim_context=context

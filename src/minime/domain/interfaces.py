@@ -334,6 +334,9 @@ class ReviewRepositoryInterface(ABC):
     def get_by_job_id(self, job_id: str) -> Review | None: ...
 
     @abstractmethod
+    def get_by_job_stage(self, job_id: str, review_stage: str) -> Review | None: ...
+
+    @abstractmethod
     def list_by_project(self, project_id: str, limit: int = 100) -> list[Review]: ...
 
     @abstractmethod
@@ -470,6 +473,9 @@ class BudgetReservationRepositoryInterface(ABC):
 
     @abstractmethod
     def get_by_id(self, reservation_id: str) -> BudgetReservation | None: ...
+
+    @abstractmethod
+    def get_by_idempotency_key(self, idempotency_key: str) -> BudgetReservation | None: ...
 
     def get_by_id_for_update(self, reservation_id: str) -> BudgetReservation | None:
         return self.get_by_id(reservation_id)

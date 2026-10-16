@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-from minime.domain.enums import EventType
+from minime.domain.enums import EventType, OperatorActionStatus, OperatorActionType
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
     BudgetLedgerEntry,
@@ -181,6 +181,205 @@ class BudgetService:
         )
         return reservation, None, headroom
 
+    def reserve_review_budget(
+        self,
+        *,
+        project_id: str,
+        run_id: str,
+        job_id: str,
+        change_id: str,
+        provider: str,
+        account_fingerprint: str,
+        model: str,
+        stage: str,
+        billing_origin: str,
+        pricing_snapshot_id: str,
+        prompt_token_upper_bound: int,
+        max_output_tokens: int,
+        idempotency_key: str,
+        candidate_sha: str | None = None,
+        candidate_generation: int | None = None,
+        manifest_id: str | None = None,
+        manifest_hash: str | None = None,
+    ) -> tuple[BudgetReservation | None, str | None]:
+        """Reserve DeepSeek review spend only against a matching durable operator action."""
+        if provider != "deepseek" or stage not in {"CONTRACT_REVIEW", "REVIEW"}:
+            return None, "REVIEW_PROVIDER_OR_STAGE_DENIED"
+        existing = self.uow.budget_reservations.get_by_idempotency_key(idempotency_key)
+        if existing:
+            exact = (
+                existing.project_id == project_id
+                and existing.run_id == run_id
+                and existing.job_id == job_id
+                and existing.provider == provider
+                and existing.account_fingerprint == account_fingerprint
+                and existing.canonical_model_identity == model
+                and existing.stage == stage
+                and existing.billing_origin == billing_origin
+            )
+            if exact and existing.status == "RESERVED":
+                return existing, None
+            return None, "REVIEW_RESERVATION_ALREADY_CONSUMED_OR_CONFLICTING"
+
+        actions = self.uow.operator_actions.list_by_run(run_id)
+        authorization = next(
+            (
+                action
+                for action in actions
+                if action.action_type
+                == (
+                    OperatorActionType.AUTHORIZE_DEEPSEEK_REVIEW
+                    if stage == "CONTRACT_REVIEW"
+                    else OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW
+                )
+                and action.status == OperatorActionStatus.COMPLETED
+                and action.project_id == project_id
+                and action.change_name == change_id
+                and action.job_id == job_id
+            ),
+            None,
+        )
+        auth = authorization.result_payload_json.get("authorization", {}) if authorization else {}
+        if not authorization or not self._review_authorization_matches(
+            auth,
+            provider=provider,
+            account_fingerprint=account_fingerprint,
+            model=model,
+            stage=stage,
+            billing_origin=billing_origin,
+            pricing_snapshot_id=pricing_snapshot_id,
+            run_id=run_id,
+            job_id=job_id,
+            now=utc_now(),
+        ):
+            return None, "DURABLE_REVIEW_BUDGET_AUTHORIZATION_MISSING_OR_MISMATCHED"
+        if stage == "REVIEW" and not (
+            candidate_sha
+            and manifest_id
+            and manifest_hash
+            and auth.get("candidate_sha") == candidate_sha
+            and auth.get("generation") == candidate_generation
+            and auth.get("manifest_id") == manifest_id
+            and auth.get("manifest_hash") == manifest_hash
+        ):
+            return None, "CODE_REVIEW_AUTHORIZATION_CANDIDATE_MISMATCH"
+
+        if any(
+            reservation.authorization_id == authorization.action_request_id
+            for reservation in self.uow.budget_reservations.list_by_project(project_id)
+        ):
+            return None, "REVIEW_BUDGET_AUTHORIZATION_ALREADY_CONSUMED"
+
+        snapshot = self.uow.pricing_snapshots.get_by_id(pricing_snapshot_id)
+        if (
+            not snapshot
+            or not snapshot.is_verified
+            or snapshot.provider != provider
+            or snapshot.account_fingerprint != account_fingerprint
+            or snapshot.canonical_model_identity != model
+            or snapshot.billing_origin != billing_origin
+            or snapshot.currency != "USD"
+            or snapshot.observed_at.tzinfo is None
+            or snapshot.observed_at > utc_now()
+            or (utc_now() - snapshot.observed_at).total_seconds() > 30 * 86400
+        ):
+            return None, "VERIFIED_PROVIDER_PRICE_MISSING_OR_MISMATCHED"
+        if prompt_token_upper_bound <= 0 or max_output_tokens <= 0:
+            return None, "REVIEW_COST_BOUND_INVALID"
+
+        max_cost = (
+            Decimal(prompt_token_upper_bound) * snapshot.prompt_price_per_token
+            + Decimal(max_output_tokens) * snapshot.output_price_per_token
+            + snapshot.additional_cost_per_request
+        )
+        try:
+            authorized_max = Decimal(str(auth["max_spend_usd"]))
+        except Exception:
+            return None, "REVIEW_AUTHORIZED_MAX_INVALID"
+        if max_cost <= 0 or max_cost > authorized_max:
+            return None, "REVIEW_COST_EXCEEDS_AUTHORIZED_MAX"
+
+        reservation = BudgetReservation(
+            project_id=project_id,
+            job_id=job_id,
+            run_id=run_id,
+            change_id=change_id,
+            role="reviewer",
+            canonical_model_identity=model,
+            reserved_amount_usd=max_cost,
+            status="RESERVED",
+            pricing_snapshot_id=snapshot.snapshot_id,
+            correlation_id=(
+                f"{run_id}:{stage}:{candidate_sha}:{manifest_hash}"
+                if stage == "REVIEW"
+                else f"{run_id}:{stage}"
+            ),
+            provider=provider,
+            account_fingerprint=account_fingerprint,
+            stage=stage,
+            billing_origin=billing_origin,
+            authorization_id=authorization.action_request_id,
+            idempotency_key=idempotency_key,
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        )
+        self.uow.budget_reservations.save(reservation)
+        self.uow.events.save(
+            Event(
+                event_type=EventType.BUDGET_RESERVED,
+                project_id=project_id,
+                change_id=change_id,
+                operation_id=job_id,
+                payload={
+                    "reservation_id": reservation.reservation_id,
+                    "authorization_id": reservation.authorization_id,
+                    "provider": provider,
+                    "account_fingerprint": account_fingerprint,
+                    "model": model,
+                    "stage": stage,
+                    "billing_origin": billing_origin,
+                    "reserved_amount_usd": str(max_cost),
+                },
+                timestamp=utc_now(),
+            )
+        )
+        return reservation, None
+
+    @staticmethod
+    def _review_authorization_matches(
+        auth: dict[str, Any],
+        *,
+        provider: str,
+        account_fingerprint: str,
+        model: str,
+        stage: str,
+        billing_origin: str,
+        pricing_snapshot_id: str,
+        run_id: str,
+        job_id: str,
+        now: datetime,
+    ) -> bool:
+        from datetime import datetime as DateTime
+
+        try:
+            expires_at = DateTime.fromisoformat(str(auth["expires_at"]))
+            max_spend = Decimal(str(auth["max_spend_usd"]))
+        except Exception:
+            return False
+        return bool(
+            auth.get("provider") == provider
+            and auth.get("account_fingerprint") == account_fingerprint
+            and auth.get("model") == model
+            and auth.get("stage") == stage
+            and auth.get("billing_origin") == billing_origin
+            and auth.get("pricing_snapshot_id") == pricing_snapshot_id
+            and auth.get("run_id") == run_id
+            and auth.get("job_id") == job_id
+            and expires_at.tzinfo is not None
+            and expires_at > now
+            and max_spend > 0
+        )
+
     def settle_reservation(
         self,
         reservation_id: str,
@@ -203,6 +402,13 @@ class BudgetService:
             if isinstance(actual_cost_usd, Decimal)
             else Decimal(str(actual_cost_usd))
         )
+        if not actual_dec.is_finite() or actual_dec < 0:
+            return None
+        if any(
+            value is not None and value < 0
+            for value in (prompt_tokens, completion_tokens, total_tokens)
+        ):
+            return None
 
         # Check for settlement breach (actual > reserved)
         if actual_dec > reservation.reserved_amount_usd:
@@ -211,7 +417,10 @@ class BudgetService:
                 project_id=reservation.project_id,
                 job_id=reservation.job_id,
                 change_id=reservation.change_id,
-                provider="openrouter",
+                provider=reservation.provider,
+                account_fingerprint=reservation.account_fingerprint,
+                stage=reservation.stage,
+                billing_origin=reservation.billing_origin,
                 role=reservation.role,
                 canonical_model_identity=reservation.canonical_model_identity,
                 prompt_tokens=prompt_tokens,
@@ -227,7 +436,11 @@ class BudgetService:
             reservation.updated_at = utc_now()
             self.uow.budget_reservations.save(reservation)
 
-            policy = self.uow.budget_policies.get_for_update(reservation.project_id)
+            policy = (
+                self.uow.budget_policies.get_for_update(reservation.project_id)
+                if reservation.provider == "openrouter"
+                else None
+            )
             if policy:
                 policy.is_breached = True
                 policy.updated_at = utc_now()
@@ -242,6 +455,8 @@ class BudgetService:
                     operation_id=reservation.job_id,
                     payload={
                         "reservation_id": reservation.reservation_id,
+                        "provider": reservation.provider,
+                        "stage": reservation.stage,
                         "reserved_amount_usd": str(reservation.reserved_amount_usd),
                         "actual_cost_usd": str(actual_dec),
                         "breach_amount_usd": str(breach_diff),
@@ -257,7 +472,10 @@ class BudgetService:
             project_id=reservation.project_id,
             job_id=reservation.job_id,
             change_id=reservation.change_id,
-            provider="openrouter",
+            provider=reservation.provider,
+            account_fingerprint=reservation.account_fingerprint,
+            stage=reservation.stage,
+            billing_origin=reservation.billing_origin,
             role=reservation.role,
             canonical_model_identity=reservation.canonical_model_identity,
             prompt_tokens=prompt_tokens,
@@ -282,6 +500,12 @@ class BudgetService:
                 operation_id=reservation.job_id,
                 payload={
                     "reservation_id": reservation.reservation_id,
+                    "authorization_id": reservation.authorization_id,
+                    "provider": reservation.provider,
+                    "account_fingerprint": reservation.account_fingerprint,
+                    "model": reservation.canonical_model_identity,
+                    "stage": reservation.stage,
+                    "billing_origin": reservation.billing_origin,
                     "amount_usd": str(actual_dec),
                     "reserved_amount_usd": str(reservation.reserved_amount_usd),
                     "released_difference_usd": str(released_diff),
@@ -329,13 +553,23 @@ class BudgetService:
             if isinstance(actual_cost_usd, Decimal)
             else Decimal(str(actual_cost_usd))
         )
+        if not actual_dec.is_finite() or actual_dec < 0:
+            return None
+        if any(
+            value is not None and value < 0
+            for value in (prompt_tokens, completion_tokens, total_tokens)
+        ):
+            return None
 
         entry = BudgetLedgerEntry(
             reservation_id=reservation.reservation_id,
             project_id=reservation.project_id,
             job_id=reservation.job_id,
             change_id=reservation.change_id,
-            provider="openrouter",
+            provider=reservation.provider,
+            account_fingerprint=reservation.account_fingerprint,
+            stage=reservation.stage,
+            billing_origin=reservation.billing_origin,
             role=reservation.role,
             canonical_model_identity=reservation.canonical_model_identity,
             prompt_tokens=prompt_tokens,
@@ -359,6 +593,12 @@ class BudgetService:
                 operation_id=reservation.job_id,
                 payload={
                     "reservation_id": reservation.reservation_id,
+                    "authorization_id": reservation.authorization_id,
+                    "provider": reservation.provider,
+                    "account_fingerprint": reservation.account_fingerprint,
+                    "model": reservation.canonical_model_identity,
+                    "stage": reservation.stage,
+                    "billing_origin": reservation.billing_origin,
                     "amount_usd": str(actual_dec),
                     "outcome": "UNPRODUCTIVE",
                     "note": (
@@ -417,6 +657,11 @@ class BudgetService:
 
         ledger_rows = self.uow.budget_ledger.list_by_project(project_id)
         reservation_rows = self.uow.budget_reservations.list_by_project(project_id)
+        # The legacy project budget remains an OpenRouter authority. Direct
+        # provider spend is charged to its own account/stage authorization and
+        # must neither consume nor breach OpenRouter's historical headroom.
+        ledger_rows = [r for r in ledger_rows if r.provider == "openrouter"]
+        reservation_rows = [r for r in reservation_rows if r.provider == "openrouter"]
 
         committed_today_dec = sum(
             (r.amount_usd for r in ledger_rows if r.created_at >= day_start),

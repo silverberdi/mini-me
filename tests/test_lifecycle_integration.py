@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 
 from conftest import (
@@ -15,14 +16,18 @@ from minime.domain.enums import (
     EventType,
     IntakeWorkspaceCreationState,
     IntakeWorkspacePublicationState,
+    OperatorActionStatus,
+    OperatorActionType,
     ReviewStatus,
     ReviewVerdict,
 )
 from minime.domain.models import (
+    BudgetReservation,
     Change,
     Event,
     IntakeWorkspaceOwnership,
     Job,
+    OperatorActionRecord,
     OrchestrationCandidate,
     OrchestrationRun,
     Project,
@@ -177,12 +182,18 @@ def test_review_authority_remains_functional_in_gate_chain(in_memory_uow):
         manifest_id="manifest-1",
         manifest_hash="hash-1",
     )
-    in_memory_uow.reviews.save(
-        Review(
+    review = Review(
             job_id="job-1",
             project_id="mini-me",
             change_name="chain-change",
-            reviewer_role="antigravity",
+            reviewer_role="deepseek",
+            reviewer_model="deepseek-chat",
+            review_stage="CODE_REVIEW",
+            provider="deepseek",
+            account_fingerprint="a" * 64,
+            budget_authorization_id="gate-code-review-auth",
+            budget_reservation_id="gate-code-review-reservation",
+            billing_origin="deepseek_direct",
             orchestration_run_id="run-1",
             candidate_generation=1,
             candidate_sha="cand-sha",
@@ -191,6 +202,51 @@ def test_review_authority_remains_functional_in_gate_chain(in_memory_uow):
             manifest_hash="hash-1",
             status=ReviewStatus.REVIEW_COMPLETED,
             verdict=ReviewVerdict.READY_TO_MERGE,
+    )
+    in_memory_uow.jobs.save(job)
+    in_memory_uow.reviews.save(review)
+    in_memory_uow.operator_actions.save(
+        OperatorActionRecord(
+            action_request_id=review.budget_authorization_id,
+            project_id="mini-me",
+            change_name="chain-change",
+            run_id=run.run_id,
+            job_id=job.job_id,
+            action_type=OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW,
+            status=OperatorActionStatus.COMPLETED,
+            result_payload_json={
+                "authorization": {
+                    "stage": "REVIEW",
+                    "provider": "deepseek",
+                    "model": "deepseek-chat",
+                    "account_fingerprint": "a" * 64,
+                    "billing_origin": "deepseek_direct",
+                    "candidate_sha": candidate.candidate_sha,
+                    "base_sha": candidate.base_sha,
+                    "generation": candidate.generation,
+                    "manifest_id": candidate.manifest_id,
+                    "manifest_hash": candidate.manifest_hash,
+                }
+            },
+        )
+    )
+    in_memory_uow.budget_reservations.save(
+        BudgetReservation(
+            reservation_id=review.budget_reservation_id,
+            project_id=job.project_id,
+            job_id=job.job_id,
+            run_id=run.run_id,
+            change_id=job.change_name,
+            role="reviewer",
+            canonical_model_identity="deepseek-chat",
+            reserved_amount_usd=Decimal("0.10"),
+            status="SETTLED",
+            pricing_snapshot_id="gate-code-review-price",
+            provider="deepseek",
+            account_fingerprint="a" * 64,
+            stage="REVIEW",
+            billing_origin="deepseek_direct",
+            authorization_id=review.budget_authorization_id,
         )
     )
 

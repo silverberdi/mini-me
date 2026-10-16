@@ -839,7 +839,18 @@ class InMemoryReviewRepository(ReviewRepositoryInterface):
         return rev.model_copy(deep=True) if rev else None
 
     def get_by_job_id(self, job_id: str) -> Review | None:
-        reviews = [r for r in self._store.values() if r.job_id == job_id]
+        reviews = [
+            r
+            for r in self._store.values()
+            if r.job_id == job_id and r.review_stage == "CODE_REVIEW"
+        ]
+        reviews.sort(key=lambda r: (r.updated_at, r.created_at), reverse=True)
+        return reviews[0].model_copy(deep=True) if reviews else None
+
+    def get_by_job_stage(self, job_id: str, review_stage: str) -> Review | None:
+        reviews = [
+            r for r in self._store.values() if r.job_id == job_id and r.review_stage == review_stage
+        ]
         reviews.sort(key=lambda r: (r.updated_at, r.created_at), reverse=True)
         return reviews[0].model_copy(deep=True) if reviews else None
 
@@ -970,11 +981,8 @@ class InMemoryProviderHealthRepository(ProviderHealthRepositoryInterface):
         self._store: dict[str, ProviderHealth] = {}
 
     def _validate_primary_provider(self, provider: str) -> None:
-        if provider not in PRIMARY_PROVIDERS:
-            raise ValueError(
-                f"Invalid primary provider '{provider}'. "
-                f"005 capacity tracking is restricted strictly to {PRIMARY_PROVIDERS}."
-            )
+        if provider not in PRIMARY_PROVIDERS | {"deepseek"}:
+            raise ValueError(f"Invalid provider '{provider}' for bounded capacity tracking.")
 
     def save(self, health: ProviderHealth) -> None:
         health.validate_primary()
@@ -1216,6 +1224,12 @@ class InMemoryBudgetReservationRepository:
 
     def get_by_id(self, reservation_id: str) -> BudgetReservation | None:
         reservation = self._store.get(reservation_id)
+        return reservation.model_copy(deep=True) if reservation else None
+
+    def get_by_idempotency_key(self, idempotency_key: str) -> BudgetReservation | None:
+        reservation = next(
+            (r for r in self._store.values() if r.idempotency_key == idempotency_key), None
+        )
         return reservation.model_copy(deep=True) if reservation else None
 
     def list_by_project(self, project_id: str) -> list[BudgetReservation]:

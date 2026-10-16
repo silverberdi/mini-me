@@ -330,7 +330,7 @@ class ProviderHealthService:
             health.last_error_summary = "Capacity refresh is currently unobservable."
             health.updated_at = now
             health.last_probe_at = now
-        if state == "EXHAUSTED":
+        if state == "EXHAUSTED" and provider in PRIMARY_PROVIDERS:
             assert observation is not None
             self.uow.capacity_windows.save(
                 CapacityWindow(

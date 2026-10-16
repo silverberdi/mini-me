@@ -134,9 +134,9 @@ DEFAULT_R01_STAGE_PROFILES: dict[str, StageProfileConfig] = {
         workflow="openspec-verify-change",
     ),
     "REVIEW": StageProfileConfig(
-        provider="codex",
-        model="gpt-5.6-luna",
-        effort="medium",
+        provider="deepseek",
+        model="deepseek-chat",
+        effort="low",
         workflow="review",
     ),
 }
@@ -599,8 +599,33 @@ def resolve_stage_profile(
     if provider in ("antigravity", "agy"):
         provider = "antigravity"
 
-    # CONTRACT_REVIEW prefers DeepSeek Direct; if not permitted or unconfigured, falls back to Antigravity
-    if stage_str == "CONTRACT_REVIEW" and provider == "deepseek":
+    role_map = {
+        "PLAN": "implementer",
+        "APPLY": "implementer",
+        "TEST": "implementer",
+        "CONTRACT_REVIEW": "reviewer",
+        "VERIFY": "reviewer",
+        "REVIEW": "reviewer",
+    }
+    role = role_map.get(stage_str, "implementer")
+    if provider == "deepseek" and role != "reviewer":
+        raise StageProfileError(
+            f"PROVIDER_ROLE_FORBIDDEN: DeepSeek Direct is reviewer-only, not {role}."
+        )
+    if provider == "openrouter":
+        raise StageProfileError(
+            "PROVIDER_ROLE_FORBIDDEN: OpenRouter can only be selected by the guarded "
+            "in-flight executor rescue path."
+        )
+    if stage_str == "CONTRACT_REVIEW" and provider != "deepseek":
+        raise StageProfileError(
+            "CONTRACT_REVIEW_REQUIRES_DEEPSEEK_DIRECT: no silent reviewer substitution is allowed."
+        )
+    if stage_str == "REVIEW" and provider != "deepseek":
+        raise StageProfileError(
+            "CODE_REVIEW_REQUIRES_DEEPSEEK_DIRECT: no silent reviewer substitution is allowed."
+        )
+    if stage_str == "CONTRACT_REVIEW":
         deepseek_allowed = (
             "deepseek" in project_config.external_providers_allowed
             and (
@@ -610,12 +635,23 @@ def resolve_stage_profile(
             and bool(os.environ.get("DEEPSEEK_API_KEY"))
         )
         if not deepseek_allowed:
-            provider = "antigravity"
-            raw_profile = StageProfileConfig(
-                provider="antigravity",
-                model="gemini-3.8-flash-low",
-                effort="low",
-                workflow=raw_profile.workflow or "openspec-explore",
+            raise StageProfileError(
+                "CONTRACT_REVIEW_WAITING: DeepSeek Direct is not configured and authorized; "
+                "no provider fallback is permitted."
+            )
+    if stage_str == "REVIEW":
+        deepseek_allowed = (
+            "deepseek" in project_config.external_providers_allowed
+            and (
+                app_config is None
+                or app_config.providers.get("deepseek", ProviderConfig(enabled=True)).enabled
+            )
+            and bool(os.environ.get("DEEPSEEK_API_KEY"))
+        )
+        if not deepseek_allowed:
+            raise StageProfileError(
+                "CODE_REVIEW_WAITING: DeepSeek Direct is not configured and authorized; "
+                "no provider fallback is permitted."
             )
 
     if provider not in project_config.external_providers_allowed:
@@ -704,15 +740,6 @@ def resolve_stage_profile(
         is_escalated = True
 
     cli_invocation = None
-    role_map = {
-        "PLAN": "implementer",
-        "APPLY": "implementer",
-        "TEST": "implementer",
-        "CONTRACT_REVIEW": "reviewer",
-        "VERIFY": "reviewer",
-        "REVIEW": "reviewer",
-    }
-    role = role_map.get(stage_str, "implementer")
     app_cfg = app_config or load_config()
     lookup_provider = provider
     if lookup_provider not in app_cfg.providers:

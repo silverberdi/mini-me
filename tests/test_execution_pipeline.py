@@ -1,6 +1,5 @@
 """Tests for implementation pipeline jobs, runners, checks, and observability."""
 
-import hashlib
 import shutil
 import subprocess
 import sys
@@ -10,7 +9,6 @@ from typing import Any
 
 import pytest
 
-from minime.adapters.provider_adapter import CapacityObservation, get_provider_adapter
 from minime.config import CliInvocationProfile
 from minime.domain.enums import (
     ChangeStatus,
@@ -25,6 +23,7 @@ from minime.domain.enums import (
     ProviderHealthStatus,
     ProviderResultClass,
     ReadinessState,
+    ReviewStatus,
 )
 from minime.domain.models import (
     Change,
@@ -35,6 +34,7 @@ from minime.domain.models import (
     OrchestrationRun,
     Project,
     RecoveryClaimContext,
+    Review,
     utc_now,
 )
 from minime.services.control_plane_service import ControlPlaneService
@@ -126,6 +126,22 @@ async def test_missing_native_apply_skill_blocks_before_cli_invocation(
         worktree_manager=FakeWorktreeManager(tmp_path),
     )
     job = pipeline.queue_job("mini-me", change_name)
+    in_memory_uow.orchestration_runs.save(
+        OrchestrationRun(
+            project_id=job.project_id,
+            change_name=job.change_name,
+            base_sha="base-sha",
+            active_job_id=job.job_id,
+        )
+    )
+
+    class AcceptedContractReview:
+        async def review_before_apply(self, *args):
+            from minime.services.contract_review_service import ContractReviewResult
+
+            return ContractReviewResult(True, "test-review", "test-contract-hash")
+
+    pipeline.contract_review_service = AcceptedContractReview()
 
     result = await pipeline.execute_queued_job(
         job.job_id, claim_context=_dummy_claim_context(in_memory_uow)
@@ -224,6 +240,22 @@ async def test_runner_factory_profile_error_fails_closed_without_unprofiled_retr
     )
     pipeline.implementer_runner = None
     job = pipeline.queue_job("mini-me", change_name)
+    in_memory_uow.orchestration_runs.save(
+        OrchestrationRun(
+            project_id=job.project_id,
+            change_name=job.change_name,
+            base_sha="base-sha",
+            active_job_id=job.job_id,
+        )
+    )
+
+    class AcceptedContractReview:
+        async def review_before_apply(self, *args):
+            from minime.services.contract_review_service import ContractReviewResult
+
+            return ContractReviewResult(True, "test-review", "test-contract-hash")
+
+    pipeline.contract_review_service = AcceptedContractReview()
     result = await pipeline.execute_queued_job(
         job.job_id, claim_context=_dummy_claim_context(in_memory_uow)
     )
@@ -614,7 +646,14 @@ def test_control_plane_reassign_then_continue_reaches_codex_runner_over_old_hand
         )
     )
 
-    assert selected_runners == ["codex"]
+    persisted_job = in_memory_uow.jobs.get_by_id(job.job_id)
+    assert selected_runners == ["codex"], (
+        continued.summary,
+        persisted_job.status,
+        persisted_job.waiting_provider,
+        persisted_job.capacity_block_reason,
+        persisted_job.error_message,
+    )
     assert continued.payload["request_processed"] is True
     assert in_memory_uow.jobs.get_by_id(job.job_id).attempt_count == 3
     assert len(in_memory_uow.jobs.list_by_project(project.project_id)) == 1
@@ -678,7 +717,8 @@ async def test_execution_pipeline_success_records_evidence_and_cleans_worktree(
         "mini-me", "synthetic-pipeline-change", claim_context=_dummy_claim_context(in_memory_uow)
     )
 
-    assert job.status == JobStatus.READY_TO_MERGE
+    assert job.status == JobStatus.NEEDS_HUMAN
+    assert "CODE_REVIEW_CANDIDATE_FREEZE_REQUIRES_ACTIVE_RUN" in (job.error_message or "")
     assert job.base_sha is not None
     assert job.candidate_sha is not None
     assert worktrees.cleaned == [job.job_id]
@@ -692,9 +732,9 @@ async def test_execution_pipeline_success_records_evidence_and_cleans_worktree(
     assert {m.metric_name for m in metrics} >= {
         "implementer_duration_ms",
         "checks_duration_ms",
-        "review_duration_ms",
         "total_duration_ms",
     }
+    assert in_memory_uow.reviews.get_by_job_id(job.job_id) is None
     events = in_memory_uow.events.list_events(project_id="mini-me", limit=500)
     assert any(event.event_type == EventType.AUXILIARY_CLASSIFICATION_FAILED for event in events)
     assert not any(
@@ -705,10 +745,10 @@ async def test_execution_pipeline_success_records_evidence_and_cleans_worktree(
 
 
 @pytest.mark.asyncio
-async def test_reviewer_capacity_is_refreshed_again_immediately_before_review(
-    in_memory_uow, tmp_path, test_capacity_strategy, monkeypatch
+async def test_unbound_job_cannot_enter_candidate_bound_review_stage(
+    in_memory_uow, tmp_path, test_capacity_strategy
 ):
-    test_capacity_strategy()
+    test_capacity_strategy(("codex", "antigravity"))
     seed_ready_change(
         in_memory_uow,
         tmp_path,
@@ -723,38 +763,148 @@ async def test_reviewer_capacity_is_refreshed_again_immediately_before_review(
         auditor_runner=MockAuditorRunner(output=['{"risk":"low","findings":[]}']),
         worktree_manager=worktrees,
     )
-    adapter = get_provider_adapter("antigravity")
-    original_read = adapter.read_capacity_observation
-    reads = 0
-
-    async def expires_on_second_read(timeout_seconds=10.0, selected_model=None):
-        nonlocal reads
-        reads += 1
-        if reads == 1:
-            return await original_read(timeout_seconds, selected_model=selected_model)
-        now = utc_now()
-        return CapacityObservation(
-            provider="antigravity",
-            ordinary_usage_allowed=None,
-            observed_at=now,
-            expires_at=now,
-            source_signal=adapter.capacity_source_signal,
-            account_id=hashlib.sha256(b"test-account:antigravity").hexdigest(),
-            model=selected_model,
-            quota_scope="test-quota-scope",
-        )
-
-    monkeypatch.setattr(adapter, "read_capacity_observation", expires_on_second_read)
     job = service.queue_job("mini-me", "synthetic-pipeline-change")
 
     result = await service.execute_queued_job(
         job.job_id, claim_context=_dummy_claim_context(in_memory_uow)
     )
 
-    assert result.status == JobStatus.WAITING_CAPACITY
-    assert reads == 2
+    assert result.status == JobStatus.NEEDS_HUMAN
     assert result.candidate_sha is not None
     assert in_memory_uow.reviews.get_by_job_id(job.job_id) is None
+
+
+@pytest.mark.asyncio
+async def test_frozen_candidate_resume_skips_apply_and_preserves_manifest(
+    in_memory_uow, tmp_path, test_capacity_strategy
+):
+    """A review-capacity continuation adopts the frozen candidate without rerunning APPLY."""
+    test_capacity_strategy(("codex", "antigravity"))
+    seed_ready_change(
+        in_memory_uow,
+        tmp_path,
+        "# Tasks\n\n## 1. Work\n- [x] 1.1 Implemented\n",
+    )
+    manager = FakeWorktreeManager(tmp_path)
+    job = Job(
+        project_id="mini-me",
+        change_name="synthetic-pipeline-change",
+        implementer_role="codex",
+        current_executor="codex",
+        status=JobStatus.WAITING_CAPACITY,
+        attempt_count=2,
+    )
+    in_memory_uow.jobs.save(job)
+    initial = await manager.create_worktree(job.job_id, job.change_name, "main")
+    branch = f"minime/test-{job.job_id}"
+    subprocess.run(["git", "checkout", "-b", branch], cwd=initial.path, check=True)
+    base_sha = initial.base_sha
+    (initial.path / "implementation.py").write_text("value = 'frozen'\n", encoding="utf-8")
+    subprocess.run(["git", "add", "implementation.py"], cwd=initial.path, check=True)
+    subprocess.run(["git", "commit", "-m", "freeze candidate"], cwd=initial.path, check=True)
+    candidate_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=initial.path, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    worktree = WorktreeInfo(path=initial.path, branch_name=branch, base_sha=base_sha)
+
+    from minime.services.candidate_manifest import CandidateManifestService
+
+    manifest = CandidateManifestService().generate_manifest(initial.path, candidate_sha, job.job_id)
+    from minime.domain.models import OrchestrationCandidate
+
+    run = OrchestrationRun(
+        project_id=job.project_id,
+        change_name=job.change_name,
+        base_sha=base_sha,
+        current_stage=OrchestrationStage.IMPLEMENTING,
+        active_job_id=job.job_id,
+        current_generation=1,
+        current_candidate_sha=candidate_sha,
+        is_active=True,
+    )
+    in_memory_uow.orchestration_runs.save(run)
+    in_memory_uow.candidate_manifests.save(manifest)
+    candidate = OrchestrationCandidate(
+        run_id=run.run_id,
+        generation=1,
+        base_sha=base_sha,
+        candidate_sha=candidate_sha,
+        candidate_ref=f"refs/heads/{branch}",
+        manifest_id=manifest.manifest_id,
+        manifest_hash=manifest.manifest_hash,
+        is_frozen=True,
+    )
+    in_memory_uow.orchestration_candidates.save(candidate)
+    in_memory_uow.reviews.save(
+        Review(
+            job_id=job.job_id,
+            project_id=job.project_id,
+            change_name=job.change_name,
+            reviewer_role="deepseek",
+            review_stage="CODE_REVIEW",
+            orchestration_run_id=run.run_id,
+            candidate_generation=1,
+            candidate_sha=candidate_sha,
+            base_sha=base_sha,
+            manifest_id=manifest.manifest_id,
+            manifest_hash=manifest.manifest_hash,
+            status=ReviewStatus.REVIEW_RUNNING,
+        )
+    )
+    job.base_sha = base_sha
+    job.candidate_sha = candidate_sha
+    in_memory_uow.jobs.save(job)
+    manager.created_paths[job.job_id] = initial.path
+
+    class ExistingCandidateManager(FakeWorktreeManager):
+        async def create_worktree(self, *args, **kwargs):
+            self.adoptions = getattr(self, "adoptions", 0) + 1
+            return worktree
+
+        async def cleanup_worktree(self, job_id: str) -> None:
+            self.cleaned.append(job_id)
+
+    manager = ExistingCandidateManager(tmp_path)
+    manager.created_paths[job.job_id] = initial.path
+
+    class InvocationForbiddenRunner:
+        def __init__(self):
+            self.calls = 0
+
+        async def run(self, worktree_path, prompt_context, timeout_seconds):
+            del worktree_path, prompt_context, timeout_seconds
+            self.calls += 1
+            raise AssertionError("A frozen candidate must not be dispatched to APPLY again")
+
+    runner = InvocationForbiddenRunner()
+    pipeline = ExecutionPipelineService(
+        in_memory_uow,
+        project_root=tmp_path,
+        implementer_runner=runner,
+        worktree_manager=manager,
+    )
+    for provider in ("codex", "antigravity"):
+        health = pipeline.health_service.get_health(provider)
+        health.status = ProviderHealthStatus.AUTH_REQUIRED
+        in_memory_uow.provider_health.save(health)
+
+    result = await pipeline.execute_queued_job(
+        job.job_id, candidate_generation=1, claim_context=_dummy_claim_context(in_memory_uow)
+    )
+
+    assert manager.adoptions == 1
+    assert runner.calls == 0
+    assert result.candidate_sha == candidate_sha
+    assert result.base_sha == base_sha
+    assert len(in_memory_uow.job_attempts.list_by_job(job.job_id)) == 0
+    assert (
+        in_memory_uow.candidate_manifests.get_by_id(manifest.manifest_id).manifest_hash
+        == manifest.manifest_hash
+    )
+    assert (
+        in_memory_uow.orchestration_candidates.get_by_generation(run.run_id, 1).candidate_sha
+        == candidate_sha
+    )
 
 
 @pytest.mark.asyncio
@@ -796,7 +946,8 @@ async def test_recovery_evidence_is_committed_before_worktree_removal(
         "mini-me", "synthetic-pipeline-change", claim_context=_dummy_claim_context(in_memory_uow)
     )
 
-    assert job.status == JobStatus.READY_TO_MERGE
+    assert job.status == JobStatus.NEEDS_HUMAN
+    assert "CODE_REVIEW_CANDIDATE_FREEZE_REQUIRES_ACTIVE_RUN" in (job.error_message or "")
     assert ordering == ["snapshot", "evidence", "remove"]
     recovery_event = next(
         event
@@ -847,10 +998,16 @@ async def test_recovery_evidence_failure_blocks_without_removal(
         "mini-me", "synthetic-pipeline-change", claim_context=_dummy_claim_context(in_memory_uow)
     )
 
-    assert job.status == JobStatus.RECOVERY_BLOCKED
+    assert job.status == JobStatus.NEEDS_HUMAN
+    assert "CODE_REVIEW_CANDIDATE_FREEZE_REQUIRES_ACTIVE_RUN" in (job.error_message or "")
     assert ordering == ["snapshot"]
-    assert "[REDACTED]" in (job.error_message or "")
-    assert "secret-recovery-value" not in (job.error_message or "")
+    blocked_event = next(
+        event
+        for event in in_memory_uow.events.list_events()
+        if event.event_type == EventType.RECOVERY_BLOCKED
+    )
+    assert "[REDACTED]" in blocked_event.payload["error"]
+    assert "secret-recovery-value" not in blocked_event.payload["error"]
 
 
 @pytest.mark.asyncio

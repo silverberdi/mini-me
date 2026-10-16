@@ -56,8 +56,53 @@ def validate_review_authority(
             )
 
     project = uow.projects.get_by_id(run.project_id)
-    if not project or existing_review.reviewer_role != project.reviewer:
-        return False, None, "Review reviewer identity does not match the assigned reviewer."
+    if (
+        not project
+        or existing_review.review_stage != "CODE_REVIEW"
+        or existing_review.provider != "deepseek"
+        or existing_review.reviewer_role != "deepseek"
+        or existing_review.billing_origin != "deepseek_direct"
+        or not existing_review.account_fingerprint
+        or not existing_review.budget_authorization_id
+        or not existing_review.budget_reservation_id
+    ):
+        return False, None, "Review is not an authorized direct DeepSeek CODE_REVIEW record."
+
+    authorization = uow.operator_actions.get_by_request_id(
+        existing_review.budget_authorization_id
+    )
+    reservation = uow.budget_reservations.get_by_id(existing_review.budget_reservation_id)
+    auth = (
+        authorization.result_payload_json.get("authorization", {}) if authorization else {}
+    )
+    if not (
+        authorization
+        and authorization.action_type.value == "AUTHORIZE_DEEPSEEK_CODE_REVIEW"
+        and authorization.status.value == "COMPLETED"
+        and authorization.project_id == project.project_id
+        and authorization.change_name == job.change_name
+        and authorization.run_id == run.run_id
+        and authorization.job_id == job.job_id
+        and auth.get("stage") == "REVIEW"
+        and auth.get("provider") == "deepseek"
+        and auth.get("billing_origin") == "deepseek_direct"
+        and auth.get("account_fingerprint") == existing_review.account_fingerprint
+        and auth.get("model") == existing_review.reviewer_model
+        and auth.get("candidate_sha") == existing_review.candidate_sha
+        and auth.get("base_sha") == existing_review.base_sha
+        and auth.get("generation") == existing_review.candidate_generation
+        and auth.get("manifest_id") == existing_review.manifest_id
+        and auth.get("manifest_hash") == existing_review.manifest_hash
+        and reservation
+        and reservation.status == "SETTLED"
+        and reservation.authorization_id == authorization.action_request_id
+        and reservation.provider == "deepseek"
+        and reservation.account_fingerprint == existing_review.account_fingerprint
+        and reservation.canonical_model_identity == existing_review.reviewer_model
+        and reservation.stage == "REVIEW"
+        and reservation.billing_origin == "deepseek_direct"
+    ):
+        return False, None, "Review lacks matching candidate-bound budget authorization and settlement."
 
     if not existing_review.candidate_sha or existing_review.candidate_sha != cand.candidate_sha:
         return (

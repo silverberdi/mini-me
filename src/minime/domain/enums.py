@@ -165,6 +165,7 @@ class PrimaryProvider(str, Enum):
 
 
 PRIMARY_PROVIDERS: set[str] = {PrimaryProvider.CODEX.value, PrimaryProvider.ANTIGRAVITY.value}
+READ_ONLY_REVIEW_PROVIDERS: set[str] = {"deepseek"}
 
 
 class SchedulerMode(str, Enum):
@@ -211,6 +212,7 @@ class CapacitySignalSource(str, Enum):
     AGY_STATUSLINE = "agy_statusline_quota"
     AGY_PRINT_USAGE = "agy_print_usage"
     PROVIDER_READ_ONLY_CAPACITY = "provider_read_only_capacity"
+    DEEPSEEK_ACCOUNT_BALANCE = "deepseek_account_balance"
     PROVIDER_EXECUTION = "provider_execution"
     UNKNOWN = "unknown"
 
@@ -241,6 +243,8 @@ class ReviewStatus(str, Enum):
 class ReviewVerdict(str, Enum):
     READY_TO_MERGE = "READY_TO_MERGE"
     CHANGES_REQUIRED = "CHANGES_REQUIRED"
+    CONTRACT_ACCEPTED = "CONTRACT_ACCEPTED"
+    CONTRACT_CHANGES_REQUIRED = "CONTRACT_CHANGES_REQUIRED"
 
 
 class FindingSeverity(str, Enum):
@@ -308,6 +312,8 @@ class EventType(str, Enum):
     JOB_CHECKS_PASSED = "JOB_CHECKS_PASSED"
     JOB_CHECKS_FAILED = "JOB_CHECKS_FAILED"
     JOB_REVIEW_RUNNING = "JOB_REVIEW_RUNNING"
+    CONTRACT_REVIEW_COMPLETED = "CONTRACT_REVIEW_COMPLETED"
+    CODE_REVIEW_COMPLETED = "CODE_REVIEW_COMPLETED"
     JOB_AUDIT_RUNNING = "JOB_AUDIT_RUNNING"
     JOB_AUDIT_COMPLETED = "JOB_AUDIT_COMPLETED"
     JOB_AUDIT_BLOCKED = "JOB_AUDIT_BLOCKED"
@@ -569,6 +575,7 @@ class OperatorActionType(str, Enum):
     RECOVER_LOCKS = "RECOVER_LOCKS"
     RECONCILE_POST_MERGE = "RECONCILE_POST_MERGE"
     AUTHORIZE_DEEPSEEK_REVIEW = "AUTHORIZE_DEEPSEEK_REVIEW"
+    AUTHORIZE_DEEPSEEK_CODE_REVIEW = "AUTHORIZE_DEEPSEEK_CODE_REVIEW"
 
 
 class OperatorActionStatus(str, Enum):

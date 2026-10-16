@@ -3,17 +3,24 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import subprocess
 from datetime import timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from conftest import ReadinessGitHubStub, create_isolated_openspec_change
+from minime.adapters import provider_adapter
+from minime.adapters.provider_adapter import CapacityObservation, DeepSeekProviderAdapter
+from minime.config import AppConfig, ProjectConfig, ProviderConfig, StageProfileConfig
 from minime.domain.enums import (
     AuditFindingSeverity,
     AuditStatus,
+    CapacitySignalSource,
     ContinuationDecision,
     ExecutionOutcome,
     ExternalActionStatus,
@@ -21,6 +28,8 @@ from minime.domain.enums import (
     ExternalReasonCode,
     HumanGate,
     JobStatus,
+    OperatorActionStatus,
+    OperatorActionType,
     OrchestrationStage,
     OrchestrationStopOutcome,
     ProjectStatus,
@@ -37,11 +46,15 @@ from minime.domain.interfaces import GitHubAdapterInterface
 from minime.domain.models import (
     AuditFinding,
     AuditRecord,
+    BudgetReservation,
     CheckResult,
     Event,
     ExternalActionResult,
     Job,
     JobAttempt,
+    OpenRouterPricingSnapshot,
+    OperatorActionRecord,
+    OperatorActionRequest,
     OrchestrationCandidate,
     OrchestrationRun,
     Project,
@@ -52,12 +65,78 @@ from minime.domain.models import (
     utc_now,
 )
 from minime.services.checks_runner import ChecksRunner, ChecksRunResult
+from minime.services.contract_review_service import DeepSeekReviewResponse
 from minime.services.deepseek_auditor_runner import MockAuditorRunner
+from minime.services.deepseek_code_review_service import DeepSeekCodeReviewService
 from minime.services.execution_pipeline import ExecutionPipelineService
 from minime.services.implementer_runner import ImplementerResult, MockImplementerRunner
 from minime.services.orchestration_service import OrchestrationService
 from minime.services.reviewer_runner import MockReviewerRunner
 from minime.services.worktree_manager import WorktreeManager
+
+
+class _DirectDeepSeekTestAdapter(DeepSeekProviderAdapter):
+    """Deterministic direct-account adapter; it exposes no inference operation."""
+
+    def __init__(self):
+        super().__init__()
+        self._test_account = hashlib.sha256(b"orchestration-test-account").hexdigest()
+
+    @property
+    def account_fingerprint(self):
+        return self._test_account
+
+    async def check_model_supported(self, model, effort=None, timeout_seconds=10.0):
+        del timeout_seconds
+        return (model == "deepseek-chat" and effort == "low", None)
+
+    async def read_capacity_observation(self, timeout_seconds=10.0, selected_model=None):
+        del timeout_seconds
+        now = utc_now()
+        return CapacityObservation(
+            provider="deepseek",
+            ordinary_usage_allowed=True,
+            observed_at=now,
+            expires_at=now + timedelta(seconds=60),
+            source_signal=CapacitySignalSource.DEEPSEEK_ACCOUNT_BALANCE,
+            account_id=self._test_account,
+            model=selected_model or "deepseek-chat",
+            quota_scope="deepseek_direct_account_balance",
+        )
+
+
+class _DeterministicCodeReviewTransport:
+    """HTTP-boundary double consumed by the real parser, budget, and review service."""
+
+    model = "deepseek-chat"
+    effort = "low"
+    review_stage = "CODE_REVIEW"
+
+    def __init__(self, responses: list[dict[str, Any]] | None = None):
+        self.responses = list(responses or [])
+        self.calls = 0
+
+    async def review(self, request: str, timeout_seconds: int):
+        del timeout_seconds
+        payload = json.loads(request)
+        assert payload["stage"] == "CODE_REVIEW"
+        self.calls += 1
+        response = (
+            self.responses.pop(0)
+            if self.responses
+            else {
+                "verdict": "READY_TO_MERGE",
+                "summary": "Deterministic transport response for integration testing.",
+                "findings": [],
+            }
+        )
+        return DeepSeekReviewResponse(
+            exit_code=0,
+            content=json.dumps(response),
+            model=self.model,
+            prompt_tokens=100,
+            completion_tokens=20,
+        )
 
 
 def _test_ctx(uow: Any, claim_key: str = "test-claim") -> RecoveryClaimContext:
@@ -73,6 +152,84 @@ def _test_ctx(uow: Any, claim_key: str = "test-claim") -> RecoveryClaimContext:
         fence_token=1,
         lease_expires_at=utc_now() + timedelta(seconds=3600),
     )
+
+
+def _install_review_service(pipeline: ExecutionPipelineService, env: dict[str, Any]) -> None:
+    if pipeline.code_review_service is None:
+        pipeline.code_review_service = DeepSeekCodeReviewService(
+            pipeline.uow,
+            health_service=pipeline.health_service,
+            budget_service=pipeline.budget_service,
+            app_config=env["app_config"],
+            runner=env["review_transport"],
+        )
+
+
+def _authorize_and_continue_frozen_candidate(
+    service: OrchestrationService, env: dict[str, Any], run: OrchestrationRun
+) -> OrchestrationRun:
+    """Use real Control Plane authorization and CONTINUE for one exact frozen candidate."""
+    from minime.services.control_plane_service import ControlPlaneService
+
+    uow = service.uow
+    run = uow.orchestration_runs.get_by_id(run.run_id) or run
+    job = uow.jobs.get_by_id(run.active_job_id) if run.active_job_id else None
+    if (
+        run.stop_outcome != OrchestrationStopOutcome.WAITING_CAPACITY
+        or not job
+        or job.status != JobStatus.WAITING_CAPACITY
+        or job.waiting_provider != "deepseek"
+        or not job.candidate_sha
+    ):
+        return run
+    assert run.current_candidate_sha == job.candidate_sha, (
+        f"candidate freeze mismatch: run={run.current_candidate_sha!r}, job={job.candidate_sha!r}, "
+        f"generation={run.current_generation}, run_stage={run.current_stage}, job_status={job.status}, "
+        f"candidate_record={service.uow.orchestration_candidates.get_latest_for_run(run.run_id)!r}"
+    )
+
+    cp = ControlPlaneService(
+        uow,
+        project_root=env["project_root"],
+        orchestration_service=service,
+    )
+    now = utc_now()
+    authorization = cp.execute_action(
+        OperatorActionRequest(
+            action_request_id=f"test-code-review-auth-{run.run_id}-{run.current_generation}",
+            project_id=run.project_id,
+            change_name=run.change_name,
+            run_id=run.run_id,
+            action_type=OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW,
+            parameters={
+                "max_spend_usd": "0.50",
+                "expires_at": (now + timedelta(minutes=15)).isoformat(),
+                "pricing_snapshot_id": env["review_pricing"].snapshot_id,
+            },
+            actor_identity="deterministic-test-operator",
+            expected_stage=run.current_stage,
+            expected_generation=run.current_generation,
+            expected_candidate_sha=job.candidate_sha,
+        )
+    )
+    assert authorization.status == OperatorActionStatus.COMPLETED, authorization.summary
+
+    continued = cp.execute_action(
+        OperatorActionRequest(
+            action_request_id=f"test-code-review-continue-{run.run_id}-{run.current_generation}",
+            project_id=run.project_id,
+            change_name=run.change_name,
+            run_id=run.run_id,
+            action_type=OperatorActionType.CONTINUE,
+            parameters={},
+            actor_identity="deterministic-test-operator",
+            expected_stage=run.current_stage,
+            expected_generation=run.current_generation,
+            expected_candidate_sha=job.candidate_sha,
+        )
+    )
+    assert continued.status == OperatorActionStatus.COMPLETED, continued.summary
+    return uow.orchestration_runs.get_by_id(run.run_id) or run
 
 
 def _assert_frozen_candidate_worktree(uow: Any, run: OrchestrationRun):
@@ -379,9 +536,11 @@ class StructuredLookupGitHubAdapter(FakeGitHubAdapter):
 
 
 @pytest.fixture
-def setup_orchestration_environment(tmp_path: Path, in_memory_uow, test_capacity_strategy):
+def setup_orchestration_environment(
+    tmp_path: Path, in_memory_uow, test_capacity_strategy, monkeypatch
+):
     """Sets up a fully configured test environment with projects, bindings, health, and changes."""
-    test_capacity_strategy()
+    test_capacity_strategy(("codex", "antigravity"))
     import subprocess
 
     from conftest import setup_managed_repository_fixture
@@ -409,6 +568,7 @@ def setup_orchestration_environment(tmp_path: Path, in_memory_uow, test_capacity
         openspec_path="openspec",
         implementer="codex",
         reviewer="antigravity",
+        external_providers_allowed=["codex", "antigravity", "deepseek"],
         independent_audit_required=True,
         status=ProjectStatus.ACTIVE,
         checks=[{"name": "pytest", "command": "pytest"}],
@@ -442,6 +602,54 @@ def setup_orchestration_environment(tmp_path: Path, in_memory_uow, test_capacity
             last_success_at=utc_now(),
         )
     )
+
+    # Coordinator scenarios now satisfy the actual CODE REVIEW preconditions.
+    # The service, authorization, capacity, budget, parser, and persistence are
+    # real; only the direct HTTP response is deterministic and non-networked.
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-only-direct-account-key")
+    adapter = _DirectDeepSeekTestAdapter()
+    monkeypatch.setitem(provider_adapter._ADAPTER_REGISTRY, "deepseek", adapter)
+    app_config = AppConfig(
+        providers={
+            "deepseek": ProviderConfig(
+                type="api",
+                enabled=True,
+                budget={"maximum_code_review_usd": "1.00"},
+            )
+        },
+        projects={
+            project_id: ProjectConfig(
+                repository="silverberdi/mini-me",
+                base_branch="main",
+                openspec_path="openspec",
+                external_providers_allowed=["codex", "antigravity", "deepseek"],
+                stage_profiles={
+                    "REVIEW": StageProfileConfig(
+                        provider="deepseek", model="deepseek-chat", effort="low", workflow="review"
+                    )
+                },
+            )
+        },
+    )
+    monkeypatch.setattr("minime.services.execution_pipeline.load_config", lambda: app_config)
+    monkeypatch.setattr("minime.services.control_plane_service.load_config", lambda: app_config)
+    monkeypatch.setattr(
+        "minime.services.deepseek_code_review_service.load_config", lambda: app_config
+    )
+    pricing = OpenRouterPricingSnapshot(
+        id="orchestration-code-review-price",
+        canonical_model_identity="deepseek-chat",
+        routed_model_identity="deepseek-chat",
+        prompt_price_per_token=Decimal("0.000001"),
+        output_price_per_token=Decimal("0.000001"),
+        currency="USD",
+        source="deepseek_official_pricing",
+        provider="deepseek",
+        account_fingerprint=adapter.account_fingerprint,
+        billing_origin="deepseek_direct",
+    )
+    in_memory_uow.pricing_snapshots.save(pricing)
+    review_transport = _DeterministicCodeReviewTransport()
 
     # Create OpenSpec change directory with valid artifacts
     change_dir = create_isolated_openspec_change(
@@ -496,12 +704,45 @@ def setup_orchestration_environment(tmp_path: Path, in_memory_uow, test_capacity
 
     WorktreeManager._verify_creation_postconditions = _safe_verify
 
-    yield {
+    original_start = OrchestrationService.start
+    original_resume = OrchestrationService.resume
+
+    def finish_authorized_review(service, run):
+        if service.pipeline is not None:
+            _install_review_service(service.pipeline, env)
+        for _ in range(3):
+            latest = service.uow.orchestration_runs.get_by_id(run.run_id) or run
+            updated = _authorize_and_continue_frozen_candidate(service, env, latest)
+            if (
+                updated.stop_outcome == latest.stop_outcome
+                and updated.updated_at == latest.updated_at
+            ):
+                break
+            run = updated
+        return service.uow.orchestration_runs.get_by_id(run.run_id) or run
+
+    def start_with_authorized_review(service, *args, **kwargs):
+        result = original_start(service, *args, **kwargs)
+        return finish_authorized_review(service, result)
+
+    def resume_with_authorized_review(service, *args, **kwargs):
+        result = original_resume(service, *args, **kwargs)
+        return finish_authorized_review(service, result)
+
+    monkeypatch.setattr(OrchestrationService, "start", start_with_authorized_review)
+    monkeypatch.setattr(OrchestrationService, "resume", resume_with_authorized_review)
+
+    env = {
         "project_id": project_id,
         "change_name": change_name,
         "project_root": tmp_path,
         "change_dir": change_dir,
+        "app_config": app_config,
+        "review_transport": review_transport,
+        "review_adapter": adapter,
+        "review_pricing": pricing,
     }
+    yield env
 
     WorktreeManager._verify_creation_postconditions = orig_verify
 
@@ -537,8 +778,18 @@ def test_pr_lookup_authoritative_not_found_allows_one_creation(
     run = _service_for_pr_lookup(env, in_memory_uow, github).start(
         env["project_id"], env["change_name"]
     )
-    assert run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
+    assert run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE, run.stop_reason
     assert github.create_calls == 1
+    job = in_memory_uow.jobs.get_by_id(run.active_job_id)
+    review = in_memory_uow.reviews.get_by_job_stage(job.job_id, "CODE_REVIEW")
+    assert review is not None
+    assert review.status == ReviewStatus.REVIEW_COMPLETED
+    assert review.candidate_sha == run.current_candidate_sha == job.candidate_sha
+    assert review.candidate_generation == run.current_generation
+    assert env["review_transport"].calls == 1
+    reservation = in_memory_uow.budget_reservations.get_by_id(review.budget_reservation_id)
+    assert reservation is not None and reservation.status == "SETTLED"
+    assert run.current_stage == OrchestrationStage.PR_PREPARED
 
 
 @pytest.mark.parametrize(
@@ -917,9 +1168,10 @@ def test_orchestration_reuses_pipeline_evidence_and_preserves_candidate_worktree
     assert ownership.canonical_worktree_path == str(retained_path)
 
     checks = in_memory_uow.check_results.list_by_job(job.job_id)
-    assert len(checks) == 1
-    assert checks[0].check_name == "candidate-file"
-    assert checks[0].exit_code == 0
+    assert len(checks) == 2  # original check plus exact-candidate resume verification
+    assert all(check.check_name == "candidate-file" for check in checks)
+    assert all(check.exit_code == 0 for check in checks)
+    assert {check.candidate_sha for check in checks} == {job.candidate_sha}
 
     manifest = in_memory_uow.candidate_manifests.get_by_candidate_sha(job.job_id, job.candidate_sha)
     assert manifest is not None
@@ -1002,22 +1254,23 @@ def test_capacity_exhaustion_stops_at_waiting_capacity(
 def test_review_remediation_loop_increments_candidate_generation(
     setup_orchestration_environment, in_memory_uow
 ):
-    """Verify review CHANGES_REQUIRED routes through remediation, incrementing candidate generation."""
+    """Verify authoritative CODE_REVIEW CHANGES_REQUIRED enters a fresh generation."""
     env = setup_orchestration_environment
-
-    class DynamicReviewer(MockReviewerRunner):
-        def __init__(self):
-            super().__init__()
-            self.calls = 0
-
-        async def run(self, worktree_path: Path, prompt_context: str, timeout_seconds: int):
-            self.calls += 1
-            if self.calls == 1:
-                out = '```json\n{"verdict": "CHANGES_REQUIRED", "summary": "Need tests", "findings": [{"severity": "BLOCKER", "location": "main.py", "violated_requirement": "Tests", "expected_correction": "Add tests"}]}\n```'
-            else:
-                out = '```json\n{"verdict": "READY_TO_MERGE", "summary": "All good", "findings": []}\n```'
-            self.stdout = [out]
-            return await super().run(worktree_path, prompt_context, timeout_seconds)
+    env["review_transport"].responses = [
+        {
+            "verdict": "CHANGES_REQUIRED",
+            "summary": "Need tests",
+            "findings": [
+                {
+                    "severity": "BLOCKER",
+                    "location": "main.py",
+                    "violated_requirement": "Tests",
+                    "expected_correction": "Add tests",
+                }
+            ],
+        },
+        {"verdict": "READY_TO_MERGE", "summary": "All good", "findings": []},
+    ]
 
     class DynamicImplementer(MockImplementerRunner):
         def __init__(self):
@@ -1060,7 +1313,7 @@ def test_review_remediation_loop_increments_candidate_generation(
         project_root=env["project_root"],
         implementer_runner=implementer,
         checks_runner=FakeChecksRunner(should_pass=True),
-        reviewer_runner=DynamicReviewer(),
+        reviewer_runner=MockReviewerRunner(),
         auditor_runner=MockAuditorRunner(
             output=['{"risk": "low", "summary": "Passed", "findings": []}']
         ),
@@ -1082,7 +1335,7 @@ def test_review_remediation_loop_increments_candidate_generation(
 
     # Generation should have incremented to 2 due to remediation
     assert run.current_generation == 2
-    assert run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
+    assert run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE, run.stop_reason
     assert run.human_gate == HumanGate.READY_FOR_HUMAN_MERGE
 
     # Both generation 1 and 2 should exist in candidates repo, gen 1 superseded
@@ -1093,6 +1346,7 @@ def test_review_remediation_loop_increments_candidate_generation(
     assert candidates[1].generation == 2
     assert candidates[1].superseded_by_id is None
     assert implementer.calls == 2
+    assert env["review_transport"].calls == 2
     job, candidate, ownership, worktree_path = _assert_frozen_candidate_worktree(in_memory_uow, run)
 
     uncommitted = worktree_path / "uncommitted-progress.txt"
@@ -1561,26 +1815,26 @@ def test_review_authority_fail_closed_validation(setup_orchestration_environment
     )
     in_memory_uow.reviews.save(review)
 
-    # A structurally valid response from the implementer identity is not independent review.
+    # A legacy provider identity cannot become an authorized direct DeepSeek record.
     review.reviewer_role = "codex"
     in_memory_uow.reviews.save(review)
     valid, verdict, reason = service._validate_review_authority(run, job, cand)
     assert valid is False
-    assert "reviewer identity does not match" in reason
+    assert "authorized direct DeepSeek CODE_REVIEW" in reason
 
     review.reviewer_role = "antigravity"
     in_memory_uow.reviews.save(review)
 
     valid, verdict, reason = service._validate_review_authority(run, job, cand)
     assert valid is False
-    assert "does not match current candidate" in reason
+    assert "authorized direct DeepSeek CODE_REVIEW" in reason
 
     # 3. Review candidate_sha mismatch (e.g. prior generation) -> fail closed
     review.candidate_sha = "stale-prior-gen-sha"
     in_memory_uow.reviews.save(review)
     valid, verdict, reason = service._validate_review_authority(run, job, cand)
     assert valid is False
-    assert "does not match current candidate" in reason
+    assert "authorized direct DeepSeek CODE_REVIEW" in reason
 
     # 4. Review base_sha mismatch -> fail closed
     review.candidate_sha = "cand-sha-1"
@@ -1588,13 +1842,80 @@ def test_review_authority_fail_closed_validation(setup_orchestration_environment
     in_memory_uow.reviews.save(review)
     valid, verdict, reason = service._validate_review_authority(run, job, cand)
     assert valid is False
-    assert "does not match run base" in reason
+    assert "authorized direct DeepSeek CODE_REVIEW" in reason
 
     # 5. Exact match -> valid READY_TO_MERGE
     review.base_sha = "base-sha-1"
+    review.provider = "deepseek"
+    review.reviewer_role = "deepseek"
+    review.reviewer_model = "deepseek-chat"
+    review.review_stage = "CODE_REVIEW"
+    review.account_fingerprint = "a" * 64
+    review.budget_authorization_id = "code-review-auth-test"
+    review.budget_reservation_id = "code-review-reservation-test"
+    review.billing_origin = "deepseek_direct"
+    review.orchestration_run_id = run.run_id
+    review.candidate_generation = cand.generation
+    review.candidate_sha = cand.candidate_sha
+    review.manifest_id = cand.manifest_id
+    review.manifest_hash = cand.manifest_hash
     in_memory_uow.reviews.save(review)
+    in_memory_uow.operator_actions.save(
+        OperatorActionRecord(
+            action_request_id=review.budget_authorization_id,
+            project_id=run.project_id,
+            change_name=run.change_name,
+            run_id=run.run_id,
+            job_id=job.job_id,
+            action_type=OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW,
+            status=OperatorActionStatus.COMPLETED,
+            result_payload_json={
+                "authorization": {
+                    "stage": "REVIEW",
+                    "provider": "deepseek",
+                    "model": "deepseek-chat",
+                    "account_fingerprint": "a" * 64,
+                    "billing_origin": "deepseek_direct",
+                    "candidate_sha": cand.candidate_sha,
+                    "base_sha": cand.base_sha,
+                    "generation": cand.generation,
+                    "manifest_id": cand.manifest_id,
+                    "manifest_hash": cand.manifest_hash,
+                }
+            },
+        )
+    )
+    in_memory_uow.budget_reservations.save(
+        BudgetReservation(
+            reservation_id=review.budget_reservation_id,
+            project_id=job.project_id,
+            job_id=job.job_id,
+            run_id=run.run_id,
+            change_id=job.change_name,
+            role="reviewer",
+            canonical_model_identity="deepseek-chat",
+            reserved_amount_usd=Decimal("0.10"),
+            status="SETTLED",
+            pricing_snapshot_id="code-review-price",
+            provider="deepseek",
+            account_fingerprint="a" * 64,
+            stage="REVIEW",
+            billing_origin="deepseek_direct",
+            authorization_id=review.budget_authorization_id,
+        )
+    )
+    saved_review = in_memory_uow.reviews.get_by_job_id(job.job_id)
+    saved_action = in_memory_uow.operator_actions.get_by_request_id(
+        review.budget_authorization_id
+    )
+    saved_reservation = in_memory_uow.budget_reservations.get_by_id(
+        review.budget_reservation_id
+    )
+    assert saved_review and saved_review.budget_authorization_id == "code-review-auth-test"
+    assert saved_action and saved_action.action_request_id == "code-review-auth-test"
+    assert saved_reservation and saved_reservation.authorization_id == "code-review-auth-test"
     valid, verdict, reason = service._validate_review_authority(run, job, cand)
-    assert valid is True
+    assert valid is True, reason
     assert verdict == ReviewVerdict.READY_TO_MERGE
 
 

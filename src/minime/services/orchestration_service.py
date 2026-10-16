@@ -3149,6 +3149,18 @@ class OrchestrationService:
         stop_details: dict[str, Any] | None = None,
     ) -> None:
         """Stop run at a legitimate stop outcome, with optional human gate."""
+        # Pipeline stages can durably freeze a candidate before returning a
+        # waiting result. The coordinator's local ``run`` is then stale; saving
+        # it wholesale would erase the candidate binding and make the exact
+        # Control Plane review authorization impossible (or authorize stale
+        # state). Apply only stop fields to the latest durable Run row.
+        latest_run = self.uow.orchestration_runs.get_for_update(run.run_id)
+        if latest_run is None:
+            latest_run = self.uow.orchestration_runs.get_by_id(run.run_id)
+        if latest_run is not None:
+            if latest_run.project_id != run.project_id or latest_run.change_name != run.change_name:
+                raise ValueError("Cannot stop an orchestration Run with conflicting identity.")
+            run = latest_run
         run.stop_outcome = stop_outcome
         run.human_gate = human_gate
         run.stop_reason = stop_reason
@@ -3620,6 +3632,21 @@ class OrchestrationService:
         if current_candidate:
             self._bind_current_authority_records(run, job, current_candidate)
         return current_candidate
+
+    def freeze_candidate_for_review(
+        self, run: OrchestrationRun, job: Job
+    ) -> OrchestrationCandidate | None:
+        """Freeze the checked candidate through the canonical candidate authority."""
+        if (
+            run.active_job_id != job.job_id
+            or run.project_id != job.project_id
+            or run.change_name != job.change_name
+            or not job.candidate_sha
+            or not job.base_sha
+            or run.base_sha != job.base_sha
+        ):
+            raise ValueError("Candidate freeze denied: Run/Job identity or base is inconsistent.")
+        return self._freeze_candidate_if_needed(run, job)
 
     def _save_candidate_with_savepoint(
         self, candidate: OrchestrationCandidate

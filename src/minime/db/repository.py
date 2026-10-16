@@ -65,6 +65,7 @@ from minime.db.models import (
 )
 from minime.domain.enums import (
     PRIMARY_PROVIDERS,
+    READ_ONLY_REVIEW_PROVIDERS,
     AdmissionBlockCondition,
     AdmissionDecision,
     AdmissionDecisionKind,
@@ -648,6 +649,13 @@ def review_model_to_domain(model: ReviewModel) -> Review:
         change_name=model.change_name,
         reviewer_role=model.reviewer_role,
         reviewer_model=model.reviewer_model,
+        review_stage=model.review_stage,
+        contract_hash=model.contract_hash,
+        provider=model.provider,
+        account_fingerprint=model.account_fingerprint,
+        budget_authorization_id=model.budget_authorization_id,
+        budget_reservation_id=model.budget_reservation_id,
+        billing_origin=model.billing_origin,
         orchestration_run_id=model.orchestration_run_id,
         candidate_generation=model.candidate_generation,
         candidate_sha=model.candidate_sha,
@@ -731,6 +739,9 @@ def pricing_snapshot_model_to_domain(
         additional_cost_per_request=_to_decimal(model.additional_cost_per_request),
         currency=model.currency,
         source=model.source,
+        provider=model.provider,
+        account_fingerprint=model.account_fingerprint,
+        billing_origin=model.billing_origin,
         observed_at=model.observed_at,
         created_at=model.created_at,
     )
@@ -741,6 +752,7 @@ def budget_reservation_model_to_domain(model: BudgetReservationModel) -> BudgetR
         reservation_id=model.id,
         project_id=model.project_id,
         job_id=model.job_id,
+        run_id=model.run_id,
         change_id=model.change_id,
         role=model.role,
         canonical_model_identity=model.canonical_model_identity,
@@ -748,6 +760,12 @@ def budget_reservation_model_to_domain(model: BudgetReservationModel) -> BudgetR
         status=model.status,
         pricing_snapshot_id=model.pricing_snapshot_id,
         correlation_id=model.correlation_id,
+        provider=model.provider,
+        account_fingerprint=model.account_fingerprint,
+        stage=model.stage,
+        billing_origin=model.billing_origin,
+        authorization_id=model.authorization_id,
+        idempotency_key=model.idempotency_key,
         created_at=model.created_at,
         updated_at=model.updated_at,
     )
@@ -761,6 +779,9 @@ def budget_ledger_model_to_domain(model: BudgetLedgerModel) -> BudgetLedgerEntry
         job_id=model.job_id,
         change_id=model.change_id,
         provider=model.provider,
+        account_fingerprint=model.account_fingerprint,
+        stage=model.stage,
+        billing_origin=model.billing_origin,
         role=model.role,
         canonical_model_identity=model.canonical_model_identity,
         prompt_tokens=model.prompt_tokens,
@@ -1825,6 +1846,13 @@ class PostgresReviewRepository(ReviewRepositoryInterface):
             existing.is_mixed_authorship = review.is_mixed_authorship
             existing.authorship_evidence = review.authorship_evidence
             existing.reviewer_model = review.reviewer_model
+            existing.review_stage = review.review_stage
+            existing.contract_hash = review.contract_hash
+            existing.provider = review.provider
+            existing.account_fingerprint = review.account_fingerprint
+            existing.budget_authorization_id = review.budget_authorization_id
+            existing.budget_reservation_id = review.budget_reservation_id
+            existing.billing_origin = review.billing_origin
             existing.orchestration_run_id = review.orchestration_run_id
             existing.candidate_generation = review.candidate_generation
             existing.candidate_sha = review.candidate_sha
@@ -1840,6 +1868,13 @@ class PostgresReviewRepository(ReviewRepositoryInterface):
                 change_name=review.change_name,
                 reviewer_role=review.reviewer_role,
                 reviewer_model=review.reviewer_model,
+                review_stage=review.review_stage,
+                contract_hash=review.contract_hash,
+                provider=review.provider,
+                account_fingerprint=review.account_fingerprint,
+                budget_authorization_id=review.budget_authorization_id,
+                budget_reservation_id=review.budget_reservation_id,
+                billing_origin=review.billing_origin,
                 orchestration_run_id=review.orchestration_run_id,
                 candidate_generation=review.candidate_generation,
                 candidate_sha=review.candidate_sha,
@@ -1864,7 +1899,17 @@ class PostgresReviewRepository(ReviewRepositoryInterface):
     def get_by_job_id(self, job_id: str) -> Review | None:
         stmt = (
             select(ReviewModel)
-            .where(ReviewModel.job_id == job_id)
+            .where(ReviewModel.job_id == job_id, ReviewModel.review_stage == "CODE_REVIEW")
+            .order_by(desc(ReviewModel.created_at))
+            .limit(1)
+        )
+        model = self.session.scalars(stmt).first()
+        return review_model_to_domain(model) if model else None
+
+    def get_by_job_stage(self, job_id: str, review_stage: str) -> Review | None:
+        stmt = (
+            select(ReviewModel)
+            .where(ReviewModel.job_id == job_id, ReviewModel.review_stage == review_stage)
             .order_by(desc(ReviewModel.created_at))
             .limit(1)
         )
@@ -2103,11 +2148,8 @@ class PostgresProviderHealthRepository(ProviderHealthRepositoryInterface):
         self.session = session
 
     def _validate_primary_provider(self, provider: str) -> None:
-        if provider not in PRIMARY_PROVIDERS:
-            raise ValueError(
-                f"Invalid primary provider '{provider}'. "
-                f"005 capacity tracking is restricted strictly to {PRIMARY_PROVIDERS}."
-            )
+        if provider not in PRIMARY_PROVIDERS | READ_ONLY_REVIEW_PROVIDERS:
+            raise ValueError(f"Invalid provider '{provider}' for bounded capacity tracking.")
 
     def save(self, health: ProviderHealth) -> None:
         health.validate_primary()
@@ -2429,6 +2471,9 @@ class PostgresOpenRouterPricingSnapshotRepository(OpenRouterPricingSnapshotRepos
                 additional_cost_per_request=snapshot.additional_cost_per_request,
                 currency=snapshot.currency,
                 source=snapshot.source,
+                provider=snapshot.provider,
+                account_fingerprint=snapshot.account_fingerprint,
+                billing_origin=snapshot.billing_origin,
                 observed_at=snapshot.observed_at,
                 created_at=snapshot.created_at,
             )
@@ -2483,6 +2528,7 @@ class PostgresBudgetReservationRepository(BudgetReservationRepositoryInterface):
                 id=reservation.reservation_id,
                 project_id=reservation.project_id,
                 job_id=reservation.job_id,
+                run_id=reservation.run_id,
                 change_id=reservation.change_id,
                 role=reservation.role,
                 canonical_model_identity=reservation.canonical_model_identity,
@@ -2490,6 +2536,12 @@ class PostgresBudgetReservationRepository(BudgetReservationRepositoryInterface):
                 status=reservation.status,
                 pricing_snapshot_id=reservation.pricing_snapshot_id,
                 correlation_id=reservation.correlation_id,
+                provider=reservation.provider,
+                account_fingerprint=reservation.account_fingerprint,
+                stage=reservation.stage,
+                billing_origin=reservation.billing_origin,
+                authorization_id=reservation.authorization_id,
+                idempotency_key=reservation.idempotency_key,
                 created_at=reservation.created_at,
                 updated_at=reservation.updated_at,
             )
@@ -2497,6 +2549,14 @@ class PostgresBudgetReservationRepository(BudgetReservationRepositoryInterface):
 
     def get_by_id(self, reservation_id: str) -> BudgetReservation | None:
         model = self.session.get(BudgetReservationModel, reservation_id)
+        return budget_reservation_model_to_domain(model) if model else None
+
+    def get_by_idempotency_key(self, idempotency_key: str) -> BudgetReservation | None:
+        model = self.session.scalars(
+            select(BudgetReservationModel).where(
+                BudgetReservationModel.idempotency_key == idempotency_key
+            )
+        ).first()
         return budget_reservation_model_to_domain(model) if model else None
 
     def get_by_id_for_update(self, reservation_id: str) -> BudgetReservation | None:
@@ -2529,6 +2589,9 @@ class PostgresBudgetLedgerRepository(BudgetLedgerRepositoryInterface):
                 job_id=entry.job_id,
                 change_id=entry.change_id,
                 provider=entry.provider,
+                account_fingerprint=entry.account_fingerprint,
+                stage=entry.stage,
+                billing_origin=entry.billing_origin,
                 role=entry.role,
                 canonical_model_identity=entry.canonical_model_identity,
                 prompt_tokens=entry.prompt_tokens,

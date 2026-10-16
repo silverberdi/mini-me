@@ -176,3 +176,32 @@ def test_drain_denied_for_new_ready_change():
     )
     assert res.eligible is False
     assert "Cannot admit new READY" in (res.denial_reason or "")
+
+
+def test_openrouter_drain_never_accepts_reviewer_role():
+    evaluator = OpenRouterEligibilityEvaluator()
+    job = Job(
+        project_id="test-proj",
+        change_name="in-flight-feature",
+        status=JobStatus.RUNNING,
+        implementer_role="codex",
+        attempt_count=1,
+        candidate_sha="candidate-sha",
+    )
+    result = evaluator.evaluate_10_points(
+        scheduler_mode=SchedulerMode.DRAIN,
+        job=job,
+        role="reviewer",
+        is_new_ready_change=False,
+        primary_health_records=[],
+        project=Project(
+            project_id="test-proj",
+            display_name="Test",
+            repository="owner/repo",
+            openrouter_drain_allowed=True,
+        ),
+        policy=None,
+        headroom=None,
+    )
+    assert not result.eligible
+    assert any("executor rescue" in reason for reason in result.reasons)

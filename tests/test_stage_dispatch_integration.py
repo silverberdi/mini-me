@@ -200,6 +200,55 @@ def _build_test_app_config() -> AppConfig:
     )
 
 
+class _AcceptedContractReview:
+    """Explicitly seed the prerequisite for tests whose subject is a later stage."""
+
+    async def review_before_apply(self, project, run, job, workspace_path):
+        del project, run, job, workspace_path
+        from minime.services.contract_review_service import ContractReviewResult
+
+        return ContractReviewResult(
+            accepted=True,
+            review_id="test-accepted-contract-review",
+            contract_hash="test-contract-sha256",
+        )
+
+
+class _WaitingContractReview:
+    def __init__(self):
+        self.calls = 0
+
+    async def review_before_apply(self, project, run, job, workspace_path):
+        del project, run, job, workspace_path
+        from minime.services.contract_review_service import ContractReviewResult
+
+        self.calls += 1
+        return ContractReviewResult(
+            accepted=False,
+            review_id=None,
+            contract_hash=None,
+            reason="DeepSeek contract capability unavailable",
+            waiting=True,
+        )
+
+
+class _RejectedContractReview:
+    def __init__(self):
+        self.calls = 0
+
+    async def review_before_apply(self, project, run, job, workspace_path):
+        del project, run, job, workspace_path
+        from minime.services.contract_review_service import ContractReviewResult
+
+        self.calls += 1
+        return ContractReviewResult(
+            accepted=False,
+            review_id="test-rejected-contract-review",
+            contract_hash="test-contract-sha256",
+            reason="Contract review returned CHANGES_REQUIRED",
+        )
+
+
 def _seed_operational_workspace(
     in_memory_uow: Any,
     workspace_path: Path,
@@ -378,6 +427,7 @@ async def test_antigravity_apply_operational_dispatch_effective_arguments(
         app_config=app_cfg,
         worktree_manager=OperationalTestWorktreeManager(workspace),
     )
+    pipeline.contract_review_service = _AcceptedContractReview()
 
     intercepted_subprocesses: list[dict[str, Any]] = []
 
@@ -450,6 +500,7 @@ async def test_operational_apply_rejects_conflicting_base_model_before_runner(
         app_config=app_cfg,
         worktree_manager=OperationalTestWorktreeManager(workspace),
     )
+    pipeline.contract_review_service = _AcceptedContractReview()
     intercepted: list[list[str]] = []
 
     async def capture_runner(self, cmd, **kwargs):
@@ -495,6 +546,7 @@ async def test_operational_apply_rejects_agy_variant_effort_conflict_before_runn
         app_config=app_cfg,
         worktree_manager=OperationalTestWorktreeManager(workspace),
     )
+    pipeline.contract_review_service = _AcceptedContractReview()
     intercepted: list[list[str]] = []
 
     async def capture_runner(self, cmd, **kwargs):
@@ -547,6 +599,7 @@ async def test_codex_apply_operational_dispatch_effective_arguments(
         app_config=app_cfg,
         worktree_manager=OperationalTestWorktreeManager(workspace),
     )
+    pipeline.contract_review_service = _AcceptedContractReview()
 
     intercepted_subprocesses: list[dict[str, Any]] = []
 
@@ -625,6 +678,7 @@ async def test_rejection_of_model_absent_from_codex_account_fails_closed_before_
         app_config=app_cfg,
         worktree_manager=OperationalTestWorktreeManager(workspace),
     )
+    pipeline.contract_review_service = _AcceptedContractReview()
 
     intercepted: list[str] = []
 
@@ -678,6 +732,7 @@ async def test_rejection_of_effort_unsupported_by_codex_model_fails_closed_befor
         app_config=app_cfg,
         worktree_manager=OperationalTestWorktreeManager(workspace),
     )
+    pipeline.contract_review_service = _AcceptedContractReview()
 
     intercepted: list[str] = []
 
@@ -732,6 +787,7 @@ async def test_rejection_of_unsupported_model_fails_closed_before_runner(
         app_config=app_cfg,
         worktree_manager=OperationalTestWorktreeManager(workspace),
     )
+    pipeline.contract_review_service = _AcceptedContractReview()
 
     intercepted: list[str] = []
 
@@ -783,6 +839,7 @@ async def test_rejection_of_incompatible_effort_fails_closed_before_runner(
         app_config=app_cfg,
         worktree_manager=OperationalTestWorktreeManager(workspace),
     )
+    pipeline.contract_review_service = _AcceptedContractReview()
 
     intercepted: list[str] = []
 
@@ -834,6 +891,7 @@ async def test_rejection_of_premium_model_default_fails_closed_before_runner(
         app_config=app_cfg,
         worktree_manager=OperationalTestWorktreeManager(workspace),
     )
+    pipeline.contract_review_service = _AcceptedContractReview()
 
     intercepted: list[str] = []
 
@@ -904,6 +962,7 @@ async def test_rejection_of_fabricated_capacity_observation_fails_closed_to_wait
         app_config=app_cfg,
         worktree_manager=OperationalTestWorktreeManager(workspace),
     )
+    pipeline.contract_review_service = _AcceptedContractReview()
 
     intercepted: list[str] = []
 
@@ -946,6 +1005,7 @@ async def test_rejection_of_jit_cli_preflight_failure_fails_closed_before_runner
         app_config=app_cfg,
         worktree_manager=OperationalTestWorktreeManager(workspace),
     )
+    pipeline.contract_review_service = _AcceptedContractReview()
 
     # Simulate JIT preflight flag verification failure
     monkeypatch.setattr(
@@ -992,11 +1052,77 @@ async def test_rejection_of_author_reviewer_identity_collision_fails_closed(
         app_config=app_cfg,
         worktree_manager=OperationalTestWorktreeManager(workspace),
     )
+    pipeline.contract_review_service = _AcceptedContractReview()
 
-    with pytest.raises(Exception, match="REVIEWER_IDENTITY_COLLISION"):
+    with pytest.raises(Exception, match="CODE_REVIEW_REQUIRES_DEEPSEEK_DIRECT"):
         pipeline._resolve_stage_profile(
             project,
             OpenSpecStage.REVIEW,
             requested_provider="antigravity",
             implementer_provider="antigravity",
         )
+
+
+@pytest.mark.asyncio
+async def test_missing_contract_review_blocks_before_apply(
+    in_memory_uow, tmp_path, monkeypatch, test_capacity_strategy
+):
+    workspace = tmp_path / "candidate-worktree"
+    _, job, _ = _seed_operational_workspace(in_memory_uow, workspace)
+    test_capacity_strategy(("codex", "antigravity"))
+    pipeline = ExecutionPipelineService(
+        in_memory_uow,
+        project_root=tmp_path,
+        app_config=_build_test_app_config(),
+        worktree_manager=OperationalTestWorktreeManager(workspace),
+    )
+    review = _WaitingContractReview()
+    pipeline.contract_review_service = review
+    intercepted: list[str] = []
+
+    async def capture_runner(self, *args, **kwargs):
+        intercepted.append("runner")
+        raise AssertionError("APPLY must not run while CONTRACT REVIEW is unavailable")
+
+    monkeypatch.setattr(AgentProcessConfinement, "run_confined_async_subprocess", capture_runner)
+    result = await pipeline.execute_queued_job(
+        job.job_id, claim_context=_acquire_claim(in_memory_uow)
+    )
+
+    assert result.status == JobStatus.WAITING_CAPACITY
+    assert review.calls == 1
+    assert intercepted == []
+    assert in_memory_uow.job_attempts.list_by_job(job.job_id) == []
+
+
+@pytest.mark.asyncio
+async def test_failed_contract_review_blocks_before_apply(
+    in_memory_uow, tmp_path, monkeypatch, test_capacity_strategy
+):
+    workspace = tmp_path / "candidate-worktree"
+    _, job, _ = _seed_operational_workspace(in_memory_uow, workspace)
+    test_capacity_strategy(("codex", "antigravity"))
+    pipeline = ExecutionPipelineService(
+        in_memory_uow,
+        project_root=tmp_path,
+        app_config=_build_test_app_config(),
+        worktree_manager=OperationalTestWorktreeManager(workspace),
+    )
+    review = _RejectedContractReview()
+    pipeline.contract_review_service = review
+    intercepted: list[str] = []
+
+    async def capture_runner(self, *args, **kwargs):
+        intercepted.append("runner")
+        raise AssertionError("APPLY must not run after a rejected CONTRACT REVIEW")
+
+    monkeypatch.setattr(AgentProcessConfinement, "run_confined_async_subprocess", capture_runner)
+    result = await pipeline.execute_queued_job(
+        job.job_id, claim_context=_acquire_claim(in_memory_uow)
+    )
+
+    assert result.status == JobStatus.NEEDS_HUMAN
+    assert review.calls == 1
+    assert "Contract review returned CHANGES_REQUIRED" in (result.error_message or "")
+    assert intercepted == []
+    assert in_memory_uow.job_attempts.list_by_job(job.job_id) == []

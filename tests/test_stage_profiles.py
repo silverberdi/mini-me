@@ -39,8 +39,9 @@ def default_project() -> ProjectConfig:
     )
 
 
-def test_default_r01_stage_profiles_resolve_non_premium(default_project):
+def test_default_r01_stage_profiles_resolve_non_premium(default_project, monkeypatch):
     """Prove canonical R01 stage profiles resolve non-premium defaults for all stages."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-only-key")
     stages = [
         OpenSpecStage.PLAN,
         OpenSpecStage.CONTRACT_REVIEW,
@@ -81,15 +82,15 @@ def test_default_r01_stage_profiles_resolve_non_premium(default_project):
     assert verify_profile.model == "gpt-5.6-luna"
 
 
-def test_stage_profile_rejects_premium_model_by_default(default_project):
+def test_stage_profile_rejects_premium_model_by_default(default_project, monkeypatch):
     """Prove premium models fail closed when configured as default without escalation."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-only-key")
     premium_cases = [
         ("antigravity", "gemini-2.5-pro"),
         ("antigravity", "gemini-pro"),
         ("antigravity", "claude-opus-5-5-high"),
         ("codex", "gpt-4o"),
         ("codex", "o1"),
-        ("deepseek", "deepseek-reasoner"),
     ]
     for provider, model in premium_cases:
         proj = ProjectConfig(
@@ -105,6 +106,18 @@ def test_stage_profile_rejects_premium_model_by_default(default_project):
         )
         with pytest.raises(StageProfileError, match="PREMIUM_MODEL_REJECTED"):
             resolve_stage_profile(proj, "APPLY")
+
+    deepseek_reviewer = ProjectConfig(
+        repository="test-org/test-repo",
+        external_providers_allowed=["deepseek"],
+        stage_profiles={
+            "CONTRACT_REVIEW": StageProfileConfig(
+                provider="deepseek", model="deepseek-reasoner", effort="medium"
+            )
+        },
+    )
+    with pytest.raises(StageProfileError, match="PREMIUM_MODEL_REJECTED"):
+        resolve_stage_profile(deepseek_reviewer, "CONTRACT_REVIEW")
 
 
 def test_stage_profile_rejects_max_effort_by_default(default_project):
@@ -249,9 +262,9 @@ def test_stage_profile_rejects_unallowed_provider():
         resolve_stage_profile(proj, "APPLY")
 
 
-def test_stage_profile_rejects_same_author_reviewer_collision(default_project):
-    """Prove reviewer stage fails closed if its provider matches the implementer."""
-    with pytest.raises(StageProfileError, match="REVIEWER_IDENTITY_COLLISION"):
+def test_stage_profile_requires_deepseek_direct_for_code_review(default_project):
+    """A primary CLI cannot substitute for the independent DeepSeek reviewer."""
+    with pytest.raises(StageProfileError, match="CODE_REVIEW_(WAITING|REQUIRES_DEEPSEEK_DIRECT)"):
         resolve_stage_profile(
             default_project,
             "REVIEW",
