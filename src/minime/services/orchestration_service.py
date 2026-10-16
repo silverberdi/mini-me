@@ -2109,7 +2109,39 @@ class OrchestrationService:
 
                 cand_sha = current_cand.candidate_sha
                 gen = current_cand.generation
-                branch_name = f"minime/{run.change_name}"
+                job_branch = f"minime/{run.change_name}-{job.job_id}"
+                expected_candidate_ref = f"refs/heads/{job_branch}"
+                expected_integration_ref = (
+                    f"{expected_candidate_ref}-integration-gen{gen}-{current_cand.base_sha[:12]}"
+                )
+                if current_cand.candidate_ref not in {
+                    None,
+                    expected_candidate_ref,
+                    expected_integration_ref,
+                }:
+                    self._stop_run(
+                        run,
+                        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+                        human_gate=HumanGate.NEEDS_HUMAN,
+                        stop_reason=(
+                            "Candidate publication ref does not belong to the active Job."
+                        ),
+                        stop_details={
+                            "code": "CANDIDATE_BRANCH_IDENTITY_MISMATCH",
+                            "candidate_ref": current_cand.candidate_ref,
+                            "expected_job_ref": expected_candidate_ref,
+                        },
+                    )
+                    break
+                # Worktree and frozen-candidate creation use a Job-scoped ref. Keep
+                # historical candidates without a ref publishable on that same
+                # deterministic Job namespace; never fall back to the shared
+                # change-only branch, which may belong to another Run/Job.
+                branch_name = (
+                    current_cand.candidate_ref.removeprefix("refs/heads/")
+                    if current_cand.candidate_ref
+                    else job_branch
+                )
 
                 # 1. Mutating Git Action: Branch Push under canonical Stage G atomic fenced dispatch intent
                 push_key = f"push:{run.run_id}:gen{gen}:{cand_sha}"

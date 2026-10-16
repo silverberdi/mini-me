@@ -30,6 +30,7 @@ from minime.adapters.github import GitHubAdapter
 from minime.adapters.provider_adapter import CapacityObservation, get_provider_adapter
 from minime.domain.enums import (
     AdmissionBlockCondition,
+    AdmissionDecision,
     AdmissionDecisionKind,
     CapacitySignalSource,
     ChangeStatus,
@@ -236,6 +237,84 @@ def test_safe_executable_pair_admits_run(
     assert res.eligible_implementer == "codex"
     assert res.eligible_reviewer == "antigravity"
     assert res.block_condition is None
+
+
+def test_fresh_intake_admission_creates_new_run_job_and_waits_for_contract_review(
+    tmp_path: Path,
+    in_memory_uow: InMemoryPersistenceUnitOfWork,
+    test_capacity_strategy,
+):
+    """Canonical intake creates new identities, then gates before any APPLY dispatch."""
+    from minime.services.contract_review_service import ContractReviewResult
+    from minime.services.execution_pipeline import ExecutionPipelineService
+
+    project, scheduler = setup_test_environment(tmp_path, in_memory_uow)
+    test_capacity_strategy(("codex", "antigravity"))
+    readiness = scheduler.readiness_service.evaluate_and_persist_change_readiness(
+        project_id=project.project_id,
+        change_name="016-autonomous-queue-work-selection",
+        project_root=str(tmp_path),
+        github_repo=project.repository,
+        github_issue=45,
+        require_published_ref=True,
+    )
+    assert readiness.is_ready
+    in_memory_uow.work_queue.save(
+        WorkQueueItem(
+            project_id=project.project_id,
+            change_name="016-autonomous-queue-work-selection",
+            github_issue_number=45,
+            priority=QueuePriority.HIGH,
+            roadmap_stage=16,
+            readiness_state=ReadinessState.READY,
+            admission_eligible=True,
+        )
+    )
+
+    class WaitingContractReview:
+        calls = 0
+
+        async def review_before_apply(self, project_arg, run_arg, job_arg, worktree_path):
+            del project_arg, run_arg, job_arg, worktree_path
+            self.calls += 1
+            return ContractReviewResult(
+                accepted=False,
+                review_id=None,
+                contract_hash=None,
+                reason="deterministic acceptance fixture: no CONTRACT_REVIEW authorization",
+                waiting=True,
+            )
+
+    contract_review = WaitingContractReview()
+    pipeline = ExecutionPipelineService(
+        in_memory_uow,
+        project_root=tmp_path,
+        contract_review_service=contract_review,
+    )
+    scheduler.orchestration_service.pipeline = pipeline
+    scheduler.orchestration_service.remediation_service.pipeline = pipeline
+
+    decision, record, run = scheduler.admit_work_item(
+        project.project_id,
+        "016-autonomous-queue-work-selection",
+        drive_admitted=True,
+        require_published_ref=True,
+    )
+
+    assert decision == AdmissionDecision.ADMITTED
+    assert record.run_id == run.run_id
+    assert run.active_job_id
+    job = in_memory_uow.jobs.get_by_id(run.active_job_id)
+    assert job is not None
+    assert job.job_id != "607cd403-038f-47cb-b655-9963f0bfbbf0"
+    assert job.status == JobStatus.WAITING_CAPACITY
+    assert contract_review.calls == 1
+    assert in_memory_uow.orchestration_candidates.get_latest_for_run(run.run_id) is None
+    assert in_memory_uow.job_attempts.list_by_job(job.job_id) == []
+    assert (
+        in_memory_uow.orchestration_runs.get_active_run(project.project_id, job.change_name).run_id
+        == run.run_id
+    )
 
 
 # 2. Implementer exhausted → WAIT

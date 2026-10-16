@@ -376,10 +376,11 @@ class FakeGitHubAdapter(GitHubAdapterInterface):
                 error_message="GitHub PR API unreachable",
             )
         key = f"{repository}:{branch}"
+        next_number = max((int(pr.get("number", 0)) for pr in self.prs.values()), default=0) + 1
         pr_data = {
             "repository": repository,
-            "number": len(self.prs) + 1,
-            "url": f"https://github.com/{repository}/pull/{len(self.prs) + 1}",
+            "number": next_number,
+            "url": f"https://github.com/{repository}/pull/{next_number}",
             "head_sha": head_sha,
             "head_branch": branch,
             "base_branch": base,
@@ -1488,22 +1489,34 @@ def test_deepseek_audit_blocking_findings_trigger_remediation(
     _assert_frozen_candidate_worktree(in_memory_uow, run)
 
 
-def test_pr_head_mismatch_fails_closed_needs_human(setup_orchestration_environment, in_memory_uow):
-    """Verify that an existing remote PR with mismatched head SHA triggers fail-closed NEEDS_HUMAN."""
+def test_new_job_pr_branch_does_not_reuse_historical_change_branch(
+    setup_orchestration_environment, in_memory_uow
+):
+    """A fresh Job publishes on its own branch and leaves the historical fixture PR intact."""
     env = setup_orchestration_environment
 
     fake_github = FakeGitHubAdapter()
-    # Pre-populate mismatched PR on remote GitHub
-    fake_github.prs["silverberdi/mini-me:minime/008-autonomous-change-orchestration"] = {
+    historical_branch_name = f"minime/{env['change_name']}"
+    historical_sha = "a9f1599aa6c45eb47a0925fb0f033e01e02f33e0"
+    historical_branch = {
+        "remote": "origin",
+        "branch": historical_branch_name,
+        "candidate_sha": historical_sha,
+    }
+    fake_github.pushed_branches.append(historical_branch.copy())
+    historical_pr_key = f"silverberdi/mini-me:{historical_branch_name}"
+    fake_github.prs[historical_pr_key] = {
         "repository": "silverberdi/mini-me",
-        "head_branch": "minime/008-autonomous-change-orchestration",
+        "head_branch": historical_branch_name,
         "base_branch": "main",
-        "number": 42,
-        "url": "https://github.com/silverberdi/mini-me/pull/42",
-        "head_sha": "some-other-unrelated-sha-9999",
+        "number": 2,
+        "url": "https://github.com/silverberdi/mini-me-r01-e2e-20261014/pull/2",
+        "head_sha": historical_sha,
         "base_sha": "main",
         "state": "OPEN",
+        "draft": True,
     }
+    preserved_pr = fake_github.prs[historical_pr_key].copy()
 
     pipeline = ExecutionPipelineService(
         uow=in_memory_uow,
@@ -1529,11 +1542,18 @@ def test_pr_head_mismatch_fails_closed_needs_human(setup_orchestration_environme
 
     run = service.start(env["project_id"], env["change_name"])
 
-    # Fail closed: must stop with NEEDS_HUMAN
-    assert run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
-    assert run.human_gate == HumanGate.NEEDS_HUMAN
-    assert "does not match" in run.stop_reason.lower()
-    assert run.stop_details.get("code") == "PR_HEAD_MISMATCH"
+    assert run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
+    assert run.human_gate == HumanGate.READY_FOR_HUMAN_MERGE
+    assert fake_github.prs[historical_pr_key] == preserved_pr
+    assert fake_github.pushed_branches[0] == historical_branch
+
+    job_branch = f"minime/{env['change_name']}-{run.active_job_id}"
+    assert job_branch != historical_branch_name
+    assert any(entry["branch"] == job_branch for entry in fake_github.pushed_branches[1:])
+    new_pr = fake_github.prs[f"silverberdi/mini-me:{job_branch}"]
+    assert new_pr["head_branch"] == job_branch
+    assert new_pr["head_sha"] != historical_sha
+    assert new_pr["number"] != 2
 
 
 def test_transient_external_failure_stops_waiting_external_and_resumes(
@@ -2256,11 +2276,6 @@ def test_push_reconciliation_zero_second_push_and_zero_force_push(
 
     # Simulate remote branch already matching candidate SHA
     cand_sha = "matching-remote-cand-sha"
-    fake_github.pushed_branches.append(
-        {"remote": "origin", "branch": f"minime/{env['change_name']}", "candidate_sha": cand_sha}
-    )
-    initial_push_count = len(fake_github.pushed_branches)
-
     # Run orchestration starting from PREPARING_PR
     job = Job(
         project_id=env["project_id"],
@@ -2272,6 +2287,11 @@ def test_push_reconciliation_zero_second_push_and_zero_force_push(
         status=JobStatus.CHECKS_PASSED,
     )
     in_memory_uow.jobs.save(job)
+    job_branch = f"minime/{env['change_name']}-{job.job_id}"
+    fake_github.pushed_branches.append(
+        {"remote": "origin", "branch": job_branch, "candidate_sha": cand_sha}
+    )
+    initial_push_count = len(fake_github.pushed_branches)
 
     run = OrchestrationRun(
         run_id="run-push-recon-test",
@@ -2291,6 +2311,7 @@ def test_push_reconciliation_zero_second_push_and_zero_force_push(
         generation=1,
         base_sha="base-1",
         candidate_sha=cand_sha,
+        candidate_ref=f"refs/heads/{job_branch}",
         manifest_id="manifest-push-recon",
         manifest_hash="hash-push-recon",
         is_frozen=True,
