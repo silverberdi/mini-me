@@ -91,6 +91,7 @@ class ProjectService:
         checks: list[dict[str, Any]] | None = None,
         external_providers_allowed: list[str] | None = None,
         openrouter_drain_allowed: bool = False,
+        independent_audit_required: bool = False,
         strict_validation_required: bool = True,
         verify_gate_required: bool = True,
         sync_gate_required: bool = True,
@@ -146,6 +147,7 @@ class ProjectService:
             external_providers_allowed=external_providers_allowed
             or ["codex", "antigravity", "deepseek"],
             openrouter_drain_allowed=openrouter_drain_allowed,
+            independent_audit_required=independent_audit_required,
             strict_validation_required=strict_validation_required,
             verify_gate_required=verify_gate_required,
             sync_gate_required=sync_gate_required,
@@ -271,6 +273,7 @@ class ProjectService:
         checks: list[dict[str, Any]] | None = None,
         external_providers_allowed: list[str] | None = None,
         openrouter_drain_allowed: bool | None = None,
+        independent_audit_required: bool | None = None,
         deployment_preview: dict[str, Any] | None = None,
         deployment_production: dict[str, Any] | None = None,
         auto_prepare: bool | None = None,
@@ -311,6 +314,8 @@ class ProjectService:
             project.external_providers_allowed = external_providers_allowed
         if openrouter_drain_allowed is not None:
             project.openrouter_drain_allowed = openrouter_drain_allowed
+        if independent_audit_required is not None:
+            project.independent_audit_required = independent_audit_required
         if deployment_preview is not None:
             project.deployment_preview = deployment_preview
         if deployment_production is not None:

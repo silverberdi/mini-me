@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validat
 
 from minime.domain.enums import (
     PRIMARY_PROVIDERS,
+    READ_ONLY_REVIEW_PROVIDERS,
     ActionRiskLevel,
     AdmissionBlockCondition,
     AdmissionDecision,
@@ -108,6 +109,7 @@ class Project(BaseModel):
         default_factory=lambda: ["codex", "antigravity", "deepseek"]
     )
     openrouter_drain_allowed: bool = False
+    independent_audit_required: bool = False
     strict_validation_required: bool = True
     verify_gate_required: bool = True
     sync_gate_required: bool = True
@@ -504,6 +506,7 @@ AUTHORITATIVE_PRICING_SOURCES: frozenset[str] = frozenset(
         "operator_verified",
         "openrouter_catalog_verified",
         "openrouter_catalog_api",
+        "deepseek_official_pricing",
     }
 )
 
@@ -518,12 +521,17 @@ class OpenRouterPricingSnapshot(BaseModel):
     additional_cost_per_request: Decimal = Field(default_factory=lambda: Decimal("0.0"))
     currency: str = "USD"
     source: str = "openrouter_catalog_api"
+    provider: str = "openrouter"
+    account_fingerprint: str | None = None
+    billing_origin: str = "openrouter"
     observed_at: datetime = Field(default_factory=utc_now)
     created_at: datetime = Field(default_factory=utc_now)
 
     @property
     def is_verified(self) -> bool:
-        return self.source in AUTHORITATIVE_PRICING_SOURCES
+        if self.provider == "deepseek":
+            return self.source in {"operator_verified", "deepseek_official_pricing"}
+        return self.provider == "openrouter" and self.source in AUTHORITATIVE_PRICING_SOURCES
 
 
 class BudgetReservation(BaseModel):
@@ -531,6 +539,7 @@ class BudgetReservation(BaseModel):
     reservation_id: str = Field(default_factory=generate_uuid, alias="id")
     project_id: str
     job_id: str
+    run_id: str | None = None
     change_id: str
     role: str
     canonical_model_identity: str
@@ -538,6 +547,12 @@ class BudgetReservation(BaseModel):
     status: str
     pricing_snapshot_id: str
     correlation_id: str | None = None
+    provider: str = "openrouter"
+    account_fingerprint: str | None = None
+    stage: str = "LEGACY_OPENROUTER"
+    billing_origin: str = "openrouter"
+    authorization_id: str | None = None
+    idempotency_key: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
@@ -550,6 +565,9 @@ class BudgetLedgerEntry(BaseModel):
     job_id: str
     change_id: str
     provider: str = "openrouter"
+    account_fingerprint: str | None = None
+    stage: str = "LEGACY_OPENROUTER"
+    billing_origin: str = "openrouter"
     role: str
     canonical_model_identity: str
     prompt_tokens: int | None = None
@@ -593,11 +611,8 @@ class ProviderHealth(BaseModel):
 
     def validate_primary(self) -> None:
         """Enforce that only primary providers (Codex, Antigravity) are tracked."""
-        if self.provider not in PRIMARY_PROVIDERS:
-            raise ValueError(
-                f"Invalid primary provider '{self.provider}'. "
-                f"005 capacity tracking is restricted strictly to {PRIMARY_PROVIDERS}."
-            )
+        if self.provider not in PRIMARY_PROVIDERS | READ_ONLY_REVIEW_PROVIDERS:
+            raise ValueError(f"Invalid provider '{self.provider}' for bounded capacity tracking.")
 
 
 class CapacityWindow(BaseModel):
@@ -704,6 +719,13 @@ class Review(BaseModel):
     change_name: str
     reviewer_role: str
     reviewer_model: str | None = None
+    review_stage: str = "CODE_REVIEW"
+    contract_hash: str | None = None
+    provider: str | None = None
+    account_fingerprint: str | None = None
+    budget_authorization_id: str | None = None
+    budget_reservation_id: str | None = None
+    billing_origin: str | None = None
     orchestration_run_id: str | None = None
     candidate_generation: int | None = None
     candidate_sha: str
@@ -736,6 +758,16 @@ class ReviewVerdictPayload(BaseModel):
     verdict: ReviewVerdict
     summary: str = ""
     findings: list[ReviewFindingPayload] = Field(default_factory=list)
+
+
+class ContractReviewVerdictPayload(BaseModel):
+    """Read-only OpenSpec contract review; intentionally not a code/merge verdict."""
+
+    verdict: ReviewVerdict
+    summary: str
+    findings: list[ReviewFindingPayload] = Field(default_factory=list)
+
+    model_config = {"extra": "forbid"}
 
 
 class AuditFinding(BaseModel):

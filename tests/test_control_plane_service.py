@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+from decimal import Decimal
+
 import pytest
 
 from minime.domain.enums import (
     ChangeStatus,
+    ExecutionOutcome,
     HumanGate,
     JobStatus,
     OperatorActionErrorCode,
@@ -13,6 +17,10 @@ from minime.domain.enums import (
     OperatorActionType,
     OrchestrationStage,
     OrchestrationStopOutcome,
+    ProgressClassification,
+    RecoveryClassification,
+    RecoveryDecisionStatus,
+    RecoverySource,
     ValidationVerdict,
 )
 from minime.domain.models import (
@@ -20,11 +28,15 @@ from minime.domain.models import (
     Job,
     JobAttempt,
     JobHandoff,
+    OperatorActionRecord,
     OperatorActionRequest,
     OrchestrationRun,
     OrchestrationWorktreeOwnership,
     Project,
+    RecoveryClaim,
+    RecoveryDecision,
     generate_uuid,
+    utc_now,
 )
 from minime.services.control_plane_service import ControlPlaneService
 from minime.services.operator_executor_selection import effective_job_executor
@@ -97,6 +109,185 @@ def test_get_available_actions_discovery(in_memory_uow, seeded_project_and_run):
     assert "not active" in action_map[OperatorActionType.CANCEL].disabled_reason.lower()
     # START_PREVIEW is enabled because candidate_sha exists and preview is enabled
     assert action_map[OperatorActionType.START_PREVIEW].enabled is True
+
+
+def test_deepseek_review_has_no_implicit_spend_ceiling(in_memory_uow, seeded_project_and_run):
+    _, _, run = seeded_project_and_run
+    service = ControlPlaneService(in_memory_uow)
+
+    assert service._deepseek_combined_review_limit({}) is None
+    assert (
+        service._deepseek_combined_review_limit(
+            {"maximum_contract_review_usd": "0.50", "maximum_code_review_usd": "1.00"}
+        )
+        is None
+    )
+    assert service._deepseek_review_total_within_limit(run, {}, Decimal("1000000"))
+    assert not service._deepseek_review_total_within_limit(
+        run, {"maximum_combined_review_usd": "1.50"}, Decimal("1.50") + Decimal("0.01")
+    )
+
+
+def _seed_stale_continue_checkpoint(uow, project, change, run):
+    now = utc_now()
+    job = Job(
+        job_id="job-stale-continue",
+        project_id=project.project_id,
+        change_name=change.name,
+        implementer_role="codex",
+        current_executor="codex",
+        status=JobStatus.CHECKS_FAILED,
+        attempt_count=1,
+        base_sha="base00000000",
+        candidate_sha="candidate00000000",
+    )
+    run.current_stage = OrchestrationStage.IMPLEMENTING
+    run.resumable_stage = OrchestrationStage.IMPLEMENTING
+    run.active_job_id = job.job_id
+    run.current_candidate_sha = None
+    run.stop_outcome = None
+    run.human_gate = None
+    run.is_active = True
+    uow.jobs.save(job)
+    uow.orchestration_runs.save(run)
+    uow.job_attempts.save(
+        JobAttempt(
+            attempt_id="attempt-stale-continue",
+            job_id=job.job_id,
+            attempt_number=1,
+            executor_role="codex",
+            model_identity="codex-test",
+            start_sha="base00000000",
+            end_sha="candidate00000000",
+            normalized_outcome=ExecutionOutcome.COMPLETED,
+            progress_classification=ProgressClassification.NO_PROGRESS,
+            started_at=now - timedelta(seconds=30),
+            completed_at=now - timedelta(seconds=20),
+            duration_ms=10_000,
+        )
+    )
+    claim_key = f"run:{run.run_id}"
+    claim = RecoveryClaim(
+        claim_key=claim_key,
+        fence_token=7,
+        owner_instance_id="prior-instance",
+        claimed_at=now - timedelta(minutes=2),
+        heartbeat_at=now - timedelta(minutes=1),
+        lease_expires_at=now - timedelta(seconds=10),
+    )
+    uow.claims._claims[claim_key] = claim
+    uow.recovery_decisions.create_decision(
+        RecoveryDecision(
+            decision_id="decision-stale-continue",
+            cycle_id="cycle-stale-continue",
+            claim_key=claim_key,
+            identity_type="RUN",
+            identity_id=run.run_id,
+            project_id=run.project_id,
+            change_name=run.change_name,
+            source=RecoverySource.CONTROL_PLANE,
+            classification=RecoveryClassification.RESUME_SAFE_CHECKPOINT,
+            planned_action="DRIVE_CONTINUATION",
+            fence_token=7,
+            status=RecoveryDecisionStatus.EXECUTING,
+            created_at=now - timedelta(seconds=40),
+        )
+    )
+    uow.operator_actions.save(
+        OperatorActionRecord(
+            action_request_id="failed-continue-request",
+            project_id=run.project_id,
+            change_name=run.change_name,
+            run_id=run.run_id,
+            # The durable legacy record is Run-bound; the current Run's
+            # active_job_id is the authoritative Job association.
+            job_id=None,
+            action_type=OperatorActionType.CONTINUE,
+            actor_identity="operator-authorized",
+            source_interface="cli",
+            precondition_stage=run.current_stage.value,
+            status=OperatorActionStatus.FAILED,
+            error_code=OperatorActionErrorCode.ACTION_EXECUTION_FAILED,
+            summary="Continuation failed after its stage checkpoint was committed.",
+            result_payload_json={
+                "error": "Fenced stage update failed: claim fence is stale, expired, or superseded."
+            },
+            created_at=now - timedelta(seconds=5),
+        )
+    )
+    uow.commit()
+    return job, claim_key
+
+
+def test_stale_active_checkpoint_allows_only_new_governed_continue(
+    in_memory_uow, seeded_project_and_run
+):
+    project, change, run = seeded_project_and_run
+    job, _ = _seed_stale_continue_checkpoint(in_memory_uow, project, change, run)
+    service = ControlPlaneService(in_memory_uow)
+
+    assert service._has_stale_active_checkpoint(
+        in_memory_uow.orchestration_runs.get_by_id(run.run_id)
+    )
+    actions = {item.action: item for item in service.get_available_actions(run.run_id)}
+    assert actions[OperatorActionType.CONTINUE].enabled
+    assert job.candidate_sha == "candidate00000000"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "live_claim",
+        "wrong_action_job",
+        "wrong_action_stage",
+        "blocked_decision",
+        "running_job",
+        "candidate_mismatch",
+        "run_candidate_frozen",
+        "unrelated_action_failure",
+    ],
+)
+def test_stale_active_checkpoint_rejects_ambiguous_or_live_state(
+    in_memory_uow, seeded_project_and_run, mutation
+):
+    project, change, run = seeded_project_and_run
+    job, claim_key = _seed_stale_continue_checkpoint(in_memory_uow, project, change, run)
+    if mutation == "live_claim":
+        claim = in_memory_uow.claims.get_by_key(claim_key)
+        claim.lease_expires_at = utc_now() + timedelta(minutes=1)
+        in_memory_uow.claims._claims[claim_key] = claim
+    elif mutation == "wrong_action_job":
+        action = in_memory_uow.operator_actions.list_by_run(run.run_id)[0]
+        action.job_id = "another-job"
+        in_memory_uow.operator_actions.save(action)
+    elif mutation == "wrong_action_stage":
+        action = in_memory_uow.operator_actions.list_by_run(run.run_id)[0]
+        action.precondition_stage = OrchestrationStage.RUNNING_CHECKS.value
+        in_memory_uow.operator_actions.save(action)
+    elif mutation == "blocked_decision":
+        decision = in_memory_uow.recovery_decisions.list_by_claim_key(claim_key)[0]
+        decision.status = RecoveryDecisionStatus.BLOCKED
+        in_memory_uow.recovery_decisions.update_decision(decision)
+    elif mutation == "candidate_mismatch":
+        persisted_job = in_memory_uow.jobs.get_by_id(job.job_id)
+        persisted_job.candidate_sha = "different-candidate"
+        in_memory_uow.jobs.save(persisted_job)
+    elif mutation == "run_candidate_frozen":
+        persisted_run = in_memory_uow.orchestration_runs.get_by_id(run.run_id)
+        persisted_run.current_candidate_sha = job.candidate_sha
+        in_memory_uow.orchestration_runs.save(persisted_run)
+    elif mutation == "unrelated_action_failure":
+        action = in_memory_uow.operator_actions.list_by_run(run.run_id)[0]
+        action.result_payload_json = {"error": "some unrelated control-plane failure"}
+        in_memory_uow.operator_actions.save(action)
+    else:
+        persisted_job = in_memory_uow.jobs.get_by_id(job.job_id)
+        persisted_job.status = JobStatus.RUNNING
+        in_memory_uow.jobs.save(persisted_job)
+
+    assert not ControlPlaneService(in_memory_uow)._has_stale_active_checkpoint(
+        in_memory_uow.orchestration_runs.get_by_id(run.run_id)
+    )
 
 
 def test_optimistic_concurrency_rejection(in_memory_uow, seeded_project_and_run):
@@ -181,7 +372,9 @@ def test_continue_reports_persisted_human_and_failed_job_outcome(
     in_memory_uow.commit()
 
     class FailedContinuation:
-        def request_run_continuation(self, run_id, *, source, force):
+        def request_run_continuation(self, run_id, *, source, force, drive_admitted):
+            assert drive_admitted is True
+            assert force is True
             persisted_run = in_memory_uow.orchestration_runs.get_by_id(run_id)
             persisted_run.is_active = False
             persisted_run.stop_outcome = OrchestrationStopOutcome.NEEDS_HUMAN
@@ -281,9 +474,7 @@ def _cancel_request(run: OrchestrationRun) -> OperatorActionRequest:
     )
 
 
-@pytest.mark.parametrize(
-    "job_status", [JobStatus.QUEUED, JobStatus.RUNNING]
-)
+@pytest.mark.parametrize("job_status", [JobStatus.QUEUED, JobStatus.RUNNING])
 def test_cancel_active_run_converges_nonterminal_linked_job(
     in_memory_uow, seeded_project_and_run, job_status
 ):

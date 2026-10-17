@@ -57,7 +57,7 @@ from minime.domain.models import (
 )
 from minime.logging import get_logger, redact_secrets, set_correlation_context
 from minime.services.lifecycle_transition_authority import LifecycleTransitionAuthority
-from minime.services.openspec_generator import OpenSpecGenerator, slugify
+from minime.services.openspec_generator import GeneratedOpenSpec, OpenSpecGenerator, slugify
 from minime.services.readiness_service import ReadinessService
 from minime.services.saga_engine import SagaEngine
 from minime.services.workspace_guard import ManagedWorkspaceGuard, is_binding_fully_valid
@@ -481,9 +481,7 @@ class IntakeService:
         # 1. OpenSpec Authored Phase
         author_action_key = f"openspec_author:{project_id}:{change_name}"
         if not _has_passed_intake_phase(saga.current_phase, "OPENSPEC_AUTHORED"):
-            generated = self.openspec_generator.generate_from_backlog_item(
-                item, project_name=project.display_name
-            )
+            generated = self._load_or_generate_openspec(project, item, change_name)
 
             if not generated.is_complete:
                 updated_item = item.model_copy(
@@ -537,21 +535,77 @@ class IntakeService:
                         / "changes"
                         / change_name
                     )
-                    proposal_file = change_dir / "proposal.md"
-                    tasks_file = change_dir / "tasks.md"
-                    design_file = change_dir / "design.md"
-                    if proposal_file.exists() and tasks_file.exists() and design_file.exists():
+                    manifest = self.openspec_generator.build_artifact_manifest(generated)
+                    expected_hashes = self._compute_artifact_sha256(generated)
+                    expected_paths = {
+                        f"{project.openspec_path}/changes/{change_name}/{relative}"
+                        for relative in manifest.files
+                    }
+                    if change_dir.exists() and not change_dir.is_symlink() and change_dir.is_dir():
+                        actual_paths = {
+                            path.relative_to(workspace.canonical_workspace_path).as_posix()
+                            for path in change_dir.rglob("*")
+                            if path.is_file() and not path.is_symlink()
+                        }
+                        if actual_paths != expected_paths:
+                            return ExternalActionResult(
+                                outcome=ExternalOutcome.AMBIGUOUS,
+                                source_adapter="filesystem",
+                                reason_code=ExternalReasonCode.EVIDENCE_INSUFFICIENT,
+                                error_message="Existing intake artifacts do not prove the exact manifest.",
+                            )
+                        if any((change_dir / rel).is_symlink() for rel in manifest.files):
+                            return ExternalActionResult(
+                                outcome=ExternalOutcome.AMBIGUOUS,
+                                source_adapter="filesystem",
+                                reason_code=ExternalReasonCode.EVIDENCE_INSUFFICIENT,
+                                error_message="Symlink found in existing intake artifacts.",
+                            )
+                        actual_hashes = {
+                            rel: hashlib.sha256((change_dir / rel).read_bytes()).hexdigest()
+                            for rel in manifest.files
+                        }
+                        head_sha = self._rev_parse_head(workspace.canonical_workspace_path)
+                        if (
+                            actual_hashes == expected_hashes
+                            and workspace.head_sha
+                            and head_sha == workspace.head_sha
+                        ):
+                            self._verify_committed_artifacts(
+                                workspace.canonical_workspace_path,
+                                head_sha,
+                                f"{project.openspec_path}/changes/{change_name}",
+                                expected_paths,
+                                manifest.files,
+                                expected_hashes,
+                            )
+                            return ExternalActionResult(
+                                outcome=ExternalOutcome.SUCCESS,
+                                source_adapter="filesystem",
+                                reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
+                                data={"change_name": change_name, "head_sha": head_sha},
+                                external_id=change_name,
+                            )
                         return ExternalActionResult(
-                            outcome=ExternalOutcome.SUCCESS,
+                            outcome=ExternalOutcome.AMBIGUOUS,
                             source_adapter="filesystem",
-                            reason_code=ExternalReasonCode.EXECUTION_SUCCESS,
-                            data={"change_name": change_name, "path": str(change_dir)},
-                            external_id=change_name,
+                            reason_code=ExternalReasonCode.EVIDENCE_INSUFFICIENT,
+                            error_message="Existing intake artifacts are not durably committed to the owned HEAD.",
+                        )
+
+                    head_sha = self._rev_parse_head(workspace.canonical_workspace_path)
+                    if workspace.head_sha is None and head_sha == workspace.base_sha:
+                        return ExternalActionResult(
+                            outcome=ExternalOutcome.FAILURE,
+                            source_adapter="filesystem",
+                            reason_code=ExternalReasonCode.NOT_FOUND,
+                            error_message="No intake artifact write or commit is observable.",
                         )
                     return ExternalActionResult(
-                        outcome=ExternalOutcome.FAILURE,
+                        outcome=ExternalOutcome.AMBIGUOUS,
                         source_adapter="filesystem",
-                        reason_code="NOT_FOUND",
+                        reason_code=ExternalReasonCode.EVIDENCE_INSUFFICIENT,
+                        error_message="Missing intake directory does not prove the owned workspace is unchanged.",
                     )
 
                 def _mutate_openspec():
@@ -572,6 +626,25 @@ class IntakeService:
                         reason_code="EXECUTION_SUCCESS",
                         data={"change_name": change_name},
                         external_id=change_name,
+                    )
+
+                if existing_author_action and existing_author_action.status in (
+                    ExternalActionStatus.EXECUTING,
+                    ExternalActionStatus.FAILED,
+                    ExternalActionStatus.UNKNOWN,
+                    ExternalActionStatus.AMBIGUOUS,
+                ):
+                    observed = _observe_openspec()
+                    retry_authorized = (
+                        observed.outcome == ExternalOutcome.FAILURE
+                        and observed.reason_code == ExternalReasonCode.NOT_FOUND
+                    )
+                    from minime.services.reconciliation_authority import ReconciliationAuthority
+
+                    ReconciliationAuthority(self.uow).reconcile_observe_before_repeat(
+                        author_action_key,
+                        observed,
+                        original_mutation_retry_authorized=retry_authorized,
                     )
 
                 fenced_res = self.saga_engine.execute_fenced_external_action(
@@ -1017,6 +1090,28 @@ class IntakeService:
             readiness_state=final_readiness,
             unmet_readiness_reasons=readiness_eval.unmet_reasons,
             human_questions=[],
+        )
+
+    def _load_or_generate_openspec(
+        self, project: Project, item: BacklogItem, change_name: str
+    ) -> GeneratedOpenSpec:
+        """Preserve pre-authored native OpenSpec artifacts when present.
+
+        Intake owns publication, not authorship. A complete existing change in
+        the bound managed repository is copied byte-for-byte into the authorized
+        intake workspace; malformed trees fail closed. Legacy backlog-only items
+        retain the existing generator path when no change directory exists.
+        """
+        source_root = self._resolve_project_root(project)
+        existing = self.openspec_generator.load_existing_change(
+            change_name=change_name,
+            source_root=source_root,
+            openspec_path=project.openspec_path,
+        )
+        if existing is not None:
+            return existing
+        return self.openspec_generator.generate_from_backlog_item(
+            item, project_name=project.display_name
         )
 
     def start_work_item(

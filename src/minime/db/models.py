@@ -48,6 +48,9 @@ class ProjectModel(Base):
         JSON, default=lambda: ["codex", "antigravity", "deepseek"], nullable=False
     )
     openrouter_drain_allowed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    independent_audit_required: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
     strict_validation_required: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default="true", nullable=False
     )
@@ -630,6 +633,15 @@ class ReviewModel(Base):
     change_name: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     reviewer_role: Mapped[str] = mapped_column(String(64), nullable=False)
     reviewer_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    review_stage: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="CODE_REVIEW", index=True
+    )
+    contract_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    provider: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    account_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    budget_authorization_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    budget_reservation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    billing_origin: Mapped[str | None] = mapped_column(String(64), nullable=True)
     orchestration_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     candidate_generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
     candidate_sha: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -765,6 +777,11 @@ class OpenRouterPricingSnapshotModel(Base):
     )
     currency: Mapped[str] = mapped_column(String(3), default="USD", nullable=False)
     source: Mapped[str] = mapped_column(String(64), nullable=False)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False, server_default="openrouter")
+    account_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    billing_origin: Mapped[str] = mapped_column(
+        String(64), nullable=False, server_default="openrouter"
+    )
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
@@ -781,6 +798,7 @@ class BudgetReservationModel(Base):
     job_id: Mapped[str] = mapped_column(
         String(64), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False
     )
+    run_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     change_id: Mapped[str] = mapped_column(String(128), nullable=False)
     role: Mapped[str] = mapped_column(String(32), nullable=False)
     canonical_model_identity: Mapped[str] = mapped_column(String(128), nullable=False)
@@ -792,6 +810,16 @@ class BudgetReservationModel(Base):
         nullable=False,
     )
     correlation_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False, server_default="openrouter")
+    account_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    stage: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="LEGACY_OPENROUTER"
+    )
+    billing_origin: Mapped[str] = mapped_column(
+        String(64), nullable=False, server_default="openrouter"
+    )
+    authorization_id: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True, unique=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False, index=True
     )
@@ -815,6 +843,13 @@ class BudgetLedgerModel(Base):
     )
     change_id: Mapped[str] = mapped_column(String(128), nullable=False)
     provider: Mapped[str] = mapped_column(String(32), default="openrouter", nullable=False)
+    account_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    stage: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="LEGACY_OPENROUTER"
+    )
+    billing_origin: Mapped[str] = mapped_column(
+        String(64), nullable=False, server_default="openrouter"
+    )
     role: Mapped[str] = mapped_column(String(32), nullable=False)
     canonical_model_identity: Mapped[str] = mapped_column(String(128), nullable=False)
     prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -1511,7 +1546,9 @@ class ProjectManagedRepositoryBindingModel(Base):
 class OrchestrationWorktreeOwnershipModel(Base):
     __tablename__ = "orchestration_worktree_ownerships"
     __table_args__ = (
-        UniqueConstraint("canonical_worktree_path", name="uq_orchestration_worktree_ownership_path"),
+        UniqueConstraint(
+            "canonical_worktree_path", name="uq_orchestration_worktree_ownership_path"
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -1521,9 +1558,7 @@ class OrchestrationWorktreeOwnershipModel(Base):
     job_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     run_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     change_name: Mapped[str] = mapped_column(String(128), nullable=False)
-    canonical_worktree_path: Mapped[str] = mapped_column(
-        String(512), nullable=False, index=True
-    )
+    canonical_worktree_path: Mapped[str] = mapped_column(String(512), nullable=False, index=True)
     source_repository_identity: Mapped[str] = mapped_column(String(255), nullable=False)
     source_base_sha: Mapped[str] = mapped_column(String(64), nullable=False)
     branch: Mapped[str] = mapped_column(String(128), nullable=False)
@@ -1574,9 +1609,7 @@ class IntakeWorkspaceOwnershipModel(Base):
     item_key: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     saga_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     change_name: Mapped[str] = mapped_column(String(128), nullable=False)
-    canonical_workspace_path: Mapped[str] = mapped_column(
-        String(512), nullable=False, index=True
-    )
+    canonical_workspace_path: Mapped[str] = mapped_column(String(512), nullable=False, index=True)
     canonical_repository_identity: Mapped[str] = mapped_column(String(255), nullable=False)
     base_sha: Mapped[str] = mapped_column(String(64), nullable=False)
     head_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -1594,9 +1627,7 @@ class IntakeWorkspaceOwnershipModel(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
     )
-    released_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     project: Mapped[ProjectModel] = relationship("ProjectModel")
 
@@ -1676,4 +1707,3 @@ class ExternalActionAttemptModel(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
     )
-

@@ -1001,7 +1001,14 @@ class GitHubAdapter(GitHubAdapterInterface):
         )
 
     def create_pull_request(
-        self, repository: str, branch: str, base: str, title: str, body: str, head_sha: str
+        self,
+        repository: str,
+        branch: str,
+        base: str,
+        title: str,
+        body: str,
+        head_sha: str,
+        draft: bool = True,
     ) -> ExternalActionResult[dict[str, Any]]:
         repo = self._repo(repository)
         existing = self.get_pull_request(repo, branch, base)
@@ -1054,10 +1061,13 @@ class GitHubAdapter(GitHubAdapterInterface):
             )
 
         try:
+            payload: dict[str, Any] = {"title": title, "body": body, "head": branch, "base": base}
+            if draft:
+                payload["draft"] = True
             response = self._request(
                 "POST",
                 f"/repos/{repo}/pulls",
-                json={"title": title, "body": body, "head": branch, "base": base},
+                json=payload,
             )
             if response.status_code in (401, 403):
                 return ExternalActionResult(
@@ -1454,9 +1464,7 @@ class GitHubAdapter(GitHubAdapterInterface):
                 error_message=str(exc),
             )
 
-    def get_issue(
-        self, repository: str, issue_number: int
-    ) -> ExternalActionResult[dict[str, Any]]:
+    def get_issue(self, repository: str, issue_number: int) -> ExternalActionResult[dict[str, Any]]:
         repo = self._repo(repository)
         try:
             response = self._request("GET", f"/repos/{repo}/issues/{issue_number}")

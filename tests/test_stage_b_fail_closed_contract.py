@@ -109,7 +109,7 @@ def test_push_branch_verifies_remote_sha(tmp_path, monkeypatch):
     git_dir.mkdir()
 
     # Setup _run_git mocks
-    def mock_run_git(args, cwd, timeout, secrets=None):
+    def mock_run_git(args, cwd, timeout, secrets=None, **kwargs):
         cmd = " ".join(args)
         proc = MagicMock()
         proc.returncode = 0
@@ -122,7 +122,9 @@ def test_push_branch_verifies_remote_sha(tmp_path, monkeypatch):
         return proc
 
     monkeypatch.setattr(adapter, "_run_git", mock_run_git)
-    monkeypatch.setattr(adapter, "_git_auth_bundle", lambda r: MagicMock(args=(), secrets=()))
+    monkeypatch.setattr(
+        adapter, "_git_auth_bundle", lambda r: MagicMock(args=(), secrets=(), env={})
+    )
 
     # Case A: matching remote SHA -> SUCCESS
     monkeypatch.setattr(
@@ -265,6 +267,7 @@ def test_adversarial_observe_before_repeat_read_safe_does_not_authorize_mutation
         original_mutation_retry_authorized=True,
     )
     assert reconciled_auth.status == ExternalActionStatus.EXECUTING
+    assert reconciled_auth.result_payload["retry_safety"] == "SAFE"
 
 
 def test_create_issue_pre_observation_unknown_blocks_post(monkeypatch):

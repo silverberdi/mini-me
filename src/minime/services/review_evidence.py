@@ -56,8 +56,71 @@ def validate_review_authority(
             )
 
     project = uow.projects.get_by_id(run.project_id)
-    if not project or existing_review.reviewer_role != project.reviewer:
-        return False, None, "Review reviewer identity does not match the assigned reviewer."
+    if (
+        not project
+        or existing_review.review_stage != "CODE_REVIEW"
+        or existing_review.provider != "deepseek"
+        or existing_review.reviewer_role != "deepseek"
+        or existing_review.billing_origin != "deepseek_direct"
+        or not existing_review.account_fingerprint
+    ):
+        return False, None, "Review is not a direct DeepSeek CODE_REVIEW record."
+
+    reservation = (
+        uow.budget_reservations.get_by_id(existing_review.budget_reservation_id)
+        if existing_review.budget_reservation_id
+        else None
+    )
+    ledger = uow.budget_ledger.list_by_project(project.project_id)
+    settled_reservation_usage = bool(
+        reservation
+        and reservation.status == "SETTLED"
+        and reservation.run_id == run.run_id
+        and reservation.job_id == job.job_id
+        and reservation.provider == "deepseek"
+        and reservation.account_fingerprint == existing_review.account_fingerprint
+        and reservation.canonical_model_identity == existing_review.reviewer_model
+        and reservation.stage == "REVIEW"
+        and reservation.billing_origin == "deepseek_direct"
+        and any(
+            entry.reservation_id == reservation.reservation_id
+            and entry.provider == "deepseek"
+            and entry.account_fingerprint == existing_review.account_fingerprint
+            and entry.canonical_model_identity == existing_review.reviewer_model
+            and entry.stage == "REVIEW"
+            and entry.billing_origin == "deepseek_direct"
+            for entry in ledger
+        )
+    )
+    unreserved_usage = bool(
+        existing_review.budget_reservation_id is None
+        and any(
+            event.event_type.value == "BUDGET_SETTLED"
+            and event.operation_id == job.job_id
+            and event.payload.get("review_id") == existing_review.review_id
+            and event.payload.get("provider") == "deepseek"
+            and event.payload.get("account_fingerprint") == existing_review.account_fingerprint
+            and event.payload.get("model") == existing_review.reviewer_model
+            and event.payload.get("stage") == "REVIEW"
+            and event.payload.get("billing_origin") == "deepseek_direct"
+            for event in uow.events.list_events(
+                project_id=project.project_id, change_id=job.change_name, limit=10000
+            )
+        )
+        and any(
+            entry.reservation_id is None
+            and entry.job_id == job.job_id
+            and entry.provider == "deepseek"
+            and entry.account_fingerprint == existing_review.account_fingerprint
+            and entry.canonical_model_identity == existing_review.reviewer_model
+            and entry.stage == "REVIEW"
+            and entry.billing_origin == "deepseek_direct"
+            and entry.entry_type == "USAGE"
+            for entry in ledger
+        )
+    )
+    if not (settled_reservation_usage or unreserved_usage):
+        return False, None, "Review lacks matching direct-account usage evidence."
 
     if not existing_review.candidate_sha or existing_review.candidate_sha != cand.candidate_sha:
         return (

@@ -5,11 +5,145 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from decimal import Decimal
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
 import yaml
 from pydantic import BaseModel, Field, field_validator
+
+
+class OpenSpecStage(str, Enum):
+    PLAN = "PLAN"
+    CONTRACT_REVIEW = "CONTRACT_REVIEW"
+    APPLY = "APPLY"
+    TEST = "TEST"
+    VERIFY = "VERIFY"
+    REVIEW = "REVIEW"
+
+
+class StageProfileConfig(BaseModel):
+    provider: str
+    model: str | None = None
+    effort: str | None = None
+    workflow: str | None = None
+    cost_basis: str = "standard"
+    is_premium: bool = False
+
+
+class StageProfileError(ValueError):
+    """Raised when stage profile resolution or capability validation fails."""
+
+
+_AGY_EFFORT_SUFFIXES = ("low", "medium", "high", "xhigh", "max")
+
+
+def agy_model_effort_variant(model: str | None) -> str | None:
+    """Return an effort encoded in the exact AGY model identifier, if present.
+
+    This recognizes identifier syntax only; compatibility is proven separately by
+    requiring that the exact identifier appears in the live account model catalog.
+    """
+    if not isinstance(model, str):
+        return None
+    normalized = model.strip().lower()
+    for effort in _AGY_EFFORT_SUFFIXES:
+        if normalized.endswith(f"-{effort}"):
+            return effort
+    return None
+
+
+SUPPORTED_PROVIDER_MODELS: dict[str, dict[str, bool]] = {
+    # provider -> {model_name: is_premium}
+    "antigravity": {
+        "gemini-3.8-flash-medium": False,
+        "gemini-3.8-flash-low": False,
+        "gemini-3.8-flash-high": False,
+        "gemini-2.5-flash": False,
+        "gemini-2.0-flash": False,
+        "gemini-flash": False,
+        "claude-sonnet-5-5-low": False,
+        "claude-sonnet-5-5-medium": False,
+        "claude-sonnet-5-5-high": False,
+        "gpt-oss-120b-medium": False,
+        "gemini-2.5-pro": True,
+        "gemini-pro": True,
+        "gemini-1.5-pro": True,
+        "claude-opus-5-5-low": True,
+        "claude-opus-5-5-medium": True,
+        "claude-opus-5-5-high": True,
+    },
+    "codex": {
+        "gpt-5.6-luna": False,
+        "gpt-6-luna": False,
+        "gpt-5.6-sol": True,
+        "gpt-5.6-terra": True,
+        "gpt-6-sol": True,
+        "gpt-6.1-sol": True,
+        "gpt-6-astra": True,
+        "gpt-5.5": False,
+        "gpt-4o-mini": False,
+        "o3-mini": False,
+        "codex-mini": False,
+        "gpt-4o": True,
+        "o1": True,
+        "o1-preview": True,
+        "o1-mini": True,
+    },
+    "deepseek": {
+        "deepseek-chat": False,
+        "deepseek-reasoner": True,
+        "deepseek-flash": False,
+    },
+}
+
+SUPPORTED_PROVIDER_EFFORTS: dict[str, set[str]] = {
+    "antigravity": {"low", "medium", "high", "xhigh", "max"},
+    "codex": {"low", "medium", "high", "xhigh", "max"},
+    # This list is only the local validation vocabulary. The DeepSeek adapter
+    # must still prove the selected level against the authenticated account's
+    # live /models catalog before any review is authorized or dispatched.
+    "deepseek": {"low", "medium", "high", "max"},
+}
+
+DEFAULT_R01_STAGE_PROFILES: dict[str, StageProfileConfig] = {
+    "PLAN": StageProfileConfig(
+        provider="codex",
+        model="gpt-5.6-luna",
+        effort="medium",
+        workflow="openspec-propose",
+    ),
+    "CONTRACT_REVIEW": StageProfileConfig(
+        provider="deepseek",
+        model="deepseek-flash",
+        effort="low",
+        workflow="openspec-explore",
+    ),
+    "APPLY": StageProfileConfig(
+        provider="antigravity",
+        model="gemini-3.8-flash-medium",
+        effort="medium",
+        workflow="openspec-apply-change",
+    ),
+    "TEST": StageProfileConfig(
+        provider="antigravity",
+        model="gemini-3.8-flash-low",
+        effort="low",
+        workflow="deterministic-tests",
+    ),
+    "VERIFY": StageProfileConfig(
+        provider="codex",
+        model="gpt-5.6-luna",
+        effort="medium",
+        workflow="openspec-verify-change",
+    ),
+    "REVIEW": StageProfileConfig(
+        provider="deepseek",
+        model="deepseek-flash",
+        effort="low",
+        workflow="review",
+    ),
+}
 
 
 class ServerConfig(BaseModel):
@@ -85,6 +219,8 @@ class ProbeConfig(BaseModel):
 class CliInvocationConfig(BaseModel):
     args: list[str] = Field(default_factory=list)
     prompt_transport: str = "stdin"
+    model: str | None = None
+    effort: str | None = None
 
 
 class ProviderConfig(BaseModel):
@@ -180,6 +316,7 @@ class ProjectConfig(BaseModel):
     )
     openrouter_drain_allowed: bool = False
     deployment: ProjectDeploymentConfig = Field(default_factory=ProjectDeploymentConfig)
+    stage_profiles: dict[str, StageProfileConfig] = Field(default_factory=dict)
 
 
 class AppConfig(BaseModel):
@@ -202,14 +339,39 @@ class CliInvocationProfile:
     executable: str
     args: tuple[str, ...]
     prompt_transport: str
+    model: str | None = None
+    effort: str | None = None
+
+
+@dataclass(frozen=True)
+class ResolvedStageProfile:
+    stage: str
+    provider: str
+    model: str
+    effort: str
+    workflow: str
+    cost_basis: str
+    is_premium: bool
+    is_escalated: bool
+    cli_invocation: CliInvocationProfile | None = None
 
 
 def resolve_cli_invocation(
-    provider: str, role: str, config: AppConfig | None = None
+    provider: str,
+    role: str,
+    config: AppConfig | None = None,
+    *,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> CliInvocationProfile:
     """Resolve and validate one provider/role CLI invocation from app configuration."""
     app_config = config or load_config()
-    provider_config = app_config.providers.get(provider)
+    provider_key = provider.lower()
+    provider_config = app_config.providers.get(provider_key)
+    if provider_config is None and provider_key == "agy":
+        provider_config = app_config.providers.get("antigravity")
+    elif provider_config is None and provider_key == "antigravity":
+        provider_config = app_config.providers.get("agy")
     if provider_config is None:
         raise ValueError(f"CLI provider '{provider}' is not configured.")
     if not provider_config.enabled:
@@ -238,12 +400,379 @@ def resolve_cli_invocation(
             f"CLI provider '{provider}' argument transport requires a '{{prompt}}' argument "
             f"for role '{role}'."
         )
+
+    effective_model = model or invocation.model
+    effective_effort = effort or invocation.effort
+    agy_variant_effort = (
+        agy_model_effort_variant(effective_model)
+        if provider_key in {"antigravity", "agy"}
+        else None
+    )
+    if agy_variant_effort:
+        configured_efforts = [value for value in (effort, invocation.effort) if value]
+        if any(value.strip().lower() != agy_variant_effort for value in configured_efforts):
+            raise ValueError(
+                f"AGY model variant '{effective_model}' encodes effort "
+                f"'{agy_variant_effort}' and contradicts the configured effort."
+            )
+        effective_effort = agy_variant_effort
+    args_list = list(invocation.args)
+
+    def option_values(flags: set[str]) -> list[str]:
+        """Return explicit values for a CLI option, including --name=value syntax."""
+        values: list[str] = []
+        index = 0
+        while index < len(args_list):
+            token = args_list[index]
+            if token in flags:
+                if index + 1 >= len(args_list) or args_list[index + 1].startswith("-"):
+                    raise ValueError(f"CLI option '{token}' has no explicit value.")
+                values.append(args_list[index + 1].strip().lower())
+                index += 2
+                continue
+            for flag in flags:
+                prefix = f"{flag}="
+                if token.startswith(prefix):
+                    values.append(token[len(prefix) :].strip().lower())
+                    break
+            else:
+                index += 1
+                continue
+            index += 1
+        return values
+
+    def ensure_exact_option(flags: set[str], expected: str | None, label: str) -> None:
+        values = option_values(flags)
+        normalized_expected = expected.strip().lower() if expected else None
+        if values and (
+            normalized_expected is None or len(values) != 1 or values[0] != normalized_expected
+        ):
+            raise ValueError(
+                f"Configured {label} option conflicts with the selected profile; "
+                "refusing silent model/effort substitution."
+            )
+
+    if provider.lower() in ("antigravity", "agy"):
+        ensure_exact_option({"--model"}, effective_model, "model")
+        configured_effort_args = option_values({"--effort"})
+        if agy_variant_effort:
+            if any(value != agy_variant_effort for value in configured_effort_args):
+                raise ValueError(
+                    f"AGY model variant '{effective_model}' encodes effort "
+                    f"'{agy_variant_effort}' and contradicts the CLI effort argument."
+                )
+            filtered_args: list[str] = []
+            index = 0
+            while index < len(args_list):
+                token = args_list[index]
+                if token == "--effort":
+                    index += 2
+                    continue
+                if token.startswith("--effort="):
+                    index += 1
+                    continue
+                filtered_args.append(token)
+                index += 1
+            args_list = filtered_args
+        else:
+            ensure_exact_option({"--effort"}, effective_effort, "effort")
+        if effective_model and not option_values({"--model"}):
+            prompt_idx = next(
+                (i for i, a in enumerate(args_list) if "{prompt}" in a), len(args_list)
+            )
+            args_list[prompt_idx:prompt_idx] = ["--model", effective_model]
+        if effective_effort and not agy_variant_effort and not option_values({"--effort"}):
+            prompt_idx = next(
+                (i for i, a in enumerate(args_list) if "{prompt}" in a), len(args_list)
+            )
+            args_list[prompt_idx:prompt_idx] = ["--effort", effective_effort]
+    elif provider.lower() == "codex":
+        ensure_exact_option({"--model", "-m"}, effective_model, "model")
+        codex_model_values: list[str] = []
+        codex_effort_values: list[str] = []
+        for index, token in enumerate(args_list):
+            config_value = token
+            if token in {"-c", "--config"} and index + 1 < len(args_list):
+                config_value = args_list[index + 1]
+            elif token.startswith("--config="):
+                config_value = token[len("--config=") :]
+            if "=" in config_value:
+                key, value = config_value.split("=", 1)
+                values = {
+                    "model": codex_model_values,
+                    "model_reasoning_effort": codex_effort_values,
+                }.get(key.strip())
+                if values is not None:
+                    values.append(value.strip().strip("\"'").lower())
+            elif "model_reasoning_effort" in config_value or config_value.strip() == "model":
+                raise ValueError(
+                    "Configured Codex model/effort override is ambiguous; "
+                    "refusing silent model/effort substitution."
+                )
+        if codex_model_values and (
+            not effective_model
+            or len(codex_model_values) != 1
+            or codex_model_values[0] != effective_model.strip().lower()
+        ):
+            raise ValueError(
+                "Configured model conflicts with the selected profile; "
+                "refusing silent model/effort substitution."
+            )
+        if codex_effort_values and (
+            not effective_effort
+            or len(codex_effort_values) != 1
+            or codex_effort_values[0] != effective_effort.strip().lower()
+        ):
+            raise ValueError(
+                "Configured reasoning effort conflicts with the selected profile; "
+                "refusing silent model/effort substitution."
+            )
+        if effective_model and not option_values({"--model", "-m"}) and not codex_model_values:
+            args_list.extend(["--model", effective_model])
+        if effective_effort and not codex_effort_values:
+            args_list.extend(["-c", f'model_reasoning_effort="{effective_effort}"'])
+
     return CliInvocationProfile(
         provider=provider,
         role=role,
         executable=executable,
-        args=tuple(invocation.args),
+        args=tuple(args_list),
         prompt_transport=invocation.prompt_transport,
+        model=effective_model,
+        effort=effective_effort,
+    )
+
+
+def resolve_stage_profile(
+    project_config: ProjectConfig,
+    stage: str | OpenSpecStage,
+    *,
+    app_config: AppConfig | None = None,
+    escalation_authorized: bool = False,
+    escalation_rationale: str | None = None,
+    budget_authorized: bool = False,
+    implementer_provider: str | None = None,
+    requested_provider: str | None = None,
+    requested_model: str | None = None,
+    requested_effort: str | None = None,
+) -> ResolvedStageProfile:
+    """Resolve and validate an independent, static profile for one OpenSpec stage.
+
+    Enforces non-premium and bounded-effort defaults. Unsupported models, unsupported
+    efforts, unbudgeted/unjustified escalation, and same-author review fail closed.
+    """
+    stage_str = stage.value if isinstance(stage, OpenSpecStage) else str(stage).strip().upper()
+    if stage_str in ("VERIFY_E2E", "VERIFY-E2E"):
+        stage_str = "VERIFY"
+    if stage_str not in {s.value for s in OpenSpecStage}:
+        raise StageProfileError(f"UNSUPPORTED_STAGE: Unknown stage '{stage}'.")
+
+    raw_profile = project_config.stage_profiles.get(stage_str)
+    if raw_profile is None:
+        raw_profile = DEFAULT_R01_STAGE_PROFILES.get(stage_str)
+    if raw_profile is None:
+        raise StageProfileError(
+            f"NO_PROFILE_FOR_STAGE: No profile configured for stage '{stage_str}'."
+        )
+
+    if requested_provider:
+        req_p = requested_provider.strip().lower()
+        if req_p in ("antigravity", "agy"):
+            req_p = "antigravity"
+        req_m = requested_model or (
+            raw_profile.model if raw_profile.provider.strip().lower() == req_p else None
+        )
+        req_e = requested_effort or (
+            raw_profile.effort if raw_profile.provider.strip().lower() == req_p else None
+        )
+        raw_profile = StageProfileConfig(
+            provider=req_p,
+            model=req_m or "",
+            effort=req_e or "",
+            workflow=raw_profile.workflow,
+        )
+    elif requested_model or requested_effort:
+        raw_profile = StageProfileConfig(
+            provider=raw_profile.provider,
+            model=requested_model or raw_profile.model,
+            effort=requested_effort or raw_profile.effort,
+            workflow=raw_profile.workflow,
+        )
+
+    provider = raw_profile.provider.strip().lower()
+    if provider in ("antigravity", "agy"):
+        provider = "antigravity"
+
+    role_map = {
+        "PLAN": "implementer",
+        "APPLY": "implementer",
+        "TEST": "implementer",
+        "CONTRACT_REVIEW": "reviewer",
+        "VERIFY": "reviewer",
+        "REVIEW": "reviewer",
+    }
+    role = role_map.get(stage_str, "implementer")
+    if provider == "deepseek" and role != "reviewer":
+        raise StageProfileError(
+            f"PROVIDER_ROLE_FORBIDDEN: DeepSeek Direct is reviewer-only, not {role}."
+        )
+    if provider == "openrouter":
+        raise StageProfileError(
+            "PROVIDER_ROLE_FORBIDDEN: OpenRouter can only be selected by the guarded "
+            "in-flight executor rescue path."
+        )
+    if stage_str == "CONTRACT_REVIEW" and provider != "deepseek":
+        raise StageProfileError(
+            "CONTRACT_REVIEW_REQUIRES_DEEPSEEK_DIRECT: no silent reviewer substitution is allowed."
+        )
+    if stage_str == "REVIEW" and provider != "deepseek":
+        raise StageProfileError(
+            "CODE_REVIEW_REQUIRES_DEEPSEEK_DIRECT: no silent reviewer substitution is allowed."
+        )
+    if stage_str == "CONTRACT_REVIEW":
+        deepseek_allowed = (
+            "deepseek" in project_config.external_providers_allowed
+            and (
+                app_config is None
+                or app_config.providers.get("deepseek", ProviderConfig(enabled=True)).enabled
+            )
+            and bool(os.environ.get("DEEPSEEK_API_KEY"))
+        )
+        if not deepseek_allowed:
+            raise StageProfileError(
+                "CONTRACT_REVIEW_WAITING: DeepSeek Direct is not configured and authorized; "
+                "no provider fallback is permitted."
+            )
+    if stage_str == "REVIEW":
+        deepseek_allowed = (
+            "deepseek" in project_config.external_providers_allowed
+            and (
+                app_config is None
+                or app_config.providers.get("deepseek", ProviderConfig(enabled=True)).enabled
+            )
+            and bool(os.environ.get("DEEPSEEK_API_KEY"))
+        )
+        if not deepseek_allowed:
+            raise StageProfileError(
+                "CODE_REVIEW_WAITING: DeepSeek Direct is not configured and authorized; "
+                "no provider fallback is permitted."
+            )
+
+    if provider not in project_config.external_providers_allowed:
+        raise StageProfileError(
+            f"PROVIDER_NOT_ALLOWED: Provider '{provider}' is not in project allowed providers: "
+            f"{project_config.external_providers_allowed}."
+        )
+
+    if stage_str == "REVIEW" and implementer_provider:
+        imp_p = implementer_provider.strip().lower()
+        if imp_p in ("antigravity", "agy"):
+            imp_p = "antigravity"
+        if provider == imp_p:
+            raise StageProfileError(
+                f"REVIEWER_IDENTITY_COLLISION: Reviewer provider '{provider}' cannot match "
+                f"implementer provider '{implementer_provider}'."
+            )
+
+    supported_models = SUPPORTED_PROVIDER_MODELS.get(provider)
+    if supported_models is None:
+        raise StageProfileError(
+            f"UNKNOWN_PROVIDER: Provider '{provider}' has no model capability catalog."
+        )
+
+    model = raw_profile.model
+    if not model:
+        model = next((m for m, prem in supported_models.items() if not prem), None)
+        if not model:
+            raise StageProfileError(
+                f"NO_DEFAULT_MODEL: No default non-premium model for provider '{provider}'."
+            )
+
+    model_norm = model.strip().lower()
+    if model_norm not in supported_models:
+        raise StageProfileError(
+            f"UNSUPPORTED_MODEL: Model '{model}' is not supported by provider '{provider}'. "
+            f"Supported models: {sorted(supported_models.keys())}."
+        )
+
+    is_premium = supported_models[model_norm]
+    is_escalated = False
+
+    if is_premium:
+        if not (
+            escalation_authorized
+            and escalation_rationale
+            and escalation_rationale.strip()
+            and budget_authorized
+        ):
+            raise StageProfileError(
+                f"PREMIUM_MODEL_REJECTED: Premium model '{model}' for provider '{provider}' "
+                f"is rejected by default. Escalation requires explicit authorization, non-empty rationale, "
+                f"and budget approval."
+            )
+        is_escalated = True
+
+    supported_efforts = SUPPORTED_PROVIDER_EFFORTS.get(provider, {"low", "medium"})
+    effort = raw_profile.effort
+    if not effort:
+        if provider == "antigravity":
+            agy_variant = agy_model_effort_variant(model)
+            if agy_variant:
+                effort = agy_variant
+        if not effort:
+            effort = "medium" if "medium" in supported_efforts else "low"
+
+    effort_norm = effort.strip().lower()
+    if effort_norm not in supported_efforts:
+        raise StageProfileError(
+            f"UNSUPPORTED_EFFORT: Effort '{effort}' is not supported by provider '{provider}'. "
+            f"Supported efforts: {sorted(supported_efforts)}."
+        )
+
+    if effort_norm in ("max", "xhigh"):
+        if not (
+            escalation_authorized
+            and escalation_rationale
+            and escalation_rationale.strip()
+            and budget_authorized
+        ):
+            raise StageProfileError(
+                f"MAX_EFFORT_REJECTED: Max-effort '{effort}' for provider '{provider}' "
+                f"is rejected by default. Escalation requires explicit authorization, non-empty rationale, "
+                f"and budget approval."
+            )
+        is_escalated = True
+
+    cli_invocation = None
+    app_cfg = app_config or load_config()
+    lookup_provider = provider
+    if lookup_provider not in app_cfg.providers:
+        if lookup_provider == "antigravity" and "agy" in app_cfg.providers:
+            lookup_provider = "agy"
+        elif lookup_provider == "agy" and "antigravity" in app_cfg.providers:
+            lookup_provider = "antigravity"
+    if lookup_provider in app_cfg.providers and app_cfg.providers[lookup_provider].type == "cli":
+        try:
+            cli_invocation = resolve_cli_invocation(
+                lookup_provider,
+                role,
+                app_cfg,
+                model=model_norm,
+                effort=effort_norm,
+            )
+        except ValueError as exc:
+            raise StageProfileError(f"CLI_RESOLUTION_FAILED: {exc}") from exc
+
+    return ResolvedStageProfile(
+        stage=stage_str,
+        provider=provider,
+        model=model_norm,
+        effort=effort_norm,
+        workflow=raw_profile.workflow or "",
+        cost_basis="premium" if is_premium else "standard",
+        is_premium=is_premium,
+        is_escalated=is_escalated,
+        cli_invocation=cli_invocation,
     )
 
 

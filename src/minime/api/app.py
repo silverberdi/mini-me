@@ -397,6 +397,7 @@ class ProjectCreateRequest(BaseModel):
         default_factory=lambda: ["codex", "antigravity", "deepseek"]
     )
     openrouter_drain_allowed: bool = False
+    independent_audit_required: bool = False
     deployment_preview: dict[str, Any] = Field(default_factory=dict)
     deployment_production: dict[str, Any] = Field(default_factory=dict)
     auto_prepare: bool = Field(default=True, strict=True)
@@ -413,6 +414,7 @@ class ProjectUpdateRequest(BaseModel):
     checks: list[dict[str, Any]] | None = None
     external_providers_allowed: list[str] | None = None
     openrouter_drain_allowed: bool | None = None
+    independent_audit_required: bool | None = None
     deployment_preview: dict[str, Any] | None = None
     deployment_production: dict[str, Any] | None = None
     auto_prepare: bool | None = Field(default=None, strict=True)
@@ -561,6 +563,7 @@ def register_project(
             checks=req.checks,
             external_providers_allowed=req.external_providers_allowed,
             openrouter_drain_allowed=req.openrouter_drain_allowed,
+            independent_audit_required=req.independent_audit_required,
             deployment_preview=req.deployment_preview,
             deployment_production=req.deployment_production,
             auto_prepare=req.auto_prepare,
@@ -606,6 +609,7 @@ def update_project_endpoint(
             checks=req.checks,
             external_providers_allowed=req.external_providers_allowed,
             openrouter_drain_allowed=req.openrouter_drain_allowed,
+            independent_audit_required=req.independent_audit_required,
             deployment_preview=req.deployment_preview,
             deployment_production=req.deployment_production,
             auto_prepare=req.auto_prepare,

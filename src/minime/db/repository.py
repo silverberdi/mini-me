@@ -65,6 +65,7 @@ from minime.db.models import (
 )
 from minime.domain.enums import (
     PRIMARY_PROVIDERS,
+    READ_ONLY_REVIEW_PROVIDERS,
     AdmissionBlockCondition,
     AdmissionDecision,
     AdmissionDecisionKind,
@@ -255,6 +256,7 @@ def project_model_to_domain(model: ProjectModel) -> Project:
         checks=model.checks or [],
         external_providers_allowed=model.external_providers_allowed or [],
         openrouter_drain_allowed=model.openrouter_drain_allowed,
+        independent_audit_required=getattr(model, "independent_audit_required", False),
         strict_validation_required=getattr(model, "strict_validation_required", True),
         verify_gate_required=getattr(model, "verify_gate_required", True),
         sync_gate_required=getattr(model, "sync_gate_required", True),
@@ -647,6 +649,13 @@ def review_model_to_domain(model: ReviewModel) -> Review:
         change_name=model.change_name,
         reviewer_role=model.reviewer_role,
         reviewer_model=model.reviewer_model,
+        review_stage=model.review_stage,
+        contract_hash=model.contract_hash,
+        provider=model.provider,
+        account_fingerprint=model.account_fingerprint,
+        budget_authorization_id=model.budget_authorization_id,
+        budget_reservation_id=model.budget_reservation_id,
+        billing_origin=model.billing_origin,
         orchestration_run_id=model.orchestration_run_id,
         candidate_generation=model.candidate_generation,
         candidate_sha=model.candidate_sha,
@@ -730,6 +739,9 @@ def pricing_snapshot_model_to_domain(
         additional_cost_per_request=_to_decimal(model.additional_cost_per_request),
         currency=model.currency,
         source=model.source,
+        provider=model.provider,
+        account_fingerprint=model.account_fingerprint,
+        billing_origin=model.billing_origin,
         observed_at=model.observed_at,
         created_at=model.created_at,
     )
@@ -740,6 +752,7 @@ def budget_reservation_model_to_domain(model: BudgetReservationModel) -> BudgetR
         reservation_id=model.id,
         project_id=model.project_id,
         job_id=model.job_id,
+        run_id=model.run_id,
         change_id=model.change_id,
         role=model.role,
         canonical_model_identity=model.canonical_model_identity,
@@ -747,6 +760,12 @@ def budget_reservation_model_to_domain(model: BudgetReservationModel) -> BudgetR
         status=model.status,
         pricing_snapshot_id=model.pricing_snapshot_id,
         correlation_id=model.correlation_id,
+        provider=model.provider,
+        account_fingerprint=model.account_fingerprint,
+        stage=model.stage,
+        billing_origin=model.billing_origin,
+        authorization_id=model.authorization_id,
+        idempotency_key=model.idempotency_key,
         created_at=model.created_at,
         updated_at=model.updated_at,
     )
@@ -760,6 +779,9 @@ def budget_ledger_model_to_domain(model: BudgetLedgerModel) -> BudgetLedgerEntry
         job_id=model.job_id,
         change_id=model.change_id,
         provider=model.provider,
+        account_fingerprint=model.account_fingerprint,
+        stage=model.stage,
+        billing_origin=model.billing_origin,
         role=model.role,
         canonical_model_identity=model.canonical_model_identity,
         prompt_tokens=model.prompt_tokens,
@@ -939,7 +961,9 @@ def recovery_decision_model_to_domain(model: RecoveryDecisionModel) -> RecoveryD
     )
 
 
-def external_action_attempt_model_to_domain(model: ExternalActionAttemptModel) -> ExternalActionAttempt:
+def external_action_attempt_model_to_domain(
+    model: ExternalActionAttemptModel,
+) -> ExternalActionAttempt:
     return ExternalActionAttempt(
         attempt_id=model.id,
         action_key=model.action_key,
@@ -971,6 +995,7 @@ class PostgresProjectRepository(ProjectRepositoryInterface):
             existing.checks = project.checks
             existing.external_providers_allowed = project.external_providers_allowed
             existing.openrouter_drain_allowed = project.openrouter_drain_allowed
+            existing.independent_audit_required = project.independent_audit_required
             existing.strict_validation_required = project.strict_validation_required
             existing.verify_gate_required = project.verify_gate_required
             existing.sync_gate_required = project.sync_gate_required
@@ -1001,6 +1026,7 @@ class PostgresProjectRepository(ProjectRepositoryInterface):
                 checks=project.checks,
                 external_providers_allowed=project.external_providers_allowed,
                 openrouter_drain_allowed=project.openrouter_drain_allowed,
+                independent_audit_required=project.independent_audit_required,
                 strict_validation_required=project.strict_validation_required,
                 verify_gate_required=project.verify_gate_required,
                 sync_gate_required=project.sync_gate_required,
@@ -1351,6 +1377,7 @@ class PostgresJobRepository(JobRepositoryInterface):
         },
         JobStatus.REVIEW_RUNNING: {
             JobStatus.AUDIT_RUNNING,
+            JobStatus.READY_TO_MERGE,
             JobStatus.CHANGES_REQUIRED,
             JobStatus.CHECKS_PASSED,
             JobStatus.QUEUED,
@@ -1730,7 +1757,6 @@ class PostgresJobRepository(JobRepositoryInterface):
         model = self.session.get(JobModel, job_id)
         return job_model_to_domain(model)
 
-
     for _status in JobStatus:
         VALID_TRANSITIONS[_status].add(JobStatus.RECOVERY_BLOCKED)
 
@@ -1766,20 +1792,32 @@ class PostgresCheckResultRepository(CheckResultRepositoryInterface):
         self.session = session
 
     def save(self, result: CheckResult) -> None:
-        self.session.add(
-            CheckResultModel(
-                id=result.result_id,
-                job_id=result.job_id,
-                check_name=result.check_name,
-                command=result.command,
-                exit_code=result.exit_code,
-                duration_ms=result.duration_ms,
-                output_snippet=result.output_snippet,
-                candidate_sha=result.candidate_sha or None,
-                candidate_generation=result.candidate_generation,
-                created_at=result.created_at,
+        existing = self.session.get(CheckResultModel, result.result_id)
+        if existing:
+            existing.job_id = result.job_id
+            existing.check_name = result.check_name
+            existing.command = result.command
+            existing.exit_code = result.exit_code
+            existing.duration_ms = result.duration_ms
+            existing.output_snippet = result.output_snippet
+            existing.candidate_sha = result.candidate_sha or None
+            existing.candidate_generation = result.candidate_generation
+            existing.created_at = result.created_at
+        else:
+            self.session.add(
+                CheckResultModel(
+                    id=result.result_id,
+                    job_id=result.job_id,
+                    check_name=result.check_name,
+                    command=result.command,
+                    exit_code=result.exit_code,
+                    duration_ms=result.duration_ms,
+                    output_snippet=result.output_snippet,
+                    candidate_sha=result.candidate_sha or None,
+                    candidate_generation=result.candidate_generation,
+                    created_at=result.created_at,
+                )
             )
-        )
 
     def list_by_job(self, job_id: str) -> list[CheckResult]:
         stmt = (
@@ -1821,6 +1859,13 @@ class PostgresReviewRepository(ReviewRepositoryInterface):
             existing.is_mixed_authorship = review.is_mixed_authorship
             existing.authorship_evidence = review.authorship_evidence
             existing.reviewer_model = review.reviewer_model
+            existing.review_stage = review.review_stage
+            existing.contract_hash = review.contract_hash
+            existing.provider = review.provider
+            existing.account_fingerprint = review.account_fingerprint
+            existing.budget_authorization_id = review.budget_authorization_id
+            existing.budget_reservation_id = review.budget_reservation_id
+            existing.billing_origin = review.billing_origin
             existing.orchestration_run_id = review.orchestration_run_id
             existing.candidate_generation = review.candidate_generation
             existing.candidate_sha = review.candidate_sha
@@ -1836,6 +1881,13 @@ class PostgresReviewRepository(ReviewRepositoryInterface):
                 change_name=review.change_name,
                 reviewer_role=review.reviewer_role,
                 reviewer_model=review.reviewer_model,
+                review_stage=review.review_stage,
+                contract_hash=review.contract_hash,
+                provider=review.provider,
+                account_fingerprint=review.account_fingerprint,
+                budget_authorization_id=review.budget_authorization_id,
+                budget_reservation_id=review.budget_reservation_id,
+                billing_origin=review.billing_origin,
                 orchestration_run_id=review.orchestration_run_id,
                 candidate_generation=review.candidate_generation,
                 candidate_sha=review.candidate_sha,
@@ -1860,7 +1912,17 @@ class PostgresReviewRepository(ReviewRepositoryInterface):
     def get_by_job_id(self, job_id: str) -> Review | None:
         stmt = (
             select(ReviewModel)
-            .where(ReviewModel.job_id == job_id)
+            .where(ReviewModel.job_id == job_id, ReviewModel.review_stage == "CODE_REVIEW")
+            .order_by(desc(ReviewModel.created_at))
+            .limit(1)
+        )
+        model = self.session.scalars(stmt).first()
+        return review_model_to_domain(model) if model else None
+
+    def get_by_job_stage(self, job_id: str, review_stage: str) -> Review | None:
+        stmt = (
+            select(ReviewModel)
+            .where(ReviewModel.job_id == job_id, ReviewModel.review_stage == review_stage)
             .order_by(desc(ReviewModel.created_at))
             .limit(1)
         )
@@ -2099,11 +2161,8 @@ class PostgresProviderHealthRepository(ProviderHealthRepositoryInterface):
         self.session = session
 
     def _validate_primary_provider(self, provider: str) -> None:
-        if provider not in PRIMARY_PROVIDERS:
-            raise ValueError(
-                f"Invalid primary provider '{provider}'. "
-                f"005 capacity tracking is restricted strictly to {PRIMARY_PROVIDERS}."
-            )
+        if provider not in PRIMARY_PROVIDERS | READ_ONLY_REVIEW_PROVIDERS:
+            raise ValueError(f"Invalid provider '{provider}' for bounded capacity tracking.")
 
     def save(self, health: ProviderHealth) -> None:
         health.validate_primary()
@@ -2114,7 +2173,11 @@ class PostgresProviderHealthRepository(ProviderHealthRepositoryInterface):
             .execution_options(populate_existing=True)
         ).first()
         if existing:
-            if existing.updated_at and health.updated_at and health.updated_at < existing.updated_at:
+            if (
+                existing.updated_at
+                and health.updated_at
+                and health.updated_at < existing.updated_at
+            ):
                 # Stale writer protection: do not overwrite newer health state
                 return
             existing.model = health.model
@@ -2425,6 +2488,9 @@ class PostgresOpenRouterPricingSnapshotRepository(OpenRouterPricingSnapshotRepos
                 additional_cost_per_request=snapshot.additional_cost_per_request,
                 currency=snapshot.currency,
                 source=snapshot.source,
+                provider=snapshot.provider,
+                account_fingerprint=snapshot.account_fingerprint,
+                billing_origin=snapshot.billing_origin,
                 observed_at=snapshot.observed_at,
                 created_at=snapshot.created_at,
             )
@@ -2479,6 +2545,7 @@ class PostgresBudgetReservationRepository(BudgetReservationRepositoryInterface):
                 id=reservation.reservation_id,
                 project_id=reservation.project_id,
                 job_id=reservation.job_id,
+                run_id=reservation.run_id,
                 change_id=reservation.change_id,
                 role=reservation.role,
                 canonical_model_identity=reservation.canonical_model_identity,
@@ -2486,6 +2553,12 @@ class PostgresBudgetReservationRepository(BudgetReservationRepositoryInterface):
                 status=reservation.status,
                 pricing_snapshot_id=reservation.pricing_snapshot_id,
                 correlation_id=reservation.correlation_id,
+                provider=reservation.provider,
+                account_fingerprint=reservation.account_fingerprint,
+                stage=reservation.stage,
+                billing_origin=reservation.billing_origin,
+                authorization_id=reservation.authorization_id,
+                idempotency_key=reservation.idempotency_key,
                 created_at=reservation.created_at,
                 updated_at=reservation.updated_at,
             )
@@ -2495,11 +2568,22 @@ class PostgresBudgetReservationRepository(BudgetReservationRepositoryInterface):
         model = self.session.get(BudgetReservationModel, reservation_id)
         return budget_reservation_model_to_domain(model) if model else None
 
-    def get_by_id_for_update(self, reservation_id: str) -> BudgetReservation | None:
-        stmt = select(BudgetReservationModel).where(BudgetReservationModel.id == reservation_id).with_for_update()
-        model = self.session.scalars(stmt).first()
+    def get_by_idempotency_key(self, idempotency_key: str) -> BudgetReservation | None:
+        model = self.session.scalars(
+            select(BudgetReservationModel).where(
+                BudgetReservationModel.idempotency_key == idempotency_key
+            )
+        ).first()
         return budget_reservation_model_to_domain(model) if model else None
 
+    def get_by_id_for_update(self, reservation_id: str) -> BudgetReservation | None:
+        stmt = (
+            select(BudgetReservationModel)
+            .where(BudgetReservationModel.id == reservation_id)
+            .with_for_update()
+        )
+        model = self.session.scalars(stmt).first()
+        return budget_reservation_model_to_domain(model) if model else None
 
     def list_by_project(self, project_id: str) -> list[BudgetReservation]:
         return [
@@ -2525,6 +2609,9 @@ class PostgresBudgetLedgerRepository(BudgetLedgerRepositoryInterface):
                 job_id=entry.job_id,
                 change_id=entry.change_id,
                 provider=entry.provider,
+                account_fingerprint=entry.account_fingerprint,
+                stage=entry.stage,
+                billing_origin=entry.billing_origin,
                 role=entry.role,
                 canonical_model_identity=entry.canonical_model_identity,
                 prompt_tokens=entry.prompt_tokens,
@@ -2936,10 +3023,13 @@ class PostgresOrchestrationRunRepository(OrchestrationRunRepositoryInterface):
         return orchestration_run_model_to_domain(model) if model else None
 
     def get_for_update(self, run_id: str) -> OrchestrationRun | None:
-        stmt = select(OrchestrationRunModel).where(OrchestrationRunModel.id == run_id).with_for_update()
+        stmt = (
+            select(OrchestrationRunModel)
+            .where(OrchestrationRunModel.id == run_id)
+            .with_for_update()
+        )
         model = self.session.scalars(stmt).first()
         return orchestration_run_model_to_domain(model) if model else None
-
 
     def get_active_run(self, project_id: str, change_name: str) -> OrchestrationRun | None:
         stmt = select(OrchestrationRunModel).where(
@@ -3635,6 +3725,9 @@ class PostgresOrchestrationExternalActionRepository(OrchestrationExternalActionR
         elif outcome == ExternalOutcome.FAILURE and original_mutation_retry_authorized is True:
             model.status = ExternalActionStatus.EXECUTING.value
             model.error_message = getattr(observed_result, "error_message", None)
+            payload = dict(model.result_payload or {})
+            payload["retry_safety"] = "SAFE"
+            model.result_payload = payload
 
         # Step 4 & 5: If UNKNOWN / AMBIGUOUS or original_mutation_retry_authorized is False -> Remain AMBIGUOUS (cannot repeat automatically)
         else:
@@ -5082,9 +5175,7 @@ def intake_workspace_ownership_model_to_domain(
     )
 
 
-class PostgresIntakeWorkspaceOwnershipRepository(
-    IntakeWorkspaceOwnershipRepositoryInterface
-):
+class PostgresIntakeWorkspaceOwnershipRepository(IntakeWorkspaceOwnershipRepositoryInterface):
     def __init__(self, session: Session):
         self.session = session
 
@@ -5139,9 +5230,7 @@ class PostgresIntakeWorkspaceOwnershipRepository(
         model = self.session.scalars(stmt).first()
         return intake_workspace_ownership_model_to_domain(model) if model else None
 
-    def get_by_item_key(
-        self, project_id: str, item_key: str
-    ) -> IntakeWorkspaceOwnership | None:
+    def get_by_item_key(self, project_id: str, item_key: str) -> IntakeWorkspaceOwnership | None:
         stmt = select(IntakeWorkspaceOwnershipModel).where(
             IntakeWorkspaceOwnershipModel.project_id == project_id,
             IntakeWorkspaceOwnershipModel.item_key == item_key,
@@ -5261,10 +5350,18 @@ class PostgresRecoveryClaimRepository(RecoveryClaimRepositoryInterface):
                 self.session.flush()
                 return recovery_claim_model_to_domain(model)
 
-            if model.released_at is None and model.lease_expires_at > now and model.owner_instance_id != owner_instance_id:
+            if (
+                model.released_at is None
+                and model.lease_expires_at > now
+                and model.owner_instance_id != owner_instance_id
+            ):
                 return None
 
-            if model.released_at is None and model.lease_expires_at > now and model.owner_instance_id == owner_instance_id:
+            if (
+                model.released_at is None
+                and model.lease_expires_at > now
+                and model.owner_instance_id == owner_instance_id
+            ):
                 model.heartbeat_at = now
                 model.lease_expires_at = lease_expires
                 self.session.flush()
@@ -5467,7 +5564,7 @@ class PostgresRecoveryClaimRepository(RecoveryClaimRepositoryInterface):
 
         # Cross-parent action ownership validation (ROOT CAUSE 4)
         if claim_key.startswith("run:"):
-            expected_run_id = claim_key[len("run:"):]
+            expected_run_id = claim_key[len("run:") :]
             if action_model.run_id != expected_run_id:
                 self.session.rollback()
                 raise ValueError(
@@ -5480,14 +5577,17 @@ class PostgresRecoveryClaimRepository(RecoveryClaimRepositoryInterface):
                     f"Parent run '{expected_run_id}' for claim '{claim_key}' is inactive or missing."
                 )
         elif claim_key.startswith("closure:"):
-            expected_saga_id = claim_key[len("closure:"):]
+            expected_saga_id = claim_key[len("closure:") :]
             if action_model.saga_id != expected_saga_id:
                 self.session.rollback()
                 raise ValueError(
                     f"Cross-parent action dispatch rejected: action '{action_key}' is bound to saga '{action_model.saga_id}', but claim key is '{claim_key}'."
                 )
             parent_saga = self.session.get(DurableSagaModel, expected_saga_id)
-            if not parent_saga or parent_saga.status in (SagaStatus.COMPLETED.value, SagaStatus.FAILED.value):
+            if not parent_saga or parent_saga.status in (
+                SagaStatus.COMPLETED.value,
+                SagaStatus.FAILED.value,
+            ):
                 self.session.rollback()
                 raise StaleClaimError(
                     f"Parent closure saga '{expected_saga_id}' for claim '{claim_key}' is inactive or missing."
@@ -5552,6 +5652,7 @@ class PostgresRecoveryClaimRepository(RecoveryClaimRepositoryInterface):
                 )
         else:
             from minime.domain.models import evaluate_dispatch_authorization
+
             auth_res = evaluate_dispatch_authorization(action_domain)
             if not auth_res.is_authorized:
                 self.session.rollback()
@@ -5560,7 +5661,11 @@ class PostgresRecoveryClaimRepository(RecoveryClaimRepositoryInterface):
                 )
 
         if action_model.status == ExternalActionStatus.RESERVED.value:
-            if action_model.last_dispatch_intent_id or action_model.remote_identifier or existing_attempts:
+            if (
+                action_model.last_dispatch_intent_id
+                or action_model.remote_identifier
+                or existing_attempts
+            ):
                 self.session.rollback()
                 raise ValueError(
                     f"Action '{action_key}' is RESERVED but POSSIBLY_DISPATCHED; observation required before dispatch."
@@ -5601,13 +5706,19 @@ class PostgresRecoveryDecisionRepository(RecoveryDecisionRepositoryInterface):
             identity_id=decision.identity_id,
             project_id=decision.project_id,
             change_name=decision.change_name,
-            source=decision.source.value if isinstance(decision.source, RecoverySource) else str(decision.source),
+            source=decision.source.value
+            if isinstance(decision.source, RecoverySource)
+            else str(decision.source),
             prior_checkpoint=decision.prior_checkpoint,
             observation_refs=decision.observation_refs,
-            classification=decision.classification.value if isinstance(decision.classification, RecoveryClassification) else str(decision.classification),
+            classification=decision.classification.value
+            if isinstance(decision.classification, RecoveryClassification)
+            else str(decision.classification),
             planned_action=decision.planned_action,
             fence_token=decision.fence_token,
-            status=decision.status.value if isinstance(decision.status, RecoveryDecisionStatus) else str(decision.status),
+            status=decision.status.value
+            if isinstance(decision.status, RecoveryDecisionStatus)
+            else str(decision.status),
             result_payload=decision.result_payload,
             reason_code=decision.reason_code,
             created_at=decision.created_at,
@@ -5621,9 +5732,7 @@ class PostgresRecoveryDecisionRepository(RecoveryDecisionRepositoryInterface):
         model = self.session.get(RecoveryDecisionModel, decision_id)
         return recovery_decision_model_to_domain(model) if model else None
 
-    def get_by_cycle_and_claim(
-        self, cycle_id: str, claim_key: str
-    ) -> RecoveryDecision | None:
+    def get_by_cycle_and_claim(self, cycle_id: str, claim_key: str) -> RecoveryDecision | None:
         stmt = select(RecoveryDecisionModel).where(
             RecoveryDecisionModel.cycle_id == cycle_id,
             RecoveryDecisionModel.claim_key == claim_key,
@@ -5632,23 +5741,27 @@ class PostgresRecoveryDecisionRepository(RecoveryDecisionRepositoryInterface):
         return recovery_decision_model_to_domain(model) if model else None
 
     def list_by_cycle(self, cycle_id: str) -> list[RecoveryDecision]:
-        stmt = select(RecoveryDecisionModel).where(
-            RecoveryDecisionModel.cycle_id == cycle_id
-        )
+        stmt = select(RecoveryDecisionModel).where(RecoveryDecisionModel.cycle_id == cycle_id)
         models = self.session.scalars(stmt).all()
         return [recovery_decision_model_to_domain(m) for m in models]
 
     def list_by_claim_key(self, claim_key: str) -> list[RecoveryDecision]:
-        stmt = select(RecoveryDecisionModel).where(
-            RecoveryDecisionModel.claim_key == claim_key
-        ).order_by(desc(RecoveryDecisionModel.created_at))
+        stmt = (
+            select(RecoveryDecisionModel)
+            .where(RecoveryDecisionModel.claim_key == claim_key)
+            .order_by(desc(RecoveryDecisionModel.created_at))
+        )
         models = self.session.scalars(stmt).all()
         return [recovery_decision_model_to_domain(m) for m in models]
 
     def update_decision(self, decision: RecoveryDecision) -> RecoveryDecision:
         model = self.session.get(RecoveryDecisionModel, decision.decision_id)
         if model:
-            model.status = decision.status.value if isinstance(decision.status, RecoveryDecisionStatus) else str(decision.status)
+            model.status = (
+                decision.status.value
+                if isinstance(decision.status, RecoveryDecisionStatus)
+                else str(decision.status)
+            )
             model.result_payload = decision.result_payload
             model.reason_code = decision.reason_code
             model.updated_at = utc_now()
@@ -5679,9 +5792,7 @@ class PostgresExternalActionAttemptRepository(ExternalActionAttemptRepositoryInt
         self.session.flush()
         return external_action_attempt_model_to_domain(model)
 
-    def get_by_dispatch_intent_key(
-        self, dispatch_intent_key: str
-    ) -> ExternalActionAttempt | None:
+    def get_by_dispatch_intent_key(self, dispatch_intent_key: str) -> ExternalActionAttempt | None:
         stmt = select(ExternalActionAttemptModel).where(
             ExternalActionAttemptModel.dispatch_intent_key == dispatch_intent_key
         )
@@ -5689,9 +5800,11 @@ class PostgresExternalActionAttemptRepository(ExternalActionAttemptRepositoryInt
         return external_action_attempt_model_to_domain(model) if model else None
 
     def list_by_action_key(self, action_key: str) -> list[ExternalActionAttempt]:
-        stmt = select(ExternalActionAttemptModel).where(
-            ExternalActionAttemptModel.action_key == action_key
-        ).order_by(ExternalActionAttemptModel.attempt_number)
+        stmt = (
+            select(ExternalActionAttemptModel)
+            .where(ExternalActionAttemptModel.action_key == action_key)
+            .order_by(ExternalActionAttemptModel.attempt_number)
+        )
         models = self.session.scalars(stmt).all()
         return [external_action_attempt_model_to_domain(m) for m in models]
 
@@ -5768,9 +5881,7 @@ class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
         self.orchestration_worktree_ownerships = PostgresOrchestrationWorktreeOwnershipRepository(
             session
         )
-        self.intake_workspace_ownerships = PostgresIntakeWorkspaceOwnershipRepository(
-            session
-        )
+        self.intake_workspace_ownerships = PostgresIntakeWorkspaceOwnershipRepository(session)
         self.durable_sagas = PostgresDurableSagaRepository(session)
         self.claims = PostgresRecoveryClaimRepository(session)
         self.recovery_decisions = PostgresRecoveryDecisionRepository(session)
@@ -5813,7 +5924,10 @@ class PostgresPersistenceUnitOfWork(PersistenceUnitOfWork):
     def acquire_advisory_lock(self, key: int, lock_timeout: str = "2s") -> None:
         """Acquire PostgreSQL transaction-scoped 64-bit advisory lock with a local lock timeout."""
         bind_name = getattr(getattr(self.session, "bind", None), "name", "")
-        if bind_name == "postgresql" or (hasattr(self.session, "bind") and "postgres" in str(self.session.bind.url)):
+        if bind_name == "postgresql" or (
+            hasattr(self.session, "bind") and "postgres" in str(self.session.bind.url)
+        ):
             from sqlalchemy import text
+
             self.session.execute(text(f"SET LOCAL lock_timeout = '{lock_timeout}'"))
             self.session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})

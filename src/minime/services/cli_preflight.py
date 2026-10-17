@@ -48,6 +48,24 @@ async def preflight_cli_invocation(
     if not resolved:
         return PreflightResult(ok=False, reason="EXECUTABLE_MISSING")
 
+    # Validate account/CLI non-inferential capabilities via provider adapter if model is specified
+    if profile.model:
+        try:
+            from minime.adapters.provider_adapter import get_provider_adapter
+
+            adapter = get_provider_adapter(profile.provider.lower())
+            supported, reason = await adapter.check_model_supported(
+                profile.model, effort=profile.effort, timeout_seconds=timeout
+            )
+            if not supported:
+                return PreflightResult(ok=False, reason=reason or "UNSUPPORTED_ACCOUNT_CAPABILITY")
+        except Exception as exc:
+            return PreflightResult(
+                ok=False, reason=f"CAPABILITY_DISCOVERY_UNAVAILABLE:{type(exc).__name__}"
+            )
+    elif profile.effort:
+        return PreflightResult(ok=False, reason="EFFORT_WITHOUT_MODEL")
+
     flags = _flag_tokens(profile.args)
     subcommand = _subcommand(profile.args)
     if subcommand:

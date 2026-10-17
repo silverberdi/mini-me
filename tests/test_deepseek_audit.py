@@ -54,6 +54,11 @@ from minime.services.reviewer_runner import MockReviewerRunner
 from minime.services.worktree_manager import WorktreeInfo
 
 
+@pytest.fixture(autouse=True)
+def setup_audit_capacity_strategy(test_capacity_strategy):
+    test_capacity_strategy()
+
+
 def _make_test_claim_context(uow=None):
     if uow is not None and hasattr(uow, "claims") and uow.claims is not None:
         c = uow.claims.acquire_or_reacquire("run:test-claim-key", owner_instance_id="test-owner-id")
@@ -222,6 +227,7 @@ def seed_ready_change(
             implementer=implementer,
             reviewer=reviewer,
             checks=[{"name": "ok", "command": f"{sys.executable} -c 'print(1)'"}],
+            independent_audit_required=True,
         )
     )
     uow.changes.save(
@@ -340,7 +346,11 @@ async def test_audit_pipeline_low_risk_ready_to_merge(in_memory_uow, tmp_path):
         ),
         worktree_manager=GitFakeWorktreeManager(tmp_path),
     )
-    job = await service.run_job("audit-project", "synthetic-audit-change", claim_context=_make_test_claim_context(in_memory_uow))
+    job = await service.run_job(
+        "audit-project",
+        "synthetic-audit-change",
+        claim_context=_make_test_claim_context(in_memory_uow),
+    )
     assert job.status == JobStatus.READY_TO_MERGE
     audit = in_memory_uow.audits.get_by_job_id(job.job_id)
     assert audit is not None
@@ -367,7 +377,11 @@ async def test_audit_pipeline_high_finding_blocks_even_with_low_risk(in_memory_u
         ),
         worktree_manager=GitFakeWorktreeManager(tmp_path),
     )
-    job = await service.run_job("audit-project", "synthetic-audit-change", claim_context=_make_test_claim_context(in_memory_uow))
+    job = await service.run_job(
+        "audit-project",
+        "synthetic-audit-change",
+        claim_context=_make_test_claim_context(in_memory_uow),
+    )
     assert job.status == JobStatus.AUDIT_BLOCKED
     audit = in_memory_uow.audits.get_by_job_id(job.job_id)
     assert audit is not None
@@ -391,7 +405,11 @@ async def test_changes_required_prevents_audit(in_memory_uow, tmp_path):
         auditor_runner=MockAuditorRunner(output=["should not run"]),
         worktree_manager=GitFakeWorktreeManager(tmp_path),
     )
-    job = await service.run_job("audit-project", "synthetic-audit-change", claim_context=_make_test_claim_context(in_memory_uow))
+    job = await service.run_job(
+        "audit-project",
+        "synthetic-audit-change",
+        claim_context=_make_test_claim_context(in_memory_uow),
+    )
     assert job.status == JobStatus.CHANGES_REQUIRED
     assert in_memory_uow.audits.get_by_job_id(job.job_id) is None
 
@@ -412,7 +430,11 @@ async def test_audit_timeout_malformed_symlink_and_mutation_fail_safely(in_memor
         auditor_runner=MockAuditorRunner(timed_out=True),
         worktree_manager=GitFakeWorktreeManager(tmp_path),
     )
-    job = await service.run_job("audit-project", "synthetic-audit-change", claim_context=_make_test_claim_context(in_memory_uow))
+    job = await service.run_job(
+        "audit-project",
+        "synthetic-audit-change",
+        claim_context=_make_test_claim_context(in_memory_uow),
+    )
     assert job.status == JobStatus.FAILED
     assert in_memory_uow.audits.get_by_job_id(job.job_id).status == AuditStatus.AUDIT_TIMED_OUT
 
@@ -422,7 +444,11 @@ async def test_audit_timeout_malformed_symlink_and_mutation_fail_safely(in_memor
         auditor_runner=MockAuditorRunner(output=["not json"]),
         worktree_manager=GitFakeWorktreeManager(tmp_path),
     )
-    job = await service.run_job("audit-project", "synthetic-audit-change", claim_context=_make_test_claim_context(in_memory_uow))
+    job = await service.run_job(
+        "audit-project",
+        "synthetic-audit-change",
+        claim_context=_make_test_claim_context(in_memory_uow),
+    )
     assert job.status == JobStatus.FAILED
     assert in_memory_uow.audits.get_by_job_id(job.job_id).status == AuditStatus.AUDIT_FAILED
 
@@ -432,7 +458,11 @@ async def test_audit_timeout_malformed_symlink_and_mutation_fail_safely(in_memor
         auditor_runner=MockAuditorRunner(output=['{"risk":"low","summary":"ok","findings":[]}']),
         worktree_manager=GitFakeWorktreeManager(tmp_path, symlink=True),
     )
-    job = await service.run_job("audit-project", "synthetic-audit-change", claim_context=_make_test_claim_context(in_memory_uow))
+    job = await service.run_job(
+        "audit-project",
+        "synthetic-audit-change",
+        claim_context=_make_test_claim_context(in_memory_uow),
+    )
     assert job.status == JobStatus.FAILED
     assert "prohibited symlink" in (job.error_message or "")
 
@@ -442,7 +472,11 @@ async def test_audit_timeout_malformed_symlink_and_mutation_fail_safely(in_memor
         auditor_runner=MockAuditorRunner(output=['{"risk":"low","summary":"ok","findings":[]}']),
         worktree_manager=GitFakeWorktreeManager(tmp_path, mutate_after_current_sha=True),
     )
-    job = await service.run_job("audit-project", "synthetic-audit-change", claim_context=_make_test_claim_context(in_memory_uow))
+    job = await service.run_job(
+        "audit-project",
+        "synthetic-audit-change",
+        claim_context=_make_test_claim_context(in_memory_uow),
+    )
     assert job.status == JobStatus.FAILED
     events = in_memory_uow.events.list_events(project_id="audit-project")
     assert any(

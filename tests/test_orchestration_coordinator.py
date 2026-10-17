@@ -2,16 +2,25 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import json
+import subprocess
 from datetime import timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from conftest import ReadinessGitHubStub, create_isolated_openspec_change
+from minime.adapters import provider_adapter
+from minime.adapters.provider_adapter import CapacityObservation, DeepSeekProviderAdapter
+from minime.config import AppConfig, ProjectConfig, ProviderConfig, StageProfileConfig
 from minime.domain.enums import (
     AuditFindingSeverity,
     AuditStatus,
+    CapacitySignalSource,
     ContinuationDecision,
     ExecutionOutcome,
     ExternalActionStatus,
@@ -19,25 +28,33 @@ from minime.domain.enums import (
     ExternalReasonCode,
     HumanGate,
     JobStatus,
+    OperatorActionStatus,
+    OperatorActionType,
     OrchestrationStage,
     OrchestrationStopOutcome,
     ProjectStatus,
     ProviderHealthStatus,
+    ProviderResultClass,
     PullRequestLookupState,
     ReadinessState,
     RetrySafety,
     ReviewStatus,
     ReviewVerdict,
+    WorktreeCreationState,
 )
 from minime.domain.interfaces import GitHubAdapterInterface
 from minime.domain.models import (
     AuditFinding,
     AuditRecord,
+    BudgetLedgerEntry,
+    BudgetReservation,
     CheckResult,
     Event,
     ExternalActionResult,
     Job,
     JobAttempt,
+    OpenRouterPricingSnapshot,
+    OperatorActionRequest,
     OrchestrationCandidate,
     OrchestrationRun,
     Project,
@@ -48,7 +65,12 @@ from minime.domain.models import (
     utc_now,
 )
 from minime.services.checks_runner import ChecksRunner, ChecksRunResult
+from minime.services.contract_review_service import (
+    DeepSeekResponseDiagnostics,
+    DeepSeekReviewResponse,
+)
 from minime.services.deepseek_auditor_runner import MockAuditorRunner
+from minime.services.deepseek_code_review_service import DeepSeekCodeReviewService
 from minime.services.execution_pipeline import ExecutionPipelineService
 from minime.services.implementer_runner import ImplementerResult, MockImplementerRunner
 from minime.services.orchestration_service import OrchestrationService
@@ -56,8 +78,90 @@ from minime.services.reviewer_runner import MockReviewerRunner
 from minime.services.worktree_manager import WorktreeManager
 
 
+class _DirectDeepSeekTestAdapter(DeepSeekProviderAdapter):
+    """Deterministic direct-account adapter; it exposes no inference operation."""
+
+    def __init__(self):
+        super().__init__()
+        self._test_account = hashlib.sha256(b"orchestration-test-account").hexdigest()
+
+    @property
+    def account_fingerprint(self):
+        return self._test_account
+
+    async def check_model_supported(self, model, effort=None, timeout_seconds=10.0):
+        del timeout_seconds
+        return (model == "deepseek-chat" and effort == "low", None)
+
+    async def read_capacity_observation(self, timeout_seconds=10.0, selected_model=None):
+        del timeout_seconds
+        now = utc_now()
+        return CapacityObservation(
+            provider="deepseek",
+            ordinary_usage_allowed=True,
+            observed_at=now,
+            expires_at=now + timedelta(seconds=60),
+            source_signal=CapacitySignalSource.DEEPSEEK_ACCOUNT_BALANCE,
+            account_id=self._test_account,
+            model=selected_model or "deepseek-chat",
+            quota_scope="deepseek_direct_account_balance",
+        )
+
+
+class _DeterministicCodeReviewTransport:
+    """HTTP-boundary double consumed by the real parser, budget, and review service."""
+
+    model = "deepseek-chat"
+    effort = "low"
+    review_stage = "CODE_REVIEW"
+
+    def __init__(self, responses: list[dict[str, Any]] | None = None):
+        self.responses = list(responses or [])
+        self.calls = 0
+
+    async def review(self, request: str, timeout_seconds: int):
+        del timeout_seconds
+        payload = json.loads(request)
+        assert payload["stage"] == "CODE_REVIEW"
+        self.calls += 1
+        response = (
+            self.responses.pop(0)
+            if self.responses
+            else {
+                "verdict": "READY_TO_MERGE",
+                "summary": "Deterministic transport response for integration testing.",
+                "findings": [],
+            }
+        )
+        content = json.dumps(response)
+        return DeepSeekReviewResponse(
+            exit_code=0,
+            content=content,
+            model=self.model,
+            prompt_tokens=100,
+            completion_tokens=20,
+            response_diagnostics=DeepSeekResponseDiagnostics(
+                http_status=200,
+                response_object="chat.completion",
+                returned_model=self.model,
+                model_matches_request=True,
+                choices_count=1,
+                finish_reason="stop",
+                content_present=True,
+                content_type="string",
+                content_length=len(content),
+                usage_present=True,
+                prompt_tokens=100,
+                completion_tokens=20,
+                total_tokens=120,
+                usage_valid=True,
+            ),
+        )
+
+
 def _test_ctx(uow: Any, claim_key: str = "test-claim") -> RecoveryClaimContext:
     from minime.services.recovery_convergence_service import RecoveryConvergenceService
+
     rec_svc = RecoveryConvergenceService(uow)
     claim = rec_svc.acquire_claim(claim_key)
     if claim:
@@ -68,6 +172,107 @@ def _test_ctx(uow: Any, claim_key: str = "test-claim") -> RecoveryClaimContext:
         fence_token=1,
         lease_expires_at=utc_now() + timedelta(seconds=3600),
     )
+
+
+def _install_review_service(pipeline: ExecutionPipelineService, env: dict[str, Any]) -> None:
+    if pipeline.code_review_service is None:
+        pipeline.code_review_service = DeepSeekCodeReviewService(
+            pipeline.uow,
+            health_service=pipeline.health_service,
+            budget_service=pipeline.budget_service,
+            app_config=env["app_config"],
+            runner=env["review_transport"],
+        )
+
+
+def _continue_frozen_candidate_under_owner_policy(
+    service: OrchestrationService, env: dict[str, Any], run: OrchestrationRun
+) -> OrchestrationRun:
+    """Resume a capacity wait under the configured owner policy, without per-call approval."""
+    from minime.services.control_plane_service import ControlPlaneService
+
+    uow = service.uow
+    run = uow.orchestration_runs.get_by_id(run.run_id) or run
+    job = uow.jobs.get_by_id(run.active_job_id) if run.active_job_id else None
+    if (
+        run.stop_outcome != OrchestrationStopOutcome.WAITING_CAPACITY
+        or not job
+        or job.status != JobStatus.WAITING_CAPACITY
+        or job.waiting_provider != "deepseek"
+        or not job.candidate_sha
+    ):
+        return run
+    assert run.current_candidate_sha == job.candidate_sha, (
+        f"candidate freeze mismatch: run={run.current_candidate_sha!r}, job={job.candidate_sha!r}, "
+        f"generation={run.current_generation}, run_stage={run.current_stage}, job_status={job.status}, "
+        f"candidate_record={service.uow.orchestration_candidates.get_latest_for_run(run.run_id)!r}"
+    )
+
+    cp = ControlPlaneService(
+        uow,
+        project_root=env["project_root"],
+        orchestration_service=service,
+    )
+    continued = cp.execute_action(
+        OperatorActionRequest(
+            action_request_id=f"test-code-review-continue-{run.run_id}-{run.current_generation}",
+            project_id=run.project_id,
+            change_name=run.change_name,
+            run_id=run.run_id,
+            action_type=OperatorActionType.CONTINUE,
+            parameters={},
+            actor_identity="deterministic-test-operator",
+            expected_stage=run.current_stage,
+            expected_generation=run.current_generation,
+            expected_candidate_sha=job.candidate_sha,
+        )
+    )
+    assert continued.status == OperatorActionStatus.COMPLETED, continued.summary
+    return uow.orchestration_runs.get_by_id(run.run_id) or run
+
+
+def _assert_frozen_candidate_worktree(uow: Any, run: OrchestrationRun):
+    job = uow.jobs.get_by_id(run.active_job_id)
+    candidate = uow.orchestration_candidates.get_latest_for_run(run.run_id)
+    ownership = uow.orchestration_worktree_ownerships.get_by_job_id(job.job_id)
+    path = Path(ownership.canonical_worktree_path)
+    assert ownership.creation_state == WorktreeCreationState.CREATED
+    assert path.is_dir()
+    assert ownership.project_id == run.project_id
+    assert ownership.job_id == job.job_id == run.active_job_id
+    assert ownership.run_id == run.run_id
+    assert ownership.change_name == run.change_name
+    assert run.current_generation == candidate.generation
+    assert run.current_candidate_sha == job.candidate_sha == candidate.candidate_sha
+    assert candidate.base_sha == run.base_sha == job.base_sha == ownership.source_base_sha
+    assert candidate.candidate_ref == f"refs/heads/{ownership.branch}"
+    assert (
+        subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=path,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        == ownership.branch
+    )
+    assert (
+        subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=path, capture_output=True, text=True, check=True
+        ).stdout.strip()
+        == candidate.candidate_sha
+    )
+    assert (
+        subprocess.run(
+            ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+            cwd=path,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        == ""
+    )
+    return job, candidate, ownership, path
 
 
 class FakeGitHubAdapter(GitHubAdapterInterface):
@@ -170,10 +375,11 @@ class FakeGitHubAdapter(GitHubAdapterInterface):
                 error_message="GitHub PR API unreachable",
             )
         key = f"{repository}:{branch}"
+        next_number = max((int(pr.get("number", 0)) for pr in self.prs.values()), default=0) + 1
         pr_data = {
             "repository": repository,
-            "number": len(self.prs) + 1,
-            "url": f"https://github.com/{repository}/pull/{len(self.prs) + 1}",
+            "number": next_number,
+            "url": f"https://github.com/{repository}/pull/{next_number}",
             "head_sha": head_sha,
             "head_branch": branch,
             "base_branch": base,
@@ -330,8 +536,11 @@ class StructuredLookupGitHubAdapter(FakeGitHubAdapter):
 
 
 @pytest.fixture
-def setup_orchestration_environment(tmp_path: Path, in_memory_uow):
+def setup_orchestration_environment(
+    tmp_path: Path, in_memory_uow, test_capacity_strategy, monkeypatch
+):
     """Sets up a fully configured test environment with projects, bindings, health, and changes."""
+    test_capacity_strategy(("codex", "antigravity"))
     import subprocess
 
     from conftest import setup_managed_repository_fixture
@@ -359,6 +568,8 @@ def setup_orchestration_environment(tmp_path: Path, in_memory_uow):
         openspec_path="openspec",
         implementer="codex",
         reviewer="antigravity",
+        external_providers_allowed=["codex", "antigravity", "deepseek"],
+        independent_audit_required=True,
         status=ProjectStatus.ACTIVE,
         checks=[{"name": "pytest", "command": "pytest"}],
     )
@@ -376,11 +587,69 @@ def setup_orchestration_environment(tmp_path: Path, in_memory_uow):
 
     # Provider health
     in_memory_uow.provider_health.save(
-        ProviderHealth(provider="codex", status=ProviderHealthStatus.AVAILABLE)
+        ProviderHealth(
+            provider="codex",
+            status=ProviderHealthStatus.AVAILABLE,
+            last_result_class=ProviderResultClass.SUCCESS,
+            last_success_at=utc_now(),
+        )
     )
     in_memory_uow.provider_health.save(
-        ProviderHealth(provider="antigravity", status=ProviderHealthStatus.AVAILABLE)
+        ProviderHealth(
+            provider="antigravity",
+            status=ProviderHealthStatus.AVAILABLE,
+            last_result_class=ProviderResultClass.SUCCESS,
+            last_success_at=utc_now(),
+        )
     )
+
+    # Coordinator scenarios now satisfy the actual CODE REVIEW preconditions.
+    # The service, authorization, capacity, budget, parser, and persistence are
+    # real; only the direct HTTP response is deterministic and non-networked.
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-only-direct-account-key")
+    adapter = _DirectDeepSeekTestAdapter()
+    monkeypatch.setitem(provider_adapter._ADAPTER_REGISTRY, "deepseek", adapter)
+    app_config = AppConfig(
+        providers={
+            "deepseek": ProviderConfig(
+                type="api",
+                enabled=True,
+                budget={"maximum_code_review_usd": "1.00"},
+            )
+        },
+        projects={
+            project_id: ProjectConfig(
+                repository="silverberdi/mini-me",
+                base_branch="main",
+                openspec_path="openspec",
+                external_providers_allowed=["codex", "antigravity", "deepseek"],
+                stage_profiles={
+                    "REVIEW": StageProfileConfig(
+                        provider="deepseek", model="deepseek-chat", effort="low", workflow="review"
+                    )
+                },
+            )
+        },
+    )
+    monkeypatch.setattr("minime.services.execution_pipeline.load_config", lambda: app_config)
+    monkeypatch.setattr("minime.services.control_plane_service.load_config", lambda: app_config)
+    monkeypatch.setattr(
+        "minime.services.deepseek_code_review_service.load_config", lambda: app_config
+    )
+    pricing = OpenRouterPricingSnapshot(
+        id="orchestration-code-review-price",
+        canonical_model_identity="deepseek-chat",
+        routed_model_identity="deepseek-chat",
+        prompt_price_per_token=Decimal("0.000001"),
+        output_price_per_token=Decimal("0.000001"),
+        currency="USD",
+        source="deepseek_official_pricing",
+        provider="deepseek",
+        account_fingerprint=adapter.account_fingerprint,
+        billing_origin="deepseek_direct",
+    )
+    in_memory_uow.pricing_snapshots.save(pricing)
+    review_transport = _DeterministicCodeReviewTransport()
 
     # Create OpenSpec change directory with valid artifacts
     change_dir = create_isolated_openspec_change(
@@ -392,6 +661,7 @@ def setup_orchestration_environment(tmp_path: Path, in_memory_uow):
     )
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-m", "Add OpenSpec change"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "push", "origin", "HEAD:refs/heads/main"], cwd=tmp_path, check=True)
     subprocess.run(
         ["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=tmp_path, check=True
     )
@@ -409,9 +679,23 @@ def setup_orchestration_environment(tmp_path: Path, in_memory_uow):
 
     orig_verify = WorktreeManager._verify_creation_postconditions
 
-    async def _safe_verify(self, path, ownership, expected_branch, expected_base_sha=None):
+    async def _safe_verify(
+        self,
+        path,
+        ownership,
+        expected_branch,
+        expected_base_sha=None,
+        expected_head_sha=None,
+    ):
         try:
-            await orig_verify(self, path, ownership, expected_branch, expected_base_sha)
+            await orig_verify(
+                self,
+                path,
+                ownership,
+                expected_branch,
+                expected_base_sha,
+                expected_head_sha,
+            )
         except RuntimeError as e:
             if "does not match expected SHA" in str(e):
                 await orig_verify(self, path, ownership, expected_branch, None)
@@ -420,12 +704,51 @@ def setup_orchestration_environment(tmp_path: Path, in_memory_uow):
 
     WorktreeManager._verify_creation_postconditions = _safe_verify
 
-    yield {
+    original_start = OrchestrationService.start
+    original_resume = OrchestrationService.resume
+
+    def finish_review_capacity_wait(service, run):
+        if service.pipeline is not None:
+            _install_review_service(service.pipeline, env)
+        for _ in range(3):
+            latest = service.uow.orchestration_runs.get_by_id(run.run_id) or run
+            updated = _continue_frozen_candidate_under_owner_policy(service, env, latest)
+            if (
+                updated.stop_outcome == latest.stop_outcome
+                and updated.updated_at == latest.updated_at
+            ):
+                break
+            run = updated
+        return service.uow.orchestration_runs.get_by_id(run.run_id) or run
+
+    def start_with_authorized_review(service, *args, **kwargs):
+        if service.pipeline is not None:
+            _install_review_service(service.pipeline, env)
+        result = original_start(service, *args, **kwargs)
+        return finish_review_capacity_wait(service, result)
+
+    def resume_with_authorized_review(service, *args, **kwargs):
+        if service.pipeline is not None:
+            _install_review_service(service.pipeline, env)
+        # A CONTROL_PLANE CONTINUE may call this method from the start wrapper's
+        # single capacity-recovery step. Do not recursively issue another
+        # continuation from inside that continuation.
+        return original_resume(service, *args, **kwargs)
+
+    monkeypatch.setattr(OrchestrationService, "start", start_with_authorized_review)
+    monkeypatch.setattr(OrchestrationService, "resume", resume_with_authorized_review)
+
+    env = {
         "project_id": project_id,
         "change_name": change_name,
         "project_root": tmp_path,
         "change_dir": change_dir,
+        "app_config": app_config,
+        "review_transport": review_transport,
+        "review_adapter": adapter,
+        "review_pricing": pricing,
     }
+    yield env
 
     WorktreeManager._verify_creation_postconditions = orig_verify
 
@@ -461,8 +784,22 @@ def test_pr_lookup_authoritative_not_found_allows_one_creation(
     run = _service_for_pr_lookup(env, in_memory_uow, github).start(
         env["project_id"], env["change_name"]
     )
-    assert run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
+    reservations = in_memory_uow.budget_reservations.list_by_project(env["project_id"])
+    assert run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE, (
+        f"{run.stop_reason}; reservations="
+        f"{[(item.stage, item.status, item.idempotency_key) for item in reservations]!r}"
+    )
     assert github.create_calls == 1
+    job = in_memory_uow.jobs.get_by_id(run.active_job_id)
+    review = in_memory_uow.reviews.get_by_job_stage(job.job_id, "CODE_REVIEW")
+    assert review is not None
+    assert review.status == ReviewStatus.REVIEW_COMPLETED
+    assert review.candidate_sha == run.current_candidate_sha == job.candidate_sha
+    assert review.candidate_generation == run.current_generation
+    assert env["review_transport"].calls == 1
+    reservation = in_memory_uow.budget_reservations.get_by_id(review.budget_reservation_id)
+    assert reservation is not None and reservation.status == "SETTLED"
+    assert run.current_stage == OrchestrationStage.PR_PREPARED
 
 
 @pytest.mark.parametrize(
@@ -797,7 +1134,7 @@ def test_same_run_resume_uses_attached_job_without_creating_duplicate(
     assert len(in_memory_uow.jobs.list_by_project(env["project_id"])) == 1
 
 
-def test_orchestration_reuses_pipeline_evidence_after_production_worktree_cleanup(
+def test_orchestration_reuses_pipeline_evidence_and_preserves_candidate_worktree(
     setup_orchestration_environment, in_memory_uow
 ):
     """The coordinator must use persisted pipeline evidence, never a removed worktree."""
@@ -833,12 +1170,20 @@ def test_orchestration_reuses_pipeline_evidence_after_production_worktree_cleanu
     assert run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
     job = in_memory_uow.jobs.get_by_id(run.active_job_id)
     assert job is not None and job.candidate_sha
-    assert not (env["project_root"] / ".minime" / "worktrees" / job.job_id).exists()
+    retained_job, candidate, ownership, retained_path = _assert_frozen_candidate_worktree(
+        in_memory_uow, run
+    )
+    assert retained_job.job_id == job.job_id
+    assert candidate.candidate_sha == job.candidate_sha
+    assert ownership.canonical_worktree_path == str(retained_path)
 
     checks = in_memory_uow.check_results.list_by_job(job.job_id)
+    # Fresh reviewer capacity is present in this scenario, so the exact
+    # candidate needs one check pass rather than a synthetic wait/resume cycle.
     assert len(checks) == 1
-    assert checks[0].check_name == "candidate-file"
-    assert checks[0].exit_code == 0
+    assert all(check.check_name == "candidate-file" for check in checks)
+    assert all(check.exit_code == 0 for check in checks)
+    assert {check.candidate_sha for check in checks} == {job.candidate_sha}
 
     manifest = in_memory_uow.candidate_manifests.get_by_candidate_sha(job.job_id, job.candidate_sha)
     assert manifest is not None
@@ -921,22 +1266,23 @@ def test_capacity_exhaustion_stops_at_waiting_capacity(
 def test_review_remediation_loop_increments_candidate_generation(
     setup_orchestration_environment, in_memory_uow
 ):
-    """Verify review CHANGES_REQUIRED routes through remediation, incrementing candidate generation."""
+    """Verify authoritative CODE_REVIEW CHANGES_REQUIRED enters a fresh generation."""
     env = setup_orchestration_environment
-
-    class DynamicReviewer(MockReviewerRunner):
-        def __init__(self):
-            super().__init__()
-            self.calls = 0
-
-        async def run(self, worktree_path: Path, prompt_context: str, timeout_seconds: int):
-            self.calls += 1
-            if self.calls == 1:
-                out = '```json\n{"verdict": "CHANGES_REQUIRED", "summary": "Need tests", "findings": [{"severity": "BLOCKER", "location": "main.py", "violated_requirement": "Tests", "expected_correction": "Add tests"}]}\n```'
-            else:
-                out = '```json\n{"verdict": "READY_TO_MERGE", "summary": "All good", "findings": []}\n```'
-            self.stdout = [out]
-            return await super().run(worktree_path, prompt_context, timeout_seconds)
+    env["review_transport"].responses = [
+        {
+            "verdict": "CHANGES_REQUIRED",
+            "summary": "Need tests",
+            "findings": [
+                {
+                    "severity": "BLOCKER",
+                    "location": "main.py",
+                    "violated_requirement": "Tests",
+                    "expected_correction": "Add tests",
+                }
+            ],
+        },
+        {"verdict": "READY_TO_MERGE", "summary": "All good", "findings": []},
+    ]
 
     class DynamicImplementer(MockImplementerRunner):
         def __init__(self):
@@ -973,12 +1319,13 @@ def test_review_remediation_loop_increments_candidate_generation(
             )
 
     fake_github = FakeGitHubAdapter()
+    implementer = DynamicImplementer()
     pipeline = ExecutionPipelineService(
         uow=in_memory_uow,
         project_root=env["project_root"],
-        implementer_runner=DynamicImplementer(),
+        implementer_runner=implementer,
         checks_runner=FakeChecksRunner(should_pass=True),
-        reviewer_runner=DynamicReviewer(),
+        reviewer_runner=MockReviewerRunner(),
         auditor_runner=MockAuditorRunner(
             output=['{"risk": "low", "summary": "Passed", "findings": []}']
         ),
@@ -991,11 +1338,16 @@ def test_review_remediation_loop_increments_candidate_generation(
         github_adapter=fake_github,
     )
 
+    async def reject_candidate_free_recovery(**kwargs):
+        raise AssertionError("frozen candidate must not enter candidate-free recovery")
+
+    pipeline.worktree_manager._verify_deleted_worktree_recreation = reject_candidate_free_recovery
+
     run = service.start(env["project_id"], env["change_name"])
 
     # Generation should have incremented to 2 due to remediation
     assert run.current_generation == 2
-    assert run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
+    assert run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE, run.stop_reason
     assert run.human_gate == HumanGate.READY_FOR_HUMAN_MERGE
 
     # Both generation 1 and 2 should exist in candidates repo, gen 1 superseded
@@ -1005,6 +1357,63 @@ def test_review_remediation_loop_increments_candidate_generation(
     assert candidates[0].superseded_by_id == candidates[1].candidate_id
     assert candidates[1].generation == 2
     assert candidates[1].superseded_by_id is None
+    assert implementer.calls == 2
+    assert env["review_transport"].calls == 2
+    job, candidate, ownership, worktree_path = _assert_frozen_candidate_worktree(in_memory_uow, run)
+
+    uncommitted = worktree_path / "uncommitted-progress.txt"
+    uncommitted.write_text("preserve this local progress\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="Existing integration worktree is dirty"):
+        asyncio.run(
+            pipeline.worktree_manager.create_worktree(
+                job.job_id,
+                run.change_name,
+                in_memory_uow.projects.get_by_id(run.project_id).base_branch,
+                project_id=run.project_id,
+                branch_name=candidate.candidate_ref.removeprefix("refs/heads/"),
+                run_id=run.run_id,
+                reuse_existing=True,
+            )
+        )
+    assert uncommitted.read_text(encoding="utf-8") == "preserve this local progress\n"
+    uncommitted.unlink()
+
+    # Contradictory Run/Job candidate identity is denied without touching the
+    # retained worktree; a DELETED candidate worktree is never reconstructed.
+    in_memory_uow.orchestration_runs.save(
+        run.model_copy(update={"current_candidate_sha": "contradictory-candidate-sha"})
+    )
+    with pytest.raises(RuntimeError, match="Run and Job candidate SHAs do not match"):
+        asyncio.run(
+            pipeline.worktree_manager.create_worktree(
+                job.job_id,
+                run.change_name,
+                in_memory_uow.projects.get_by_id(run.project_id).base_branch,
+                project_id=run.project_id,
+                branch_name=candidate.candidate_ref.removeprefix("refs/heads/"),
+                run_id=run.run_id,
+                reuse_existing=True,
+            )
+        )
+    assert worktree_path.is_dir()
+    in_memory_uow.orchestration_runs.save(run)
+    cleanup = asyncio.run(
+        pipeline.worktree_manager.remove_clean_worktree(job.job_id, project_id=run.project_id)
+    )
+    assert cleanup.outcome == ExternalOutcome.SUCCESS
+    assert not worktree_path.exists()
+    with pytest.raises(RuntimeError, match="physically existing CREATED ownership"):
+        asyncio.run(
+            pipeline.worktree_manager.create_worktree(
+                job.job_id,
+                run.change_name,
+                in_memory_uow.projects.get_by_id(run.project_id).base_branch,
+                project_id=run.project_id,
+                branch_name=candidate.candidate_ref.removeprefix("refs/heads/"),
+                run_id=run.run_id,
+                reuse_existing=True,
+            )
+        )
 
 
 def test_deepseek_audit_blocking_findings_trigger_remediation(
@@ -1062,10 +1471,11 @@ def test_deepseek_audit_blocking_findings_trigger_remediation(
             )
 
     fake_github = FakeGitHubAdapter()
+    implementer = DynamicImplementer()
     pipeline = ExecutionPipelineService(
         uow=in_memory_uow,
         project_root=env["project_root"],
-        implementer_runner=DynamicImplementer(),
+        implementer_runner=implementer,
         checks_runner=FakeChecksRunner(should_pass=True),
         reviewer_runner=MockReviewerRunner(
             stdout=[
@@ -1086,24 +1496,38 @@ def test_deepseek_audit_blocking_findings_trigger_remediation(
     assert run.current_generation == 2
     assert run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
     assert run.human_gate == HumanGate.READY_FOR_HUMAN_MERGE
+    assert implementer.calls == 2
+    _assert_frozen_candidate_worktree(in_memory_uow, run)
 
 
-def test_pr_head_mismatch_fails_closed_needs_human(setup_orchestration_environment, in_memory_uow):
-    """Verify that an existing remote PR with mismatched head SHA triggers fail-closed NEEDS_HUMAN."""
+def test_new_job_pr_branch_does_not_reuse_historical_change_branch(
+    setup_orchestration_environment, in_memory_uow
+):
+    """A fresh Job publishes on its own branch and leaves the historical fixture PR intact."""
     env = setup_orchestration_environment
 
     fake_github = FakeGitHubAdapter()
-    # Pre-populate mismatched PR on remote GitHub
-    fake_github.prs["silverberdi/mini-me:minime/008-autonomous-change-orchestration"] = {
+    historical_branch_name = f"minime/{env['change_name']}"
+    historical_sha = "a9f1599aa6c45eb47a0925fb0f033e01e02f33e0"
+    historical_branch = {
+        "remote": "origin",
+        "branch": historical_branch_name,
+        "candidate_sha": historical_sha,
+    }
+    fake_github.pushed_branches.append(historical_branch.copy())
+    historical_pr_key = f"silverberdi/mini-me:{historical_branch_name}"
+    fake_github.prs[historical_pr_key] = {
         "repository": "silverberdi/mini-me",
-        "head_branch": "minime/008-autonomous-change-orchestration",
+        "head_branch": historical_branch_name,
         "base_branch": "main",
-        "number": 42,
-        "url": "https://github.com/silverberdi/mini-me/pull/42",
-        "head_sha": "some-other-unrelated-sha-9999",
+        "number": 2,
+        "url": "https://github.com/silverberdi/mini-me-r01-e2e-20261014/pull/2",
+        "head_sha": historical_sha,
         "base_sha": "main",
         "state": "OPEN",
+        "draft": True,
     }
+    preserved_pr = fake_github.prs[historical_pr_key].copy()
 
     pipeline = ExecutionPipelineService(
         uow=in_memory_uow,
@@ -1129,11 +1553,18 @@ def test_pr_head_mismatch_fails_closed_needs_human(setup_orchestration_environme
 
     run = service.start(env["project_id"], env["change_name"])
 
-    # Fail closed: must stop with NEEDS_HUMAN
-    assert run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
-    assert run.human_gate == HumanGate.NEEDS_HUMAN
-    assert "does not match" in run.stop_reason.lower()
-    assert run.stop_details.get("code") == "PR_HEAD_MISMATCH"
+    assert run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
+    assert run.human_gate == HumanGate.READY_FOR_HUMAN_MERGE
+    assert fake_github.prs[historical_pr_key] == preserved_pr
+    assert fake_github.pushed_branches[0] == historical_branch
+
+    job_branch = f"minime/{env['change_name']}-{run.active_job_id}"
+    assert job_branch != historical_branch_name
+    assert any(entry["branch"] == job_branch for entry in fake_github.pushed_branches[1:])
+    new_pr = fake_github.prs[f"silverberdi/mini-me:{job_branch}"]
+    assert new_pr["head_branch"] == job_branch
+    assert new_pr["head_sha"] != historical_sha
+    assert new_pr["number"] != 2
 
 
 def test_transient_external_failure_stops_waiting_external_and_resumes(
@@ -1249,6 +1680,90 @@ def test_ready_to_merge_job_without_audit_cannot_prepare_pr(
     assert len(fake_github.pushed_branches) == 0
 
 
+def test_candidate_changed_paths_are_read_from_candidate_worktree(
+    setup_orchestration_environment, in_memory_uow, tmp_path
+):
+    """VERIFY must inspect the frozen candidate tree, not stale managed checkout files."""
+    env = setup_orchestration_environment
+    service = OrchestrationService(in_memory_uow, project_root=env["project_root"])
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=env["project_root"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    candidate_root = tmp_path / "candidate-verification-worktree"
+    branch = "test/verify-candidate-tree"
+    subprocess.run(
+        ["git", "worktree", "add", "-b", branch, str(candidate_root), base_sha],
+        cwd=env["project_root"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    try:
+        changed_file = candidate_root / "src" / "candidate_only.py"
+        changed_file.parent.mkdir(parents=True, exist_ok=True)
+        changed_file.write_text("candidate tree evidence = True\n", encoding="utf-8")
+        subprocess.run(["git", "add", "src/candidate_only.py"], cwd=candidate_root, check=True)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-m",
+                "candidate",
+            ],
+            cwd=candidate_root,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        candidate_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=candidate_root,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        run = OrchestrationRun(
+            run_id="run-verify-candidate-tree",
+            project_id=env["project_id"],
+            change_name=env["change_name"],
+            base_sha=base_sha,
+        )
+        candidate = OrchestrationCandidate(
+            run_id=run.run_id,
+            generation=1,
+            base_sha=base_sha,
+            candidate_sha=candidate_sha,
+            manifest_hash="test-manifest",
+            is_frozen=True,
+        )
+        assert service._candidate_changed_paths(run, candidate, candidate_root) == [
+            "src/candidate_only.py"
+        ]
+    finally:
+        subprocess.run(
+            ["git", "worktree", "remove", str(candidate_root)],
+            cwd=env["project_root"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        subprocess.run(
+            ["git", "branch", "-d", branch],
+            cwd=env["project_root"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+
 def test_review_authority_fail_closed_validation(setup_orchestration_environment, in_memory_uow):
     """
     HIGH Finding 2 Regression Test:
@@ -1293,14 +1808,41 @@ def test_review_authority_fail_closed_validation(setup_orchestration_environment
     assert valid is False
     assert "No review record exists" in reason
 
+    # A complete candidate-bound DeepSeek Audit is not a Review authority.
+    in_memory_uow.audits.save(
+        AuditRecord(
+            job_id=job.job_id,
+            project_id=env["project_id"],
+            change_name=env["change_name"],
+            provider="deepseek",
+            candidate_sha="cand-sha-1",
+            base_sha="base-sha-1",
+            orchestration_run_id=run.run_id,
+            candidate_generation=1,
+            manifest_id=cand.manifest_id,
+            manifest_hash=cand.manifest_hash,
+            is_full_candidate=True,
+            status=AuditStatus.AUDIT_COMPLETED,
+        )
+    )
+    valid, verdict, reason = service._validate_review_authority(run, job, cand)
+    assert valid is False
+    assert "No review record exists" in reason
+
     # 2. Review candidate_sha is empty -> fail closed (NULL must NEVER mean current)
     review = Review(
         job_id=job.job_id,
         project_id=env["project_id"],
         change_name=env["change_name"],
-        reviewer_role="antigravity",
+        reviewer_role="deepseek",
         candidate_sha="",
         base_sha="base-sha-1",
+        reviewer_model="deepseek-chat",
+        provider="deepseek",
+        review_stage="CODE_REVIEW",
+        account_fingerprint="a" * 64,
+        billing_origin="deepseek_direct",
+        budget_reservation_id="code-review-reservation-test",
         orchestration_run_id="run-review-auth-test",
         candidate_generation=1,
         manifest_id="manifest-review-auth",
@@ -1309,17 +1851,66 @@ def test_review_authority_fail_closed_validation(setup_orchestration_environment
         verdict=ReviewVerdict.READY_TO_MERGE,
     )
     in_memory_uow.reviews.save(review)
+    in_memory_uow.budget_reservations.save(
+        BudgetReservation(
+            reservation_id=review.budget_reservation_id,
+            project_id=job.project_id,
+            job_id=job.job_id,
+            run_id=run.run_id,
+            change_id=job.change_name,
+            role="reviewer",
+            canonical_model_identity="deepseek-chat",
+            reserved_amount_usd=Decimal("0.10"),
+            status="SETTLED",
+            pricing_snapshot_id="code-review-price",
+            provider="deepseek",
+            account_fingerprint="a" * 64,
+            stage="REVIEW",
+            billing_origin="deepseek_direct",
+            authorization_id=None,
+            idempotency_key="review:v1:code-review-auth-test",
+        )
+    )
+    in_memory_uow.budget_ledger.save(
+        BudgetLedgerEntry(
+            reservation_id=review.budget_reservation_id,
+            project_id=job.project_id,
+            job_id=job.job_id,
+            change_id=job.change_name,
+            provider="deepseek",
+            account_fingerprint="a" * 64,
+            stage="REVIEW",
+            billing_origin="deepseek_direct",
+            role="reviewer",
+            canonical_model_identity="deepseek-chat",
+            prompt_tokens=100,
+            completion_tokens=20,
+            total_tokens=120,
+            amount_usd=Decimal("0.000120"),
+            entry_type="USAGE",
+        )
+    )
+
+    # A legacy provider identity cannot become an authorized direct DeepSeek record.
+    review.reviewer_role = "codex"
+    in_memory_uow.reviews.save(review)
+    valid, verdict, reason = service._validate_review_authority(run, job, cand)
+    assert valid is False
+    assert "direct DeepSeek CODE_REVIEW" in reason
+
+    review.reviewer_role = "deepseek"
+    in_memory_uow.reviews.save(review)
 
     valid, verdict, reason = service._validate_review_authority(run, job, cand)
     assert valid is False
-    assert "does not match current candidate" in reason
+    assert "candidate SHA" in reason
 
     # 3. Review candidate_sha mismatch (e.g. prior generation) -> fail closed
     review.candidate_sha = "stale-prior-gen-sha"
     in_memory_uow.reviews.save(review)
     valid, verdict, reason = service._validate_review_authority(run, job, cand)
     assert valid is False
-    assert "does not match current candidate" in reason
+    assert "candidate SHA" in reason
 
     # 4. Review base_sha mismatch -> fail closed
     review.candidate_sha = "cand-sha-1"
@@ -1327,13 +1918,30 @@ def test_review_authority_fail_closed_validation(setup_orchestration_environment
     in_memory_uow.reviews.save(review)
     valid, verdict, reason = service._validate_review_authority(run, job, cand)
     assert valid is False
-    assert "does not match run base" in reason
+    assert "base SHA" in reason
 
     # 5. Exact match -> valid READY_TO_MERGE
     review.base_sha = "base-sha-1"
+    review.provider = "deepseek"
+    review.reviewer_role = "deepseek"
+    review.reviewer_model = "deepseek-chat"
+    review.review_stage = "CODE_REVIEW"
+    review.account_fingerprint = "a" * 64
+    review.budget_authorization_id = None
+    review.budget_reservation_id = "code-review-reservation-test"
+    review.billing_origin = "deepseek_direct"
+    review.orchestration_run_id = run.run_id
+    review.candidate_generation = cand.generation
+    review.candidate_sha = cand.candidate_sha
+    review.manifest_id = cand.manifest_id
+    review.manifest_hash = cand.manifest_hash
     in_memory_uow.reviews.save(review)
+    saved_review = in_memory_uow.reviews.get_by_job_id(job.job_id)
+    saved_reservation = in_memory_uow.budget_reservations.get_by_id(review.budget_reservation_id)
+    assert saved_review and saved_review.budget_authorization_id is None
+    assert saved_reservation and saved_reservation.authorization_id is None
     valid, verdict, reason = service._validate_review_authority(run, job, cand)
-    assert valid is True
+    assert valid is True, reason
     assert verdict == ReviewVerdict.READY_TO_MERGE
 
 
@@ -1674,11 +2282,6 @@ def test_push_reconciliation_zero_second_push_and_zero_force_push(
 
     # Simulate remote branch already matching candidate SHA
     cand_sha = "matching-remote-cand-sha"
-    fake_github.pushed_branches.append(
-        {"remote": "origin", "branch": f"minime/{env['change_name']}", "candidate_sha": cand_sha}
-    )
-    initial_push_count = len(fake_github.pushed_branches)
-
     # Run orchestration starting from PREPARING_PR
     job = Job(
         project_id=env["project_id"],
@@ -1690,6 +2293,11 @@ def test_push_reconciliation_zero_second_push_and_zero_force_push(
         status=JobStatus.CHECKS_PASSED,
     )
     in_memory_uow.jobs.save(job)
+    job_branch = f"minime/{env['change_name']}-{job.job_id}"
+    fake_github.pushed_branches.append(
+        {"remote": "origin", "branch": job_branch, "candidate_sha": cand_sha}
+    )
+    initial_push_count = len(fake_github.pushed_branches)
 
     run = OrchestrationRun(
         run_id="run-push-recon-test",
@@ -1709,6 +2317,7 @@ def test_push_reconciliation_zero_second_push_and_zero_force_push(
         generation=1,
         base_sha="base-1",
         candidate_sha=cand_sha,
+        candidate_ref=f"refs/heads/{job_branch}",
         manifest_id="manifest-push-recon",
         manifest_hash="hash-push-recon",
         is_frozen=True,

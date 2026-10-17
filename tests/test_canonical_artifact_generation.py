@@ -104,6 +104,7 @@ def test_prepare_work_item_idempotency(
     )
 
     from minime.services.recovery_convergence_service import RecoveryConvergenceService
+
     rec_svc = RecoveryConvergenceService(in_memory_uow)
     claim_ctx = rec_svc.acquire_claim("intake:app-proj:023-caching")
 
@@ -122,3 +123,107 @@ def test_prepare_work_item_idempotency(
     assert res2.github_issue_number == res1.github_issue_number
     assert res2.openspec_change_name == res1.openspec_change_name
     assert res2.readiness_state.value == "READY"
+
+
+def test_intake_preserves_pre_authored_openspec_change_byte_for_byte(
+    in_memory_uow: InMemoryPersistenceUnitOfWork, tmp_path: Path, monkeypatch
+) -> None:
+    repo_dir = tmp_path / "native-proposal-repo"
+    setup_managed_repository_fixture(
+        in_memory_uow, "native-proposal-project", repo_dir, tmp_path / "worktrees"
+    )
+    project = Project(
+        project_id="native-proposal-project",
+        display_name="Native Proposal Project",
+        repository="test-owner/native-proposal-repo",
+        base_branch="main",
+    )
+    in_memory_uow.projects.save(project)
+    item = BacklogItem(
+        project_id=project.project_id,
+        item_key="parse-normalized-tags",
+        title="Parse normalized tags",
+        status=WorkItemStatus.PREPARING,
+        description="Preserve and intake the already authored OpenSpec change.",
+    )
+    change_dir = repo_dir / "openspec" / "changes" / item.item_key
+    spec_dir = change_dir / "specs" / "normalized-tag-parsing"
+    spec_dir.mkdir(parents=True)
+    native_contents = {
+        "proposal.md": "# Native proposal\n\nDo not regenerate this text.\n",
+        "design.md": "# Native design\n\nExact source bytes.\n",
+        "tasks.md": "# Native tasks\n\n- [ ] Implement by mini me\n",
+        "specs/normalized-tag-parsing/spec.md": (
+            "# Native spec\n\n## ADDED Requirements\n\n### Requirement: Parse tags\n"
+        ),
+    }
+    for relative, content in native_contents.items():
+        target = change_dir / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content.encode("utf-8"))
+
+    generator = OpenSpecGenerator(project_root=repo_dir, uow=in_memory_uow)
+    service = IntakeService(in_memory_uow, project_root=repo_dir)
+    service.openspec_generator = generator
+
+    def forbidden_regeneration(*args, **kwargs):
+        raise AssertionError("Existing native OpenSpec artifacts must not be regenerated.")
+
+    monkeypatch.setattr(generator, "generate_from_backlog_item", forbidden_regeneration)
+    loaded = service._load_or_generate_openspec(project, item, item.item_key)
+    assert generator._build_artifact_contents(loaded) == native_contents
+
+    saga = DurableSaga(
+        id="saga-native-proposal",
+        saga_type=SagaType.INTAKE,
+        project_id=project.project_id,
+        work_item_key=item.item_key,
+        change_name=item.item_key,
+        status=SagaStatus.IN_PROGRESS,
+        current_phase="STARTED",
+    )
+    in_memory_uow.durable_sagas.save(saga)
+    ownership = service._reserve_intake_workspace(project, item, saga)
+    service._activate_intake_workspace(ownership, project)
+    target = generator.write_change_to_disk(
+        "openspec",
+        loaded,
+        project_id=project.project_id,
+        uow=in_memory_uow,
+        target_workspace_path=ownership.canonical_workspace_path,
+    )
+    for relative, content in native_contents.items():
+        assert (target / relative).read_bytes() == content.encode("utf-8")
+
+
+def test_existing_openspec_intake_rejects_unmanifested_and_symlink_files(
+    tmp_path: Path,
+) -> None:
+    repo_dir = tmp_path / "repo"
+    change_dir = repo_dir / "openspec" / "changes" / "safe-change"
+    specs = change_dir / "specs" / "capability"
+    specs.mkdir(parents=True)
+    (change_dir / "proposal.md").write_text("proposal\n", encoding="utf-8")
+    (change_dir / "design.md").write_text("design\n", encoding="utf-8")
+    (change_dir / "tasks.md").write_text("tasks\n", encoding="utf-8")
+    (specs / "spec.md").write_text("spec\n", encoding="utf-8")
+    (change_dir / ".openspec.yaml").write_text(
+        "schema: spec-driven\ncreated: 2026-10-16\n", encoding="utf-8"
+    )
+    (change_dir / "unexpected.json").write_text("{}", encoding="utf-8")
+
+    generator = OpenSpecGenerator(project_root=repo_dir)
+    import pytest
+
+    with pytest.raises(ValueError, match="Unexpected file"):
+        generator.load_existing_change("safe-change", repo_dir)
+
+    (change_dir / "unexpected.json").unlink()
+    loaded = generator.load_existing_change("safe-change", repo_dir)
+    assert loaded is not None
+    assert ".openspec.yaml" not in generator.build_artifact_manifest(loaded).files
+    outside = tmp_path / "outside.md"
+    outside.write_text("outside", encoding="utf-8")
+    (change_dir / "linked.md").symlink_to(outside)
+    with pytest.raises(ValueError, match="Symlink"):
+        generator.load_existing_change("safe-change", repo_dir)

@@ -94,6 +94,13 @@ class MockUnitOfWork:
         self.changes.get_by_name = lambda pid, cname: self._changes_dict.get(f"{pid}:{cname}")
         self.changes.save = lambda c: self._changes_dict.update({f"{c.project_id}:{c.name}": c})
 
+        # The production pipeline consults the canonical run repository when
+        # resolving an executor. These isolated pipeline tests intentionally
+        # have no orchestration run, so model that repository contract rather
+        # than omitting the authority from the test UoW.
+        self.orchestration_runs = MagicMock()
+        self.orchestration_runs.get_active_run = lambda project_id, change_name: None
+
         self.events = MagicMock()
         self.events.save = MagicMock()
 
@@ -360,7 +367,9 @@ async def test_continuation_pipeline_multi_attempt_success(tmp_path: Path):
         ),
     ):
         job = pipeline.queue_job("proj-1", "007-continuation")
-        res_job = await pipeline.execute_queued_job(job.job_id, claim_context=_make_test_claim_context())
+        res_job = await pipeline.execute_queued_job(
+            job.job_id, claim_context=_make_test_claim_context()
+        )
 
     # Verify that job completed with attempt_count == 2
     assert res_job.attempt_count == 2
@@ -478,7 +487,9 @@ async def test_reviewer_visibility_blindness_escalation(tmp_path: Path):
         return_value=(True, None),
     ):
         job = pipeline.queue_job("proj-1", "007-continuation")
-        res_job = await pipeline.execute_queued_job(job.job_id, claim_context=_make_test_claim_context())
+        res_job = await pipeline.execute_queued_job(
+            job.job_id, claim_context=_make_test_claim_context()
+        )
 
     assert res_job.status == JobStatus.NEEDS_HUMAN
     assert "Reviewer workspace snapshot missing candidate files" in (res_job.error_message or "")
@@ -665,7 +676,9 @@ async def test_reassignment_creates_handoff_and_tracks_mixed_authorship(tmp_path
         ),
     ):
         job = pipeline.queue_job("proj-1", "007-continuation")
-        res_job = await pipeline.execute_queued_job(job.job_id, claim_context=_make_test_claim_context())
+        res_job = await pipeline.execute_queued_job(
+            job.job_id, claim_context=_make_test_claim_context()
+        )
 
     assert res_job.reassignment_count == 1
     assert res_job.attempt_count == 4
@@ -828,7 +841,9 @@ async def test_continuation_counters_reconstructed_after_restart_prevent_fresh_b
             return_value=(True, None),
         ),
     ):
-        res_job = await pipeline.execute_queued_job("job-restart-1", claim_context=_make_test_claim_context())
+        res_job = await pipeline.execute_queued_job(
+            "job-restart-1", claim_context=_make_test_claim_context()
+        )
 
     # Because codex exhausted retries, it immediately reassigned on attempt 3 without granting a 3rd corrective retry
     assert res_job.reassignment_count == 1
@@ -938,11 +953,16 @@ async def test_post_reassignment_capacity_check_uses_effective_executor(tmp_path
             return_value=(True, None),
         ),
     ):
-        res_job = await pipeline.execute_queued_job("job-cap-1", claim_context=_make_test_claim_context())
+        res_job = await pipeline.execute_queued_job(
+            "job-cap-1", claim_context=_make_test_claim_context()
+        )
 
     # Confirms implementer stage proceeded without blocking on codex, and then review stage checked effective reviewer (codex)
     assert res_job.status == JobStatus.WAITING_CAPACITY
     assert res_job.waiting_provider == "codex"
+    assert res_job.candidate_sha == "sha1"
+    mock_rev_runner.run.assert_not_awaited()
+    pipeline._run_audit_stage.assert_not_awaited()
 
 
 @pytest.mark.parametrize(
@@ -1115,7 +1135,9 @@ async def test_pipeline_rule_k_exhaustive_provider_health_status_on_reassignment
             return_value=(True, None),
         ),
     ):
-        res_job = await pipeline.execute_queued_job(job_id, claim_context=_make_test_claim_context())
+        res_job = await pipeline.execute_queued_job(
+            job_id, claim_context=_make_test_claim_context()
+        )
 
     if target_status == ProviderHealthStatus.AVAILABLE:
         # Reassignment succeeded and immediately executed next attempt

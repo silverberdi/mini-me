@@ -118,6 +118,34 @@ def validate_pre_review_integrity(
             f"Base SHA mismatch: registered base branch 'origin/{base_branch}' resolves to '{resolved_base_sha}' but expected base SHA is '{expected_base_sha}'.",
         )
 
+    # 3. Validate no tracked generated compiler/runtime artifacts in candidate
+    try:
+        from minime.services.candidate_manifest import is_generated_runtime_artifact
+
+        proc_files = subprocess.run(
+            ["git", "ls-files"],
+            cwd=str(worktree_path),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc_files.returncode == 0:
+            violating = [
+                f.strip()
+                for f in proc_files.stdout.splitlines()
+                if f.strip() and is_generated_runtime_artifact(f.strip())
+            ]
+            if violating:
+                return (
+                    False,
+                    f"Pre-review integrity failure: candidate contains tracked generated compiler/runtime artifacts: {sorted(violating)}",
+                )
+    except Exception as exc:
+        return (
+            False,
+            f"Pre-review integrity error checking generated artifacts: {exc}",
+        )
+
     return True, None
 
 

@@ -15,6 +15,7 @@ When code is modified and checks pass:
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -80,8 +81,13 @@ class LightweightReconciliationService:
         if tasks_file.exists() and checks_passed:
             lines = tasks_file.read_text(encoding="utf-8").splitlines()
             new_lines: list[str] = []
+            current_section: str | None = None
             for line in lines:
                 stripped = line.strip()
+                if stripped.startswith("## "):
+                    current_section = stripped[3:].strip()
+                    new_lines.append(line)
+                    continue
                 match = tracker._task_re.match(stripped)
                 if match and match.group("mark").lower() != "x":
                     body = match.group("body").strip()
@@ -90,20 +96,21 @@ class LightweightReconciliationService:
                     body_lower = body.lower()
                     # Reconcile verification, test, check, sync, or documentation tasks when checks pass
                     task_obj = OpenSpecTask(
-                        task_id=task_id, text=body, section=None, complete=False
+                        task_id=task_id, text=body, section=current_section, complete=False
                     )
-                    should_mark = is_verification_task(task_obj) or any(
-                        kw in body_lower
-                        for kw in [
-                            "test",
-                            "check",
-                            "verify",
-                            "sync",
-                            "spec",
-                            "document",
-                            "manifest",
-                            "evidence",
-                        ]
+                    is_impl = bool(current_section and "implementation" in current_section.lower())
+                    should_mark = (not is_impl) and (
+                        is_verification_task(task_obj)
+                        or any(
+                            re.search(rf"\b{kw}\b", body_lower)
+                            for kw in [
+                                "sync",
+                                "spec",
+                                "document",
+                                "manifest",
+                                "evidence",
+                            ]
+                        )
                     )
                     if should_mark:
                         indent = line[: len(line) - len(stripped)]

@@ -12,6 +12,8 @@ Verifies:
 
 from __future__ import annotations
 
+import subprocess
+import time
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -25,8 +27,10 @@ from tests.conftest import (
 )
 
 from minime.adapters.github import GitHubAdapter
+from minime.adapters.provider_adapter import CapacityObservation, get_provider_adapter
 from minime.domain.enums import (
     AdmissionBlockCondition,
+    AdmissionDecision,
     AdmissionDecisionKind,
     CapacitySignalSource,
     ChangeStatus,
@@ -36,6 +40,7 @@ from minime.domain.enums import (
     JobStatus,
     OrchestrationStage,
     ProviderHealthStatus,
+    ProviderResultClass,
     QueuePriority,
     ReadinessState,
     RetrySafety,
@@ -118,6 +123,14 @@ def setup_test_environment(
                 health_id=f"ph-{implementer}",
                 provider=implementer,
                 status=implementer_status,
+                last_result_class=(
+                    ProviderResultClass.SUCCESS
+                    if implementer_status == ProviderHealthStatus.AVAILABLE
+                    else None
+                ),
+                last_success_at=(
+                    utc_now() if implementer_status == ProviderHealthStatus.AVAILABLE else None
+                ),
             )
         )
         uow.provider_health.save(
@@ -125,6 +138,14 @@ def setup_test_environment(
                 health_id=f"ph-{reviewer}",
                 provider=reviewer,
                 status=reviewer_status,
+                last_result_class=(
+                    ProviderResultClass.SUCCESS
+                    if reviewer_status == ProviderHealthStatus.AVAILABLE
+                    else None
+                ),
+                last_success_at=(
+                    utc_now() if reviewer_status == ProviderHealthStatus.AVAILABLE else None
+                ),
             )
         )
     else:
@@ -218,6 +239,86 @@ def test_safe_executable_pair_admits_run(
     assert res.block_condition is None
 
 
+def test_fresh_intake_admission_creates_new_run_job_and_waits_for_contract_review(
+    tmp_path: Path,
+    in_memory_uow: InMemoryPersistenceUnitOfWork,
+    test_capacity_strategy,
+):
+    """Canonical intake creates new identities, then gates before any APPLY dispatch."""
+    from minime.services.contract_review_service import ContractReviewResult
+    from minime.services.execution_pipeline import ExecutionPipelineService
+
+    project, scheduler = setup_test_environment(tmp_path, in_memory_uow)
+    test_capacity_strategy(("codex", "antigravity"))
+    readiness = scheduler.readiness_service.evaluate_and_persist_change_readiness(
+        project_id=project.project_id,
+        change_name="016-autonomous-queue-work-selection",
+        project_root=str(tmp_path),
+        github_repo=project.repository,
+        github_issue=45,
+        require_published_ref=True,
+    )
+    assert readiness.is_ready
+    in_memory_uow.work_queue.save(
+        WorkQueueItem(
+            project_id=project.project_id,
+            change_name="016-autonomous-queue-work-selection",
+            github_issue_number=45,
+            priority=QueuePriority.HIGH,
+            roadmap_stage=16,
+            readiness_state=ReadinessState.READY,
+            admission_eligible=True,
+        )
+    )
+
+    class WaitingContractReview:
+        calls = 0
+
+        async def review_before_apply(
+            self, project_arg, run_arg, job_arg, worktree_path, *, claim_context=None
+        ):
+            del project_arg, run_arg, job_arg, worktree_path
+            self.calls += 1
+            return ContractReviewResult(
+                accepted=False,
+                review_id=None,
+                contract_hash=None,
+                reason="deterministic acceptance fixture: no CONTRACT_REVIEW authorization",
+                waiting=True,
+            )
+
+    contract_review = WaitingContractReview()
+    pipeline = ExecutionPipelineService(
+        in_memory_uow,
+        project_root=tmp_path,
+        contract_review_service=contract_review,
+    )
+    scheduler.orchestration_service.pipeline = pipeline
+    scheduler.orchestration_service.remediation_service.pipeline = pipeline
+
+    decision, record, run = scheduler.admit_work_item(
+        project.project_id,
+        "016-autonomous-queue-work-selection",
+        drive_admitted=True,
+        require_published_ref=True,
+    )
+
+    assert decision == AdmissionDecision.ADMITTED
+    assert record.run_id == run.run_id
+    assert run.active_job_id
+    job = in_memory_uow.jobs.get_by_id(run.active_job_id)
+    assert job is not None
+    assert job.job_id != "607cd403-038f-47cb-b655-9963f0bfbbf0"
+    assert job.status == JobStatus.WAITING_CAPACITY
+    assert contract_review.calls == 1
+    assert in_memory_uow.orchestration_candidates.get_latest_for_run(run.run_id) is None
+    assert in_memory_uow.job_attempts.list_by_job(job.job_id) == []
+    assert (
+        in_memory_uow.orchestration_runs.get_active_run(project.project_id, job.change_name).run_id
+        == run.run_id
+    )
+
+
 # 2. Implementer exhausted → WAIT
 def test_implementer_exhausted_yields_wait(
     tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork
@@ -281,6 +382,127 @@ def test_auth_missing_yields_needs_human(
 
     assert res.decision == AdmissionDecisionKind.NEEDS_HUMAN
     assert res.block_condition == AdmissionBlockCondition.AUTH_REQUIRED
+
+
+def test_configured_provider_pair_must_be_explicitly_permitted_before_admission(
+    tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork
+):
+    project, scheduler = setup_test_environment(
+        tmp_path, in_memory_uow, external_providers_allowed=["codex"]
+    )
+
+    result = scheduler.evaluate_admission(project.project_id, "016-autonomous-queue-work-selection")
+
+    assert result.decision == AdmissionDecisionKind.NEEDS_HUMAN
+    assert result.refusal_details["code"] == "PROVIDER_NOT_AUTHORIZED"
+    assert result.refusal_details["providers"] == ["antigravity"]
+    assert in_memory_uow.orchestration_runs.list_runs(is_active=True) == []
+    assert in_memory_uow.jobs.list_by_project(project.project_id) == []
+
+
+def test_managed_workspace_preflight_blocks_before_run_or_job_creation(
+    tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork
+):
+    project, scheduler = setup_test_environment(tmp_path, in_memory_uow)
+    scheduler.project_root = (tmp_path / "different-repository").resolve()
+
+    evidence = scheduler.prepare_admission_evidence(
+        project.project_id, "016-autonomous-queue-work-selection"
+    )
+    result = scheduler.evaluate_admission(
+        project.project_id,
+        "016-autonomous-queue-work-selection",
+        evidence=evidence,
+    )
+
+    assert evidence.workspace_preflight_error == (
+        "Scheduler project root does not match the durable managed repository root."
+    )
+    assert result.decision == AdmissionDecisionKind.NEEDS_HUMAN
+    assert result.block_condition == AdmissionBlockCondition.CONFIGURATION_INVALID
+    assert in_memory_uow.orchestration_runs.list_runs(is_active=True) == []
+    assert in_memory_uow.jobs.list_by_project(project.project_id) == []
+
+
+def test_missing_managed_workspace_authority_blocks_before_admission(
+    tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork
+):
+    project, scheduler = setup_test_environment(tmp_path, in_memory_uow)
+    binding = in_memory_uow.project_managed_repository_bindings.get_by_project_id(
+        project.project_id
+    )
+    in_memory_uow.project_managed_repository_bindings.save(
+        binding.model_copy(update={"is_valid": False, "mismatch_reasons": ["test invalidation"]})
+    )
+
+    error, _ = scheduler._evaluate_workspace_preflight(project.project_id)
+
+    assert error == "Managed repository binding is missing, invalid, or unverified."
+    assert in_memory_uow.orchestration_runs.list_runs(is_active=True) == []
+    assert in_memory_uow.jobs.list_by_project(project.project_id) == []
+
+
+def test_managed_workspace_preflight_accepts_exact_binding_and_denies_stale_binding(
+    tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork
+):
+    project, scheduler = setup_test_environment(tmp_path, in_memory_uow)
+    evidence = scheduler.prepare_admission_evidence(
+        project.project_id, "016-autonomous-queue-work-selection"
+    )
+    assert evidence.workspace_preflight_error is None
+    assert evidence.workspace_binding_id
+
+    binding = in_memory_uow.project_managed_repository_bindings.get_by_project_id(
+        project.project_id
+    )
+    in_memory_uow.project_managed_repository_bindings.save(
+        binding.model_copy(update={"canonical_repository_identity": "github.com/other/repo"})
+    )
+    result = scheduler.evaluate_admission(
+        project.project_id,
+        "016-autonomous-queue-work-selection",
+        evidence=evidence,
+    )
+
+    assert result.decision == AdmissionDecisionKind.NEEDS_HUMAN
+    assert result.refusal_details["code"] == "STALE_WORKSPACE_PREFLIGHT"
+    assert in_memory_uow.orchestration_runs.list_runs(is_active=True) == []
+    assert in_memory_uow.jobs.list_by_project(project.project_id) == []
+
+
+def test_managed_workspace_preflight_denies_wrong_remote_before_admission(
+    tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork
+):
+    project, scheduler = setup_test_environment(tmp_path, in_memory_uow)
+    subprocess.run(
+        ["git", "remote", "set-url", "origin", "https://github.com/other/repo.git"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+
+    error, _ = scheduler._evaluate_workspace_preflight(project.project_id)
+
+    assert error and "Git identity verification failed" in error
+    assert in_memory_uow.orchestration_runs.list_runs(is_active=True) == []
+    assert in_memory_uow.jobs.list_by_project(project.project_id) == []
+
+
+def test_managed_workspace_preflight_denies_symlinked_repository_escape(
+    tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork
+):
+    project, scheduler = setup_test_environment(tmp_path, in_memory_uow)
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside.mkdir()
+    linked_root = tmp_path.parent / f"{tmp_path.name}-linked"
+    linked_root.symlink_to(outside, target_is_directory=True)
+    scheduler.project_root = linked_root
+
+    error, _ = scheduler._evaluate_workspace_preflight(project.project_id)
+
+    assert error == "Scheduler project root does not match the durable managed repository root."
+    assert in_memory_uow.orchestration_runs.list_runs(is_active=True) == []
+    assert in_memory_uow.jobs.list_by_project(project.project_id) == []
 
 
 # 6. Invalid config → NEEDS_HUMAN
@@ -630,6 +852,13 @@ def test_drain_never_invokes_fresh_admission(
         implementer_status=ProviderHealthStatus.EXHAUSTED,
         reviewer_status=ProviderHealthStatus.EXHAUSTED,
     )
+
+    async def no_capacity_refresh(provider: str) -> bool:
+        del provider
+        return False
+
+    # This policy unit test stays offline while asserting the already-exhausted path.
+    scheduler.provider_health_service.refresh_capacity_from_read_only_source = no_capacity_refresh
     scheduler.mode = SchedulerMode.DRAIN
     _seed_active_inflight_run(in_memory_uow)
     _enable_drain_budget(in_memory_uow, project)
@@ -645,7 +874,9 @@ def test_drain_never_invokes_fresh_admission(
     scheduler.recovery_convergence_service = MagicMock()
     scheduler.recovery_convergence_service.request_run_continuation.return_value = mock_run
 
-    dec, record, run_res = scheduler.admit_work_item(project.project_id, "016-autonomous-queue-work-selection")
+    dec, record, run_res = scheduler.admit_work_item(
+        project.project_id, "016-autonomous-queue-work-selection"
+    )
 
     assert scheduler.orchestration_service.admit_change.call_count == 0
     assert record.operational_decision == AdmissionDecisionKind.DRAIN
@@ -667,11 +898,12 @@ def test_drain_mode_refuses_new_ready_work(
 
 # 23. Entry-point convergence: same state produces identical operational decision
 def test_entry_point_convergence_consistency(
-    tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork
+    tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork, test_capacity_strategy
 ):
     from minime.domain.models import AdmissionResult, OrchestrationRun
 
     _, scheduler = setup_test_environment(tmp_path, in_memory_uow)
+    test_capacity_strategy()
 
     mock_run = OrchestrationRun(
         run_id="run-1",
@@ -688,9 +920,74 @@ def test_entry_point_convergence_consistency(
     eval_direct = scheduler.evaluate_admission("mini-me", "016-autonomous-queue-work-selection")
     dec, record, _ = scheduler.admit_work_item("mini-me", "016-autonomous-queue-work-selection")
 
-    assert record.operational_decision == eval_direct.decision
-    assert record.block_condition == eval_direct.block_condition
-    assert record.safe_executable_pair_exists == eval_direct.safe_executable_pair_exists
+    # The actual admission path refreshes both sources even when the pure
+    # snapshot is already acceptable; the resulting decision remains convergent.
+    assert eval_direct.decision == AdmissionDecisionKind.RUN
+    assert record.operational_decision == AdmissionDecisionKind.RUN
+    assert record.safe_executable_pair_exists is True
+
+
+def test_admission_refreshes_both_primary_capacities_just_in_time(
+    tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork
+):
+    project, scheduler = setup_test_environment(tmp_path, in_memory_uow)
+    refreshed: list[str] = []
+
+    async def refresh(provider: str) -> bool:
+        refreshed.append(provider)
+        return False
+
+    scheduler.provider_health_service.refresh_capacity_from_read_only_source = refresh
+
+    scheduler.admit_work_item(project.project_id, "016-autonomous-queue-work-selection")
+
+    assert set(refreshed) == {"codex", "antigravity"}
+    assert len(refreshed) == 2
+
+
+def test_capacity_expiring_while_admission_locks_are_acquired_fails_closed(
+    tmp_path: Path,
+    in_memory_uow: InMemoryPersistenceUnitOfWork,
+    test_capacity_strategy,
+    monkeypatch,
+):
+    project, scheduler = setup_test_environment(tmp_path, in_memory_uow)
+    test_capacity_strategy()
+
+    for provider in ("codex", "antigravity"):
+        adapter = get_provider_adapter(provider)
+
+        async def short_observation(adapter=adapter, provider=provider):
+            now = utc_now()
+            return CapacityObservation(
+                provider=provider,
+                ordinary_usage_allowed=True,
+                observed_at=now,
+                expires_at=now + timedelta(milliseconds=20),
+                source_signal=adapter.capacity_source_signal,
+                account_id=f"test-account:{provider}",
+                model=f"test-model:{provider}",
+            )
+
+        monkeypatch.setattr(adapter, "read_capacity_observation", short_observation)
+
+    original_lock = scheduler.uow.acquire_advisory_lock
+    delayed = False
+
+    def acquire_with_delay(*args, **kwargs):
+        nonlocal delayed
+        if not delayed:
+            delayed = True
+            time.sleep(0.04)
+        return original_lock(*args, **kwargs)
+
+    monkeypatch.setattr(scheduler.uow, "acquire_advisory_lock", acquire_with_delay)
+    _, record, run = scheduler.admit_work_item(
+        project.project_id, "016-autonomous-queue-work-selection"
+    )
+
+    assert run is None
+    assert record.operational_decision == AdmissionDecisionKind.WAIT
 
 
 # 24. A scheduler tick must not synthesize UNKNOWN provider health into AVAILABLE.
@@ -726,10 +1023,11 @@ def test_tick_missing_health_never_run(
 
 # 25. An actual existing AVAILABLE record still yields normal eligibility through tick.
 def test_tick_existing_available_yields_run(
-    tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork
+    tmp_path: Path, in_memory_uow: InMemoryPersistenceUnitOfWork, test_capacity_strategy
 ):
     init_git_repo(tmp_path)
     _, scheduler = setup_test_environment(tmp_path, in_memory_uow)
+    test_capacity_strategy()
 
     in_memory_uow.work_queue.save(
         WorkQueueItem(

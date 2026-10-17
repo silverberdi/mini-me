@@ -208,5 +208,13 @@ class MockReviewerRunner(ReviewerRunnerInterface):
         )
 
 
-def runner_for_reviewer(reviewer: str, config: AppConfig | None = None) -> ReviewerRunnerInterface:
-    return CliReviewerRunner(resolve_cli_invocation(reviewer, "reviewer", config))
+def runner_for_reviewer(
+    reviewer: str,
+    config: AppConfig | None = None,
+    *,
+    model: str | None = None,
+    effort: str | None = None,
+) -> ReviewerRunnerInterface:
+    return CliReviewerRunner(
+        resolve_cli_invocation(reviewer, "reviewer", config, model=model, effort=effort)
+    )
