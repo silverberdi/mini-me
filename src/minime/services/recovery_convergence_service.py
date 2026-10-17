@@ -1251,7 +1251,7 @@ class RecoveryConvergenceService:
                     )
 
         if (
-            not run.is_active
+            (not run.is_active and not (force or drain_mode))
             or run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
             or run.current_stage
             in (OrchestrationStage.PR_PREPARED, OrchestrationStage.POST_MERGE_RECONCILING)
@@ -1451,6 +1451,44 @@ class RecoveryConvergenceService:
                     self.uow.commit()
                     self.release_claim(context)
                     return decision
+
+        if run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN:
+            if not (force or drain_mode):
+                decision = RecoveryDecision(
+                    cycle_id=cycle_id,
+                    claim_key=claim_key,
+                    identity_type="RUN",
+                    identity_id=run_id,
+                    project_id=run.project_id,
+                    change_name=run.change_name,
+                    source=source,
+                    fence_token=context.fence_token,
+                    classification=RecoveryClassification.NEEDS_HUMAN,
+                    planned_action="NO_ACTION",
+                    status=RecoveryDecisionStatus.NO_ACTION,
+                    reason_code="ESCALATED_NEEDS_HUMAN",
+                )
+                self._create_decision(decision)
+                self.release_claim(context)
+                return decision
+            else:
+                self.uow.orchestration_runs.update_stop_outcome(
+                    run_id=run.run_id,
+                    stop_outcome=None,
+                    stop_reason=None,
+                    is_active=True,
+                    claim_context=context,
+                )
+                if run.active_job_id:
+                    job = self.uow.jobs.get_by_id(run.active_job_id)
+                    if job and job.status in {JobStatus.NEEDS_HUMAN, JobStatus.FAILED}:
+                        self.uow.jobs.transition(
+                            job_id=job.job_id,
+                            new_status=JobStatus.RUNNING.value,
+                            error_message=None,
+                            claim_context=context,
+                        )
+                self.uow.commit()
 
         actions = self.uow.orchestration_external_actions.list_by_run(run.run_id)
         has_ambiguous = False

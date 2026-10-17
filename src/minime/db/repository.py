@@ -1792,20 +1792,32 @@ class PostgresCheckResultRepository(CheckResultRepositoryInterface):
         self.session = session
 
     def save(self, result: CheckResult) -> None:
-        self.session.add(
-            CheckResultModel(
-                id=result.result_id,
-                job_id=result.job_id,
-                check_name=result.check_name,
-                command=result.command,
-                exit_code=result.exit_code,
-                duration_ms=result.duration_ms,
-                output_snippet=result.output_snippet,
-                candidate_sha=result.candidate_sha or None,
-                candidate_generation=result.candidate_generation,
-                created_at=result.created_at,
+        existing = self.session.get(CheckResultModel, result.result_id)
+        if existing:
+            existing.job_id = result.job_id
+            existing.check_name = result.check_name
+            existing.command = result.command
+            existing.exit_code = result.exit_code
+            existing.duration_ms = result.duration_ms
+            existing.output_snippet = result.output_snippet
+            existing.candidate_sha = result.candidate_sha or None
+            existing.candidate_generation = result.candidate_generation
+            existing.created_at = result.created_at
+        else:
+            self.session.add(
+                CheckResultModel(
+                    id=result.result_id,
+                    job_id=result.job_id,
+                    check_name=result.check_name,
+                    command=result.command,
+                    exit_code=result.exit_code,
+                    duration_ms=result.duration_ms,
+                    output_snippet=result.output_snippet,
+                    candidate_sha=result.candidate_sha or None,
+                    candidate_generation=result.candidate_generation,
+                    created_at=result.created_at,
+                )
             )
-        )
 
     def list_by_job(self, job_id: str) -> list[CheckResult]:
         stmt = (

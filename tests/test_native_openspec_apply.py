@@ -7,8 +7,10 @@ import pytest
 from minime.config import CliInvocationProfile
 from minime.services.implementer_runner import CliImplementerRunner
 from minime.services.native_openspec_apply import (
+    AGY_APPLY_SKILL_PATH,
     CODEX_APPLY_SKILL_PATH,
     NativeOpenSpecWorkflowUnavailable,
+    parse_antigravity_apply_output,
     parse_codex_apply_jsonl,
     resolve_codex_openspec_apply,
     workflow_unchanged,
@@ -210,3 +212,25 @@ def test_codex_implementer_command_enables_json_tool_trace():
     assert command[1:4] == ["exec", "--json", "-"]
     assert "--approve-for-me" in command
     assert "--ephemeral" in command
+
+
+def test_antigravity_apply_output_parses_workflow_evidence():
+    lines = [
+        "Using change: sample-change",
+        "## Implementing: sample-change (schema: spec-driven)",
+        "### Working on task 1.1: Add feature",
+        "✓ Task complete",
+        "## Implementation Complete",
+        "**Progress:** 1/1 tasks complete ✓",
+    ]
+    messages, evidence = parse_antigravity_apply_output(
+        lines,
+        change_name="sample-change",
+        workflow_path=AGY_APPLY_SKILL_PATH,
+        workflow_sha256="d" * 64,
+    )
+    assert evidence["workflow_observed"] is True
+    assert evidence["skill_read_observed"] is True
+    assert evidence["apply_instructions_observed"] is True
+    assert evidence["completed_tool_events"] == 1
+

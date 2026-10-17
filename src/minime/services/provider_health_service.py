@@ -405,9 +405,9 @@ class ProviderHealthService:
         try:
             reader_sig = inspect.signature(reader)
             if "selected_model" in reader_sig.parameters:
-                observation = await reader(timeout_seconds=10.0, selected_model=model)
+                observation = await reader(timeout_seconds=15.0, selected_model=model)
             else:
-                observation = await reader(timeout_seconds=10.0)
+                observation = await reader(timeout_seconds=15.0)
         except Exception:
             logger.info("Read-only capacity source unavailable for %s", provider)
             observation = None

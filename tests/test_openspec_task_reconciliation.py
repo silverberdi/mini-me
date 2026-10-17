@@ -26,6 +26,15 @@ def test_is_verification_task_detection():
     assert not is_verification_task(
         OpenSpecTask("3", "Implement Postgres persistence repository", None, False)
     )
+    assert not is_verification_task(
+        OpenSpecTask("1.1", "Add pure parse_tags utility with specified normalization", "1. Implementation", False)
+    )
+    assert not is_verification_task(
+        OpenSpecTask("1.2", "Add deterministic tests for edge cases", "1. Implementation", False)
+    )
+    assert is_verification_task(
+        OpenSpecTask("2.1", "Run pytest to confirm clean pass", "2. Verification", False)
+    )
 
 
 def _setup_test_env(tmp_path):

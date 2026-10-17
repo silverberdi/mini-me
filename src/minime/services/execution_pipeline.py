@@ -1627,25 +1627,26 @@ class ExecutionPipelineService:
                     ver_res.incomplete_tasks
                     and all(
                         is_verification_task(t)
-                        or any(
-                            kw in t.text.lower()
-                            for kw in [
-                                "test",
-                                "check",
-                                "verify",
-                                "sync",
-                                "spec",
-                                "document",
-                                "manifest",
-                                "evidence",
-                            ]
+                        or (
+                            (not t.section or "implementation" not in t.section.lower())
+                            and any(
+                                re.search(rf"\b{kw}\b", t.text.lower())
+                                for kw in [
+                                    "sync",
+                                    "spec",
+                                    "document",
+                                    "manifest",
+                                    "evidence",
+                                ]
+                            )
                         )
                         for t in ver_res.incomplete_tasks
                     )
                 )
                 can_reconcile = self.reconciliation_service.can_reconcile(
                     code_changed=bool(
-                        touched_files or (job.base_sha and current_sha != job.base_sha)
+                        touched_files
+                        or (attempt_start_sha and current_sha != attempt_start_sha)
                     ),
                     checks_passed=(
                         outcome == ExecutionOutcome.COMPLETED or not ver_res.failing_checks

@@ -1098,9 +1098,16 @@ class WorktreeManager:
         default_worktree_id = f"wt-{job_id}" if job_id else f"wt-{path.name}"
         existing_by_id = repo.get_by_id(default_worktree_id) if hasattr(repo, "get_by_id") else None
         if existing_by_id and existing_by_id.canonical_worktree_path != canonical_path:
-            worktree_id = f"wt-{job_id}-{path.name}" if job_id else f"wt-{path.name}"
+            if job_id and path.name.startswith(f"{job_id}-"):
+                worktree_id = f"wt-{path.name}"
+            else:
+                worktree_id = f"wt-{job_id}-{path.name}" if job_id else f"wt-{path.name}"
         else:
             worktree_id = default_worktree_id
+
+        if len(worktree_id) > 64:
+            suffix = hashlib.sha256(worktree_id.encode()).hexdigest()[:16]
+            worktree_id = f"{worktree_id[:47]}-{suffix}"
 
         existing = (
             repo.get_by_canonical_path(canonical_path)
@@ -1807,10 +1814,14 @@ class WorktreeManager:
                         and hasattr(self.uow, "orchestration_runs")
                         and self.uow.orchestration_runs
                     ):
-                        r = self.uow.orchestration_runs.get_by_id(job_id) or (
-                            self.uow.orchestration_runs.get_by_job_id(job_id)
-                            if hasattr(self.uow.orchestration_runs, "get_by_job_id")
-                            else None
+                        r = (
+                            self.uow.orchestration_runs.get_by_id(eff_run_id)
+                            or self.uow.orchestration_runs.get_by_id(job_id)
+                            or (
+                                self.uow.orchestration_runs.get_by_job_id(job_id)
+                                if hasattr(self.uow.orchestration_runs, "get_by_job_id")
+                                else None
+                            )
                         )
                         if r:
                             cand_sha = getattr(r, "candidate_sha", None) or getattr(
@@ -1818,6 +1829,27 @@ class WorktreeManager:
                             )
                             if cand_sha == actual_sha:
                                 has_candidate_proof = True
+                    if (
+                        not has_candidate_proof
+                        and hasattr(self.uow, "job_attempts")
+                        and self.uow.job_attempts
+                    ):
+                        attempts = self.uow.job_attempts.list_by_job(job_id)
+                        if any(
+                            getattr(att, "end_sha", None) == actual_sha
+                            or getattr(att, "start_sha", None) == actual_sha
+                            for att in attempts
+                        ):
+                            has_candidate_proof = True
+                    if (
+                        not has_candidate_proof
+                        and hasattr(self.uow, "orchestration_candidates")
+                        and self.uow.orchestration_candidates
+                        and eff_run_id
+                    ):
+                        candidates = self.uow.orchestration_candidates.list_by_run(eff_run_id)
+                        if any(getattr(c, "candidate_sha", None) == actual_sha for c in candidates):
+                            has_candidate_proof = True
                 if not has_candidate_proof:
                     raise RuntimeError(
                         f"Refusing to adopt existing {worktree_kind} at '{path}': "
@@ -1979,6 +2011,10 @@ class WorktreeManager:
         if any(
             event.event_type == EventType.WORKTREE_RECOVERY_SNAPSHOT
             and event.payload.get("job_id") == job_id
+            and (
+                event.payload.get("recovery_sha") == candidate_sha
+                or event.payload.get("authoritative_candidate") is True
+            )
             for event in events
         ):
             raise RuntimeError(
@@ -2240,7 +2276,19 @@ class WorktreeManager:
             source_base=source_base,
             attempts=attempts,
         )
-        if not attempts and not review_only_recovery:
+        waiting_capacity_recovery = self._has_durable_waiting_capacity_pre_attempt_recovery(
+            job=job,
+            run=run,
+            ownership=ownership,
+            project_id=project_id,
+            run_id=run_id,
+            change_name=change_name,
+            path=path,
+            branch=branch,
+            source_base=source_base,
+            attempts=attempts,
+        )
+        if not attempts and not review_only_recovery and not waiting_capacity_recovery:
             refuse(
                 "the latest durable attempt does not prove a recoverable initialization failure."
             )
@@ -2290,6 +2338,7 @@ class WorktreeManager:
             or crash_interrupted_recovery
             or auth_required_created_recovery
             or review_only_recovery
+            or waiting_capacity_recovery
         ):
             refuse(
                 "the latest durable attempt does not prove an environment/provider initialization failure, an evidenced crash-interrupted CREATED recovery, or a fully evidenced AUTH_REQUIRED CREATED-worktree continuation."
@@ -2592,6 +2641,51 @@ class WorktreeManager:
         ):
             return False
         return True
+
+    def _has_durable_waiting_capacity_pre_attempt_recovery(
+        self,
+        *,
+        job: Any,
+        run: Any,
+        ownership: Any,
+        project_id: str,
+        run_id: str,
+        change_name: str,
+        path: Path,
+        branch: str,
+        source_base: str,
+        attempts: list[Any],
+    ) -> bool:
+        if (
+            attempts
+            or ownership.creation_state != WorktreeCreationState.DELETED
+            or not run.is_active
+            or run.current_stage != OrchestrationStage.IMPLEMENTING
+            or job.candidate_sha
+            or run.current_candidate_sha
+            or run.base_sha != source_base
+            or (job.base_sha and job.base_sha != source_base)
+        ):
+            return False
+
+        events_repo = getattr(self.uow, "events", None)
+        if not events_repo:
+            return False
+        events = events_repo.list_events(project_id=project_id, change_id=change_name, limit=1000)
+        has_waiting_capacity = any(
+            event.event_type in {EventType.JOB_WAITING_CAPACITY, EventType.ORCHESTRATION_STOPPED}
+            and (event.operation_id == job.job_id or (event.payload or {}).get("job_id") == job.job_id)
+            for event in events
+        ) or job.waiting_provider is not None or job.capacity_block_reason is not None
+
+        has_recovery_snapshot = any(
+            event.event_type == EventType.WORKTREE_RECOVERY_SNAPSHOT
+            and event.operation_id == job.job_id
+            and (event.payload or {}).get("job_id") == job.job_id
+            and (event.payload or {}).get("branch") == branch
+            for event in events
+        )
+        return has_waiting_capacity and has_recovery_snapshot
 
     def _has_durable_auth_required_created_recovery(
         self,

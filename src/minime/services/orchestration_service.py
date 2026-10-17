@@ -532,10 +532,11 @@ class OrchestrationService:
             run.stop_details = {}
             if run.active_job_id:
                 job = self.uow.jobs.get_by_id(run.active_job_id)
-                if job and job.status == JobStatus.NEEDS_HUMAN:
+                if job and job.status in {JobStatus.NEEDS_HUMAN, JobStatus.FAILED}:
                     job.status = JobStatus.RUNNING
                     job.continuation_decision = None
                     job.escalation_reason = None
+                    job.error_message = None
                     self.uow.jobs.save(job)
             self.uow.orchestration_runs.save(run)
             self.uow.flush()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -211,6 +212,31 @@ class CliImplementerRunner(ImplementerRunnerInterface):
                 raw_jsonl_lines,
                 change_name=expected_change,
                 workflow_path=CODEX_APPLY_SKILL_PATH,
+                workflow_sha256=expected_sha,
+            )
+            stdout_lines = self._sanitize_output("\n".join(extracted_messages).encode())
+        elif (
+            self.profile is not None
+            and self.profile.provider.lower() in {"antigravity", "agy"}
+            and self.profile.role == "implementer"
+        ):
+            from minime.services.native_openspec_apply import (
+                AGY_APPLY_SKILL_PATH,
+                NATIVE_APPLY_SKILL_SHA_RE,
+                parse_antigravity_apply_output,
+            )
+
+            change_match = re.search(r"/opsx-apply\s+([a-z0-9][a-z0-9._-]{0,127})", prompt_context)
+            sha_match = NATIVE_APPLY_SKILL_SHA_RE.search(prompt_context)
+            expected_change = change_match.group(1) if change_match else ""
+            expected_sha = sha_match.group(1) if sha_match else ""
+            raw_lines = process_result.stdout.decode(errors="replace").splitlines()[
+                : self.MAX_OUTPUT_LINES
+            ]
+            extracted_messages, workflow_evidence = parse_antigravity_apply_output(
+                raw_lines,
+                change_name=expected_change,
+                workflow_path=AGY_APPLY_SKILL_PATH,
                 workflow_sha256=expected_sha,
             )
             stdout_lines = self._sanitize_output("\n".join(extracted_messages).encode())

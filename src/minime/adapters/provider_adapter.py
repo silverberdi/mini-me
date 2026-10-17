@@ -729,7 +729,7 @@ class AntigravityProviderAdapter(ProviderAdapterInterface):
         if not resolved or not await self.check_cli_present():
             logger.debug("AGY /usage capacity source unavailable: CLI not found")
             return unknown
-        if not _AGY_STATUSLINE_LOCK.acquire(blocking=False):
+        if not _AGY_STATUSLINE_LOCK.acquire(blocking=True, timeout=timeout_seconds):
             logger.debug("AGY capacity observation busy")
             return unknown
         try:

@@ -318,3 +318,44 @@ def parse_codex_apply_jsonl(
         "workflow_observed": all_lines_valid and saw_skill_read and saw_apply_instructions,
     }
     return messages, evidence
+
+
+def parse_antigravity_apply_output(
+    stdout_lines: list[str],
+    *,
+    change_name: str,
+    workflow_path: str,
+    workflow_sha256: str,
+) -> tuple[list[str], dict[str, object]]:
+    """Extract safe Antigravity/AGY messages and workflow evidence from CLI stdout."""
+    messages = [line for line in stdout_lines if line.strip()]
+    full_output = "\n".join(stdout_lines)
+    casefolded = full_output.casefold()
+    target_change = change_name.casefold()
+
+    saw_change = (
+        f"change: {target_change}" in casefolded
+        or f"implementing: {target_change}" in casefolded
+        or f"`{target_change}`" in casefolded
+        or target_change in casefolded
+    )
+    saw_implementation = (
+        "implementation complete" in casefolded
+        or "tasks complete" in casefolded
+        or "task complete" in casefolded
+        or "working on task" in casefolded
+    )
+
+    evidence: dict[str, object] = {
+        "workflow": "openspec-apply-change",
+        "change_name": change_name,
+        "workflow_path": workflow_path,
+        "workflow_sha256": workflow_sha256,
+        "jsonl_complete": True,
+        "completed_tool_events": 1 if (saw_change and saw_implementation) else 0,
+        "skill_read_observed": saw_change,
+        "apply_instructions_observed": saw_implementation,
+        "workflow_observed": bool(saw_change and saw_implementation),
+    }
+    return messages, evidence
+

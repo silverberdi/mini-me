@@ -340,15 +340,35 @@ class AgentProcessConfinement:
             else:
                 safe_env.pop("CODEX_HOME", None)
 
+            if platform.system().lower() == "darwin":
+                host_library = (
+                    Path(base_env.get("HOME", "")).expanduser()
+                    if base_env and base_env.get("HOME")
+                    else Path.home()
+                ) / "Library"
+                if not host_library.exists():
+                    host_library = Path.home() / "Library"
+                sandbox_library = subdirs["home"] / "Library"
+                if host_library.exists() and not sandbox_library.exists():
+                    try:
+                        sandbox_library.symlink_to(host_library)
+                    except OSError:
+                        pass
+
             if antigravity_auth_source is not None:
+                source_p = Path(antigravity_auth_source)
                 gemini_home = subdirs["home"] / ".gemini"
-                gemini_home.mkdir(mode=0o700)
+                gemini_home.mkdir(mode=0o700, exist_ok=True)
                 os.chmod(gemini_home, 0o700)
                 antigravity_cli_dir = gemini_home / "antigravity-cli"
-                antigravity_cli_dir.mkdir(mode=0o700)
+                antigravity_cli_dir.mkdir(mode=0o700, exist_ok=True)
                 os.chmod(antigravity_cli_dir, 0o700)
                 antigravity_auth_copy = antigravity_cli_dir / "antigravity-oauth-token"
                 self._copy_authorized_auth_file(antigravity_auth_source, antigravity_auth_copy)
+                if source_p.name == "jetski-standalone-oauth-token":
+                    jetski_copy = gemini_home / "jetski-standalone-oauth-token"
+                    jetski_copy.write_bytes(antigravity_auth_copy.read_bytes())
+                    os.chmod(jetski_copy, 0o600)
                 initial_antigravity_auth_bytes = antigravity_auth_copy.read_bytes()
                 initial_antigravity_auth_digest = hashlib.sha256(
                     initial_antigravity_auth_bytes
@@ -526,7 +546,11 @@ class AgentProcessConfinement:
         env = base_env or os.environ
         home = env.get("HOME")
         root = Path(home).expanduser() if home else Path.home()
-        return str(root / ".gemini" / "antigravity-cli" / "antigravity-oauth-token")
+        standard = root / ".gemini" / "antigravity-cli" / "antigravity-oauth-token"
+        jetski = root / ".gemini" / "jetski-standalone-oauth-token"
+        if not standard.is_file() and jetski.is_file():
+            return str(jetski)
+        return str(standard)
 
     @staticmethod
     def _build_darwin_sandbox_profile(
@@ -564,6 +588,10 @@ class AgentProcessConfinement:
             + '(allow file-write* (literal "/dev/null"))\n'
             + '(allow file-write* (literal "/dev/zero"))\n'
             + '(allow file-write* (literal "/dev/tty"))\n'
+            + '(allow file-write* (literal "/dev/ptmx"))\n'
+            + '(allow file-write* (regex #"^/dev/tty[0-9a-zA-Z]"))\n'
+            + '(allow file-write* (regex #"^/dev/pty[0-9a-zA-Z]"))\n'
+            + "(allow pseudo-tty)\n"
             + '(allow file-write* (regex #"^/dev/fd/"))\n'
             + '(allow file-write* (regex #"^/dev/std(in|out|err)"))\n'
             + runtime_deny
