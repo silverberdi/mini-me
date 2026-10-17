@@ -139,9 +139,14 @@ class OpenSpecTaskTracker:
         lines = target_file.read_text(encoding="utf-8").splitlines()
         reconciled_ids: list[str] = []
         new_lines: list[str] = []
+        current_section: str | None = None
 
         for line in lines:
             stripped = line.strip()
+            if stripped.startswith("## "):
+                current_section = stripped[3:].strip()
+                new_lines.append(line)
+                continue
             match = self._task_re.match(stripped)
             if match and match.group("mark").lower() != "x":
                 body = match.group("body").strip()
@@ -150,7 +155,7 @@ class OpenSpecTaskTracker:
                 task = OpenSpecTask(
                     task_id=task_id,
                     text=body,
-                    section=None,
+                    section=current_section,
                     complete=False,
                 )
                 if is_verification_task(task):
@@ -164,15 +169,6 @@ class OpenSpecTaskTracker:
             target_file.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
             return True, reconciled_ids
         return False, []
-
-    def format_prompt_context(self, openspec_path: str, change_name: str) -> str:
-        tasks = self.parse_tasks(openspec_path, change_name)
-        lines = [f"OpenSpec change: {change_name}", "Tasks:"]
-        for task in tasks:
-            status = "complete" if task.complete else "pending"
-            section = f" [{task.section}]" if task.section else ""
-            lines.append(f"- {task.task_id}{section}: {status}: {task.text}")
-        return "\n".join(lines)
 
 
 _VERIFICATION_PATTERNS = (
@@ -190,5 +186,7 @@ _VERIFICATION_PATTERNS = (
 
 def is_verification_task(task: OpenSpecTask) -> bool:
     """Determine if an OpenSpec task represents deterministic verification/checks."""
+    if task.section and "implementation" in task.section.lower():
+        return False
     text = task.text.lower()
     return any(pattern.search(text) for pattern in _VERIFICATION_PATTERNS)

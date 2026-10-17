@@ -72,6 +72,13 @@ class ChecksRunner:
             inherited_database_url = env.pop("MINIME_DATABASE_URL", None)
             env.pop("MINIME_EXPECTED_DATABASE", None)
 
+            # Isolate bytecode compilation to an ephemeral directory outside the candidate worktree
+            import tempfile
+
+            pycache_dir = Path(tempfile.gettempdir()) / "minime_pycache" / job_id
+            pycache_dir.mkdir(parents=True, exist_ok=True)
+            env["PYTHONPYCACHEPREFIX"] = str(pycache_dir)
+
             wt_path = Path(worktree_path)
             wt_venv_bin = wt_path / ".venv" / "bin"
             repo_venv_bin = Path.cwd() / ".venv" / "bin"
@@ -276,6 +283,11 @@ class ChecksRunner:
                 evidence_reference={"exit_code": exit_code, "command": command},
             )
             diagnostics.append(diag)
+
+        # Post-check worktree hygiene: purge any transient untracked runtime artifacts
+        from minime.services.candidate_manifest import purge_transient_generated_artifacts
+
+        purge_transient_generated_artifacts(worktree_path)
 
         return ChecksRunResult(
             passed=all(result.exit_code == 0 for result in results),

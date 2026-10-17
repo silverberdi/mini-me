@@ -222,7 +222,6 @@ class IntakeWorkspaceOwnershipRepositoryInterface(ABC):
     def delete(self, workspace_id: str) -> None: ...
 
 
-
 class EventRepositoryInterface(ABC):
     @abstractmethod
     def save(self, event: Event) -> None: ...
@@ -332,6 +331,12 @@ class ReviewRepositoryInterface(ABC):
 
     @abstractmethod
     def get_by_job_id(self, job_id: str) -> Review | None: ...
+
+    @abstractmethod
+    def get_by_job_stage(self, job_id: str, review_stage: str) -> Review | None: ...
+
+    @abstractmethod
+    def list_by_job(self, job_id: str) -> list[Review]: ...
 
     @abstractmethod
     def list_by_project(self, project_id: str, limit: int = 100) -> list[Review]: ...
@@ -471,9 +476,11 @@ class BudgetReservationRepositoryInterface(ABC):
     @abstractmethod
     def get_by_id(self, reservation_id: str) -> BudgetReservation | None: ...
 
+    @abstractmethod
+    def get_by_idempotency_key(self, idempotency_key: str) -> BudgetReservation | None: ...
+
     def get_by_id_for_update(self, reservation_id: str) -> BudgetReservation | None:
         return self.get_by_id(reservation_id)
-
 
     @abstractmethod
     def list_by_project(self, project_id: str) -> list[BudgetReservation]: ...
@@ -578,7 +585,6 @@ class OrchestrationRunRepositoryInterface(ABC):
 
     def get_for_update(self, run_id: str) -> OrchestrationRun | None:
         return self.get_by_id(run_id)
-
 
     @abstractmethod
     def get_active_run(self, project_id: str, change_name: str) -> OrchestrationRun | None: ...
@@ -882,7 +888,6 @@ class PersistenceUnitOfWork(ABC):
         pass
 
 
-
 class ProviderEfficiencyMetricsRepositoryInterface(ABC):
     @abstractmethod
     def save(self, metrics: ProviderEfficiencyMetrics) -> None: ...
@@ -1090,9 +1095,7 @@ class GitHubAdapterInterface(ABC):
             reason_code=ExternalReasonCode.UNSUPPORTED,
         )
 
-    def get_issue(
-        self, repository: str, issue_number: int
-    ) -> ExternalActionResult[dict[str, Any]]:
+    def get_issue(self, repository: str, issue_number: int) -> ExternalActionResult[dict[str, Any]]:
         return ExternalActionResult[dict[str, Any]](
             outcome=ExternalOutcome.UNKNOWN,
             value={},
@@ -1248,9 +1251,7 @@ class RecoveryDecisionRepositoryInterface(ABC):
     def get_by_id(self, decision_id: str) -> RecoveryDecision | None: ...
 
     @abstractmethod
-    def get_by_cycle_and_claim(
-        self, cycle_id: str, claim_key: str
-    ) -> RecoveryDecision | None: ...
+    def get_by_cycle_and_claim(self, cycle_id: str, claim_key: str) -> RecoveryDecision | None: ...
 
     @abstractmethod
     def list_by_cycle(self, cycle_id: str) -> list[RecoveryDecision]: ...
@@ -1282,4 +1283,3 @@ class ExternalActionAttemptRepositoryInterface(ABC):
         result_payload: dict[str, Any] | None = None,
         error_message: str | None = None,
     ) -> ExternalActionAttempt: ...
-

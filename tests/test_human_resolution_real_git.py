@@ -162,12 +162,12 @@ def make_service(uow, repo: Path, base_a: str, candidate_sha: str, candidate_ref
     manager = WorktreeManager(repo, uow=uow)
     orig_verify = manager._verify_creation_postconditions
 
-    async def _safe_verify(path, ownership, expected_branch, expected_base_sha=None):
+    async def _safe_verify(path, ownership, expected_branch, expected_base_sha=None, **kwargs):
         try:
-            await orig_verify(path, ownership, expected_branch, expected_base_sha)
+            await orig_verify(path, ownership, expected_branch, expected_base_sha, **kwargs)
         except RuntimeError as e:
             if "does not match expected SHA" in str(e):
-                await orig_verify(path, ownership, expected_branch, None)
+                await orig_verify(path, ownership, expected_branch, None, **kwargs)
             else:
                 raise
 

@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 from minime.domain.models import BacklogItem
 
@@ -55,11 +58,122 @@ class OpenSpecGenerator:
             normalized.append(posix)
         return OpenSpecArtifactManifest(generated.change_name, tuple(normalized))
 
+    def load_existing_change(
+        self,
+        change_name: str,
+        source_root: str | Path,
+        openspec_path: str = "openspec",
+    ) -> GeneratedOpenSpec | None:
+        """Read a pre-authored OpenSpec change without regenerating its contents.
+
+        The source is the bound managed repository; IntakeService later copies these
+        exact bytes into its authorized intake workspace and publishes them through
+        its normal fenced CAS path. An absent directory returns ``None`` so legacy
+        backlog-driven generation remains available. A present but malformed tree
+        fails closed rather than being silently overwritten.
+        """
+        if (
+            not change_name
+            or Path(change_name).is_absolute()
+            or ".." in Path(change_name).parts
+            or Path(change_name).name != change_name
+        ):
+            raise ValueError(f"Unsafe OpenSpec change name: {change_name!r}")
+        openspec_rel = Path(openspec_path)
+        if openspec_rel.is_absolute() or ".." in openspec_rel.parts or not openspec_path:
+            raise ValueError(f"Unsafe OpenSpec root path: {openspec_path!r}")
+
+        root = Path(source_root).resolve(strict=True)
+        change_dir = root / openspec_rel / "changes" / change_name
+        cursor = root
+        for part in (*openspec_rel.parts, "changes", change_name):
+            cursor = cursor / part
+            if cursor.is_symlink():
+                raise ValueError("Symlink is not allowed in the existing OpenSpec path.")
+        if not change_dir.exists() and not change_dir.is_symlink():
+            return None
+        if change_dir.is_symlink() or not change_dir.is_dir():
+            raise ValueError("Existing OpenSpec change path is not a real directory.")
+
+        contents: dict[str, str] = {}
+        for path in change_dir.rglob("*"):
+            if path.is_symlink():
+                raise ValueError(f"Symlink is not allowed in existing OpenSpec change: {path}")
+            if path.is_dir():
+                continue
+            if not path.is_file():
+                raise ValueError(f"Non-regular file is not allowed in OpenSpec change: {path}")
+            relative = path.relative_to(change_dir).as_posix()
+            if relative == ".openspec.yaml":
+                try:
+                    metadata = yaml.safe_load(path.read_text(encoding="utf-8"))
+                except (OSError, UnicodeError, yaml.YAMLError) as exc:
+                    raise ValueError(
+                        "Existing OpenSpec metadata is unreadable or invalid."
+                    ) from exc
+                if (
+                    not isinstance(metadata, dict)
+                    or set(metadata) != {"schema", "created"}
+                    or metadata.get("schema") != "spec-driven"
+                ):
+                    raise ValueError(
+                        "Existing OpenSpec metadata is not the supported spec-driven sidecar."
+                    )
+                created = metadata.get("created")
+                try:
+                    if isinstance(created, date):
+                        date.fromisoformat(created.isoformat())
+                    elif isinstance(created, str):
+                        date.fromisoformat(created)
+                    else:
+                        raise ValueError
+                except ValueError as exc:
+                    raise ValueError(
+                        "Existing OpenSpec metadata has an invalid creation date."
+                    ) from exc
+                continue
+            is_root_artifact = relative in {"proposal.md", "tasks.md", "design.md"}
+            is_spec = relative.startswith("specs/") and relative.endswith(".md")
+            if not (is_root_artifact or is_spec):
+                raise ValueError(f"Unexpected file in existing OpenSpec change: {relative}")
+            try:
+                contents[relative] = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                raise ValueError(f"Unable to read OpenSpec artifact {relative!r} as UTF-8") from exc
+
+        required = {"proposal.md", "tasks.md", "design.md"}
+        if not required.issubset(contents) or not any(
+            name.startswith("specs/") and name.endswith(".md") for name in contents
+        ):
+            raise ValueError(
+                "Existing OpenSpec change lacks required proposal, design, tasks, or spec artifacts."
+            )
+
+        specs = {name: content for name, content in contents.items() if name.startswith("specs/")}
+        generated = GeneratedOpenSpec(
+            change_name=change_name,
+            proposal_content=contents["proposal.md"],
+            tasks_content=contents["tasks.md"],
+            specs=specs,
+            design_content=contents["design.md"],
+        )
+        manifest = self.build_artifact_manifest(generated)
+        if set(manifest.files) != set(contents):
+            raise ValueError(
+                "Existing OpenSpec artifacts do not match the canonical writer manifest."
+            )
+        return generated
+
     def _build_artifact_contents(self, generated: GeneratedOpenSpec) -> dict[str, str]:
-        contents = {"proposal.md": generated.proposal_content, "tasks.md": generated.tasks_content, **generated.specs}
+        contents = {
+            "proposal.md": generated.proposal_content,
+            "tasks.md": generated.tasks_content,
+            **generated.specs,
+        }
         if generated.design_content:
             contents["design.md"] = generated.design_content
         return contents
+
     """Generates standard canonical OpenSpec artifacts from normalized backlog items."""
 
     def __init__(
@@ -271,7 +385,11 @@ class OpenSpecGenerator:
             base_root = Path(target_workspace_path).resolve()
         else:
             intake_repo = getattr(eff_uow, "intake_workspace_ownerships", None)
-            active_ow = intake_repo.get_active_by_item_key(project_id, generated.change_name) if intake_repo else None
+            active_ow = (
+                intake_repo.get_active_by_item_key(project_id, generated.change_name)
+                if intake_repo
+                else None
+            )
             if not active_ow and intake_repo:
                 # search active list by change name
                 active_list = intake_repo.list_active()

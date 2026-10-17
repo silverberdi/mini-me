@@ -137,16 +137,24 @@ def pg_engine() -> Generator[Engine, None, None]:
         conn.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public;"))
         conn.commit()
     Base.metadata.create_all(engine)
+    from minime.db.session import EXPECTED_ALEMBIC_HEAD
+
     with engine.connect() as conn:
         conn.execute(text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(64) PRIMARY KEY);"))
         conn.execute(text("DELETE FROM alembic_version;"))
-        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('g01_recovery_convergence');"))
+        conn.execute(text(f"INSERT INTO alembic_version (version_num) VALUES ('{EXPECTED_ALEMBIC_HEAD}');"))
         conn.commit()
     yield engine
     with engine.connect() as conn:
         conn.execute(text("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid();"))
         conn.commit()
         conn.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public;"))
+        conn.commit()
+    Base.metadata.create_all(engine)
+    with engine.connect() as conn:
+        conn.execute(text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(64) PRIMARY KEY);"))
+        conn.execute(text("DELETE FROM alembic_version;"))
+        conn.execute(text(f"INSERT INTO alembic_version (version_num) VALUES ('{EXPECTED_ALEMBIC_HEAD}');"))
         conn.commit()
     engine.dispose()
 
@@ -156,9 +164,12 @@ def pg_session_factory(pg_engine: Engine) -> sessionmaker[Session]:
     return sessionmaker(bind=pg_engine, autoflush=False, expire_on_commit=False)
 
 
-def _seed_base_project_and_change(session: Session, change_name: str = "change-stage-g-01") -> tuple[str, str]:
+def _seed_base_project_and_change(
+    session: Session,
+    change_name: str = "change-stage-g-01",
+    project_id: str = "proj-stage-g",
+) -> tuple[str, str]:
     uow = PostgresPersistenceUnitOfWork(session)
-    project_id = "proj-stage-g"
     if not uow.projects.get_by_id(project_id):
         uow.projects.save(
             Project(
@@ -1376,7 +1387,7 @@ def test_blocker_2_restart_recovery_service_delegates_to_convergence(pg_session_
 def test_blocker_c_fresh_admission_passes_claim_context(pg_session_factory: sessionmaker[Session], tmp_path: Path):
     """Fresh admission with drive_admitted=True MUST acquire run claim and pass explicit claim_context to drive_coordinator."""
     session = pg_session_factory()
-    project_id, change_name = _seed_base_project_and_change(session, "blockerc-fresh")
+    project_id, change_name = _seed_base_project_and_change(session, "blockerc-fresh", project_id="proj-blockerc")
     uow = PostgresPersistenceUnitOfWork(session)
 
     from datetime import datetime, timezone
@@ -1385,6 +1396,7 @@ def test_blocker_c_fresh_admission_passes_claim_context(pg_session_factory: sess
         AdmissionDecision,
         ChangeStatus,
         ProviderHealthStatus,
+        ProviderResultClass,
         QueuePriority,
         ReadinessState,
         WorkItemStatus,
@@ -1392,8 +1404,18 @@ def test_blocker_c_fresh_admission_passes_claim_context(pg_session_factory: sess
     from minime.domain.models import BacklogItem, ProviderHealth, WorkQueueItem
     from minime.services.scheduler_service import SchedulerService
 
-    uow.provider_health.save(ProviderHealth(provider="codex", status=ProviderHealthStatus.AVAILABLE))
-    uow.provider_health.save(ProviderHealth(provider="antigravity", status=ProviderHealthStatus.AVAILABLE))
+    now_utc = datetime.now(timezone.utc)
+    for prov in ["codex", "antigravity", "deepseek"]:
+        uow.provider_health.save(
+            ProviderHealth(
+                health_id=f"ph-{prov}",
+                provider=prov,
+                status=ProviderHealthStatus.AVAILABLE,
+                last_result_class=ProviderResultClass.SUCCESS,
+                last_success_at=now_utc,
+                updated_at=now_utc,
+            )
+        )
 
     proj = uow.projects.get_by_id(project_id)
     if proj:
@@ -1448,9 +1470,11 @@ def test_blocker_c_fresh_admission_passes_claim_context(pg_session_factory: sess
         project_id,
         tmp_path,
         tmp_path / ".minime" / "worktrees",
-        canonical_repository_identity="https://github.com/silverberdi/mini-me.git",
+        canonical_repository_identity="github.com/silverberdi/mini-me",
+        local_remote=False,
     )
     create_isolated_openspec_change(tmp_path, change_name=change_name)
+    uow.commit()
 
     mock_gh = ReadinessGitHubStub()
     readiness_svc = ReadinessService(uow, github_adapter=mock_gh)
@@ -1461,6 +1485,9 @@ def test_blocker_c_fresh_admission_passes_claim_context(pg_session_factory: sess
         _test_global_max_jobs_override=100,
         one_active_implementation_per_project=False,
     )
+    from unittest.mock import AsyncMock
+    scheduler.provider_health_service.refresh_capacity_from_read_only_source = AsyncMock(return_value=True)
+    scheduler.provider_health_service.has_fresh_capacity_evidence = lambda *args, **kwargs: True
 
     from minime.domain.models import ReadinessEvaluation
 
@@ -1487,7 +1514,7 @@ def test_blocker_c_fresh_admission_passes_claim_context(pg_session_factory: sess
 
     dec, record, run = scheduler.admit_work_item(project_id, change_name, drive_admitted=True)
 
-    assert dec == AdmissionDecision.ADMITTED
+    assert dec == AdmissionDecision.ADMITTED, f"REFUSED: {getattr(record, 'reason_summary', None)} {getattr(record, 'refusal_details', None)}"
     assert run is not None
     assert len(received_claim_ctx) == 1
     assert received_claim_ctx[0] is not None
@@ -2023,6 +2050,9 @@ def test_rc01_restart_matrix_implementation_checks_review(pg_session_factory: se
     session = pg_session_factory()
     project_id, change_name = _seed_base_project_and_change(session, "rc01-imp-checks-review")
     uow = PostgresPersistenceUnitOfWork(session)
+    proj = uow.projects.get_by_id(project_id)
+    if proj:
+        uow.projects.save(proj.model_copy(update={"independent_audit_required": True}))
     job = Job(
         job_id="job-rc01-review",
         project_id=project_id,

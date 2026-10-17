@@ -17,7 +17,6 @@ from minime.api.app import app, get_uow
 from minime.cli.main import app as cli_app
 from minime.domain.enums import (
     ChangeStatus,
-    EventType,
     FindingSeverity,
     JobStatus,
     ReadinessState,
@@ -193,6 +192,24 @@ class GitFakeWorktreeManager:
         self.cleaned.append(job_id)
 
 
+class CountingReviewerRunner(MockReviewerRunner):
+    """Legacy CLI reviewer test double; R01 must never dispatch it for CODE_REVIEW."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.calls = 0
+
+    async def run(self, worktree_path, prompt_context, timeout_seconds):
+        self.calls += 1
+        return await super().run(worktree_path, prompt_context, timeout_seconds)
+
+
+def assert_unbound_candidate_waits_for_authoritative_review(job, uow) -> None:
+    assert job.status == JobStatus.NEEDS_HUMAN
+    assert "CODE_REVIEW_CANDIDATE_FREEZE_REQUIRES_ACTIVE_RUN" in (job.error_message or "")
+    assert uow.reviews.get_by_job_id(job.job_id) is None
+
+
 def setup_project_and_change(
     uow,
     tmp_path: Path,
@@ -288,7 +305,10 @@ def test_broken_symlink_rejected(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_reviewer_never_starts_if_symlink_detected(in_memory_uow, tmp_path):
+async def test_legacy_reviewer_never_starts_without_durable_candidate_run(
+    in_memory_uow, tmp_path, test_capacity_strategy
+):
+    test_capacity_strategy(("codex", "antigravity"))
     setup_project_and_change(in_memory_uow, tmp_path)
 
     # Worktree manager that plants a symlink before review
@@ -314,10 +334,13 @@ async def test_reviewer_never_starts_if_symlink_detected(in_memory_uow, tmp_path
         worktree_manager=WorktreeWithSymlink(tmp_path),
     )
 
-    job = await service.run_job("review-test-project", "synthetic-review-change", claim_context=_make_test_claim_context(in_memory_uow))
+    job = await service.run_job(
+        "review-test-project",
+        "synthetic-review-change",
+        claim_context=_make_test_claim_context(in_memory_uow),
+    )
 
-    assert job.status == JobStatus.FAILED
-    assert "prohibited symlink" in (job.error_message or "")
+    assert_unbound_candidate_waits_for_authoritative_review(job, in_memory_uow)
     assert reviewer_called is False
 
 
@@ -817,13 +840,16 @@ def test_reviewer_prompt_builder(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_review_pipeline_ready_to_merge_flow(in_memory_uow, tmp_path):
+async def test_legacy_ready_verdict_cannot_substitute_for_candidate_bound_deepseek_review(
+    in_memory_uow, tmp_path, test_capacity_strategy
+):
+    test_capacity_strategy(("codex", "antigravity"))
     setup_project_and_change(in_memory_uow, tmp_path)
     service = ExecutionPipelineService(
         in_memory_uow,
         project_root=tmp_path,
         implementer_runner=MockImplementerRunner(stdout=["implementation done"]),
-        reviewer_runner=MockReviewerRunner(
+        reviewer_runner=CountingReviewerRunner(
             stdout=[
                 '```json\n{"verdict": "READY_TO_MERGE", "summary": "All good", "findings": []}\n```'
             ]
@@ -834,25 +860,21 @@ async def test_review_pipeline_ready_to_merge_flow(in_memory_uow, tmp_path):
         worktree_manager=GitFakeWorktreeManager(tmp_path),
     )
 
-    job = await service.run_job("review-test-project", "synthetic-review-change", claim_context=_make_test_claim_context(in_memory_uow))
-
-    assert job.status == JobStatus.READY_TO_MERGE
-    review = in_memory_uow.reviews.get_by_job_id(job.job_id)
-    assert review is not None
-    assert review.status == ReviewStatus.REVIEW_COMPLETED
-    assert review.verdict == ReviewVerdict.READY_TO_MERGE
-    assert review.reviewer_role == "antigravity"
-    assert review.candidate_sha == job.candidate_sha
-    events = in_memory_uow.events.list_events(
-        project_id="review-test-project", change_id="synthetic-review-change"
+    job = await service.run_job(
+        "review-test-project",
+        "synthetic-review-change",
+        claim_context=_make_test_claim_context(in_memory_uow),
     )
-    event_types = [e.event_type for e in events]
-    assert EventType.JOB_REVIEW_RUNNING in event_types
-    assert EventType.JOB_READY_TO_MERGE in event_types
+
+    assert_unbound_candidate_waits_for_authoritative_review(job, in_memory_uow)
+    assert service.reviewer_runner.calls == 0
 
 
 @pytest.mark.asyncio
-async def test_review_pipeline_changes_required_flow(in_memory_uow, tmp_path):
+async def test_review_pipeline_changes_required_flow(
+    in_memory_uow, tmp_path, test_capacity_strategy
+):
+    test_capacity_strategy(("codex", "antigravity"))
     setup_project_and_change(in_memory_uow, tmp_path)
     reviewer_output = json.dumps(
         {
@@ -872,81 +894,77 @@ async def test_review_pipeline_changes_required_flow(in_memory_uow, tmp_path):
         in_memory_uow,
         project_root=tmp_path,
         implementer_runner=MockImplementerRunner(),
-        reviewer_runner=MockReviewerRunner(stdout=[f"```json\n{reviewer_output}\n```"]),
+        reviewer_runner=CountingReviewerRunner(stdout=[f"```json\n{reviewer_output}\n```"]),
         worktree_manager=GitFakeWorktreeManager(tmp_path),
     )
 
-    job = await service.run_job("review-test-project", "synthetic-review-change", claim_context=_make_test_claim_context(in_memory_uow))
-
-    assert job.status == JobStatus.CHANGES_REQUIRED
-    review = in_memory_uow.reviews.get_by_job_id(job.job_id)
-    assert review is not None
-    assert review.status == ReviewStatus.REVIEW_COMPLETED
-    assert review.verdict == ReviewVerdict.CHANGES_REQUIRED
-    findings = in_memory_uow.review_findings.list_by_review(review.review_id)
-    assert len(findings) == 1
-    assert findings[0].severity == FindingSeverity.BLOCKER
-    assert findings[0].location == "src/main.py:10"
-    events = in_memory_uow.events.list_events(
-        project_id="review-test-project", change_id="synthetic-review-change"
+    job = await service.run_job(
+        "review-test-project",
+        "synthetic-review-change",
+        claim_context=_make_test_claim_context(in_memory_uow),
     )
-    assert any(e.event_type == EventType.JOB_CHANGES_REQUIRED for e in events)
+
+    assert_unbound_candidate_waits_for_authoritative_review(job, in_memory_uow)
+    assert service.reviewer_runner.calls == 0
 
 
 @pytest.mark.asyncio
-async def test_review_pipeline_timeout_fails_safely(in_memory_uow, tmp_path):
+async def test_review_pipeline_timeout_fails_safely(
+    in_memory_uow, tmp_path, test_capacity_strategy
+):
+    test_capacity_strategy(("codex", "antigravity"))
     setup_project_and_change(in_memory_uow, tmp_path)
     service = ExecutionPipelineService(
         in_memory_uow,
         project_root=tmp_path,
         implementer_runner=MockImplementerRunner(),
-        reviewer_runner=MockReviewerRunner(timed_out=True),
+        reviewer_runner=CountingReviewerRunner(timed_out=True),
         worktree_manager=GitFakeWorktreeManager(tmp_path),
     )
 
-    job = await service.run_job("review-test-project", "synthetic-review-change", claim_context=_make_test_claim_context(in_memory_uow))
-
-    assert job.status == JobStatus.FAILED
-    review = in_memory_uow.reviews.get_by_job_id(job.job_id)
-    assert review is not None
-    assert review.status == ReviewStatus.REVIEW_TIMED_OUT
-    events = in_memory_uow.events.list_events(
-        project_id="review-test-project", change_id="synthetic-review-change"
+    job = await service.run_job(
+        "review-test-project",
+        "synthetic-review-change",
+        claim_context=_make_test_claim_context(in_memory_uow),
     )
-    assert any(e.event_type == EventType.REVIEW_TIMEOUT for e in events)
+
+    assert_unbound_candidate_waits_for_authoritative_review(job, in_memory_uow)
+    assert service.reviewer_runner.calls == 0
 
 
 @pytest.mark.asyncio
-async def test_review_pipeline_malformed_output_fails_safely(in_memory_uow, tmp_path):
+async def test_review_pipeline_malformed_output_fails_safely(
+    in_memory_uow, tmp_path, test_capacity_strategy
+):
+    test_capacity_strategy(("codex", "antigravity"))
     setup_project_and_change(in_memory_uow, tmp_path)
     service = ExecutionPipelineService(
         in_memory_uow,
         project_root=tmp_path,
         implementer_runner=MockImplementerRunner(),
-        reviewer_runner=MockReviewerRunner(stdout=["Invalid output without json payload"]),
+        reviewer_runner=CountingReviewerRunner(stdout=["Invalid output without json payload"]),
         worktree_manager=GitFakeWorktreeManager(tmp_path),
     )
 
-    job = await service.run_job("review-test-project", "synthetic-review-change", claim_context=_make_test_claim_context(in_memory_uow))
-
-    assert job.status == JobStatus.FAILED
-    review = in_memory_uow.reviews.get_by_job_id(job.job_id)
-    assert review is not None
-    assert review.status == ReviewStatus.REVIEW_FAILED
-    events = in_memory_uow.events.list_events(
-        project_id="review-test-project", change_id="synthetic-review-change"
+    job = await service.run_job(
+        "review-test-project",
+        "synthetic-review-change",
+        claim_context=_make_test_claim_context(in_memory_uow),
     )
-    assert any(e.event_type == EventType.MALFORMED_REVIEW_OUTPUT for e in events)
+
+    assert_unbound_candidate_waits_for_authoritative_review(job, in_memory_uow)
+    assert service.reviewer_runner.calls == 0
 
 
 @pytest.mark.asyncio
-async def test_review_pipeline_secret_redaction(in_memory_uow, tmp_path):
+async def test_review_pipeline_secret_redaction(in_memory_uow, tmp_path, test_capacity_strategy):
+    test_capacity_strategy(("codex", "antigravity"))
     setup_project_and_change(in_memory_uow, tmp_path)
     service = ExecutionPipelineService(
         in_memory_uow,
         project_root=tmp_path,
         implementer_runner=MockImplementerRunner(),
-        reviewer_runner=MockReviewerRunner(
+        reviewer_runner=CountingReviewerRunner(
             stdout=[
                 "Reviewing apiKey=secret_live_key_999",
                 '```json\n{"verdict": "READY_TO_MERGE", "summary": "ok", "findings": []}\n```',
@@ -958,11 +976,16 @@ async def test_review_pipeline_secret_redaction(in_memory_uow, tmp_path):
         worktree_manager=GitFakeWorktreeManager(tmp_path),
     )
 
-    job = await service.run_job("review-test-project", "synthetic-review-change", claim_context=_make_test_claim_context(in_memory_uow))
+    job = await service.run_job(
+        "review-test-project",
+        "synthetic-review-change",
+        claim_context=_make_test_claim_context(in_memory_uow),
+    )
 
-    assert job.status == JobStatus.READY_TO_MERGE
+    assert_unbound_candidate_waits_for_authoritative_review(job, in_memory_uow)
+    assert service.reviewer_runner.calls == 0
     logs = in_memory_uow.job_logs.list_by_job(job.job_id)
-    assert any("[REDACTED]" in log.message for log in logs)
+    assert all("secret_live_key_999" not in log.message for log in logs)
 
 
 def test_fastapi_review_endpoints(in_memory_uow):

@@ -72,10 +72,10 @@ class OpenRouterEligibilityEvaluator:
             f"Job '{job.job_id}' is not in an active in-flight status or has no material execution started",
         )
 
-        # 3. Blocked on implementer or reviewer stage
+        # 3. OpenRouter is executor rescue only; it can never authoritatively review.
         check_3 = (
-            role in {"implementer", "reviewer"},
-            f"Role '{role}' is not eligible for fallback",
+            role == "implementer",
+            f"Role '{role}' is not eligible for OpenRouter executor rescue",
         )
 
         # 4. No new READY / BACKLOG / QUEUED work admitted into drain fallback

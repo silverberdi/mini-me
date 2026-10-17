@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import subprocess
+from decimal import Decimal
 from pathlib import Path
 
 from conftest import (
@@ -15,14 +17,19 @@ from minime.domain.enums import (
     EventType,
     IntakeWorkspaceCreationState,
     IntakeWorkspacePublicationState,
+    OperatorActionStatus,
+    OperatorActionType,
     ReviewStatus,
     ReviewVerdict,
 )
 from minime.domain.models import (
+    BudgetLedgerEntry,
+    BudgetReservation,
     Change,
     Event,
     IntakeWorkspaceOwnership,
     Job,
+    OperatorActionRecord,
     OrchestrationCandidate,
     OrchestrationRun,
     Project,
@@ -57,8 +64,9 @@ def _record_event(uow, change_name: str, event_type: EventType) -> None:
     uow.events.save(Event(event_type=event_type, project_id="mini-me", change_id=change_name))
 
 
-def test_lifecycle_gate_chain_end_to_end(in_memory_uow, tmp_path: Path):
+def test_lifecycle_gate_chain_end_to_end(in_memory_uow, tmp_path: Path, test_capacity_strategy):
     """Strict-validity -> APPLY -> VERIFY -> sync -> archive -> integrity audit PASS."""
+    test_capacity_strategy(("codex", "antigravity"))
     init_git_repo(tmp_path)
     create_isolated_openspec_change(tmp_path, "chain-change", tasks_content="- [x] 1.1 Do thing\n")
     project = _project()
@@ -84,6 +92,9 @@ def test_lifecycle_gate_chain_end_to_end(in_memory_uow, tmp_path: Path):
         canonical_repository_identity="github.com/silverberdi/mini-me",
         remote_name="origin",
     )
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True
+    ).stdout.strip()
     published_sha = publish_local_intake_ref(tmp_path, "chain-change")
     managed_binding = in_memory_uow.project_managed_repository_bindings.get_by_project_id(
         "mini-me"
@@ -97,7 +108,7 @@ def test_lifecycle_gate_chain_end_to_end(in_memory_uow, tmp_path: Path):
             change_name="chain-change",
             canonical_workspace_path=str(tmp_path),
             canonical_repository_identity=managed_binding.canonical_repository_identity,
-            base_sha=published_sha,
+            base_sha=base_sha,
             head_sha=published_sha,
             creation_state=IntakeWorkspaceCreationState.ACTIVE,
             publication_state=IntakeWorkspacePublicationState.PUBLISHED,
@@ -177,12 +188,18 @@ def test_review_authority_remains_functional_in_gate_chain(in_memory_uow):
         manifest_id="manifest-1",
         manifest_hash="hash-1",
     )
-    in_memory_uow.reviews.save(
-        Review(
+    review = Review(
             job_id="job-1",
             project_id="mini-me",
             change_name="chain-change",
-            reviewer_role="antigravity",
+            reviewer_role="deepseek",
+            reviewer_model="deepseek-chat",
+            review_stage="CODE_REVIEW",
+            provider="deepseek",
+            account_fingerprint="a" * 64,
+            budget_authorization_id="gate-code-review-auth",
+            budget_reservation_id="gate-code-review-reservation",
+            billing_origin="deepseek_direct",
             orchestration_run_id="run-1",
             candidate_generation=1,
             candidate_sha="cand-sha",
@@ -191,6 +208,68 @@ def test_review_authority_remains_functional_in_gate_chain(in_memory_uow):
             manifest_hash="hash-1",
             status=ReviewStatus.REVIEW_COMPLETED,
             verdict=ReviewVerdict.READY_TO_MERGE,
+    )
+    in_memory_uow.jobs.save(job)
+    in_memory_uow.reviews.save(review)
+    in_memory_uow.operator_actions.save(
+        OperatorActionRecord(
+            action_request_id=review.budget_authorization_id,
+            project_id="mini-me",
+            change_name="chain-change",
+            run_id=run.run_id,
+            job_id=job.job_id,
+            action_type=OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW,
+            status=OperatorActionStatus.COMPLETED,
+            result_payload_json={
+                "authorization": {
+                    "stage": "REVIEW",
+                    "provider": "deepseek",
+                    "model": "deepseek-chat",
+                    "account_fingerprint": "a" * 64,
+                    "billing_origin": "deepseek_direct",
+                    "candidate_sha": candidate.candidate_sha,
+                    "base_sha": candidate.base_sha,
+                    "generation": candidate.generation,
+                    "manifest_id": candidate.manifest_id,
+                    "manifest_hash": candidate.manifest_hash,
+                }
+            },
+        )
+    )
+    in_memory_uow.budget_reservations.save(
+        BudgetReservation(
+            reservation_id=review.budget_reservation_id,
+            project_id=job.project_id,
+            job_id=job.job_id,
+            run_id=run.run_id,
+            change_id=job.change_name,
+            role="reviewer",
+            canonical_model_identity="deepseek-chat",
+            reserved_amount_usd=Decimal("0.10"),
+            status="SETTLED",
+            pricing_snapshot_id="gate-code-review-price",
+            provider="deepseek",
+            account_fingerprint="a" * 64,
+            stage="REVIEW",
+            billing_origin="deepseek_direct",
+            authorization_id=review.budget_authorization_id,
+        )
+    )
+    in_memory_uow.budget_ledger.save(
+        BudgetLedgerEntry(
+            entry_id="gate-code-review-ledger",
+            reservation_id=review.budget_reservation_id,
+            project_id=job.project_id,
+            job_id=job.job_id,
+            change_id=job.change_name,
+            provider="deepseek",
+            account_fingerprint="a" * 64,
+            stage="REVIEW",
+            billing_origin="deepseek_direct",
+            role="reviewer",
+            canonical_model_identity="deepseek-chat",
+            amount_usd=Decimal("0.05"),
+            entry_type="SETTLEMENT",
         )
     )
 

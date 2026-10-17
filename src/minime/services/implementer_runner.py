@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import shutil
 import signal
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from minime.config import AppConfig, CliInvocationProfile, resolve_cli_invocation
@@ -16,6 +17,7 @@ from minime.domain.enums import ExternalOutcome
 from minime.logging import redact_secrets
 from minime.services.agent_confinement import AgentConfinementError, AgentProcessConfinement
 from minime.services.cli_preflight import preflight_cli_invocation
+from minime.services.native_openspec_apply import parse_codex_apply_jsonl
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +31,7 @@ class ImplementerResult:
     duration_ms: int
     preflight_error: str | None = None
     environment_error: bool = False
+    native_workflow_evidence: dict[str, object] | None = None
 
 
 class ImplementerRunnerInterface:
@@ -53,11 +56,14 @@ class CliImplementerRunner(ImplementerRunnerInterface):
             self.command = invocation
 
     def _command_for_prompt(self, prompt_context: str) -> list[str]:
-        if self.profile and self.profile.prompt_transport == "argument":
+        effective_profile = self._profile_for_prompt()
+        if effective_profile and effective_profile.prompt_transport == "argument":
             raw_cmd = [
-                self.profile.executable,
-                *(arg.replace("{prompt}", prompt_context) for arg in self.profile.args),
+                effective_profile.executable,
+                *(arg.replace("{prompt}", prompt_context) for arg in effective_profile.args),
             ]
+        elif effective_profile is not None:
+            raw_cmd = [effective_profile.executable, *effective_profile.args]
         else:
             raw_cmd = list(self.command)
         if raw_cmd:
@@ -66,6 +72,20 @@ class CliImplementerRunner(ImplementerRunnerInterface):
             if resolved:
                 raw_cmd[0] = resolved
         return raw_cmd
+
+    def _profile_for_prompt(self):
+        if self.profile is None:
+            return None
+        if self.profile.provider.lower() != "codex" or self.profile.role != "implementer":
+            return self.profile
+        args = list(self.profile.args)
+        if not args or args[0] != "exec":
+            raise ValueError(
+                "Codex implementer profile must use the observable `codex exec` interface."
+            )
+        if "--json" not in args:
+            args.insert(1, "--json")
+        return replace(self.profile, args=tuple(args))
 
     async def run(
         self, worktree_path: Path, prompt_context: str, timeout_seconds: int
@@ -92,8 +112,20 @@ class CliImplementerRunner(ImplementerRunnerInterface):
                 environment_error=environment_error,
             )
 
-        if self.profile is not None:
-            preflight = await preflight_cli_invocation(self.profile)
+        try:
+            effective_profile = self._profile_for_prompt()
+        except ValueError as exc:
+            return ImplementerResult(
+                exit_code=-2,
+                timed_out=False,
+                stdout=[],
+                stderr=[redact_secrets(str(exc))],
+                duration_ms=0,
+                preflight_error="NATIVE_WORKFLOW_TRANSPORT_UNSUPPORTED",
+            )
+
+        if effective_profile is not None:
+            preflight = await preflight_cli_invocation(effective_profile)
             if not preflight.ok:
                 return ImplementerResult(
                     exit_code=-2,
@@ -104,7 +136,17 @@ class CliImplementerRunner(ImplementerRunnerInterface):
                     preflight_error=preflight.reason,
                 )
 
-        raw_command = self._command_for_prompt(prompt_context)
+        try:
+            raw_command = self._command_for_prompt(prompt_context)
+        except ValueError as exc:
+            return ImplementerResult(
+                exit_code=-2,
+                timed_out=False,
+                stdout=[],
+                stderr=[redact_secrets(str(exc))],
+                duration_ms=0,
+                preflight_error="NATIVE_WORKFLOW_TRANSPORT_UNSUPPORTED",
+            )
         input_bytes = (
             prompt_context.encode()
             if not self.profile or self.profile.prompt_transport == "stdin"
@@ -146,16 +188,71 @@ class CliImplementerRunner(ImplementerRunnerInterface):
             process_result.credential_rotation_detected
             and not process_result.credential_access_refresh_only
         )
+        stdout_lines: list[str]
+        workflow_evidence: dict[str, object] | None = None
+        if (
+            self.profile is not None
+            and self.profile.provider.lower() == "codex"
+            and self.profile.role == "implementer"
+        ):
+            from minime.services.native_openspec_apply import (
+                CODEX_APPLY_SKILL_PATH,
+                NATIVE_APPLY_CHANGE_RE,
+                NATIVE_APPLY_SKILL_SHA_RE,
+            )
+
+            change_match = NATIVE_APPLY_CHANGE_RE.search(prompt_context)
+            sha_match = NATIVE_APPLY_SKILL_SHA_RE.search(prompt_context)
+            expected_change = change_match.group(1) if change_match else ""
+            expected_sha = sha_match.group(1) if sha_match else ""
+            raw_jsonl_lines = process_result.stdout.decode(errors="replace").splitlines()[
+                : self.MAX_OUTPUT_LINES
+            ]
+            extracted_messages, workflow_evidence = parse_codex_apply_jsonl(
+                raw_jsonl_lines,
+                change_name=expected_change,
+                workflow_path=CODEX_APPLY_SKILL_PATH,
+                workflow_sha256=expected_sha,
+            )
+            stdout_lines = self._sanitize_output("\n".join(extracted_messages).encode())
+        elif (
+            self.profile is not None
+            and self.profile.provider.lower() in {"antigravity", "agy"}
+            and self.profile.role == "implementer"
+        ):
+            from minime.services.native_openspec_apply import (
+                AGY_APPLY_SKILL_PATH,
+                NATIVE_APPLY_SKILL_SHA_RE,
+                parse_antigravity_apply_output,
+            )
+
+            change_match = re.search(r"/opsx-apply\s+([a-z0-9][a-z0-9._-]{0,127})", prompt_context)
+            sha_match = NATIVE_APPLY_SKILL_SHA_RE.search(prompt_context)
+            expected_change = change_match.group(1) if change_match else ""
+            expected_sha = sha_match.group(1) if sha_match else ""
+            raw_lines = process_result.stdout.decode(errors="replace").splitlines()[
+                : self.MAX_OUTPUT_LINES
+            ]
+            extracted_messages, workflow_evidence = parse_antigravity_apply_output(
+                raw_lines,
+                change_name=expected_change,
+                workflow_path=AGY_APPLY_SKILL_PATH,
+                workflow_sha256=expected_sha,
+            )
+            stdout_lines = self._sanitize_output("\n".join(extracted_messages).encode())
+        else:
+            stdout_lines = self._sanitize_output(process_result.stdout)
         return ImplementerResult(
             exit_code=process_result.returncode,
             timed_out=process_result.timed_out,
-            stdout=self._sanitize_output(process_result.stdout),
+            stdout=stdout_lines,
             stderr=self._sanitize_output(process_result.stderr),
             duration_ms=duration_ms,
             preflight_error=(
                 "PROVIDER_CREDENTIAL_ROTATION_NOT_PERSISTED" if rotation_error else None
             ),
             environment_error=rotation_error,
+            native_workflow_evidence=workflow_evidence,
         )
 
     async def _terminate_process_group(self, proc: asyncio.subprocess.Process) -> None:
@@ -248,6 +345,12 @@ class MockImplementerRunner(ImplementerRunnerInterface):
 
 
 def runner_for_implementer(
-    implementer: str, config: AppConfig | None = None
+    implementer: str,
+    config: AppConfig | None = None,
+    *,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> ImplementerRunnerInterface:
-    return CliImplementerRunner(resolve_cli_invocation(implementer, "implementer", config))
+    return CliImplementerRunner(
+        resolve_cli_invocation(implementer, "implementer", config, model=model, effort=effort)
+    )

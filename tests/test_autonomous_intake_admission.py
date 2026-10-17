@@ -20,6 +20,7 @@ from minime.domain.enums import (
     ExternalReasonCode,
     OrchestrationStage,
     ProviderHealthStatus,
+    ProviderResultClass,
     QueuePriority,
     ReadinessState,
     RetrySafety,
@@ -112,10 +113,22 @@ def test_auto_prepare_on_backlog_creation_happy_path(
 
     # Set up available provider pair
     in_memory_uow.provider_health.save(
-        ProviderHealth(provider="codex", status=ProviderHealthStatus.AVAILABLE)
+        ProviderHealth(
+            provider="codex",
+            status=ProviderHealthStatus.AVAILABLE,
+            last_result_class=ProviderResultClass.SUCCESS,
+            last_success_at=utc_now(),
+            updated_at=utc_now(),
+        )
     )
     in_memory_uow.provider_health.save(
-        ProviderHealth(provider="antigravity", status=ProviderHealthStatus.AVAILABLE)
+        ProviderHealth(
+            provider="antigravity",
+            status=ProviderHealthStatus.AVAILABLE,
+            last_result_class=ProviderResultClass.SUCCESS,
+            last_success_at=utc_now(),
+            updated_at=utc_now(),
+        )
     )
 
     mock_gh = MagicMock()
@@ -211,10 +224,22 @@ def test_auto_prepare_needs_human_on_ambiguity_and_resume(
     in_memory_uow.projects.save(project)
 
     in_memory_uow.provider_health.save(
-        ProviderHealth(provider="codex", status=ProviderHealthStatus.AVAILABLE)
+        ProviderHealth(
+            provider="codex",
+            status=ProviderHealthStatus.AVAILABLE,
+            last_result_class=ProviderResultClass.SUCCESS,
+            last_success_at=utc_now(),
+            updated_at=utc_now(),
+        )
     )
     in_memory_uow.provider_health.save(
-        ProviderHealth(provider="antigravity", status=ProviderHealthStatus.AVAILABLE)
+        ProviderHealth(
+            provider="antigravity",
+            status=ProviderHealthStatus.AVAILABLE,
+            last_result_class=ProviderResultClass.SUCCESS,
+            last_success_at=utc_now(),
+            updated_at=utc_now(),
+        )
     )
 
     mock_gh = MagicMock()
@@ -299,12 +324,24 @@ def test_auto_admit_single_concurrency_deterministic_selection(
     )
     in_memory_uow.projects.save(project)
 
-    # Set codex provider to AVAILABLE
+    # Set codex provider to AVAILABLE with valid capacity evidence
     in_memory_uow.provider_health.save(
-        ProviderHealth(provider="codex", status=ProviderHealthStatus.AVAILABLE)
+        ProviderHealth(
+            provider="codex",
+            status=ProviderHealthStatus.AVAILABLE,
+            last_result_class=ProviderResultClass.SUCCESS,
+            last_success_at=utc_now(),
+            updated_at=utc_now(),
+        )
     )
     in_memory_uow.provider_health.save(
-        ProviderHealth(provider="antigravity", status=ProviderHealthStatus.AVAILABLE)
+        ProviderHealth(
+            provider="antigravity",
+            status=ProviderHealthStatus.AVAILABLE,
+            last_result_class=ProviderResultClass.SUCCESS,
+            last_success_at=utc_now(),
+            updated_at=utc_now(),
+        )
     )
 
     now = utc_now()

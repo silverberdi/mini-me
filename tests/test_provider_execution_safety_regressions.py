@@ -13,6 +13,8 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from minime.adapters.openrouter_adapter import MockOpenRouterAdapter
 from minime.adapters.provider_adapter import FakeProviderAdapter
 from minime.domain.enums import (
@@ -20,6 +22,7 @@ from minime.domain.enums import (
     EventType,
     ExecutionOutcome,
     JobStatus,
+    OrchestrationStage,
     ProviderHealthStatus,
     ProviderResultClass,
     ReadinessState,
@@ -30,15 +33,34 @@ from minime.domain.models import (
     NormalizedProviderResult,
     OpenRouterBudgetPolicy,
     OpenRouterPricingSnapshot,
+    OrchestrationRun,
     Project,
     ProviderHealth,
     RecoveryClaimContext,
     utc_now,
 )
+from minime.services.contract_review_service import ContractReviewResult
 from minime.services.deepseek_auditor_runner import MockAuditorRunner
 from minime.services.execution_pipeline import ExecutionPipelineService
 from minime.services.provider_health_service import ProviderHealthService
 from minime.services.worktree_manager import WorktreeInfo
+
+
+class _AcceptedContractReview:
+    """Explicitly seed accepted contract review prerequisite for later-stage testing."""
+
+    async def review_before_apply(self, project, run, job, workspace_path, *, claim_context=None):
+        del project, run, job, workspace_path, claim_context
+        return ContractReviewResult(
+            accepted=True,
+            review_id="test-accepted-contract-review",
+            contract_hash="test-contract-sha256",
+        )
+
+
+@pytest.fixture(autouse=True)
+def setup_exhausted_primaries(test_capacity_strategy):
+    test_capacity_strategy({"codex": False, "antigravity": False, "deepseek": True})
 
 
 def _make_test_claim_context(uow=None):
@@ -269,6 +291,17 @@ async def test_openrouter_fallback_success_creates_no_fabricated_candidate(in_me
         status=JobStatus.RUNNING,
     )
     in_memory_uow.jobs.save(job)
+    run = OrchestrationRun(
+        run_id=f"run-{change_name}",
+        project_id=project.project_id,
+        change_name=change_name,
+        base_sha="0" * 40,
+        current_stage=OrchestrationStage.IMPLEMENTING,
+        resumable_stage=OrchestrationStage.IMPLEMENTING,
+        is_active=True,
+        active_job_id=job.job_id,
+    )
+    in_memory_uow.orchestration_runs.save(run)
     in_memory_uow.commit()
 
     canned_success = NormalizedProviderResult(
@@ -300,6 +333,7 @@ async def test_openrouter_fallback_success_creates_no_fabricated_candidate(in_me
         project_root=tmp_path,
         worktree_manager=worktrees,
         openrouter_adapter=mock_openrouter,
+        contract_review_service=_AcceptedContractReview(),
         auditor_runner=MockAuditorRunner(
             output=[json.dumps({"risk": "low", "summary": "Audit passed cleanly", "findings": []})]
         ),
@@ -362,6 +396,17 @@ async def test_openrouter_success_without_harness_returns_truthful_outcome(in_me
         status=JobStatus.RUNNING,
     )
     in_memory_uow.jobs.save(job)
+    run = OrchestrationRun(
+        run_id=f"run-{change_name}",
+        project_id=project.project_id,
+        change_name=change_name,
+        base_sha="0" * 40,
+        current_stage=OrchestrationStage.IMPLEMENTING,
+        resumable_stage=OrchestrationStage.IMPLEMENTING,
+        is_active=True,
+        active_job_id=job.job_id,
+    )
+    in_memory_uow.orchestration_runs.save(run)
     in_memory_uow.commit()
 
     canned_success = NormalizedProviderResult(
@@ -389,6 +434,7 @@ async def test_openrouter_success_without_harness_returns_truthful_outcome(in_me
         project_root=tmp_path,
         worktree_manager=worktrees,
         openrouter_adapter=mock_openrouter,
+        contract_review_service=_AcceptedContractReview(),
         auditor_runner=MockAuditorRunner(),
     )
 

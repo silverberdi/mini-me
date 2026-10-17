@@ -58,12 +58,16 @@ def test_needs_human_question_answering_flow(
     )
 
     from minime.services.recovery_convergence_service import RecoveryConvergenceService
+
     rec_svc = RecoveryConvergenceService(in_memory_uow)
     claim_ctx = rec_svc.acquire_claim("intake:app-proj:024-vague-feature")
 
     # Preparing underspecified item sets NEEDS_HUMAN
     res = service.prepare_work_item(
-        "app-proj", "024-vague-feature", operator_email="operator@example.com", claim_context=claim_ctx
+        "app-proj",
+        "024-vague-feature",
+        operator_email="operator@example.com",
+        claim_context=claim_ctx,
     )
     assert res.item.status == WorkItemStatus.NEEDS_HUMAN
     assert len(res.human_questions) > 0
@@ -84,8 +88,9 @@ def test_needs_human_question_answering_flow(
 
 
 def test_start_work_item_and_duplicate_suppression(
-    in_memory_uow: InMemoryPersistenceUnitOfWork, tmp_path: Path
+    in_memory_uow: InMemoryPersistenceUnitOfWork, tmp_path: Path, test_capacity_strategy
 ) -> None:
+    test_capacity_strategy()
     repo_dir = tmp_path / "app-repo"
     setup_managed_repository_fixture(
         in_memory_uow,
@@ -126,9 +131,12 @@ def test_start_work_item_and_duplicate_suppression(
 
     # Prepare to reach READY
     from minime.services.recovery_convergence_service import RecoveryConvergenceService
+
     rec_svc = RecoveryConvergenceService(in_memory_uow)
     claim_ctx = rec_svc.acquire_claim("intake:app-proj:025-ready-task")
-    service.prepare_work_item("app-proj", "025-ready-task", operator_email="operator@example.com", claim_context=claim_ctx)
+    service.prepare_work_item(
+        "app-proj", "025-ready-task", operator_email="operator@example.com", claim_context=claim_ctx
+    )
 
     # Start execution
     start1 = service.start_work_item(

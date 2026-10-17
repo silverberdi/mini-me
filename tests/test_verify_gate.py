@@ -2,13 +2,22 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 
 from conftest import create_isolated_openspec_change
 from minime.adapters.openspec import OpenSpecAdapter
-from minime.domain.enums import ReviewStatus, ReviewVerdict
+from minime.domain.enums import (
+    OperatorActionStatus,
+    OperatorActionType,
+    ReviewStatus,
+    ReviewVerdict,
+)
 from minime.domain.models import (
+    BudgetLedgerEntry,
+    BudgetReservation,
     Job,
+    OperatorActionRecord,
     OrchestrationCandidate,
     OrchestrationRun,
     Project,
@@ -216,9 +225,86 @@ def test_verify_gate_requires_candidate_binding(tmp_path: Path):
 def test_review_evidence_report_passes(in_memory_uow):
     project = _project()
     in_memory_uow.projects.save(project)
-    in_memory_uow.reviews.save(_review())
+    run, job, candidate = _run(), _job(), _candidate()
+    review = _review().model_copy(
+        update={
+            "reviewer_role": "deepseek",
+            "status": ReviewStatus.REVIEW_COMPLETED,
+            "verdict": ReviewVerdict.READY_TO_MERGE,
+            "provider": "deepseek",
+            "reviewer_model": "deepseek-chat",
+            "review_stage": "CODE_REVIEW",
+            "account_fingerprint": "a" * 64,
+            "budget_authorization_id": "verify-code-review-auth",
+            "budget_reservation_id": "verify-code-review-reservation",
+            "billing_origin": "deepseek_direct",
+        }
+    )
+    in_memory_uow.jobs.save(job)
+    in_memory_uow.reviews.save(review)
+    in_memory_uow.operator_actions.save(
+        OperatorActionRecord(
+            action_request_id=review.budget_authorization_id,
+            project_id=project.project_id,
+            change_name=job.change_name,
+            run_id=run.run_id,
+            job_id=job.job_id,
+            action_type=OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW,
+            status=OperatorActionStatus.COMPLETED,
+            result_payload_json={
+                "authorization": {
+                    "stage": "REVIEW",
+                    "provider": "deepseek",
+                    "model": "deepseek-chat",
+                    "account_fingerprint": "a" * 64,
+                    "billing_origin": "deepseek_direct",
+                    "candidate_sha": candidate.candidate_sha,
+                    "base_sha": candidate.base_sha,
+                    "generation": candidate.generation,
+                    "manifest_id": candidate.manifest_id,
+                    "manifest_hash": candidate.manifest_hash,
+                }
+            },
+        )
+    )
+    in_memory_uow.budget_reservations.save(
+        BudgetReservation(
+            reservation_id=review.budget_reservation_id,
+            project_id=project.project_id,
+            job_id=job.job_id,
+            run_id=run.run_id,
+            change_id=job.change_name,
+            role="reviewer",
+            canonical_model_identity="deepseek-chat",
+            reserved_amount_usd=Decimal("0.10"),
+            status="SETTLED",
+            pricing_snapshot_id="verify-code-review-price",
+            provider="deepseek",
+            account_fingerprint="a" * 64,
+            stage="REVIEW",
+            billing_origin="deepseek_direct",
+            authorization_id=review.budget_authorization_id,
+        )
+    )
+    in_memory_uow.budget_ledger.save(
+        BudgetLedgerEntry(
+            entry_id="verify-code-review-ledger",
+            reservation_id=review.budget_reservation_id,
+            project_id=project.project_id,
+            job_id=job.job_id,
+            change_id=job.change_name,
+            provider="deepseek",
+            account_fingerprint="a" * 64,
+            stage="REVIEW",
+            billing_origin="deepseek_direct",
+            role="reviewer",
+            canonical_model_identity="deepseek-chat",
+            amount_usd=Decimal("0.05"),
+            entry_type="SETTLEMENT",
+        )
+    )
     report = build_review_evidence_report(
-        in_memory_uow, _run(), _job(), _candidate(), project, AuthorshipService()
+        in_memory_uow, run, job, candidate, project, AuthorshipService()
     )
     assert report.satisfied is True
     assert report.status == "PASS"

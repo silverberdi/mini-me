@@ -27,18 +27,17 @@ def test_provider_health_primary_validation():
     )
     valid_antigravity.validate_primary()
 
-    invalid_deepseek = ProviderHealth(
+    valid_deepseek = ProviderHealth(
         provider="deepseek",
         status=ProviderHealthStatus.AVAILABLE,
     )
-    with pytest.raises(ValueError, match="Invalid primary provider 'deepseek'"):
-        invalid_deepseek.validate_primary()
+    valid_deepseek.validate_primary()
 
     invalid_openrouter = ProviderHealth(
         provider="openrouter",
         status=ProviderHealthStatus.AVAILABLE,
     )
-    with pytest.raises(ValueError, match="Invalid primary provider 'openrouter'"):
+    with pytest.raises(ValueError, match="Invalid provider 'openrouter'"):
         invalid_openrouter.validate_primary()
 
 
@@ -88,9 +87,9 @@ def test_provider_health_repository_operations(in_memory_uow):
     assert updated.consecutive_failures == 0
     assert updated.last_success_at is not None
 
-    # 4. Reject non-primary provider query
-    with pytest.raises(ValueError, match="Invalid primary provider 'deepseek'"):
-        in_memory_uow.provider_health.get_by_provider("deepseek")
+    # 4. Reject non-tracked provider query
+    with pytest.raises(ValueError, match="Invalid provider 'openrouter'"):
+        in_memory_uow.provider_health.get_by_provider("openrouter")
 
 
 def test_capacity_window_repository_operations(in_memory_uow):

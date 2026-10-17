@@ -616,6 +616,12 @@ def test_postgres_intake_reconciliation_integration(tmp_path: Path):
         conn.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public;"))
         conn.commit()
     Base.metadata.create_all(engine)
+    from minime.db.session import EXPECTED_ALEMBIC_HEAD
+    with engine.connect() as conn:
+        conn.execute(text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(64) PRIMARY KEY);"))
+        conn.execute(text("DELETE FROM alembic_version;"))
+        conn.execute(text(f"INSERT INTO alembic_version (version_num) VALUES ('{EXPECTED_ALEMBIC_HEAD}');"))
+        conn.commit()
 
     session_factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 

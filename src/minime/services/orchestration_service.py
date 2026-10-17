@@ -120,6 +120,7 @@ ALLOWED_STAGE_TRANSITIONS: dict[OrchestrationStage, set[OrchestrationStage]] = {
     OrchestrationStage.FREEZING_CANDIDATE: {OrchestrationStage.COMPLEMENTARY_REVIEW},
     OrchestrationStage.COMPLEMENTARY_REVIEW: {
         OrchestrationStage.INDEPENDENT_AUDIT,
+        OrchestrationStage.PREPARING_PR,
         OrchestrationStage.REVIEW_REMEDIATION,
     },
     OrchestrationStage.REVIEW_REMEDIATION: {OrchestrationStage.IMPLEMENTING},
@@ -340,6 +341,7 @@ class OrchestrationService:
             )
 
         from minime.db.savepoint import execute_with_savepoint_recovery
+
         session = getattr(self.uow, "session", None)
         if session is not None and hasattr(session, "begin_nested"):
             saved, recovery_res = execute_with_savepoint_recovery(
@@ -392,6 +394,7 @@ class OrchestrationService:
     ) -> AdmissionResult:
         """Public admission entry point; delegates through canonical SchedulerService.admit_work_item authority."""
         from minime.services.scheduler_service import SchedulerService
+
         scheduler = getattr(self, "_scheduler_service_override", None) or SchedulerService(
             self.uow,
             project_root=project_root or self.project_root,
@@ -404,7 +407,11 @@ class OrchestrationService:
 
         reason = dec_rec.reason_summary if dec_rec else "Admission refused by scheduler authority"
         refusal_code = dec_rec.reason_code.value if dec_rec and dec_rec.reason_code else "REFUSED"
-        refusal_details = dec_rec.refusal_details if dec_rec and dec_rec.refusal_details else {"code": refusal_code}
+        refusal_details = (
+            dec_rec.refusal_details
+            if dec_rec and dec_rec.refusal_details
+            else {"code": refusal_code}
+        )
         return AdmissionResult(
             admitted=False,
             refusal_reason=reason,
@@ -424,9 +431,14 @@ class OrchestrationService:
             raise ValueError(admission.refusal_reason or "Admission failed")
 
         from minime.services.recovery_convergence_service import RecoveryConvergenceService
-        rec_svc = RecoveryConvergenceService(self.uow, project_root=project_root or self.project_root)
+
+        rec_svc = RecoveryConvergenceService(
+            self.uow, project_root=project_root or self.project_root
+        )
         claim_context = rec_svc.acquire_claim(f"run:{admission.run.run_id}")
-        return self.drive_coordinator(admission.run.run_id, project_root=project_root, claim_context=claim_context)
+        return self.drive_coordinator(
+            admission.run.run_id, project_root=project_root, claim_context=claim_context
+        )
 
     def resume(
         self,
@@ -441,12 +453,16 @@ class OrchestrationService:
 
         validate_claim_context_authoritative(self.uow, claim_context)
 
-        run = self.uow.orchestration_runs.get_for_update(run_id) or self.uow.orchestration_runs.get_by_id(run_id)
+        run = self.uow.orchestration_runs.get_for_update(
+            run_id
+        ) or self.uow.orchestration_runs.get_by_id(run_id)
         if not run:
             raise ValueError(f"Orchestration run '{run_id}' not found.")
 
         # Check if already in terminal state or inactive
-        if run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE or not run.is_active:
+        if run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE:
+            return run
+        if not run.is_active and not (force or drain_mode):
             return run
 
         # Revalidate / clear transient waiting states when resuming
@@ -516,10 +532,11 @@ class OrchestrationService:
             run.stop_details = {}
             if run.active_job_id:
                 job = self.uow.jobs.get_by_id(run.active_job_id)
-                if job and job.status == JobStatus.NEEDS_HUMAN:
+                if job and job.status in {JobStatus.NEEDS_HUMAN, JobStatus.FAILED}:
                     job.status = JobStatus.RUNNING
                     job.continuation_decision = None
                     job.escalation_reason = None
+                    job.error_message = None
                     self.uow.jobs.save(job)
             self.uow.orchestration_runs.save(run)
             self.uow.flush()
@@ -549,7 +566,9 @@ class OrchestrationService:
             self.uow.flush()
 
         self.uow.commit()
-        return self.drive_coordinator(run.run_id, project_root=project_root, claim_context=claim_context)
+        return self.drive_coordinator(
+            run.run_id, project_root=project_root, claim_context=claim_context
+        )
 
     def resolve_preserved_candidate(
         self,
@@ -887,6 +906,7 @@ class OrchestrationService:
         current_base, base_error = resolve_base_branch_sha(root, project.base_branch)
         if not current_base:
             raise ValueError(base_error or "Current registered base could not be resolved.")
+        integrated_and_checked = False
         if current_base != candidate.base_sha:
             next_generation = candidate.generation + 1
             resolution_identity = {
@@ -1064,6 +1084,7 @@ class OrchestrationService:
             # Successful integration continues through the common authority reset below.
             candidate = self.uow.orchestration_candidates.get_latest_for_run(run_id) or candidate
             current_base = candidate.base_sha
+            integrated_and_checked = True
 
         resolution_identity = {
             "run_id": run_id,
@@ -1086,39 +1107,41 @@ class OrchestrationService:
         if existing:
             return self.uow.orchestration_runs.get_by_id(run_id) or run
 
-        # Reopen the preserved branch in a managed worktree solely for a fresh
-        # authoritative check run.  No implementer stage is invoked.
-        manager = self.pipeline.worktree_manager
-        worktree = run_coroutine_sync(
-            manager.create_worktree(
-                job.job_id,
-                run.change_name,
-                project.base_branch,
-                project_id=run.project_id,
-                branch_name=candidate.candidate_ref.removeprefix("refs/heads/"),
-                run_id=run_id,
-            )
-        )
-        try:
-            check_run = run_coroutine_sync(
-                self.pipeline.checks_runner.run(
+        if not integrated_and_checked:
+            # Reopen the preserved branch in a managed worktree solely for a fresh
+            # authoritative check run.  No implementer stage is invoked.
+            manager = self.pipeline.worktree_manager
+            worktree = run_coroutine_sync(
+                manager.create_worktree(
                     job.job_id,
-                    project.checks,
-                    worktree.path,
-                    candidate_sha=candidate.candidate_sha,
-                    candidate_generation=candidate.generation,
+                    run.change_name,
+                    project.base_branch,
+                    project_id=run.project_id,
+                    branch_name=candidate.candidate_ref.removeprefix("refs/heads/"),
+                    run_id=run_id,
+                    allow_reopen=True,
                 )
             )
-            for result in check_run.results:
-                self.uow.check_results.save(result)
-            for diagnostic in check_run.diagnostics:
-                self.uow.evidence_diagnostics.save(diagnostic)
-            if not check_run.passed:
+            try:
+                check_run = run_coroutine_sync(
+                    self.pipeline.checks_runner.run(
+                        job.job_id,
+                        project.checks,
+                        worktree.path,
+                        candidate_sha=candidate.candidate_sha,
+                        candidate_generation=candidate.generation,
+                    )
+                )
+                for result in check_run.results:
+                    self.uow.check_results.save(result)
+                for diagnostic in check_run.diagnostics:
+                    self.uow.evidence_diagnostics.save(diagnostic)
+                if not check_run.passed:
+                    self.uow.flush()
+                    raise ValueError("Preserved candidate deterministic checks failed.")
                 self.uow.flush()
-                raise ValueError("Preserved candidate deterministic checks failed.")
-            self.uow.flush()
-        finally:
-            run_coroutine_sync(manager.remove_clean_worktree(job.job_id, project_id=run.project_id))
+            finally:
+                run_coroutine_sync(manager.remove_clean_worktree(job.job_id, project_id=run.project_id))
 
         run.stop_outcome = None
         run.human_gate = None
@@ -1169,9 +1192,14 @@ class OrchestrationService:
         run.human_gate = None
         self.uow.orchestration_runs.save(run)
         from minime.services.recovery_convergence_service import RecoveryConvergenceService
-        rec_svc = RecoveryConvergenceService(self.uow, project_root=project_root or self.project_root)
+
+        rec_svc = RecoveryConvergenceService(
+            self.uow, project_root=project_root or self.project_root
+        )
         claim_context = rec_svc.acquire_claim(f"run:{run_id}")
-        return self.drive_coordinator(run_id, project_root=project_root, claim_context=claim_context)
+        return self.drive_coordinator(
+            run_id, project_root=project_root, claim_context=claim_context
+        )
 
     def _reconcile_completed_human_integration(
         self,
@@ -1531,7 +1559,12 @@ class OrchestrationService:
             if not isinstance(raw_run, OrchestrationRun):
                 raw_run = self.uow.orchestration_runs.get_by_id(run_id)
             run = raw_run
-            if not run or not isinstance(run, OrchestrationRun) or not run.is_active or run.stop_outcome is not None:
+            if (
+                not run
+                or not isinstance(run, OrchestrationRun)
+                or not run.is_active
+                or run.stop_outcome is not None
+            ):
                 break
 
             stage = run.current_stage
@@ -1570,7 +1603,9 @@ class OrchestrationService:
                         reason_code="execution_start",
                         actor="orchestrator",
                     )
-                self._advance_stage(run, OrchestrationStage.PREPARING_EXECUTION, claim_context=claim_context)
+                self._advance_stage(
+                    run, OrchestrationStage.PREPARING_EXECUTION, claim_context=claim_context
+                )
 
             elif stage == OrchestrationStage.PREPARING_EXECUTION:
                 project = self.uow.projects.get_by_id(run.project_id)
@@ -1584,24 +1619,10 @@ class OrchestrationService:
                     )
                     break
 
-                # 1. Check provider capacity before execution
-                effective_executor = project.implementer
-                health = self.pipeline.health_service.get_health(effective_executor)
-                if health.status != ProviderHealthStatus.AVAILABLE:
-                    # Capacity shortage -> WAITING_CAPACITY (not a human gate)
-                    self._stop_run(
-                        run,
-                        stop_outcome=OrchestrationStopOutcome.WAITING_CAPACITY,
-                        human_gate=None,
-                        stop_reason=f"Primary implementer '{effective_executor}' is {health.status.value}.",
-                        stop_details={
-                            "provider": effective_executor,
-                            "status": health.status.value,
-                        },
-                    )
-                    break
-
-                # 2. Attach or queue Job
+                # The pipeline owns stage-specific JIT capacity. A project-level
+                # implementer health check here can incorrectly block CONTRACT_REVIEW
+                # before its own DeepSeek capacity/budget authority is reached.
+                # Attach or queue the Job; no provider dispatch occurs in this step.
                 if not run.active_job_id:
                     try:
                         job = self.pipeline.queue_job(run.project_id, run.change_name, commit=False)
@@ -1615,7 +1636,7 @@ class OrchestrationService:
                                 stop_outcome=OrchestrationStopOutcome.WAITING_CAPACITY,
                                 human_gate=None,
                                 stop_reason=str(exc),
-                                stop_details={"provider": effective_executor},
+                                stop_details={"provider": project.implementer},
                             )
                             break
                         raise
@@ -1623,7 +1644,9 @@ class OrchestrationService:
                     self.uow.orchestration_runs.update_active_job(run.run_id, job.job_id)
                     self.uow.commit()
 
-                self._advance_stage(run, OrchestrationStage.IMPLEMENTING, claim_context=claim_context)
+                self._advance_stage(
+                    run, OrchestrationStage.IMPLEMENTING, claim_context=claim_context
+                )
 
             elif stage == OrchestrationStage.IMPLEMENTING:
                 job = self.uow.jobs.get_by_id(run.active_job_id)
@@ -1707,7 +1730,9 @@ class OrchestrationService:
                     )
                     break
 
-                self._advance_stage(run, OrchestrationStage.EVALUATING_ATTEMPT, claim_context=claim_context)
+                self._advance_stage(
+                    run, OrchestrationStage.EVALUATING_ATTEMPT, claim_context=claim_context
+                )
 
             elif stage == OrchestrationStage.EVALUATING_ATTEMPT:
                 job = self.uow.jobs.get_by_id(run.active_job_id)
@@ -1771,7 +1796,9 @@ class OrchestrationService:
                     and job.status != JobStatus.CHECKS_FAILED
                 ):
                     # Ready for checks / freeze / review / audit stages
-                    self._advance_stage(run, OrchestrationStage.RUNNING_CHECKS, claim_context=claim_context)
+                    self._advance_stage(
+                        run, OrchestrationStage.RUNNING_CHECKS, claim_context=claim_context
+                    )
                 else:
                     if latest_att and latest_att.continuation_decision is not None:
                         decision = latest_att.continuation_decision
@@ -1794,7 +1821,9 @@ class OrchestrationService:
                             )
                             break
                         # Explicit operator continuation / fresh implementation attempt / checks remediation
-                        self._advance_stage(run, OrchestrationStage.IMPLEMENTING, claim_context=claim_context)
+                        self._advance_stage(
+                            run, OrchestrationStage.IMPLEMENTING, claim_context=claim_context
+                        )
                     elif decision in {
                         ContinuationDecision.CONTINUE_SAME_AGENT,
                         ContinuationDecision.CORRECT_AND_RETRY,
@@ -1815,7 +1844,9 @@ class OrchestrationService:
                                 },
                             )
                             break
-                        self._advance_stage(run, OrchestrationStage.IMPLEMENTING, claim_context=claim_context)
+                        self._advance_stage(
+                            run, OrchestrationStage.IMPLEMENTING, claim_context=claim_context
+                        )
                     elif decision == ContinuationDecision.WAIT_EXTERNAL:
                         self._stop_run(
                             run,
@@ -1843,7 +1874,9 @@ class OrchestrationService:
                         break
                     else:
                         # Verified complete or ready for checks
-                        self._advance_stage(run, OrchestrationStage.RUNNING_CHECKS, claim_context=claim_context)
+                        self._advance_stage(
+                            run, OrchestrationStage.RUNNING_CHECKS, claim_context=claim_context
+                        )
 
             elif stage == OrchestrationStage.RUNNING_CHECKS:
                 job = self.uow.jobs.get_by_id(run.active_job_id)
@@ -1897,11 +1930,15 @@ class OrchestrationService:
                             JobStatus.CHECKS_FAILED.value,
                             error_message="Deterministic checks failed.",
                         )
-                    self._advance_stage(run, OrchestrationStage.EVALUATING_ATTEMPT, claim_context=claim_context)
+                    self._advance_stage(
+                        run, OrchestrationStage.EVALUATING_ATTEMPT, claim_context=claim_context
+                    )
                 else:
                     if job.status in {JobStatus.RUNNING, JobStatus.CHECKS_RUNNING}:
                         self.uow.jobs.transition(job.job_id, JobStatus.CHECKS_PASSED.value)
-                    self._advance_stage(run, OrchestrationStage.FREEZING_CANDIDATE, claim_context=claim_context)
+                    self._advance_stage(
+                        run, OrchestrationStage.FREEZING_CANDIDATE, claim_context=claim_context
+                    )
 
             elif stage == OrchestrationStage.FREEZING_CANDIDATE:
                 job = self.uow.jobs.get_by_id(run.active_job_id)
@@ -1919,7 +1956,9 @@ class OrchestrationService:
                 if not current_candidate:
                     break
 
-                self._advance_stage(run, OrchestrationStage.COMPLEMENTARY_REVIEW, claim_context=claim_context)
+                self._advance_stage(
+                    run, OrchestrationStage.COMPLEMENTARY_REVIEW, claim_context=claim_context
+                )
 
             elif stage == OrchestrationStage.COMPLEMENTARY_REVIEW:
                 job = self.uow.jobs.get_by_id(run.active_job_id)
@@ -1935,10 +1974,18 @@ class OrchestrationService:
 
                 valid, verdict, reason = self._validate_review_authority(run, job, current_cand)
                 if valid and verdict == ReviewVerdict.READY_TO_MERGE:
-                    self._advance_stage(run, OrchestrationStage.INDEPENDENT_AUDIT, claim_context=claim_context)
+                    project = self.uow.projects.get_by_id(run.project_id)
+                    target_stage = (
+                        OrchestrationStage.INDEPENDENT_AUDIT
+                        if project and project.independent_audit_required
+                        else OrchestrationStage.PREPARING_PR
+                    )
+                    self._advance_stage(run, target_stage, claim_context=claim_context)
                 else:
                     # Changes required or invalid/missing review authority -> route to review remediation
-                    self._advance_stage(run, OrchestrationStage.REVIEW_REMEDIATION, claim_context=claim_context)
+                    self._advance_stage(
+                        run, OrchestrationStage.REVIEW_REMEDIATION, claim_context=claim_context
+                    )
 
             elif stage == OrchestrationStage.REVIEW_REMEDIATION:
                 job = self.uow.jobs.get_by_id(run.active_job_id)
@@ -1960,7 +2007,9 @@ class OrchestrationService:
                     )
                     break
                 # Review changes required -> route to continuation remediation attempt
-                self._advance_stage(run, OrchestrationStage.IMPLEMENTING, claim_context=claim_context)
+                self._advance_stage(
+                    run, OrchestrationStage.IMPLEMENTING, claim_context=claim_context
+                )
 
             elif stage == OrchestrationStage.INDEPENDENT_AUDIT:
                 job = self.uow.jobs.get_by_id(run.active_job_id)
@@ -1976,10 +2025,21 @@ class OrchestrationService:
 
                 valid, is_passing, reason = self._validate_audit_authority(run, job, current_cand)
                 if valid and is_passing:
-                    self._advance_stage(run, OrchestrationStage.PREPARING_PR, claim_context=claim_context)
+                    self._advance_stage(
+                        run, OrchestrationStage.PREPARING_PR, claim_context=claim_context
+                    )
+                elif not (
+                    (project := self.uow.projects.get_by_id(run.project_id))
+                    and project.independent_audit_required
+                ):
+                    self._advance_stage(
+                        run, OrchestrationStage.PREPARING_PR, claim_context=claim_context
+                    )
                 else:
                     # Audit failed or missing/invalid audit authority -> route to audit remediation
-                    self._advance_stage(run, OrchestrationStage.AUDIT_REMEDIATION, claim_context=claim_context)
+                    self._advance_stage(
+                        run, OrchestrationStage.AUDIT_REMEDIATION, claim_context=claim_context
+                    )
 
             elif stage == OrchestrationStage.AUDIT_REMEDIATION:
                 job = self.uow.jobs.get_by_id(run.active_job_id)
@@ -2001,7 +2061,9 @@ class OrchestrationService:
                     )
                     break
                 # Audit failed -> feed to continuation governance for corrective remediation
-                self._advance_stage(run, OrchestrationStage.IMPLEMENTING, claim_context=claim_context)
+                self._advance_stage(
+                    run, OrchestrationStage.IMPLEMENTING, claim_context=claim_context
+                )
 
             elif stage == OrchestrationStage.PREPARING_PR:
                 job = self.uow.jobs.get_by_id(run.active_job_id)
@@ -2020,20 +2082,57 @@ class OrchestrationService:
                     break
 
                 # STRICT AUDIT GATE: PR preparation requires an actual CURRENT authoritative DeepSeek Direct audit
-                audit_valid, audit_passing, audit_reason = self._validate_audit_authority(
-                    run=run, job=job, cand=current_cand
+                audit_required = bool(project and project.independent_audit_required)
+                audit_valid, audit_passing, audit_reason = (
+                    self._validate_audit_authority(run=run, job=job, cand=current_cand)
+                    if audit_required
+                    else (True, True, None)
                 )
-                if not audit_valid or not audit_passing:
+                if audit_required and (not audit_valid or not audit_passing):
                     logger.warning(
                         f"PR preparation blocked: no valid passing audit for candidate '{current_cand.candidate_sha}'. Reason: {audit_reason}"
                     )
                     # Cannot prepare PR without authoritative audit -> stay in INDEPENDENT_AUDIT
-                    self._advance_stage(run, OrchestrationStage.INDEPENDENT_AUDIT, claim_context=claim_context)
+                    self._advance_stage(
+                        run, OrchestrationStage.INDEPENDENT_AUDIT, claim_context=claim_context
+                    )
                     continue
 
                 cand_sha = current_cand.candidate_sha
                 gen = current_cand.generation
-                branch_name = f"minime/{run.change_name}"
+                job_branch = f"minime/{run.change_name}-{job.job_id}"
+                expected_candidate_ref = f"refs/heads/{job_branch}"
+                expected_integration_ref = (
+                    f"{expected_candidate_ref}-integration-gen{gen}-{current_cand.base_sha[:12]}"
+                )
+                if current_cand.candidate_ref not in {
+                    None,
+                    expected_candidate_ref,
+                    expected_integration_ref,
+                }:
+                    self._stop_run(
+                        run,
+                        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+                        human_gate=HumanGate.NEEDS_HUMAN,
+                        stop_reason=(
+                            "Candidate publication ref does not belong to the active Job."
+                        ),
+                        stop_details={
+                            "code": "CANDIDATE_BRANCH_IDENTITY_MISMATCH",
+                            "candidate_ref": current_cand.candidate_ref,
+                            "expected_job_ref": expected_candidate_ref,
+                        },
+                    )
+                    break
+                # Worktree and frozen-candidate creation use a Job-scoped ref. Keep
+                # historical candidates without a ref publishable on that same
+                # deterministic Job namespace; never fall back to the shared
+                # change-only branch, which may belong to another Run/Job.
+                branch_name = (
+                    current_cand.candidate_ref.removeprefix("refs/heads/")
+                    if current_cand.candidate_ref
+                    else job_branch
+                )
 
                 # 1. Mutating Git Action: Branch Push under canonical Stage G atomic fenced dispatch intent
                 push_key = f"push:{run.run_id}:gen{gen}:{cand_sha}"
@@ -2258,14 +2357,17 @@ class OrchestrationService:
                         binding.github_pr_url = new_pr.get("url")
                         self.uow.bindings.save(binding)
                         self.uow.commit()
-                        self._advance_stage(run, OrchestrationStage.PR_PREPARED, claim_context=claim_context)
+                        self._advance_stage(
+                            run, OrchestrationStage.PR_PREPARED, claim_context=claim_context
+                        )
                 else:
                     from minime.domain.enums import ExternalReasonCode
 
                     err = fenced_pr_res.error_message or "PR creation failed."
-                    pr_reason = (
-                        getattr(fenced_pr_res, "reason_code", None)
-                        or (getattr(fenced_pr_res.result, "reason_code", None) if hasattr(fenced_pr_res, "result") else None)
+                    pr_reason = getattr(fenced_pr_res, "reason_code", None) or (
+                        getattr(fenced_pr_res.result, "reason_code", None)
+                        if hasattr(fenced_pr_res, "result")
+                        else None
                     )
                     is_needs_human = (
                         "PR_HEAD_MISMATCH" in str(err)
@@ -2375,7 +2477,11 @@ class OrchestrationService:
                 )
                 break
 
-        if claim_context is not None and hasattr(self.uow, "claims") and self.uow.claims is not None:
+        if (
+            claim_context is not None
+            and hasattr(self.uow, "claims")
+            and self.uow.claims is not None
+        ):
             from minime.services.recovery_convergence_service import RecoveryConvergenceService
 
             rec_svc = RecoveryConvergenceService(self.uow, project_root=root)
@@ -2446,7 +2552,9 @@ class OrchestrationService:
                 )
             )
             self.uow.commit()
-            return self.drive_coordinator(run_id, project_root=project_root, claim_context=claim_context)
+            return self.drive_coordinator(
+                run_id, project_root=project_root, claim_context=claim_context
+            )
         return self.uow.orchestration_runs.get_by_id(run_id) or run
 
     def get_status(self, run_id: str) -> OrchestrationStatusView:
@@ -2619,8 +2727,9 @@ class OrchestrationService:
         self,
         run: OrchestrationRun,
         candidate: OrchestrationCandidate | None,
+        candidate_root: str | Path,
     ) -> list[str] | None:
-        """Return candidate changed paths relative to base, or None when unverifiable."""
+        """Return the exact candidate tree's changed paths, or None when unverifiable."""
         import subprocess
 
         base_sha = run.base_sha
@@ -2630,7 +2739,7 @@ class OrchestrationService:
         try:
             result = subprocess.run(
                 ["git", "diff", "--name-only", f"{base_sha}..{candidate_sha}"],
-                cwd=str(self.project_root),
+                cwd=str(Path(candidate_root).resolve()),
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -2657,19 +2766,63 @@ class OrchestrationService:
             return None
 
         candidate_sha = candidate.candidate_sha if candidate else run.current_candidate_sha
-        changed_paths = self._candidate_changed_paths(run, candidate)
+        job = self.uow.jobs.get_by_id(run.active_job_id) if run.active_job_id else None
+        if not candidate or not job or not candidate_sha:
+            return GateResult(
+                "verify",
+                GateStatus.UNKNOWN,
+                GateReason(
+                    "VERIFY_UNVERIFIABLE",
+                    "Published candidate worktree and active job are required for authoritative verification.",
+                ),
+            )
+
+        manager = self.pipeline.worktree_manager
+        ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None)
+        ownership = ownership_repo.get_by_job_id(job.job_id) if ownership_repo else None
+        if ownership is None:
+            return GateResult(
+                "verify",
+                GateStatus.UNKNOWN,
+                GateReason(
+                    "VERIFY_UNVERIFIABLE",
+                    "Candidate worktree ownership is unavailable.",
+                ),
+            )
+        try:
+            candidate_root = manager.worktree_path(job.job_id, run.project_id).resolve()
+            run_coroutine_sync(
+                manager._verify_frozen_candidate_worktree_adoption(
+                    path=candidate_root,
+                    job_id=job.job_id,
+                    project_id=run.project_id,
+                    run_id=run.run_id,
+                    change_name=run.change_name,
+                    ownership=ownership,
+                )
+            )
+        except Exception as exc:
+            return GateResult(
+                "verify",
+                GateStatus.UNKNOWN,
+                GateReason(
+                    "VERIFY_UNVERIFIABLE",
+                    "Candidate worktree could not be authoritatively verified.",
+                    details={"error": str(exc)},
+                ),
+            )
+        changed_paths = self._candidate_changed_paths(run, candidate, candidate_root)
 
         verify_result = VerifyGate(self.openspec_adapter).evaluate(
             project=project,
             change_name=run.change_name,
-            project_root=str(self.project_root),
+            project_root=str(candidate_root),
             candidate_sha=candidate_sha,
             changed_paths=changed_paths,
         )
         if verify_result.is_blocking:
             return verify_result
 
-        job = self.uow.jobs.get_by_id(run.active_job_id) if run.active_job_id else None
         if not job or not candidate:
             return GateResult(
                 "verify",
@@ -2804,13 +2957,19 @@ class OrchestrationService:
 
         def _sync_orig() -> None:
             if orig_run is not locked_run:
-                orig_run.current_stage = locked_run.current_stage
-                orig_run.resumable_stage = locked_run.resumable_stage
-                orig_run.stop_outcome = locked_run.stop_outcome
-                orig_run.human_gate = locked_run.human_gate
-                orig_run.stop_reason = locked_run.stop_reason
-                orig_run.stop_details = locked_run.stop_details
-                orig_run.is_active = locked_run.is_active
+                # Stop authority reloads and saves the latest durable record, so
+                # its mutations need not be reflected in the locked domain copy.
+                # Return the persisted truth to the caller rather than a stale
+                # pre-stop snapshot.
+                latest = self.uow.orchestration_runs.get_by_id(orig_run.run_id) or locked_run
+                orig_run.current_stage = latest.current_stage
+                orig_run.resumable_stage = latest.resumable_stage
+                orig_run.stop_outcome = latest.stop_outcome
+                orig_run.human_gate = latest.human_gate
+                orig_run.stop_reason = latest.stop_reason
+                orig_run.stop_details = latest.stop_details
+                orig_run.is_active = latest.is_active
+
         if from_stage == to_stage:
             _sync_orig()
             return
@@ -2960,7 +3119,11 @@ class OrchestrationService:
         elif to_stage == OrchestrationStage.PREPARING_PR:
             if not job or not candidate:
                 return "Cannot prepare PR without current job and candidate evidence."
-            valid, passing, reason = self._validate_audit_authority(run, job, candidate)
+            project = self.uow.projects.get_by_id(run.project_id)
+            if project and project.independent_audit_required:
+                valid, passing, reason = self._validate_audit_authority(run, job, candidate)
+            else:
+                valid, passing, reason = True, True, None
             if not valid or not passing:
                 return reason or "Cannot prepare PR without current passing audit authority."
         elif to_stage == OrchestrationStage.PR_PREPARED:
@@ -3014,6 +3177,18 @@ class OrchestrationService:
         stop_details: dict[str, Any] | None = None,
     ) -> None:
         """Stop run at a legitimate stop outcome, with optional human gate."""
+        # Pipeline stages can durably freeze a candidate before returning a
+        # waiting result. The coordinator's local ``run`` is then stale; saving
+        # it wholesale would erase the candidate binding and make the exact
+        # Control Plane review authorization impossible (or authorize stale
+        # state). Apply only stop fields to the latest durable Run row.
+        latest_run = self.uow.orchestration_runs.get_for_update(run.run_id)
+        if latest_run is None:
+            latest_run = self.uow.orchestration_runs.get_by_id(run.run_id)
+        if latest_run is not None:
+            if latest_run.project_id != run.project_id or latest_run.change_name != run.change_name:
+                raise ValueError("Cannot stop an orchestration Run with conflicting identity.")
+            run = latest_run
         run.stop_outcome = stop_outcome
         run.human_gate = human_gate
         run.stop_reason = stop_reason
@@ -3235,7 +3410,10 @@ class OrchestrationService:
                 timeout=5,
             )
             if top.returncode != 0 or Path(top.stdout.strip()).resolve() != managed_root:
-                return managed_root, f"Registered repository root is not a valid Git repository: {managed_root}"
+                return (
+                    managed_root,
+                    f"Registered repository root is not a valid Git repository: {managed_root}",
+                )
             candidate = subprocess.run(
                 ["git", "rev-parse", "--verify", f"{candidate_sha}^{{commit}}"],
                 cwd=root,
@@ -3393,7 +3571,7 @@ class OrchestrationService:
             )
             self.uow.events.save(
                 Event(
-                    event_type=EventType.JOB_FAILED,
+                    event_type=EventType.AUXILIARY_CLASSIFICATION_FAILED,
                     project_id=change.project_id,
                     change_id=change.name,
                     payload={
@@ -3408,9 +3586,7 @@ class OrchestrationService:
         self, run: OrchestrationRun, job: Job
     ) -> OrchestrationCandidate | None:
         """Freeze candidate in current generation using Pattern A savepoint conflict recovery."""
-        manifest = self.uow.candidate_manifests.get_by_candidate_sha(
-            job.job_id, job.candidate_sha
-        )
+        manifest = self.uow.candidate_manifests.get_by_candidate_sha(job.job_id, job.candidate_sha)
         if not manifest or not manifest.manifest_hash or manifest.total_files_count <= 0:
             self._stop_run(
                 run,
@@ -3485,18 +3661,35 @@ class OrchestrationService:
             self._bind_current_authority_records(run, job, current_candidate)
         return current_candidate
 
+    def freeze_candidate_for_review(
+        self, run: OrchestrationRun, job: Job
+    ) -> OrchestrationCandidate | None:
+        """Freeze the checked candidate through the canonical candidate authority."""
+        if (
+            run.active_job_id != job.job_id
+            or run.project_id != job.project_id
+            or run.change_name != job.change_name
+            or not job.candidate_sha
+            or not job.base_sha
+            or run.base_sha != job.base_sha
+        ):
+            raise ValueError("Candidate freeze denied: Run/Job identity or base is inconsistent.")
+        return self._freeze_candidate_if_needed(run, job)
+
     def _save_candidate_with_savepoint(
         self, candidate: OrchestrationCandidate
     ) -> tuple[bool, OrchestrationCandidate | None]:
         """Save candidate with Pattern A savepoint recovery for uq_orchestration_candidate_generation."""
         session = getattr(self.uow, "session", None)
         if session is not None and hasattr(session, "begin_nested"):
+
             def _recovery_fn() -> OrchestrationCandidate | None:
                 return self.uow.orchestration_candidates.get_by_generation(
                     candidate.run_id, candidate.generation
                 )
 
             from minime.db.savepoint import execute_with_savepoint_recovery
+
             saved, recovery_res = execute_with_savepoint_recovery(
                 session=session,
                 save_fn=lambda: self.uow.orchestration_candidates.save(candidate),

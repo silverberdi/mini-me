@@ -14,6 +14,7 @@ from tests.conftest import (
 from minime.domain.enums import (
     AdmissionDecisionKind,
     ProviderHealthStatus,
+    ProviderResultClass,
     WorkItemPriority,
 )
 from minime.domain.models import (
@@ -21,6 +22,7 @@ from minime.domain.models import (
     Project,
     ProviderHealth,
     WorkItemStatus,
+    utc_now,
 )
 from minime.services.intake_service import IntakeService
 
@@ -38,10 +40,22 @@ def _setup_ready_item(uow: InMemoryPersistenceUnitOfWork, tmp_path: Path) -> Int
     uow.projects.save(project)
 
     uow.provider_health.save(
-        ProviderHealth(provider="codex", status=ProviderHealthStatus.AVAILABLE)
+        ProviderHealth(
+            provider="codex",
+            status=ProviderHealthStatus.AVAILABLE,
+            last_result_class=ProviderResultClass.SUCCESS,
+            last_success_at=utc_now(),
+            updated_at=utc_now(),
+        )
     )
     uow.provider_health.save(
-        ProviderHealth(provider="antigravity", status=ProviderHealthStatus.AVAILABLE)
+        ProviderHealth(
+            provider="antigravity",
+            status=ProviderHealthStatus.AVAILABLE,
+            last_result_class=ProviderResultClass.SUCCESS,
+            last_success_at=utc_now(),
+            updated_at=utc_now(),
+        )
     )
 
     item = BacklogItem(

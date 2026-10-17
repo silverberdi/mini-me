@@ -11,6 +11,15 @@ from decimal import Decimal
 from pathlib import Path
 
 from minime.adapters.openrouter_adapter import OpenRouterAdapter, OpenRouterRequest
+from minime.config import (
+    AppConfig,
+    OpenSpecStage,
+    ProjectConfig,
+    ResolvedStageProfile,
+    StageProfileError,
+    load_config,
+    resolve_stage_profile,
+)
 from minime.domain.enums import (
     AttemptProductivityClass,
     AuditFindingSeverity,
@@ -31,6 +40,7 @@ from minime.domain.enums import (
     ReadinessState,
     ReviewStatus,
     ReviewVerdict,
+    WorktreeCreationState,
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
@@ -64,27 +74,39 @@ from minime.services.candidate_integrity import (
     verify_post_audit,
     verify_pre_audit,
 )
-from minime.services.candidate_manifest import CandidateManifestService
+from minime.services.candidate_manifest import (
+    CandidateArtifactRejectionError,
+    CandidateManifestService,
+)
 from minime.services.capacity_lifecycle_service import CapacityLifecycleService
 from minime.services.checks_runner import ChecksRunner
+from minime.services.cli_preflight import preflight_cli_invocation
 from minime.services.complementary_policy import validate_complementary_pair
 from minime.services.continuation_engine import (
     ContinuationContext,
     ContinuationEngine,
 )
+from minime.services.contract_review_service import ContractReviewService
 from minime.services.deepseek_auditor_runner import (
     AuditorRunnerInterface,
     DeepSeekAuditorRunner,
     build_audit_prompt,
 )
+from minime.services.deepseek_code_review_service import DeepSeekCodeReviewService
 from minime.services.efficiency_telemetry_service import EfficiencyTelemetryService
 from minime.services.handoff_manager import HandoffManager
 from minime.services.implementer_runner import (
+    CliImplementerRunner,
     ImplementerRunnerInterface,
     runner_for_implementer,
 )
 from minime.services.lightweight_reconciliation_service import LightweightReconciliationService
 from minime.services.model_independence_policy import ModelIndependencePolicy
+from minime.services.native_openspec_apply import (
+    NativeOpenSpecWorkflowUnavailable,
+    resolve_native_openspec_apply,
+    workflow_unchanged,
+)
 from minime.services.openrouter_eligibility import OpenRouterEligibilityEvaluator
 from minime.services.openspec_tasks import OpenSpecTaskTracker, is_verification_task
 from minime.services.outcome_governance import (
@@ -97,6 +119,7 @@ from minime.services.provider_policy_service import ProviderPolicyService
 from minime.services.review_verdict_parser import parse_review_verdict
 from minime.services.reviewer_contract import build_reviewer_prompt
 from minime.services.reviewer_runner import (
+    CliReviewerRunner,
     ReviewerRunnerInterface,
     runner_for_reviewer,
 )
@@ -120,6 +143,41 @@ def format_candidate_workspace_context(worktree_path: str | Path) -> str:
             "Do not write candidate files to provider scratch directories, another checkout, or the parent repository root.",
         ]
     )
+
+
+def _classify_attempt_productivity(
+    outcome: ExecutionOutcome,
+    progress: ProgressClassification | None,
+    *,
+    is_same_sha_duplicate: bool,
+) -> AttemptProductivityClass:
+    """Classify provider completion from observed repository/task progress.
+
+    A zero-exit provider result is not itself evidence of productive work. This
+    keeps no-op completions from being recorded as substantive progress when
+    Git/task evidence says otherwise.
+    """
+    if is_same_sha_duplicate:
+        return AttemptProductivityClass.SAME_SHA_NO_PROGRESS
+    if outcome == ExecutionOutcome.COMPLETED:
+        if progress in {
+            ProgressClassification.GOOD_PROGRESS,
+            ProgressClassification.PARTIAL_PROGRESS,
+        }:
+            return AttemptProductivityClass.SUBSTANTIVE_PROGRESS
+        return AttemptProductivityClass.OTHER
+    if progress in {
+        ProgressClassification.GOOD_PROGRESS,
+        ProgressClassification.PARTIAL_PROGRESS,
+    }:
+        return AttemptProductivityClass.SUBSTANTIVE_PROGRESS
+    if outcome in {ExecutionOutcome.CHANGES_REQUIRED, ExecutionOutcome.FALSE_BLOCKER}:
+        return AttemptProductivityClass.VALID_CORRECTIVE_WORK
+    if outcome in {ExecutionOutcome.AUTH_REQUIRED, ExecutionOutcome.PROVIDER_PREFLIGHT_FAILURE}:
+        return AttemptProductivityClass.PROVIDER_PREFLIGHT_FAILURE
+    if outcome == ExecutionOutcome.PROVIDER_FAILURE:
+        return AttemptProductivityClass.PROVIDER_FAILURE
+    return AttemptProductivityClass.SAME_SHA_NO_PROGRESS
 
 
 EVENT_BY_STATUS = {
@@ -170,9 +228,15 @@ class ExecutionPipelineService:
         openrouter_api_key: str | None = None,
         implementer_timeout_seconds: int = 3600,
         reviewer_timeout_seconds: int = 3600,
+        app_config: AppConfig | None = None,
+        contract_review_service: ContractReviewService | None = None,
+        code_review_service: DeepSeekCodeReviewService | None = None,
     ):
         self.uow = uow
         self.project_root = Path(project_root)
+        self.app_config = app_config or load_config()
+        self.contract_review_service = contract_review_service
+        self.code_review_service = code_review_service
         self.implementer_runner = implementer_runner
         self.reviewer_runner = reviewer_runner
         self.auditor_runner = auditor_runner
@@ -224,8 +288,265 @@ class ExecutionPipelineService:
         result = method(worktree_path, job_id, project_id)
         return str(await result) if inspect.isawaitable(result) else current_sha
 
+    def _get_provider_health(self, provider: str):
+        getter = getattr(self.health_service, "get_health", None)
+        return getter(provider) if callable(getter) else None
+
+    def _stage_capacity_evidence_matches(self, provider: str, model: str | None) -> bool:
+        """Bind JIT evidence to the model/scope selected for this exact stage."""
+        if not model:
+            return False
+        verifier = getattr(self.health_service, "has_fresh_capacity_evidence", None)
+        if not callable(verifier):
+            return False
+        quota_scope = None
+        if provider == "codex":
+            quota_scope = "codex"
+        elif provider in {"antigravity", "agy"}:
+            from minime.adapters.provider_adapter import AntigravityProviderAdapter
+
+            quota_scope = AntigravityProviderAdapter.map_model_to_quota_group(model)
+            if quota_scope is None:
+                return False
+        try:
+            return bool(verifier(provider, model=model, quota_scope=quota_scope))
+        except Exception:
+            logger.info("Stage-bound capacity evidence unavailable for %s", provider)
+            return False
+
+    async def _refresh_capacity_before_stage(self, provider: str, model: str | None = None):
+        """Refresh provider-owned capacity immediately before a stage is dispatched."""
+        refresh = getattr(self.health_service, "refresh_capacity_from_read_only_source", None)
+        if callable(refresh):
+            try:
+                sig = inspect.signature(refresh)
+                if "model" in sig.parameters:
+                    result = refresh(provider, model=model)
+                else:
+                    result = refresh(provider)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                logger.info("JIT read-only capacity observation unavailable for %s", provider)
+        return self._get_provider_health(provider)
+
+    def _get_project_config(self, project: Project) -> ProjectConfig:
+        from minime.config import StageProfileConfig
+
+        if project.project_id in self.app_config.projects:
+            cfg = self.app_config.projects[project.project_id].model_copy(deep=True)
+            if project.implementer:
+                cfg.implementer = project.implementer
+            if project.reviewer:
+                cfg.reviewer = project.reviewer
+            if project.reviewer and project.reviewer == project.implementer:
+                cfg.stage_profiles["REVIEW"] = StageProfileConfig(
+                    provider=project.reviewer,
+                    model="",
+                    effort="medium",
+                    workflow="openspec-verify-change",
+                )
+            return cfg
+        stage_profiles = {}
+        if project.reviewer and project.reviewer == project.implementer:
+            stage_profiles["REVIEW"] = StageProfileConfig(
+                provider=project.reviewer,
+                model="",
+                effort="medium",
+                workflow="openspec-verify-change",
+            )
+        return ProjectConfig(
+            repository=project.repository,
+            base_branch=project.base_branch,
+            openspec_path=project.openspec_path,
+            implementer=project.implementer,
+            reviewer=project.reviewer,
+            checks=project.checks,
+            external_providers_allowed=project.external_providers_allowed,
+            openrouter_drain_allowed=project.openrouter_drain_allowed,
+            stage_profiles=stage_profiles,
+        )
+
+    def _resolve_stage_profile(
+        self,
+        project: Project,
+        stage: OpenSpecStage | str,
+        *,
+        requested_provider: str | None = None,
+        requested_model: str | None = None,
+        requested_effort: str | None = None,
+        implementer_provider: str | None = None,
+    ) -> ResolvedStageProfile:
+        project_config = self._get_project_config(project)
+        return resolve_stage_profile(
+            project_config,
+            stage,
+            app_config=self.app_config,
+            requested_provider=requested_provider,
+            requested_model=requested_model,
+            requested_effort=requested_effort,
+            implementer_provider=implementer_provider,
+        )
+
+    def _verify_frozen_candidate_review_resume(
+        self,
+        *,
+        run_identity,
+        job: Job,
+        candidate_generation: int,
+        worktree,
+    ):
+        """Return the exact frozen candidate/manifest only when review-only resume is safe."""
+        if (
+            run_identity is None
+            or run_identity.project_id != job.project_id
+            or run_identity.change_name != job.change_name
+            or run_identity.active_job_id != job.job_id
+            or run_identity.current_generation != candidate_generation
+            or run_identity.current_candidate_sha != job.candidate_sha
+            or not job.candidate_sha
+            or not job.base_sha
+            or run_identity.base_sha != job.base_sha
+            or getattr(worktree, "base_sha", None) != job.base_sha
+        ):
+            return None, None, "durable Run/Job/candidate identity is inconsistent"
+
+        candidate = self.uow.orchestration_candidates.get_by_generation(
+            run_identity.run_id, candidate_generation
+        )
+        if (
+            candidate is None
+            or not candidate.is_frozen
+            or candidate.run_id != run_identity.run_id
+            or candidate.base_sha != job.base_sha
+            or candidate.candidate_sha != job.candidate_sha
+            or not candidate.candidate_ref
+        ):
+            return None, None, "matching frozen candidate record is unavailable"
+
+        manifest = self.uow.candidate_manifests.get_by_id(candidate.manifest_id)
+        if (
+            manifest is None
+            or manifest.job_id != job.job_id
+            or manifest.candidate_sha != candidate.candidate_sha
+            or manifest.manifest_id != candidate.manifest_id
+            or manifest.manifest_hash != candidate.manifest_hash
+            or not manifest.manifest_hash
+            or manifest.total_files_count <= 0
+        ):
+            return None, None, "candidate manifest does not match the frozen record"
+
+        root = Path(worktree.path).resolve(strict=True)
+        if Path(worktree.path).is_symlink() or not root.is_dir():
+            return None, None, "candidate worktree is missing or resolves through a symlink"
+        try:
+            git_root = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            branch = subprocess.run(
+                ["git", "symbolic-ref", "--short", "HEAD"],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            status = subprocess.run(
+                ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout
+        except (OSError, subprocess.SubprocessError) as exc:
+            return None, None, f"candidate Git identity is unobservable ({type(exc).__name__})"
+
+        expected_branch = candidate.candidate_ref.removeprefix("refs/heads/")
+        if (
+            Path(git_root).resolve() != root
+            or head != candidate.candidate_sha
+            or branch != expected_branch
+            or status
+        ):
+            return None, None, "candidate worktree HEAD, branch, repository, or cleanliness differs"
+
+        try:
+            observed_manifest = self.manifest_service.generate_manifest(
+                root, candidate.candidate_sha, job.job_id
+            )
+        except (CandidateArtifactRejectionError, OSError, ValueError) as exc:
+            return None, None, f"candidate manifest cannot be verified ({type(exc).__name__})"
+        if (
+            observed_manifest.manifest_hash != manifest.manifest_hash
+            or observed_manifest.tracked_files != manifest.tracked_files
+            or observed_manifest.staged_files != manifest.staged_files
+            or observed_manifest.untracked_files != manifest.untracked_files
+            or observed_manifest.deleted_files != manifest.deleted_files
+            or observed_manifest.total_files_count != manifest.total_files_count
+        ):
+            return None, None, "candidate tree does not reproduce its frozen manifest"
+        return candidate, manifest, None
+
     async def _preserve_and_cleanup_worktree(self, job: Job, worktree) -> None:
-        """Persist recovery authority before allowing managed cleanup."""
+        """Preserve active orchestration candidates for review/remediation resume."""
+        if job.candidate_sha:
+            runs_repo = getattr(self.uow, "orchestration_runs", None)
+            ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None)
+            ownership = ownership_repo.get_by_job_id(job.job_id) if ownership_repo else None
+            run = (
+                runs_repo.get_by_id(ownership.run_id)
+                if runs_repo and ownership and ownership.run_id
+                else None
+            )
+            if ownership is not None:
+                if run is None:
+                    raise RuntimeError(
+                        "Candidate worktree preservation denied: durable ownership has no matching Run."
+                    )
+                if (
+                    ownership.creation_state != WorktreeCreationState.CREATED
+                    or Path(ownership.canonical_worktree_path).is_symlink()
+                    or not Path(ownership.canonical_worktree_path).is_dir()
+                    or str(Path(ownership.canonical_worktree_path).resolve())
+                    != str(Path(worktree.path).resolve())
+                    or ownership.branch != worktree.branch_name
+                    or run.active_job_id != job.job_id
+                    or run.project_id != job.project_id
+                    or run.change_name != job.change_name
+                ):
+                    raise RuntimeError(
+                        "Candidate worktree preservation denied: active Run/Job identity conflicts."
+                    )
+                manifests = getattr(self.uow, "candidate_manifests", None)
+                manifest = (
+                    manifests.get_by_candidate_sha(job.job_id, job.candidate_sha)
+                    if manifests
+                    else None
+                )
+                if (
+                    not manifest
+                    or manifest.candidate_sha != job.candidate_sha
+                    or not manifest.manifest_hash
+                    or manifest.total_files_count <= 0
+                ):
+                    # Keep the physical worktree even when its candidate evidence is
+                    # incomplete. A later governed retry must fail closed, not lose it.
+                    raise RuntimeError(
+                        "Candidate worktree preservation denied: matching durable manifest is unavailable."
+                    )
+                return
+
+        # Candidate-free attempts retain the existing snapshot-then-cleanup path.
         create_snapshot = getattr(self.worktree_manager, "create_recovery_snapshot", None)
         remove_clean = getattr(self.worktree_manager, "remove_clean_worktree", None)
         if inspect.iscoroutinefunction(create_snapshot) and inspect.iscoroutinefunction(
@@ -298,6 +619,14 @@ class ExecutionPipelineService:
 
         validate_claim_context_authoritative(self.uow, claim_context)
         job = self.queue_job(project_id, change_name)
+        run_identity = self.uow.orchestration_runs.get_active_run(project_id, change_name)
+        if run_identity and run_identity.active_job_id != job.job_id:
+            run_identity.active_job_id = job.job_id
+            if hasattr(self.uow.orchestration_runs, "update_active_job"):
+                self.uow.orchestration_runs.update_active_job(run_identity.run_id, job.job_id)
+            else:
+                self.uow.orchestration_runs.save(run_identity)
+            self.uow.commit()
         return await self.execute_queued_job(job.job_id, claim_context=claim_context)
 
     async def execute_queued_job(
@@ -332,6 +661,30 @@ class ExecutionPipelineService:
             current_executor = current_executor or project.implementer
             job.current_executor = current_executor
 
+            # Resume without APPLY only for a candidate with durable, exact
+            # CODE_REVIEW work still in progress. A candidate SHA alone is not
+            # sufficient: remediation after CHANGES_REQUIRED must return to APPLY.
+            pending_code_review = (
+                self.uow.reviews.get_by_job_stage(job.job_id, "CODE_REVIEW")
+                if job.candidate_sha
+                else None
+            )
+            resume_frozen_candidate = bool(
+                run_identity
+                and pending_code_review
+                and pending_code_review.status == ReviewStatus.REVIEW_RUNNING
+                and pending_code_review.review_stage == "CODE_REVIEW"
+                and pending_code_review.project_id == job.project_id
+                and pending_code_review.job_id == job.job_id
+                and pending_code_review.change_name == job.change_name
+                and pending_code_review.orchestration_run_id == run_identity.run_id
+                and pending_code_review.candidate_generation == candidate_generation
+                and pending_code_review.candidate_sha == job.candidate_sha
+                and pending_code_review.base_sha == job.base_sha
+                and bool(pending_code_review.manifest_id)
+                and bool(pending_code_review.manifest_hash)
+            )
+
             past_attempts = self.uow.job_attempts.list_by_job(job.job_id)
             past_attempts.sort(key=lambda a: a.attempt_number)
 
@@ -350,12 +703,16 @@ class ExecutionPipelineService:
                         }
                         for a in past_attempts
                     )
-                    or self.health_service.get_health(PrimaryProvider.CODEX.value).status
-                    != ProviderHealthStatus.AVAILABLE
+                    or (
+                        getattr(
+                            self._get_provider_health(PrimaryProvider.CODEX.value), "status", None
+                        )
+                        != ProviderHealthStatus.AVAILABLE
+                    )
                 )
             ):
-                ag_health = self.health_service.get_health(PrimaryProvider.ANTIGRAVITY.value)
-                if ag_health.status == ProviderHealthStatus.AVAILABLE:
+                ag_health = self._get_provider_health(PrimaryProvider.ANTIGRAVITY.value)
+                if ag_health is not None and ag_health.status == ProviderHealthStatus.AVAILABLE:
                     orig_executor = current_executor
                     current_executor = PrimaryProvider.ANTIGRAVITY.value
                     job.current_executor = current_executor
@@ -397,77 +754,10 @@ class ExecutionPipelineService:
                     )
                     self.uow.commit()
 
-            # Check effective executor capacity availability before creating worktree / starting implementer
-            effective_implementer = current_executor
-            imp_health = self.health_service.get_health(effective_implementer)
-            is_primary_imp_available = imp_health.status == ProviderHealthStatus.AVAILABLE
-
-            if not is_primary_imp_available:
-                # Primary implementer is exhausted / unavailable. Check for OpenRouter fallback eligibility.
-                dual_exhausted = self._is_dual_primary_exhausted(project)
-                if not dual_exhausted:
-                    # Single primary exhaustion: DRAIN rules prohibit fallback when other primary is available
-                    job = self.uow.jobs.set_waiting_capacity(
-                        job.job_id,
-                        effective_implementer,
-                        f"Primary implementer '{effective_implementer}' is {imp_health.status.value}",
-                    )
-                    self._save_event(
-                        EventType.JOB_WAITING_CAPACITY,
-                        job,
-                        {
-                            "waiting_provider": effective_implementer,
-                            "status": imp_health.status.value,
-                        },
-                    )
-                    self.uow.commit()
-                    return job
-
-                # Dual-primary exhaustion: Evaluate 10-point OpenRouter fallback eligibility
-                sched_status = self.lifecycle_service.get_scheduler_status(project.project_id)
-                policy, headroom = self.budget_service.get_headroom(project.project_id)
-                primary_health_records = self.health_service.list_all_health()
-
-                elig = self.eligibility_evaluator.evaluate_10_points(
-                    scheduler_mode=sched_status.mode,
-                    job=job,
-                    role="implementer",
-                    is_new_ready_change=False,
-                    primary_health_records=primary_health_records,
-                    project=project,
-                    policy=policy,
-                    headroom=headroom,
-                    model_identity_valid=True,
-                    candidate_integrity_valid=True,
-                    pipeline_invariants_valid=True,
-                )
-
-                if not elig.eligible:
-                    self._save_event(
-                        EventType.FALLBACK_DENIED,
-                        job,
-                        {
-                            "role": "implementer",
-                            "reason": elig.denial_reason,
-                            "reasons": elig.reasons,
-                        },
-                    )
-                    job = self.uow.jobs.set_waiting_capacity(
-                        job.job_id,
-                        "openrouter",
-                        f"OpenRouter fallback ineligible: {elig.denial_reason}",
-                    )
-                    self._save_event(
-                        EventType.JOB_WAITING_CAPACITY,
-                        job,
-                        {"waiting_provider": "openrouter", "status": "fallback_ineligible"},
-                    )
-                    self.uow.commit()
-                    return job
-
-                # Fallback is eligible for implementer!
-                implementer_fallback_used = True
-                fallback_implementer_model = self.default_implementer_model
+            # APPLY capability and capacity are deliberately resolved only after
+            # CONTRACT_REVIEW. A later stage's provider must not prevent the
+            # earlier read-only contract gate from running.
+            apply_profile: ResolvedStageProfile | None = None
 
             # Transition to RUNNING if not already in RUNNING status
             if job.status != JobStatus.RUNNING:
@@ -481,10 +771,39 @@ class ExecutionPipelineService:
                 reuse_existing=True,
             )
             worktree_created = True
-            job.base_sha = worktree.base_sha
-            self.uow.jobs.save(job)
+            if resume_frozen_candidate:
+                if worktree.base_sha != job.base_sha:
+                    return self._transition(
+                        job,
+                        JobStatus.NEEDS_HUMAN,
+                        "Frozen candidate worktree base differs from durable Job base; candidate preserved.",
+                    )
+            else:
+                job.base_sha = worktree.base_sha
+                self.uow.jobs.save(job)
+                if run_identity and run_identity.base_sha != worktree.base_sha:
+                    run_identity.base_sha = worktree.base_sha
+                    self.uow.orchestration_runs.save(run_identity)
             self._log(job.job_id, "system", f"Created worktree {worktree.path}")
             self.uow.commit()
+
+            frozen_candidate = None
+            frozen_manifest = None
+            if resume_frozen_candidate:
+                frozen_candidate, frozen_manifest, resume_error = (
+                    self._verify_frozen_candidate_review_resume(
+                        run_identity=run_identity,
+                        job=job,
+                        candidate_generation=candidate_generation,
+                        worktree=worktree,
+                    )
+                )
+                if resume_error:
+                    return self._transition(
+                        job,
+                        JobStatus.NEEDS_HUMAN,
+                        f"Frozen candidate review resume denied: {resume_error}",
+                    )
 
             corrective_retries_for_current_executor = 0
             same_outcome_streak = 1
@@ -494,6 +813,197 @@ class ExecutionPipelineService:
             corrective_prompt: str | None = None
             active_attempt: JobAttempt | None = None
             worktree_task_tracker = OpenSpecTaskTracker(worktree.path)
+
+            # Production CLI execution requires the independent OpenSpec contract
+            # review before any APPLY dispatch. Explicitly injected implementer
+            # runners are isolated test/diagnostic doubles and are not production
+            # admission evidence; the dedicated operational acceptance exercises
+            # this path with the real service and intercepted HTTP boundary.
+            if (
+                self.implementer_runner is None
+                and not past_attempts
+                and job.attempt_count <= 1
+                and not job.candidate_sha
+            ):
+                if not run_identity or run_identity.active_job_id != job.job_id:
+                    return self._transition(
+                        job,
+                        JobStatus.NEEDS_HUMAN,
+                        error_message="CONTRACT_REVIEW requires exact durable Run/Job identity.",
+                    )
+                contract_review = self.contract_review_service or ContractReviewService(
+                    self.uow,
+                    health_service=self.health_service,
+                    budget_service=self.budget_service,
+                    app_config=self.app_config,
+                )
+                result = await contract_review.review_before_apply(
+                    project,
+                    run_identity,
+                    job,
+                    worktree.path,
+                    claim_context=claim_context,
+                )
+                if not result.accepted:
+                    reason = (
+                        result.reason or "DeepSeek CONTRACT_REVIEW did not accept the contract."
+                    )
+                    if result.waiting:
+                        job = self.uow.jobs.set_waiting_capacity(job.job_id, "deepseek", reason)
+                        self._save_event(
+                            EventType.JOB_WAITING_CAPACITY,
+                            job,
+                            {
+                                "waiting_provider": "deepseek",
+                                "review_stage": "CONTRACT_REVIEW",
+                                "reason": reason,
+                            },
+                        )
+                        self.uow.commit()
+                        return job
+                    return self._transition(job, JobStatus.NEEDS_HUMAN, error_message=reason)
+
+            if not resume_frozen_candidate:
+                # A configured stage profile is authoritative for a new job.
+                # Only a durable operator reassignment, handoff, prior attempt,
+                # or already materialized non-default executor may override it.
+                profile_override = bool(
+                    operator_reassigned
+                    or pending_handoff
+                    or past_attempts
+                    or current_executor != project.implementer
+                )
+                try:
+                    apply_profile = self._resolve_stage_profile(
+                        project,
+                        OpenSpecStage.APPLY,
+                        requested_provider=current_executor if profile_override else None,
+                    )
+                except StageProfileError as exc:
+                    reason = f"Stage profile resolution rejected for APPLY: {exc}"
+                    return self._transition(job, JobStatus.NEEDS_HUMAN, reason)
+
+                if not profile_override and current_executor != apply_profile.provider:
+                    previous_executor = current_executor
+                    current_executor = apply_profile.provider
+                    job.current_executor = current_executor
+                    self.uow.jobs.save(job)
+                    self._save_event(
+                        EventType.STAGE_PROFILE_SELECTED,
+                        job,
+                        {
+                            "stage": OpenSpecStage.APPLY.value,
+                            "previous_executor": previous_executor,
+                            "selected_provider": apply_profile.provider,
+                            "model": apply_profile.model,
+                            "effort": apply_profile.effort,
+                            "workflow": apply_profile.workflow,
+                            "selection_source": "configured_stage_profile",
+                        },
+                    )
+                    self.uow.commit()
+
+                # Validate exact account/model/effort and stage-bound capacity
+                # only at the APPLY dispatch boundary, after contract review.
+                if self.implementer_runner is None:
+                    from minime.adapters.provider_adapter import get_provider_adapter
+
+                    adapter = get_provider_adapter(apply_profile.provider, self.app_config)
+                    supported, check_reason = await adapter.check_model_supported(
+                        apply_profile.model, effort=apply_profile.effort
+                    )
+                    if not supported:
+                        reason = f"Account capability check rejected for APPLY: {check_reason}"
+                        return self._transition(job, JobStatus.NEEDS_HUMAN, reason)
+
+                imp_health = await self._refresh_capacity_before_stage(
+                    apply_profile.provider, model=apply_profile.model
+                )
+                is_primary_imp_available = (
+                    imp_health is not None
+                    and imp_health.status == ProviderHealthStatus.AVAILABLE
+                    and self._stage_capacity_evidence_matches(
+                        apply_profile.provider, apply_profile.model
+                    )
+                )
+                if is_primary_imp_available and imp_health.model:
+                    from minime.adapters.provider_adapter import AntigravityProviderAdapter
+
+                    target_group = AntigravityProviderAdapter.map_model_to_quota_group(
+                        apply_profile.model
+                    )
+                    observed_group = AntigravityProviderAdapter.map_model_to_quota_group(
+                        imp_health.model
+                    )
+                    if (
+                        imp_health.model.lower() != apply_profile.model.lower()
+                        and target_group
+                        and observed_group != target_group
+                    ):
+                        is_primary_imp_available = False
+
+                if not is_primary_imp_available:
+                    dual_exhausted = self._is_dual_primary_exhausted(project)
+                    if not dual_exhausted:
+                        status_desc = imp_health.status.value if imp_health else "UNKNOWN"
+                        job = self.uow.jobs.set_waiting_capacity(
+                            job.job_id,
+                            apply_profile.provider,
+                            f"Stage APPLY provider '{apply_profile.provider}' is {status_desc}",
+                        )
+                        self._save_event(
+                            EventType.JOB_WAITING_CAPACITY,
+                            job,
+                            {
+                                "waiting_provider": apply_profile.provider,
+                                "status": status_desc,
+                                "stage": "APPLY",
+                                "model": apply_profile.model,
+                            },
+                        )
+                        self.uow.commit()
+                        return job
+
+                    sched_status = self.lifecycle_service.get_scheduler_status(project.project_id)
+                    policy, headroom = self.budget_service.get_headroom(project.project_id)
+                    primary_health_records = self.health_service.list_all_health()
+                    elig = self.eligibility_evaluator.evaluate_10_points(
+                        scheduler_mode=sched_status.mode,
+                        job=job,
+                        role="implementer",
+                        is_new_ready_change=False,
+                        primary_health_records=primary_health_records,
+                        project=project,
+                        policy=policy,
+                        headroom=headroom,
+                        model_identity_valid=True,
+                        candidate_integrity_valid=True,
+                        pipeline_invariants_valid=True,
+                    )
+                    if not elig.eligible:
+                        self._save_event(
+                            EventType.FALLBACK_DENIED,
+                            job,
+                            {
+                                "role": "implementer",
+                                "reason": elig.denial_reason,
+                                "reasons": elig.reasons,
+                            },
+                        )
+                        job = self.uow.jobs.set_waiting_capacity(
+                            job.job_id,
+                            "openrouter",
+                            f"OpenRouter fallback ineligible: {elig.denial_reason}",
+                        )
+                        self._save_event(
+                            EventType.JOB_WAITING_CAPACITY,
+                            job,
+                            {"waiting_provider": "openrouter", "status": "fallback_ineligible"},
+                        )
+                        self.uow.commit()
+                        return job
+                    implementer_fallback_used = True
+                    fallback_implementer_model = self.default_implementer_model
 
             if past_attempts:
                 last_att = past_attempts[-1]
@@ -542,11 +1052,105 @@ class ExecutionPipelineService:
                     job.attempt_count = max(job.attempt_count, len(past_attempts) + 1)
 
             # Main implementer continuation loop
-            while True:
+            while not resume_frozen_candidate:
                 past_attempts = self.uow.job_attempts.list_by_job(job.job_id)
                 past_attempts.sort(key=lambda a: a.attempt_number)
                 attempt_number = job.attempt_count
                 attempt_id = f"att-{job.job_id}-{attempt_number}"
+
+                attempt_runner: ImplementerRunnerInterface | None = None
+                native_apply_workflow = None
+                unverified_runner = False
+                if not implementer_fallback_used and self.implementer_runner is None:
+                    try:
+                        apply_profile = self._resolve_stage_profile(
+                            project,
+                            OpenSpecStage.APPLY,
+                            requested_provider=current_executor,
+                        )
+                        attempt_runner = runner_for_implementer(
+                            apply_profile.provider,
+                            config=self.app_config,
+                            model=apply_profile.model,
+                            effort=apply_profile.effort,
+                        )
+                        if isinstance(attempt_runner, CliImplementerRunner):
+                            if (
+                                attempt_runner.profile is None
+                                or attempt_runner.profile.provider.lower()
+                                not in {"codex", "antigravity", "agy"}
+                            ):
+                                raise NativeOpenSpecWorkflowUnavailable(
+                                    f"R01 native APPLY evidence is verified for Codex and Antigravity, got: {attempt_runner.profile.provider if attempt_runner.profile else 'None'}."
+                                )
+                            preflight = preflight_cli_invocation(attempt_runner.profile)
+                            if inspect.isawaitable(preflight):
+                                preflight = await preflight
+                            if not preflight.ok:
+                                reason = f"Implementer CLI preflight failed: {preflight.reason}"
+                                job = self._transition(job, JobStatus.NEEDS_HUMAN, reason)
+                                return job
+                            managed_binding = (
+                                self.uow.project_managed_repository_bindings.get_by_project_id(
+                                    job.project_id
+                                )
+                                if getattr(
+                                    self.uow,
+                                    "project_managed_repository_bindings",
+                                    None,
+                                )
+                                else None
+                            )
+                            if (
+                                not run_identity
+                                or run_identity.project_id != job.project_id
+                                or run_identity.change_name != job.change_name
+                                or run_identity.active_job_id != job.job_id
+                                or not managed_binding
+                                or not managed_binding.is_valid
+                                or not managed_binding.canonical_repository_identity
+                                or not job.base_sha
+                            ):
+                                raise NativeOpenSpecWorkflowUnavailable(
+                                    "Native APPLY requires an exact durable Run, Job, repository, and base binding."
+                                )
+                            apply_provider = attempt_runner.profile.provider.lower()
+                            native_apply_workflow = resolve_native_openspec_apply(
+                                worktree.path,
+                                job.change_name,
+                                provider=apply_provider,
+                                project_id=job.project_id,
+                                repository_identity=managed_binding.canonical_repository_identity,
+                                run_id=run_identity.run_id,
+                                job_id=job.job_id,
+                                attempt_id=attempt_id,
+                                generation=candidate_generation,
+                                base_sha=job.base_sha,
+                            )
+                        else:
+                            # A non-CLI injected/diagnostic boundary is not product evidence.
+                            # It may exercise failure handling in tests, but can never
+                            # authorize a candidate below.
+                            unverified_runner = True
+                    except StageProfileError as exc:
+                        reason = f"Stage profile rejected for APPLY: {exc}"
+                        job = self._transition(job, JobStatus.NEEDS_HUMAN, reason)
+                        return job
+                    except (NativeOpenSpecWorkflowUnavailable, ValueError, OSError) as exc:
+                        reason = f"Native OpenSpec APPLY preflight blocked: {exc}"
+                        job = self._transition(job, JobStatus.NEEDS_HUMAN, reason)
+                        return job
+                    except Exception as exc:
+                        reason = (
+                            "Validated APPLY profile could not construct runner; "
+                            f"refusing unprofiled dispatch ({type(exc).__name__})."
+                        )
+                        job = self._transition(job, JobStatus.NEEDS_HUMAN, reason)
+                        return job
+                elif self.implementer_runner is not None:
+                    # Explicitly injected runner dependencies are used by isolated unit/contract
+                    # tests; they do not constitute product acceptance or native workflow evidence.
+                    attempt_runner = self.implementer_runner
 
                 # Consume pending handoff if available
                 latest_handoff = pending_handoff
@@ -561,10 +1165,14 @@ class ExecutionPipelineService:
 
                 workspace_path = worktree.path.resolve()
                 workspace_context = format_candidate_workspace_context(workspace_path)
-                task_context = worktree_task_tracker.format_prompt_context(
-                    project.openspec_path, job.change_name
-                )
-                prompt_context = f"{workspace_context}\n\n{task_context}"
+                if native_apply_workflow is not None:
+                    prompt_context = (
+                        f"{workspace_context}\n\n{native_apply_workflow.dispatch_instruction()}"
+                    )
+                else:
+                    prompt_context = (
+                        f"{workspace_context}\n\nApply OpenSpec change '{job.change_name}'."
+                    )
                 if handoff_prompt:
                     prompt_context = f"{prompt_context}\n\n{handoff_prompt}"
                 if corrective_prompt:
@@ -804,7 +1412,14 @@ class ExecutionPipelineService:
                         imp_outcome = openrouter_res
                 else:
                     # Primary implementer runner execution
-                    runner = self.implementer_runner or runner_for_implementer(current_executor)
+                    runner = attempt_runner or self.implementer_runner
+                    if runner is None:
+                        job = self._transition(
+                            job,
+                            JobStatus.NEEDS_HUMAN,
+                            "Validated APPLY profile did not produce a runner; refusing unprofiled dispatch.",
+                        )
+                        return job
                     result = await runner.run(
                         worktree.path,
                         prompt_context,
@@ -812,6 +1427,35 @@ class ExecutionPipelineService:
                     )
                     runner_stdout = result.stdout
                     runner_stderr = result.stderr
+                    if native_apply_workflow is not None:
+                        workflow_evidence = dict(result.native_workflow_evidence or {})
+                        workflow_evidence["dispatch_identity"] = {
+                            "project_id": native_apply_workflow.project_id,
+                            "repository_identity": native_apply_workflow.repository_identity,
+                            "run_id": native_apply_workflow.run_id,
+                            "job_id": native_apply_workflow.job_id,
+                            "attempt_id": native_apply_workflow.attempt_id,
+                            "generation": native_apply_workflow.generation,
+                            "base_sha": native_apply_workflow.base_sha,
+                            "stage": "APPLY",
+                            "change_name": native_apply_workflow.change_name,
+                        }
+                        workflow_evidence["skill_source_unchanged"] = workflow_unchanged(
+                            worktree.path, native_apply_workflow
+                        )
+                        workflow_evidence["workflow_observed"] = (
+                            workflow_evidence.get("workflow_observed") is True
+                            and workflow_evidence["skill_source_unchanged"] is True
+                            and workflow_evidence.get("change_name") == job.change_name
+                            and workflow_evidence.get("workflow_sha256")
+                            == native_apply_workflow.workflow_sha256
+                        )
+                        active_attempt.error_details["native_openspec_apply"] = workflow_evidence
+                        if workflow_evidence["workflow_observed"] is not True:
+                            has_insufficient_evidence = True
+                        self.uow.job_attempts.save(active_attempt)
+                    elif unverified_runner:
+                        has_insufficient_evidence = True
                     if getattr(result, "environment_error", False):
                         has_environment_failure = True
                     elif getattr(result, "preflight_error", None):
@@ -1022,25 +1666,26 @@ class ExecutionPipelineService:
                     ver_res.incomplete_tasks
                     and all(
                         is_verification_task(t)
-                        or any(
-                            kw in t.text.lower()
-                            for kw in [
-                                "test",
-                                "check",
-                                "verify",
-                                "sync",
-                                "spec",
-                                "document",
-                                "manifest",
-                                "evidence",
-                            ]
+                        or (
+                            (not t.section or "implementation" not in t.section.lower())
+                            and any(
+                                re.search(rf"\b{kw}\b", t.text.lower())
+                                for kw in [
+                                    "sync",
+                                    "spec",
+                                    "document",
+                                    "manifest",
+                                    "evidence",
+                                ]
+                            )
                         )
                         for t in ver_res.incomplete_tasks
                     )
                 )
                 can_reconcile = self.reconciliation_service.can_reconcile(
                     code_changed=bool(
-                        touched_files or (job.base_sha and current_sha != job.base_sha)
+                        touched_files
+                        or (attempt_start_sha and current_sha != attempt_start_sha)
                     ),
                     checks_passed=(
                         outcome == ExecutionOutcome.COMPLETED or not ver_res.failing_checks
@@ -1084,40 +1729,11 @@ class ExecutionPipelineService:
                     ):
                         is_same_sha = True
                 active_attempt.is_same_sha_duplicate = is_same_sha
-
-                if is_same_sha:
-                    active_attempt.productivity_class = (
-                        AttemptProductivityClass.SAME_SHA_NO_PROGRESS
-                    )
-                elif outcome == ExecutionOutcome.COMPLETED or progress in {
-                    ProgressClassification.GOOD_PROGRESS,
-                    ProgressClassification.PARTIAL_PROGRESS,
-                    "GOOD_PROGRESS",
-                    "PARTIAL_PROGRESS",
-                    "MADE_PROGRESS",
-                    "PARTIAL_COMPLETION",
-                    "FULL_COMPLETION",
-                }:
-                    active_attempt.productivity_class = (
-                        AttemptProductivityClass.SUBSTANTIVE_PROGRESS
-                    )
-                elif outcome in {ExecutionOutcome.CHANGES_REQUIRED, ExecutionOutcome.FALSE_BLOCKER}:
-                    active_attempt.productivity_class = (
-                        AttemptProductivityClass.VALID_CORRECTIVE_WORK
-                    )
-                elif outcome in {
-                    ExecutionOutcome.AUTH_REQUIRED,
-                    ExecutionOutcome.PROVIDER_PREFLIGHT_FAILURE,
-                }:
-                    active_attempt.productivity_class = (
-                        AttemptProductivityClass.PROVIDER_PREFLIGHT_FAILURE
-                    )
-                elif outcome == ExecutionOutcome.PROVIDER_FAILURE:
-                    active_attempt.productivity_class = AttemptProductivityClass.PROVIDER_FAILURE
-                else:
-                    active_attempt.productivity_class = (
-                        AttemptProductivityClass.SAME_SHA_NO_PROGRESS
-                    )
+                active_attempt.productivity_class = _classify_attempt_productivity(
+                    outcome,
+                    progress,
+                    is_same_sha_duplicate=is_same_sha,
+                )
 
                 duration_ms = int((utc_now() - exec_start).total_seconds() * 1000)
                 active_attempt.end_sha = current_sha
@@ -1402,8 +2018,11 @@ class ExecutionPipelineService:
                     self.uow.commit()
 
                     # Check target executor capacity availability under canonical 005/006 lifecycle
-                    target_health = self.health_service.get_health(target_executor)
-                    if target_health.status != ProviderHealthStatus.AVAILABLE:
+                    target_health = self._get_provider_health(target_executor)
+                    if (
+                        target_health is not None
+                        and target_health.status != ProviderHealthStatus.AVAILABLE
+                    ):
                         dual_exhausted = self._is_dual_primary_exhausted(project)
                         if not dual_exhausted:
                             job = self.uow.jobs.set_waiting_capacity(
@@ -1471,23 +2090,53 @@ class ExecutionPipelineService:
 
                     continue
 
-            # Candidate Manifest generation before checks and review
-            manifest = self.manifest_service.generate_manifest(
-                worktree.path,
-                job.candidate_sha or "",
-                job.job_id,
-                attempt_id=active_attempt.attempt_id if active_attempt else None,
-            )
-            self.uow.candidate_manifests.save(manifest)
-            self._save_event(
-                EventType.CANDIDATE_MANIFEST_CREATED,
-                job,
-                {
-                    "manifest_hash": manifest.manifest_hash,
-                    "total_files": manifest.total_files_count,
-                },
-            )
-            self.uow.commit()
+            # Candidate Manifest generation before checks and review. A resumed
+            # candidate must retain its frozen manifest identity; regenerating
+            # one would create a different durable checkpoint.
+            try:
+                if frozen_manifest is not None:
+                    manifest = frozen_manifest
+                else:
+                    manifest = self.manifest_service.generate_manifest(
+                        worktree.path,
+                        job.candidate_sha or "",
+                        job.job_id,
+                        attempt_id=active_attempt.attempt_id if active_attempt else None,
+                    )
+            except CandidateArtifactRejectionError as err:
+                logger.error("Candidate manifest rejected: %s", err)
+                diag = EvidenceDiagnostic(
+                    job_id=job.job_id,
+                    attempt_id=active_attempt.attempt_id if active_attempt else None,
+                    stage_type="CANDIDATE_FREEZE",
+                    check_name="candidate_artifact_exclusion",
+                    diagnostic_status=EvidenceDiagnosticStatus.FAIL,
+                    environment_identity=str(worktree.path),
+                    candidate_sha=job.candidate_sha or "",
+                    reason=str(err),
+                    evidence_reference={"violating_paths": err.violating_paths},
+                )
+                self.uow.evidence_diagnostics.save(diag)
+                self._save_event(
+                    EventType.COMPLETION_REJECTED,
+                    job,
+                    {"error": str(err), "violating_paths": err.violating_paths},
+                )
+                self.uow.commit()
+                self._transition(job, JobStatus.FAILED)
+                return self._require_job(job.job_id)
+
+            if frozen_manifest is None:
+                self.uow.candidate_manifests.save(manifest)
+                self._save_event(
+                    EventType.CANDIDATE_MANIFEST_CREATED,
+                    job,
+                    {
+                        "manifest_hash": manifest.manifest_hash,
+                        "total_files": manifest.total_files_count,
+                    },
+                )
+                self.uow.commit()
 
             # Deterministic checks stage
             checks_started = utc_now()
@@ -1541,96 +2190,181 @@ class ExecutionPipelineService:
 
             job = self._transition(job, JobStatus.CHECKS_PASSED)
 
-            # Complementary review stage with effective reviewer based on current executor
-            effective_reviewer = (
-                project.implementer if current_executor == project.reviewer else project.reviewer
+            if not run_identity:
+                return self._transition(
+                    job,
+                    JobStatus.NEEDS_HUMAN,
+                    "CODE_REVIEW_CANDIDATE_FREEZE_REQUIRES_ACTIVE_RUN; candidate preserved.",
+                )
+            from minime.services.orchestration_service import OrchestrationService
+
+            candidate_authority = OrchestrationService(
+                self.uow, project_root=self.project_root, pipeline=self
             )
-            rev_health = self.health_service.get_health(effective_reviewer)
-            is_primary_rev_available = rev_health.status == ProviderHealthStatus.AVAILABLE
+            frozen_candidate = candidate_authority.freeze_candidate_for_review(run_identity, job)
+            if not frozen_candidate:
+                return self._transition(
+                    job,
+                    JobStatus.NEEDS_HUMAN,
+                    "CODE_REVIEW_CANDIDATE_FREEZE_FAILED; candidate preserved.",
+                )
+            if frozen_candidate.generation != candidate_generation:
+                # Candidate generations are finalized when the post-check
+                # manifest is frozen. Bind the just-completed checks for this
+                # exact SHA to that durable generation before review can read
+                # them; older-generation check evidence is never rewritten.
+                rebound_results = []
+                for check_result in check_run_results:
+                    if check_result.candidate_sha != frozen_candidate.candidate_sha:
+                        return self._transition(
+                            job,
+                            JobStatus.NEEDS_HUMAN,
+                            "CODE_REVIEW_CHECK_IDENTITY_MISMATCH; candidate is preserved.",
+                        )
+                    rebound = check_result.model_copy(
+                        update={"candidate_generation": frozen_candidate.generation}
+                    )
+                    self.uow.check_results.save(rebound)
+                    rebound_results.append(rebound)
+                check_run_results = rebound_results
+                self.uow.commit()
+                candidate_generation = frozen_candidate.generation
+
+            # The frozen candidate record is the authority for the manifest
+            # identity. A freshly generated in-memory manifest may have the
+            # same content hash but a different ID (for example after a retry
+            # that observed the same candidate SHA). Review must use the exact
+            # durable manifest referenced by the frozen candidate.
+            authoritative_manifest = self.uow.candidate_manifests.get_by_id(
+                frozen_candidate.manifest_id or ""
+            )
+            if (
+                authoritative_manifest is None
+                or authoritative_manifest.job_id != job.job_id
+                or authoritative_manifest.candidate_sha != frozen_candidate.candidate_sha
+                or authoritative_manifest.manifest_id != frozen_candidate.manifest_id
+                or authoritative_manifest.manifest_hash != frozen_candidate.manifest_hash
+                or authoritative_manifest.manifest_hash != manifest.manifest_hash
+            ):
+                return self._transition(
+                    job,
+                    JobStatus.NEEDS_HUMAN,
+                    "CODE_REVIEW_CANDIDATE_MANIFEST_IDENTITY_MISMATCH; candidate is preserved.",
+                )
+            manifest = authoritative_manifest
+            run_identity = self.uow.orchestration_runs.get_by_id(run_identity.run_id)
+
+            # R01 final code review is an independent DeepSeek Direct stage; no
+            # primary executor, auditor, or OpenRouter route may substitute.
+            effective_reviewer = "deepseek"
+            review_profile: ResolvedStageProfile | None = None
+            try:
+                review_profile = self._resolve_stage_profile(
+                    project,
+                    OpenSpecStage.REVIEW,
+                    implementer_provider=current_executor,
+                )
+            except StageProfileError as exc:
+                if "CODE_REVIEW_WAITING" in str(exc):
+                    reason = f"Stage profile waiting for REVIEW: {exc}"
+                    job = self.uow.jobs.set_waiting_capacity(job.job_id, effective_reviewer, reason)
+                    self._save_event(
+                        EventType.JOB_WAITING_CAPACITY,
+                        job,
+                        {
+                            "waiting_provider": effective_reviewer,
+                            "review_stage": "CODE_REVIEW",
+                            "reason": reason,
+                        },
+                    )
+                    self.uow.commit()
+                    return job
+                err_msg = f"Stage profile rejected for REVIEW: {exc}"
+                self._save_event(
+                    EventType.REVIEW_POLICY_VIOLATION,
+                    job,
+                    {
+                        "error": err_msg,
+                        "implementer": current_executor,
+                        "reviewer": effective_reviewer,
+                    },
+                )
+                job = self._transition(job, JobStatus.NEEDS_HUMAN, err_msg)
+                return job
+
+            if review_profile and self.reviewer_runner is None:
+                from minime.adapters.provider_adapter import get_provider_adapter
+
+                rev_adapter = get_provider_adapter(review_profile.provider, self.app_config)
+                rev_supported, rev_reason = await rev_adapter.check_model_supported(
+                    review_profile.model, effort=review_profile.effort
+                )
+                if not rev_supported:
+                    err_msg = f"Account capability check rejected for REVIEW: {rev_reason}"
+                    self._save_event(
+                        EventType.REVIEW_POLICY_VIOLATION,
+                        job,
+                        {
+                            "error": err_msg,
+                            "implementer": current_executor,
+                            "reviewer": effective_reviewer,
+                        },
+                    )
+                    job = self._transition(job, JobStatus.NEEDS_HUMAN, err_msg)
+                    return job
+
+            # Checks may take minutes; admission-time reviewer capacity is not
+            # reusable here. Refresh just before entering the review stage.
+            if self.reviewer_runner is not None and self.code_review_service is None:
+                is_primary_rev_available = True
+            else:
+                rev_health = await self._refresh_capacity_before_stage(
+                    effective_reviewer, model=review_profile.model if review_profile else None
+                )
+                is_primary_rev_available = (
+                    rev_health is not None
+                    and rev_health.status == ProviderHealthStatus.AVAILABLE
+                    and self._stage_capacity_evidence_matches(
+                        effective_reviewer, review_profile.model if review_profile else None
+                    )
+                )
             reviewer_fallback_used = False
             selected_reviewer_model: str | None = None
             rev_identity = None
 
             if not is_primary_rev_available:
-                dual_exhausted = self._is_dual_primary_exhausted(project)
-                if not dual_exhausted:
-                    job = self.uow.jobs.set_waiting_capacity(
-                        job.job_id,
-                        effective_reviewer,
-                        f"Primary reviewer '{effective_reviewer}' is {rev_health.status.value}",
-                    )
-                    self._save_event(
-                        EventType.JOB_WAITING_CAPACITY,
-                        job,
-                        {"waiting_provider": effective_reviewer, "status": rev_health.status.value},
-                    )
-                    self.uow.commit()
-                    return job
-
-                sched_status = self.lifecycle_service.get_scheduler_status(project.project_id)
-                policy, headroom = self.budget_service.get_headroom(project.project_id)
-                primary_health_records = self.health_service.list_all_health()
-
-                elig = self.eligibility_evaluator.evaluate_10_points(
-                    scheduler_mode=sched_status.mode,
-                    job=job,
-                    role="reviewer",
-                    is_new_ready_change=False,
-                    primary_health_records=primary_health_records,
-                    project=project,
-                    policy=policy,
-                    headroom=headroom,
-                    model_identity_valid=True,
-                    candidate_integrity_valid=True,
-                    pipeline_invariants_valid=True,
+                status = rev_health.status.value if rev_health else "unknown"
+                reason = (
+                    "OpenRouter is executor rescue only and cannot review. "
+                    f"Independent reviewer '{effective_reviewer}' is {status}; preserving candidate."
                 )
-
-                if not elig.eligible:
-                    self._save_event(
-                        EventType.FALLBACK_DENIED,
-                        job,
-                        {"role": "reviewer", "reason": elig.denial_reason, "reasons": elig.reasons},
-                    )
-                    job = self.uow.jobs.set_waiting_capacity(
-                        job.job_id,
-                        "openrouter",
-                        f"OpenRouter fallback ineligible: {elig.denial_reason}",
-                    )
-                    self._save_event(
-                        EventType.JOB_WAITING_CAPACITY,
-                        job,
-                        {"waiting_provider": "openrouter", "status": "fallback_ineligible"},
-                    )
-                    self.uow.commit()
-                    return job
-
-                effective_imp_model = fallback_implementer_model or current_executor
-                selected_reviewer_model, rev_identity = (
-                    self.independence_policy.select_independent_reviewer(
-                        effective_imp_model, self.allowed_reviewer_models
-                    )
+                job = self.uow.jobs.set_waiting_capacity(job.job_id, effective_reviewer, reason)
+                self._save_event(
+                    EventType.JOB_WAITING_CAPACITY,
+                    job,
+                    {"waiting_provider": effective_reviewer, "status": status, "reason": reason},
                 )
+                self.uow.commit()
+                return job
 
-                if not selected_reviewer_model or not rev_identity:
-                    job = self.uow.jobs.set_waiting_capacity(
-                        job.job_id,
-                        "openrouter",
-                        "DISTINCT_REVIEWER_UNAVAILABLE",
-                    )
-                    self._save_event(
-                        EventType.JOB_WAITING_CAPACITY,
-                        job,
-                        {
-                            "waiting_provider": "openrouter",
-                            "reason": "DISTINCT_REVIEWER_UNAVAILABLE",
-                        },
-                    )
-                    self.uow.commit()
-                    return job
+            if self.reviewer_runner is None and self.code_review_service is None and (
+                review_profile is None or review_profile.provider != "deepseek"
+            ):
+                reason = (
+                    "R01 CODE_REVIEW requires DeepSeek Direct; reviewer substitution is forbidden."
+                )
+                self._save_event(
+                    EventType.REVIEW_POLICY_VIOLATION,
+                    job,
+                    {
+                        "error": reason,
+                        "configured_provider": review_profile.provider if review_profile else None,
+                    },
+                )
+                job = self._transition(job, JobStatus.NEEDS_HUMAN, reason)
+                return job
 
-                reviewer_fallback_used = True
-
-            if not reviewer_fallback_used:
+            if review_profile.provider != "deepseek" and not reviewer_fallback_used:
                 valid_pair, pair_err = validate_complementary_pair(
                     current_executor, effective_reviewer
                 )
@@ -1661,20 +2395,41 @@ class ExecutionPipelineService:
                     job,
                     {"error": pre_err},
                 )
+                self.uow.commit()
                 raise RuntimeError(pre_err or "Pre-review candidate integrity failure.")
 
             # Observation-only symlink safety scan
             self.reviewer_view_manager.verify_candidate_tree(worktree.path)
 
-            effective_reviewer_role = (
-                f"openrouter:{selected_reviewer_model}"
-                if reviewer_fallback_used
-                else (
-                    project.implementer
-                    if current_executor == project.reviewer
-                    else project.reviewer
+            effective_reviewer_role = "deepseek"
+
+            # Candidate verification and worktree preparation can outlive the
+            # earlier reviewer snapshot. Obtain one final observation immediately
+            # before materializing the review workspace / persisting REVIEW_RUNNING.
+            if not reviewer_fallback_used and (self.reviewer_runner is None or self.code_review_service is not None):
+                rev_health = await self._refresh_capacity_before_stage(
+                    effective_reviewer,
+                    model=review_profile.model if review_profile else None,
                 )
-            )
+                if (
+                    rev_health is None
+                    or rev_health.status != ProviderHealthStatus.AVAILABLE
+                    or not self._stage_capacity_evidence_matches(
+                        effective_reviewer, review_profile.model if review_profile else None
+                    )
+                ):
+                    job = self.uow.jobs.set_waiting_capacity(
+                        job.job_id,
+                        effective_reviewer,
+                        f"Primary reviewer '{effective_reviewer}' is {rev_health.status.value}",
+                    )
+                    self._save_event(
+                        EventType.JOB_WAITING_CAPACITY,
+                        job,
+                        {"waiting_provider": effective_reviewer, "status": rev_health.status.value},
+                    )
+                    self.uow.commit()
+                    return job
 
             # Create dedicated reviewer EXECUTION_WORKTREE
             review_wt_info = await self.worktree_manager.create_review_worktree(
@@ -1731,10 +2486,10 @@ class ExecutionPipelineService:
             }
             authorship_evidence = self.authorship_service.evaluate_reviewer_authorship(
                 job_id=job.job_id,
-                reviewer_role=project.reviewer,
+                reviewer_role=effective_reviewer_role,
                 surviving_files=candidate_files,
                 candidate_sha=job.candidate_sha or "",
-                candidate_generation=active_attempt.attempt_number if active_attempt else None,
+                candidate_generation=candidate_generation,
                 uow=self.uow,
             )
 
@@ -1782,8 +2537,14 @@ class ExecutionPipelineService:
                 project_id=job.project_id,
                 change_name=job.change_name,
                 reviewer_role=effective_reviewer_role,
+                reviewer_model=review_profile.model if review_profile else None,
+                review_stage="CODE_REVIEW",
+                orchestration_run_id=run_identity.run_id if run_identity else None,
+                candidate_generation=candidate_generation,
                 candidate_sha=job.candidate_sha or "",
                 base_sha=job.base_sha or "",
+                manifest_id=manifest.manifest_id,
+                manifest_hash=manifest.manifest_hash,
                 status=ReviewStatus.REVIEW_RUNNING,
                 is_mixed_authorship=authorship_evidence["is_mixed_authorship"],
                 authorship_evidence=authorship_evidence,
@@ -1804,7 +2565,54 @@ class ExecutionPipelineService:
 
             verdict_payload = None
 
-            if reviewer_fallback_used and selected_reviewer_model and rev_identity:
+            if self.code_review_service is not None or (
+                review_profile and review_profile.provider == "deepseek" and self.reviewer_runner is None
+            ):
+                candidate = (
+                    self.uow.orchestration_candidates.get_by_generation(
+                        run_identity.run_id, candidate_generation
+                    )
+                    if run_identity
+                    else None
+                )
+                if candidate is None:
+                    return self._transition(
+                        job,
+                        JobStatus.NEEDS_HUMAN,
+                        "CODE_REVIEW_CANDIDATE_RECORD_MISSING; candidate is preserved.",
+                    )
+                code_review_service = self.code_review_service or DeepSeekCodeReviewService(
+                    self.uow,
+                    health_service=self.health_service,
+                    budget_service=self.budget_service,
+                    app_config=self.app_config,
+                    timeout_seconds=self.reviewer_timeout_seconds,
+                )
+                code_review = await code_review_service.review_candidate(
+                    project=project,
+                    run=run_identity,
+                    job=job,
+                    candidate=candidate,
+                    manifest=manifest,
+                    candidate_worktree=readonly_view,
+                    authorship_evidence=authorship_evidence,
+                )
+                if not code_review.accepted or not code_review.verdict:
+                    if code_review.waiting:
+                        reason = code_review.reason or "DEEPSEEK_CODE_REVIEW_WAITING"
+                        job = self.uow.jobs.set_waiting_capacity(job.job_id, "deepseek", reason)
+                        self._save_event(
+                            EventType.JOB_WAITING_CAPACITY,
+                            job,
+                            {"waiting_provider": "deepseek", "stage": "REVIEW", "reason": reason},
+                        )
+                        self.uow.commit()
+                        return job
+                    reason = code_review.reason or "DeepSeek code review failed closed."
+                    return self._transition(job, JobStatus.NEEDS_HUMAN, reason)
+                review = self.uow.reviews.get_by_id(code_review.review_id) or review
+                verdict_payload = code_review.verdict
+            elif reviewer_fallback_used and selected_reviewer_model and rev_identity:
                 # OpenRouter fallback reviewer execution
                 snapshot = self.uow.pricing_snapshots.get_latest_verified_for_model(
                     selected_reviewer_model, rev_identity.canonical_name
@@ -1975,7 +2783,32 @@ class ExecutionPipelineService:
                     return job
             else:
                 # Primary reviewer runner execution
-                reviewer = self.reviewer_runner or runner_for_reviewer(effective_reviewer)
+                if self.reviewer_runner is not None:
+                    reviewer = self.reviewer_runner
+                elif review_profile and review_profile.cli_invocation is not None:
+                    reviewer = CliReviewerRunner(review_profile.cli_invocation)
+                else:
+                    try:
+                        if review_profile is None:
+                            raise StageProfileError("REVIEW profile is unavailable")
+                        reviewer = runner_for_reviewer(
+                            effective_reviewer,
+                            config=self.app_config,
+                            model=review_profile.model,
+                            effort=review_profile.effort,
+                        )
+                    except (TypeError, StageProfileError) as exc:
+                        self.uow.reviews.transition(
+                            review.review_id,
+                            ReviewStatus.REVIEW_FAILED.value,
+                            error_message=f"Validated REVIEW profile could not construct runner: {exc}",
+                        )
+                        self.uow.commit()
+                        return self._transition(
+                            job,
+                            JobStatus.NEEDS_HUMAN,
+                            "Validated REVIEW profile could not construct runner; refusing unprofiled dispatch.",
+                        )
                 review_result = await reviewer.run(
                     readonly_view,
                     review_prompt,
@@ -2184,14 +3017,36 @@ class ExecutionPipelineService:
                     verdict=ReviewVerdict.READY_TO_MERGE.value,
                     summary=verdict_payload.summary,
                 )
-                self.uow.commit()
-                job = await self._run_audit_stage(
-                    job=job,
-                    project=project,
-                    worktree_path=worktree.path,
-                    check_run_results=check_run_results,
-                    review_id=review.review_id,
+                self._save_event(
+                    EventType.CODE_REVIEW_COMPLETED,
+                    job,
+                    {
+                        "review_id": review.review_id,
+                        "review_stage": "CODE_REVIEW",
+                        "provider": review.provider,
+                        "model": review.reviewer_model,
+                        "account_fingerprint": review.account_fingerprint,
+                        "authorization_id": review.budget_authorization_id,
+                        "reservation_id": review.budget_reservation_id,
+                        "candidate_sha": review.candidate_sha,
+                        "base_sha": review.base_sha,
+                        "generation": review.candidate_generation,
+                        "manifest_id": review.manifest_id,
+                        "manifest_hash": review.manifest_hash,
+                        "verdict": ReviewVerdict.READY_TO_MERGE.value,
+                    },
                 )
+                self.uow.commit()
+                if project.independent_audit_required:
+                    job = await self._run_audit_stage(
+                        job=job,
+                        project=project,
+                        worktree_path=worktree.path,
+                        check_run_results=check_run_results,
+                        review_id=review.review_id,
+                    )
+                else:
+                    job = self._transition(job, JobStatus.READY_TO_MERGE)
             elif verdict_payload.verdict == ReviewVerdict.CHANGES_REQUIRED:
                 self.uow.reviews.transition(
                     review.review_id,
@@ -2199,15 +3054,35 @@ class ExecutionPipelineService:
                     verdict=ReviewVerdict.CHANGES_REQUIRED.value,
                     summary=verdict_payload.summary,
                 )
-                for item in verdict_payload.findings:
-                    finding = ReviewFinding(
-                        review_id=review.review_id,
-                        severity=item.severity,
-                        location=item.location,
-                        violated_requirement=item.violated_requirement,
-                        expected_correction=item.expected_correction,
-                    )
-                    self.uow.review_findings.save(finding)
+                self._save_event(
+                    EventType.CODE_REVIEW_COMPLETED,
+                    job,
+                    {
+                        "review_id": review.review_id,
+                        "review_stage": "CODE_REVIEW",
+                        "provider": review.provider,
+                        "model": review.reviewer_model,
+                        "account_fingerprint": review.account_fingerprint,
+                        "authorization_id": review.budget_authorization_id,
+                        "reservation_id": review.budget_reservation_id,
+                        "candidate_sha": review.candidate_sha,
+                        "base_sha": review.base_sha,
+                        "generation": review.candidate_generation,
+                        "manifest_id": review.manifest_id,
+                        "manifest_hash": review.manifest_hash,
+                        "verdict": ReviewVerdict.CHANGES_REQUIRED.value,
+                    },
+                )
+                if not self.uow.review_findings.list_by_review(review.review_id):
+                    for item in verdict_payload.findings:
+                        finding = ReviewFinding(
+                            review_id=review.review_id,
+                            severity=item.severity,
+                            location=item.location,
+                            violated_requirement=item.violated_requirement,
+                            expected_correction=item.expected_correction,
+                        )
+                        self.uow.review_findings.save(finding)
                 self.uow.commit()
                 self._transition(job, JobStatus.CHANGES_REQUIRED)
 
@@ -2536,9 +3411,8 @@ class ExecutionPipelineService:
 
     def _is_dual_primary_exhausted(self, project: Project) -> bool:
         """Check if both primary providers (Codex and Antigravity) are exhausted / unavailable."""
-        all_health = self.health_service.list_all_health()
-        codex_h = next((h for h in all_health if h.provider == "codex"), None)
-        agy_h = next((h for h in all_health if h.provider == "antigravity"), None)
+        codex_h = self._get_provider_health("codex")
+        agy_h = self._get_provider_health("antigravity")
         codex_unavail = codex_h is not None and codex_h.status != ProviderHealthStatus.AVAILABLE
         agy_unavail = agy_h is not None and agy_h.status != ProviderHealthStatus.AVAILABLE
         return codex_unavail and agy_unavail
@@ -2646,7 +3520,7 @@ class ExecutionPipelineService:
             )
             self.uow.events.save(
                 Event(
-                    event_type=EventType.JOB_FAILED,
+                    event_type=EventType.AUXILIARY_CLASSIFICATION_FAILED,
                     project_id=job.project_id,
                     change_id=job.change_name,
                     payload={

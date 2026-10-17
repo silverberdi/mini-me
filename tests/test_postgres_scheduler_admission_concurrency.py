@@ -19,6 +19,7 @@ from minime.domain.enums import (
     AdmissionRefusalCode,
     ChangeStatus,
     ProviderHealthStatus,
+    ProviderResultClass,
     QueuePriority,
     ReadinessState,
     WorkItemStatus,
@@ -119,13 +120,26 @@ def pg_engine() -> Generator[Engine, None, None]:
     engine = create_engine(PG_TEST_URL, pool_size=10, max_overflow=20, pool_pre_ping=True)
     from sqlalchemy import text
 
+    from minime.db.session import EXPECTED_ALEMBIC_HEAD
+
     with engine.connect() as conn:
         conn.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public;"))
         conn.commit()
     Base.metadata.create_all(engine)
+    with engine.connect() as conn:
+        conn.execute(text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(64) PRIMARY KEY);"))
+        conn.execute(text("DELETE FROM alembic_version;"))
+        conn.execute(text(f"INSERT INTO alembic_version (version_num) VALUES ('{EXPECTED_ALEMBIC_HEAD}');"))
+        conn.commit()
     yield engine
     with engine.connect() as conn:
         conn.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public;"))
+        conn.commit()
+    Base.metadata.create_all(engine)
+    with engine.connect() as conn:
+        conn.execute(text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(64) PRIMARY KEY);"))
+        conn.execute(text("DELETE FROM alembic_version;"))
+        conn.execute(text(f"INSERT INTO alembic_version (version_num) VALUES ('{EXPECTED_ALEMBIC_HEAD}');"))
         conn.commit()
     engine.dispose()
 
@@ -160,16 +174,24 @@ def _seed_project_and_change(
         (cdir / "design.md").write_text("# Design")
         (cdir / "specs").mkdir(exist_ok=True)
         (cdir / "specs" / "test.md").write_text("# Spec")
-        import subprocess
-        if not (project_root / ".git").exists():
-            subprocess.run(["git", "init", str(project_root)], check=False, capture_output=True)
-            subprocess.run(["git", "-C", str(project_root), "checkout", "-b", "main"], check=False, capture_output=True)
-            subprocess.run(["git", "-C", str(project_root), "config", "user.name", "Test"], check=False, capture_output=True)
-            subprocess.run(["git", "-C", str(project_root), "config", "user.email", "test@example.com"], check=False, capture_output=True)
-        subprocess.run(["git", "-C", str(project_root), "add", "."], check=False, capture_output=True)
-        subprocess.run(["git", "-C", str(project_root), "commit", "--allow-empty", "-m", f"seed {change_name}"], check=False, capture_output=True)
     with session_factory() as session:
         uow = PostgresPersistenceUnitOfWork(session)
+        if project_root:
+            from tests.conftest import setup_managed_repository_fixture
+            mb = uow.project_managed_repository_bindings.get_by_project_id(project_id)
+            if not mb:
+                setup_managed_repository_fixture(
+                    uow=uow,
+                    project_id=project_id,
+                    repo_root=project_root,
+                    worktree_parent_dir=project_root / ".minime" / "worktrees",
+                    canonical_repository_identity="github.com/owner/repo",
+                    local_remote=False,
+                )
+            import subprocess
+            subprocess.run(["git", "-C", str(project_root), "add", "."], check=False, capture_output=True)
+            subprocess.run(["git", "-C", str(project_root), "commit", "--allow-empty", "-m", f"seed {change_name}"], check=False, capture_output=True)
+
         proj = Project(
             project_id=project_id,
             display_name=f"Project {project_id}",
@@ -222,12 +244,15 @@ def _seed_project_and_change(
         )
         uow.backlog_items.save(backlog)
 
-        for provider in ["codex", "antigravity"]:
+        for provider in ["codex", "antigravity", "deepseek"]:
             uow.provider_health.save(
                 ProviderHealth(
                     health_id=f"ph-{provider}",
                     provider=provider,
                     status=ProviderHealthStatus.AVAILABLE,
+                    last_result_class=ProviderResultClass.SUCCESS,
+                    last_success_at=utc_now(),
+                    updated_at=utc_now(),
                 )
             )
         uow.commit()
@@ -238,7 +263,7 @@ def _make_scheduler(
     tmp_path: Path,
     _test_global_max_jobs_override: int | None = None,
 ) -> SchedulerService:
-    from unittest.mock import MagicMock
+    from unittest.mock import AsyncMock, MagicMock
 
     from minime.domain.models import ReadinessEvaluation
     mock_readiness = MagicMock()
@@ -253,12 +278,14 @@ def _make_scheduler(
     )
     mock_readiness.evaluate_change_readiness.return_value = eval_res
     mock_readiness.evaluate_change_readiness_pure.return_value = eval_res
-    return SchedulerService(
+    sched = SchedulerService(
         uow,
         project_root=tmp_path,
         _test_global_max_jobs_override=_test_global_max_jobs_override,
         readiness_service=mock_readiness,
     )
+    sched.provider_health_service.refresh_capacity_from_read_only_source = AsyncMock(return_value=True)
+    return sched
 
 
 def test_t01_same_change_savepoint_recovery(pg_session_factory: sessionmaker[Session], tmp_path: Path):
@@ -289,6 +316,7 @@ def test_t01_same_change_savepoint_recovery(pg_session_factory: sessionmaker[Ses
     t1.join()
     t2.join()
 
+    print(f"DEBUG t01 results: {[(r[0], getattr(r[1], 'reason_code', None), getattr(r[1], 'reason_summary', None), getattr(r[1], 'refusal_details', None)) for r in results]}")
     decisions = [r[0] for r in results]
     assert AdmissionDecision.ADMITTED in decisions
     assert AdmissionDecision.REFUSED in decisions
@@ -338,22 +366,24 @@ def test_t03_global_concurrency_limit(pg_session_factory: sessionmaker[Session],
     Two changes in different projects are admitted concurrently under normal production construction.
     The first caller succeeds; the second receives GLOBAL_CONCURRENCY_LIMIT.
     """
-    _seed_project_and_change(pg_session_factory, "t03-p1", "c1", issue_number=1, max_concurrent_jobs=5, project_root=tmp_path)
-    _seed_project_and_change(pg_session_factory, "t03-p2", "c2", issue_number=2, max_concurrent_jobs=5, project_root=tmp_path)
+    p1_root = tmp_path / "p1"
+    p2_root = tmp_path / "p2"
+    _seed_project_and_change(pg_session_factory, "t03-p1", "c1", issue_number=1, max_concurrent_jobs=5, project_root=p1_root)
+    _seed_project_and_change(pg_session_factory, "t03-p2", "c2", issue_number=2, max_concurrent_jobs=5, project_root=p2_root)
 
     results: list[tuple[AdmissionDecision, Any, Any]] = [None, None]  # type: ignore
 
-    def worker(idx: int, pid: str, cname: str):
+    def worker(idx: int, pid: str, cname: str, root: Path):
         with pg_session_factory() as session:
             uow = PostgresPersistenceUnitOfWork(session)
             # Production construction with no override -> enforces max_global_jobs = 1
-            scheduler = _make_scheduler(uow, tmp_path)
+            scheduler = _make_scheduler(uow, root)
             assert scheduler.max_global_jobs == 1
             dec, rec, run = scheduler.admit_work_item(pid, cname)
             results[idx] = (dec, rec, run)
 
-    t1 = threading.Thread(target=worker, args=(0, "t03-p1", "c1"))
-    t2 = threading.Thread(target=worker, args=(1, "t03-p2", "c2"))
+    t1 = threading.Thread(target=worker, args=(0, "t03-p1", "c1", p1_root))
+    t2 = threading.Thread(target=worker, args=(1, "t03-p2", "c2", p2_root))
 
     t1.start()
     t2.start()

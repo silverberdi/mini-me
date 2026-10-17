@@ -175,10 +175,17 @@ class MockJobRepo:
             )
         ]
 
-    def transition(self, job_id: str, new_status: Any, error_message: str | None = None, claim_context: Any = None) -> Job | None:
+    def transition(
+        self,
+        job_id: str,
+        new_status: Any,
+        error_message: str | None = None,
+        claim_context: Any = None,
+    ) -> Job | None:
         job = self.get_by_id(job_id)
         if job:
             from minime.domain.enums import JobStatus
+
             job.status = new_status if isinstance(new_status, JobStatus) else JobStatus(new_status)
             if error_message:
                 job.error_message = error_message
@@ -204,7 +211,9 @@ class MockOrchestrationRunRepo:
     def list_runs(self) -> list[OrchestrationRun]:
         return list(self.runs.values())
 
-    def update_stage(self, run_id: str, current_stage=None, resumable_stage=None, claim_context=None) -> OrchestrationRun | None:
+    def update_stage(
+        self, run_id: str, current_stage=None, resumable_stage=None, claim_context=None
+    ) -> OrchestrationRun | None:
         run = self.get_by_id(run_id)
         if run:
             if current_stage is not None:
@@ -213,7 +222,15 @@ class MockOrchestrationRunRepo:
                 run.resumable_stage = resumable_stage
         return run
 
-    def update_stop_outcome(self, run_id: str, stop_outcome=None, stop_reason=None, is_active=None, human_gate=None, claim_context=None) -> OrchestrationRun | None:
+    def update_stop_outcome(
+        self,
+        run_id: str,
+        stop_outcome=None,
+        stop_reason=None,
+        is_active=None,
+        human_gate=None,
+        claim_context=None,
+    ) -> OrchestrationRun | None:
         run = self.get_by_id(run_id)
         if run:
             if stop_outcome is not None:
@@ -744,9 +761,15 @@ def test_pending_persistence_failure_prevents_git_add(tmp_dirs):
         created_at=utc_now(),
         updated_at=utc_now(),
     )
+    mock_r_repo.get_by_id.return_value = None
     bad_uow.project_managed_repository_bindings = mock_b_repo
     bad_uow.jobs = mock_j_repo
     bad_uow.orchestration_runs = mock_r_repo
+    # MagicMock fabricates a truthy candidate repository on attribute access.  This
+    # scenario specifically exercises the missing-ownership persistence failure,
+    # so make the absence of candidate authority explicit instead of manufacturing
+    # candidate evidence accidentally.
+    bad_uow.orchestration_candidates = None
     bad_uow.orchestration_worktree_ownerships = None
     wt_manager = WorktreeManager(project_root=tmp_dirs["repo_root"], uow=bad_uow)
 
@@ -2859,6 +2882,7 @@ def test_post_merge_reconciliation_refuses_claim_when_cleanup_fails(tmp_dirs):
     pm_service.verify_candidate_ancestry = MagicMock(return_value=True)
 
     from minime.services.recovery_convergence_service import RecoveryConvergenceService
+
     rec_svc = RecoveryConvergenceService(uow)
     claim_ctx = rec_svc.acquire_claim("run:run-refuse-6")
 
@@ -2912,7 +2936,7 @@ def test_lightweight_reconciliation_missing_uow_fails_closed(tmp_dirs):
     tasks_dir = Path(tmp_dirs["repo_root"]) / "openspec" / "changes" / "rec-change"
     tasks_dir.mkdir(parents=True, exist_ok=True)
     tasks_file = tasks_dir / "tasks.md"
-    initial_content = "# Tasks\n- [ ] 1.1 test verification task\n"
+    initial_content = "# Tasks\n- [ ] 1.1 run pytest verification task\n"
     tasks_file.write_text(initial_content, encoding="utf-8")
 
     job = Job(
@@ -3152,20 +3176,32 @@ def test_create_worktree_reuse_requires_source_base_sha_and_proven_head(tmp_dirs
         )
     ).stdout.strip()
 
-    uow = MockUOW()
-    binding = ProjectManagedRepositoryBinding(
-        project_id="proj-reuse-sha",
+    from tests.conftest import InMemoryPersistenceUnitOfWork, setup_managed_repository_fixture
+
+    uow = InMemoryPersistenceUnitOfWork()
+    setup_managed_repository_fixture(
+        uow,
+        "proj-reuse-sha",
+        Path(tmp_dirs["repo_root"]),
+        Path(tmp_dirs["worktrees"]),
         canonical_repository_identity="github.com/org/repo",
-        managed_repository_root=tmp_dirs["repo_root"],
-        worktree_parent_dir=tmp_dirs["worktrees"],
+        local_remote=False,
     )
-    uow.project_managed_repository_bindings.save(binding)
+    uow.projects.save(
+        Project(
+            project_id="proj-reuse-sha",
+            display_name="Reuse SHA test",
+            repository="github.com/org/repo",
+            base_branch="main",
+        )
+    )
     uow.jobs.save(
         Job(
             job_id="job-reuse-sha",
             project_id="proj-reuse-sha",
             change_name="change-reuse",
             implementer_role="codex",
+            base_sha=base_sha,
         )
     )
     uow.orchestration_runs.save(
@@ -3250,10 +3286,53 @@ def test_create_worktree_reuse_requires_source_base_sha_and_proven_head(tmp_dirs
             )
         )
 
-    # Record unproven_head as candidate_sha in job => Proven => Accepted
+    # A Job SHA alone is not sufficient candidate authority.  Build the full
+    # frozen candidate chain used by production adoption: Run + Job identity,
+    # completed attempt, candidate manifest, and immutable candidate record.
     job = uow.jobs.get_by_id("job-reuse-sha")
     job.candidate_sha = unproven_head
     uow.jobs.save(job)
+    run = uow.orchestration_runs.get_by_id("run-reuse-sha")
+    run.current_candidate_sha = unproven_head
+    uow.orchestration_runs.save(run)
+
+    from minime.domain.enums import ExecutionOutcome, ProgressClassification
+    from minime.domain.models import JobAttempt, OrchestrationCandidate
+    from minime.services.candidate_manifest import CandidateManifestService
+
+    attempt_id = "attempt-reuse-sha"
+    uow.job_attempts.save(
+        JobAttempt(
+            attempt_id=attempt_id,
+            job_id="job-reuse-sha",
+            attempt_number=1,
+            executor_role="codex",
+            model_identity="codex-test",
+            start_sha=base_sha,
+            end_sha=unproven_head,
+            normalized_outcome=ExecutionOutcome.COMPLETED,
+            progress_classification=ProgressClassification.PARTIAL_PROGRESS,
+            started_at=utc_now(),
+            completed_at=utc_now(),
+            duration_ms=1,
+        )
+    )
+    manifest = CandidateManifestService().generate_manifest(
+        wt_path, unproven_head, "job-reuse-sha", attempt_id=attempt_id
+    )
+    uow.candidate_manifests.save(manifest)
+    uow.orchestration_candidates.save(
+        OrchestrationCandidate(
+            run_id="run-reuse-sha",
+            generation=1,
+            base_sha=base_sha,
+            candidate_sha=unproven_head,
+            candidate_ref="refs/heads/minime/change-reuse-job-reuse-sha",
+            manifest_id=manifest.manifest_id,
+            manifest_hash=manifest.manifest_hash,
+            is_frozen=True,
+        )
+    )
 
     info = asyncio.run(
         wt_manager.create_worktree(
@@ -3907,6 +3986,7 @@ def test_blocker_1_openspec_generator_symlink_preflight_atomicity(tmp_dirs):
     ws_dir.mkdir(parents=True, exist_ok=True)
     from minime.domain.enums import IntakeWorkspaceCreationState, IntakeWorkspacePublicationState
     from minime.domain.models import IntakeWorkspaceOwnership
+
     uow.intake_workspace_ownerships.save(
         IntakeWorkspaceOwnership(
             workspace_id="ws-blocker1",
@@ -5249,7 +5329,9 @@ def _setup_remote_and_managed(tmp_path, project_id="proj-conv"):
     )
 
     seed_dir = tmp_path / f"seed_{project_id}"
-    subprocess.run(["git", "clone", str(remote_bare), str(seed_dir)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "clone", str(remote_bare), str(seed_dir)], check=True, capture_output=True
+    )
     subprocess.run(["git", "config", "user.name", "Remote Dev"], cwd=seed_dir, check=True)
     subprocess.run(["git", "config", "user.email", "dev@remote.local"], cwd=seed_dir, check=True)
     (seed_dir / "README.md").write_text("# Initial Base\n", encoding="utf-8")
@@ -5264,7 +5346,9 @@ def _setup_remote_and_managed(tmp_path, project_id="proj-conv"):
         ["git", "clone", str(remote_bare), str(managed_target)], check=True, capture_output=True
     )
     subprocess.run(["git", "config", "user.name", "Managed Dev"], cwd=managed_target, check=True)
-    subprocess.run(["git", "config", "user.email", "dev@managed.local"], cwd=managed_target, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "dev@managed.local"], cwd=managed_target, check=True
+    )
 
     return {
         "trusted_root": trusted_root,
@@ -5358,7 +5442,9 @@ def test_safe_convergence_ahead_fails_closed(tmp_path):
     (managed / "local_ahead.txt").write_text("Local ahead\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=managed, check=True)
     subprocess.run(["git", "commit", "-m", "C_ahead"], cwd=managed, check=True, capture_output=True)
-    ahead_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=managed, text=True).strip()
+    ahead_sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=managed, text=True
+    ).strip()
 
     uow = MockUOW()
     service = ProjectOnboardingService(
@@ -5402,8 +5488,12 @@ def test_safe_convergence_diverged_fails_closed(tmp_path):
     managed = env["managed_target"]
     (managed / "local_change.txt").write_text("Local C2\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=managed, check=True)
-    subprocess.run(["git", "commit", "-m", "C2_local"], cwd=managed, check=True, capture_output=True)
-    local_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=managed, text=True).strip()
+    subprocess.run(
+        ["git", "commit", "-m", "C2_local"], cwd=managed, check=True, capture_output=True
+    )
+    local_sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=managed, text=True
+    ).strip()
 
     uow = MockUOW()
     service = ProjectOnboardingService(
@@ -5481,7 +5571,9 @@ def test_safe_convergence_wrong_remote_identity_fails_closed_before_mutation(tmp
     managed = env["managed_target"]
     # Point origin URL to wrong repo
     wrong_remote = tmp_path / "wrong_remote.git"
-    subprocess.run(["git", "remote", "set-url", "origin", str(wrong_remote)], cwd=managed, check=True)
+    subprocess.run(
+        ["git", "remote", "set-url", "origin", str(wrong_remote)], cwd=managed, check=True
+    )
 
     uow = MockUOW()
     service = ProjectOnboardingService(

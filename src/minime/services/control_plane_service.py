@@ -7,12 +7,21 @@ idempotency, cancellation safety, and durable audit persistence across presentat
 from __future__ import annotations
 
 import logging
+from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from minime.config import (
+    OpenSpecStage,
+    ProjectConfig,
+    load_config,
+    resolve_stage_profile,
+)
 from minime.domain.enums import (
     ActionRiskLevel,
     EventType,
+    ExternalActionStatus,
     HumanGate,
     JobStatus,
     OperatorActionErrorCode,
@@ -22,7 +31,10 @@ from minime.domain.enums import (
     OrchestrationStopOutcome,
     PreviewStatus,
     ProviderHealthStatus,
+    RecoveryClassification,
+    RecoveryDecisionStatus,
     RecoverySource,
+    ReviewStatus,
     ValidationVerdict,
 )
 from minime.domain.interfaces import PersistenceUnitOfWork
@@ -74,12 +86,68 @@ class ControlPlaneService:
         )
         self.provider_health_service = provider_health_service or ProviderHealthService(uow)
         self.recovery_convergence_service = RecoveryConvergenceService(
-            uow, project_root=self.project_root, health_service=self.provider_health_service
+            uow,
+            project_root=self.project_root,
+            health_service=self.provider_health_service,
+            orchestration_service=self.orchestration_service,
         )
         gh_adapter = getattr(self.orchestration_service, "github_adapter", None)
         self.post_merge_service = post_merge_service or PostMergeReconciliationService(
             uow, project_root=self.project_root, github_adapter=gh_adapter
         )
+
+    def _deepseek_review_authorized_total(self, run: OrchestrationRun) -> Decimal | None:
+        """Return prior DeepSeek review authorizations for this Run, or None if ambiguous."""
+        total = Decimal("0")
+        review_actions = {
+            OperatorActionType.AUTHORIZE_DEEPSEEK_REVIEW: "CONTRACT_REVIEW",
+            OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW: "REVIEW",
+        }
+        for action in self.uow.operator_actions.list_by_run(run.run_id):
+            expected_stage = review_actions.get(action.action_type)
+            if not expected_stage or action.status != OperatorActionStatus.COMPLETED:
+                continue
+            auth = action.result_payload_json.get("authorization", {})
+            if (
+                action.project_id != run.project_id
+                or action.change_name != run.change_name
+                or action.run_id != run.run_id
+                or not action.job_id
+                or auth.get("provider") != "deepseek"
+                or auth.get("billing_origin") != "deepseek_direct"
+                or auth.get("stage") != expected_stage
+                or auth.get("run_id") != run.run_id
+                or auth.get("job_id") != action.job_id
+            ):
+                return None
+            try:
+                amount = Decimal(str(auth["max_spend_usd"]))
+            except Exception:
+                return None
+            if not amount.is_finite() or amount <= 0:
+                return None
+            total += amount
+        return total
+
+    def _deepseek_combined_review_limit(self, budget: dict[str, Any]) -> Decimal | None:
+        """Return only an owner-configured combined limit; no value means uncapped."""
+        try:
+            configured = budget.get("maximum_combined_review_usd")
+            if configured is None:
+                return None
+            limit = Decimal(str(configured))
+        except Exception:
+            return Decimal("0")
+        return limit if limit.is_finite() and limit > 0 else Decimal("0")
+
+    def _deepseek_review_total_within_limit(
+        self, run: OrchestrationRun, budget: dict[str, Any], requested: Decimal
+    ) -> bool:
+        limit = self._deepseek_combined_review_limit(budget)
+        if limit is None:
+            return True
+        prior_total = self._deepseek_review_authorized_total(run)
+        return prior_total is not None and limit > 0 and prior_total + requested <= limit
 
     def get_available_actions(self, run_id: str) -> list[ActionDescriptor]:
         """Discover all supported operator actions for a run and their current eligibility."""
@@ -97,8 +165,15 @@ class ControlPlaneService:
         # 1. CONTINUE / RESUME
         continue_enabled = False
         continue_reason: str | None = None
-        if run.is_active:
+        stale_checkpoint = self._has_stale_active_checkpoint(run) if run.is_active else False
+        if (
+            run.is_active
+            and run.stop_outcome != OrchestrationStopOutcome.WAITING_CAPACITY
+            and not stale_checkpoint
+        ):
             continue_reason = "Run is already active"
+        elif stale_checkpoint:
+            continue_enabled = True
         elif run.current_stage == OrchestrationStage.PR_PREPARED:
             continue_reason = "Run has completed PR preparation"
         elif run.stop_outcome == OrchestrationStopOutcome.CANCELLED:
@@ -417,7 +492,276 @@ class ControlPlaneService:
             )
         )
 
+        job = self.uow.jobs.get_by_id(run.active_job_id) if run.active_job_id else None
+        contract_review_authorization_allowed = bool(
+            job
+            and run.current_stage
+            in {
+                OrchestrationStage.ADMITTED,
+                OrchestrationStage.PREPARING_EXECUTION,
+                OrchestrationStage.IMPLEMENTING,
+            }
+            and run.project_id == job.project_id
+            and run.change_name == job.change_name
+            and not self.uow.job_attempts.list_by_job(job.job_id)
+            and not job.candidate_sha
+            and not self.uow.reviews.get_by_job_stage(job.job_id, "CONTRACT_REVIEW")
+        )
+        descriptors.append(
+            ActionDescriptor(
+                action=OperatorActionType.AUTHORIZE_DEEPSEEK_REVIEW,
+                display_name="Authorize DeepSeek Contract Review",
+                description=(
+                    "Authorize one bounded, direct-account DeepSeek review for the exact "
+                    "OpenSpec contract. This does not authorize APPLY or merge."
+                ),
+                enabled=contract_review_authorization_allowed,
+                disabled_reason=(
+                    None
+                    if contract_review_authorization_allowed
+                    else "A matching admitted Run/Job without an existing contract review is required."
+                ),
+                requires_confirmation=True,
+                confirmation_prompt=(
+                    "Authorize a single direct DeepSeek CONTRACT_REVIEW spend up to the "
+                    "configured maximum for this Run/Job?"
+                ),
+                risk_level=ActionRiskLevel.HIGH,
+                parameters_schema={
+                    "type": "object",
+                    "required": ["max_spend_usd", "expires_at", "pricing_snapshot_id"],
+                    "properties": {
+                        "max_spend_usd": {"type": "string"},
+                        "expires_at": {"type": "string", "format": "date-time"},
+                        "pricing_snapshot_id": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
+            )
+        )
+
+        candidates_repo = getattr(self.uow, "orchestration_candidates", None)
+        manifests_repo = getattr(self.uow, "candidate_manifests", None)
+        check_results_repo = getattr(self.uow, "check_results", None)
+        reviews_repo = getattr(self.uow, "reviews", None)
+
+        code_candidate = (
+            candidates_repo.get_by_generation(run.run_id, run.current_generation)
+            if job and candidates_repo
+            else None
+        )
+        code_manifest = (
+            manifests_repo.get_by_id(code_candidate.manifest_id)
+            if code_candidate and code_candidate.manifest_id and manifests_repo
+            else None
+        )
+        check_evidence = (
+            [
+                check
+                for check in check_results_repo.list_by_job(job.job_id)
+                if check.candidate_sha == code_candidate.candidate_sha
+                and check.candidate_generation == code_candidate.generation
+                and check.exit_code == 0
+            ]
+            if job and code_candidate and check_results_repo
+            else []
+        )
+        prior_code_review = (
+            reviews_repo.get_by_job_stage(job.job_id, "CODE_REVIEW")
+            if job and reviews_repo
+            else None
+        )
+        code_review_slot_open = bool(
+            prior_code_review is None
+            or (
+                prior_code_review.status == ReviewStatus.REVIEW_RUNNING
+                and prior_code_review.budget_authorization_id is None
+                and prior_code_review.budget_reservation_id is None
+                and prior_code_review.provider is None
+            )
+        )
+        code_review_authorization_allowed = bool(
+            job
+            and code_candidate
+            and code_manifest
+            and code_candidate.is_frozen
+            and code_candidate.run_id == run.run_id
+            and code_candidate.generation == run.current_generation
+            and code_candidate.candidate_sha == job.candidate_sha
+            and code_candidate.candidate_sha == run.current_candidate_sha
+            and code_candidate.base_sha == run.base_sha
+            and code_manifest.job_id == job.job_id
+            and code_manifest.candidate_sha == code_candidate.candidate_sha
+            and code_manifest.manifest_hash == code_candidate.manifest_hash
+            and check_evidence
+            and job.status in {JobStatus.CHECKS_PASSED, JobStatus.WAITING_CAPACITY}
+            and run.project_id == job.project_id
+            and run.change_name == job.change_name
+            and code_review_slot_open
+        )
+        descriptors.append(
+            ActionDescriptor(
+                action=OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW,
+                display_name="Authorize DeepSeek Code Review",
+                description=(
+                    "Authorize one bounded, direct-account DeepSeek read-only review of "
+                    "the exact frozen candidate. This does not authorize merge."
+                ),
+                enabled=code_review_authorization_allowed,
+                disabled_reason=(
+                    None
+                    if code_review_authorization_allowed
+                    else "A matching frozen candidate with passing checks and no code review is required."
+                ),
+                requires_confirmation=True,
+                confirmation_prompt=(
+                    "Authorize one direct DeepSeek REVIEW spend up to the configured "
+                    "maximum for this exact candidate?"
+                ),
+                risk_level=ActionRiskLevel.HIGH,
+                parameters_schema={
+                    "type": "object",
+                    "required": ["max_spend_usd", "expires_at", "pricing_snapshot_id"],
+                    "properties": {
+                        "max_spend_usd": {"type": "string"},
+                        "expires_at": {"type": "string", "format": "date-time"},
+                        "pricing_snapshot_id": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
+            )
+        )
+
         return descriptors
+
+    def _has_stale_active_checkpoint(self, run: OrchestrationRun) -> bool:
+        """Prove a narrow orphaned CONTINUE checkpoint is safe to resume.
+
+        An active flag alone cannot authorize a second execution. This exception
+        requires a completed attempt, a failed canonical CONTINUE action, and
+        its matching still-EXECUTING recovery decision under an expired/released
+        fence. Any live claim, active Job state, frozen candidate, pending review,
+        or unresolved external action keeps CONTINUE disabled.
+        """
+        if (
+            not run.is_active
+            or run.stop_outcome is not None
+            or run.current_stage
+            not in {
+                OrchestrationStage.IMPLEMENTING,
+                OrchestrationStage.EVALUATING_ATTEMPT,
+                OrchestrationStage.RUNNING_CHECKS,
+            }
+            or not run.active_job_id
+        ):
+            return False
+
+        job = self.uow.jobs.get_by_id(run.active_job_id)
+        if (
+            not job
+            or job.job_id != run.active_job_id
+            or job.project_id != run.project_id
+            or job.change_name != run.change_name
+            or job.status != JobStatus.CHECKS_FAILED
+        ):
+            return False
+
+        attempts = self.uow.job_attempts.list_by_job(job.job_id)
+        attempts.sort(key=lambda attempt: attempt.attempt_number)
+        if not attempts:
+            return False
+        latest_attempt = attempts[-1]
+        if (
+            sum(item.attempt_number == latest_attempt.attempt_number for item in attempts) != 1
+            or latest_attempt.completed_at is None
+            or latest_attempt.attempt_number != job.attempt_count
+            or not job.candidate_sha
+            or latest_attempt.end_sha != job.candidate_sha
+            or run.current_candidate_sha is not None
+        ):
+            return False
+
+        claim_key = f"run:{run.run_id}"
+        claim_repo = getattr(self.uow, "claims", None)
+        decisions_repo = getattr(self.uow, "recovery_decisions", None)
+        if not claim_repo or not decisions_repo:
+            return False
+        claim = claim_repo.get_by_key(claim_key)
+        if not claim or (claim.released_at is None and claim.lease_expires_at > utc_now()):
+            return False
+
+        decisions = decisions_repo.list_by_claim_key(claim_key)
+        if not decisions:
+            return False
+        decision = max(decisions, key=lambda item: item.created_at)
+        if (
+            decision.identity_type != "RUN"
+            or decision.identity_id != run.run_id
+            or decision.project_id != run.project_id
+            or decision.change_name != run.change_name
+            or decision.source != RecoverySource.CONTROL_PLANE
+            or decision.classification != RecoveryClassification.RESUME_SAFE_CHECKPOINT
+            or decision.planned_action != "DRIVE_CONTINUATION"
+            or decision.status != RecoveryDecisionStatus.EXECUTING
+            or decision.fence_token != claim.fence_token
+            or latest_attempt.started_at < decision.created_at
+        ):
+            return False
+
+        action_records = self.uow.operator_actions.list_by_run(run.run_id)
+        if not action_records:
+            return False
+        latest_action = max(action_records, key=lambda item: item.created_at)
+        action_error = (latest_action.result_payload_json or {}).get("error")
+        stale_fence_ack_failure = isinstance(action_error, str) and (
+            "claim fence is stale, expired, or superseded" in action_error.lower()
+        )
+        if (
+            latest_action.action_type != OperatorActionType.CONTINUE
+            or latest_action.status != OperatorActionStatus.FAILED
+            or latest_action.error_code != OperatorActionErrorCode.ACTION_EXECUTION_FAILED
+            or latest_action.project_id != run.project_id
+            or latest_action.change_name != run.change_name
+            or latest_action.run_id != run.run_id
+            # Older Control Plane versions persisted CONTINUE against the Run
+            # only (job_id=NULL). The Run's authoritative active_job_id above,
+            # the decision identity, and the attempt interval still bind that
+            # action to exactly one Job. A contradictory non-null Job identity
+            # is never accepted.
+            or latest_action.job_id not in {None, job.job_id}
+            or latest_action.precondition_stage != run.current_stage.value
+            or latest_action.created_at <= decision.created_at
+            or not stale_fence_ack_failure
+        ):
+            return False
+
+        candidates_repo = getattr(self.uow, "orchestration_candidates", None)
+        latest_candidate = candidates_repo.get_latest_for_run(run.run_id) if candidates_repo else None
+        if latest_candidate:
+            return False
+
+        reviews_repo = getattr(self.uow, "reviews", None)
+        if reviews_repo:
+            for review in reviews_repo.list_by_job(job.job_id):
+                if review.status in {
+                    ReviewStatus.REVIEW_PENDING,
+                    ReviewStatus.REVIEW_RUNNING,
+                    ReviewStatus.REVIEW_TIMED_OUT,
+                }:
+                    return False
+
+        external_repo = getattr(self.uow, "orchestration_external_actions", None)
+        if external_repo:
+            unresolved = {
+                ExternalActionStatus.RESERVED,
+                ExternalActionStatus.EXECUTING,
+                ExternalActionStatus.FAILED,
+                ExternalActionStatus.UNKNOWN,
+                ExternalActionStatus.AMBIGUOUS,
+            }
+            if any(action.status in unresolved for action in external_repo.list_by_run(run.run_id)):
+                return False
+        return True
 
     def execute_action(self, request: OperatorActionRequest) -> OperatorActionResult:
         """Governed execution of an operator action with optimistic concurrency and idempotency."""
@@ -450,7 +794,21 @@ class ControlPlaneService:
             )
 
         # 2. Authority & Run Lookup
-        run = self.uow.orchestration_runs.get_by_id(request.run_id)
+        run_repo = self.uow.orchestration_runs
+        if request.action_type in {
+            OperatorActionType.AUTHORIZE_DEEPSEEK_REVIEW,
+            OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW,
+        }:
+            # Serialize the combined per-Run review ceiling check with its
+            # durable authorization insert. Without this row lock, simultaneous
+            # CONTRACT_REVIEW and CODE_REVIEW authorizations could each observe
+            # stale totals and exceed the pilot cap.
+            get_for_update = getattr(run_repo, "get_for_update", None)
+            run = get_for_update(request.run_id) if callable(get_for_update) else None
+            if run is None:
+                run = run_repo.get_by_id(request.run_id)
+        else:
+            run = run_repo.get_by_id(request.run_id)
         if not run:
             return self._record_and_return_rejection(
                 request=request,
@@ -500,6 +858,10 @@ class ControlPlaneService:
                 return self._execute_recover_locks(request, run, sanitized_params)
             elif request.action_type == OperatorActionType.RECONCILE_POST_MERGE:
                 return self._execute_reconcile_post_merge(request, run, sanitized_params)
+            elif request.action_type == OperatorActionType.AUTHORIZE_DEEPSEEK_REVIEW:
+                return self._execute_authorize_deepseek_review(request, run, sanitized_params)
+            elif request.action_type == OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW:
+                return self._execute_authorize_deepseek_code_review(request, run, sanitized_params)
             else:
                 return self._record_and_return_rejection(
                     request=request,
@@ -629,7 +991,14 @@ class ControlPlaneService:
         run: OrchestrationRun,
         sanitized_params: dict[str, Any],
     ) -> OperatorActionResult:
-        if run.is_active and not sanitized_params.get("force"):
+        waiting_capacity_checkpoint = run.stop_outcome == OrchestrationStopOutcome.WAITING_CAPACITY
+        stale_checkpoint = self._has_stale_active_checkpoint(run)
+        if (
+            run.is_active
+            and not sanitized_params.get("force")
+            and not waiting_capacity_checkpoint
+            and not stale_checkpoint
+        ):
             return self._record_and_return_rejection(
                 request=request,
                 run=run,
@@ -682,7 +1051,10 @@ class ControlPlaneService:
 
         # Drive run continuation through canonical RecoveryConvergenceService
         self.recovery_convergence_service.request_run_continuation(
-            run.run_id, source=RecoverySource.CONTROL_PLANE, force=True
+            run.run_id,
+            source=RecoverySource.CONTROL_PLANE,
+            force=True,
+            drive_admitted=True,
         )
         resumed_run = self.uow.orchestration_runs.get_by_id(run.run_id) or run
         linked_job = (
@@ -779,6 +1151,506 @@ class ControlPlaneService:
             },
         )
 
+    def _execute_authorize_deepseek_review(
+        self,
+        request: OperatorActionRequest,
+        run: OrchestrationRun,
+        sanitized_params: dict[str, Any],
+    ) -> OperatorActionResult:
+        """Persist a one-use contract-review spend authorization after non-inference checks."""
+        job = self.uow.jobs.get_by_id(run.active_job_id) if run.active_job_id else None
+        if (
+            not job
+            or run.current_stage
+            not in {
+                OrchestrationStage.ADMITTED,
+                OrchestrationStage.PREPARING_EXECUTION,
+                OrchestrationStage.IMPLEMENTING,
+            }
+            or run.active_job_id != job.job_id
+            or run.project_id != job.project_id
+            or run.change_name != job.change_name
+            or bool(self.uow.job_attempts.list_by_job(job.job_id))
+            or bool(job.candidate_sha)
+            or self.uow.reviews.get_by_job_stage(job.job_id, "CONTRACT_REVIEW")
+        ):
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.ACTION_NOT_ALLOWED,
+                summary="DeepSeek spend authorization is only available before APPLY for the exact active Run/Job.",
+                sanitized_params=sanitized_params,
+            )
+        prior = [
+            action
+            for action in self.uow.operator_actions.list_by_run(run.run_id)
+            if action.action_type == OperatorActionType.AUTHORIZE_DEEPSEEK_REVIEW
+            and action.status == OperatorActionStatus.COMPLETED
+        ]
+        if prior:
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.ACTION_ALREADY_COMPLETED,
+                summary="A DeepSeek CONTRACT_REVIEW authorization already exists for this Run.",
+                sanitized_params=sanitized_params,
+            )
+        if set(sanitized_params) != {"max_spend_usd", "expires_at", "pricing_snapshot_id"}:
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.INVALID_ACTION_PARAMETERS,
+                summary="Authorization requires exactly max_spend_usd, expires_at, and pricing_snapshot_id.",
+                sanitized_params=sanitized_params,
+            )
+        try:
+            max_spend = Decimal(str(sanitized_params["max_spend_usd"]))
+            expires_at = datetime.fromisoformat(str(sanitized_params["expires_at"]))
+            if expires_at.tzinfo is None or max_spend <= 0:
+                raise ValueError("invalid authorization bound")
+        except (InvalidOperation, ValueError, TypeError):
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.INVALID_ACTION_PARAMETERS,
+                summary="Authorization amount or expiry is invalid.",
+                sanitized_params=sanitized_params,
+            )
+        now = utc_now()
+        if expires_at <= now or (expires_at - now).total_seconds() > 3600:
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.INVALID_ACTION_PARAMETERS,
+                summary="Contract-review spend authorization must expire within one hour.",
+                sanitized_params=sanitized_params,
+            )
+
+        project = self.uow.projects.get_by_id(run.project_id)
+        if not project:
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.AUTHORITY_MISMATCH,
+                summary="Project binding is unavailable for spend authorization.",
+                sanitized_params=sanitized_params,
+            )
+        app_config = load_config()
+        project_config = app_config.projects.get(project.project_id) or ProjectConfig(
+            repository=project.repository,
+            base_branch=project.base_branch,
+            openspec_path=project.openspec_path,
+            implementer=project.implementer,
+            reviewer=project.reviewer,
+            external_providers_allowed=project.external_providers_allowed,
+        )
+        provider_config = app_config.providers.get("deepseek")
+        configured_max = (
+            provider_config.budget.get("maximum_contract_review_usd")
+            if provider_config and isinstance(provider_config.budget, dict)
+            else None
+        )
+        if configured_max is not None:
+            try:
+                configured_max = Decimal(str(configured_max))
+            except Exception:
+                configured_max = Decimal("0")
+        if configured_max is not None and max_spend > configured_max:
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.BUDGET_BLOCKED,
+                summary="Requested spend exceeds the configured contract-review ceiling.",
+                sanitized_params=sanitized_params,
+            )
+        review_budget = provider_config.budget if provider_config else {}
+        if not self._deepseek_review_total_within_limit(run, review_budget, max_spend):
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.BUDGET_BLOCKED,
+                summary="Combined DeepSeek review authorizations exceed the configured owner limit or are ambiguous.",
+                sanitized_params=sanitized_params,
+            )
+        try:
+            profile = resolve_stage_profile(
+                project_config, OpenSpecStage.CONTRACT_REVIEW, app_config=app_config
+            )
+            from minime.adapters.provider_adapter import get_provider_adapter
+
+            adapter = get_provider_adapter("deepseek", app_config)
+            supported, _ = __import__("asyncio").run(
+                adapter.check_model_supported(profile.model, effort=profile.effort)
+            )
+            account_fingerprint = getattr(adapter, "account_fingerprint", None)
+            snapshot = self.uow.pricing_snapshots.get_by_id(
+                str(sanitized_params["pricing_snapshot_id"])
+            )
+        except Exception:
+            supported = False
+            account_fingerprint = None
+            snapshot = None
+            profile = None
+        if (
+            not profile
+            or profile.provider != "deepseek"
+            or not supported
+            or not account_fingerprint
+            or not snapshot
+            or not snapshot.is_verified
+            or snapshot.provider != "deepseek"
+            or snapshot.account_fingerprint != account_fingerprint
+            or snapshot.canonical_model_identity != profile.model
+            or snapshot.billing_origin != "deepseek_direct"
+            or snapshot.currency != "USD"
+        ):
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.BUDGET_BLOCKED,
+                summary="Direct DeepSeek model, account, and verified price evidence is unavailable or mismatched.",
+                sanitized_params=sanitized_params,
+            )
+
+        authorization = {
+            "provider": "deepseek",
+            "account_fingerprint": account_fingerprint,
+            "model": profile.model,
+            "stage": "CONTRACT_REVIEW",
+            "billing_origin": "deepseek_direct",
+            "pricing_snapshot_id": snapshot.snapshot_id,
+            "run_id": run.run_id,
+            "job_id": job.job_id,
+            "max_spend_usd": str(max_spend),
+            "expires_at": expires_at.isoformat(),
+            "authorized_by": request.actor_identity,
+            "action_request_id": request.action_request_id,
+        }
+        record = OperatorActionRecord(
+            action_request_id=request.action_request_id,
+            project_id=run.project_id,
+            change_name=run.change_name,
+            run_id=run.run_id,
+            job_id=job.job_id,
+            action_type=request.action_type,
+            actor_identity=request.actor_identity,
+            source_interface=request.source_interface,
+            precondition_stage=run.current_stage.value,
+            status=OperatorActionStatus.COMPLETED,
+            summary="One-use DeepSeek Direct CONTRACT_REVIEW budget authorized; APPLY and merge remain separate gates.",
+            evidence_reference=snapshot.snapshot_id,
+            parameters_json=sanitized_params,
+            result_payload_json={"authorization": authorization},
+        )
+        self.uow.operator_actions.save(record)
+        self.uow.events.save(
+            Event(
+                event_type=EventType.OPERATOR_ACTION_EXECUTED,
+                payload={
+                    "action_request_id": request.action_request_id,
+                    "action_type": request.action_type.value,
+                    "run_id": run.run_id,
+                    "job_id": job.job_id,
+                    "provider": "deepseek",
+                    "stage": "CONTRACT_REVIEW",
+                    "model": profile.model,
+                    "authorization_id": request.action_request_id,
+                },
+                timestamp=now,
+            )
+        )
+        self.uow.commit()
+        return OperatorActionResult(
+            action_request_id=request.action_request_id,
+            action_type=request.action_type,
+            status=OperatorActionStatus.COMPLETED,
+            summary=record.summary,
+            resulting_stage=run.current_stage,
+            resulting_outcome=run.stop_outcome,
+            resulting_gate=run.human_gate,
+            evidence_reference=snapshot.snapshot_id,
+            payload={
+                "provider": "deepseek",
+                "stage": "CONTRACT_REVIEW",
+                "maximum_usd": str(max_spend),
+            },
+        )
+
+    def _execute_authorize_deepseek_code_review(
+        self,
+        request: OperatorActionRequest,
+        run: OrchestrationRun,
+        sanitized_params: dict[str, Any],
+    ) -> OperatorActionResult:
+        """Authorize one bounded review for a specific frozen candidate only."""
+        job = self.uow.jobs.get_by_id(run.active_job_id) if run.active_job_id else None
+        candidates_repo = getattr(self.uow, "orchestration_candidates", None)
+        manifests_repo = getattr(self.uow, "candidate_manifests", None)
+        candidate = (
+            candidates_repo.get_by_generation(run.run_id, run.current_generation)
+            if job and candidates_repo
+            else None
+        )
+        manifest = (
+            manifests_repo.get_by_id(candidate.manifest_id)
+            if candidate and candidate.manifest_id and manifests_repo
+            else None
+        )
+        passing_checks = (
+            [
+                item
+                for item in self.uow.check_results.list_by_job(job.job_id)
+                if candidate
+                and item.candidate_sha == candidate.candidate_sha
+                and item.candidate_generation == candidate.generation
+                and item.exit_code == 0
+            ]
+            if job
+            else []
+        )
+        prior_code_review = (
+            self.uow.reviews.get_by_job_stage(job.job_id, "CODE_REVIEW") if job else None
+        )
+        review_slot_open = bool(
+            prior_code_review is None
+            or (
+                prior_code_review.status == ReviewStatus.REVIEW_RUNNING
+                and prior_code_review.budget_authorization_id is None
+                and prior_code_review.budget_reservation_id is None
+                and prior_code_review.provider is None
+            )
+        )
+        if (
+            not job
+            or not candidate
+            or not manifest
+            or not candidate.is_frozen
+            or run.active_job_id != job.job_id
+            or run.project_id != job.project_id
+            or run.change_name != job.change_name
+            or candidate.run_id != run.run_id
+            or candidate.generation != run.current_generation
+            or candidate.candidate_sha != job.candidate_sha
+            or candidate.candidate_sha != run.current_candidate_sha
+            or candidate.base_sha != run.base_sha
+            or manifest.job_id != job.job_id
+            or manifest.candidate_sha != candidate.candidate_sha
+            or manifest.manifest_hash != candidate.manifest_hash
+            or job.status not in {JobStatus.CHECKS_PASSED, JobStatus.WAITING_CAPACITY}
+            or not passing_checks
+            or not review_slot_open
+        ):
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.ACTION_NOT_ALLOWED,
+                summary="Code-review authorization requires the exact frozen candidate and passing checks.",
+                sanitized_params=sanitized_params,
+            )
+        prior_same_candidate = any(
+            action.action_type == OperatorActionType.AUTHORIZE_DEEPSEEK_CODE_REVIEW
+            and action.status == OperatorActionStatus.COMPLETED
+            and action.job_id == job.job_id
+            and action.result_payload_json.get("authorization", {}).get("candidate_sha")
+            == candidate.candidate_sha
+            for action in self.uow.operator_actions.list_by_run(run.run_id)
+        )
+        if prior_same_candidate:
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.ACTION_ALREADY_COMPLETED,
+                summary="Code-review spend is already authorized for this candidate.",
+                sanitized_params=sanitized_params,
+            )
+        if set(sanitized_params) != {"max_spend_usd", "expires_at", "pricing_snapshot_id"}:
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.INVALID_ACTION_PARAMETERS,
+                summary="Authorization requires exactly max_spend_usd, expires_at, and pricing_snapshot_id.",
+                sanitized_params=sanitized_params,
+            )
+        try:
+            max_spend = Decimal(str(sanitized_params["max_spend_usd"]))
+            expires_at = datetime.fromisoformat(str(sanitized_params["expires_at"]))
+            if expires_at.tzinfo is None or max_spend <= 0:
+                raise ValueError("invalid authorization bound")
+        except (InvalidOperation, ValueError, TypeError):
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.INVALID_ACTION_PARAMETERS,
+                summary="Authorization amount or expiry is invalid.",
+                sanitized_params=sanitized_params,
+            )
+        now = utc_now()
+        if expires_at <= now or (expires_at - now).total_seconds() > 3600:
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.INVALID_ACTION_PARAMETERS,
+                summary="Code-review authorization must expire within one hour.",
+                sanitized_params=sanitized_params,
+            )
+        project = self.uow.projects.get_by_id(run.project_id)
+        if not project:
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.AUTHORITY_MISMATCH,
+                summary="Project binding is unavailable for code-review authorization.",
+                sanitized_params=sanitized_params,
+            )
+        app_config = load_config()
+        project_config = app_config.projects.get(project.project_id) or ProjectConfig(
+            repository=project.repository,
+            base_branch=project.base_branch,
+            openspec_path=project.openspec_path,
+            implementer=project.implementer,
+            reviewer=project.reviewer,
+            external_providers_allowed=project.external_providers_allowed,
+        )
+        provider_config = app_config.providers.get("deepseek")
+        configured_max = (
+            provider_config.budget.get("maximum_code_review_usd")
+            if provider_config and isinstance(provider_config.budget, dict)
+            else None
+        )
+        if configured_max is not None:
+            try:
+                configured_max = Decimal(str(configured_max))
+            except Exception:
+                configured_max = Decimal("0")
+        if configured_max is not None and max_spend > configured_max:
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.BUDGET_BLOCKED,
+                summary="Requested spend exceeds the configured code-review ceiling.",
+                sanitized_params=sanitized_params,
+            )
+        review_budget = provider_config.budget if provider_config else {}
+        if not self._deepseek_review_total_within_limit(run, review_budget, max_spend):
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.BUDGET_BLOCKED,
+                summary="Combined DeepSeek review authorizations exceed the configured owner limit or are ambiguous.",
+                sanitized_params=sanitized_params,
+            )
+        try:
+            profile = resolve_stage_profile(
+                project_config, OpenSpecStage.REVIEW, app_config=app_config
+            )
+            from minime.adapters.provider_adapter import get_provider_adapter
+
+            adapter = get_provider_adapter("deepseek", app_config)
+            supported, _ = __import__("asyncio").run(
+                adapter.check_model_supported(profile.model, effort=profile.effort)
+            )
+            account_fingerprint = getattr(adapter, "account_fingerprint", None)
+            snapshot = self.uow.pricing_snapshots.get_by_id(
+                str(sanitized_params["pricing_snapshot_id"])
+            )
+        except Exception:
+            supported = False
+            account_fingerprint = None
+            snapshot = None
+            profile = None
+        if (
+            not profile
+            or profile.provider != "deepseek"
+            or not supported
+            or not account_fingerprint
+            or not snapshot
+            or not snapshot.is_verified
+            or snapshot.provider != "deepseek"
+            or snapshot.account_fingerprint != account_fingerprint
+            or snapshot.canonical_model_identity != profile.model
+            or snapshot.billing_origin != "deepseek_direct"
+            or snapshot.currency != "USD"
+        ):
+            return self._record_and_return_rejection(
+                request=request,
+                run=run,
+                error_code=OperatorActionErrorCode.BUDGET_BLOCKED,
+                summary="Direct DeepSeek code-review model, account, and verified price evidence is unavailable or mismatched.",
+                sanitized_params=sanitized_params,
+            )
+        authorization = {
+            "provider": "deepseek",
+            "account_fingerprint": account_fingerprint,
+            "model": profile.model,
+            "stage": "REVIEW",
+            "billing_origin": "deepseek_direct",
+            "pricing_snapshot_id": snapshot.snapshot_id,
+            "run_id": run.run_id,
+            "job_id": job.job_id,
+            "candidate_sha": candidate.candidate_sha,
+            "base_sha": candidate.base_sha,
+            "generation": candidate.generation,
+            "manifest_id": candidate.manifest_id,
+            "manifest_hash": candidate.manifest_hash,
+            "max_spend_usd": str(max_spend),
+            "expires_at": expires_at.isoformat(),
+            "authorized_by": request.actor_identity,
+            "action_request_id": request.action_request_id,
+        }
+        summary = "One-use DeepSeek Direct code REVIEW authorized for the exact candidate; merge remains a separate human gate."
+        record = OperatorActionRecord(
+            action_request_id=request.action_request_id,
+            project_id=run.project_id,
+            change_name=run.change_name,
+            run_id=run.run_id,
+            job_id=job.job_id,
+            action_type=request.action_type,
+            actor_identity=request.actor_identity,
+            source_interface=request.source_interface,
+            precondition_stage=run.current_stage.value,
+            status=OperatorActionStatus.COMPLETED,
+            summary=summary,
+            evidence_reference=snapshot.snapshot_id,
+            parameters_json=sanitized_params,
+            result_payload_json={"authorization": authorization},
+        )
+        self.uow.operator_actions.save(record)
+        self.uow.events.save(
+            Event(
+                event_type=EventType.OPERATOR_ACTION_EXECUTED,
+                payload={
+                    "action_request_id": request.action_request_id,
+                    "action_type": request.action_type.value,
+                    "run_id": run.run_id,
+                    "job_id": job.job_id,
+                    "provider": "deepseek",
+                    "stage": "REVIEW",
+                    "candidate_sha": candidate.candidate_sha,
+                    "manifest_hash": candidate.manifest_hash,
+                    "model": profile.model,
+                    "authorization_id": request.action_request_id,
+                },
+                timestamp=now,
+            )
+        )
+        self.uow.commit()
+        return OperatorActionResult(
+            action_request_id=request.action_request_id,
+            action_type=request.action_type,
+            status=OperatorActionStatus.COMPLETED,
+            summary=summary,
+            resulting_stage=run.current_stage,
+            resulting_outcome=run.stop_outcome,
+            resulting_gate=run.human_gate,
+            evidence_reference=snapshot.snapshot_id,
+            payload={
+                "provider": "deepseek",
+                "stage": "REVIEW",
+                "candidate_sha": candidate.candidate_sha,
+                "maximum_usd": str(max_spend),
+            },
+        )
+
     def _execute_retry(
         self,
         request: OperatorActionRequest,
@@ -817,11 +1689,28 @@ class ControlPlaneService:
 
         # Increment retry count and resume through RecoveryConvergenceService
         run.retry_count += 1
-        self.uow.orchestration_runs.save(run)
-        self.uow.commit()
+        with self.uow.orchestration_runs.session.begin_nested():
+            run.stop_outcome = None
+            run.human_gate = None
+            run.is_active = True
+            run.stop_reason = None
+            run.stop_details = {}
+            if run.active_job_id:
+                job = self.uow.jobs.get_by_id(run.active_job_id)
+                if job:
+                    if job.base_sha and job.base_sha != run.base_sha:
+                        run.base_sha = job.base_sha
+                    job.status = JobStatus.RUNNING
+                    job.continuation_decision = None
+                    job.escalation_reason = None
+                    self.uow.jobs.save(job)
+            run.resumable_stage = OrchestrationStage.IMPLEMENTING
+            run.current_stage = OrchestrationStage.IMPLEMENTING
+            self.uow.orchestration_runs.save(run)
+            self.uow.commit()
 
         self.recovery_convergence_service.request_run_continuation(
-            run.run_id, source=RecoverySource.CONTROL_PLANE
+            run.run_id, source=RecoverySource.CONTROL_PLANE, force=True
         )
         resumed_run = self.uow.orchestration_runs.get_by_id(run.run_id) or run
 
@@ -970,14 +1859,7 @@ class ControlPlaneService:
                 summary="Could not acquire the canonical run recovery claim for reassignment.",
                 sanitized_params=sanitized_params,
             )
-        from minime.domain.models import RecoveryClaimContext
-
-        claim_context = RecoveryClaimContext(
-            claim_key=claim.claim_key,
-            owner_instance_id=claim.owner_instance_id,
-            fence_token=claim.fence_token,
-            lease_expires_at=claim.lease_expires_at,
-        )
+        claim_context = claim
         committed = False
         try:
             current_job = self.uow.jobs.get_by_id(job.job_id)
@@ -1179,7 +2061,10 @@ class ControlPlaneService:
                 )
 
             resumed_run = self.orchestration_service.remediate_preserved_candidate(
-                run.run_id, contract_path=contract, project_root=self.project_root, claim_context=claim_ctx
+                run.run_id,
+                contract_path=contract,
+                project_root=self.project_root,
+                claim_context=claim_ctx,
             )
             summary = f"Preserved candidate remediation started; generation is now {resumed_run.current_generation}."
             record = OperatorActionRecord(
@@ -1621,7 +2506,12 @@ class ControlPlaneService:
             RecoveryDecisionStatus,
             RecoverySource,
         )
-        gh_adapter = getattr(self.post_merge_service, "github_adapter", getattr(self.orchestration_service, "github_adapter", None))
+
+        gh_adapter = getattr(
+            self.post_merge_service,
+            "github_adapter",
+            getattr(self.orchestration_service, "github_adapter", None),
+        )
         rec_svc = RecoveryConvergenceService(
             self.uow,
             project_root=self.project_root,

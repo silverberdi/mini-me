@@ -12,7 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine, func, select, text
+from sqlalchemy import create_engine, func, select, text, update
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
 
@@ -24,6 +24,7 @@ from minime.db.models import (
     JobAttemptModel,
     JobModel,
     OrchestrationRunModel,
+    RecoveryClaimModel,
 )
 from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.domain.enums import (
@@ -35,22 +36,29 @@ from minime.domain.enums import (
     ExternalOutcome,
     HumanGate,
     JobStatus,
+    OperatorActionErrorCode,
     OperatorActionStatus,
     OperatorActionType,
     OrchestrationStage,
     OrchestrationStopOutcome,
     ProgressClassification,
     ProviderHealthStatus,
+    RecoveryClassification,
+    RecoveryDecisionStatus,
+    RecoverySource,
     WorktreeCreationState,
 )
 from minime.domain.models import (
+    Change,
     Event,
     Job,
     JobAttempt,
+    OperatorActionRecord,
     OperatorActionRequest,
     OrchestrationRun,
     Project,
     ProviderHealth,
+    RecoveryDecision,
     utc_now,
 )
 from minime.services import execution_pipeline
@@ -97,6 +105,126 @@ def _git(repo: Path, *args: str) -> str:
 
 def _git_bytes(repo: Path, *args: str) -> bytes:
     return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True).stdout
+
+
+def test_postgres_control_plane_accepts_only_exact_stale_continue_checkpoint(
+    isolated_pg_session_factory,
+):
+    """The narrow stale-CONTINUE predicate reads its authorities from PostgreSQL."""
+    session = isolated_pg_session_factory()
+    uow = PostgresPersistenceUnitOfWork(session)
+    now = utc_now()
+    project_id = f"project-{uuid.uuid4().hex}"
+    change_name = "checkpoint-recovery"
+    run_id = f"run-{uuid.uuid4().hex}"
+    job_id = f"job-{uuid.uuid4().hex}"
+    base_sha = "b" * 40
+    candidate_sha = "c" * 40
+
+    project = Project(project_id=project_id, display_name="Checkpoint", repository="test/repo")
+    change = Change(project_id=project_id, name=change_name)
+    job = Job(
+        job_id=job_id,
+        project_id=project_id,
+        change_name=change_name,
+        implementer_role="codex",
+        current_executor="codex",
+        status=JobStatus.CHECKS_FAILED,
+        attempt_count=1,
+        base_sha=base_sha,
+        candidate_sha=candidate_sha,
+    )
+    run = OrchestrationRun(
+        run_id=run_id,
+        project_id=project_id,
+        change_name=change_name,
+        base_sha=base_sha,
+        current_stage=OrchestrationStage.IMPLEMENTING,
+        resumable_stage=OrchestrationStage.IMPLEMENTING,
+        active_job_id=job_id,
+        current_generation=1,
+        current_candidate_sha=None,
+        is_active=True,
+    )
+    uow.projects.save(project)
+    uow.changes.save(change)
+    uow.jobs.save(job)
+    uow.orchestration_runs.save(run)
+    uow.job_attempts.save(
+        JobAttempt(
+            attempt_id=f"attempt-{uuid.uuid4().hex}",
+            job_id=job_id,
+            attempt_number=1,
+            executor_role="codex",
+            model_identity="codex-test",
+            start_sha=base_sha,
+            end_sha=candidate_sha,
+            normalized_outcome=ExecutionOutcome.COMPLETED,
+            progress_classification=ProgressClassification.NO_PROGRESS,
+            started_at=now - timedelta(seconds=30),
+            completed_at=now - timedelta(seconds=20),
+            duration_ms=10_000,
+        )
+    )
+    claim_key = f"run:{run_id}"
+    claim = uow.claims.acquire_or_reacquire(claim_key, "old-instance", lease_seconds=60)
+    assert claim is not None
+    session.execute(
+        update(RecoveryClaimModel)
+        .where(RecoveryClaimModel.claim_key == claim_key)
+        .values(lease_expires_at=now - timedelta(seconds=10))
+    )
+    uow.recovery_decisions.create_decision(
+        RecoveryDecision(
+            decision_id=f"decision-{uuid.uuid4().hex}",
+            cycle_id=f"cycle-{uuid.uuid4().hex}",
+            claim_key=claim_key,
+            identity_type="RUN",
+            identity_id=run_id,
+            project_id=project_id,
+            change_name=change_name,
+            source=RecoverySource.CONTROL_PLANE,
+            classification=RecoveryClassification.RESUME_SAFE_CHECKPOINT,
+            planned_action="DRIVE_CONTINUATION",
+            fence_token=claim.fence_token,
+            status=RecoveryDecisionStatus.EXECUTING,
+            created_at=now - timedelta(seconds=40),
+        )
+    )
+    uow.operator_actions.save(
+        OperatorActionRecord(
+            action_request_id=f"action-{uuid.uuid4().hex}",
+            project_id=project_id,
+            change_name=change_name,
+            run_id=run_id,
+            job_id=None,
+            action_type=OperatorActionType.CONTINUE,
+            actor_identity="operator",
+            source_interface="cli",
+            precondition_stage=OrchestrationStage.IMPLEMENTING.value,
+            status=OperatorActionStatus.FAILED,
+            error_code=OperatorActionErrorCode.ACTION_EXECUTION_FAILED,
+            summary="Prior CONTINUE failed while acknowledging the committed checkpoint.",
+            result_payload_json={
+                "error": "Fenced stage update failed: claim fence is stale, expired, or superseded."
+            },
+            created_at=now - timedelta(seconds=5),
+        )
+    )
+    uow.commit()
+
+    service = ControlPlaneService(uow)
+    persisted_run = uow.orchestration_runs.get_by_id(run_id)
+    assert persisted_run is not None
+    assert service._has_stale_active_checkpoint(persisted_run)
+
+    persisted_job = uow.jobs.get_by_id(job_id)
+    assert persisted_job is not None
+    persisted_job.candidate_sha = "d" * 40
+    uow.jobs.save(persisted_job)
+    uow.commit()
+    assert not service._has_stale_active_checkpoint(uow.orchestration_runs.get_by_id(run_id))
+    session.close()
 
 
 @pytest.mark.parametrize(
@@ -343,10 +471,12 @@ def test_auth_required_created_recovery_predicate_fails_closed(contradiction, tm
 
 
 def test_postgres_continue_reuses_created_worktree_after_auth_required_history(
-    isolated_pg_session_factory, tmp_path: Path, monkeypatch
+    isolated_pg_session_factory, tmp_path: Path, monkeypatch, test_capacity_strategy
 ):
     """A fenced real CONTINUE may reuse only the exact intact CREATED auth-failure workspace."""
     from conftest import publish_verified_intake_workspace, setup_managed_repository_fixture
+
+    test_capacity_strategy(("codex", "antigravity"))
 
     project_id = f"n01-auth-{uuid.uuid4().hex[:8]}"
     change_name = "operational-blocker-visibility"
@@ -662,7 +792,11 @@ def test_postgres_continue_reuses_created_worktree_after_auth_required_history(
                 return await self.delegate.run(candidate_path, prompt_context, timeout_seconds)
 
         runner = RecordingRunner()
-        monkeypatch.setattr(execution_pipeline, "runner_for_implementer", lambda _provider: runner)
+        monkeypatch.setattr(
+            execution_pipeline,
+            "runner_for_implementer",
+            lambda _provider, **kwargs: runner,
+        )
         result = ControlPlaneService(uow, project_root=managed_root).execute_action(
             OperatorActionRequest(
                 action_request_id=str(uuid.uuid4()),
@@ -753,10 +887,12 @@ def test_postgres_continue_reuses_created_worktree_after_auth_required_history(
 
 
 def test_postgres_control_plane_continue_rebuilds_same_run_job_and_worktree(
-    isolated_pg_session_factory, tmp_path: Path, monkeypatch
+    isolated_pg_session_factory, tmp_path: Path, monkeypatch, test_capacity_strategy
 ):
     """Exercise durable CP/claim/recovery and real Git worktree authorities; no provider is invoked."""
     from conftest import publish_verified_intake_workspace, setup_managed_repository_fixture
+
+    test_capacity_strategy(("codex", "antigravity"))
 
     project_id = f"n01-cont-{uuid.uuid4().hex[:8]}"
     change_name = "operational-blocker-visibility"
@@ -1133,7 +1269,7 @@ def test_postgres_control_plane_continue_rebuilds_same_run_job_and_worktree(
         monkeypatch.setattr(
             execution_pipeline,
             "runner_for_implementer",
-            lambda _provider: recording_runner,
+            lambda _provider, **kwargs: recording_runner,
         )
         request = OperatorActionRequest(
             action_request_id=str(uuid.uuid4()),
@@ -1313,10 +1449,12 @@ def test_postgres_control_plane_continue_rebuilds_same_run_job_and_worktree(
 
 
 def test_postgres_continue_adopts_created_recovery_worktree_and_repairs_only_final_lf(
-    isolated_pg_session_factory, tmp_path: Path, monkeypatch
+    isolated_pg_session_factory, tmp_path: Path, monkeypatch, test_capacity_strategy
 ):
     """Recover the exact CREATED production shape without rewriting its snapshot lineage."""
     from conftest import publish_verified_intake_workspace, setup_managed_repository_fixture
+
+    test_capacity_strategy(("codex", "antigravity"))
 
     project_id = f"n01-created-{uuid.uuid4().hex[:8]}"
     change_name = "operational-blocker-visibility"
@@ -1514,7 +1652,11 @@ def test_postgres_continue_adopts_created_recovery_worktree_and_repairs_only_fin
                 return self.result
 
         runner = RecordingRunner()
-        monkeypatch.setattr(execution_pipeline, "runner_for_implementer", lambda _provider: runner)
+        monkeypatch.setattr(
+            execution_pipeline,
+            "runner_for_implementer",
+            lambda _provider, **kwargs: runner,
+        )
         original_materialize = WorktreeManager._materialize_verified_published_intake_artifacts
 
         async def fail_first_materialization(self, **kwargs):
@@ -1779,9 +1921,10 @@ def test_postgres_continue_adopts_created_recovery_worktree_and_repairs_only_fin
 
 
 def test_postgres_continue_accepts_only_recovery_evidenced_incomplete_premature_stop(
-    isolated_pg_session_factory, tmp_path: Path, monkeypatch
+    isolated_pg_session_factory, tmp_path: Path, monkeypatch, test_capacity_strategy
 ):
     """One canonical CONTINUE emits recovery evidence and adopts the same CREATED worktree."""
+    test_capacity_strategy(("codex", "antigravity"))
     from datetime import timedelta
 
     from conftest import publish_verified_intake_workspace, setup_managed_repository_fixture
@@ -2111,7 +2254,11 @@ def test_postgres_continue_accepts_only_recovery_evidenced_incomplete_premature_
                 return self.result
 
         runner = RecordingRunner()
-        monkeypatch.setattr(execution_pipeline, "runner_for_implementer", lambda _provider: runner)
+        monkeypatch.setattr(
+            execution_pipeline,
+            "runner_for_implementer",
+            lambda _provider, **kwargs: runner,
+        )
         before_runs = session.scalar(
             select(func.count())
             .select_from(OrchestrationRunModel)

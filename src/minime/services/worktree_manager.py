@@ -1098,9 +1098,16 @@ class WorktreeManager:
         default_worktree_id = f"wt-{job_id}" if job_id else f"wt-{path.name}"
         existing_by_id = repo.get_by_id(default_worktree_id) if hasattr(repo, "get_by_id") else None
         if existing_by_id and existing_by_id.canonical_worktree_path != canonical_path:
-            worktree_id = f"wt-{job_id}-{path.name}" if job_id else f"wt-{path.name}"
+            if job_id and path.name.startswith(f"{job_id}-"):
+                worktree_id = f"wt-{path.name}"
+            else:
+                worktree_id = f"wt-{job_id}-{path.name}" if job_id else f"wt-{path.name}"
         else:
             worktree_id = default_worktree_id
+
+        if len(worktree_id) > 64:
+            suffix = hashlib.sha256(worktree_id.encode()).hexdigest()[:16]
+            worktree_id = f"{worktree_id[:47]}-{suffix}"
 
         existing = (
             repo.get_by_canonical_path(canonical_path)
@@ -1807,10 +1814,14 @@ class WorktreeManager:
                         and hasattr(self.uow, "orchestration_runs")
                         and self.uow.orchestration_runs
                     ):
-                        r = self.uow.orchestration_runs.get_by_id(job_id) or (
-                            self.uow.orchestration_runs.get_by_job_id(job_id)
-                            if hasattr(self.uow.orchestration_runs, "get_by_job_id")
-                            else None
+                        r = (
+                            self.uow.orchestration_runs.get_by_id(eff_run_id)
+                            or self.uow.orchestration_runs.get_by_id(job_id)
+                            or (
+                                self.uow.orchestration_runs.get_by_job_id(job_id)
+                                if hasattr(self.uow.orchestration_runs, "get_by_job_id")
+                                else None
+                            )
                         )
                         if r:
                             cand_sha = getattr(r, "candidate_sha", None) or getattr(
@@ -1818,6 +1829,27 @@ class WorktreeManager:
                             )
                             if cand_sha == actual_sha:
                                 has_candidate_proof = True
+                    if (
+                        not has_candidate_proof
+                        and hasattr(self.uow, "job_attempts")
+                        and self.uow.job_attempts
+                    ):
+                        attempts = self.uow.job_attempts.list_by_job(job_id)
+                        if any(
+                            getattr(att, "end_sha", None) == actual_sha
+                            or getattr(att, "start_sha", None) == actual_sha
+                            for att in attempts
+                        ):
+                            has_candidate_proof = True
+                    if (
+                        not has_candidate_proof
+                        and hasattr(self.uow, "orchestration_candidates")
+                        and self.uow.orchestration_candidates
+                        and eff_run_id
+                    ):
+                        candidates = self.uow.orchestration_candidates.list_by_run(eff_run_id)
+                        if any(getattr(c, "candidate_sha", None) == actual_sha for c in candidates):
+                            has_candidate_proof = True
                 if not has_candidate_proof:
                     raise RuntimeError(
                         f"Refusing to adopt existing {worktree_kind} at '{path}': "
@@ -1836,6 +1868,201 @@ class WorktreeManager:
         except Exception as err:
             raise RuntimeError(
                 f"Refusing to adopt existing {worktree_kind} at '{path}': Adoption check failed: {err}"
+            )
+
+    async def _verify_frozen_candidate_worktree_adoption(
+        self,
+        *,
+        path: Path,
+        job_id: str,
+        project_id: str,
+        run_id: str,
+        change_name: str,
+        ownership: OrchestrationWorktreeOwnership,
+    ) -> None:
+        """Adopt only the existing clean worktree for the exact frozen candidate."""
+        jobs_repo = getattr(self.uow, "jobs", None)
+        runs_repo = getattr(self.uow, "orchestration_runs", None)
+        candidates_repo = getattr(self.uow, "orchestration_candidates", None)
+        manifests_repo = getattr(self.uow, "candidate_manifests", None)
+        job = jobs_repo.get_by_id(job_id) if jobs_repo else None
+        run = runs_repo.get_by_id(run_id) if runs_repo else None
+        if (
+            not job
+            or not run
+            or job.job_id != job_id
+            or job.project_id != project_id
+            or job.change_name != change_name
+            or run.run_id != run_id
+            or run.project_id != project_id
+            or run.change_name != change_name
+            or run.active_job_id != job_id
+        ):
+            raise RuntimeError(
+                "Candidate worktree adoption denied: durable Run/Job identity is missing or contradictory."
+            )
+
+        if ownership.creation_state != WorktreeCreationState.CREATED:
+            raise RuntimeError(
+                "Candidate worktree adoption denied: candidate work may only adopt a physically existing CREATED ownership."
+            )
+        if path.is_symlink() or not path.is_dir():
+            raise RuntimeError(
+                "Candidate worktree adoption denied: CREATED candidate worktree is absent or unsafe."
+            )
+        if (
+            ownership.project_id != project_id
+            or ownership.job_id != job_id
+            or ownership.run_id != run_id
+            or ownership.change_name != change_name
+            or str(Path(ownership.canonical_worktree_path).resolve()) != str(path.resolve())
+            or ownership.source_base_sha != run.base_sha
+            or job.base_sha != run.base_sha
+        ):
+            raise RuntimeError(
+                "Candidate worktree adoption denied: ownership, path, or original base identity conflicts."
+            )
+
+        candidate_sha = job.candidate_sha
+        run_candidate_sha = run.current_candidate_sha
+        if not candidate_sha or run_candidate_sha != candidate_sha:
+            raise RuntimeError(
+                "Candidate worktree adoption denied: Run and Job candidate SHAs do not match."
+            )
+        latest = candidates_repo.get_latest_for_run(run_id) if candidates_repo else None
+        candidates = candidates_repo.list_by_run(run_id) if candidates_repo else []
+        current_candidates = [
+            candidate for candidate in candidates if not candidate.superseded_by_id
+        ]
+        if (
+            latest is None
+            or len(current_candidates) != 1
+            or current_candidates[0].candidate_id != latest.candidate_id
+            or not latest.is_frozen
+            or latest.run_id != run_id
+            or latest.generation != run.current_generation
+            or latest.candidate_sha != candidate_sha
+            or latest.base_sha != run.base_sha
+            or not latest.manifest_id
+            or not latest.manifest_hash
+        ):
+            raise RuntimeError(
+                "Candidate worktree adoption denied: no unique frozen candidate matches Run/Job generation and SHA."
+            )
+
+        expected_branch = (
+            latest.candidate_ref.removeprefix("refs/heads/") if latest.candidate_ref else ""
+        )
+        if not expected_branch or expected_branch != ownership.branch:
+            raise RuntimeError(
+                "Candidate worktree adoption denied: frozen candidate branch conflicts with ownership."
+            )
+
+        manifest = manifests_repo.get_by_id(latest.manifest_id) if manifests_repo else None
+        if (
+            not manifest
+            or manifest.job_id != job_id
+            or manifest.candidate_sha != candidate_sha
+            or manifest.manifest_hash != latest.manifest_hash
+            or manifest.total_files_count <= 0
+            or manifest.staged_files
+            or manifest.untracked_files
+            or manifest.deleted_files
+        ):
+            raise RuntimeError(
+                "Candidate worktree adoption denied: candidate manifest is missing, contradictory, or not a committed tree."
+            )
+        attempts_repo = getattr(self.uow, "job_attempts", None)
+        attempts = attempts_repo.list_by_job(job_id) if attempts_repo else []
+        manifest_attempts = [
+            attempt for attempt in attempts if attempt.attempt_id == manifest.attempt_id
+        ]
+        if (
+            not manifest.attempt_id
+            or len(manifest_attempts) != 1
+            or manifest_attempts[0].end_sha != candidate_sha
+            or manifest_attempts[0].completed_at is None
+        ):
+            raise RuntimeError(
+                "Candidate worktree adoption denied: candidate manifest is not bound to one completed durable attempt."
+            )
+
+        actions_repo = getattr(self.uow, "orchestration_external_actions", None)
+        if not actions_repo or not callable(getattr(actions_repo, "list_by_run", None)):
+            raise RuntimeError(
+                "Candidate worktree adoption denied: external-action state is unobservable."
+            )
+        for action in actions_repo.list_by_run(run_id):
+            action_status = getattr(action.status, "value", action.status)
+            if action_status in {"RESERVED", "EXECUTING", "UNKNOWN", "AMBIGUOUS"}:
+                raise RuntimeError(
+                    "Candidate worktree adoption denied: an external action is unresolved."
+                )
+
+        # A recovery-snapshot event means a different preservation route has
+        # already observed mutable state. It cannot be silently reinterpreted
+        # as the frozen candidate checkpoint.
+        events_repo = getattr(self.uow, "events", None)
+        events = (
+            events_repo.list_events(project_id=project_id, change_id=change_name, limit=10000)
+            if events_repo
+            else []
+        )
+        if any(
+            event.event_type == EventType.WORKTREE_RECOVERY_SNAPSHOT
+            and event.payload.get("job_id") == job_id
+            and (
+                event.payload.get("recovery_sha") == candidate_sha
+                or event.payload.get("authoritative_candidate") is True
+            )
+            for event in events
+        ):
+            raise RuntimeError(
+                "Candidate worktree adoption denied: recovery-snapshot evidence conflicts with frozen candidate adoption."
+            )
+
+        await self._verify_worktree_adoption_proof(
+            path=path,
+            job_id=job_id,
+            eff_project_id=project_id,
+            eff_run_id=run_id,
+            eff_change_name=change_name,
+            expected_branch=expected_branch,
+            expected_base_sha=run.base_sha,
+            require_clean=True,
+            worktree_kind="frozen candidate worktree",
+        )
+        actual_head = (await self.current_sha(path)).strip()
+        branch_head = (
+            await self._git(
+                ["rev-parse", "--verify", f"refs/heads/{expected_branch}^{{commit}}"],
+                cwd=self.project_root,
+            )
+        ).strip()
+        if actual_head != candidate_sha or branch_head != candidate_sha:
+            raise RuntimeError(
+                "Candidate worktree adoption denied: worktree HEAD or persisted branch ref differs from the frozen SHA."
+            )
+        await self._git(
+            ["merge-base", "--is-ancestor", run.base_sha, candidate_sha],
+            cwd=self.project_root,
+        )
+
+        from minime.services.candidate_manifest import CandidateManifestService
+
+        observed_manifest = CandidateManifestService().generate_manifest(
+            path, candidate_sha, job_id
+        )
+        if (
+            observed_manifest.manifest_hash != manifest.manifest_hash
+            or observed_manifest.total_files_count != manifest.total_files_count
+            or observed_manifest.tracked_files != manifest.tracked_files
+            or observed_manifest.staged_files
+            or observed_manifest.untracked_files
+            or observed_manifest.deleted_files
+        ):
+            raise RuntimeError(
+                "Candidate worktree adoption denied: observed worktree files differ from the frozen manifest."
             )
 
     async def _verify_deleted_worktree_recreation(
@@ -2037,24 +2264,50 @@ class WorktreeManager:
 
         attempts_repo = getattr(self.uow, "job_attempts", None)
         attempts = attempts_repo.list_by_job(job_id) if attempts_repo else []
-        if not attempts:
+        review_only_recovery = self._has_durable_failed_contract_review_recovery(
+            job=job,
+            run=run,
+            ownership=ownership,
+            project_id=project_id,
+            run_id=run_id,
+            change_name=change_name,
+            path=path,
+            branch=branch,
+            source_base=source_base,
+            attempts=attempts,
+        )
+        waiting_capacity_recovery = self._has_durable_waiting_capacity_pre_attempt_recovery(
+            job=job,
+            run=run,
+            ownership=ownership,
+            project_id=project_id,
+            run_id=run_id,
+            change_name=change_name,
+            path=path,
+            branch=branch,
+            source_base=source_base,
+            attempts=attempts,
+        )
+        if not attempts and not review_only_recovery and not waiting_capacity_recovery:
             refuse(
                 "the latest durable attempt does not prove a recoverable initialization failure."
             )
         # Preserve the pre-existing ordering/acceptance behavior for ordinary
         # environment/provider initialization failures. The new exceptional
         # PREMATURE_STOP route requires a unique latest attempt identity.
-        latest_attempt = attempts[-1]
-        ordinary_recovery_outcome = latest_attempt.normalized_outcome in {
-            ExecutionOutcome.ENVIRONMENT_UNAVAILABLE,
-            ExecutionOutcome.PROVIDER_FAILURE,
-        }
-        latest_attempt_number = max(attempt.attempt_number for attempt in attempts)
+        latest_attempt = attempts[-1] if attempts else None
+        ordinary_recovery_outcome = bool(
+            latest_attempt
+            and latest_attempt.normalized_outcome
+            in {ExecutionOutcome.ENVIRONMENT_UNAVAILABLE, ExecutionOutcome.PROVIDER_FAILURE}
+        )
+        latest_attempt_number = max((attempt.attempt_number for attempt in attempts), default=0)
         latest_attempts = [
             attempt for attempt in attempts if attempt.attempt_number == latest_attempt_number
         ]
         crash_interrupted_recovery = (
             is_created_recovery
+            and latest_attempt is not None
             and len(latest_attempts) == 1
             and latest_attempt.attempt_number == latest_attempt_number
             and self._has_durable_crash_interruption_recovery(
@@ -2068,6 +2321,7 @@ class WorktreeManager:
         )
         auth_required_created_recovery = (
             is_created_recovery
+            and latest_attempt is not None
             and self._has_durable_auth_required_created_recovery(
                 attempts=attempts,
                 latest_attempt=latest_attempt,
@@ -2083,6 +2337,8 @@ class WorktreeManager:
             ordinary_recovery_outcome
             or crash_interrupted_recovery
             or auth_required_created_recovery
+            or review_only_recovery
+            or waiting_capacity_recovery
         ):
             refuse(
                 "the latest durable attempt does not prove an environment/provider initialization failure, an evidenced crash-interrupted CREATED recovery, or a fully evidenced AUTH_REQUIRED CREATED-worktree continuation."
@@ -2235,6 +2491,201 @@ class WorktreeManager:
         ):
             refuse("canonical remote base changed during recreation validation.")
         return branch_sha
+
+    def _has_durable_failed_contract_review_recovery(
+        self,
+        *,
+        job: Any,
+        run: Any,
+        ownership: Any,
+        project_id: str,
+        run_id: str,
+        change_name: str,
+        path: Path,
+        branch: str,
+        source_base: str,
+        attempts: list[Any],
+    ) -> bool:
+        """Permit only a fenced, planning-only snapshot after failed read-only review.
+
+        This is intentionally distinct from implementation-attempt recovery: it is
+        limited to terminal failed CONTRACT_REVIEW history with no JobAttempt and
+        cannot authorize worktrees lacking the exact recovery event/snapshot.
+        """
+        if (
+            attempts
+            or ownership.creation_state != WorktreeCreationState.DELETED
+            or job.status != JobStatus.RUNNING
+            or not run.is_active
+            or run.current_stage != OrchestrationStage.IMPLEMENTING
+            or job.candidate_sha
+            or run.current_candidate_sha
+            or run.base_sha != source_base
+            or (job.base_sha and job.base_sha != source_base)
+        ):
+            return False
+
+        reviews_repo = getattr(self.uow, "reviews", None)
+        reservations_repo = getattr(self.uow, "budget_reservations", None)
+        if not reviews_repo or not reservations_repo or not hasattr(reviews_repo, "list_by_job"):
+            return False
+        reviews = reviews_repo.list_by_job(job.job_id)
+        if not reviews:
+            return False
+        for review in reviews:
+            if (
+                review.project_id != project_id
+                or review.job_id != job.job_id
+                or review.change_name != change_name
+                or review.orchestration_run_id != run_id
+                or review.candidate_generation != run.current_generation
+                or review.review_stage != "CONTRACT_REVIEW"
+                or review.status.value != "REVIEW_FAILED"
+                or not review.error_message
+                or not review.contract_hash
+                or review.candidate_sha != review.contract_hash
+                or review.base_sha != source_base
+                or review.provider != "deepseek"
+                or review.reviewer_role != "deepseek"
+                or not review.reviewer_model
+                or not review.account_fingerprint
+                or review.billing_origin != "deepseek_direct"
+                or not review.budget_reservation_id
+            ):
+                return False
+            reservation = reservations_repo.get_by_id(review.budget_reservation_id)
+            if not reservation or (
+                reservation.project_id != project_id
+                or reservation.run_id != run_id
+                or reservation.job_id != job.job_id
+                or reservation.change_id != change_name
+                or reservation.provider != "deepseek"
+                or reservation.account_fingerprint != review.account_fingerprint
+                or reservation.canonical_model_identity != review.reviewer_model
+                or reservation.stage != "CONTRACT_REVIEW"
+                or reservation.billing_origin != "deepseek_direct"
+                or reservation.status not in {"UNRESOLVED", "SETTLED"}
+            ):
+                return False
+
+        candidate_repo = getattr(self.uow, "orchestration_candidates", None)
+        if candidate_repo and candidate_repo.get_latest_for_run(run_id):
+            return False
+
+        events_repo = getattr(self.uow, "events", None)
+        claims_repo = getattr(self.uow, "claims", None)
+        decisions_repo = getattr(self.uow, "recovery_decisions", None)
+        action_repo = getattr(self.uow, "orchestration_external_actions", None)
+        if not all((events_repo, claims_repo, decisions_repo, action_repo)):
+            return False
+        events = events_repo.list_events(project_id=project_id, change_id=change_name, limit=1000)
+        recovery_events = [
+            event
+            for event in events
+            if event.event_type == EventType.WORKTREE_RECOVERY_SNAPSHOT
+            and event.operation_id == job.job_id
+            and event.payload.get("job_id") == job.job_id
+            and event.payload.get("branch") == branch
+            and event.payload.get("recovery_sha")
+            and event.payload.get("worktree_path")
+            and str(Path(event.payload["worktree_path"]).resolve()) == str(path.resolve())
+            and event.payload.get("authoritative_candidate") is False
+        ]
+        if len(recovery_events) != 1:
+            return False
+        recovery_event = recovery_events[0]
+        # The snapshot is immutable planning-only evidence. It must postdate the
+        # first failed read-only review that caused recovery, but later read-only
+        # review retries cannot invalidate it: they cannot write the worktree and
+        # the no-candidate/no-JobAttempt checks above remain mandatory.
+        if recovery_event.timestamp <= min(review.updated_at for review in reviews):
+            return False
+
+        claim_key = f"run:{run_id}"
+        claim = claims_repo.get_by_key(claim_key)
+        now = utc_now()
+        if (
+            not claim
+            or not claim.is_active
+            or claim.lease_expires_at <= now
+            or not claims_repo.validate_cas(
+                claim_key=claim_key,
+                owner_instance_id=claim.owner_instance_id,
+                fence_token=claim.fence_token,
+            )
+        ):
+            return False
+        decisions = decisions_repo.list_by_claim_key(claim_key)
+        if not decisions:
+            return False
+        decision = max(decisions, key=lambda item: item.created_at)
+        if (
+            decision.identity_type != "RUN"
+            or decision.identity_id != run_id
+            or decision.project_id != project_id
+            or decision.change_name != change_name
+            or decision.source.value != "CONTROL_PLANE"
+            or decision.planned_action != "DRIVE_CONTINUATION"
+            or decision.classification.value != "RESUME_SAFE_CHECKPOINT"
+            or decision.status.value != "EXECUTING"
+            or decision.fence_token != claim.fence_token
+            or decision.created_at <= max(review.updated_at for review in reviews)
+        ):
+            return False
+        cycle_decisions = decisions_repo.list_by_cycle(decision.cycle_id)
+        if len(cycle_decisions) != 1 or cycle_decisions[0].decision_id != decision.decision_id:
+            return False
+        unresolved_statuses = {"RESERVED", "EXECUTING", "UNKNOWN", "AMBIGUOUS"}
+        if any(
+            item.status.value in unresolved_statuses for item in action_repo.list_by_run(run_id)
+        ):
+            return False
+        return True
+
+    def _has_durable_waiting_capacity_pre_attempt_recovery(
+        self,
+        *,
+        job: Any,
+        run: Any,
+        ownership: Any,
+        project_id: str,
+        run_id: str,
+        change_name: str,
+        path: Path,
+        branch: str,
+        source_base: str,
+        attempts: list[Any],
+    ) -> bool:
+        if (
+            attempts
+            or ownership.creation_state != WorktreeCreationState.DELETED
+            or not run.is_active
+            or run.current_stage != OrchestrationStage.IMPLEMENTING
+            or job.candidate_sha
+            or run.current_candidate_sha
+            or run.base_sha != source_base
+            or (job.base_sha and job.base_sha != source_base)
+        ):
+            return False
+
+        events_repo = getattr(self.uow, "events", None)
+        if not events_repo:
+            return False
+        events = events_repo.list_events(project_id=project_id, change_id=change_name, limit=1000)
+        has_waiting_capacity = any(
+            event.event_type in {EventType.JOB_WAITING_CAPACITY, EventType.ORCHESTRATION_STOPPED}
+            and (event.operation_id == job.job_id or (event.payload or {}).get("job_id") == job.job_id)
+            for event in events
+        ) or job.waiting_provider is not None or job.capacity_block_reason is not None
+
+        has_recovery_snapshot = any(
+            event.event_type == EventType.WORKTREE_RECOVERY_SNAPSHOT
+            and event.operation_id == job.job_id
+            and (event.payload or {}).get("job_id") == job.job_id
+            and (event.payload or {}).get("branch") == branch
+            for event in events
+        )
+        return has_waiting_capacity and has_recovery_snapshot
 
     def _has_durable_auth_required_created_recovery(
         self,
@@ -2578,8 +3029,12 @@ class WorktreeManager:
         branch_name: str | None = None,
         reuse_existing: bool = False,
         run_id: str | None = None,
+        allow_reopen: bool = False,
     ) -> WorktreeInfo:
-        path = self.worktree_path(job_id, project_id).resolve()
+        requested_path = self.worktree_path(job_id, project_id)
+        if requested_path.is_symlink():
+            raise ValueError(f"Worktree path may not be a symlink: {requested_path}")
+        path = requested_path.resolve()
         parent = self.resolve_worktree_parent_dir(project_id).resolve()
         if parent not in path.parents:
             raise ValueError(f"Worktree path escapes managed root: {path}")
@@ -2619,10 +3074,62 @@ class WorktreeManager:
         historical_ownership = (
             worktree_ownership_repo.get_by_job_id(job_id) if worktree_ownership_repo else None
         )
+        job_repo = getattr(self.uow, "jobs", None)
+        candidate_job = job_repo.get_by_id(job_id) if job_repo else None
+        runs_repo = getattr(self.uow, "orchestration_runs", None)
+        candidate_run = runs_repo.get_by_id(eff_run_id) if runs_repo and eff_run_id else None
+        candidates_repo = getattr(self.uow, "orchestration_candidates", None)
+        durable_candidate = (
+            candidates_repo.get_latest_for_run(eff_run_id)
+            if candidates_repo and eff_run_id
+            else None
+        )
+        candidate_evidence_present = bool(
+            (candidate_job and candidate_job.candidate_sha)
+            or (candidate_run and candidate_run.current_candidate_sha)
+            or durable_candidate
+        )
+
+        if candidate_evidence_present and not allow_reopen:
+            if not reuse_existing:
+                raise RuntimeError(
+                    "Candidate worktree adoption denied: a persisted candidate cannot create a replacement worktree."
+                )
+            if (
+                not historical_ownership
+                or historical_ownership.creation_state != WorktreeCreationState.CREATED
+                or not path.is_dir()
+                or path.is_symlink()
+            ):
+                raise RuntimeError(
+                    "Candidate worktree adoption denied: candidate work requires its exact physically existing CREATED ownership."
+                )
+            if requested_branch_name and requested_branch_name != historical_ownership.branch:
+                raise RuntimeError(
+                    "Candidate worktree adoption denied: requested branch conflicts with durable ownership."
+                )
+            if not eff_project_id or not eff_run_id:
+                raise RuntimeError(
+                    "Candidate worktree adoption denied: durable project/run identity is unavailable."
+                )
+            await self._verify_frozen_candidate_worktree_adoption(
+                path=path,
+                job_id=job_id,
+                project_id=eff_project_id,
+                run_id=eff_run_id,
+                change_name=eff_change_name,
+                ownership=historical_ownership,
+            )
+            return WorktreeInfo(
+                path=path,
+                branch_name=historical_ownership.branch,
+                base_sha=historical_ownership.source_base_sha,
+            )
+
         recreation_source_base = None
         recovery_snapshot_sha = None
         recovery_event_candidate = False
-        if historical_ownership and historical_ownership.creation_state in {
+        if not allow_reopen and historical_ownership and historical_ownership.creation_state in {
             WorktreeCreationState.DELETED,
             WorktreeCreationState.CREATED,
         }:
@@ -2747,13 +3254,21 @@ class WorktreeManager:
 
         # 4. Write marker, prove postconditions, and transition to CREATED
         self._write_ownership_marker(path, ownership)
-        await self._verify_creation_postconditions(
-            path,
-            ownership,
-            expected_branch=branch_name,
-            expected_base_sha=recreation_source_base or base_sha,
-            expected_head_sha=recovered_head_sha,
-        )
+        if recovered_head_sha:
+            await self._verify_creation_postconditions(
+                path,
+                ownership,
+                expected_branch=branch_name,
+                expected_base_sha=recreation_source_base or base_sha,
+                expected_head_sha=recovered_head_sha,
+            )
+        else:
+            await self._verify_creation_postconditions(
+                path,
+                ownership,
+                expected_branch=branch_name,
+                expected_base_sha=None if branch_exists else (recreation_source_base or base_sha),
+            )
         self._finalize_created_ownership(ownership)
 
         await self._materialize_verified_published_intake_artifacts(
@@ -3048,6 +3563,9 @@ class WorktreeManager:
             require_created_ownership=True,
             job_id=job_id,
         )
+        from minime.services.candidate_manifest import purge_transient_generated_artifacts
+
+        purge_transient_generated_artifacts(path)
         state = await self.inspect_worktree_state(path)
         if state.dirty:
             await self._git(

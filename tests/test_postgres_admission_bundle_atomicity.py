@@ -130,14 +130,22 @@ def pg_engine() -> Generator[Engine, None, None]:
         conn.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public;"))
         conn.commit()
     Base.metadata.create_all(engine)
+    from minime.db.session import EXPECTED_ALEMBIC_HEAD
+
     with engine.connect() as conn:
         conn.execute(text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(64) PRIMARY KEY);"))
         conn.execute(text("DELETE FROM alembic_version;"))
-        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('g01_recovery_convergence');"))
+        conn.execute(text(f"INSERT INTO alembic_version (version_num) VALUES ('{EXPECTED_ALEMBIC_HEAD}');"))
         conn.commit()
     yield engine
     with engine.connect() as conn:
         conn.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public;"))
+        conn.commit()
+    Base.metadata.create_all(engine)
+    with engine.connect() as conn:
+        conn.execute(text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(64) PRIMARY KEY);"))
+        conn.execute(text("DELETE FROM alembic_version;"))
+        conn.execute(text(f"INSERT INTO alembic_version (version_num) VALUES ('{EXPECTED_ALEMBIC_HEAD}');"))
         conn.commit()
     engine.dispose()
 
@@ -150,6 +158,9 @@ def pg_session_factory(pg_engine: Engine) -> sessionmaker[Session]:
 @pytest.fixture(autouse=True)
 def _clean_db(pg_engine: Engine):
     from sqlalchemy import text
+
+    from minime.db.session import EXPECTED_ALEMBIC_HEAD
+
     with pg_engine.connect() as conn:
         conn.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public;"))
         conn.commit()
@@ -157,7 +168,7 @@ def _clean_db(pg_engine: Engine):
     with pg_engine.connect() as conn:
         conn.execute(text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(64) PRIMARY KEY);"))
         conn.execute(text("DELETE FROM alembic_version;"))
-        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('g01_recovery_convergence');"))
+        conn.execute(text(f"INSERT INTO alembic_version (version_num) VALUES ('{EXPECTED_ALEMBIC_HEAD}');"))
         conn.commit()
 
 
@@ -434,8 +445,19 @@ def test_t05a_no_intermediate_admission_commit(
                 status=WorkItemStatus.READY,
             )
         )
-        uow.provider_health.save(ProviderHealth(provider="codex", status=ProviderHealthStatus.AVAILABLE))
-        uow.provider_health.save(ProviderHealth(provider="antigravity", status=ProviderHealthStatus.AVAILABLE))
+        from minime.domain.enums import ProviderResultClass
+
+        for provider in ["codex", "antigravity", "deepseek"]:
+            uow.provider_health.save(
+                ProviderHealth(
+                    health_id=f"ph-{provider}",
+                    provider=provider,
+                    status=ProviderHealthStatus.AVAILABLE,
+                    last_result_class=ProviderResultClass.SUCCESS,
+                    last_success_at=utc_now(),
+                    updated_at=utc_now(),
+                )
+            )
         from tests.conftest import publish_local_intake_ref
 
         from minime.domain.enums import (
@@ -450,6 +472,9 @@ def test_t05a_no_intermediate_admission_commit(
         bare = _subprocess.run(
             ["git", "remote", "get-url", "origin"], cwd=tmp_path, capture_output=True, text=True, check=True
         ).stdout.strip()
+        real_main = _subprocess.run(
+            ["git", "rev-parse", "refs/heads/main"], cwd=tmp_path, capture_output=True, text=True, check=True
+        ).stdout.strip()
         _mb = uow.project_managed_repository_bindings.get_by_project_id(project_id)
         if _mb is not None:
             _mb.canonical_repository_identity = bare
@@ -463,11 +488,12 @@ def test_t05a_no_intermediate_admission_commit(
                 change_name=change_name,
                 canonical_workspace_path=str(tmp_path),
                 canonical_repository_identity=bare,
-                base_sha="main",
+                base_sha=real_main,
                 creation_state=IntakeWorkspaceCreationState.ACTIVE,
                 publication_state=IntakeWorkspacePublicationState.PUBLISHED,
                 published_ref=f"refs/minime/intake/{change_name}",
                 published_sha=real_sha,
+                head_sha=real_sha,
             )
         )
         uow.commit()
@@ -478,6 +504,9 @@ def test_t05a_no_intermediate_admission_commit(
         from tests.conftest import ReadinessGitHubStub
         real_readiness = ReadinessService(uow, github_adapter=ReadinessGitHubStub())
         scheduler = SchedulerService(uow, project_root=tmp_path, readiness_service=real_readiness)
+
+        from unittest.mock import AsyncMock
+        scheduler.provider_health_service.refresh_capacity_from_read_only_source = AsyncMock(return_value=True)
 
         commit_events: list[tuple[str, float]] = []
         lock_events: list[tuple[str, float]] = []
@@ -559,6 +588,7 @@ def test_t05a_no_intermediate_admission_commit(
         uow = PostgresPersistenceUnitOfWork(session)
         real_readiness = ReadinessService(uow, github_adapter=ReadinessGitHubStub())
         scheduler = SchedulerService(uow, project_root=tmp_path, readiness_service=real_readiness)
+        scheduler.provider_health_service.refresh_capacity_from_read_only_source = AsyncMock(return_value=True)
 
         orig_save = uow.scheduler_decisions.save
 
@@ -672,8 +702,19 @@ def test_t05b_locks_not_held_during_external_observations(
                 status=WorkItemStatus.READY,
             )
         )
-        uow.provider_health.save(ProviderHealth(provider="codex", status=ProviderHealthStatus.AVAILABLE))
-        uow.provider_health.save(ProviderHealth(provider="antigravity", status=ProviderHealthStatus.AVAILABLE))
+        from minime.domain.enums import ProviderResultClass
+
+        for provider in ["codex", "antigravity", "deepseek"]:
+            uow.provider_health.save(
+                ProviderHealth(
+                    health_id=f"ph-{provider}",
+                    provider=provider,
+                    status=ProviderHealthStatus.AVAILABLE,
+                    last_result_class=ProviderResultClass.SUCCESS,
+                    last_success_at=utc_now(),
+                    updated_at=utc_now(),
+                )
+            )
         from tests.conftest import publish_local_intake_ref
 
         from minime.domain.enums import (
@@ -688,6 +729,9 @@ def test_t05b_locks_not_held_during_external_observations(
         bare = _subprocess.run(
             ["git", "remote", "get-url", "origin"], cwd=tmp_path, capture_output=True, text=True, check=True
         ).stdout.strip()
+        real_main = _subprocess.run(
+            ["git", "rev-parse", "refs/heads/main"], cwd=tmp_path, capture_output=True, text=True, check=True
+        ).stdout.strip()
         _mb = uow.project_managed_repository_bindings.get_by_project_id(project_id)
         if _mb is not None:
             _mb.canonical_repository_identity = bare
@@ -701,11 +745,12 @@ def test_t05b_locks_not_held_during_external_observations(
                 change_name=change_name,
                 canonical_workspace_path=str(tmp_path),
                 canonical_repository_identity=bare,
-                base_sha="main",
+                base_sha=real_main,
                 creation_state=IntakeWorkspaceCreationState.ACTIVE,
                 publication_state=IntakeWorkspacePublicationState.PUBLISHED,
                 published_ref=f"refs/minime/intake/{change_name}",
                 published_sha=real_sha,
+                head_sha=real_sha,
             )
         )
         uow.commit()

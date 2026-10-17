@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -20,12 +21,33 @@ from minime.services.scheduler_service import SchedulerService
 
 @pytest.mark.asyncio
 async def test_codex_adapter_probe_includes_skip_git_repo_check():
-    """Verify CodexProviderAdapter probe availability includes --skip-git-repo-check flag."""
+    """Verify CodexProviderAdapter probe availability uses non-inferential App Server stdio protocol."""
     adapter = CodexProviderAdapter(executable="codex")
 
-    mock_proc = AsyncMock()
-    mock_proc.communicate = AsyncMock(return_value=(b"echo probe", b""))
-    mock_proc.returncode = 0
+    mock_proc = MagicMock()
+    mock_proc.stdin = AsyncMock()
+    mock_proc.stdin.write = MagicMock()
+    mock_proc.stdin.drain = AsyncMock()
+    init_resp = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {}}).encode() + b"\n"
+    rate_resp = (
+        json.dumps({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+                "accountId": "test-account",
+                "ordinaryUsageAllowed": True,
+                "rateLimits": {
+                    "limitId": "codex",
+                    "normalModelSlug": "gpt-5.6-luna",
+                },
+            },
+        }).encode()
+        + b"\n"
+    )
+    mock_proc.stdout = AsyncMock()
+    mock_proc.stdout.readline = AsyncMock(side_effect=[init_resp, rate_resp, b""])
+    mock_proc.kill = MagicMock()
+    mock_proc.wait = AsyncMock()
 
     with (
         patch("shutil.which", return_value="/usr/local/bin/codex"),
@@ -35,8 +57,7 @@ async def test_codex_adapter_probe_includes_skip_git_repo_check():
         assert res is True
         mock_exec.assert_called_once()
         args = mock_exec.call_args[0]
-        assert "--skip-git-repo-check" in args
-        assert "--ephemeral" in args
+        assert args == ("/usr/local/bin/codex", "app-server", "--stdio")
 
 
 def test_codex_adapter_extracts_auth_error_signal():
@@ -88,6 +109,7 @@ async def test_expensive_probe_gated_when_no_ready_work(in_memory_uow):
 
     with patch("minime.services.provider_health_service.get_provider_adapter") as mock_get_adapter:
         mock_adapter = MagicMock()
+        mock_adapter.supports_read_only_capacity_observation = False
         mock_adapter.check_cli_present = AsyncMock(return_value=True)
         mock_adapter.check_auth_ready = AsyncMock(return_value=True)
         mock_adapter.probe_is_expensive = True
@@ -140,6 +162,7 @@ async def test_expensive_probe_runs_when_actionable_ready_work_exists(in_memory_
 
     with patch("minime.services.provider_health_service.get_provider_adapter") as mock_get_adapter:
         mock_adapter = MagicMock()
+        mock_adapter.supports_read_only_capacity_observation = False
         mock_adapter.check_cli_present = AsyncMock(return_value=True)
         mock_adapter.check_auth_ready = AsyncMock(return_value=True)
         mock_adapter.probe_is_expensive = True
@@ -221,6 +244,7 @@ async def test_auth_401_transitions_health_to_auth_required(in_memory_uow, tmp_p
 
     with patch("minime.services.provider_health_service.get_provider_adapter") as mock_get_adapter:
         mock_adapter = MagicMock()
+        mock_adapter.supports_read_only_capacity_observation = False
         mock_adapter.check_cli_present = AsyncMock(return_value=True)
         mock_adapter.check_auth_ready = AsyncMock(return_value=True)
         mock_adapter.probe_is_expensive = True
@@ -326,6 +350,7 @@ async def test_subsequent_tick_bypasses_probing_when_auth_required(in_memory_uow
 
     with patch("minime.services.provider_health_service.get_provider_adapter") as mock_get_adapter:
         mock_adapter = MagicMock()
+        mock_adapter.supports_read_only_capacity_observation = False
         mock_adapter.check_cli_present = AsyncMock(return_value=True)
         mock_adapter.check_auth_ready = AsyncMock(return_value=True)
         mock_adapter.probe_is_expensive = True

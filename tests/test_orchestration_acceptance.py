@@ -10,13 +10,21 @@ Validates the full set of requirements:
 
 from __future__ import annotations
 
+import hashlib
+import json
+from datetime import timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from conftest import ReadinessGitHubStub, create_isolated_openspec_change
+from minime.adapters import provider_adapter
+from minime.adapters.provider_adapter import CapacityObservation, DeepSeekProviderAdapter
+from minime.config import AppConfig, ProjectConfig, ProviderConfig, StageProfileConfig
 from minime.domain.enums import (
+    CapacitySignalSource,
     ExternalOutcome,
     ExternalReasonCode,
     HumanGate,
@@ -26,22 +34,99 @@ from minime.domain.enums import (
     ProviderHealthStatus,
     ReadinessState,
     RetrySafety,
+    ReviewStatus,
 )
 from minime.domain.interfaces import GitHubAdapterInterface
 from minime.domain.models import (
     CheckResult,
     Event,
     ExternalActionResult,
+    OpenRouterPricingSnapshot,
     Project,
     ProjectBinding,
     ProviderHealth,
+    utc_now,
 )
 from minime.services.checks_runner import ChecksRunResult
+from minime.services.contract_review_service import (
+    DeepSeekResponseDiagnostics,
+    DeepSeekReviewResponse,
+)
 from minime.services.deepseek_auditor_runner import MockAuditorRunner
+from minime.services.deepseek_code_review_service import DeepSeekCodeReviewService
 from minime.services.execution_pipeline import ExecutionPipelineService
 from minime.services.implementer_runner import ImplementerResult, MockImplementerRunner
 from minime.services.orchestration_service import OrchestrationService
 from minime.services.reviewer_runner import MockReviewerRunner
+
+
+class _AcceptanceDeepSeekAdapter(DeepSeekProviderAdapter):
+    @property
+    def account_fingerprint(self):
+        return hashlib.sha256(b"acceptance-deepseek-account").hexdigest()
+
+    async def check_model_supported(self, model, effort=None, timeout_seconds=10.0):
+        del timeout_seconds
+        return (model == "deepseek-chat" and effort == "low", None)
+
+    async def read_capacity_observation(self, timeout_seconds=10.0, selected_model=None):
+
+        del timeout_seconds
+        now = utc_now()
+        return CapacityObservation(
+            provider="deepseek",
+            ordinary_usage_allowed=True,
+            observed_at=now,
+            expires_at=now + timedelta(seconds=60),
+            source_signal=CapacitySignalSource.DEEPSEEK_ACCOUNT_BALANCE,
+            account_id=self.account_fingerprint,
+            model=selected_model or "deepseek-chat",
+            quota_scope="deepseek_direct_account_balance",
+        )
+
+
+class _AcceptanceReviewTransport:
+    model = "deepseek-chat"
+    effort = "low"
+    review_stage = "CODE_REVIEW"
+
+    def __init__(self):
+        self.calls = 0
+
+    async def review(self, request: str, timeout_seconds: int):
+        del timeout_seconds
+        payload = json.loads(request)
+        assert payload["stage"] == "CODE_REVIEW"
+        self.calls += 1
+        content = json.dumps(
+            {
+                "verdict": "READY_TO_MERGE",
+                "summary": "Acceptance review passed.",
+                "findings": [],
+            }
+        )
+        return DeepSeekReviewResponse(
+            exit_code=0,
+            content=content,
+            model=self.model,
+            prompt_tokens=100,
+            completion_tokens=20,
+            response_diagnostics=DeepSeekResponseDiagnostics(
+                http_status=200,
+                returned_model=self.model,
+                model_matches_request=True,
+                choices_count=1,
+                finish_reason="stop",
+                content_present=True,
+                content_type="str",
+                content_length=len(content),
+                usage_present=True,
+                prompt_tokens=100,
+                completion_tokens=20,
+                total_tokens=120,
+                usage_valid=True,
+            ),
+        )
 
 
 class DeterministicGitHubAdapter(GitHubAdapterInterface):
@@ -186,6 +271,8 @@ class AcceptanceChecksRunner:
         worktree_path: str | Path,
         candidate_sha: str = "",
         attempt_id: str | None = None,
+        candidate_generation: int | None = None,
+        **kwargs,
     ) -> ChecksRunResult:
         exit_code = 0 if self.should_pass else 1
         res = CheckResult(
@@ -200,13 +287,14 @@ class AcceptanceChecksRunner:
 
 
 @pytest.fixture
-def setup_acceptance_env(tmp_path: Path, in_memory_uow):
+def setup_acceptance_env(tmp_path: Path, in_memory_uow, monkeypatch, test_capacity_strategy):
     import subprocess
 
     from conftest import setup_managed_repository_fixture
 
     project_id = "mini-me"
     change_name = "008-autonomous-change-orchestration"
+    test_capacity_strategy(("codex", "antigravity"))
 
     setup_managed_repository_fixture(
         in_memory_uow,
@@ -227,6 +315,8 @@ def setup_acceptance_env(tmp_path: Path, in_memory_uow):
         openspec_path="openspec",
         implementer="codex",
         reviewer="antigravity",
+        external_providers_allowed=["codex", "antigravity", "deepseek"],
+        independent_audit_required=True,
         status=ProjectStatus.ACTIVE,
         checks=[{"name": "pytest", "command": "pytest"}],
     )
@@ -247,6 +337,52 @@ def setup_acceptance_env(tmp_path: Path, in_memory_uow):
     in_memory_uow.provider_health.save(
         ProviderHealth(provider="antigravity", status=ProviderHealthStatus.AVAILABLE)
     )
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-only-acceptance-key")
+    review_adapter = _AcceptanceDeepSeekAdapter()
+    review_transport = _AcceptanceReviewTransport()
+    monkeypatch.setitem(provider_adapter._ADAPTER_REGISTRY, "deepseek", review_adapter)
+    app_config = AppConfig(
+        providers={
+            "deepseek": ProviderConfig(
+                type="api", enabled=True, budget={"maximum_code_review_usd": "1.00"}
+            )
+        },
+        projects={
+            project_id: ProjectConfig(
+                repository="silverberdi/mini-me",
+                base_branch="main",
+                openspec_path="openspec",
+                external_providers_allowed=["codex", "antigravity", "deepseek"],
+                stage_profiles={
+                    "REVIEW": StageProfileConfig(
+                        provider="deepseek",
+                        model="deepseek-chat",
+                        effort="low",
+                        workflow="review",
+                    )
+                },
+            )
+        },
+    )
+    monkeypatch.setattr("minime.services.execution_pipeline.load_config", lambda: app_config)
+    monkeypatch.setattr("minime.services.control_plane_service.load_config", lambda: app_config)
+    monkeypatch.setattr(
+        "minime.services.deepseek_code_review_service.load_config", lambda: app_config
+    )
+    pricing = OpenRouterPricingSnapshot(
+        id="acceptance-code-review-price",
+        canonical_model_identity="deepseek-chat",
+        routed_model_identity="deepseek-chat",
+        prompt_price_per_token=Decimal("0.000001"),
+        output_price_per_token=Decimal("0.000001"),
+        currency="USD",
+        source="deepseek_official_pricing",
+        provider="deepseek",
+        account_fingerprint=review_adapter.account_fingerprint,
+        billing_origin="deepseek_direct",
+    )
+    in_memory_uow.pricing_snapshots.save(pricing)
 
     create_isolated_openspec_change(
         tmp_path,
@@ -272,7 +408,15 @@ def setup_acceptance_env(tmp_path: Path, in_memory_uow):
         )
     )
 
-    return {"project_id": project_id, "change_name": change_name, "project_root": tmp_path}
+    return {
+        "project_id": project_id,
+        "change_name": change_name,
+        "project_root": tmp_path,
+        "app_config": app_config,
+        "review_adapter": review_adapter,
+        "review_transport": review_transport,
+        "review_pricing": pricing,
+    }
 
 
 def test_acceptance_successful_end_to_end_orchestration(setup_acceptance_env, in_memory_uow):
@@ -293,6 +437,11 @@ def test_acceptance_successful_end_to_end_orchestration(setup_acceptance_env, in
         auditor_runner=MockAuditorRunner(
             output=['{"risk": "low", "summary": "Passed", "findings": []}']
         ),
+        code_review_service=DeepSeekCodeReviewService(
+            in_memory_uow,
+            runner=env["review_transport"],
+            app_config=env["app_config"],
+        ),
     )
 
     service = OrchestrationService(
@@ -304,18 +453,31 @@ def test_acceptance_successful_end_to_end_orchestration(setup_acceptance_env, in
 
     run = service.start(env["project_id"], env["change_name"])
 
-    # Must end at PR_PREPARED stage
+    # Autonomous orchestration reaches READY_FOR_HUMAN_MERGE with a frozen candidate,
+    # completed DeepSeek code review under owner policy, and reconciled remote Draft PR.
     assert run.current_stage == OrchestrationStage.PR_PREPARED
-    # Stop outcome must be READY_FOR_HUMAN_MERGE
     assert run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
-    # Human gate must be READY_FOR_HUMAN_MERGE
     assert run.human_gate == HumanGate.READY_FOR_HUMAN_MERGE
-    # Active must be False
     assert run.is_active is False
+
+    job = in_memory_uow.jobs.get_by_id(run.active_job_id)
+    candidate = in_memory_uow.orchestration_candidates.get_latest_for_run(run.run_id)
+    assert job and candidate and candidate.is_frozen
+    assert candidate.candidate_sha == run.current_candidate_sha == job.candidate_sha
+
+    review = in_memory_uow.reviews.get_by_job_stage(job.job_id, "CODE_REVIEW")
+    assert review and review.status == ReviewStatus.REVIEW_COMPLETED
+    assert review.candidate_sha == run.current_candidate_sha
+    assert env["review_transport"].calls == 1
+    reservation = in_memory_uow.budget_reservations.get_by_id(review.budget_reservation_id)
+    assert reservation and reservation.status == "SETTLED"
+
     # Remote PR created in status view
     status_view = service.get_status(run.run_id)
     assert status_view.pr_url is not None
     assert "github.com/silverberdi/mini-me/pull" in status_view.pr_url
+    published_pr = next(iter(fake_github.prs.values()))
+    assert published_pr["head_sha"] == run.current_candidate_sha
 
 
 def test_acceptance_duplicate_active_run_refused(setup_acceptance_env, in_memory_uow):
