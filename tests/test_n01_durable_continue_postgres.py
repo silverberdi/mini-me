@@ -1921,9 +1921,10 @@ def test_postgres_continue_adopts_created_recovery_worktree_and_repairs_only_fin
 
 
 def test_postgres_continue_accepts_only_recovery_evidenced_incomplete_premature_stop(
-    isolated_pg_session_factory, tmp_path: Path, monkeypatch
+    isolated_pg_session_factory, tmp_path: Path, monkeypatch, test_capacity_strategy
 ):
     """One canonical CONTINUE emits recovery evidence and adopts the same CREATED worktree."""
+    test_capacity_strategy(("codex", "antigravity"))
     from datetime import timedelta
 
     from conftest import publish_verified_intake_workspace, setup_managed_repository_fixture

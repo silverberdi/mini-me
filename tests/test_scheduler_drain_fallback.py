@@ -61,6 +61,25 @@ def _make_test_claim_context(uow=None):
     )
 
 
+class _AcceptedContractReview:
+    """Explicitly seed accepted contract review prerequisite for later-stage testing."""
+
+    async def review_before_apply(self, project, run, job, workspace_path, *, claim_context=None):
+        del project, run, job, workspace_path, claim_context
+        from minime.services.contract_review_service import ContractReviewResult
+
+        return ContractReviewResult(
+            accepted=True,
+            review_id="test-accepted-contract-review",
+            contract_hash="test-contract-sha256",
+        )
+
+
+@pytest.fixture(autouse=True)
+def setup_exhausted_primaries(test_capacity_strategy):
+    test_capacity_strategy({"codex": False, "antigravity": False, "deepseek": True})
+
+
 class GitFakeWorktreeManager:
     """Mock WorktreeManager that initializes a genuine lightweight git repo."""
 
@@ -403,6 +422,17 @@ async def test_fallback_implementer_execution_flow(in_memory_uow, tmp_path):
         status=JobStatus.RUNNING,
     )
     in_memory_uow.jobs.save(job)
+    run = OrchestrationRun(
+        run_id=f"run-{change_name}",
+        project_id=project.project_id,
+        change_name=change_name,
+        base_sha="0" * 40,
+        current_stage=OrchestrationStage.IMPLEMENTING,
+        resumable_stage=OrchestrationStage.IMPLEMENTING,
+        is_active=True,
+        active_job_id=job.job_id,
+    )
+    in_memory_uow.orchestration_runs.save(run)
     in_memory_uow.commit()
 
     mock_openrouter = MockOpenRouterAdapter(
@@ -433,6 +463,7 @@ async def test_fallback_implementer_execution_flow(in_memory_uow, tmp_path):
         project_root=tmp_path,
         worktree_manager=GitFakeWorktreeManager(tmp_path),
         openrouter_adapter=mock_openrouter,
+        contract_review_service=_AcceptedContractReview(),
         auditor_runner=MockAuditorRunner(
             output=[json.dumps({"risk": "low", "summary": "Audit passed cleanly", "findings": []})]
         ),
@@ -639,6 +670,17 @@ async def test_atomic_reservation_denial_prevents_http_dispatch(in_memory_uow, t
         status=JobStatus.RUNNING,
     )
     in_memory_uow.jobs.save(job)
+    run = OrchestrationRun(
+        run_id="run-denied-change",
+        project_id=project.project_id,
+        change_name="denied-change",
+        base_sha="0" * 40,
+        current_stage=OrchestrationStage.IMPLEMENTING,
+        resumable_stage=OrchestrationStage.IMPLEMENTING,
+        is_active=True,
+        active_job_id=job.job_id,
+    )
+    in_memory_uow.orchestration_runs.save(run)
     in_memory_uow.commit()
 
     mock_adapter = MockOpenRouterAdapter()
@@ -647,6 +689,7 @@ async def test_atomic_reservation_denial_prevents_http_dispatch(in_memory_uow, t
         project_root=tmp_path,
         worktree_manager=GitFakeWorktreeManager(tmp_path),
         openrouter_adapter=mock_adapter,
+        contract_review_service=_AcceptedContractReview(),
         auditor_runner=MockAuditorRunner(),
     )
 
@@ -691,6 +734,17 @@ async def test_missing_verified_pricing_snapshot_denies_fallback_with_zero_http(
         status=JobStatus.RUNNING,
     )
     in_memory_uow.jobs.save(job)
+    run = OrchestrationRun(
+        run_id=f"run-{change_name}",
+        project_id=project.project_id,
+        change_name=change_name,
+        base_sha="0" * 40,
+        current_stage=OrchestrationStage.IMPLEMENTING,
+        resumable_stage=OrchestrationStage.IMPLEMENTING,
+        is_active=True,
+        active_job_id=job.job_id,
+    )
+    in_memory_uow.orchestration_runs.save(run)
     in_memory_uow.commit()
 
     mock_adapter = MockOpenRouterAdapter()
@@ -699,6 +753,7 @@ async def test_missing_verified_pricing_snapshot_denies_fallback_with_zero_http(
         project_root=tmp_path,
         worktree_manager=GitFakeWorktreeManager(tmp_path),
         openrouter_adapter=mock_adapter,
+        contract_review_service=_AcceptedContractReview(),
         auditor_runner=MockAuditorRunner(),
     )
 
@@ -764,6 +819,17 @@ async def test_unverified_pinned_default_snapshot_in_db_denies_fallback_with_zer
         status=JobStatus.RUNNING,
     )
     in_memory_uow.jobs.save(job)
+    run = OrchestrationRun(
+        run_id=f"run-{change_name}",
+        project_id=project.project_id,
+        change_name=change_name,
+        base_sha="0" * 40,
+        current_stage=OrchestrationStage.IMPLEMENTING,
+        resumable_stage=OrchestrationStage.IMPLEMENTING,
+        is_active=True,
+        active_job_id=job.job_id,
+    )
+    in_memory_uow.orchestration_runs.save(run)
     in_memory_uow.commit()
 
     mock_adapter = MockOpenRouterAdapter()
@@ -772,6 +838,7 @@ async def test_unverified_pinned_default_snapshot_in_db_denies_fallback_with_zer
         project_root=tmp_path,
         worktree_manager=GitFakeWorktreeManager(tmp_path),
         openrouter_adapter=mock_adapter,
+        contract_review_service=_AcceptedContractReview(),
         auditor_runner=MockAuditorRunner(),
     )
 
@@ -780,8 +847,10 @@ async def test_unverified_pinned_default_snapshot_in_db_denies_fallback_with_zer
     # 1. Zero HTTP dispatched
     assert len(mock_adapter.calls) == 0
 
-    # 2. Job paused in WAITING_CAPACITY because pinned_default cannot authorize spend
-    assert result_job.status == JobStatus.WAITING_CAPACITY
+    assert result_job.status == JobStatus.WAITING_CAPACITY, (
+        result_job.status,
+        result_job.error_message,
+    )
     assert "PRICING_SNAPSHOT_MISSING" in result_job.capacity_block_reason
 
 
@@ -866,6 +935,7 @@ def test_drain_resume_continues_inflight_job_through_real_runtime(in_memory_uow,
         project_root=tmp_path,
         worktree_manager=GitFakeWorktreeManager(tmp_path),
         openrouter_adapter=mock_openrouter,
+        contract_review_service=_AcceptedContractReview(),
         auditor_runner=MockAuditorRunner(
             output=[json.dumps({"risk": "low", "summary": "ok", "findings": []})]
         ),
@@ -877,8 +947,6 @@ def test_drain_resume_continues_inflight_job_through_real_runtime(in_memory_uow,
     claim_ctx = rec_svc.acquire_claim(f"run:{run.run_id}")
     orch.resume(run.run_id, project_root=tmp_path, drain_mode=True, claim_context=claim_ctx)
 
-    # The real continuation advanced: OpenRouter fallback was actually invoked
-    # through the pipeline (not a mocked resume()).
     assert len(mock_openrouter.calls) >= 1
 
     resumed = in_memory_uow.orchestration_runs.get_by_id(run.run_id)

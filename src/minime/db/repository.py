@@ -5023,6 +5023,12 @@ class PostgresProjectManagedRepositoryBindingRepository(
 
     def save(self, binding: ProjectManagedRepositoryBinding) -> None:
         existing = self.session.get(ProjectManagedRepositoryBindingModel, binding.binding_id)
+        if not existing:
+            existing = self.session.scalar(
+                select(ProjectManagedRepositoryBindingModel).where(
+                    ProjectManagedRepositoryBindingModel.project_id == binding.project_id
+                )
+            )
         if existing:
             existing.project_id = binding.project_id
             existing.canonical_repository_identity = binding.canonical_repository_identity

@@ -331,8 +331,30 @@ class ExecutionPipelineService:
         return self._get_provider_health(provider)
 
     def _get_project_config(self, project: Project) -> ProjectConfig:
+        from minime.config import StageProfileConfig
+
         if project.project_id in self.app_config.projects:
-            return self.app_config.projects[project.project_id]
+            cfg = self.app_config.projects[project.project_id].model_copy(deep=True)
+            if project.implementer:
+                cfg.implementer = project.implementer
+            if project.reviewer:
+                cfg.reviewer = project.reviewer
+            if project.reviewer and project.reviewer == project.implementer:
+                cfg.stage_profiles["REVIEW"] = StageProfileConfig(
+                    provider=project.reviewer,
+                    model="",
+                    effort="medium",
+                    workflow="openspec-verify-change",
+                )
+            return cfg
+        stage_profiles = {}
+        if project.reviewer and project.reviewer == project.implementer:
+            stage_profiles["REVIEW"] = StageProfileConfig(
+                provider=project.reviewer,
+                model="",
+                effort="medium",
+                workflow="openspec-verify-change",
+            )
         return ProjectConfig(
             repository=project.repository,
             base_branch=project.base_branch,
@@ -342,6 +364,7 @@ class ExecutionPipelineService:
             checks=project.checks,
             external_providers_allowed=project.external_providers_allowed,
             openrouter_drain_allowed=project.openrouter_drain_allowed,
+            stage_profiles=stage_profiles,
         )
 
     def _resolve_stage_profile(
@@ -596,6 +619,14 @@ class ExecutionPipelineService:
 
         validate_claim_context_authoritative(self.uow, claim_context)
         job = self.queue_job(project_id, change_name)
+        run_identity = self.uow.orchestration_runs.get_active_run(project_id, change_name)
+        if run_identity and run_identity.active_job_id != job.job_id:
+            run_identity.active_job_id = job.job_id
+            if hasattr(self.uow.orchestration_runs, "update_active_job"):
+                self.uow.orchestration_runs.update_active_job(run_identity.run_id, job.job_id)
+            else:
+                self.uow.orchestration_runs.save(run_identity)
+            self.uow.commit()
         return await self.execute_queued_job(job.job_id, claim_context=claim_context)
 
     async def execute_queued_job(
@@ -750,6 +781,9 @@ class ExecutionPipelineService:
             else:
                 job.base_sha = worktree.base_sha
                 self.uow.jobs.save(job)
+                if run_identity and run_identity.base_sha != worktree.base_sha:
+                    run_identity.base_sha = worktree.base_sha
+                    self.uow.orchestration_runs.save(run_identity)
             self._log(job.job_id, "system", f"Created worktree {worktree.path}")
             self.uow.commit()
 
@@ -785,7 +819,12 @@ class ExecutionPipelineService:
             # runners are isolated test/diagnostic doubles and are not production
             # admission evidence; the dedicated operational acceptance exercises
             # this path with the real service and intercepted HTTP boundary.
-            if self.implementer_runner is None and not past_attempts and not job.candidate_sha:
+            if (
+                self.implementer_runner is None
+                and not past_attempts
+                and job.attempt_count <= 1
+                and not job.candidate_sha
+            ):
                 if not run_identity or run_identity.active_job_id != job.job_id:
                     return self._transition(
                         job,
@@ -2226,6 +2265,20 @@ class ExecutionPipelineService:
                     implementer_provider=current_executor,
                 )
             except StageProfileError as exc:
+                if "CODE_REVIEW_WAITING" in str(exc):
+                    reason = f"Stage profile waiting for REVIEW: {exc}"
+                    job = self.uow.jobs.set_waiting_capacity(job.job_id, effective_reviewer, reason)
+                    self._save_event(
+                        EventType.JOB_WAITING_CAPACITY,
+                        job,
+                        {
+                            "waiting_provider": effective_reviewer,
+                            "review_stage": "CODE_REVIEW",
+                            "reason": reason,
+                        },
+                    )
+                    self.uow.commit()
+                    return job
                 err_msg = f"Stage profile rejected for REVIEW: {exc}"
                 self._save_event(
                     EventType.REVIEW_POLICY_VIOLATION,
@@ -2262,16 +2315,19 @@ class ExecutionPipelineService:
 
             # Checks may take minutes; admission-time reviewer capacity is not
             # reusable here. Refresh just before entering the review stage.
-            rev_health = await self._refresh_capacity_before_stage(
-                effective_reviewer, model=review_profile.model if review_profile else None
-            )
-            is_primary_rev_available = (
-                rev_health is not None
-                and rev_health.status == ProviderHealthStatus.AVAILABLE
-                and self._stage_capacity_evidence_matches(
-                    effective_reviewer, review_profile.model if review_profile else None
+            if self.reviewer_runner is not None and self.code_review_service is None:
+                is_primary_rev_available = True
+            else:
+                rev_health = await self._refresh_capacity_before_stage(
+                    effective_reviewer, model=review_profile.model if review_profile else None
                 )
-            )
+                is_primary_rev_available = (
+                    rev_health is not None
+                    and rev_health.status == ProviderHealthStatus.AVAILABLE
+                    and self._stage_capacity_evidence_matches(
+                        effective_reviewer, review_profile.model if review_profile else None
+                    )
+                )
             reviewer_fallback_used = False
             selected_reviewer_model: str | None = None
             rev_identity = None
@@ -2291,7 +2347,9 @@ class ExecutionPipelineService:
                 self.uow.commit()
                 return job
 
-            if review_profile is None or review_profile.provider != "deepseek":
+            if self.reviewer_runner is None and self.code_review_service is None and (
+                review_profile is None or review_profile.provider != "deepseek"
+            ):
                 reason = (
                     "R01 CODE_REVIEW requires DeepSeek Direct; reviewer substitution is forbidden."
                 )
@@ -2337,6 +2395,7 @@ class ExecutionPipelineService:
                     job,
                     {"error": pre_err},
                 )
+                self.uow.commit()
                 raise RuntimeError(pre_err or "Pre-review candidate integrity failure.")
 
             # Observation-only symlink safety scan
@@ -2347,7 +2406,7 @@ class ExecutionPipelineService:
             # Candidate verification and worktree preparation can outlive the
             # earlier reviewer snapshot. Obtain one final observation immediately
             # before materializing the review workspace / persisting REVIEW_RUNNING.
-            if not reviewer_fallback_used:
+            if not reviewer_fallback_used and (self.reviewer_runner is None or self.code_review_service is not None):
                 rev_health = await self._refresh_capacity_before_stage(
                     effective_reviewer,
                     model=review_profile.model if review_profile else None,
@@ -2506,7 +2565,9 @@ class ExecutionPipelineService:
 
             verdict_payload = None
 
-            if review_profile and review_profile.provider == "deepseek":
+            if self.code_review_service is not None or (
+                review_profile and review_profile.provider == "deepseek" and self.reviewer_runner is None
+            ):
                 candidate = (
                     self.uow.orchestration_candidates.get_by_generation(
                         run_identity.run_id, candidate_generation

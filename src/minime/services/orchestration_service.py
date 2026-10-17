@@ -906,6 +906,7 @@ class OrchestrationService:
         current_base, base_error = resolve_base_branch_sha(root, project.base_branch)
         if not current_base:
             raise ValueError(base_error or "Current registered base could not be resolved.")
+        integrated_and_checked = False
         if current_base != candidate.base_sha:
             next_generation = candidate.generation + 1
             resolution_identity = {
@@ -1083,6 +1084,7 @@ class OrchestrationService:
             # Successful integration continues through the common authority reset below.
             candidate = self.uow.orchestration_candidates.get_latest_for_run(run_id) or candidate
             current_base = candidate.base_sha
+            integrated_and_checked = True
 
         resolution_identity = {
             "run_id": run_id,
@@ -1105,39 +1107,41 @@ class OrchestrationService:
         if existing:
             return self.uow.orchestration_runs.get_by_id(run_id) or run
 
-        # Reopen the preserved branch in a managed worktree solely for a fresh
-        # authoritative check run.  No implementer stage is invoked.
-        manager = self.pipeline.worktree_manager
-        worktree = run_coroutine_sync(
-            manager.create_worktree(
-                job.job_id,
-                run.change_name,
-                project.base_branch,
-                project_id=run.project_id,
-                branch_name=candidate.candidate_ref.removeprefix("refs/heads/"),
-                run_id=run_id,
-            )
-        )
-        try:
-            check_run = run_coroutine_sync(
-                self.pipeline.checks_runner.run(
+        if not integrated_and_checked:
+            # Reopen the preserved branch in a managed worktree solely for a fresh
+            # authoritative check run.  No implementer stage is invoked.
+            manager = self.pipeline.worktree_manager
+            worktree = run_coroutine_sync(
+                manager.create_worktree(
                     job.job_id,
-                    project.checks,
-                    worktree.path,
-                    candidate_sha=candidate.candidate_sha,
-                    candidate_generation=candidate.generation,
+                    run.change_name,
+                    project.base_branch,
+                    project_id=run.project_id,
+                    branch_name=candidate.candidate_ref.removeprefix("refs/heads/"),
+                    run_id=run_id,
+                    allow_reopen=True,
                 )
             )
-            for result in check_run.results:
-                self.uow.check_results.save(result)
-            for diagnostic in check_run.diagnostics:
-                self.uow.evidence_diagnostics.save(diagnostic)
-            if not check_run.passed:
+            try:
+                check_run = run_coroutine_sync(
+                    self.pipeline.checks_runner.run(
+                        job.job_id,
+                        project.checks,
+                        worktree.path,
+                        candidate_sha=candidate.candidate_sha,
+                        candidate_generation=candidate.generation,
+                    )
+                )
+                for result in check_run.results:
+                    self.uow.check_results.save(result)
+                for diagnostic in check_run.diagnostics:
+                    self.uow.evidence_diagnostics.save(diagnostic)
+                if not check_run.passed:
+                    self.uow.flush()
+                    raise ValueError("Preserved candidate deterministic checks failed.")
                 self.uow.flush()
-                raise ValueError("Preserved candidate deterministic checks failed.")
-            self.uow.flush()
-        finally:
-            run_coroutine_sync(manager.remove_clean_worktree(job.job_id, project_id=run.project_id))
+            finally:
+                run_coroutine_sync(manager.remove_clean_worktree(job.job_id, project_id=run.project_id))
 
         run.stop_outcome = None
         run.human_gate = None

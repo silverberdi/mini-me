@@ -3029,6 +3029,7 @@ class WorktreeManager:
         branch_name: str | None = None,
         reuse_existing: bool = False,
         run_id: str | None = None,
+        allow_reopen: bool = False,
     ) -> WorktreeInfo:
         requested_path = self.worktree_path(job_id, project_id)
         if requested_path.is_symlink():
@@ -3089,7 +3090,7 @@ class WorktreeManager:
             or durable_candidate
         )
 
-        if candidate_evidence_present:
+        if candidate_evidence_present and not allow_reopen:
             if not reuse_existing:
                 raise RuntimeError(
                     "Candidate worktree adoption denied: a persisted candidate cannot create a replacement worktree."
@@ -3128,7 +3129,7 @@ class WorktreeManager:
         recreation_source_base = None
         recovery_snapshot_sha = None
         recovery_event_candidate = False
-        if historical_ownership and historical_ownership.creation_state in {
+        if not allow_reopen and historical_ownership and historical_ownership.creation_state in {
             WorktreeCreationState.DELETED,
             WorktreeCreationState.CREATED,
         }:
@@ -3253,13 +3254,21 @@ class WorktreeManager:
 
         # 4. Write marker, prove postconditions, and transition to CREATED
         self._write_ownership_marker(path, ownership)
-        await self._verify_creation_postconditions(
-            path,
-            ownership,
-            expected_branch=branch_name,
-            expected_base_sha=recreation_source_base or base_sha,
-            expected_head_sha=recovered_head_sha,
-        )
+        if recovered_head_sha:
+            await self._verify_creation_postconditions(
+                path,
+                ownership,
+                expected_branch=branch_name,
+                expected_base_sha=recreation_source_base or base_sha,
+                expected_head_sha=recovered_head_sha,
+            )
+        else:
+            await self._verify_creation_postconditions(
+                path,
+                ownership,
+                expected_branch=branch_name,
+                expected_base_sha=None if branch_exists else (recreation_source_base or base_sha),
+            )
         self._finalize_created_ownership(ownership)
 
         await self._materialize_verified_published_intake_artifacts(

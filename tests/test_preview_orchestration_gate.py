@@ -40,6 +40,7 @@ def mock_uow():
     uow.claims = None
     uow.projects = MagicMock()
     uow.orchestration_runs = MagicMock()
+    uow.orchestration_runs.get_for_update.side_effect = lambda run_id: uow.orchestration_runs.get_by_id(run_id)
     uow.orchestration_candidates = MagicMock()
     uow.preview_sessions = MagicMock()
     uow.validation_runs = MagicMock()

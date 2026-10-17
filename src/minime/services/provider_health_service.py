@@ -561,33 +561,34 @@ class ProviderHealthService:
             elif outcome.capacity_reset_at:
                 signal_source = CapacitySignalSource.RESPONSE_BODY_TIMESTAMP
 
-            window = CapacityWindow(
-                provider=outcome.provider,
-                model=outcome.model,
-                quota_exhausted_at=now,
-                capacity_reset_at=outcome.capacity_reset_at,
-                retry_after_seconds=retry_secs,
-                source_signal=signal_source,
-                created_at=now,
-            )
-            self.uow.capacity_windows.save(window)
-
-            self.uow.events.save(
-                Event(
-                    event_type=EventType.PRIMARY_CAPACITY_EXHAUSTED,
-                    payload={
-                        "provider": outcome.provider,
-                        "role": outcome.role,
-                        "result_class": outcome.result_class.value,
-                        "capacity_reset_at": outcome.capacity_reset_at.isoformat()
-                        if outcome.capacity_reset_at
-                        else None,
-                        "retry_after_seconds": retry_secs,
-                        "summary": outcome.summary,
-                    },
-                    timestamp=now,
+            if outcome.provider in PRIMARY_PROVIDERS:
+                window = CapacityWindow(
+                    provider=outcome.provider,
+                    model=outcome.model,
+                    quota_exhausted_at=now,
+                    capacity_reset_at=outcome.capacity_reset_at,
+                    retry_after_seconds=retry_secs,
+                    source_signal=signal_source,
+                    created_at=now,
                 )
-            )
+                self.uow.capacity_windows.save(window)
+
+                self.uow.events.save(
+                    Event(
+                        event_type=EventType.PRIMARY_CAPACITY_EXHAUSTED,
+                        payload={
+                            "provider": outcome.provider,
+                            "role": outcome.role,
+                            "result_class": outcome.result_class.value,
+                            "capacity_reset_at": outcome.capacity_reset_at.isoformat()
+                            if outcome.capacity_reset_at
+                            else None,
+                            "retry_after_seconds": retry_secs,
+                            "summary": outcome.summary,
+                        },
+                        timestamp=now,
+                    )
+                )
             self.uow.commit()
             return new_health
 

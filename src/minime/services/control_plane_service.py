@@ -540,29 +540,36 @@ class ControlPlaneService:
             )
         )
 
+        candidates_repo = getattr(self.uow, "orchestration_candidates", None)
+        manifests_repo = getattr(self.uow, "candidate_manifests", None)
+        check_results_repo = getattr(self.uow, "check_results", None)
+        reviews_repo = getattr(self.uow, "reviews", None)
+
         code_candidate = (
-            self.uow.orchestration_candidates.get_by_generation(run.run_id, run.current_generation)
-            if job
+            candidates_repo.get_by_generation(run.run_id, run.current_generation)
+            if job and candidates_repo
             else None
         )
         code_manifest = (
-            self.uow.candidate_manifests.get_by_id(code_candidate.manifest_id)
-            if code_candidate and code_candidate.manifest_id
+            manifests_repo.get_by_id(code_candidate.manifest_id)
+            if code_candidate and code_candidate.manifest_id and manifests_repo
             else None
         )
         check_evidence = (
             [
                 check
-                for check in self.uow.check_results.list_by_job(job.job_id)
+                for check in check_results_repo.list_by_job(job.job_id)
                 if check.candidate_sha == code_candidate.candidate_sha
                 and check.candidate_generation == code_candidate.generation
                 and check.exit_code == 0
             ]
-            if job and code_candidate
+            if job and code_candidate and check_results_repo
             else []
         )
         prior_code_review = (
-            self.uow.reviews.get_by_job_stage(job.job_id, "CODE_REVIEW") if job else None
+            reviews_repo.get_by_job_stage(job.job_id, "CODE_REVIEW")
+            if job and reviews_repo
+            else None
         )
         code_review_slot_open = bool(
             prior_code_review is None
@@ -728,7 +735,8 @@ class ControlPlaneService:
         ):
             return False
 
-        latest_candidate = self.uow.orchestration_candidates.get_latest_for_run(run.run_id)
+        candidates_repo = getattr(self.uow, "orchestration_candidates", None)
+        latest_candidate = candidates_repo.get_latest_for_run(run.run_id) if candidates_repo else None
         if latest_candidate:
             return False
 
@@ -1376,14 +1384,16 @@ class ControlPlaneService:
     ) -> OperatorActionResult:
         """Authorize one bounded review for a specific frozen candidate only."""
         job = self.uow.jobs.get_by_id(run.active_job_id) if run.active_job_id else None
+        candidates_repo = getattr(self.uow, "orchestration_candidates", None)
+        manifests_repo = getattr(self.uow, "candidate_manifests", None)
         candidate = (
-            self.uow.orchestration_candidates.get_by_generation(run.run_id, run.current_generation)
-            if job
+            candidates_repo.get_by_generation(run.run_id, run.current_generation)
+            if job and candidates_repo
             else None
         )
         manifest = (
-            self.uow.candidate_manifests.get_by_id(candidate.manifest_id)
-            if candidate and candidate.manifest_id
+            manifests_repo.get_by_id(candidate.manifest_id)
+            if candidate and candidate.manifest_id and manifests_repo
             else None
         )
         passing_checks = (
@@ -1849,14 +1859,7 @@ class ControlPlaneService:
                 summary="Could not acquire the canonical run recovery claim for reassignment.",
                 sanitized_params=sanitized_params,
             )
-        from minime.domain.models import RecoveryClaimContext
-
-        claim_context = RecoveryClaimContext(
-            claim_key=claim.claim_key,
-            owner_instance_id=claim.owner_instance_id,
-            fence_token=claim.fence_token,
-            lease_expires_at=claim.lease_expires_at,
-        )
+        claim_context = claim
         committed = False
         try:
             current_job = self.uow.jobs.get_by_id(job.job_id)

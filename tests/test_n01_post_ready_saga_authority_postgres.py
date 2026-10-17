@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from minime.db.models import Base
 from minime.db.repository import PostgresPersistenceUnitOfWork
+from minime.db.session import EXPECTED_ALEMBIC_HEAD
 from minime.domain.enums import (
     ChangeStatus,
     ExternalActionStatus,
@@ -75,7 +76,7 @@ def isolated_pg_session_factory():
             "CREATE TABLE alembic_version (version_num VARCHAR(64) PRIMARY KEY)"
         )
         connection.exec_driver_sql(
-            "INSERT INTO alembic_version (version_num) VALUES ('g02_intake_workspace_isolation')"
+            f"INSERT INTO alembic_version (version_num) VALUES ('{EXPECTED_ALEMBIC_HEAD}')"
         )
     try:
         yield sessionmaker(bind=test_engine, autoflush=False, expire_on_commit=False)

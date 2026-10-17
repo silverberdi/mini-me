@@ -18,6 +18,7 @@ from minime.domain.enums import (
     ExternalOutcome,
     ExternalReasonCode,
     ProviderHealthStatus,
+    ProviderResultClass,
     QueuePriority,
     ReadinessState,
     RetrySafety,
@@ -29,6 +30,7 @@ from minime.domain.models import (
     ProjectBinding,
     ProviderHealth,
     WorkQueueItem,
+    utc_now,
 )
 from minime.services.readiness_service import ReadinessService
 from minime.services.scheduler_service import SchedulerService
@@ -59,12 +61,25 @@ def test_real_scheduler_multi_item_acceptance(
         canonical_repository_identity="github.com/silverberdi/mini-me",
     )
 
+    now = utc_now()
     in_memory_uow.provider_health.save(
-        ProviderHealth(health_id="ph-c", provider="codex", status=ProviderHealthStatus.AVAILABLE)
+        ProviderHealth(
+            health_id="ph-c",
+            provider="codex",
+            status=ProviderHealthStatus.AVAILABLE,
+            last_result_class=ProviderResultClass.SUCCESS,
+            last_success_at=now,
+            updated_at=now,
+        )
     )
     in_memory_uow.provider_health.save(
         ProviderHealth(
-            health_id="ph-a", provider="antigravity", status=ProviderHealthStatus.AVAILABLE
+            health_id="ph-a",
+            provider="antigravity",
+            status=ProviderHealthStatus.AVAILABLE,
+            last_result_class=ProviderResultClass.SUCCESS,
+            last_success_at=now,
+            updated_at=now,
         )
     )
 

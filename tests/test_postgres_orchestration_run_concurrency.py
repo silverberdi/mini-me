@@ -115,13 +115,26 @@ def pg_engine() -> Generator[Engine, None, None]:
     engine = create_engine(PG_TEST_URL, pool_size=10, max_overflow=20, pool_pre_ping=True)
     from sqlalchemy import text
 
+    from minime.db.session import EXPECTED_ALEMBIC_HEAD
+
     with engine.connect() as conn:
         conn.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public;"))
         conn.commit()
     Base.metadata.create_all(engine)
+    with engine.connect() as conn:
+        conn.execute(text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(64) PRIMARY KEY);"))
+        conn.execute(text("DELETE FROM alembic_version;"))
+        conn.execute(text(f"INSERT INTO alembic_version (version_num) VALUES ('{EXPECTED_ALEMBIC_HEAD}');"))
+        conn.commit()
     yield engine
     with engine.connect() as conn:
         conn.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public;"))
+        conn.commit()
+    Base.metadata.create_all(engine)
+    with engine.connect() as conn:
+        conn.execute(text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(64) PRIMARY KEY);"))
+        conn.execute(text("DELETE FROM alembic_version;"))
+        conn.execute(text(f"INSERT INTO alembic_version (version_num) VALUES ('{EXPECTED_ALEMBIC_HEAD}');"))
         conn.commit()
     engine.dispose()
 
@@ -741,12 +754,12 @@ def test_f18_resolve_preserved_candidate_concurrency(pg_session_factory: session
                 mgr = WorktreeManager(repo, uow=uow_w)
                 orig_verify = mgr._verify_creation_postconditions
 
-                async def _safe_verify(path, ownership, expected_branch, expected_base_sha=None):
+                async def _safe_verify(path, ownership, expected_branch, expected_base_sha=None, **kwargs):
                     try:
-                        await orig_verify(path, ownership, expected_branch, expected_base_sha)
+                        await orig_verify(path, ownership, expected_branch, expected_base_sha, **kwargs)
                     except RuntimeError as e:
                         if "does not match expected SHA" in str(e):
-                            await orig_verify(path, ownership, expected_branch, None)
+                            await orig_verify(path, ownership, expected_branch, None, **kwargs)
                         else:
                             raise
 

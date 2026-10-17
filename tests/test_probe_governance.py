@@ -134,6 +134,7 @@ async def test_successful_recovery_leaves_success_evidence(in_memory_uow, monkey
 async def test_repeated_scheduler_cycles_do_not_exceed_max_per_hour(in_memory_uow, monkeypatch):
     clock = _Clock()
     service = _service(in_memory_uow, clock, monkeypatch, max_per_hour=2)
+    in_memory_uow.provider_health._store.pop("antigravity", None)
     _setup_exhausted(service)
     adapter = _ExpensiveFake(name="codex", available=False)
     monkeypatch.setattr(

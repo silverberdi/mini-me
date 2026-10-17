@@ -2936,7 +2936,7 @@ def test_lightweight_reconciliation_missing_uow_fails_closed(tmp_dirs):
     tasks_dir = Path(tmp_dirs["repo_root"]) / "openspec" / "changes" / "rec-change"
     tasks_dir.mkdir(parents=True, exist_ok=True)
     tasks_file = tasks_dir / "tasks.md"
-    initial_content = "# Tasks\n- [ ] 1.1 test verification task\n"
+    initial_content = "# Tasks\n- [ ] 1.1 run pytest verification task\n"
     tasks_file.write_text(initial_content, encoding="utf-8")
 
     job = Job(

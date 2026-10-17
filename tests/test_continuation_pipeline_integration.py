@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from datetime import timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -13,12 +14,14 @@ from minime.domain.enums import (
     ExecutionOutcome,
     JobStatus,
     ProviderHealthStatus,
+    ProviderResultClass,
     ReadinessState,
 )
 from minime.domain.models import (
     Change,
     EvidenceDiagnostic,
     Job,
+    OrchestrationRun,
     Project,
     ProviderHealth,
     RecoveryClaimContext,
@@ -99,7 +102,26 @@ class MockUnitOfWork:
         # have no orchestration run, so model that repository contract rather
         # than omitting the authority from the test UoW.
         self.orchestration_runs = MagicMock()
-        self.orchestration_runs.get_active_run = lambda project_id, change_name: None
+        self._runs_dict = {}
+        self.orchestration_runs.get_by_id = lambda rid: self._runs_dict.get(rid)
+        self.orchestration_runs.get_for_update = lambda rid: self._runs_dict.get(rid)
+        self.orchestration_runs.get_active_run = lambda pid, cname: next(
+            (r for r in self._runs_dict.values() if r.project_id == pid and r.change_name == cname and r.is_active),
+            None,
+        )
+        self.orchestration_runs.save = lambda r: self._runs_dict.update({r.run_id: r})
+
+        self.orchestration_candidates = MagicMock()
+        self._candidates_dict = {}
+        self.orchestration_candidates.save = lambda c: self._candidates_dict.update({c.candidate_id: c})
+        self.orchestration_candidates.get_latest_for_run = lambda rid: next(
+            (c for c in sorted(self._candidates_dict.values(), key=lambda x: x.generation, reverse=True) if c.run_id == rid),
+            None,
+        )
+        self.orchestration_candidates.get_by_generation = lambda rid, gen: next(
+            (c for c in self._candidates_dict.values() if c.run_id == rid and c.generation == gen),
+            None,
+        )
 
         self.events = MagicMock()
         self.events.save = MagicMock()
@@ -165,11 +187,20 @@ class MockUnitOfWork:
         self.candidate_manifests = MagicMock()
         self._manifests = {}
         self.candidate_manifests.save = lambda m: self._manifests.update({m.manifest_id: m})
+        self.candidate_manifests.get_by_id = lambda mid: self._manifests.get(mid)
         self.candidate_manifests.get_latest_manifest = lambda jid: next(
             (
                 m
                 for m in sorted(self._manifests.values(), key=lambda x: x.created_at, reverse=True)
                 if m.job_id == jid
+            ),
+            None,
+        )
+        self.candidate_manifests.get_by_candidate_sha = lambda jid, csha: next(
+            (
+                m
+                for m in sorted(self._manifests.values(), key=lambda x: x.created_at, reverse=True)
+                if m.job_id == jid and m.candidate_sha == csha
             ),
             None,
         )
@@ -200,10 +231,37 @@ class MockUnitOfWork:
                 health_id=f"ph-{p}",
                 provider=p,
                 status=ProviderHealthStatus.AVAILABLE,
+                last_result_class=ProviderResultClass.SUCCESS,
+                last_success_at=utc_now(),
                 updated_at=utc_now(),
             )
         )
         self.provider_health.list_all = MagicMock(return_value=[])
+
+        self.operator_actions = MagicMock()
+        self.operator_actions.list_by_run = lambda rid: []
+        self.operator_actions.save = MagicMock()
+
+        self.classification_snapshots = MagicMock()
+        self.classification_snapshots.save = MagicMock()
+        self.classification_snapshots.get_by_id = lambda sid: None
+
+        self.orchestration_worktree_ownerships = MagicMock()
+        self._ownerships_dict = {}
+        self.orchestration_worktree_ownerships.get_by_job_id = lambda jid: self._ownerships_dict.get(jid)
+        self.orchestration_worktree_ownerships.get_for_job = lambda jid: self._ownerships_dict.get(jid)
+        self.orchestration_worktree_ownerships.get_by_run_id = lambda rid: next(
+            (o for o in self._ownerships_dict.values() if o.run_id == rid), None
+        )
+        self.orchestration_worktree_ownerships.save = lambda o: self._ownerships_dict.update({o.job_id: o})
+
+        self.external_action_reservations = MagicMock()
+        self.external_action_reservations.list_by_job = lambda jid: []
+        self.external_action_reservations.save = MagicMock()
+
+        self.orchestration_stage_events = MagicMock()
+        self.orchestration_stage_events.get_by_transition_key = lambda k: None
+        self.orchestration_stage_events.save = MagicMock()
 
     def _set_waiting(self, jid, p, r=None):
         job = self._jobs_dict.get(jid)
@@ -352,6 +410,8 @@ async def test_continuation_pipeline_multi_attempt_success(tmp_path: Path):
     pipeline.health_service.get_health = MagicMock(
         return_value=MagicMock(status=ProviderHealthStatus.AVAILABLE)
     )
+    pipeline.health_service.has_fresh_capacity_evidence = MagicMock(return_value=True)
+    pipeline.health_service.refresh_capacity_from_read_only_source = AsyncMock(return_value=True)
     pipeline.health_service.record_outcome = MagicMock()
 
     from unittest.mock import patch
@@ -384,8 +444,12 @@ async def test_continuation_pipeline_multi_attempt_success(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_reviewer_visibility_blindness_escalation(tmp_path: Path):
+async def test_reviewer_visibility_blindness_escalation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, test_capacity_strategy
+):
     """Test that when reviewer snapshot is missing candidate files, it triggers REVIEW_ENVIRONMENT_INVALID and NEEDS_HUMAN."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-only-key")
+    test_capacity_strategy(("codex", "antigravity", "deepseek"))
     uow = MockUnitOfWork()
     project = Project(
         project_id="proj-1",
@@ -396,6 +460,7 @@ async def test_reviewer_visibility_blindness_escalation(tmp_path: Path):
         base_branch="main",
         implementer="codex",
         reviewer="antigravity",
+        external_providers_allowed=["codex", "antigravity", "deepseek"],
     )
     uow._projects_dict[project.project_id] = project
 
@@ -410,6 +475,10 @@ async def test_reviewer_visibility_blindness_escalation(tmp_path: Path):
     mock_worktree = MagicMock()
     mock_worktree.path = tmp_path / "worktree"
     mock_worktree.path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init"], cwd=str(mock_worktree.path), check=True, capture_output=True)
+    (mock_worktree.path / "file1.py").write_text("print('hello')\n")
+    subprocess.run(["git", "add", "."], cwd=str(mock_worktree.path), check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=str(mock_worktree.path), check=True, capture_output=True)
     mock_worktree.base_sha = "base123"
     mock_worktree_mgr.create_worktree = AsyncMock(return_value=mock_worktree)
     mock_worktree_mgr.current_sha = AsyncMock(return_value="sha123")
@@ -478,6 +547,8 @@ async def test_reviewer_visibility_blindness_escalation(tmp_path: Path):
     pipeline.health_service.get_health = MagicMock(
         return_value=MagicMock(status=ProviderHealthStatus.AVAILABLE)
     )
+    pipeline.health_service.has_fresh_capacity_evidence = MagicMock(return_value=True)
+    pipeline.health_service.refresh_capacity_from_read_only_source = AsyncMock(return_value=True)
     pipeline.health_service.record_outcome = MagicMock()
 
     from unittest.mock import patch
@@ -487,6 +558,16 @@ async def test_reviewer_visibility_blindness_escalation(tmp_path: Path):
         return_value=(True, None),
     ):
         job = pipeline.queue_job("proj-1", "007-continuation")
+        uow.orchestration_runs.save(
+            OrchestrationRun(
+                run_id="run-rev-blindness",
+                project_id=job.project_id,
+                change_name=job.change_name,
+                base_sha="base123",
+                active_job_id=job.job_id,
+                is_active=True,
+            )
+        )
         res_job = await pipeline.execute_queued_job(
             job.job_id, claim_context=_make_test_claim_context()
         )
@@ -658,6 +739,8 @@ async def test_reassignment_creates_handoff_and_tracks_mixed_authorship(tmp_path
     pipeline.health_service.get_health = MagicMock(
         return_value=MagicMock(status=ProviderHealthStatus.AVAILABLE)
     )
+    pipeline.health_service.has_fresh_capacity_evidence = MagicMock(return_value=True)
+    pipeline.health_service.refresh_capacity_from_read_only_source = AsyncMock(return_value=True)
     pipeline.health_service.record_outcome = MagicMock()
     pipeline._run_audit_stage = AsyncMock(
         side_effect=lambda job, project, worktree_path, check_run_results, review_id: job
@@ -827,6 +910,8 @@ async def test_continuation_counters_reconstructed_after_restart_prevent_fresh_b
     pipeline.health_service.get_health = MagicMock(
         return_value=MagicMock(status=ProviderHealthStatus.AVAILABLE)
     )
+    pipeline.health_service.has_fresh_capacity_evidence = MagicMock(return_value=True)
+    pipeline.health_service.refresh_capacity_from_read_only_source = AsyncMock(return_value=True)
     pipeline._run_audit_stage = AsyncMock(side_effect=lambda job, *args, **kwargs: job)
 
     from unittest.mock import patch
@@ -851,8 +936,12 @@ async def test_continuation_counters_reconstructed_after_restart_prevent_fresh_b
 
 
 @pytest.mark.asyncio
-async def test_post_reassignment_capacity_check_uses_effective_executor(tmp_path):
+async def test_post_reassignment_capacity_check_uses_effective_executor(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, test_capacity_strategy
+):
     """Proves that capacity checking uses job.current_executor, not project.implementer."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    test_capacity_strategy(("codex", "antigravity", "deepseek"))
     uow = MockUnitOfWork()
     project = Project(
         project_id="proj-cap",
@@ -860,6 +949,7 @@ async def test_post_reassignment_capacity_check_uses_effective_executor(tmp_path
         repository="owner/repo",
         implementer="codex",
         reviewer="antigravity",
+        external_providers_allowed=["codex", "antigravity", "deepseek"],
     )
     uow.projects.save(project)
 
@@ -873,15 +963,32 @@ async def test_post_reassignment_capacity_check_uses_effective_executor(tmp_path
         status=JobStatus.QUEUED,
     )
     uow.jobs.save(job)
+    uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id="run-cap-1",
+            project_id=job.project_id,
+            change_name=job.change_name,
+            base_sha="base-sha",
+            active_job_id=job.job_id,
+            is_active=True,
+        )
+    )
+
+    wt_path = tmp_path / "wt"
+    wt_path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init"], cwd=str(wt_path), check=True, capture_output=True)
+    (wt_path / "file1.py").write_text("print('hello')\n")
+    subprocess.run(["git", "add", "."], cwd=str(wt_path), check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=str(wt_path), check=True, capture_output=True)
 
     mock_worktree_mgr = MagicMock()
     mock_worktree_mgr.create_worktree = AsyncMock(
-        return_value=MagicMock(path=tmp_path / "wt", base_sha="base-sha")
+        return_value=MagicMock(path=wt_path, base_sha="base-sha")
     )
     mock_worktree_mgr.current_sha = AsyncMock(return_value="sha1")
     mock_worktree_mgr.cleanup_worktree = AsyncMock()
     mock_worktree_mgr.create_review_worktree = AsyncMock(
-        return_value=MagicMock(path=tmp_path / "wt", base_sha="base-sha")
+        return_value=MagicMock(path=wt_path, base_sha="base-sha")
     )
     mock_worktree_mgr.remove_review_worktree = AsyncMock()
 
@@ -904,13 +1011,17 @@ async def test_post_reassignment_capacity_check_uses_effective_executor(tmp_path
         outcome_governance=mock_outcome_gov,
     )
 
-    # Codex is exhausted, but Antigravity is available
+    # Codex is exhausted, but Antigravity is available; DeepSeek is exhausted for review
     def mock_get_health(provider):
-        if provider == "codex":
+        if provider in ("codex", "deepseek"):
             return MagicMock(status=ProviderHealthStatus.EXHAUSTED)
         return MagicMock(status=ProviderHealthStatus.AVAILABLE)
 
     pipeline.health_service.get_health = MagicMock(side_effect=mock_get_health)
+    pipeline.health_service.has_fresh_capacity_evidence = MagicMock(
+        side_effect=lambda p, *a, **kw: mock_get_health(p).status == ProviderHealthStatus.AVAILABLE
+    )
+    pipeline.health_service.refresh_capacity_from_read_only_source = AsyncMock(return_value=True)
     pipeline._is_dual_primary_exhausted = MagicMock(return_value=False)
 
     # Antigravity is available, so it should proceed to create worktree rather than setting WAITING_CAPACITY for codex
@@ -957,10 +1068,11 @@ async def test_post_reassignment_capacity_check_uses_effective_executor(tmp_path
             "job-cap-1", claim_context=_make_test_claim_context()
         )
 
-    # Confirms implementer stage proceeded without blocking on codex, and then review stage checked effective reviewer (codex)
+    # Confirms implementer stage proceeded on antigravity without blocking on codex, and then review stage checked effective reviewer (deepseek)
     assert res_job.status == JobStatus.WAITING_CAPACITY
-    assert res_job.waiting_provider == "codex"
+    assert res_job.waiting_provider == "deepseek"
     assert res_job.candidate_sha == "sha1"
+    mock_imp_runner.run.assert_awaited_once()
     mock_rev_runner.run.assert_not_awaited()
     pipeline._run_audit_stage.assert_not_awaited()
 
@@ -1121,6 +1233,10 @@ async def test_pipeline_rule_k_exhaustive_provider_health_status_on_reassignment
         return MagicMock(status=ProviderHealthStatus.AVAILABLE)
 
     pipeline.health_service.get_health = MagicMock(side_effect=mock_get_health)
+    pipeline.health_service.has_fresh_capacity_evidence = MagicMock(
+        side_effect=lambda p, *a, **kw: mock_get_health(p).status == ProviderHealthStatus.AVAILABLE
+    )
+    pipeline.health_service.refresh_capacity_from_read_only_source = AsyncMock(return_value=True)
     pipeline._run_audit_stage = AsyncMock(side_effect=lambda job, *args, **kwargs: job)
 
     from unittest.mock import patch
@@ -1157,8 +1273,12 @@ async def test_pipeline_rule_k_exhaustive_provider_health_status_on_reassignment
 
 
 @pytest.mark.asyncio
-async def test_pipeline_reassignment_resumes_when_capacity_returns(tmp_path):
+async def test_pipeline_reassignment_resumes_when_capacity_returns(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, test_capacity_strategy
+):
     """Proves that when capacity returns, target executor resumes without duplicate handoff or double-incremented reassignment count."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    test_capacity_strategy(("codex", "antigravity", "deepseek"))
     uow = MockUnitOfWork()
     project = Project(
         project_id="proj-resume",
@@ -1166,6 +1286,7 @@ async def test_pipeline_reassignment_resumes_when_capacity_returns(tmp_path):
         repository="owner/repo",
         implementer="codex",
         reviewer="antigravity",
+        external_providers_allowed=["codex", "antigravity", "deepseek"],
     )
     uow.projects.save(project)
     change = Change(
@@ -1188,6 +1309,16 @@ async def test_pipeline_reassignment_resumes_when_capacity_returns(tmp_path):
         reassignment_count=0,
     )
     uow.jobs.save(job)
+    uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id="run-resume-1",
+            project_id=job.project_id,
+            change_name=job.change_name,
+            base_sha="base-sha",
+            active_job_id=job.job_id,
+            is_active=True,
+        )
+    )
 
     # 2 prior attempts exhausted corrective retries for codex
     from minime.domain.enums import ContinuationDecision
@@ -1218,15 +1349,21 @@ async def test_pipeline_reassignment_resumes_when_capacity_returns(tmp_path):
     uow.job_attempts.save(att1)
     uow.job_attempts.save(att2)
 
+    wt_resume = tmp_path / "wt-resume"
+    wt_resume.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init"], cwd=str(wt_resume), check=True, capture_output=True)
+    (wt_resume / "file1.py").write_text("print('hello')\n")
+    subprocess.run(["git", "add", "."], cwd=str(wt_resume), check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=str(wt_resume), check=True, capture_output=True)
+
     mock_worktree_mgr = MagicMock()
-    (tmp_path / "wt-resume").mkdir()
     mock_worktree_mgr.create_worktree = AsyncMock(
-        return_value=MagicMock(path=tmp_path / "wt-resume", base_sha="base-sha")
+        return_value=MagicMock(path=wt_resume, base_sha="base-sha")
     )
     mock_worktree_mgr.current_sha = AsyncMock(return_value="sha-att3")
     mock_worktree_mgr.cleanup_worktree = AsyncMock()
     mock_worktree_mgr.create_review_worktree = AsyncMock(
-        return_value=MagicMock(path=tmp_path / "wt-resume", base_sha="base-sha")
+        return_value=MagicMock(path=wt_resume, base_sha="base-sha")
     )
     mock_worktree_mgr.remove_review_worktree = AsyncMock()
 
@@ -1302,6 +1439,10 @@ async def test_pipeline_reassignment_resumes_when_capacity_returns(tmp_path):
             else ProviderHealthStatus.AVAILABLE
         )
     )
+    pipeline.health_service.has_fresh_capacity_evidence = MagicMock(
+        side_effect=lambda p, *a, **kw: pipeline.health_service.get_health(p).status == ProviderHealthStatus.AVAILABLE
+    )
+    pipeline.health_service.refresh_capacity_from_read_only_source = AsyncMock(return_value=True)
 
     from unittest.mock import patch
 
@@ -1327,9 +1468,25 @@ async def test_pipeline_reassignment_resumes_when_capacity_returns(tmp_path):
     pipeline.health_service.get_health = MagicMock(
         return_value=MagicMock(status=ProviderHealthStatus.AVAILABLE)
     )
+    pipeline.health_service.has_fresh_capacity_evidence = MagicMock(return_value=True)
+    pipeline.health_service.refresh_capacity_from_read_only_source = AsyncMock(return_value=True)
     pipeline._run_audit_stage = AsyncMock(
         side_effect=lambda job, *args, **kwargs: pipeline._transition(job, JobStatus.READY_TO_MERGE)
     )
+    from minime.domain.enums import ReviewVerdict
+    from minime.domain.models import ReviewVerdictPayload
+    from minime.services.deepseek_code_review_service import CodeReviewResult
+
+    mock_code_review = MagicMock()
+    mock_code_review.review_candidate = AsyncMock(
+        return_value=CodeReviewResult(
+            accepted=True,
+            review_id=None,
+            candidate_sha="sha-att4",
+            verdict=ReviewVerdictPayload(verdict=ReviewVerdict.READY_TO_MERGE, summary="Approved", findings=[]),
+        )
+    )
+    pipeline.code_review_service = mock_code_review
 
     with (
         patch(
@@ -1467,6 +1624,8 @@ async def test_pipeline_rule_k_structurally_ineligible_escalates_to_needs_human(
     pipeline.health_service.get_health = MagicMock(
         return_value=MagicMock(status=ProviderHealthStatus.AVAILABLE)
     )
+    pipeline.health_service.has_fresh_capacity_evidence = MagicMock(return_value=True)
+    pipeline.health_service.refresh_capacity_from_read_only_source = AsyncMock(return_value=True)
 
     from unittest.mock import patch
 
@@ -1645,6 +1804,8 @@ async def test_pipeline_reassigns_to_antigravity_on_codex_non_convergence(tmp_pa
     pipeline.health_service.get_health = MagicMock(
         return_value=MagicMock(status=ProviderHealthStatus.AVAILABLE)
     )
+    pipeline.health_service.has_fresh_capacity_evidence = MagicMock(return_value=True)
+    pipeline.health_service.refresh_capacity_from_read_only_source = AsyncMock(return_value=True)
     pipeline.reconciliation_service.can_reconcile = MagicMock(return_value=False)
 
     from unittest.mock import patch
@@ -1668,7 +1829,6 @@ async def test_pipeline_reassigns_to_antigravity_on_codex_non_convergence(tmp_pa
         )
         await pipeline.execute_queued_job(job_id, claim_context=_make_test_claim_context())
 
-    # Verify that Antigravity was assigned under premium recovery
     saved_events = [call[0][0].event_type for call in uow.events.save.call_args_list]
     assert EventType.AGENT_REASSIGNED in saved_events
     assert EventType.PREMIUM_PROVIDER_ASSIGNED in saved_events

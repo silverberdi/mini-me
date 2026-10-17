@@ -212,7 +212,7 @@ class SimpleChecksRunner:
 def setup_env(tmp_path: Path, in_memory_uow):
     import subprocess
 
-    from conftest import create_isolated_openspec_change, setup_managed_repository_fixture
+    from tests.conftest import create_isolated_openspec_change, setup_managed_repository_fixture
 
     project_id = "mini-me"
     change_name = "008-autonomous-change-orchestration"
@@ -236,6 +236,7 @@ def setup_env(tmp_path: Path, in_memory_uow):
         openspec_path="openspec",
         implementer="codex",
         reviewer="antigravity",
+        external_providers_allowed=["codex", "antigravity", "deepseek"],
         status=ProjectStatus.ACTIVE,
         checks=[{"name": "pytest", "command": "pytest"}],
     )
@@ -250,12 +251,21 @@ def setup_env(tmp_path: Path, in_memory_uow):
     )
     in_memory_uow.bindings.save(binding)
 
-    in_memory_uow.provider_health.save(
-        ProviderHealth(provider="codex", status=ProviderHealthStatus.AVAILABLE)
-    )
-    in_memory_uow.provider_health.save(
-        ProviderHealth(provider="antigravity", status=ProviderHealthStatus.AVAILABLE)
-    )
+    from datetime import datetime, timezone
+
+    from minime.domain.enums import ProviderResultClass
+
+    now = datetime.now(timezone.utc)
+    for prov in ["codex", "antigravity", "deepseek"]:
+        in_memory_uow.provider_health.save(
+            ProviderHealth(
+                provider=prov,
+                status=ProviderHealthStatus.AVAILABLE,
+                last_result_class=ProviderResultClass.SUCCESS,
+                last_success_at=now,
+                updated_at=now,
+            )
+        )
 
     create_isolated_openspec_change(
         tmp_path,
@@ -284,8 +294,97 @@ def setup_env(tmp_path: Path, in_memory_uow):
     return {"project_id": project_id, "change_name": change_name, "project_root": tmp_path}
 
 
-def test_idempotent_push_and_pr_pre_reservation(setup_env, in_memory_uow):
+def _setup_mock_code_review(pipeline: ExecutionPipelineService, in_memory_uow):
+    from decimal import Decimal
+    from unittest.mock import AsyncMock, MagicMock
+
+    from minime.domain.enums import ReviewStatus, ReviewVerdict
+    from minime.domain.models import (
+        BudgetLedgerEntry,
+        BudgetReservation,
+        Review,
+        ReviewVerdictPayload,
+    )
+    from minime.services.deepseek_code_review_service import CodeReviewResult
+
+    async def mock_review(project, run, job, candidate, manifest, candidate_worktree, authorship_evidence):
+        rev_id = f"rev-{job.job_id}"
+        res_id = f"res-{job.job_id}"
+        in_memory_uow.budget_reservations.save(
+            BudgetReservation(
+                reservation_id=res_id,
+                project_id=project.project_id,
+                change_id=job.change_name,
+                run_id=run.run_id,
+                job_id=job.job_id,
+                provider="deepseek",
+                account_fingerprint="a" * 64,
+                canonical_model_identity="deepseek-chat",
+                stage="REVIEW",
+                billing_origin="deepseek_direct",
+                status="SETTLED",
+                role="reviewer",
+                reserved_amount_usd=Decimal("0.01"),
+                pricing_snapshot_id="snap-1",
+            )
+        )
+        in_memory_uow.budget_ledger.save(
+            BudgetLedgerEntry(
+                reservation_id=res_id,
+                project_id=project.project_id,
+                job_id=job.job_id,
+                change_id=job.change_name,
+                role="reviewer",
+                entry_type="SETTLEMENT",
+                provider="deepseek",
+                account_fingerprint="a" * 64,
+                canonical_model_identity="deepseek-chat",
+                stage="REVIEW",
+                billing_origin="deepseek_direct",
+                amount_usd=Decimal("0.01"),
+            )
+        )
+        rev = Review(
+            review_id=rev_id,
+            job_id=job.job_id,
+            project_id=project.project_id,
+            change_name=job.change_name,
+            reviewer_role="deepseek",
+            reviewer_model="deepseek-chat",
+            review_stage="CODE_REVIEW",
+            provider="deepseek",
+            account_fingerprint="a" * 64,
+            budget_reservation_id=res_id,
+            billing_origin="deepseek_direct",
+            orchestration_run_id=run.run_id,
+            candidate_generation=candidate.generation,
+            candidate_sha=candidate.candidate_sha,
+            base_sha=run.base_sha,
+            manifest_id=manifest.manifest_id,
+            manifest_hash=manifest.manifest_hash,
+            status=ReviewStatus.REVIEW_RUNNING,
+            verdict=None,
+        )
+        in_memory_uow.reviews.save(rev)
+        return CodeReviewResult(
+            accepted=True,
+            review_id=rev_id,
+            candidate_sha=candidate.candidate_sha,
+            verdict=ReviewVerdictPayload(
+                verdict=ReviewVerdict.READY_TO_MERGE, summary="All good", findings=[]
+            ),
+        )
+
+    mock_cr_service = MagicMock()
+    mock_cr_service.review_candidate = AsyncMock(side_effect=mock_review)
+    pipeline.code_review_service = mock_cr_service
+    pipeline.health_service.refresh_capacity_from_read_only_source = AsyncMock(return_value=True)
+    pipeline.health_service.has_fresh_capacity_evidence = MagicMock(return_value=True)
+
+
+def test_idempotent_push_and_pr_pre_reservation(setup_env, in_memory_uow, monkeypatch):
     """Verify that external actions are reserved in database before mutating Git/GitHub."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
     env = setup_env
     fake_github = CountingGitHubAdapter()
 
@@ -303,6 +402,7 @@ def test_idempotent_push_and_pr_pre_reservation(setup_env, in_memory_uow):
             output=['{"risk": "low", "summary": "Passed", "findings": []}']
         ),
     )
+    _setup_mock_code_review(pipeline, in_memory_uow)
 
     service = OrchestrationService(
         uow=in_memory_uow,
@@ -332,8 +432,9 @@ def test_idempotent_push_and_pr_pre_reservation(setup_env, in_memory_uow):
     assert fake_github.pr_calls == 1
 
 
-def test_transient_github_pr_failure_and_resume_recovery(setup_env, in_memory_uow):
+def test_transient_github_pr_failure_and_resume_recovery(setup_env, in_memory_uow, monkeypatch):
     """Verify transient PR failure stops at WAITING_EXTERNAL and resume succeeds without re-executing implementation."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
     env = setup_env
     fake_github = CountingGitHubAdapter()
     fake_github.fail_pr_once = True  # First PR creation attempt fails
@@ -352,6 +453,7 @@ def test_transient_github_pr_failure_and_resume_recovery(setup_env, in_memory_uo
             output=['{"risk": "low", "summary": "Passed", "findings": []}']
         ),
     )
+    _setup_mock_code_review(pipeline, in_memory_uow)
 
     service = OrchestrationService(
         uow=in_memory_uow,

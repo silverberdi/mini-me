@@ -162,15 +162,22 @@ def test_cli_commands(setup_api_env, in_memory_uow, monkeypatch):
     assert bad_res.exit_code != 0
 
 
-def _exhaust_implementer(in_memory_uow):
+def _exhaust_implementer(in_memory_uow, monkeypatch=None):
+    from unittest.mock import AsyncMock
+
     in_memory_uow.provider_health.save(
         ProviderHealth(provider="codex", status=ProviderHealthStatus.EXHAUSTED)
     )
+    if monkeypatch:
+        monkeypatch.setattr(
+            "minime.services.provider_health_service.ProviderHealthService.refresh_capacity_from_read_only_source",
+            AsyncMock(return_value=False),
+        )
 
 
-def test_api_admit_blocked_when_implementer_exhausted(setup_api_env, in_memory_uow):
+def test_api_admit_blocked_when_implementer_exhausted(setup_api_env, in_memory_uow, monkeypatch):
     env = setup_api_env
-    _exhaust_implementer(in_memory_uow)
+    _exhaust_implementer(in_memory_uow, monkeypatch)
 
     app.dependency_overrides[get_uow] = lambda: in_memory_uow
     client = TestClient(app)
@@ -246,7 +253,7 @@ def test_api_admit_run_records_scheduler_decision(setup_api_env, in_memory_uow):
 
 def test_cli_orchestrate_start_blocked(setup_api_env, in_memory_uow, monkeypatch):
     env = setup_api_env
-    _exhaust_implementer(in_memory_uow)
+    _exhaust_implementer(in_memory_uow, monkeypatch)
 
     class FakeSessionContext:
         def __enter__(self):
@@ -277,9 +284,9 @@ def test_cli_orchestrate_start_blocked(setup_api_env, in_memory_uow, monkeypatch
     assert len(runs) == 0
 
 
-def test_api_run_job_blocked_when_wait(setup_api_env, in_memory_uow):
+def test_api_run_job_blocked_when_wait(setup_api_env, in_memory_uow, monkeypatch):
     env = setup_api_env
-    _exhaust_implementer(in_memory_uow)
+    _exhaust_implementer(in_memory_uow, monkeypatch)
 
     app.dependency_overrides[get_uow] = lambda: in_memory_uow
     client = TestClient(app)
@@ -319,7 +326,7 @@ def test_api_run_job_blocked_when_needs_human(setup_api_env, in_memory_uow):
 
 def test_cli_run_blocked_when_wait(setup_api_env, in_memory_uow, monkeypatch):
     env = setup_api_env
-    _exhaust_implementer(in_memory_uow)
+    _exhaust_implementer(in_memory_uow, monkeypatch)
 
     class FakeSessionContext:
         def __enter__(self):

@@ -3152,9 +3152,17 @@ def test_capacity_strategy(monkeypatch):
                 quota_scope=quota_scope,
             )
 
-    def install(providers: tuple[str, ...] | list[str] = tuple(PRIMARY_PROVIDERS)):
-        for provider in providers:
-            adapter = DeterministicCapacityAdapter(provider, True)
-            monkeypatch.setitem(provider_adapter._ADAPTER_REGISTRY, provider, adapter)
+    def install(
+        providers: tuple[str, ...] | list[str] | dict[str, bool | None] = tuple(PRIMARY_PROVIDERS),
+        allowed: bool = True,
+    ):
+        if isinstance(providers, dict):
+            for provider, allow_val in providers.items():
+                adapter = DeterministicCapacityAdapter(provider, allow_val)
+                monkeypatch.setitem(provider_adapter._ADAPTER_REGISTRY, provider, adapter)
+        else:
+            for provider in providers:
+                adapter = DeterministicCapacityAdapter(provider, allowed)
+                monkeypatch.setitem(provider_adapter._ADAPTER_REGISTRY, provider, adapter)
 
     return install

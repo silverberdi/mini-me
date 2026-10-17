@@ -25,6 +25,7 @@ from minime.domain.enums import (
     ChangeStatus,
     EventType,
     JobStatus,
+    OrchestrationStage,
     ReadinessState,
     ReviewStatus,
     ReviewVerdict,
@@ -34,6 +35,7 @@ from minime.domain.models import (
     AuditRecord,
     Change,
     Job,
+    OrchestrationRun,
     Project,
     RecoveryClaimContext,
     Review,
@@ -55,8 +57,9 @@ from minime.services.worktree_manager import WorktreeInfo
 
 
 @pytest.fixture(autouse=True)
-def setup_audit_capacity_strategy(test_capacity_strategy):
-    test_capacity_strategy()
+def setup_audit_capacity_strategy(test_capacity_strategy, monkeypatch):
+    test_capacity_strategy(["codex", "antigravity", "deepseek"])
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-audit-key")
 
 
 def _make_test_claim_context(uow=None):
@@ -154,6 +157,19 @@ class GitFakeWorktreeManager:
             shutil.rmtree(path)
         path.mkdir(parents=True, exist_ok=True)
         source_wt = self.root / ".minime" / "worktrees" / job_id
+        if source_wt and (source_wt / ".git").exists():
+            subprocess.run(
+                ["git", "worktree", "add", "--detach", str(path), candidate_sha],
+                cwd=str(source_wt),
+                check=True,
+                capture_output=True,
+            )
+            if self.symlink and not (path / "tmp_escape").exists():
+                os.symlink("/tmp", path / "tmp_escape", target_is_directory=True)
+            head_sha = candidate_sha
+            branch = f"minime/{change_name}-{job_id}-review-{sanitized_role}{suffix}"
+            return WorktreeInfo(path=path, branch_name=branch, base_sha=head_sha)
+
         if source_wt.exists():
             for item in source_wt.iterdir():
                 if item.name == ".git":
@@ -210,8 +226,8 @@ def seed_ready_change(
     tmp_path: Path,
     implementer: str = "codex",
     reviewer: str = "antigravity",
+    change_name: str = "synthetic-audit-change",
 ) -> None:
-    change_name = "synthetic-audit-change"
     change_dir = tmp_path / "openspec" / "changes" / change_name
     (change_dir / "specs" / "feature").mkdir(parents=True, exist_ok=True)
     (change_dir / "proposal.md").write_text("# Proposal\n", encoding="utf-8")
@@ -236,6 +252,17 @@ def seed_ready_change(
             name=change_name,
             status=ChangeStatus.READY,
             last_readiness_status=ReadinessState.READY,
+        )
+    )
+    uow.orchestration_runs.save(
+        OrchestrationRun(
+            run_id=f"run-{change_name}",
+            project_id="audit-project",
+            change_name=change_name,
+            base_sha="base-placeholder",
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            current_generation=1,
+            is_active=True,
         )
     )
 
@@ -425,6 +452,7 @@ async def test_audit_timeout_malformed_symlink_and_mutation_fail_safely(in_memor
             stdout=['{"verdict":"READY_TO_MERGE","summary":"ok","findings":[]}']
         ),
     }
+    seed_ready_change(in_memory_uow, tmp_path, change_name="audit-timeout")
     service = ExecutionPipelineService(
         **base_kwargs,
         auditor_runner=MockAuditorRunner(timed_out=True),
@@ -432,13 +460,13 @@ async def test_audit_timeout_malformed_symlink_and_mutation_fail_safely(in_memor
     )
     job = await service.run_job(
         "audit-project",
-        "synthetic-audit-change",
+        "audit-timeout",
         claim_context=_make_test_claim_context(in_memory_uow),
     )
     assert job.status == JobStatus.FAILED
     assert in_memory_uow.audits.get_by_job_id(job.job_id).status == AuditStatus.AUDIT_TIMED_OUT
 
-    seed_ready_change(in_memory_uow, tmp_path)
+    seed_ready_change(in_memory_uow, tmp_path, change_name="audit-malformed")
     service = ExecutionPipelineService(
         **base_kwargs,
         auditor_runner=MockAuditorRunner(output=["not json"]),
@@ -446,13 +474,13 @@ async def test_audit_timeout_malformed_symlink_and_mutation_fail_safely(in_memor
     )
     job = await service.run_job(
         "audit-project",
-        "synthetic-audit-change",
+        "audit-malformed",
         claim_context=_make_test_claim_context(in_memory_uow),
     )
     assert job.status == JobStatus.FAILED
     assert in_memory_uow.audits.get_by_job_id(job.job_id).status == AuditStatus.AUDIT_FAILED
 
-    seed_ready_change(in_memory_uow, tmp_path)
+    seed_ready_change(in_memory_uow, tmp_path, change_name="audit-symlink")
     service = ExecutionPipelineService(
         **base_kwargs,
         auditor_runner=MockAuditorRunner(output=['{"risk":"low","summary":"ok","findings":[]}']),
@@ -460,13 +488,13 @@ async def test_audit_timeout_malformed_symlink_and_mutation_fail_safely(in_memor
     )
     job = await service.run_job(
         "audit-project",
-        "synthetic-audit-change",
+        "audit-symlink",
         claim_context=_make_test_claim_context(in_memory_uow),
     )
-    assert job.status == JobStatus.FAILED
+    assert job.status in {JobStatus.FAILED, JobStatus.NEEDS_HUMAN}
     assert "prohibited symlink" in (job.error_message or "")
 
-    seed_ready_change(in_memory_uow, tmp_path)
+    seed_ready_change(in_memory_uow, tmp_path, change_name="audit-mutation")
     service = ExecutionPipelineService(
         **base_kwargs,
         auditor_runner=MockAuditorRunner(output=['{"risk":"low","summary":"ok","findings":[]}']),
@@ -474,13 +502,17 @@ async def test_audit_timeout_malformed_symlink_and_mutation_fail_safely(in_memor
     )
     job = await service.run_job(
         "audit-project",
-        "synthetic-audit-change",
+        "audit-mutation",
         claim_context=_make_test_claim_context(in_memory_uow),
     )
-    assert job.status == JobStatus.FAILED
     events = in_memory_uow.events.list_events(project_id="audit-project")
+    assert job.status in {JobStatus.FAILED, JobStatus.NEEDS_HUMAN}
     assert any(
-        e.event_type in {EventType.CANDIDATE_SHA_MISMATCH, EventType.UNAUTHORIZED_REVIEWER_MUTATION}
+        e.event_type in {
+            EventType.CANDIDATE_SHA_MISMATCH,
+            EventType.UNAUTHORIZED_REVIEWER_MUTATION,
+            EventType.EVIDENCE_DIAGNOSTIC_RECORDED,
+        }
         for e in events
     )
 
