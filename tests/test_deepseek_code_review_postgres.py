@@ -40,7 +40,10 @@ from minime.domain.models import (
 from minime.services import control_plane_service
 from minime.services.budget_service import BudgetService
 from minime.services.candidate_manifest import CandidateManifestService
-from minime.services.contract_review_service import DeepSeekReviewResponse
+from minime.services.contract_review_service import (
+    DeepSeekResponseDiagnostics,
+    DeepSeekReviewResponse,
+)
 from minime.services.deepseek_code_review_service import DeepSeekCodeReviewService
 from minime.services.provider_health_service import ProviderHealthService
 
@@ -64,18 +67,34 @@ class _NoInferenceReviewRunner:
         assert timeout_seconds > 0
         payload = json.loads(request)
         assert payload["stage"] == "CODE_REVIEW"
+        content = json.dumps(
+            {
+                "verdict": "READY_TO_MERGE",
+                "summary": "Deterministic fixture review",
+                "findings": [],
+            }
+        )
         return DeepSeekReviewResponse(
             0,
-            json.dumps(
-                {
-                    "verdict": "READY_TO_MERGE",
-                    "summary": "Deterministic fixture review",
-                    "findings": [],
-                }
-            ),
+            content,
             self.model,
             25,
             20,
+            response_diagnostics=DeepSeekResponseDiagnostics(
+                http_status=200,
+                returned_model=self.model,
+                model_matches_request=True,
+                choices_count=1,
+                finish_reason="stop",
+                content_present=True,
+                content_type="str",
+                content_length=len(content),
+                usage_present=True,
+                prompt_tokens=25,
+                completion_tokens=20,
+                total_tokens=45,
+                usage_valid=True,
+            ),
         )
 
 
@@ -447,7 +466,7 @@ def test_code_review_authorization_reservation_settlement_and_idempotency_in_pos
             assert reservation.canonical_model_identity == "deepseek-flash"
             assert reservation.stage == "REVIEW"
             assert reservation.billing_origin == "deepseek_direct"
-            assert reservation.authorization_id == code_auth.action_request_id
+            assert reservation.authorization_id is None
             assert Decimal("0") < reservation.reserved_amount_usd < Decimal("1.00")
             assert reservation.reserved_amount_usd <= Decimal("0.50") + Decimal("1.00")
 
