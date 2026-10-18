@@ -44,6 +44,7 @@ from minime.services.provider_health_service import ProviderHealthService
 from minime.services.review_verdict_parser import parse_review_verdict
 
 MAX_REVIEW_INPUT_BYTES = 1_000_000
+MAX_REVIEW_DIFF_BYTES = 250_000
 MAX_REVIEW_OUTPUT_TOKENS = 4096
 
 
@@ -642,6 +643,11 @@ class DeepSeekCodeReviewService:
             text=True,
             check=True,
         ).stdout
+        if len(diff_text.encode("utf-8")) > MAX_REVIEW_DIFF_BYTES:
+            raise ValueError("candidate git diff exceeds allowable review input bound")
+        safe_git_diff = redact_secrets(diff_text)
+        if len(safe_git_diff.encode("utf-8")) > MAX_REVIEW_DIFF_BYTES:
+            raise ValueError("candidate git diff exceeds allowable review input bound")
 
         name_status_lines = subprocess.run(
             ["git", "diff", "--name-status", f"{diff_base}..{candidate.candidate_sha}"],
@@ -745,7 +751,7 @@ class DeepSeekCodeReviewService:
 
         if not items:
             raise ValueError("frozen candidate has no reviewable files")
-        return items, diff_text
+        return items, safe_git_diff
 
     def _read_exact_checks(
         self, job: Job, candidate: OrchestrationCandidate

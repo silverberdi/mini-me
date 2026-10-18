@@ -16,6 +16,12 @@ The system SHALL construct the complementary review payload sent to the reviewer
 - **THEN** the manifest hash is computed over all tracked files in the candidate tree
 - **AND** payload reduction for the reviewer API does not weaken or alter the stored candidate manifest hash or candidate SHA validation.
 
+#### Scenario: Review diff sanitization and size bounding fail-closed
+- **GIVEN** a code review payload preparation for an exact candidate
+- **WHEN** git diff contains sensitive credentials, secrets, or API keys
+- **THEN** the system sanitizes the diff using secret redaction (`redact_secrets`) before transmission to the reviewer model
+- **AND** if the candidate diff exceeds the configured maximum allowable bound (`MAX_REVIEW_DIFF_BYTES`), the review service SHALL fail closed with an explicit preflight error rather than silently truncating modification evidence.
+
 ### Requirement: Unconditional inclusion of security, policy, and workflow modifications
 The system SHALL NOT unconditionally exclude `.agent/`, `.agents/`, `.openspec/`, or configuration paths from the review payload. Whenever a candidate modifies, adds, or deletes files within agent skills, workflows, repository rules, permissions, or security boundaries, the system SHALL explicitly include those modified files and their diffs in the review payload.
 

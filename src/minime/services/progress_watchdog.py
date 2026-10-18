@@ -26,6 +26,29 @@ class WatchdogSignal(str, Enum):
     FILESYSTEM_MUTATION = "FILESYSTEM_MUTATION"
     TOOL_CALL = "TOOL_CALL"
     PROCESS_CPU_ACTIVITY = "PROCESS_CPU_ACTIVITY"
+    PROCESS_NETWORK_ACTIVITY = "PROCESS_NETWORK_ACTIVITY"
+
+
+def _parse_cputime_seconds(raw: str) -> float:
+    """Parse ps cputime format [[days-]hh:]mm:ss[.ss] into total seconds."""
+    try:
+        raw = raw.strip()
+        days = 0.0
+        if "-" in raw:
+            d_part, raw = raw.split("-", 1)
+            days = float(d_part)
+        parts = raw.split(":")
+        if len(parts) == 3:
+            h, m, s = parts
+            return days * 86400.0 + float(h) * 3600.0 + float(m) * 60.0 + float(s)
+        if len(parts) == 2:
+            m, s = parts
+            return days * 86400.0 + float(m) * 60.0 + float(s)
+        if len(parts) == 1:
+            return days * 86400.0 + float(parts[0])
+    except Exception:
+        pass
+    return 0.0
 
 
 class ProgressWatchdog:
@@ -38,12 +61,14 @@ class ProgressWatchdog:
         inactivity_threshold_seconds: float | None = None,
         stall_timeout_seconds: float | None = None,
         check_interval_seconds: float | None = None,
+        min_deadlock_confirmation_probes: int | None = None,
     ):
         self.worktree_path = Path(worktree_path)
         # Allow env override for fast deterministic unit tests
         env_inactivity = os.getenv("MINIME_WATCHDOG_INACTIVITY_SECONDS")
         env_stall = os.getenv("MINIME_WATCHDOG_STALL_SECONDS")
         env_interval = os.getenv("MINIME_WATCHDOG_INTERVAL_SECONDS")
+        env_probes = os.getenv("MINIME_WATCHDOG_DEADLOCK_PROBES")
 
         self.inactivity_threshold_seconds = (
             float(env_inactivity)
@@ -60,12 +85,19 @@ class ProgressWatchdog:
             if env_interval is not None
             else (check_interval_seconds if check_interval_seconds is not None else 1.0)
         )
+        self.min_deadlock_confirmation_probes = (
+            int(env_probes)
+            if env_probes is not None
+            else (min_deadlock_confirmation_probes if min_deadlock_confirmation_probes is not None else 3)
+        )
 
         self.state: WatchdogState = WatchdogState.RUNNING
         self.last_activity_at: float = time.monotonic()
         self.signals_recorded: list[dict[str, Any]] = []
         self._last_worktree_mtime: float = self._get_max_worktree_mtime()
         self.diagnostic_reason: str | None = None
+        self._deadlock_confirmation_count: int = 0
+        self._last_process_cputimes: dict[int, float] = {}
 
     def _get_max_worktree_mtime(self) -> float:
         max_mtime = 0.0
@@ -90,6 +122,7 @@ class ProgressWatchdog:
 
     def record_activity(self, sig: WatchdogSignal, details: str = "") -> None:
         self.last_activity_at = time.monotonic()
+        self._deadlock_confirmation_count = 0
         self.signals_recorded.append(
             {"signal": sig.value, "timestamp": self.last_activity_at, "details": details}
         )
@@ -105,58 +138,145 @@ class ProgressWatchdog:
             return True
         return False
 
-    def check_process_cpu_activity(self, pid: int) -> bool:
-        """Non-destructive process polling checking whether process has consumed compute."""
-        try:
-            # Check if process is alive
-            os.kill(pid, 0)
-        except OSError:
+    def get_process_tree_pids(self, pid: int) -> set[int]:
+        """Discover the root PID and all recursively spawned descendant PIDs."""
+        pids = {pid}
+        to_explore = [pid]
+        while to_explore:
+            curr = to_explore.pop()
+            try:
+                proc = subprocess.run(
+                    ["pgrep", "-P", str(curr)],
+                    capture_output=True,
+                    text=True,
+                    timeout=1.0,
+                )
+                if proc.returncode == 0 and proc.stdout.strip():
+                    for line in proc.stdout.strip().split():
+                        try:
+                            child = int(line)
+                            if child not in pids:
+                                pids.add(child)
+                                to_explore.append(child)
+                        except ValueError:
+                            pass
+            except Exception:
+                pass
+        return pids
+
+    def check_process_tree_activity(self, pid: int) -> bool:
+        """Inspect root PID and all children for CPU usage, thread states, CPU time advances, and open sockets."""
+        tree = self.get_process_tree_pids(pid)
+        any_alive = False
+        activity_detected = False
+
+        for p in tree:
+            try:
+                os.kill(p, 0)
+                any_alive = True
+            except OSError:
+                continue
+
+            try:
+                proc = subprocess.run(
+                    ["ps", "-p", str(p), "-o", "%cpu=,stat=,cputime="],
+                    capture_output=True,
+                    text=True,
+                    timeout=1.0,
+                )
+                if proc.returncode == 0 and proc.stdout.strip():
+                    parts = proc.stdout.strip().split()
+                    if parts:
+                        try:
+                            cpu = float(parts[0])
+                            stat = parts[1] if len(parts) > 1 else ""
+                            cputime_str = parts[2] if len(parts) > 2 else ""
+
+                            # 1. Direct active CPU or executing thread state (R=running, D=disk wait)
+                            if cpu > 0.0 or ("R" in stat or "D" in stat):
+                                activity_detected = True
+
+                            # 2. Cumulative CPU time advance
+                            if cputime_str:
+                                cur_secs = _parse_cputime_seconds(cputime_str)
+                                prev_secs = self._last_process_cputimes.get(p)
+                                self._last_process_cputimes[p] = cur_secs
+                                if prev_secs is not None and cur_secs > prev_secs:
+                                    activity_detected = True
+                        except (ValueError, IndexError):
+                            pass
+            except Exception:
+                pass
+
+            # 3. Check for active network sockets (e.g. streaming LLM completions or HTTP requests)
+            try:
+                sock_proc = subprocess.run(
+                    ["lsof", "-n", "-P", "-i", "-a", "-p", str(p)],
+                    capture_output=True,
+                    text=True,
+                    timeout=1.0,
+                )
+                if sock_proc.returncode == 0 and sock_proc.stdout.strip():
+                    activity_detected = True
+            except Exception:
+                pass
+
+            if activity_detected:
+                break
+
+        if not any_alive:
             return False
 
-        try:
-            # Use ps to inspect CPU usage or process state
-            proc = subprocess.run(
-                ["ps", "-p", str(pid), "-o", "%cpu=,stat="],
-                capture_output=True,
-                text=True,
-                timeout=1.5,
-            )
-            if proc.returncode == 0 and proc.stdout.strip():
-                parts = proc.stdout.strip().split()
-                if parts:
-                    try:
-                        cpu = float(parts[0])
-                        stat = parts[1] if len(parts) > 1 else ""
-                        # If CPU > 0.0 or stat is active (R/D), consider actively computing
-                        if cpu > 0.0 or ("R" in stat or "D" in stat):
-                            return True
-                    except ValueError:
-                        pass
-        except Exception:
-            pass
-        return False
+        return activity_detected
+
+    def check_process_cpu_activity(self, pid: int) -> bool:
+        """Backward-compatible process polling checking whether process tree has consumed compute."""
+        return self.check_process_tree_activity(pid)
 
     def evaluate_tick(self, pid: int | None = None) -> WatchdogState:
-        """Evaluate state machine progression: RUNNING -> SUSPECTED_STALL -> STALLED -> RECOVERY."""
+        """Evaluate state machine progression: RUNNING -> SUSPECTED_STALL -> STALLED.
+
+        Silence and duration alone are never sufficient to transition to STALLED
+        when an attached process is running. The watchdog inspects the full process
+        tree (CPU, state, CPU-time advances, sockets) and requires positive confirmation
+        of an irrecoverable deadlock across multiple consecutive probes before
+        authorizing termination.
+        """
         self.check_filesystem_activity()
         inactivity = time.monotonic() - self.last_activity_at
 
+        if pid is not None and self.check_process_tree_activity(pid):
+            self.record_activity(
+                WatchdogSignal.PROCESS_CPU_ACTIVITY, f"PID {pid} process tree active"
+            )
+            return self.state
+
         if inactivity < self.inactivity_threshold_seconds:
+            self._deadlock_confirmation_count = 0
             self.state = WatchdogState.RUNNING
             return self.state
 
         if inactivity < self.stall_timeout_seconds:
-            # Transition to SUSPECTED_STALL and non-destructively probe
+            self._deadlock_confirmation_count = 0
             self.state = WatchdogState.SUSPECTED_STALL
-            if pid is not None and self.check_process_cpu_activity(pid):
-                # Active CPU consumption observed despite silent I/O; keep thread alive
-                self.record_activity(
-                    WatchdogSignal.PROCESS_CPU_ACTIVITY, f"PID {pid} actively computing"
-                )
-                self.state = WatchdogState.RUNNING
             return self.state
 
-        # Inactivity exceeded stall timeout with no forward progress
+        # Inactivity has reached or exceeded stall_timeout_seconds
+        if pid is not None:
+            # Require positive deadlock confirmation across multiple consecutive probes
+            self._deadlock_confirmation_count += 1
+            if self._deadlock_confirmation_count < self.min_deadlock_confirmation_probes:
+                self.state = WatchdogState.SUSPECTED_STALL
+                return self.state
+
+            self.state = WatchdogState.STALLED
+            self.diagnostic_reason = (
+                f"WATCHDOG_HANG_TERMINATED: positive deadlock confirmed over "
+                f"{self._deadlock_confirmation_count} probes"
+            )
+            return self.state
+
+        # When no PID is attached, inactivity exceeding stall timeout declares STALLED
         self.state = WatchdogState.STALLED
         self.diagnostic_reason = "WATCHDOG_HANG_TERMINATED"
         return self.state

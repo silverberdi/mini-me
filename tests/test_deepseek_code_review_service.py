@@ -689,3 +689,137 @@ async def test_code_review_unconditionally_includes_security_policy_modification
     assert ".agent/skills/security/SKILL.md" in paths_in_payload
     assert "enforce_safe = False" in payload["git_diff"]
 
+
+@pytest.mark.asyncio
+async def test_code_review_redacts_secrets_in_git_diff(
+    in_memory_uow, monkeypatch, tmp_path
+):
+    runner = _ReviewRunner()
+    project, run, job, candidate, manifest, repo, _, _, auth, service = await _fixture(
+        tmp_path, monkeypatch, in_memory_uow, runner=runner
+    )
+
+    base_sha = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+    # Commit with a secret token in diff
+    secret_line = 'API_SECRET = "sk-ant-api03-1234567890abcdef1234567890abcdef12345678"\n'
+    (repo / "client.py").write_text(secret_line, encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "client.py"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "add client"], check=True)
+    candidate_sha = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+    manifest = CandidateManifestService().generate_manifest(repo, candidate_sha, job.job_id)
+    candidate.base_sha = base_sha
+    candidate.candidate_sha = candidate_sha
+    candidate.manifest_id = manifest.manifest_id
+    candidate.manifest_hash = manifest.manifest_hash
+    run.base_sha = base_sha
+    run.current_candidate_sha = candidate_sha
+    job.base_sha = base_sha
+    job.candidate_sha = candidate_sha
+    in_memory_uow.jobs.save(job)
+    in_memory_uow.orchestration_runs.save(run)
+    in_memory_uow.candidate_manifests.save(manifest)
+    in_memory_uow.orchestration_candidates.save(candidate)
+    in_memory_uow.check_results.save(
+        CheckResult(
+            job_id=job.job_id,
+            check_name="pytest",
+            command="pytest -q",
+            exit_code=0,
+            duration_ms=10,
+            output_snippet="1 passed",
+            candidate_sha=candidate_sha,
+            candidate_generation=candidate.generation,
+        )
+    )
+
+    result = await service.review_candidate(
+        project=project,
+        run=run,
+        job=job,
+        candidate=candidate,
+        manifest=manifest,
+        candidate_worktree=repo,
+        authorship_evidence={},
+    )
+    assert result.accepted
+    payload = json.loads(runner.request or "{}")
+
+    # The raw secret token MUST be redacted from git_diff
+    diff_text = payload.get("git_diff", "")
+    assert "sk-ant-api03-1234567890abcdef1234567890abcdef12345678" not in diff_text
+    assert "[REDACTED" in diff_text
+    # But structural modification remains intact
+    assert "API_SECRET" in diff_text
+
+
+@pytest.mark.asyncio
+async def test_code_review_fails_closed_when_git_diff_exceeds_bound(
+    in_memory_uow, monkeypatch, tmp_path
+):
+    import minime.services.deepseek_code_review_service as dcrs
+
+    runner = _ReviewRunner()
+    project, run, job, candidate, manifest, repo, _, _, auth, service = await _fixture(
+        tmp_path, monkeypatch, in_memory_uow, runner=runner
+    )
+
+    base_sha = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+    (repo / "large.py").write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "large.py"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "add large"], check=True)
+    candidate_sha = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+    manifest = CandidateManifestService().generate_manifest(repo, candidate_sha, job.job_id)
+    candidate.base_sha = base_sha
+    candidate.candidate_sha = candidate_sha
+    candidate.manifest_id = manifest.manifest_id
+    candidate.manifest_hash = manifest.manifest_hash
+    run.base_sha = base_sha
+    run.current_candidate_sha = candidate_sha
+    job.base_sha = base_sha
+    job.candidate_sha = candidate_sha
+    in_memory_uow.jobs.save(job)
+    in_memory_uow.orchestration_runs.save(run)
+    in_memory_uow.candidate_manifests.save(manifest)
+    in_memory_uow.orchestration_candidates.save(candidate)
+    in_memory_uow.check_results.save(
+        CheckResult(
+            job_id=job.job_id,
+            check_name="pytest",
+            command="pytest -q",
+            exit_code=0,
+            duration_ms=10,
+            output_snippet="1 passed",
+            candidate_sha=candidate_sha,
+            candidate_generation=candidate.generation,
+        )
+    )
+
+    # Set diff bound artificially low to trigger fail-closed behavior
+    monkeypatch.setattr(dcrs, "MAX_REVIEW_DIFF_BYTES", 10)
+
+    result = await service.review_candidate(
+        project=project,
+        run=run,
+        job=job,
+        candidate=candidate,
+        manifest=manifest,
+        candidate_worktree=repo,
+        authorship_evidence={},
+    )
+    # Must fail closed without silent truncation
+    assert result.accepted is False
+    assert result.reason == "CODE_REVIEW_PREFLIGHT_BLOCKED:ValueError"
+
+

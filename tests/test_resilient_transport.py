@@ -107,4 +107,59 @@ async def test_non_idempotent_post_send_drop_raises_ambiguous_error():
 
     with pytest.raises(PostSendAmbiguousError):
         await transport.execute_with_retry(non_idempotent_call, is_idempotent=False)
+    # Ambiguous post-send failure must NOT be retried automatically even once
+    assert attempts == 1
+    assert transport.total_retries == 0
+
+
+@pytest.mark.asyncio
+async def test_non_idempotent_pre_send_error_retries_and_recovers():
+    transport = ResilientTransport(max_retries=3, base_delay_seconds=0.01, jitter_range=(0.0, 0.01))
+    attempts = 0
+
+    async def pre_send_failure_call():
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            # ConnectError is demonstrably pre-send (connection could not be established)
+            raise httpx.ConnectError("Connection refused by peer before transmission")
+        return httpx.Response(200, json={"status": "ok"})
+
+    response = await transport.execute_with_retry(pre_send_failure_call, is_idempotent=False)
+    assert response.status_code == 200
+    assert attempts == 3
+    assert transport.total_retries == 2
+
+
+@pytest.mark.asyncio
+async def test_non_idempotent_server_error_502_fails_fast_without_duplicate_post():
+    transport = ResilientTransport(max_retries=3, base_delay_seconds=0.01)
+    attempts = 0
+
+    async def gateway_error_call():
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(502, json={"error": "Bad Gateway"})
+
+    response = await transport.execute_with_retry(gateway_error_call, is_idempotent=False)
+    assert response.status_code == 502
+    assert attempts == 1
+    assert transport.total_retries == 0
+
+
+@pytest.mark.asyncio
+async def test_non_idempotent_http_429_retries_and_recovers():
+    transport = ResilientTransport(max_retries=3, base_delay_seconds=0.01, jitter_range=(0.0, 0.01))
+    attempts = 0
+
+    async def rate_limited_call():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(429, headers={"retry-after": "0.01"})
+        return httpx.Response(200, json={"result": "success"})
+
+    response = await transport.execute_with_retry(rate_limited_call, is_idempotent=False)
+    assert response.status_code == 200
     assert attempts == 2
+    assert transport.total_retries == 1

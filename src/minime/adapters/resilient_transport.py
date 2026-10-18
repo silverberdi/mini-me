@@ -34,11 +34,35 @@ class NonRetriableClientError(TransportClassificationError):
     """Permanent client failure (400, 401, 403, invalid schema) that must not be retried."""
 
 
+def is_pre_send_exception(exc: Exception) -> bool:
+    """Determine if a failure demonstrably occurred prior to request transmission.
+
+    Only failures that prevent connection establishment or fail before any HTTP
+    request bytes are written to the wire are considered pre-send. Once a connection
+    is established and request transmission begins, failures are ambiguous or post-send.
+    """
+    if isinstance(exc, ConnectionRefusedError):
+        return True
+    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout)):
+        return True
+    return False
+
+
 def is_retriable_transport_exception(exc: Exception) -> bool:
     """Determine if an exception represents a transient network/socket interruption."""
-    if isinstance(exc, (ConnectionResetError, BrokenPipeError, ConnectionRefusedError, socket.error)):
+    if isinstance(
+        exc, (ConnectionResetError, BrokenPipeError, ConnectionRefusedError, socket.error)
+    ):
         return True
-    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.NetworkError, httpx.RemoteProtocolError)):
+    if isinstance(
+        exc,
+        (
+            httpx.ConnectError,
+            httpx.ConnectTimeout,
+            httpx.NetworkError,
+            httpx.RemoteProtocolError,
+        ),
+    ):
         return True
     if isinstance(exc, httpx.ReadTimeout):
         return True
@@ -89,7 +113,7 @@ class ResilientTransport:
         self.cumulative_stall_seconds: float = 0.0
 
     def calculate_delay(self, attempt: int, retry_after_header: str | None = None) -> float:
-        exponential = self.base_delay * (2 ** attempt)
+        exponential = self.base_delay * (2**attempt)
         jitter = random.uniform(*self.jitter_range)
         calculated = min(self.max_delay, exponential + jitter)
         if retry_after_header:
@@ -100,14 +124,29 @@ class ResilientTransport:
         self,
         operation: Callable[[], Coroutine[Any, Any, httpx.Response]],
         *,
-        is_idempotent: bool = True,
+        is_idempotent: bool = False,
     ) -> httpx.Response:
-        """Execute an HTTP operation with retry for transient transport errors."""
+        """Execute an HTTP operation with retry for transient transport errors.
+
+        If `is_idempotent=False` (default, for paid non-idempotent operations like
+        LLM POST completions without effective server-side idempotency keys),
+        only demonstrably pre-send failures (e.g. DNS failure, connection refused,
+        connect timeout) or explicit rate-limit rejections (HTTP 429) may be retried.
+        Any ambiguous post-send failure (e.g. socket drop while awaiting response,
+        read timeout, remote protocol error) raises PostSendAmbiguousError immediately
+        without blind retry to prevent duplicate billing or unobserved external effects.
+        """
         last_exc: Exception | None = None
         for attempt in range(self.max_retries + 1):
             try:
                 response = await operation()
                 if is_retriable_status_code(response.status_code):
+                    # For non-idempotent operations, 429 (Too Many Requests) is an explicit
+                    # rejection before inference execution and is safe to retry with backoff.
+                    # Server errors (502, 503, 504) for non-idempotent operations may reflect
+                    # partial or unobserved upstream execution; do not retry automatically.
+                    if not is_idempotent and response.status_code != 429:
+                        return response
                     if attempt < self.max_retries:
                         retry_after = response.headers.get("retry-after")
                         delay = self.calculate_delay(attempt, retry_after)
@@ -123,10 +162,15 @@ class ResilientTransport:
                 last_exc = exc
                 if not is_retriable_transport_exception(exc):
                     raise
-                if not is_idempotent and attempt > 0:
+
+                pre_send = is_pre_send_exception(exc)
+                if not is_idempotent and not pre_send:
+                    # Ambiguous / post-send: request may have reached the provider.
+                    # Never retry automatically, even on initial attempt.
                     raise PostSendAmbiguousError(
-                        f"Non-idempotent request dropped after initial attempt: {exc}"
+                        f"Ambiguous post-send transport failure for non-idempotent operation: {type(exc).__name__}: {exc}"
                     ) from exc
+
                 if attempt < self.max_retries:
                     delay = self.calculate_delay(attempt)
                     self.total_retries += 1

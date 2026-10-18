@@ -14,7 +14,10 @@ import httpx
 from pydantic import ValidationError
 
 from minime.adapters.provider_adapter import get_provider_adapter
-from minime.adapters.resilient_transport import ResilientTransport
+from minime.adapters.resilient_transport import (
+    ResilientTransport,
+    TransportClassificationError,
+)
 from minime.config import (
     AppConfig,
     OpenSpecStage,
@@ -318,7 +321,7 @@ class DeepSeekContractReviewRunner:
             )
 
         try:
-            response = await transport.execute_with_retry(_do_post, is_idempotent=True)
+            response = await transport.execute_with_retry(_do_post, is_idempotent=False)
             transport_retry_count = transport.total_retries
             transport_stall_ms = int(transport.cumulative_stall_seconds * 1000)
             diagnostics = DeepSeekResponseDiagnostics(
@@ -398,7 +401,15 @@ class DeepSeekContractReviewRunner:
                 response_error,
                 diagnostics,
             )
-        except (httpx.HTTPError, ValueError, TypeError) as exc:
+        except (httpx.HTTPError, ValueError, TypeError, TransportClassificationError) as exc:
+            transport_retry_count = transport.total_retries
+            transport_stall_ms = int(transport.cumulative_stall_seconds * 1000)
+            if diagnostics is None:
+                diagnostics = DeepSeekResponseDiagnostics(
+                    http_status=0,
+                    transport_retry_count=transport_retry_count,
+                    transport_stall_ms=transport_stall_ms,
+                )
             return DeepSeekReviewResponse(
                 0, None, None, None, None, type(exc).__name__, diagnostics
             )

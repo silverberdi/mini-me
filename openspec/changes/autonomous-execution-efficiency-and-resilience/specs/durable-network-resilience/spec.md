@@ -28,6 +28,12 @@ The system SHALL classify external operations as either pre-send failures (safe 
 - **THEN** the system retains the existing reservation as unresolved exposure
 - **AND** the system SHALL NOT dispatch an identical paid request without prior observation or explicit operator reconciliation.
 
+#### Scenario: Non-idempotent paid inference is never blind-retried upon ambiguous drop
+- **GIVEN** a paid review or completion request transmitted to an external provider with `is_idempotent=False`
+- **WHEN** a socket drop or network interruption occurs after request transmission begins
+- **THEN** the system immediately raises `PostSendAmbiguousError` on the first attempt without blind re-execution
+- **AND** only demonstrably pre-send failures (e.g. `ConnectError`) or explicit rate-limits (HTTP 429) may be automatically retried.
+
 ### Requirement: Daemon orchestration independence from supervisory sessions
 The system SHALL execute background orchestration runs, jobs, and sandbox child processes independently from the interactive terminal or session lifecycle of Codex, Antigravity, or user CLI clients. Supervisory session disconnection SHALL NOT abort active runs, drop durable worktrees, or corrupt checkpoint fencing.
 
