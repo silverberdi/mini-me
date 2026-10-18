@@ -152,9 +152,19 @@ class AgentProcessConfinement:
         self.allowed_worktree_path = self._canonical_directory(
             allowed_worktree_path, "assigned worktree"
         )
+        default_root = os.environ.get("MINIME_RUNTIME_ROOT")
+        if not default_root:
+            cwd_minime = os.path.join(os.getcwd(), ".minime")
+            if os.path.isdir(cwd_minime):
+                default_root = cwd_minime
+            elif os.path.isdir("/opt/minime/runtime"):
+                default_root = "/opt/minime/runtime"
+            elif os.path.isdir("/opt/minime/app/.minime"):
+                default_root = "/opt/minime/app/.minime"
+            else:
+                default_root = cwd_minime
         self.runtime_root = self._canonical_directory(
-            runtime_root
-            or os.environ.get("MINIME_RUNTIME_ROOT", os.path.join(os.getcwd(), ".minime")),
+            runtime_root or default_root,
             "runtime root",
         )
         if self._is_path_inside(

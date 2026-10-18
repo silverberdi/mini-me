@@ -22,9 +22,15 @@ class ChecksRunResult:
 
 
 class ChecksRunner:
-    def __init__(self, output_limit: int = 4000, timeout_seconds: int = 300):
+    def __init__(
+        self,
+        output_limit: int = 4000,
+        timeout_seconds: int = 300,
+        runtime_root: str | None = None,
+    ):
         self.output_limit = output_limit
         self.timeout_seconds = timeout_seconds
+        self.runtime_root = runtime_root
 
     async def run(
         self,
@@ -167,7 +173,10 @@ class ChecksRunner:
             try:
                 from minime.services.agent_confinement import AgentProcessConfinement
 
-                confinement = AgentProcessConfinement(allowed_worktree_path=str(worktree_path))
+                confinement = AgentProcessConfinement(
+                    allowed_worktree_path=str(worktree_path),
+                    runtime_root=self.runtime_root,
+                )
                 preflight = confinement.validate_command_preflight(cwd=str(worktree_path))
                 if (
                     not confinement.is_confinement_available()

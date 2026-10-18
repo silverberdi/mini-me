@@ -1594,14 +1594,10 @@ class OrchestrationService:
             heartbeat.start()
             should_release_claim = True
 
-        _orig_stop_run = self._stop_run
-
-        def _fenced_stop_run(*args, **kwargs):
+        def _stop_coordinator_run(*args, **kwargs):
             if "claim_context" not in kwargs and claim_context is not None:
                 kwargs["claim_context"] = claim_context
-            return _orig_stop_run(*args, **kwargs)
-
-        self._stop_run = _fenced_stop_run
+            return self._stop_run(*args, **kwargs)
 
         try:
             while True:
@@ -1669,7 +1665,7 @@ class OrchestrationService:
                 elif stage == OrchestrationStage.PREPARING_EXECUTION:
                     project = self.uow.projects.get_by_id(run.project_id)
                     if not project:
-                        self._stop_run(
+                        _stop_coordinator_run(
                             run,
                             stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
                             human_gate=HumanGate.NEEDS_HUMAN,
@@ -1692,7 +1688,7 @@ class OrchestrationService:
                                 "waiting for capacity recovery" in str(exc).lower()
                                 or "scheduler is in wait mode" in str(exc).lower()
                             ):
-                                self._stop_run(
+                                _stop_coordinator_run(
                                     run,
                                     stop_outcome=OrchestrationStopOutcome.WAITING_CAPACITY,
                                     human_gate=None,
@@ -1712,7 +1708,7 @@ class OrchestrationService:
                 elif stage == OrchestrationStage.IMPLEMENTING:
                     job = self.uow.jobs.get_by_id(run.active_job_id)
                     if not job:
-                        self._stop_run(
+                        _stop_coordinator_run(
                             run,
                             stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
                             human_gate=HumanGate.NEEDS_HUMAN,
@@ -1749,7 +1745,7 @@ class OrchestrationService:
                             run.run_id,
                             redacted_error,
                         )
-                        self._stop_run(
+                        _stop_coordinator_run(
                             run,
                             stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
                             human_gate=HumanGate.NEEDS_HUMAN,
@@ -1771,7 +1767,7 @@ class OrchestrationService:
                     validate_claim_context_authoritative(self.uow, claim_context)
 
                     if not job:
-                        self._stop_run(
+                        _stop_coordinator_run(
                             run,
                             stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
                             human_gate=HumanGate.NEEDS_HUMAN,
@@ -1780,7 +1776,7 @@ class OrchestrationService:
                         break
 
                     if job.status == JobStatus.WAITING_CAPACITY:
-                        self._stop_run(
+                        _stop_coordinator_run(
                             run,
                             stop_outcome=OrchestrationStopOutcome.WAITING_CAPACITY,
                             human_gate=None,
@@ -1796,7 +1792,7 @@ class OrchestrationService:
                         JobStatus.NEEDS_HUMAN,
                         JobStatus.RECOVERY_BLOCKED,
                     }:
-                        self._stop_run(
+                        _stop_coordinator_run(
                             run,
                             stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
                             human_gate=HumanGate.NEEDS_HUMAN,
@@ -1818,7 +1814,7 @@ class OrchestrationService:
                 elif stage == OrchestrationStage.EVALUATING_ATTEMPT:
                     job = self.uow.jobs.get_by_id(run.active_job_id)
                     if not job:
-                        self._stop_run(
+                        _stop_coordinator_run(
                             run,
                             stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
                             human_gate=HumanGate.NEEDS_HUMAN,
@@ -1833,7 +1829,7 @@ class OrchestrationService:
                             or job.escalation_reason
                             or "Candidate preservation is blocked."
                         )
-                        self._stop_run(
+                        _stop_coordinator_run(
                             run,
                             stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
                             human_gate=HumanGate.NEEDS_HUMAN,
@@ -1847,7 +1843,7 @@ class OrchestrationService:
                         JobStatus.CANCELLED,
                         JobStatus.NEEDS_HUMAN,
                     }:
-                        self._stop_run(
+                        _stop_coordinator_run(
                             run,
                             stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
                             human_gate=HumanGate.NEEDS_HUMAN,
@@ -1895,7 +1891,7 @@ class OrchestrationService:
                         ):
                             # Bounded checks remediation: prevent runaway loop when checks fail repeatedly
                             if job.status == JobStatus.CHECKS_FAILED and len(attempts) >= 2:
-                                self._stop_run(
+                                _stop_coordinator_run(
                                     run,
                                     stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
                                     human_gate=HumanGate.NEEDS_HUMAN,
@@ -1913,7 +1909,7 @@ class OrchestrationService:
                             ContinuationDecision.REASSIGN_AGENT,
                         }:
                             if len(attempts) >= 2:
-                                self._stop_run(
+                                _stop_coordinator_run(
                                     run,
                                     stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
                                     human_gate=HumanGate.NEEDS_HUMAN,
@@ -1931,7 +1927,7 @@ class OrchestrationService:
                                 run, OrchestrationStage.IMPLEMENTING, claim_context=claim_context
                             )
                         elif decision == ContinuationDecision.WAIT_EXTERNAL:
-                            self._stop_run(
+                            _stop_coordinator_run(
                                 run,
                                 stop_outcome=OrchestrationStopOutcome.WAITING_EXTERNAL,
                                 human_gate=None,
@@ -1944,7 +1940,7 @@ class OrchestrationService:
                             decision == ContinuationDecision.NEEDS_HUMAN
                             or job.status == JobStatus.NEEDS_HUMAN
                         ):
-                            self._stop_run(
+                            _stop_coordinator_run(
                                 run,
                                 stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
                                 human_gate=HumanGate.NEEDS_HUMAN,
@@ -1966,7 +1962,7 @@ class OrchestrationService:
                     job = self.uow.jobs.get_by_id(run.active_job_id)
                     project = self.uow.projects.get_by_id(run.project_id)
                     if not job or not job.candidate_sha:
-                        self._stop_run(
+                        _stop_coordinator_run(
                             run,
                             stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
                             human_gate=HumanGate.NEEDS_HUMAN,
@@ -1992,7 +1988,7 @@ class OrchestrationService:
                         if check.get("name") not in checks_by_name
                     ]
                     if missing_checks:
-                        self._stop_run(
+                        _stop_coordinator_run(
                             run,
                             stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
                             human_gate=HumanGate.NEEDS_HUMAN,
@@ -2027,7 +2023,7 @@ class OrchestrationService:
                 elif stage == OrchestrationStage.FREEZING_CANDIDATE:
                     job = self.uow.jobs.get_by_id(run.active_job_id)
                     if not job or not job.candidate_sha or job.base_sha != run.base_sha:
-                        self._stop_run(
+                        _stop_coordinator_run(
                             run,
                             stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
                             human_gate=HumanGate.NEEDS_HUMAN,
@@ -2048,7 +2044,7 @@ class OrchestrationService:
                     job = self.uow.jobs.get_by_id(run.active_job_id)
                     current_cand = self.uow.orchestration_candidates.get_latest_for_run(run.run_id)
                     if not current_cand:
-                        self._stop_run(
+                        _stop_coordinator_run(
                             run,
                             stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
                             human_gate=HumanGate.NEEDS_HUMAN,
@@ -2080,7 +2076,7 @@ class OrchestrationService:
                         or job.status
                         in {JobStatus.FAILED, JobStatus.NEEDS_HUMAN, JobStatus.CANCELLED}
                     ):
-                        self._stop_run(
+                        _stop_coordinator_run(
                             run,
                             stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
                             human_gate=HumanGate.NEEDS_HUMAN,
@@ -2100,7 +2096,7 @@ class OrchestrationService:
                     job = self.uow.jobs.get_by_id(run.active_job_id)
                     current_cand = self.uow.orchestration_candidates.get_latest_for_run(run.run_id)
                     if not current_cand:
-                        self._stop_run(
+                        _stop_coordinator_run(
                             run,
                             stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
                             human_gate=HumanGate.NEEDS_HUMAN,
@@ -2137,7 +2133,7 @@ class OrchestrationService:
                         or job.status
                         in {JobStatus.FAILED, JobStatus.NEEDS_HUMAN, JobStatus.CANCELLED}
                     ):
-                        self._stop_run(
+                        _stop_coordinator_run(
                             run,
                             stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
                             human_gate=HumanGate.NEEDS_HUMAN,
@@ -2161,7 +2157,7 @@ class OrchestrationService:
                     )
                     current_cand = self.uow.orchestration_candidates.get_latest_for_run(run.run_id)
                     if not current_cand:
-                        self._stop_run(
+                        _stop_coordinator_run(
                             run,
                             stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
                             human_gate=HumanGate.NEEDS_HUMAN,
@@ -2196,7 +2192,7 @@ class OrchestrationService:
                         expected_candidate_ref,
                         expected_integration_ref,
                     }:
-                        self._stop_run(
+                        _stop_coordinator_run(
                             run,
                             stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
                             human_gate=HumanGate.NEEDS_HUMAN,
@@ -2320,7 +2316,7 @@ class OrchestrationService:
                     if fenced_push_res.outcome != ExternalOutcome.SUCCESS:
                         err = fenced_push_res.error_message or "Branch push failed."
                         if "REMOTE_BRANCH_MISMATCH" in str(err):
-                            self._stop_run(
+                            _stop_coordinator_run(
                                 run,
                                 stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
                                 human_gate=HumanGate.NEEDS_HUMAN,
@@ -2328,7 +2324,7 @@ class OrchestrationService:
                                 stop_details={"code": "REMOTE_BRANCH_MISMATCH"},
                             )
                         else:
-                            self._stop_run(
+                            _stop_coordinator_run(
                                 run,
                                 stop_outcome=OrchestrationStopOutcome.WAITING_EXTERNAL,
                                 human_gate=None,
@@ -2465,7 +2461,7 @@ class OrchestrationService:
                                 and pr_reason != ExternalReasonCode.UNOBSERVABLE
                             )
                         )
-                        self._stop_run(
+                        _stop_coordinator_run(
                             run,
                             stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN
                             if is_needs_human
@@ -2526,7 +2522,7 @@ class OrchestrationService:
                                 )
                             )
                             self.uow.commit()
-                            self._stop_run(
+                            _stop_coordinator_run(
                                 run,
                                 stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
                                 human_gate=HumanGate.NEEDS_HUMAN,
@@ -2545,7 +2541,7 @@ class OrchestrationService:
                     # and review-evidence binding must pass before the human merge gate.
                     verify_result = self._evaluate_verify_gate(run, project, current_cand)
                     if verify_result is not None and verify_result.is_blocking:
-                        self._stop_run(
+                        _stop_coordinator_run(
                             run,
                             stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
                             human_gate=HumanGate.NEEDS_HUMAN,
@@ -2558,7 +2554,7 @@ class OrchestrationService:
                         break
 
                     # Final terminal checkpoint: set human gate to READY_FOR_HUMAN_MERGE and STOP
-                    self._stop_run(
+                    _stop_coordinator_run(
                         run,
                         stop_outcome=OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE,
                         human_gate=HumanGate.READY_FOR_HUMAN_MERGE,
@@ -2571,7 +2567,6 @@ class OrchestrationService:
             self.uow.rollback()
             raise
         finally:
-            self._stop_run = _orig_stop_run
             if heartbeat is not None:
                 stopped_cleanly = heartbeat.stop(timeout=5.0)
                 if not stopped_cleanly or heartbeat.is_alive:

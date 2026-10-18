@@ -1279,7 +1279,9 @@ class RecoveryDecisionRepositoryInterface(ABC):
     def list_by_claim_key(self, claim_key: str) -> list[RecoveryDecision]: ...
 
     @abstractmethod
-    def update_decision(self, decision: RecoveryDecision) -> RecoveryDecision: ...
+    def update_decision(
+        self, decision: RecoveryDecision, claim_context: RecoveryClaimContext | None = None
+    ) -> RecoveryDecision: ...
 
 
 class ExternalActionAttemptRepositoryInterface(ABC):

@@ -75,6 +75,7 @@ class OperationalHeartbeat:
         uow: Any = None,
         lease_seconds: int = DEFAULT_LEASE_SECONDS,
         renew_claim: Any | None = None,
+        stop_timeout: float = 5.0,
     ):
         self.recovery_service = recovery_service
         self.uow = uow
@@ -82,9 +83,13 @@ class OperationalHeartbeat:
         self.interval_seconds = interval_seconds
         self.lease_seconds = lease_seconds
         self.renew_claim = renew_claim
+        self.stop_timeout = stop_timeout
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self.heartbeat_failed = False
+        self.stopped_cleanly = False
+        self._renewal_lock = threading.Lock()
+        self._renewal_in_progress = threading.Event()
 
     def start(self) -> OperationalHeartbeat:
         def _run():
@@ -92,39 +97,45 @@ class OperationalHeartbeat:
                 if self._stop_event.is_set():
                     break
                 try:
-                    if not self.claim_context or self._stop_event.is_set():
-                        break
-                    context_snapshot = self.claim_context
-                    if self.renew_claim is not None:
-                        success = self.renew_claim(context_snapshot, self.lease_seconds)
-                    elif self.recovery_service is not None:
-                        success = self.recovery_service.heartbeat(context_snapshot)
-                    elif (
-                        self.uow is not None
-                        and hasattr(self.uow, "claims")
-                        and self.uow.claims is not None
-                    ):
-                        success = self.uow.claims.renew_heartbeat(
-                            claim_key=context_snapshot.claim_key,
-                            owner_instance_id=context_snapshot.owner_instance_id,
-                            fence_token=context_snapshot.fence_token,
-                            lease_seconds=self.lease_seconds,
-                        )
-                    else:
-                        success = True
-                    if self._stop_event.is_set():
-                        break
-                    if not success:
-                        self.heartbeat_failed = True
-                        logger.warning(
-                            "Heartbeat renewal failed for claim '%s'; worker is now stale.",
-                            getattr(context_snapshot, "claim_key", "unknown"),
-                        )
-                        break
-                    if self.claim_context is not None and not self._stop_event.is_set():
-                        self.claim_context.lease_expires_at = utc_now() + timedelta(
-                            seconds=self.lease_seconds
-                        )
+                    with self._renewal_lock:
+                        if not self.claim_context or self._stop_event.is_set():
+                            break
+                        context_snapshot = self.claim_context
+                        self._renewal_in_progress.set()
+                        try:
+                            if self.renew_claim is not None:
+                                success = self.renew_claim(context_snapshot, self.lease_seconds)
+                            elif self.recovery_service is not None:
+                                success = self.recovery_service.heartbeat(context_snapshot)
+                            elif (
+                                self.uow is not None
+                                and hasattr(self.uow, "claims")
+                                and self.uow.claims is not None
+                            ):
+                                success = self.uow.claims.renew_heartbeat(
+                                    claim_key=context_snapshot.claim_key,
+                                    owner_instance_id=context_snapshot.owner_instance_id,
+                                    fence_token=context_snapshot.fence_token,
+                                    lease_seconds=self.lease_seconds,
+                                )
+                            else:
+                                success = True
+                        finally:
+                            self._renewal_in_progress.clear()
+
+                        if self._stop_event.is_set():
+                            break
+                        if not success:
+                            self.heartbeat_failed = True
+                            logger.warning(
+                                "Heartbeat renewal failed for claim '%s'; worker is now stale.",
+                                getattr(context_snapshot, "claim_key", "unknown"),
+                            )
+                            break
+                        if self.claim_context is not None and not self._stop_event.is_set():
+                            self.claim_context.lease_expires_at = utc_now() + timedelta(
+                                seconds=self.lease_seconds
+                            )
                 except Exception as exc:
                     self.heartbeat_failed = True
                     logger.warning(
@@ -138,32 +149,42 @@ class OperationalHeartbeat:
         self._thread.start()
         return self
 
-    def stop(self, timeout: float = 5.0) -> bool:
+    def stop(self, timeout: float | None = None) -> bool:
         """Reliably stop heartbeat background thread and guarantee no further renewals can occur."""
+        effective_timeout = timeout if timeout is not None else self.stop_timeout
         self._stop_event.set()
         context_ref = self.claim_context
         # Cease local claim context reference to guarantee no renewal attempt can proceed
         self.claim_context = None
         if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=timeout)
-            if self._thread.is_alive():
+            self._thread.join(timeout=effective_timeout)
+            if self._thread.is_alive() or self._renewal_in_progress.is_set():
+                self.heartbeat_failed = True
+                self.stopped_cleanly = False
                 logger.warning(
                     "Heartbeat thread did not terminate within %ss for claim '%s'.",
-                    timeout,
+                    effective_timeout,
                     getattr(context_ref, "claim_key", "unknown"),
                 )
                 return False
+        self.stopped_cleanly = True
         return True
 
     @property
     def is_alive(self) -> bool:
         return bool(self._thread and self._thread.is_alive())
 
+    @property
+    def is_renewing(self) -> bool:
+        return self._renewal_in_progress.is_set()
+
     def __enter__(self) -> OperationalHeartbeat:
         return self.start()
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        self.stop()
+        clean = self.stop()
+        if not clean or self.is_alive or self._renewal_in_progress.is_set():
+            self.heartbeat_failed = True
 
 
 class RecoveryConvergenceService:
@@ -193,6 +214,7 @@ class RecoveryConvergenceService:
         self.heartbeat_seconds = heartbeat_seconds
         self.post_merge_service = post_merge_service
         self.github_adapter = github_adapter
+        self.heartbeat_stop_timeout: float = 5.0
         # Reuse the coordinator already composed by the caller when one is
         # available. This preserves its configured runner/adapter boundaries
         # across canonical CONTINUE without changing claim/fencing authority.
@@ -695,9 +717,11 @@ class RecoveryConvergenceService:
         if hasattr(self.uow, "recovery_decisions") and self.uow.recovery_decisions is not None:
             self.uow.recovery_decisions.create_decision(decision)
 
-    def _update_decision(self, decision: RecoveryDecision) -> None:
+    def _update_decision(
+        self, decision: RecoveryDecision, claim_context: RecoveryClaimContext | None = None
+    ) -> None:
         if hasattr(self.uow, "recovery_decisions") and self.uow.recovery_decisions is not None:
-            self.uow.recovery_decisions.update_decision(decision)
+            self.uow.recovery_decisions.update_decision(decision, claim_context=claim_context)
 
     def acquire_claim(self, claim_key: str, lease_seconds: int = 60) -> RecoveryClaimContext | None:
         """Acquire or re-acquire a claim for this owner instance."""
@@ -1683,6 +1707,7 @@ class RecoveryConvergenceService:
                 interval_seconds=self.heartbeat_seconds,
                 lease_seconds=self.lease_seconds,
                 renew_claim=renew_claim,
+                stop_timeout=getattr(self, "heartbeat_stop_timeout", 5.0),
             ) as heartbeat:
                 orchestration_svc.resume(
                     run_id=run.run_id,
@@ -1691,8 +1716,13 @@ class RecoveryConvergenceService:
                     claim_context=context,
                     manage_heartbeat=False,
                 )
-            if heartbeat.heartbeat_failed:
-                raise StaleClaimError("CLAIM_HEARTBEAT_RENEWAL_FAILED")
+            if (
+                heartbeat.heartbeat_failed
+                or not heartbeat.stopped_cleanly
+                or heartbeat.is_alive
+                or heartbeat.is_renewing
+            ):
+                raise StaleClaimError("CLAIM_HEARTBEAT_RENEWAL_FAILED_OR_THREAD_ALIVE")
             decision.status = RecoveryDecisionStatus.COMPLETED
         except StaleClaimError as exc:
             logger.warning("Run continuation fence lost for '%s': %s", run.run_id, exc)
@@ -1702,8 +1732,17 @@ class RecoveryConvergenceService:
             # ZERO DATABASE WRITES after claim loss: do not persist decision, do not release claim
             return decision
         except Exception as exc:
-            if heartbeat.heartbeat_failed:
-                logger.warning("Run continuation heartbeat failed for '%s': %s", run.run_id, exc)
+            if (
+                heartbeat.heartbeat_failed
+                or not heartbeat.stopped_cleanly
+                or heartbeat.is_alive
+                or heartbeat.is_renewing
+            ):
+                logger.warning(
+                    "Run continuation heartbeat failed or teardown incomplete for '%s': %s",
+                    run.run_id,
+                    exc,
+                )
                 self.uow.rollback()
                 decision.status = RecoveryDecisionStatus.BLOCKED
                 decision.reason_code = self._bounded_decision_failure_code(exc)
@@ -1712,12 +1751,35 @@ class RecoveryConvergenceService:
             decision.status = RecoveryDecisionStatus.BLOCKED
             decision.reason_code = self._bounded_decision_failure_code(exc)
 
-        # Before writing decision or releasing claim, verify authority is still active and owned
-        if self.validate_claim(context):
-            self._update_decision(decision)
-            self.release_claim(context)
-        else:
+        # Before writing decision or releasing claim, verify heartbeat terminated cleanly
+        if (
+            heartbeat.heartbeat_failed
+            or not heartbeat.stopped_cleanly
+            or heartbeat.is_alive
+            or heartbeat.is_renewing
+        ):
             self.uow.rollback()
+            decision.status = RecoveryDecisionStatus.BLOCKED
+            decision.reason_code = "HEARTBEAT_THREAD_TEARDOWN_FAILED"
+            return decision
+
+        try:
+            # Atomic point-of-persistence fencing: update decision with claim fence check, then release claim
+            self._update_decision(decision, claim_context=context)
+            released = self.release_claim(context)
+            if not released:
+                raise StaleClaimError("FAILED_TO_RELEASE_CLAIM_ATOMICALLY")
+            self.uow.commit()
+        except StaleClaimError as exc:
+            logger.warning(
+                "Claim fence lost during final decision persistence for '%s': %s",
+                run.run_id,
+                exc,
+            )
+            self.uow.rollback()
+            decision.status = RecoveryDecisionStatus.BLOCKED
+            decision.reason_code = self._bounded_decision_failure_code(exc)
+            return decision
         return decision
 
     def _converge_saga_identity(

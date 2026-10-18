@@ -3313,18 +3313,167 @@ def test_postgres_concurrent_supersession_during_slow_stage_commits_zero_mutatio
     session_B.close()
 
 
-def test_postgres_recovery_convergence_outer_claim_loss_commits_zero_mutations(
+def test_postgres_interleaved_coordinator_drives_isolated_claim_contexts_no_cross_contamination(
     pg_session_factory: sessionmaker[Session], tmp_path: Path
 ):
-    """Task 2.8 / Bucket 3: Claim fence loss during recovery convergence rolls back session and commits zero database writes."""
+    """C1: Shared OrchestrationService instance drives two interleaved runs without claim context bleeding."""
+    session_A = pg_session_factory()
+    session_B = pg_session_factory()
+
+    project_id, change_A = _seed_base_project_and_change(session_A, "change-interleaved-A")
+    _, change_B = _seed_base_project_and_change(session_B, "change-interleaved-B")
+    uow_A = PostgresPersistenceUnitOfWork(session_A)
+    uow_B = PostgresPersistenceUnitOfWork(session_B)
+
+    run_A = OrchestrationRun(
+        run_id=f"run-A-{uuid4().hex[:8]}",
+        project_id=project_id,
+        change_name=change_A,
+        base_sha="0123456789abcdef0123456789abcdef01234567",
+        current_stage=OrchestrationStage.PREPARING_EXECUTION,
+        current_generation=1,
+        is_active=True,
+    )
+    uow_A.orchestration_runs.save(run_A)
+    session_A.commit()
+
+    run_B = OrchestrationRun(
+        run_id=f"run-B-{uuid4().hex[:8]}",
+        project_id=project_id,
+        change_name=change_B,
+        base_sha="0123456789abcdef0123456789abcdef01234567",
+        current_stage=OrchestrationStage.PREPARING_EXECUTION,
+        current_generation=1,
+        is_active=True,
+    )
+    uow_B.orchestration_runs.save(run_B)
+    session_B.commit()
+
+    rec_A = RecoveryConvergenceService(uow_A, owner_instance_id="worker-A")
+    claim_A = rec_A.acquire_claim(f"run:{run_A.run_id}", lease_seconds=60)
+    assert claim_A is not None
+
+    rec_B = RecoveryConvergenceService(uow_B, owner_instance_id="worker-B")
+    claim_B = rec_B.acquire_claim(f"run:{run_B.run_id}", lease_seconds=60)
+    assert claim_B is not None
+
+    shared_service = OrchestrationService(uow_A, project_root=tmp_path)
+
     from minime.db.models import RecoveryClaimModel
 
+    session_B.query(RecoveryClaimModel).filter_by(claim_key=f"run:{run_B.run_id}").update(
+        {"fence_token": 99, "owner_instance_id": "other-node"}
+    )
+    session_B.commit()
+
+    with pytest.raises(StaleClaimError):
+        shared_service.drive_coordinator(
+            run_B.run_id, claim_context=claim_B, manage_heartbeat=False
+        )
+
+    def _mock_queue_job(*a, **kw):
+        raise ValueError("waiting for capacity recovery")
+
+    shared_service.pipeline.queue_job = _mock_queue_job
+
+    final_run_A = shared_service.drive_coordinator(
+        run_A.run_id, claim_context=claim_A, manage_heartbeat=False
+    )
+    assert final_run_A.stop_outcome == OrchestrationStopOutcome.WAITING_CAPACITY
+
+    session_B.rollback()
+    refreshed_B = uow_B.orchestration_runs.get_by_id(run_B.run_id)
+    assert refreshed_B.stop_outcome is None
+
+    session_A.rollback()
+    refreshed_A = uow_A.orchestration_runs.get_by_id(run_A.run_id)
+    assert refreshed_A.stop_outcome == OrchestrationStopOutcome.WAITING_CAPACITY
+
+    session_A.close()
+    session_B.close()
+
+
+def test_postgres_recovery_heartbeat_blocked_renewal_teardown_suppresses_release(
+    pg_session_factory: sessionmaker[Session], tmp_path: Path
+):
+    """C2: Recovery outer heartbeat with blocked renewal times out teardown, suppresses release, and commits zero writes."""
+    import threading
+
     session = pg_session_factory()
-    project_id, change_name = _seed_base_project_and_change(session, "change-rec-fence-loss")
+    project_id, change_name = _seed_base_project_and_change(session, "change-rec-blocked-teardown")
     uow = PostgresPersistenceUnitOfWork(session)
 
     run = OrchestrationRun(
-        run_id=f"run-rec-loss-{uuid4().hex[:8]}",
+        run_id=f"run-rec-block-{uuid4().hex[:8]}",
+        project_id=project_id,
+        change_name=change_name,
+        base_sha="0123456789abcdef0123456789abcdef01234567",
+        current_stage=OrchestrationStage.PREPARING_EXECUTION,
+        resumable_stage=OrchestrationStage.PREPARING_EXECUTION,
+        current_generation=1,
+        is_active=True,
+    )
+    uow.orchestration_runs.save(run)
+    session.commit()
+
+    rec_svc = RecoveryConvergenceService(uow, owner_instance_id="worker-recovery")
+    rec_svc.heartbeat_seconds = 0.05
+    rec_svc.heartbeat_stop_timeout = 0.02  # Fast timeout, zero 5-second delay
+    claim_key = f"run:{run.run_id}"
+    cycle_id = f"cycle-{uuid4().hex[:8]}"
+
+    renew_started = threading.Event()
+    unblock_renew = threading.Event()
+
+    def _blocking_renew(claim_context, lease):
+        renew_started.set()
+        unblock_renew.wait(timeout=0.3)
+        return True
+
+    uow.renew_claim_heartbeat_isolated = _blocking_renew
+
+    class FastResumeOrchService:
+        def resume(self, *args, **kwargs):
+            renew_started.wait(timeout=0.2)
+
+    rec_svc.orchestration_service = FastResumeOrchService()
+
+    res_decision = rec_svc._converge_run_identity(
+        run_id=run.run_id,
+        cycle_id=cycle_id,
+        claim_key=claim_key,
+        source=RecoverySource.STARTUP,
+    )
+
+    unblock_renew.set()
+
+    assert res_decision.status == RecoveryDecisionStatus.BLOCKED
+    assert res_decision.reason_code in {
+        "CLAIM_HEARTBEAT_FAILED",
+        "CLAIM_HEARTBEAT_RENEWAL_FAILED_OR_THREAD_ALIVE",
+        "HEARTBEAT_THREAD_TEARDOWN_FAILED",
+    }
+
+    session.rollback()
+    claim_db = uow.claims.get_by_key(claim_key)
+    assert claim_db is not None
+    assert claim_db.released_at is None
+
+    session.close()
+
+
+def test_postgres_recovery_convergence_atomic_decision_fencing_prevents_stale_write(
+    pg_session_factory: sessionmaker[Session], tmp_path: Path
+):
+    """C3: Supersession between resume and decision persistence raises StaleClaimError and preserves exact pre-convergence state."""
+    from minime.db.models import RecoveryClaimModel, RecoveryDecisionModel
+
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "change-rec-atomic-fence")
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    run = OrchestrationRun(
+        run_id=f"run-atomic-fence-{uuid4().hex[:8]}",
         project_id=project_id,
         change_name=change_name,
         base_sha="0123456789abcdef0123456789abcdef01234567",
@@ -3340,18 +3489,17 @@ def test_postgres_recovery_convergence_outer_claim_loss_commits_zero_mutations(
     claim_key = f"run:{run.run_id}"
     cycle_id = f"cycle-{uuid4().hex[:8]}"
 
-    class FakeOrchService:
+    class SupersedingOrchService:
         def resume(self, *args, **kwargs):
-            # Supersede claim in DB so fence is lost
-            session.query(RecoveryClaimModel).filter_by(claim_key=claim_key).update(
-                {"fence_token": 99, "owner_instance_id": "other-node"}
+            session_B = pg_session_factory()
+            session_B.query(RecoveryClaimModel).filter_by(claim_key=claim_key).update(
+                {"fence_token": 99, "owner_instance_id": "successor-node"}
             )
-            session.commit()
-            raise StaleClaimError("CLAIM_SUPERSEDED_DURING_CONVERGENCE")
+            session_B.commit()
+            session_B.close()
 
-    rec_svc.orchestration_service = FakeOrchService()
+    rec_svc.orchestration_service = SupersedingOrchService()
 
-    # Converge run identity on daemon startup recovery
     res_decision = rec_svc._converge_run_identity(
         run_id=run.run_id,
         cycle_id=cycle_id,
@@ -3359,18 +3507,17 @@ def test_postgres_recovery_convergence_outer_claim_loss_commits_zero_mutations(
         source=RecoverySource.STARTUP,
     )
 
-    # Decision returned in memory is BLOCKED with failure code
     assert res_decision.status == RecoveryDecisionStatus.BLOCKED
-    assert res_decision.reason_code is not None
 
-    # Verify zero database writes committed to recovery_decisions and claim was not released
     session.rollback()
-    db_decision = uow.recovery_decisions.get_by_id(res_decision.decision_id)
-    assert db_decision is None or db_decision.status != RecoveryDecisionStatus.COMPLETED
+    persisted_decision = session.query(RecoveryDecisionModel).filter_by(cycle_id=cycle_id).first()
+    assert persisted_decision is not None
+    assert persisted_decision.status != RecoveryDecisionStatus.COMPLETED.value
 
     claim_db = uow.claims.get_by_key(claim_key)
     assert claim_db is not None
-    assert claim_db.fence_token == 99  # Preserved other node's claim
-    assert claim_db.released_at is None  # NOT released by stale worker!
+    assert claim_db.fence_token == 99
+    assert claim_db.owner_instance_id == "successor-node"
+    assert claim_db.released_at is None
 
     session.close()

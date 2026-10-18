@@ -1021,6 +1021,8 @@ def test_real_bubblewrap_checks_runner_execution(tmp_path: Path):
     """Task 1.4: Real Linux Bubblewrap integration test executing ChecksRunner on a sample test suite."""
     from minime.services.checks_runner import ChecksRunner
 
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir()
     worktree = tmp_path / "worktree"
     worktree.mkdir()
     sample_test = worktree / "test_sample.py"
@@ -1032,7 +1034,7 @@ def test_real_bubblewrap_checks_runner_execution(tmp_path: Path):
         encoding="utf-8",
     )
 
-    runner = ChecksRunner()
+    runner = ChecksRunner(runtime_root=str(runtime_root))
     result = asyncio.run(
         runner.run(
             job_id="job-test-checks-bwrap",

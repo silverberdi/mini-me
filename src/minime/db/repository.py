@@ -5779,7 +5779,24 @@ class PostgresRecoveryDecisionRepository(RecoveryDecisionRepositoryInterface):
         models = self.session.scalars(stmt).all()
         return [recovery_decision_model_to_domain(m) for m in models]
 
-    def update_decision(self, decision: RecoveryDecision) -> RecoveryDecision:
+    def update_decision(
+        self, decision: RecoveryDecision, claim_context: RecoveryClaimContext | None = None
+    ) -> RecoveryDecision:
+        if claim_context is not None:
+            now = utc_now()
+            stmt = select(RecoveryClaimModel).where(
+                RecoveryClaimModel.claim_key == claim_context.claim_key,
+                RecoveryClaimModel.owner_instance_id == claim_context.owner_instance_id,
+                RecoveryClaimModel.fence_token == claim_context.fence_token,
+                RecoveryClaimModel.released_at.is_(None),
+                RecoveryClaimModel.lease_expires_at > now,
+            )
+            claim = self.session.scalars(stmt).first()
+            if not claim:
+                raise StaleClaimError(
+                    f"Claim fence lost for '{claim_context.claim_key}' during decision update."
+                )
+
         model = self.session.get(RecoveryDecisionModel, decision.decision_id)
         if model:
             model.status = (
