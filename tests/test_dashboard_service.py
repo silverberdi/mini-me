@@ -12,6 +12,7 @@ from minime.domain.enums import (
     JobStatus,
     OrchestrationStage,
     OrchestrationStopOutcome,
+    PreviewStatus,
     ProjectStatus,
     ReadinessState,
     ReviewVerdict,
@@ -23,6 +24,7 @@ from minime.domain.models import (
     CheckResult,
     Job,
     OrchestrationRun,
+    PreviewSession,
     Project,
     ProjectBinding,
     Review,
@@ -248,6 +250,19 @@ def test_dashboard_change_detail_pipeline_phases(
     )
     in_memory_uow.audits.save(aud)
 
+    preview_session = PreviewSession(
+        preview_id="preview-run-3",
+        project_id="test-proj",
+        change_name="003-audited-feature",
+        run_id="run-3",
+        candidate_generation=3,
+        head_sha="cand123456",
+        base_sha="base123456",
+        image_digest="sha256:preview-image",
+        status=PreviewStatus.READY,
+    )
+    in_memory_uow.preview_sessions.save(preview_session)
+
     # Binding
     binding = ProjectBinding(
         project_id="test-proj",
@@ -278,6 +293,11 @@ def test_dashboard_change_detail_pipeline_phases(
     assert detail.checks[0].status == "PASS"
 
     assert detail.review.verdict == "READY_TO_MERGE"
+    assert detail.preview_validation.preview_session.candidate_generation == 3
+    assert (
+        detail.preview_validation.preview_session.head_sha
+        == detail.candidate_authority.candidate_sha
+    )
     assert detail.review.is_stale_to_current_candidate is False
 
     assert detail.audit.status == "AUDIT_COMPLETED"

@@ -1717,9 +1717,14 @@ def get_validation_scenarios_endpoint(
 @app.post("/api/v1/validations/submit", tags=["validations"])
 def submit_validation(
     req: ValidationSubmitRequest,
+    request: Request,
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> dict[str, Any]:
     verdict = ValidationVerdict.PASS if req.verdict.upper() == "PASS" else ValidationVerdict.FAIL
+    authenticated_operator = getattr(request.state, "operator", None)
+    # The request body is client-controlled and is never an identity authority.
+    # Auth-disabled local environments get an explicit non-identity marker.
+    actor_identity = getattr(authenticated_operator, "email", None) or "unauthenticated"
     val_svc = ValidationAuthorityService(uow)
     validation = val_svc.record_validation(
         project_id=req.project_id,
@@ -1733,7 +1738,7 @@ def submit_validation(
         preview_id=req.preview_id,
         generation=req.candidate_generation,
         notes=req.notes,
-        operator=req.operator,
+        operator=actor_identity,
     )
     return {
         "validation_id": validation.validation_id,

@@ -12,6 +12,13 @@ import { renderBacklogDetail as renderBacklogDetailView, renderBacklogTable as r
 import { renderAuditEvidence, renderCandidateEvidence, renderChecksEvidence, renderReviewEvidence, renderRunOverview } from "./views/evidence_views.js";
 import { actionHistory, discoverActions, executeAction } from "./services/control_plane_client.js";
 import { renderChangesView } from "./views/runs_view.js";
+import { createActionController } from "./controllers/action_controller.js";
+import { createPreviewController } from "./controllers/preview_controller.js";
+import { createBacklogController } from "./controllers/backlog_controller.js";
+import { createLifecycleController } from "./controllers/lifecycle_controller.js";
+import { createProjectsController } from "./controllers/projects_controller.js";
+import { createNavigationController } from "./controllers/navigation_controller.js";
+import { getStatusBadgeClass } from "./views/status_view.js";
 
 /** Single native-module coordinator for the existing Control Center workflows. */
 // Operational and authenticated responses must never be read from the HTTP cache.
@@ -24,20 +31,6 @@ const fetch = (input, init = {}) => {
 };
 
   // Safe Storage Helpers
-  function safeGetStorage(key, defaultVal) {
-    try {
-      return localStorage.getItem(key) || defaultVal;
-    } catch (_) {
-      return defaultVal;
-    }
-  }
-
-  function safeSetStorage(key, val) {
-    try {
-      localStorage.setItem(key, val);
-    } catch (_) {}
-  }
-
   // State
   let overviewData = null;
   let queueData = null;
@@ -48,20 +41,12 @@ const fetch = (input, init = {}) => {
   let refreshInProgress = false;
   let refreshPending = false;
   let initialSelected = false;
-  let activeFilter = 'ALL';
-  let searchQuery = '';
-  let refreshIntervalSeconds = parseInt(safeGetStorage('minime_dashboard_interval', '10'), 10);
-  let countdownSeconds = refreshIntervalSeconds;
-  let countdownInterval = null;
+  let navigationController = null;
 
   // 021 Intake & Projects State
-  let currentMainView = 'viewExecutions';
   let currentProjectId = null;
-  let projectsList = [];
   let backlogItems = [];
   let selectedBacklogItem = null;
-  let backlogFilter = 'ALL';
-  let backlogSearchQuery = '';
   let editingItemKey = null;
 
   // DOM Elements
@@ -176,6 +161,39 @@ const fetch = (input, init = {}) => {
   const operatorProfileGroup = document.getElementById('operatorProfileGroup');
   const operatorEmailText = document.getElementById('operatorEmailText');
   const logoutBtn = document.getElementById('logoutBtn');
+  const lifecycleController = createLifecycleController({
+    refreshCurrentView: () => {
+      if (navigationController?.currentView === 'viewBacklog') return fetchBacklog(currentProjectId);
+      if (navigationController?.currentView === 'viewProjects') return fetchProjects();
+      return fetchOverview();
+    },
+    refreshAfterReconnect: () => {
+      if (navigationController?.currentView === 'viewBacklog') void fetchBacklog(currentProjectId);
+      else if (navigationController?.currentView === 'viewProjects') void fetchProjects();
+      return fetchOverview();
+    },
+    refreshOverview: fetchOverview,
+    setOfflineBanner,
+    markFreshnessStale: () => {
+      ["overviewFreshness", "queueFreshness", "providerFreshness", "healthFreshness"].forEach((id) => {
+        const node = document.getElementById(id);
+        if (node) {
+          node.textContent = "Sin conexión: la última lectura puede estar desactualizada.";
+          node.dataset.state = "STALE";
+        }
+      });
+    },
+    onResize: () => {
+      const executions = document.getElementById('viewExecutions');
+      if (executions?.classList.contains('active')) {
+        executions.style.display = window.matchMedia('(min-width: 1200px)').matches ? 'grid' : 'block';
+      }
+    },
+    refreshButton: refreshBtn,
+    refreshIntervalSelect,
+    autoRefreshToggle,
+    refreshTimer,
+  });
   const sessionController = createSessionController({
     fetch,
     loginSection,
@@ -184,7 +202,7 @@ const fetch = (input, init = {}) => {
     emailNode: operatorEmailText,
     onAuthenticated: (operator) => { void initDesktopPaneLayout(operator.email); },
     onUnauthenticated: () => {
-      clearInterval(countdownInterval);
+      lifecycleController.stop();
       overviewData = null;
       queueData = null;
       providerData = null;
@@ -200,12 +218,120 @@ const fetch = (input, init = {}) => {
       setOfflineBanner(false);
     },
   });
+  const actionController = createActionController({
+    execute: executeAction,
+    discover: discoverActions,
+    notify: showToast,
+    refreshOverview: fetchOverview,
+    refreshSelectedDetail: async () => {
+      if (selectedChange?.project_id && selectedChange?.change_name) {
+        await fetchChangeDetail(selectedChange.project_id, selectedChange.change_name);
+      }
+    },
+    getActor: () => sessionController.currentUser?.email,
+    toolbar: document.getElementById('actionToolbar'),
+    escapeHtml,
+    openParameters: openParamModal,
+    openConfirmation: openConfirmModal,
+  });
+  const previewController = createPreviewController({
+    fetchRequest: fetch,
+    notify: showToast,
+    refresh: fetchOverview,
+    getActor: () => sessionController.currentUser?.email,
+  });
+  const backlogController = createBacklogController({
+    fetchRequest: fetch,
+    notify: showToast,
+    getProjectId: () => currentProjectId,
+    refreshBacklog: fetchBacklog,
+    refreshProjects: fetchProjects,
+    selectItem: selectBacklogItem,
+    clearSelectedItem: () => { selectedBacklogItem = null; },
+    onStarted: () => setTimeout(() => switchMainView('viewExecutions'), 1000),
+    confirmAction: (message) => window.confirm(message),
+  });
+  const projectsController = createProjectsController({
+    fetchRequest: fetch,
+    notify: showToast,
+    onUnauthorized: () => sessionController.showLogin(),
+    getCurrentProjectId: () => currentProjectId,
+    setCurrentProjectId: (projectId) => { currentProjectId = projectId; },
+    getCurrentView: () => navigationController?.currentView,
+    renderProjectSelect: renderProjectSelectView,
+    renderProjectsGrid: renderProjectsGridView,
+    projectSelect,
+    backlogProjectDisplay,
+    projectGrid: projectsGridContainer,
+    onboardingButton: onboardProjectBtn,
+    onboardingModal: onboardProjectModal,
+    onboardingForm: onboardProjectForm,
+    cancelOnboardingButton: cancelOnboardBtn,
+    contextModal: projectContextModal,
+    closeContextButton: closeContextModalBtn,
+    contextNodes: {
+      discoveredFacts: ctxDiscoveredFacts,
+      inferredStructure: ctxInferredStructure,
+      missingContext: ctxMissingContext,
+    },
+    discoverBacklog: (projectId) => backlogController.discover(projectId),
+    openBacklog: () => switchMainView('viewBacklog'),
+    fetchBacklog,
+  });
+  navigationController = createNavigationController({
+    documentRef: document,
+    windowRef: window,
+    mainNavTabs,
+    bottomNavTabs: document.querySelectorAll('.bottom-nav [data-main-view]'),
+    scrollButtons: document.querySelectorAll('.bottom-nav [data-scroll-to]'),
+    mainViewPanes,
+    detailTabs,
+    tabPanes,
+    changeSearchInput,
+    filterPills,
+    changesTableBody,
+    attentionItemsContainer,
+    copyShaButton: copyShaBtn,
+    candidateShaNode: dtCandidateSha,
+    fetchBacklog: () => currentProjectId ? fetchBacklog(currentProjectId) : renderBacklogUnavailable(),
+    fetchProjects,
+    fetchOverview,
+    renderBacklogUnavailable,
+    renderChangesTable,
+    selectChange,
+  });
 
   // Initialization
   export async function initDashboard() {
     themeController.initialize();
     sessionController.bindLogout(logoutBtn);
-    setupEventListeners();
+    lifecycleController.bind();
+    projectsController.bindEvents();
+    navigationController.bind();
+    actionController.bindToolbar();
+    backlogController.bindEvents({
+      searchInput: backlogSearchInput,
+      statusPills: backlogStatusPills,
+      tableBody: backlogTableBody,
+      newItemButton: newWorkItemBtn,
+      cancelButton: cancelWorkItemBtn,
+      itemModal: newWorkItemModal,
+      itemForm: newWorkItemForm,
+      discoverButton: discoverBacklogBtn,
+      prepareButton: bkPrepareBtn,
+      startButton: bkStartBtn,
+      editButton: bkEditBtn,
+      deleteButton: bkDeleteBtn,
+      answerForm: answerQuestionForm,
+      answerInput: humanAnswerInput,
+      runArtifact: bkArtRun,
+      getSelectedItem: () => selectedBacklogItem,
+      openEditor: (item) => openNewWorkItemModal(item),
+      saveForm: saveWorkItem,
+      renderTable: renderBacklogTable,
+      clearAnswer: () => { if (humanAnswerInput) humanAnswerInput.value = ''; },
+      onOpenRun: () => switchMainView('viewExecutions'),
+    });
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.register("/sw.js").catch(() => {});
     }
@@ -213,341 +339,8 @@ const fetch = (input, init = {}) => {
     if (authenticated) {
       await fetchProjects();
       switchMainView('viewExecutions');
-      setupAutoRefresh();
+      lifecycleController.start();
     }
-  }
-
-  // Event Listeners
-  function setupEventListeners() {
-    window.addEventListener('resize', () => {
-      const executions = document.getElementById('viewExecutions');
-      if (executions?.classList.contains('active')) {
-        executions.style.display = window.matchMedia('(min-width: 1200px)').matches ? 'grid' : 'block';
-      }
-    }, { passive: true });
-    window.addEventListener('offline', () => {
-      setOfflineBanner(true);
-      ["overviewFreshness", "queueFreshness", "providerFreshness", "healthFreshness"].forEach((id) => {
-        const node = document.getElementById(id);
-        if (node) {
-          node.textContent = "Sin conexión: la última lectura puede estar desactualizada.";
-          node.dataset.state = "STALE";
-        }
-      });
-    });
-    window.addEventListener('online', () => {
-      if (currentMainView === 'viewBacklog') fetchBacklog(currentProjectId);
-      else if (currentMainView === 'viewProjects') fetchProjects();
-      fetchOverview();
-    });
-    // 021 Main View Navigation
-    mainNavTabs.forEach((tab) => {
-      tab.addEventListener('click', () => {
-        const targetView = tab.getAttribute('data-main-view');
-        if (targetView) switchMainView(targetView);
-      });
-    });
-    document.querySelectorAll('.bottom-nav [data-main-view]').forEach((tab) => {
-      tab.addEventListener('click', () => {
-        const targetView = tab.getAttribute('data-main-view');
-        if (targetView) switchMainView(targetView);
-      });
-    });
-    document.querySelectorAll('.bottom-nav [data-scroll-to]').forEach((button) => {
-      button.addEventListener('click', () => {
-        switchMainView('viewExecutions');
-        const target = document.getElementById(button.getAttribute('data-scroll-to'));
-        target?.scrollIntoView({
-          behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
-          block: 'start',
-        });
-      });
-    });
-
-    if (projectSelect) {
-      projectSelect.addEventListener('change', (e) => {
-        currentProjectId = e.target.value;
-        if (backlogProjectDisplay) {
-          backlogProjectDisplay.textContent = `Proyecto: ${currentProjectId}`;
-        }
-        if (currentMainView === 'viewBacklog') {
-          fetchBacklog(currentProjectId);
-        }
-      });
-    }
-
-    // Backlog Search & Filter
-    if (backlogSearchInput) {
-      backlogSearchInput.addEventListener('input', (e) => {
-        backlogSearchQuery = e.target.value.toLowerCase().trim();
-        renderBacklogTable();
-      });
-    }
-
-    backlogStatusPills.forEach((pill) => {
-      pill.addEventListener('click', () => {
-        backlogStatusPills.forEach((p) => p.classList.remove('active'));
-        pill.classList.add('active');
-        backlogFilter = pill.getAttribute('data-backlog-filter');
-        renderBacklogTable();
-      });
-    });
-
-    if (backlogTableBody) {
-      backlogTableBody.addEventListener('click', (e) => {
-        const actionButton = e.target.closest('[data-backlog-action]');
-        if (actionButton) {
-          e.stopPropagation();
-          const itemKey = actionButton.dataset.itemKey;
-          if (actionButton.dataset.backlogAction === 'prepare') void prepareBacklogItem(itemKey);
-          if (actionButton.dataset.backlogAction === 'start') void startBacklogItem(itemKey);
-          return;
-        }
-        const row = e.target.closest('[data-item-key]');
-        if (row) {
-          const itemKey = row.getAttribute('data-item-key');
-          selectBacklogItem(itemKey);
-        }
-      });
-    }
-
-    projectsGridContainer?.addEventListener('click', (event) => {
-      const button = event.target.closest('[data-project-action][data-project-id]');
-      if (!button) return;
-      const projectId = button.dataset.projectId;
-      if (button.dataset.projectAction === 'inspect') void inspectContext(projectId);
-      else if (button.dataset.projectAction === 'discover') void discoverBacklogContext(projectId);
-      else if (button.dataset.projectAction === 'backlog') {
-        currentProjectId = projectId;
-        if (projectSelect) projectSelect.value = projectId;
-        switchMainView('viewBacklog');
-      }
-    });
-
-    bkArtRun?.addEventListener('click', (event) => {
-      const button = event.target.closest('[data-open-run]');
-      if (button?.dataset.openRun) switchMainView('viewExecutions');
-    });
-
-    // Backlog Action Buttons & Forms
-    if (newWorkItemBtn) {
-      newWorkItemBtn.addEventListener('click', () => {
-        openNewWorkItemModal();
-      });
-    }
-
-    if (cancelWorkItemBtn) {
-      cancelWorkItemBtn.addEventListener('click', () => {
-        if (newWorkItemModal) newWorkItemModal.close();
-      });
-    }
-
-    if (newWorkItemForm) {
-      newWorkItemForm.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        await saveWorkItem();
-      });
-    }
-
-    if (discoverBacklogBtn) {
-      discoverBacklogBtn.addEventListener('click', async () => {
-        await discoverBacklogContext(currentProjectId);
-      });
-    }
-
-    if (bkPrepareBtn) {
-      bkPrepareBtn.addEventListener('click', async () => {
-        if (selectedBacklogItem) {
-          await prepareBacklogItem(selectedBacklogItem.item_key);
-        }
-      });
-    }
-
-    if (bkStartBtn) {
-      bkStartBtn.addEventListener('click', async () => {
-        if (selectedBacklogItem) {
-          await startBacklogItem(selectedBacklogItem.item_key);
-        }
-      });
-    }
-
-    if (bkEditBtn) {
-      bkEditBtn.addEventListener('click', () => {
-        if (selectedBacklogItem) {
-          openNewWorkItemModal(selectedBacklogItem);
-        }
-      });
-    }
-
-    if (bkDeleteBtn) {
-      bkDeleteBtn.addEventListener('click', async () => {
-        if (selectedBacklogItem) {
-          await deleteWorkItem(selectedBacklogItem.item_key);
-        }
-      });
-    }
-
-    if (answerQuestionForm) {
-      answerQuestionForm.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        if (selectedBacklogItem) {
-          const answer = humanAnswerInput ? humanAnswerInput.value.trim() : '';
-          if (answer) {
-            await submitQuestionAnswer(selectedBacklogItem.item_key, answer);
-          }
-        }
-      });
-    }
-
-    // Project Onboarding & Context Modals
-    if (onboardProjectBtn) {
-      onboardProjectBtn.addEventListener('click', () => {
-        openOnboardModal();
-      });
-    }
-
-    if (cancelOnboardBtn) {
-      cancelOnboardBtn.addEventListener('click', () => {
-        if (onboardProjectModal) onboardProjectModal.close();
-      });
-    }
-
-    if (onboardProjectForm) {
-      onboardProjectForm.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        await submitOnboardProject();
-      });
-    }
-
-    if (closeContextModalBtn) {
-      closeContextModalBtn.addEventListener('click', () => {
-        if (projectContextModal) projectContextModal.close();
-      });
-    }
-
-    if (refreshBtn) {
-      refreshBtn.addEventListener('click', () => {
-        if (currentMainView === 'viewBacklog') {
-          fetchBacklog(currentProjectId);
-        } else if (currentMainView === 'viewProjects') {
-          fetchProjects();
-        } else {
-          fetchOverview();
-        }
-        resetCountdown();
-      });
-    }
-
-    if (refreshIntervalSelect) {
-      refreshIntervalSelect.value = String(refreshIntervalSeconds);
-      refreshIntervalSelect.addEventListener('change', (e) => {
-        refreshIntervalSeconds = parseInt(e.target.value, 10);
-        safeSetStorage('minime_dashboard_interval', String(refreshIntervalSeconds));
-        countdownSeconds = refreshIntervalSeconds;
-        setupAutoRefresh();
-      });
-    }
-
-    if (autoRefreshToggle) {
-      autoRefreshToggle.addEventListener('change', () => {
-        if (autoRefreshToggle.checked) {
-          setupAutoRefresh();
-        } else {
-          clearInterval(countdownInterval);
-          if (refreshTimer) refreshTimer.textContent = 'desactivada';
-        }
-      });
-    }
-
-    document.addEventListener('visibilitychange', () => {
-      if (!document.hidden && autoRefreshToggle && autoRefreshToggle.checked) {
-        resetCountdown();
-      }
-    });
-
-    if (changeSearchInput) {
-      changeSearchInput.addEventListener('input', (e) => {
-        searchQuery = e.target.value.toLowerCase().trim();
-        renderChangesTable();
-      });
-    }
-
-    filterPills.forEach((pill) => {
-      pill.addEventListener('click', () => {
-        filterPills.forEach((p) => p.classList.remove('active'));
-        pill.classList.add('active');
-        activeFilter = pill.getAttribute('data-filter');
-        renderChangesTable();
-      });
-    });
-
-    detailTabs.forEach((tab) => {
-      tab.addEventListener('click', () => {
-        detailTabs.forEach((t) => {
-          t.classList.remove('active');
-          t.setAttribute('aria-selected', 'false');
-        });
-        tabPanes.forEach((p) => p.classList.remove('active'));
-
-        tab.classList.add('active');
-        tab.setAttribute('aria-selected', 'true');
-        const targetId = tab.getAttribute('data-tab');
-        const targetPane = document.getElementById(targetId);
-        if (targetPane) targetPane.classList.add('active');
-      });
-    });
-
-    if (attentionItemsContainer) {
-      attentionItemsContainer.addEventListener('click', (e) => {
-        const card = e.target.closest('[data-project-id]');
-        if (card) {
-          selectChange(card.getAttribute('data-project-id'), card.getAttribute('data-change-name'));
-        }
-      });
-    }
-
-    if (changesTableBody) {
-      changesTableBody.addEventListener('click', (e) => {
-        const row = e.target.closest('[data-project-id]');
-        if (row) {
-          selectChange(row.getAttribute('data-project-id'), row.getAttribute('data-change-name'));
-        }
-      });
-    }
-
-    if (copyShaBtn) {
-      copyShaBtn.addEventListener('click', () => {
-        if (dtCandidateSha && dtCandidateSha.textContent !== '---') {
-          navigator.clipboard.writeText(dtCandidateSha.getAttribute('data-full-sha') || dtCandidateSha.textContent);
-          copyShaBtn.textContent = '✓';
-          setTimeout(() => { copyShaBtn.textContent = '📋'; }, 1500);
-        }
-      });
-    }
-
-  }
-
-  // Auto-Refresh
-  function setupAutoRefresh() {
-    clearInterval(countdownInterval);
-    countdownSeconds = refreshIntervalSeconds;
-    if (refreshTimer) refreshTimer.textContent = `${countdownSeconds}s`;
-
-    countdownInterval = setInterval(() => {
-      if (!autoRefreshToggle.checked) return;
-      if (document.hidden) return;
-      countdownSeconds -= 1;
-      if (countdownSeconds <= 0) {
-        countdownSeconds = refreshIntervalSeconds;
-        fetchOverview();
-      }
-      if (refreshTimer) refreshTimer.textContent = `${countdownSeconds}s`;
-    }, 1000);
-  }
-
-  function resetCountdown() {
-    countdownSeconds = refreshIntervalSeconds;
-    if (refreshTimer) refreshTimer.textContent = `${countdownSeconds}s`;
   }
 
   // API Fetching
@@ -691,8 +484,8 @@ const fetch = (input, init = {}) => {
     initialSelected = renderChangesView({
       root: changesTableBody,
       changes: overviewData.changes,
-      filter: activeFilter,
-      query: searchQuery,
+      filter: navigationController.activeFilter,
+      query: navigationController.searchQuery,
       selected: selectedChange,
       alreadyAutoSelected: initialSelected,
       statusClass: getStatusBadgeClass,
@@ -776,7 +569,7 @@ const fetch = (input, init = {}) => {
     renderTimelineTab(detail.timeline);
 
     // Action Toolbar
-    renderActionToolbar(detail);
+    void actionController.renderToolbar(detail);
   }
 
   function showToast(message, type = 'info') {
@@ -790,190 +583,8 @@ const fetch = (input, init = {}) => {
     }, 4000);
   }
 
-  async function renderActionToolbar(detail) {
-    const toolbar = document.getElementById('actionToolbar');
-    if (!toolbar) return;
-    const runId = detail?.run_id;
-    if (!runId) {
-      toolbar.innerHTML = '';
-      return;
-    }
-    try {
-      const actions = await discoverActions(runId);
-      if (!actions || !actions.length) {
-        toolbar.innerHTML = '<span class="text-muted">No hay acciones disponibles</span>';
-        return;
-      }
-      toolbar.innerHTML = actions.map(action => {
-        const actionType = action.action || action.action_type;
-        const isDanger = ['cancel', 'recover_locks'].includes(actionType.toLowerCase());
-        const isPrimary = ['continue', 'resolve_gate'].includes(actionType.toLowerCase());
-        const btnClass = isDanger ? 'btn-danger' : (isPrimary ? 'btn-primary' : 'btn-secondary');
-        const disabledAttr = action.enabled === false ? 'disabled' : '';
-        const tooltip = action.disabled_reason ? `title="${escapeHtml(action.disabled_reason)}"` : `title="${escapeHtml(action.description || '')}"`;
-        return `<button type="button" class="btn btn-sm ${btnClass}" data-action="${escapeHtml(actionType)}" ${disabledAttr} ${tooltip}>${escapeHtml(action.display_name || actionType)}</button>`;
-      }).join(' ');
-
-      toolbar.querySelectorAll('[data-action]:not(:disabled)').forEach(button => {
-        button.addEventListener('click', () => {
-          const actionType = button.dataset.action;
-          const action = actions.find(item => (item.action || item.action_type) === actionType);
-          if (action) handleActionClick(action, detail);
-        });
-      });
-    } catch (err) {
-      toolbar.innerHTML = '<span class="text-muted">Acciones del operador no disponibles</span>';
-    }
-  }
-
-  function handleActionClick(action, detail) {
-    const actionType = (action.action || action.action_type || '').toLowerCase();
-
-    if (actionType === 'reassign') {
-      openParamModal({
-        title: 'Reasignar ejecutor',
-        description: `Selecciona el proveedor de ejecución para «${detail.change_name}».`,
-        fields: [
-          {
-            name: 'executor',
-            label: 'Ejecutor de destino',
-            type: 'select',
-            options: [
-              { value: 'codex', label: 'Codex (implementación)' },
-              { value: 'antigravity', label: 'Antigravity (supervisión)' }
-            ],
-            default: 'codex'
-          },
-          {
-            name: 'rationale',
-            label: 'Motivo de la reasignación (opcional)',
-            type: 'text',
-            placeholder: 'Explica el motivo del relevo…'
-          }
-        ],
-        onSubmit: (params) => {
-          executeOperatorAction(detail, 'REASSIGN', {
-            target_executor: params.executor,
-            rationale: params.rationale || ''
-          });
-        }
-      });
-    } else if (actionType === 'resolve_gate') {
-      openParamModal({
-        title: 'Resolver compuerta humana',
-        description: `Resolver la compuerta de «${detail.change_name}» (${detail.human_gate || 'desconocida'}).`,
-        fields: [
-          {
-            name: 'resolution',
-            label: 'Decisión',
-            type: 'select',
-            options: [
-              { value: 'APPROVED', label: 'Aprobar (continuar)' },
-              { value: 'REJECTED', label: 'Rechazar (solicitar cambios)' },
-              { value: 'OVERRIDDEN', label: 'Anular compuerta' }
-            ],
-            default: 'APPROVED'
-          },
-          {
-            name: 'notes',
-            label: 'Notas de la decisión',
-            type: 'textarea',
-            placeholder: 'Añade notas o el motivo de la decisión…'
-          }
-        ],
-        onSubmit: (params) => {
-          executeOperatorAction(detail, 'RESOLVE_GATE', {
-            gate_action: params.resolution,
-            operator_notes: params.notes || ''
-          });
-        }
-      });
-    } else if (actionType === 'retry') {
-      openParamModal({
-        title: 'Reintentar etapa',
-        description: `Reintentar la etapa de «${detail.change_name}».`,
-        fields: [
-          {
-            name: 'reason',
-            label: 'Motivo del reintento (opcional)',
-            type: 'text',
-            placeholder: 'Motivo del reintento…'
-          }
-        ],
-        onSubmit: (params) => {
-          executeOperatorAction(detail, 'RETRY', {
-            reason: params.reason || 'Operator manual retry'
-          });
-        }
-      });
-    } else if (action.requires_confirmation || ['cancel', 'recover_locks', 'reconcile_post_merge'].includes(actionType)) {
-      openConfirmModal({
-        title: action.display_name || `Confirm ${actionType.toUpperCase()}`,
-        description: action.confirmation_prompt || action.description || `Confirm execution of ${action.display_name || actionType}.`,
-        warning: actionType === 'cancel' ? 'Esto cancelará la ejecución activa y liberará sus recursos gobernados.' : (actionType === 'recover_locks' ? 'Esto intentará recuperar los bloqueos obsoletos de esta ejecución.' : ''),
-        meta: {
-          'Change': detail.change_name,
-          'Run ID': detail.run_id ? detail.run_id.slice(0, 8) + '...' : '---',
-          'Etapa actual': detail.current_stage || '—',
-          'Nivel de riesgo': action.risk_level || 'UNKNOWN'
-        },
-        onConfirm: () => {
-          executeOperatorAction(detail, action.action || action.action_type);
-        }
-      });
-    } else {
-      executeOperatorAction(detail, action.action || action.action_type);
-    }
-  }
-
-  async function executeOperatorAction(detail, actionType, parameters = {}) {
-    const runId = detail?.run_id;
-    if (!runId) {
-      showToast('No se puede ejecutar la acción: el cambio no tiene un Run activo.', 'error');
-      return;
-    }
-    const payload = {
-      action_request_id: crypto.randomUUID(),
-      project_id: detail.project_id,
-      change_name: detail.change_name,
-      run_id: runId,
-      action_type: actionType.toUpperCase(),
-      parameters: parameters,
-      actor_identity: sessionController.currentUser?.email || 'operator',
-      source_interface: 'pwa',
-      expected_stage: detail.current_stage || null,
-      expected_generation: detail.candidate_authority?.generation || (detail.generation || null),
-      expected_candidate_sha: detail.candidate_authority?.candidate_sha || (detail.candidate_sha || null),
-      expected_human_gate: detail.human_gate || null,
-      requested_at: new Date().toISOString()
-    };
-
-    try {
-      showToast(`Ejecutando ${actionType}…`, 'info');
-      const result = await executeAction(runId, payload);
-      if (result.status === 'SUCCESS' || result.status === 'COMPLETED' || result.status === 'ACCEPTED' || result.success === true) {
-        showToast(`Acción ${actionType} completada: ${result.summary || result.message || 'Ejecución finalizada'}`, 'success');
-        await fetchOverview();
-        if (selectedChange && selectedChange.projectId && selectedChange.changeName) {
-          await fetchChangeDetail(selectedChange.projectId, selectedChange.changeName);
-        }
-      } else {
-        const errMsg = result.summary || result.error_message || result.error_code || result.detail || result.message || 'La acción fue rechazada o falló.';
-        showToast(`Falló la acción: ${errMsg}`, 'error');
-        await fetchOverview();
-        if (selectedChange && selectedChange.projectId && selectedChange.changeName) {
-          await fetchChangeDetail(selectedChange.projectId, selectedChange.changeName);
-        }
-      }
-    } catch (err) {
-      const message = err.payload?.summary || err.payload?.error_message || err.payload?.error_code || err.message;
-      showToast(`Falló la acción: ${message}`, 'error');
-      await fetchOverview();
-    }
-  }
-
   async function renderEfficiencyTab(projectId, changeName) {
-    const container = document.getElementById('efficiencyContentContainer');
+    const container = document.getElementById('efficiencyDetailsContainer');
     if (!container) return;
     if (!projectId || !changeName) {
       container.innerHTML = '<p class="table-empty">No hay telemetría registrada para este cambio.</p>';
@@ -1100,8 +711,8 @@ const fetch = (input, init = {}) => {
 
   function renderCandidateTab(detail) {
     renderCandidateEvidence({
-      summary: document.getElementById('candidateAuthSummary'),
-      history: document.getElementById('candidateHistoryTbody'),
+      summary: document.getElementById('candidateDetailsContainer'),
+      history: document.getElementById('candidateHistoryBody'),
       detail,
     });
   }
@@ -1115,11 +726,11 @@ const fetch = (input, init = {}) => {
   }
 
   function renderReviewTab(review, candidate) {
-    renderReviewEvidence({ container: document.getElementById('reviewContentContainer'), review, candidate });
+    renderReviewEvidence({ container: document.getElementById('reviewDetailsContainer'), review, candidate });
   }
 
   function renderAuditTab(audit, candidate) {
-    renderAuditEvidence({ container: document.getElementById('auditContentContainer'), audit, candidate });
+    renderAuditEvidence({ container: document.getElementById('auditDetailsContainer'), audit, candidate });
   }
 
   function renderPreviewTab(previewVal, detail) {
@@ -1141,25 +752,19 @@ const fetch = (input, init = {}) => {
     const previewIdentityValid = Boolean(
       candSha && baseSha && Number.isInteger(candidateGeneration) && candidateGeneration > 0,
     );
+    const previewMatchesCandidate = Boolean(session && previewIdentityValid
+      && session.head_sha === candSha
+      && session.base_sha === baseSha
+      && Number(session.candidate_generation) === candidateGeneration
+      && session.image_digest);
+    const validationAllowed = previewMatchesCandidate && session.status === 'READY' && !isStale;
 
     // Action buttons visibility
     if (session && (session.status === 'READY' || session.status === 'STARTING' || session.status === 'PROBING')) {
       if (launchBtn) launchBtn.style.display = 'none';
       if (teardownBtn) {
         teardownBtn.style.display = 'inline-block';
-        teardownBtn.onclick = async () => {
-          teardownBtn.disabled = true;
-          teardownBtn.textContent = 'Tearing down...';
-          try {
-            await fetch(`/api/v1/previews/${session.preview_id}/teardown`, { method: 'POST' });
-            fetchOverview();
-          } catch (e) {
-            alert(`Teardown failed: ${e}`);
-          } finally {
-            teardownBtn.disabled = false;
-            teardownBtn.textContent = '⏹ Teardown';
-          }
-        };
+        teardownBtn.onclick = () => previewController.teardown({ session, button: teardownBtn });
       }
     } else {
       if (teardownBtn) teardownBtn.style.display = 'none';
@@ -1169,51 +774,11 @@ const fetch = (input, init = {}) => {
         launchBtn.title = previewIdentityValid
           ? 'Crear vista previa para la identidad exacta del candidato'
           : 'No disponible: falta identidad verificable de candidato, base o generación';
-        launchBtn.onclick = async () => {
-          if (!previewIdentityValid) return;
-          launchBtn.disabled = true;
-          launchBtn.textContent = 'Building...';
-          try {
-            const buildRes = await fetch('/api/v1/previews/build', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                project_id: detail.project_id,
-                change_name: detail.change_name,
-                run_id: detail.run_id,
-                head_sha: candSha,
-                base_sha: baseSha,
-                candidate_generation: candidateGeneration,
-              })
-            });
-            if (!buildRes.ok) {
-              const err = await buildRes.json();
-              throw new Error(err.detail || 'Build failed');
-            }
-            const buildData = await buildRes.json();
-
-            launchBtn.textContent = 'Starting container...';
-            const startRes = await fetch('/api/v1/previews/start', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                preview_id: buildData.preview_id,
-                internal_port: 8787,
-                probe_health: true,
-              })
-            });
-            if (!startRes.ok) {
-              const err = await startRes.json();
-              throw new Error(err.detail || 'Start failed');
-            }
-            fetchOverview();
-          } catch (e) {
-            alert(`Preview launch failed: ${e.message}`);
-          } finally {
-            launchBtn.disabled = false;
-            launchBtn.textContent = '🚀 Launch Preview';
-          }
-        };
+        launchBtn.onclick = () => previewController.launch({
+          detail,
+          candidate: { head_sha: candSha, base_sha: baseSha, generation: candidateGeneration },
+          button: launchBtn,
+        });
       }
     }
 
@@ -1222,19 +787,19 @@ const fetch = (input, init = {}) => {
       statusContainer.innerHTML = `
         <div class="overview-meta-grid" style="margin-bottom: 8px;">
           <div class="meta-box">
-            <div class="meta-box-label">Preview Requirement</div>
-            <div class="meta-box-val">${isRequired ? '<span class="badge badge-warning">REQUIRED FOR MERGE</span>' : '<span class="text-muted">Optional</span>'}</div>
+          <div class="meta-box-label">Requisito de vista previa</div>
+          <div class="meta-box-val">${isRequired ? '<span class="badge badge-warning">REQUERIDA PARA INTEGRAR</span>' : '<span class="text-muted">Opcional</span>'}</div>
           </div>
           <div class="meta-box">
-            <div class="meta-box-label">Status</div>
-            <div class="meta-box-val"><span class="badge badge-discovered">NOT LAUNCHED</span></div>
+          <div class="meta-box-label">Estado</div>
+          <div class="meta-box-val"><span class="badge badge-discovered">NO INICIADA</span></div>
           </div>
           <div class="meta-box">
-            <div class="meta-box-label">Validation Verdict</div>
-            <div class="meta-box-val"><span class="badge badge-not-ready">PENDING</span></div>
+          <div class="meta-box-label">Veredicto de validación</div>
+          <div class="meta-box-val"><span class="badge badge-not-ready">PENDIENTE</span></div>
           </div>
         </div>
-        <p class="text-muted" style="font-size: 12px; margin: 0;">Click "Launch Preview" to build and start an isolated container environment for this candidate.</p>
+      <p class="text-muted" style="font-size: 12px; margin: 0;">Inicia una vista previa aislada para el candidato seleccionado.</p>
       `;
     } else {
       const isReady = session.status === 'READY';
@@ -1242,28 +807,28 @@ const fetch = (input, init = {}) => {
       statusContainer.innerHTML = `
         <div class="overview-meta-grid" style="margin-bottom: 12px;">
           <div class="meta-box">
-            <div class="meta-box-label">Preview Status</div>
+          <div class="meta-box-label">Estado de la vista previa</div>
             <div class="meta-box-val"><span class="badge ${statusBadgeClass}">${escapeHtml(session.status)}</span></div>
           </div>
           <div class="meta-box">
-            <div class="meta-box-label">Live Preview URL</div>
+          <div class="meta-box-label">URL de la vista previa</div>
             <div class="meta-box-val">
               ${session.preview_url ? `<a href="${sanitizeUrl(session.preview_url)}" target="_blank" rel="noopener noreferrer" class="text-primary font-mono font-bold">${escapeHtml(session.preview_url)} ↗</a>` : '<span class="text-muted">---</span>'}
             </div>
           </div>
           <div class="meta-box">
-            <div class="meta-box-label">Allocated Port</div>
+          <div class="meta-box-label">Puerto asignado</div>
             <div class="meta-box-val font-mono">${session.allocated_port || '---'}</div>
           </div>
           <div class="meta-box">
-            <div class="meta-box-label">Authority Verdict</div>
+          <div class="meta-box-label">Autoridad de validación</div>
             <div class="meta-box-val">
-              ${isAuthorized ? '<span class="badge badge-completed">VALIDATED PASS</span>' : (isStale ? '<span class="badge badge-warning">STALE (RE-VALIDATION REQUIRED)</span>' : '<span class="badge badge-not-ready">NEEDS VALIDATION</span>')}
+              ${isAuthorized ? '<span class="badge badge-completed">APROBACIÓN REGISTRADA</span>' : (isStale ? '<span class="badge badge-warning">OBSOLETA (REQUIERE REVALIDACIÓN)</span>' : '<span class="badge badge-not-ready">REQUIERE VALIDACIÓN</span>')}
             </div>
           </div>
         </div>
         <div class="meta-box" style="margin-bottom: 8px;">
-          <div class="meta-box-label">Immutable Image Digest</div>
+          <div class="meta-box-label">Digest inmutable de imagen</div>
           <div class="meta-box-val font-mono" style="font-size: 11px; word-break: break-all;">${escapeHtml(session.image_digest || '---')}</div>
         </div>
         ${session.failure_reason ? `
@@ -1278,7 +843,7 @@ const fetch = (input, init = {}) => {
     // Render Guided Validation Scenarios
     const scenarios = (previewVal && previewVal.scenarios) ? previewVal.scenarios : [];
     if (scenarios.length === 0) {
-      scenariosContainer.innerHTML = `<p class="text-muted" style="font-size: 12px;">No specific validation scenarios defined for this change.</p>`;
+      scenariosContainer.innerHTML = `<p class="text-muted" style="font-size: 12px;">No hay escenarios de validación definidos para este cambio.</p>`;
     } else {
       scenariosContainer.innerHTML = `
         <div class="checks-list" style="margin-bottom: 16px;">
@@ -1286,88 +851,61 @@ const fetch = (input, init = {}) => {
             <div class="check-item" style="flex-direction: column; align-items: flex-start; gap: 6px;">
               <div style="display: flex; justify-content: space-between; width: 100%; align-items: center;">
                 <div class="check-item-title font-bold">${escapeHtml(sc.title)}</div>
-                <span class="badge badge-ready">Required</span>
+                <span class="badge ${sc.required ? 'badge-ready' : 'badge-discovered'}">${sc.required ? 'Obligatorio' : 'Opcional'}</span>
               </div>
               <p style="font-size: 12px; margin: 0; color: var(--text-muted);">${escapeHtml(sc.description)}</p>
               ${sc.ordered_steps && sc.ordered_steps.length > 0 ? `
                 <div style="margin-top: 4px; padding-left: 8px; font-size: 11px;">
                   ${sc.ordered_steps.map((st, stIdx) => `
                     <label style="display: flex; align-items: center; gap: 6px; margin: 3px 0; cursor: pointer;">
-                      <input type="checkbox" class="scenario-step-check" data-scenario-id="${escapeHtml(sc.scenario_id)}" data-step-idx="${stIdx}" checked>
+                      <input type="checkbox" class="scenario-step-check" data-scenario-id="${escapeHtml(sc.scenario_id)}" data-step-idx="${stIdx}">
                       <span>${escapeHtml(st)}</span>
                     </label>
                   `).join('')}
                 </div>
-              ` : ''}
+              ` : `<label class="validation-scenario-completion"><input type="checkbox" class="scenario-complete-check" data-scenario-id="${escapeHtml(sc.scenario_id)}"><span>Confirmo que completé este escenario.</span></label>`}
             </div>
           `).join('')}
         </div>
 
         <div class="validation-submission-form" style="background: var(--bg-card-sub); padding: 12px; border-radius: 6px; border: 1px solid var(--border-color);">
-          <h5 style="margin: 0 0 10px 0; font-size: 13px;">Record Candidate Validation Verdict</h5>
+          <h5 style="margin: 0 0 10px 0; font-size: 13px;">Registrar validación del candidato</h5>
           <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px;">
             <div>
-              <label style="font-size: 11px; color: var(--text-muted); display: block; margin-bottom: 4px;">Verdict</label>
+              <label style="font-size: 11px; color: var(--text-muted); display: block; margin-bottom: 4px;">Veredicto</label>
               <select id="validationVerdictSelect" style="width: 100%; padding: 6px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-input); color: var(--text-primary);">
-                <option value="PASS" selected>PASS — Candidate Visually Verified</option>
-                <option value="FAIL">FAIL — Visual Defects Observed</option>
+                <option value="PASS" selected>PASS — Validación visual completada</option>
+                <option value="FAIL">FAIL — Se observaron defectos</option>
               </select>
             </div>
-            <div>
-              <label style="font-size: 11px; color: var(--text-muted); display: block; margin-bottom: 4px;">Operator Identity</label>
-              <input type="text" id="validationOperatorInput" value="human_operator" style="width: 100%; padding: 6px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-input); color: var(--text-primary);">
-            </div>
+            <p class="text-muted" id="validationOperatorIdentity">La validación se registrará con la identidad autenticada.</p>
           </div>
           <div style="margin-bottom: 10px;">
-            <label style="font-size: 11px; color: var(--text-muted); display: block; margin-bottom: 4px;">Validation Notes / Observations</label>
-            <textarea id="validationNotesInput" rows="2" placeholder="Document verified visual flows, layout checks, or defect notes..." style="width: 100%; padding: 6px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-input); color: var(--text-primary); font-size: 12px;"></textarea>
+            <label style="font-size: 11px; color: var(--text-muted); display: block; margin-bottom: 4px;">Notas u observaciones</label>
+            <textarea id="validationNotesInput" rows="2" placeholder="Describe los flujos comprobados o los defectos observados…" style="width: 100%; padding: 6px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-input); color: var(--text-primary); font-size: 12px;"></textarea>
           </div>
-          <button id="submitValidationBtn" class="btn btn-primary btn-sm">💾 Submit Validation Verdict</button>
+          <button id="submitValidationBtn" class="btn btn-primary btn-sm" ${validationAllowed ? '' : 'disabled'}>Registrar validación</button>
+          ${validationAllowed ? '' : '<p class="text-muted">No disponible: falta una vista previa READY vinculada a este candidato o la evidencia está obsoleta.</p>'}
         </div>
       `;
 
       // Wire submit button
       const submitBtn = document.getElementById('submitValidationBtn');
       if (submitBtn) {
-        submitBtn.onclick = async () => {
-          submitBtn.disabled = true;
-          submitBtn.textContent = 'Submitting...';
+        submitBtn.onclick = () => {
           const verdict = document.getElementById('validationVerdictSelect').value;
-          const operator = document.getElementById('validationOperatorInput').value || 'human_operator';
           const notes = document.getElementById('validationNotesInput').value || '';
-          const imgDigest = session ? session.image_digest : '';
-
-          try {
-            const res = await fetch('/api/v1/validations/submit', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                project_id: detail.project_id,
-                change_name: detail.change_name,
-                run_id: detail.run_id,
-                preview_id: session ? session.preview_id : null,
-                candidate_generation: detail.candidate_authority ? detail.candidate_authority.generation : 1,
-                head_sha: candSha,
-                base_sha: baseSha,
-                image_digest: imgDigest,
-                verdict: verdict,
-                operator: operator,
-                notes: notes,
-                scenario_results: scenarios.map(sc => ({ scenario_id: sc.scenario_id, status: verdict })),
-              })
-            });
-            if (!res.ok) {
-              const err = await res.json();
-              throw new Error(err.detail || 'Validation submit failed');
-            }
-            alert(`Validation verdict '${verdict}' successfully recorded for candidate!`);
-            fetchOverview();
-          } catch (e) {
-            alert(`Error submitting validation: ${e.message}`);
-          } finally {
-            submitBtn.disabled = false;
-            submitBtn.textContent = '💾 Submit Validation Verdict';
-          }
+          return previewController.submitValidation({
+            detail,
+            session,
+            candidate: { head_sha: candSha, base_sha: baseSha, generation: candidateGeneration },
+            scenarios,
+            container: scenariosContainer,
+            verdict,
+            notes,
+            allowed: validationAllowed,
+            button: submitBtn,
+          });
         };
       }
     }
@@ -1408,7 +946,7 @@ const fetch = (input, init = {}) => {
 
   function renderGitHubTab(github, projectId) {
 
-    const container = document.getElementById('githubContentContainer');
+    const container = document.getElementById('githubDetailsContainer');
     if (!container) return;
 
     if (!github || (!github.issue_number && !github.pr_number)) {
@@ -1461,178 +999,11 @@ const fetch = (input, init = {}) => {
   // =========================================================================
 
   function switchMainView(viewName) {
-    currentMainView = viewName;
-    document.querySelectorAll('[data-main-view]').forEach((tab) => {
-      const isTarget = tab.getAttribute('data-main-view') === viewName;
-      tab.classList.toggle('active', isTarget);
-      if (tab.hasAttribute('aria-selected')) {
-        tab.setAttribute('aria-selected', isTarget ? 'true' : 'false');
-      }
-      if (tab.hasAttribute('aria-current')) {
-        if (isTarget) tab.setAttribute('aria-current', 'page');
-        else tab.removeAttribute('aria-current');
-      }
-    });
-
-    mainViewPanes.forEach((pane) => {
-      if (pane.id === viewName) {
-        pane.style.display = viewName === 'viewExecutions'
-          && window.matchMedia('(min-width: 1200px)').matches ? 'grid' : 'block';
-        pane.classList.add('active');
-      } else {
-        pane.style.display = 'none';
-        pane.classList.remove('active');
-      }
-    });
-
-    if (viewName === 'viewBacklog') {
-      if (currentProjectId) fetchBacklog(currentProjectId);
-      else renderBacklogUnavailable();
-    } else if (viewName === 'viewProjects') {
-      fetchProjects();
-    } else if (viewName === 'viewExecutions') {
-      fetchOverview();
-    }
+    navigationController.switchView(viewName);
   }
 
   // Projects Operations
-  async function fetchProjects() {
-    try {
-      const resp = await fetch('/projects');
-      if ([401, 403].includes(resp.status)) {
-        sessionController.showLogin();
-        return;
-      }
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      projectsList = await resp.json();
-      renderProjectSelect();
-      if (currentMainView === 'viewProjects') {
-        renderProjectsGrid();
-      }
-    } catch (err) {
-      console.error('Failed to fetch projects:', err);
-    }
-  }
-
-  function renderProjectSelect() {
-    if (!projectSelect) return;
-    currentProjectId = renderProjectSelectView(
-      projectSelect,
-      projectsList,
-      projectSelect.value || currentProjectId,
-    );
-    if (backlogProjectDisplay) {
-      backlogProjectDisplay.textContent = `Proyecto: ${currentProjectId || 'DESCONOCIDO'}`;
-    }
-  }
-
-  function renderProjectsGrid() {
-    renderProjectsGridView(projectsGridContainer, projectsList, currentProjectId);
-  }
-
-  function openOnboardModal() {
-    if (!onboardProjectModal) return;
-    if (onboardProjectForm) onboardProjectForm.reset();
-    onboardProjectModal.showModal();
-  }
-
-  async function submitOnboardProject() {
-    const projId = document.getElementById('onboardProjectId')?.value.trim();
-    const projName = document.getElementById('onboardProjectName')?.value.trim();
-    const repo = document.getElementById('onboardRepository')?.value.trim();
-    const branch = document.getElementById('onboardBaseBranch')?.value.trim() || 'main';
-    const openspecPath = document.getElementById('onboardOpenSpecPath')?.value.trim() || 'openspec';
-    const roadmapPath = document.getElementById('onboardRoadmapPath')?.value.trim() || 'docs/ROADMAP.md';
-    const backlogPath = document.getElementById('onboardBacklogPath')?.value.trim() || 'docs/ROADMAP.md';
-
-    if (!repo) {
-      showToast('Repository is required', 'warning');
-      return;
-    }
-
-    try {
-      const resp = await fetch('/api/v1/projects/onboard', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          project_id: projId || undefined,
-          name: projName || undefined,
-          repository: repo,
-          base_branch: branch,
-          openspec_path: openspecPath,
-          roadmap_path: roadmapPath,
-          backlog_path: backlogPath
-        })
-      });
-
-      if (!resp.ok) {
-        const errData = await resp.json().catch(() => ({}));
-        throw new Error(errData.detail || `HTTP ${resp.status}`);
-      }
-
-      const result = await resp.json();
-      showToast(`Project '${result.project.name}' onboarded successfully! Discovered ${result.discovered_items_count} backlog items.`, 'success');
-      if (onboardProjectModal) onboardProjectModal.close();
-      await fetchProjects();
-      currentProjectId = result.project.id;
-      if (projectSelect) projectSelect.value = currentProjectId;
-      switchMainView('viewBacklog');
-    } catch (err) {
-      console.error('Failed onboarding project:', err);
-      showToast(`Onboarding failed: ${err.message}`, 'error');
-    }
-  }
-
-  async function inspectContext(projectId) {
-    try {
-      const resp = await fetch(`/api/v1/projects/${encodeURIComponent(projectId)}/context`);
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      const report = await resp.json();
-      renderContextReport(report);
-      if (projectContextModal) projectContextModal.showModal();
-    } catch (err) {
-      console.error('Failed fetching context:', err);
-      showToast(`Failed inspecting context: ${err.message}`, 'error');
-    }
-  }
-
-  function renderContextReport(report) {
-    if (ctxDiscoveredFacts) {
-      if (!report.discovered_facts || report.discovered_facts.length === 0) {
-        ctxDiscoveredFacts.innerHTML = '<p class="text-muted">No facts discovered.</p>';
-      } else {
-        ctxDiscoveredFacts.innerHTML = report.discovered_facts.map(f => `
-          <div class="fact-card">
-            <div class="fact-header">
-              <span class="badge badge-discovered">${escapeHtml(f.fact_type)}</span>
-              <span class="fact-source font-mono text-xs">${escapeHtml(f.source_file)}</span>
-            </div>
-            <div class="fact-content">${escapeHtml(f.content)}</div>
-          </div>
-        `).join('');
-      }
-    }
-
-    if (ctxInferredStructure) {
-      if (!report.inferred_structure || report.inferred_structure.length === 0) {
-        ctxInferredStructure.innerHTML = '<li class="text-muted">No inferred milestones or waves.</li>';
-      } else {
-        ctxInferredStructure.innerHTML = report.inferred_structure.map(s => `
-          <li>${escapeHtml(s)}</li>
-        `).join('');
-      }
-    }
-
-    if (ctxMissingContext) {
-      if (!report.missing_context || report.missing_context.length === 0) {
-        ctxMissingContext.innerHTML = '<li class="text-success">✓ No critical context gaps identified.</li>';
-      } else {
-        ctxMissingContext.innerHTML = report.missing_context.map(g => `
-          <li class="text-warning">⚠️ ${escapeHtml(g)}</li>
-        `).join('');
-      }
-    }
-  }
+  function fetchProjects() { return projectsController.fetchProjects(); }
 
   // Backlog Operations
   async function fetchBacklog(projectId) {
@@ -1717,8 +1088,8 @@ const fetch = (input, init = {}) => {
     renderBacklogTableView({
       root: backlogTableBody,
       items: backlogItems,
-      filter: backlogFilter,
-      query: backlogSearchQuery,
+      filter: backlogController.filter,
+      query: backlogController.searchQuery,
       selectedItem: selectedBacklogItem,
       escapeHtml,
       getStatusBadgeClass,
@@ -1772,71 +1143,6 @@ const fetch = (input, init = {}) => {
     });
   }
 
-  async function prepareBacklogItem(itemKey) {
-    try {
-      showToast(`Preparing artifacts for '${itemKey}'...`, 'info');
-      const resp = await fetch(`/api/v1/projects/${encodeURIComponent(currentProjectId)}/backlog/${encodeURIComponent(itemKey)}/prepare`, {
-        method: 'POST'
-      });
-      if (!resp.ok) {
-        const errData = await resp.json().catch(() => ({}));
-        throw new Error(errData.detail || `HTTP ${resp.status}`);
-      }
-      const result = await resp.json();
-      showToast(`Artifacts generated! Status: ${result.status}`, result.status === 'READY' ? 'success' : 'warning');
-      await fetchBacklog(currentProjectId);
-      selectBacklogItem(itemKey);
-    } catch (err) {
-      console.error('Failed preparing work item:', err);
-      showToast(`Preparation failed: ${err.message}`, 'error');
-    }
-  }
-
-  async function startBacklogItem(itemKey) {
-    try {
-      showToast(`Admitting '${itemKey}' into autonomous scheduler...`, 'info');
-      const resp = await fetch(`/api/v1/projects/${encodeURIComponent(currentProjectId)}/backlog/${encodeURIComponent(itemKey)}/start`, {
-        method: 'POST'
-      });
-      if (!resp.ok) {
-        const errData = await resp.json().catch(() => ({}));
-        throw new Error(errData.detail || `HTTP ${resp.status}`);
-      }
-      const result = await resp.json();
-      showToast(`Work started! Run ID: ${result.run_id}`, 'success');
-      await fetchBacklog(currentProjectId);
-      selectBacklogItem(itemKey);
-      setTimeout(() => {
-        switchMainView('viewExecutions');
-      }, 1000);
-    } catch (err) {
-      console.error('Failed starting work item:', err);
-      showToast(`Failed starting work item: ${err.message}`, 'error');
-    }
-  }
-
-  async function submitQuestionAnswer(itemKey, answerText) {
-    try {
-      showToast('Submitting clarification...', 'info');
-      const resp = await fetch(`/api/v1/projects/${encodeURIComponent(currentProjectId)}/backlog/${encodeURIComponent(itemKey)}/answer`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ answer: answerText })
-      });
-      if (!resp.ok) {
-        const errData = await resp.json().catch(() => ({}));
-        throw new Error(errData.detail || `HTTP ${resp.status}`);
-      }
-      showToast('Clarification recorded! Re-evaluating readiness...', 'success');
-      if (humanAnswerInput) humanAnswerInput.value = '';
-      await fetchBacklog(currentProjectId);
-      selectBacklogItem(itemKey);
-    } catch (err) {
-      console.error('Failed answering question:', err);
-      showToast(`Failed submitting answer: ${err.message}`, 'error');
-    }
-  }
-
   function openNewWorkItemModal(itemToEdit = null) {
     if (!newWorkItemModal) return;
     if (itemToEdit) {
@@ -1873,89 +1179,16 @@ const fetch = (input, init = {}) => {
     }
 
     try {
-      if (editingItemKey) {
-        const resp = await fetch(`/api/v1/projects/${encodeURIComponent(currentProjectId)}/backlog/${encodeURIComponent(editingItemKey)}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            title,
-            priority,
-            description,
-            acceptance_criteria: criteria
-          })
-        });
-        if (!resp.ok) {
-          const errData = await resp.json().catch(() => ({}));
-          throw new Error(errData.detail || `HTTP ${resp.status}`);
-        }
-        showToast(`Work item '${editingItemKey}' updated!`, 'success');
-        if (newWorkItemModal) newWorkItemModal.close();
-        await fetchBacklog(currentProjectId);
-        selectBacklogItem(editingItemKey);
-      } else {
-        const resp = await fetch(`/api/v1/projects/${encodeURIComponent(currentProjectId)}/backlog`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            item_key: itemKey || undefined,
-            title,
-            priority,
-            description,
-            acceptance_criteria: criteria
-          })
-        });
-        if (!resp.ok) {
-          const errData = await resp.json().catch(() => ({}));
-          throw new Error(errData.detail || `HTTP ${resp.status}`);
-        }
-        const created = await resp.json();
-        showToast(`Work item '${created.item_key}' created!`, 'success');
-        if (newWorkItemModal) newWorkItemModal.close();
-        await fetchBacklog(currentProjectId);
-        selectBacklogItem(created.item_key);
-      }
+      await backlogController.save({
+        item_key: itemKey || undefined,
+        title,
+        priority,
+        description,
+        acceptance_criteria: criteria,
+      }, editingItemKey);
+      if (newWorkItemModal) newWorkItemModal.close();
     } catch (err) {
-      console.error('Failed saving work item:', err);
-      showToast(`Failed saving work item: ${err.message}`, 'error');
-    }
-  }
-
-  async function deleteWorkItem(itemKey) {
-    if (!confirm(`Are you sure you want to delete work item '${itemKey}'?`)) return;
-    try {
-      const resp = await fetch(`/api/v1/projects/${encodeURIComponent(currentProjectId)}/backlog/${encodeURIComponent(itemKey)}`, {
-        method: 'DELETE'
-      });
-      if (!resp.ok) {
-        const errData = await resp.json().catch(() => ({}));
-        throw new Error(errData.detail || `HTTP ${resp.status}`);
-      }
-      showToast(`Work item '${itemKey}' deleted.`, 'info');
-      selectedBacklogItem = null;
-      await fetchBacklog(currentProjectId);
-    } catch (err) {
-      console.error('Failed deleting work item:', err);
-      showToast(`Delete failed: ${err.message}`, 'error');
-    }
-  }
-
-  async function discoverBacklogContext(projectId) {
-    try {
-      showToast('Scanning repository context & roadmap...', 'info');
-      const resp = await fetch(`/api/v1/projects/${encodeURIComponent(projectId)}/context/discover`, {
-        method: 'POST'
-      });
-      if (!resp.ok) {
-        const errData = await resp.json().catch(() => ({}));
-        throw new Error(errData.detail || `HTTP ${resp.status}`);
-      }
-      const result = await resp.json();
-      showToast(`Discovery complete! Discovered ${result.discovered_items_count} items.`, 'success');
-      await fetchProjects();
-      await fetchBacklog(projectId);
-    } catch (err) {
-      console.error('Failed discovering context:', err);
-      showToast(`Discovery failed: ${err.message}`, 'error');
+      showToast(`No se pudo guardar el trabajo: ${err.message}`, 'error');
     }
   }
 
@@ -1974,19 +1207,6 @@ const fetch = (input, init = {}) => {
 
   // Expose helper functions globally for inline handlers
   // Utilities
-  function getStatusBadgeClass(status) {
-    switch (status) {
-      case 'READY': return 'badge-ready';
-      case 'RUNNING': return 'badge-running';
-      case 'WAITING': return 'badge-waiting';
-      case 'NEEDS_HUMAN': return 'badge-needs-human';
-      case 'COMPLETED': return 'badge-completed';
-      case 'FAILED': return 'badge-failed';
-      case 'NOT_READY': return 'badge-not-ready';
-      default: return 'badge-discovered';
-    }
-  }
-
   function escapeHtml(str) {
     if (str === null || str === undefined) return '';
     return String(str)

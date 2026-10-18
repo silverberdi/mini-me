@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import Request
 from fastapi.testclient import TestClient
 
-from minime.api.app import app, get_uow
+from minime.api.app import ValidationSubmitRequest, app, get_uow, submit_validation
 from minime.domain.enums import PreviewStatus, ValidationVerdict
 from minime.domain.models import PreviewSession, Project, ValidationRun
 
@@ -158,7 +161,54 @@ def test_validation_submit_endpoint(client, mock_uow):
     assert data["verdict"] == "PASS"
     assert data["head_sha"] == "abc1234"
     assert mock_uow.validation_runs.save.called
+    assert mock_uow.validation_runs.save.call_args.args[0].operator == "unauthenticated"
     assert mock_uow.events.save.called
+
+
+def test_validation_record_uses_authenticated_operator_over_request_body(mock_uow):
+    request = Request(
+        {
+            "type": "http",
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/api/v1/validations/submit",
+            "raw_path": b"/api/v1/validations/submit",
+            "query_string": b"",
+            "headers": [],
+            "client": ("test", 1234),
+            "server": ("test", 80),
+            "state": {"operator": SimpleNamespace(email="verified@example.test")},
+        }
+    )
+    payload = ValidationSubmitRequest(
+        project_id="mini-me",
+        change_name="013-preview",
+        head_sha="abc1234",
+        base_sha="def5678",
+        image_digest="sha256:112233",
+        verdict="PASS",
+        operator="forged@example.test",
+    )
+
+    with patch("minime.api.app.ValidationAuthorityService") as service_type:
+        service_type.return_value.record_validation.return_value = SimpleNamespace(
+            validation_id="validation-1",
+            project_id="mini-me",
+            change_name="013-preview",
+            head_sha="abc1234",
+            base_sha="def5678",
+            image_digest="sha256:112233",
+            verdict=ValidationVerdict.PASS,
+            operator="verified@example.test",
+            created_at=datetime.now(UTC),
+        )
+        submit_validation(payload, request, mock_uow)
+
+    assert (
+        service_type.return_value.record_validation.call_args.kwargs["operator"]
+        == "verified@example.test"
+    )
 
 
 def test_validation_authority_endpoint(client, mock_uow):

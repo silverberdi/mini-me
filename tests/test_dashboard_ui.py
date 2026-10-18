@@ -48,7 +48,12 @@ def test_ui_assets_exist_and_are_complete() -> None:
     assert "/api/v1/dashboard/overview" in api_client
     assert "renderPipelineStepper" in js_content
     assert "createThemeController" in js_content
-    assert "let currentMainView = 'viewExecutions'" in js_content
+    assert "createNavigationController" in js_content
+    navigation_controller = (
+        static_dir / "js" / "controllers" / "navigation_controller.js"
+    ).read_text(encoding="utf-8")
+    assert "let currentView = 'viewExecutions'" in navigation_controller
+    assert "function switchView(viewName)" in navigation_controller
     assert "project?.auto_prepare" in js_content
     assert "project?.auto_admit" in js_content
     assert "project?.max_concurrent_jobs" in js_content

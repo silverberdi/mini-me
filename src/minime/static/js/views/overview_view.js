@@ -52,13 +52,13 @@ export function renderOverviewView({ data, elements, escapeHtml, updateScheduler
     }
     if (elements.attentionItemsContainer) {
       elements.attentionItemsContainer.innerHTML = attentionItems.map((item) => `
-        <div class="attention-item-card" data-project-id="${escapeHtml(item.project_id)}" data-change-name="${escapeHtml(item.change_name)}">
+        <button type="button" class="attention-item-card" data-project-id="${escapeHtml(item.project_id)}" data-change-name="${escapeHtml(item.change_name)}" aria-label="Abrir ${escapeHtml(item.project_id)} / ${escapeHtml(item.change_name)}: ${escapeHtml(item.reason)}">
           <div class="attention-item-left">
             <span class="attention-item-name">${escapeHtml(item.project_id)} / ${escapeHtml(item.change_name)}</span>
             <span class="attention-item-reason">${escapeHtml(item.reason)}</span>
           </div>
           <span class="badge badge-needs-human">${escapeHtml(item.stop_outcome || item.stage)}</span>
-        </div>
+        </button>
       `).join("");
     }
   } else if (elements.attentionBanner) {

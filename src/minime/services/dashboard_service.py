@@ -267,6 +267,7 @@ class GitHubPRSummaryDTO(BaseModel):
 
 class PreviewSessionDTO(BaseModel):
     preview_id: str
+    candidate_generation: int | None = None
     status: str
     head_sha: str
     head_sha_short: str
@@ -1893,6 +1894,7 @@ class OperationsDashboardService:
             if preview_session:
                 preview_dto = PreviewSessionDTO(
                     preview_id=preview_session.preview_id,
+                    candidate_generation=preview_session.candidate_generation,
                     status=preview_session.status.value,
                     head_sha=preview_session.head_sha,
                     head_sha_short=_short_sha(preview_session.head_sha) or "",

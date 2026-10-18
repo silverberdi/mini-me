@@ -356,7 +356,13 @@ html, body {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  width: 100%;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
 }
+.attention-item-card:focus-visible, .data-table tbody tr[role="button"]:focus-visible { outline: 3px solid var(--color-primary); outline-offset: 2px; }
 
 .attention-item-left {
   display: flex;
@@ -530,6 +536,9 @@ html, body {
 .badge-running { background-color: var(--color-primary-bg); color: var(--color-primary); border: 1px solid var(--color-primary); }
 .badge-waiting { background-color: var(--color-warning-bg); color: var(--color-warning); border: 1px solid var(--color-warning); }
 .badge-needs-human { background-color: var(--color-warning-bg); color: var(--color-warning); border: 1px solid var(--color-warning); font-weight: 700; }
+.badge-paused { background-color: var(--bg-card); color: var(--text-muted); border: 1px dashed var(--border-color); }
+.badge-unknown { background-color: var(--bg-card); color: var(--text-muted); border: 1px solid var(--border-color); }
+.badge-recovery { background-color: var(--color-info-bg); color: var(--color-info); border: 1px solid var(--color-info); }
 .badge-completed { background-color: var(--color-purple-bg); color: var(--color-purple); border: 1px solid var(--color-purple); }
 .badge-failed { background-color: var(--color-danger-bg); color: var(--color-danger); border: 1px solid var(--color-danger); }
 .badge-not-ready { background-color: var(--bg-card); color: var(--text-muted); border: 1px solid var(--border-color); }

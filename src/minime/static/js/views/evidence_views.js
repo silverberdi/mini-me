@@ -21,7 +21,7 @@ export function renderCandidateEvidence({ summary, history, detail }) {
   }
   if (history) {
     history.innerHTML = detail.candidate_history?.length ? detail.candidate_history.map((candidate) => `
-      <tr><td><strong>gen-${escapeHtml(candidate.generation)}</strong></td><td><code class="code-sha">${escapeHtml(candidate.candidate_sha_short)}</code></td><td><code class="code-sha">${escapeHtml(candidate.base_sha_short)}</code></td><td>${candidate.is_superseded ? '<span class="badge badge-not-ready">OBSOLETO</span>' : '<span class="badge badge-ready">ACTUAL</span>'}</td><td class="font-mono text-muted">${escapeHtml(candidate.manifest_hash ? `${candidate.manifest_hash.substring(0, 10)}…` : "—")}</td></tr>
+      <tr><td><strong>gen-${escapeHtml(candidate.generation)}</strong></td><td><code class="code-sha">${escapeHtml(candidate.candidate_sha_short)}</code></td><td><code class="code-sha">${escapeHtml(candidate.base_sha_short)}</code></td><td>${candidate.is_superseded ? '<span class="badge badge-not-ready">OBSOLETO</span>' : '<span class="badge badge-ready">ACTUAL</span>'}</td><td class="font-mono text-muted">${escapeHtml(candidate.created_at || "—")}</td></tr>
     `).join("") : '<tr><td colspan="5" class="table-empty">No hay historial de candidatos.</td></tr>';
   }
 }

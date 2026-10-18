@@ -495,8 +495,13 @@
 
               <!-- Tab 6: Preview & Validation -->
               <div class="tab-pane" id="previewTab" role="tabpanel">
-                <div class="section-card" id="previewContainer"></div>
-                <div class="section-card" id="validationScenariosContainer"></div>
+                <div class="section-card" id="previewContainer">
+                  <div id="previewContainerStatus" aria-live="polite"></div>
+                </div>
+                <div class="section-card" id="validationScenariosContainer">
+                  <div id="guidedValidationContainer"></div>
+                  <div id="validationHistoryContainer"></div>
+                </div>
               </div>
 
               <!-- Tab 7: GitHub & PR -->

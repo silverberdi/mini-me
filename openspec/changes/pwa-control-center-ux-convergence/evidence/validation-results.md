@@ -4,6 +4,31 @@ Candidate branch: `proposal/control-center-ux-convergence`.
 Starting candidate HEAD for this continuation: `b0c798233142681119f004c3fe039fea838d6473`.
 Test host: macOS / Python 3.14.5. Test runtime: `/tmp/minime-pwa-test-runtime` via `MINIME_RUNTIME_ROOT`; no production service or database was accessed.
 
+## Continuation from `b0110c12469674515b8fa2ed1adefe1541e20900`
+
+The order-sensitive Chrome failure was traced to test fixture lifecycle, not application behavior: `test_real_browser_api_cache_isolation_across_operator_sessions` logs out and revokes the module-scoped fixture's initial session, while later browser tests reused that revoked token. The dashboard correctly hid operational rows and displayed its unauthenticated placeholder. The logout/cache test now issues a new session using the real `SessionManager` after completing its revocation assertions and updates the shared fixture token for subsequent cases. No auth guard or assertion was weakened.
+
+Ordered reproduction:
+
+```text
+tests/test_pwa_real_browser.py -k 'api_cache_isolation_across_operator_sessions or selected_change_renders_candidate_bound_preview_and_detail_tabs'
+2 passed, 20 deselected in 10.89s
+```
+
+Final consolidated affected group after the correction:
+
+```text
+tests/test_pwa_real_browser.py tests/test_pwa_service_worker.py tests/test_pwa_assets.py
+tests/test_pwa_contract.py tests/test_dashboard_ui.py tests/test_dashboard_api.py
+tests/test_dashboard_security.py tests/test_dashboard_stale_isolation.py
+tests/test_dashboard_service.py tests/test_preview_api_endpoints.py
+tests/test_control_plane_api.py tests/test_control_plane_service.py
+tests/test_pwa_desktop_layout.py tests/test_systemd_scheduler_observer.py
+108 passed, 4 warnings in 76.46s
+```
+
+The four warnings are existing Starlette/httpx deprecation and duplicate FastAPI OpenAPI operation IDs. The action-controller migration was part of this run. This is a focused affected-group result, not a post-correction repository-wide pytest run.
+
 ## Focused validation after implementation fixes
 
 Consolidated affected group:

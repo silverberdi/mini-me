@@ -1,5 +1,6 @@
 """Static, deterministic coverage for the 017 PWA observable contracts."""
 
+import re
 from pathlib import Path
 
 STATIC = Path(__file__).parents[1] / "src" / "minime" / "static"
@@ -51,8 +52,12 @@ def test_telemetry_and_control_plane_clients_use_canonical_routes() -> None:
         assert route in client
     assert "initDashboard" in read("js/app.js")
     dashboard = read("js/dashboard.js")
-    assert "setupAutoRefresh" in dashboard
+    lifecycle = read("js/controllers/lifecycle_controller.js")
     assert "initDashboard" in dashboard
+    assert "createLifecycleController" in dashboard
+    assert "function bind()" in lifecycle
+    assert "function start()" in lifecycle
+    assert "function stop()" in lifecycle
     assert 'cache: "no-store"' in client
     assert 'credentials: "same-origin"' in client
     assert "scheduler_service" in read("js/views/operational_panels_view.js")
@@ -81,3 +86,13 @@ def test_evidence_and_preview_contracts_are_explicit() -> None:
     assert 'const CACHE_PREFIX = "minime-pwa-shell-"' in sw
     assert "CACHE_NAME = `${CACHE_PREFIX}v2`" in sw
     assert "503" not in sw
+
+
+def test_frontend_has_no_direct_host_mutation_provider_or_merge_entrypoint() -> None:
+    scripts = "\n".join(path.read_text() for path in (STATIC / "js").rglob("*.js"))
+    forbidden = re.compile(
+        r"(?im)(?:\bsystemctl\b|\bchild_process\b|\bsubprocess\b|"
+        r"\bcodex\s+exec\b|\bagy\s+exec\b|\bgit\s+push\b|"
+        r"api\.deepseek\.com|openrouter\.ai|/pulls?/[^\s'\"]+/merge)"
+    )
+    assert forbidden.search(scripts) is None

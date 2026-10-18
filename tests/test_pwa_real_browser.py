@@ -129,6 +129,7 @@ def create_seeded_uow() -> InMemoryPersistenceUnitOfWork:
         change_name="017-pwa-control-center",
         base_sha="b7fe685ee72a50e72f385932a9f2efd342359806",
         current_stage=OrchestrationStage.RUNNING_CHECKS,
+        active_job_id="job-017",
         is_active=True,
     )
     run2 = OrchestrationRun(
@@ -1069,6 +1070,17 @@ async def test_real_browser_api_cache_isolation_across_operator_sessions(
             })
         """)
         assert not any(path.startswith("/api/") for path in final_paths)
+        # This module-scoped browser fixture is shared by later tests. Logout
+        # correctly revokes its original token, so rotate the fixture's token
+        # to a newly issued session rather than letting later cases inherit a
+        # revoked credential and mistake the authenticated dashboard for an
+        # overview rendering regression.
+        from minime.services.auth_service import SessionManager
+
+        next_token, _ = SessionManager(browser_test_env["uow"]).create_session(
+            "operator@example.com"
+        )
+        browser_test_env["session_token"] = next_token
     finally:
         await client.close()
 
@@ -1127,6 +1139,215 @@ async def test_real_browser_offline_state_and_reconnection_refresh(
 
 
 @pytest.mark.asyncio
+async def test_real_browser_lifecycle_controller_has_one_refresh_and_listener_owner(
+    browser_test_env: dict[str, Any],
+) -> None:
+    client = ChromeCDPClient(browser_test_env["ws_url"])
+    await client.connect()
+    try:
+        await authenticate_browser(
+            client, browser_test_env["server_url"], browser_test_env["session_token"]
+        )
+        result = await client.eval_js("""
+          (async () => {
+            const {createLifecycleController} = await import('/static/js/controllers/lifecycle_controller.js');
+            class Events {
+              listeners = new Map();
+              addEventListener(name, handler) {
+                const registered = this.listeners.get(name) || [];
+                registered.push(handler);
+                this.listeners.set(name, registered);
+              }
+              dispatch(name, event = {}) { (this.listeners.get(name) || []).forEach(handler => handler(event)); }
+              count(name) { return (this.listeners.get(name) || []).length; }
+            }
+            const windowRef = new Events();
+            let timerCallback;
+            let nextTimer = 0;
+            let clears = 0;
+            windowRef.setInterval = callback => { timerCallback = callback; return ++nextTimer; };
+            windowRef.clearInterval = () => { clears += 1; };
+            const documentRef = new Events();
+            documentRef.hidden = false;
+            const values = new Map();
+            const storage = {getItem: key => values.get(key) || null, setItem: (key, value) => values.set(key, value)};
+            const refreshButton = new Events();
+            const refreshIntervalSelect = new Events();
+            refreshIntervalSelect.value = '10';
+            const autoRefreshToggle = new Events();
+            autoRefreshToggle.checked = true;
+            const refreshTimer = {textContent: ''};
+            let refreshCurrent = 0;
+            let refreshOverview = 0;
+            let reconnect = 0;
+            let offline = 0;
+            let stale = 0;
+            const controller = createLifecycleController({
+              windowRef, documentRef,
+              refreshCurrentView: () => { refreshCurrent += 1; },
+              refreshAfterReconnect: () => { reconnect += 1; },
+              refreshOverview: () => { refreshOverview += 1; },
+              setOfflineBanner: value => { offline += value ? 1 : -1; },
+              markFreshnessStale: () => { stale += 1; },
+              getCurrentView: () => 'viewExecutions',
+              onResize: () => {}, refreshButton, refreshIntervalSelect, autoRefreshToggle,
+              refreshTimer, storage,
+            });
+            controller.bind();
+            controller.bind();
+            controller.start();
+            controller.start();
+            const listenerCounts = {
+              online: windowRef.count('online'), offline: windowRef.count('offline'),
+              visibility: documentRef.count('visibilitychange'), refresh: refreshButton.count('click'),
+            };
+            refreshButton.dispatch('click');
+            windowRef.dispatch('offline');
+            windowRef.dispatch('online');
+            documentRef.hidden = true;
+            documentRef.dispatch('visibilitychange');
+            const hiddenCountdown = refreshTimer.textContent;
+            documentRef.hidden = false;
+            documentRef.dispatch('visibilitychange');
+            const visibleCountdown = refreshTimer.textContent;
+            autoRefreshToggle.checked = false;
+            autoRefreshToggle.dispatch('change');
+            const stoppedLabel = refreshTimer.textContent;
+            autoRefreshToggle.checked = true;
+            autoRefreshToggle.dispatch('change');
+            refreshIntervalSelect.value = '30';
+            refreshIntervalSelect.dispatch('change', {target: refreshIntervalSelect});
+            const persistedInterval = values.get('minime_dashboard_interval');
+            refreshIntervalSelect.value = '999';
+            refreshIntervalSelect.dispatch('change', {target: refreshIntervalSelect});
+            const rejectedInterval = refreshIntervalSelect.value;
+            const beforeHiddenTick = refreshOverview;
+            documentRef.hidden = true;
+            timerCallback();
+            const hiddenTickDidNotRefresh = refreshOverview === beforeHiddenTick;
+            controller.stop();
+            return {
+              listenerCounts, refreshCurrent, reconnect, offline, stale, hiddenCountdown,
+              visibleCountdown, stoppedLabel, persistedInterval, rejectedInterval,
+              hiddenTickDidNotRefresh, clears, activeView: 'viewExecutions',
+            };
+          })()
+        """)
+        assert result["listenerCounts"] == {
+            "online": 1,
+            "offline": 1,
+            "visibility": 1,
+            "refresh": 1,
+        }
+        assert result["refreshCurrent"] == 1
+        assert result["reconnect"] == 1
+        assert result["offline"] == 0
+        assert result["stale"] == 1
+        assert result["hiddenCountdown"] == "10s"
+        assert result["visibleCountdown"] == "10s"
+        assert result["stoppedLabel"] == "desactivada"
+        assert result["persistedInterval"] == "30"
+        assert result["rejectedInterval"] == "30"
+        assert result["hiddenTickDidNotRefresh"] is True
+        assert result["clears"] >= 2
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_real_browser_projects_domain_navigation_and_context_use_authoritative_api(
+    browser_test_env: dict[str, Any],
+) -> None:
+    client = ChromeCDPClient(browser_test_env["ws_url"])
+    await client.connect()
+    try:
+        await authenticate_browser(
+            client, browser_test_env["server_url"], browser_test_env["session_token"]
+        )
+        await client.eval_js("document.getElementById('navTabProjects').click()")
+        await asyncio.sleep(0.25)
+        project = await client.eval_js("""
+          (() => {
+            const card = document.querySelector('#projectsGridContainer .project-card');
+            return {
+              title: card?.querySelector('.project-name')?.textContent,
+              repository: card?.querySelector('.meta-row .font-mono')?.textContent,
+              actions: [...(card?.querySelectorAll('[data-project-action]') || [])].map(button => button.dataset.projectAction),
+              selectedProject: document.getElementById('projectSelect').value,
+            };
+          })()
+        """)
+        assert project["title"] == "mini me"
+        assert project["repository"] == "silverberdi/mini-me"
+        assert project["actions"] == ["inspect", "discover", "backlog"]
+        assert project["selectedProject"] == "mini-me"
+
+        await client.eval_js("document.querySelector('[data-project-action=backlog]').click()")
+        await asyncio.sleep(0.2)
+        selected_view = await client.eval_js("""
+          ({
+            backlogActive: document.getElementById('viewBacklog').classList.contains('active'),
+            selectedProject: document.getElementById('projectSelect').value,
+            displayedProject: document.getElementById('backlogProjectDisplay').textContent,
+          })
+        """)
+        assert selected_view["backlogActive"] is True
+        assert selected_view["selectedProject"] == "mini-me"
+        assert selected_view["displayedProject"] == "Proyecto: mini-me"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_real_browser_status_view_keeps_authoritative_states_distinct(
+    browser_test_env: dict[str, Any],
+) -> None:
+    client = ChromeCDPClient(browser_test_env["ws_url"])
+    await client.connect()
+    try:
+        await client.navigate(f"{browser_test_env['server_url']}/")
+        states = [
+            "RUNNING",
+            "PAUSED",
+            "WAITING_CAPACITY",
+            "NEEDS_HUMAN",
+            "UNKNOWN",
+            "AUTH_REQUIRED",
+            "RECOVERY",
+            "READY_FOR_HUMAN_MERGE",
+        ]
+        rendered = await client.eval_js(f"""
+          (async () => {{
+            const {{getStatusBadgeClass}} = await import('/static/js/views/status_view.js');
+            const {{renderChangesView}} = await import('/static/js/views/runs_view.js');
+            const root = document.createElement('tbody');
+            const states = {json.dumps(states)};
+            renderChangesView({{
+              root,
+              changes: states.map((status, index) => ({{project_id:'p',change_name:`c-${{index}}`,status}})),
+              filter: 'ALL', query: '', selected: null, alreadyAutoSelected: true,
+              statusClass: getStatusBadgeClass, formatTime: () => 'hace 0 s', onSelect: () => {{}}
+            }});
+            return [...root.querySelectorAll('tr[data-project-id]')].map(row => ({{
+              status: row.querySelector('.badge').textContent,
+              className: row.querySelector('.badge').className,
+            }}));
+          }})()
+        """)
+        assert [item["status"] for item in rendered] == states
+        by_state = {item["status"]: item["className"] for item in rendered}
+        assert "badge-paused" in by_state["PAUSED"]
+        assert "badge-unknown" in by_state["UNKNOWN"]
+        assert "badge-recovery" in by_state["RECOVERY"]
+        assert "badge-needs-human" in by_state["AUTH_REQUIRED"]
+        # Text remains the canonical backend state even where visual tokens share a color family.
+        assert by_state["WAITING_CAPACITY"] != by_state["RUNNING"]
+        assert by_state["READY_FOR_HUMAN_MERGE"] != by_state["NEEDS_HUMAN"]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_real_browser_auth_expiry_hides_operational_state(
     browser_test_env: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
@@ -1148,6 +1369,7 @@ async def test_real_browser_auth_expiry_hides_operational_state(
             if before != "none":
                 break
             await asyncio.sleep(0.1)
+
         assert before != "none"
 
         assert session_mgr.revoke_session_by_token(session_token)
@@ -1225,6 +1447,295 @@ async def test_real_browser_candidate_review_and_check_views_preserve_identity_s
         assert "No hay una generación de candidato finalizada" in rendered["candidate"]
         assert "No hay resultados de verificaciones determinísticas" in rendered["checks"]
         assert rendered["count"] == "—"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_real_browser_action_controller_refreshes_the_selected_snake_case_identity(
+    browser_test_env: dict[str, Any],
+) -> None:
+    client = ChromeCDPClient(browser_test_env["ws_url"])
+    await client.connect()
+    try:
+        await client.navigate(f"{browser_test_env['server_url']}/")
+        result = await client.eval_js("""
+          (async () => {
+            const { createActionController, visibleControlPlaneActions } = await import('/static/js/controllers/action_controller.js');
+            const calls = { request: null, notices: [], overview: 0, detail: [] };
+            const controller = createActionController({
+              execute: async (runId, request) => { calls.request = {runId, request}; return {status:'ACCEPTED'}; },
+              notify: (message, kind) => calls.notices.push({message, kind}),
+              refreshOverview: async () => { calls.overview += 1; },
+              refreshSelectedDetail: async () => { calls.detail.push(['project-real', 'change-real']); },
+              getActor: () => 'operator@example.test',
+            });
+            await controller.executeAction({
+              run_id:'run-exact', project_id:'project-real', change_name:'change-real',
+              current_stage:'IMPLEMENTING', candidate_authority:{generation:4,candidate_sha:'candidate-sha'},
+            }, 'CONTINUE');
+            return {
+              calls,
+              visibleActions: visibleControlPlaneActions([
+                {action:'CONTINUE', enabled:true},
+                {action:'MERGE', enabled:true},
+                {action_type:'merge_pull_request', enabled:true},
+              ]).map(action => action.action || action.action_type),
+            };
+          })()
+        """)
+        calls = result["calls"]
+        assert calls["request"]["runId"] == "run-exact"
+        assert calls["request"]["request"]["project_id"] == "project-real"
+        assert calls["request"]["request"]["change_name"] == "change-real"
+        assert calls["request"]["request"]["expected_generation"] == 4
+        assert calls["request"]["request"]["expected_candidate_sha"] == "candidate-sha"
+        assert calls["overview"] == 1
+        assert calls["detail"] == [["project-real", "change-real"]]
+        assert calls["notices"][-1]["kind"] == "success"
+        assert result["visibleActions"] == ["CONTINUE"]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_real_browser_action_controller_owns_discovery_toolbar_and_single_listener(
+    browser_test_env: dict[str, Any],
+) -> None:
+    client = ChromeCDPClient(browser_test_env["ws_url"])
+    await client.connect()
+    try:
+        await client.navigate(f"{browser_test_env['server_url']}/")
+        result = await client.eval_js("""
+          (async () => {
+            const {createActionController} = await import('/static/js/controllers/action_controller.js');
+            const toolbar = document.createElement('div');
+            const calls = {discovery: [], execution: []};
+            let releaseStaleDiscovery;
+            const detail = {run_id:'run-owned', project_id:'project-real', change_name:'change-real', current_stage:'IMPLEMENTING'};
+            const controller = createActionController({
+              toolbar,
+              discover: async runId => {
+                calls.discovery.push(runId);
+                if (runId === 'run-stale') return new Promise(resolve => { releaseStaleDiscovery = resolve; });
+                if (runId === 'run-current') return [{action:'CONTINUE', enabled:true, display_name:'Actual'}];
+                return [
+                  {action:'CONTINUE', enabled:true, display_name:'Continuar'},
+                  {action:'MERGE', enabled:true, display_name:'No debe mostrarse'},
+                ];
+              },
+              execute: async (runId, request) => { calls.execution.push({runId, request}); return {status:'ACCEPTED'}; },
+              notify: () => {}, refreshOverview: async () => {}, refreshSelectedDetail: async () => {},
+              getActor: () => 'operator@example.test',
+            });
+            controller.bindToolbar();
+            controller.bindToolbar();
+            await controller.renderToolbar(detail);
+            const buttons = [...toolbar.querySelectorAll('[data-action]')].map(button => button.dataset.action);
+            toolbar.querySelector('[data-action="CONTINUE"]').click();
+            await new Promise(resolve => setTimeout(resolve, 0));
+            const staleRender = controller.renderToolbar({...detail, run_id:'run-stale'});
+            await Promise.resolve();
+            await controller.renderToolbar({...detail, run_id:'run-current'});
+            releaseStaleDiscovery([{action:'CANCEL', enabled:true, display_name:'Obsoleta'}]);
+            await staleRender;
+            return {
+              calls, buttons,
+              buttonsAfterRace:[...toolbar.querySelectorAll('[data-action]')].map(button => button.dataset.action),
+            };
+          })()
+        """)
+        assert result["calls"]["discovery"] == ["run-owned", "run-stale", "run-current"]
+        assert result["buttons"] == ["CONTINUE"]
+        assert len(result["calls"]["execution"]) == 1
+        request = result["calls"]["execution"][0]["request"]
+        assert request["project_id"] == "project-real"
+        assert request["change_name"] == "change-real"
+        assert request["run_id"] == "run-owned"
+        assert request["action_type"] == "CONTINUE"
+        assert result["buttonsAfterRace"] == ["CONTINUE"]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_real_browser_preview_controller_requires_exact_preview_and_records_completed_scenarios(
+    browser_test_env: dict[str, Any],
+) -> None:
+    client = ChromeCDPClient(browser_test_env["ws_url"])
+    await client.connect()
+    try:
+        await client.navigate(f"{browser_test_env['server_url']}/")
+        outcome = await client.eval_js("""
+          (async () => {
+            const { createPreviewController } = await import('/static/js/controllers/preview_controller.js');
+            const calls = { requests: [], notices: [] };
+            const controller = createPreviewController({
+              fetchRequest: async (url, init) => {
+                calls.requests.push({url, init});
+                return {ok:true, json:async () => ({validation_id:'validation-1'})};
+              },
+              notify: (message, kind) => calls.notices.push({message, kind}),
+              refresh: async () => {},
+              getActor: () => 'authenticated@example.test',
+            });
+            const detail = {project_id:'p-1', change_name:'change-1', run_id:'run-1'};
+            const candidate = {head_sha:'head-1', base_sha:'base-1', generation:2};
+            const session = {preview_id:'preview-1', head_sha:'head-1', base_sha:'base-1', candidate_generation:2, image_digest:'sha256:image', status:'READY'};
+            const container = {querySelectorAll: (selector) => selector === '.scenario-step-check' ? [{dataset:{scenarioId:'s-1'},checked:true}] : []};
+            await controller.submitValidation({detail,session,candidate,scenarios:[{scenario_id:'s-1',required:true}],container,verdict:'PASS',notes:'verified',allowed:true});
+            const afterValid = calls.requests.length;
+            await controller.submitValidation({detail,session:{...session,head_sha:'old-head'},candidate,scenarios:[],container,verdict:'PASS',notes:'stale',allowed:true});
+            return {calls, afterValid};
+          })()
+        """)
+        assert outcome["afterValid"] == 1
+        assert len(outcome["calls"]["requests"]) == 1
+        payload = json.loads(outcome["calls"]["requests"][0]["init"]["body"])
+        assert payload["project_id"] == "p-1"
+        assert payload["head_sha"] == "head-1"
+        assert payload["base_sha"] == "base-1"
+        assert payload["candidate_generation"] == 2
+        assert payload["image_digest"] == "sha256:image"
+        assert payload["scenario_results"] == [{"scenario_id": "s-1", "status": "PASS"}]
+        assert "operator" not in payload
+        assert "no corresponde exactamente" in outcome["calls"]["notices"][-1]["message"]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_real_browser_selected_change_renders_candidate_bound_preview_and_detail_tabs(
+    browser_test_env: dict[str, Any],
+) -> None:
+    client = ChromeCDPClient(browser_test_env["ws_url"])
+    await client.connect()
+    try:
+        await authenticate_browser(
+            client, browser_test_env["server_url"], browser_test_env["session_token"]
+        )
+        detail = await client.eval_js(
+            "fetch('/api/v1/dashboard/changes/mini-me/017-pwa-control-center', {cache:'no-store'}).then(r => r.json())"
+        )
+        assert detail["project_id"] == "mini-me"
+        assert detail["change_name"] == "017-pwa-control-center"
+        assert detail["preview_validation"]["preview_session"]["candidate_generation"] == 1
+        assert (
+            detail["preview_validation"]["preview_session"]["head_sha"]
+            == detail["candidate_authority"]["candidate_sha"]
+        )
+
+        row_clicked = False
+        for _ in range(20):
+            row_clicked = await client.eval_js("""
+              (() => {
+                const row = [...document.querySelectorAll('#changesTableBody tr[data-project-id]')]
+                  .find(item => item.dataset.projectId === 'mini-me' && item.dataset.changeName === '017-pwa-control-center');
+                if (!row) return false;
+                row.click();
+                return true;
+              })()
+            """)
+            if row_clicked:
+                break
+            await asyncio.sleep(0.1)
+        assert row_clicked is True, await client.eval_js("""
+          ({view: document.querySelector('.main-view-pane.active')?.id,
+            operator: document.getElementById('operatorEmailText')?.textContent,
+            rows: document.getElementById('changesTableBody')?.innerText,
+            errors: window.__pwaErrors || []})
+        """)
+
+        selected = None
+        for _ in range(20):
+            selected = await client.eval_js("""
+              ({project: document.getElementById('dtProject').textContent,
+                change: document.getElementById('dtChangeName').textContent})
+            """)
+            if selected["project"] == "mini-me" and selected["change"] == "017-pwa-control-center":
+                break
+            await asyncio.sleep(0.1)
+        assert selected == {"project": "mini-me", "change": "017-pwa-control-center"}
+
+        has_candidate = await client.eval_js(
+            "document.getElementById('candidateDetailsContainer').textContent.length > 0"
+        )
+        assert has_candidate is True
+
+        identity = await client.eval_js("""
+          ({
+            project: document.getElementById('dtProject').textContent,
+            repository: document.getElementById('dtRepository').textContent,
+            change: document.getElementById('dtChangeName').textContent,
+            run: document.getElementById('overviewMetaGrid').textContent,
+            job: document.getElementById('overviewMetaGrid').textContent,
+            generation: document.getElementById('dtGeneration').textContent,
+            candidate: document.getElementById('dtCandidateSha').dataset.fullSha,
+            pipeline: document.getElementById('pipelineStepper').textContent,
+          })
+        """)
+        assert identity["project"] == detail["project_id"]
+        assert identity["repository"] == detail["repository_identity"]
+        assert identity["change"] == detail["change_name"]
+        assert detail["run_id"] in identity["run"] and detail["job_id"] in identity["job"]
+        assert identity["generation"] == f"gen-{detail['candidate_authority']['generation']}"
+        assert identity["candidate"] == detail["candidate_authority"]["candidate_sha"]
+        assert identity["pipeline"].strip()
+
+        await client.eval_js(
+            "document.querySelector('button[data-tab=\\\"candidateTab\\\"]').click()"
+        )
+        candidate = await client.eval_js(
+            "document.getElementById('candidateDetailsContainer').textContent"
+        )
+        assert detail["candidate_authority"]["candidate_sha"] in candidate, await client.eval_js(
+            "({errors:window.__pwaErrors,detail:document.getElementById('detailContent').textContent,rows:document.getElementById('changesTableBody').innerText})"
+        )
+
+        await client.eval_js(
+            "document.querySelector('button[data-tab=\\\"previewTab\\\"]').click()"
+        )
+        preview = await client.eval_js(
+            "({status:document.getElementById('previewContainerStatus').textContent, submitDisabled:document.getElementById('submitValidationBtn').disabled})"
+        )
+        assert "READY" in preview["status"]
+        assert preview["submitDisabled"] is False
+
+        await client.eval_js("document.querySelector('button[data-tab=\\\"reviewTab\\\"]').click()")
+        review = await client.eval_js(
+            "document.getElementById('reviewDetailsContainer').textContent"
+        )
+        if detail["review"]["status"] == "not_started":
+            assert "aún no se ha ejecutado" in review
+        else:
+            assert detail["review"]["candidate_sha"][:8] in review
+
+        detail_sections = [
+            ("overview", "overviewTab", "overviewMetaGrid"),
+            ("checks", "checksTab", "checksListContainer"),
+            ("audit", "auditTab", "auditDetailsContainer"),
+            ("github", "githubTab", "githubDetailsContainer"),
+            ("efficiency", "efficiencyTab", "efficiencyDetailsContainer"),
+            ("history", "actionHistoryTab", "actionHistoryContentContainer"),
+            ("timeline", "timelineTab", "timelineListContainer"),
+        ]
+        rendered_sections = {}
+        for index, (name, _tab, content_id) in enumerate(detail_sections):
+            await client.eval_js(
+                f"document.querySelectorAll('.detail-tabs .tab-btn')[{index}].click()"
+            )
+            await asyncio.sleep(0.1)
+            rendered_sections[name] = await client.eval_js(
+                f"document.getElementById('{content_id}').textContent.trim()"
+            )
+        assert "run-017" in rendered_sections["overview"]
+        assert "ruff-lint" in rendered_sections["checks"]
+        assert "unit-tests" in rendered_sections["checks"]
+        assert rendered_sections["audit"]
+        assert rendered_sections["github"]
+        assert rendered_sections["efficiency"]
+        assert rendered_sections["history"]
+        assert rendered_sections["timeline"]
     finally:
         await client.close()
 

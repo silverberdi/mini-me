@@ -20,7 +20,7 @@ export function renderChangesView({ root, changes, filter, query, selected, alre
   }
   root.innerHTML = visible.map((change) => {
     const isSelected = selected?.project_id === change.project_id && selected?.change_name === change.change_name;
-    return `<tr class="${isSelected ? "selected" : ""}" data-project-id="${escapeHtml(change.project_id)}" data-change-name="${escapeHtml(change.change_name)}">
+    return `<tr class="${isSelected ? "selected" : ""}" tabindex="0" role="button" aria-label="Abrir ${escapeHtml(change.project_id)} / ${escapeHtml(change.change_name)} — ${escapeHtml(change.status)}" data-project-id="${escapeHtml(change.project_id)}" data-change-name="${escapeHtml(change.change_name)}">
       <td><span class="badge ${statusClass(change.status)}">${escapeHtml(change.status)}</span></td>
       <td><strong>${escapeHtml(change.change_name)}</strong></td>
       <td>${escapeHtml(change.project_id)}</td>

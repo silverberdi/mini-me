@@ -1,6 +1,6 @@
 import { initDashboard } from "./dashboard.js";
 
-// One bootstrap owns initialization; dashboard.js owns refresh and listeners.
+// One DOM-ready bootstrap; domain controllers own lifecycle and interaction listeners.
 let initialized = false;
 function bootstrap() {
   if (initialized) return;
