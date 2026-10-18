@@ -1664,7 +1664,11 @@ class RecoveryConvergenceService:
                 renew_claim=renew_claim,
             ) as heartbeat:
                 orchestration_svc.resume(
-                    run_id=run.run_id, drain_mode=drain_mode, force=force, claim_context=context
+                    run_id=run.run_id,
+                    drain_mode=drain_mode,
+                    force=force,
+                    claim_context=context,
+                    manage_heartbeat=False,
                 )
             if heartbeat.heartbeat_failed:
                 raise StaleClaimError("CLAIM_HEARTBEAT_RENEWAL_FAILED")

@@ -731,6 +731,8 @@ class AgentProcessConfinement:
                 "--ro-bind",
                 "/",
                 "/",
+                "--dev",
+                "/dev",
                 "--bind",
                 self.allowed_worktree_path,
                 self.allowed_worktree_path,
@@ -823,7 +825,9 @@ class AgentProcessConfinement:
                 stdout_chunks: list[bytes] = []
                 stderr_chunks: list[bytes] = []
 
-                async def _read_stream(stream: asyncio.StreamReader | None, chunks: list[bytes], sig: WatchdogSignal):
+                async def _read_stream(
+                    stream: asyncio.StreamReader | None, chunks: list[bytes], sig: WatchdogSignal
+                ):
                     if not stream:
                         return
                     while True:
@@ -838,8 +842,12 @@ class AgentProcessConfinement:
                     await process.stdin.drain()
                     process.stdin.close()
 
-                stdout_task = asyncio.create_task(_read_stream(process.stdout, stdout_chunks, WatchdogSignal.STDOUT_EMISSION))
-                stderr_task = asyncio.create_task(_read_stream(process.stderr, stderr_chunks, WatchdogSignal.STDERR_EMISSION))
+                stdout_task = asyncio.create_task(
+                    _read_stream(process.stdout, stdout_chunks, WatchdogSignal.STDOUT_EMISSION)
+                )
+                stderr_task = asyncio.create_task(
+                    _read_stream(process.stderr, stderr_chunks, WatchdogSignal.STDERR_EMISSION)
+                )
 
                 start_time = time.monotonic()
                 try:
@@ -847,7 +855,9 @@ class AgentProcessConfinement:
                         if process.returncode is not None:
                             break
                         try:
-                            await asyncio.wait_for(process.wait(), timeout=watchdog.check_interval_seconds)
+                            await asyncio.wait_for(
+                                process.wait(), timeout=watchdog.check_interval_seconds
+                            )
                             break
                         except asyncio.TimeoutError:
                             state = watchdog.evaluate_tick(process.pid)
@@ -870,7 +880,10 @@ class AgentProcessConfinement:
                                 await self._terminate_process_group(process)
                                 break
 
-                            if state == WatchdogState.SUSPECTED_STALL and watchdog.diagnostic_reason:
+                            if (
+                                state == WatchdogState.SUSPECTED_STALL
+                                and watchdog.diagnostic_reason
+                            ):
                                 logger.debug(
                                     f"Process PID {process.pid} inactive ({watchdog.diagnostic_reason}); preserving process under uncertainty."
                                 )

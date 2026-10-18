@@ -5420,6 +5420,25 @@ class PostgresRecoveryClaimRepository(RecoveryClaimRepositoryInterface):
         res = self.session.execute(stmt)
         return res.rowcount > 0
 
+    def release_claim(
+        self,
+        claim_key_or_context: str | RecoveryClaimContext,
+        owner_instance_id: str | None = None,
+        fence_token: int | None = None,
+    ) -> bool:
+        """Strictly idempotent release of an operational recovery claim."""
+        if isinstance(claim_key_or_context, RecoveryClaimContext):
+            return self.release(
+                claim_key=claim_key_or_context.claim_key,
+                owner_instance_id=claim_key_or_context.owner_instance_id,
+                fence_token=claim_key_or_context.fence_token,
+            )
+        return self.release(
+            claim_key=str(claim_key_or_context),
+            owner_instance_id=owner_instance_id or "",
+            fence_token=fence_token or 0,
+        )
+
     def get_by_key(self, claim_key: str) -> RecoveryClaim | None:
         model = self.session.get(RecoveryClaimModel, claim_key)
         return recovery_claim_model_to_domain(model) if model else None
