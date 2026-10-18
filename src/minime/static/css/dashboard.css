@@ -1567,6 +1567,10 @@ body.theme-light {
   font-weight: 700;
 }
 
+.check-diagnostic { font-size: 0.72rem; color: var(--color-danger); margin-top: 4px; overflow-wrap: anywhere; }
+.check-duration { font-size: 0.72rem; }
+.review-summary p { margin-top: 4px; font-size: 0.75rem; overflow-wrap: anywhere; }
+
 /* NEEDS_HUMAN Card */
 .needs-human-card {
   background: var(--color-warning-bg);

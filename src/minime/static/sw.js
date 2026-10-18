@@ -32,6 +32,7 @@ const SHELL_ASSETS = [
   "/static/js/views/overview_view.js",
   "/static/js/views/projects_view.js",
   "/static/js/views/backlog_view.js",
+  "/static/js/views/evidence_views.js",
   "/static/js/views/runs_view.js",
   "/static/js/components/toast.js",
   "/static/manifest.webmanifest",

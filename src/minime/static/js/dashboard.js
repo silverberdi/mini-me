@@ -9,6 +9,7 @@ import { renderOverviewView } from "./views/overview_view.js";
 import { renderProjectSelect as renderProjectSelectView, renderProjectsGrid as renderProjectsGridView } from "./views/projects_view.js";
 import { renderPipelineStepper as renderPipelineStepperView } from "./components/pipeline_stepper.js";
 import { renderBacklogDetail as renderBacklogDetailView, renderBacklogTable as renderBacklogTableView } from "./views/backlog_view.js";
+import { renderAuditEvidence, renderCandidateEvidence, renderChecksEvidence, renderReviewEvidence, renderRunOverview } from "./views/evidence_views.js";
 import { actionHistory, discoverActions, executeAction } from "./services/control_plane_client.js";
 import { renderChangesView } from "./views/runs_view.js";
 
@@ -1083,244 +1084,36 @@ const fetch = (input, init = {}) => {
   }
 
   function renderOverviewTab(detail) {
-    const metaGrid = document.getElementById('overviewMetaGrid');
-    const blockerSection = document.getElementById('overviewBlockerSection');
-    const blockersList = document.getElementById('overviewBlockersList');
-
-    if (metaGrid) {
-      metaGrid.innerHTML = `
-        <div class="meta-box">
-          <div class="meta-box-label">Etapa actual</div>
-          <div class="meta-box-val">${escapeHtml(detail.current_stage || 'UNKNOWN')}</div>
-        </div>
-        <div class="meta-box">
-          <div class="meta-box-label">Stop Outcome</div>
-          <div class="meta-box-val">${escapeHtml(detail.stop_outcome || 'UNKNOWN')}</div>
-        </div>
-        <div class="meta-box">
-          <div class="meta-box-label">Run ID</div>
-          <div class="meta-box-val font-mono text-muted">${escapeHtml(detail.run_id || '---')}</div>
-        </div>
-        <div class="meta-box">
-          <div class="meta-box-label">Active Job ID</div>
-          <div class="meta-box-val font-mono text-muted">${escapeHtml(detail.job_id || '---')}</div>
-        </div>
-      `;
-    }
-
-    if (detail.blocker_details && detail.blocker_details.length > 0) {
-      blockerSection.style.display = 'block';
-      blockersList.innerHTML = detail.blocker_details.map(b => `
-        <div class="attention-item-card">
-          <div class="attention-item-left">
-            <span class="attention-item-name">${escapeHtml(b.type || b.claim_type || 'BLOCKER')}</span>
-            <span class="attention-item-reason">${escapeHtml(b.reason || b.description || '')}</span>
-          </div>
-          ${b.human_gate ? `<span class="badge badge-needs-human">${escapeHtml(b.human_gate)}</span>` : ''}
-        </div>
-      `).join('');
-    } else {
-      blockerSection.style.display = 'none';
-    }
+    renderRunOverview({
+      metaGrid: document.getElementById('overviewMetaGrid'),
+      blockerSection: document.getElementById('overviewBlockerSection'),
+      blockersList: document.getElementById('overviewBlockersList'),
+      detail,
+    });
   }
 
   function renderCandidateTab(detail) {
-    const summary = document.getElementById('candidateAuthSummary');
-    const tbody = document.getElementById('candidateHistoryTbody');
-
-    if (summary) {
-      if (detail.candidate_authority) {
-        const ca = detail.candidate_authority;
-        summary.innerHTML = `
-          <div class="overview-meta-grid">
-            <div class="meta-box">
-              <div class="meta-box-label">Current Candidate SHA</div>
-              <div class="meta-box-val"><code class="code-sha">${escapeHtml(ca.candidate_sha)}</code></div>
-            </div>
-            <div class="meta-box">
-              <div class="meta-box-label">Base SHA</div>
-              <div class="meta-box-val"><code class="code-sha">${escapeHtml(ca.base_sha)}</code></div>
-            </div>
-            <div class="meta-box">
-              <div class="meta-box-label">Generation</div>
-              <div class="meta-box-val">Generation ${ca.generation} ${ca.is_frozen ? '(Frozen)' : '(Active)'}</div>
-            </div>
-            <div class="meta-box">
-              <div class="meta-box-label">Manifest Hash</div>
-              <div class="meta-box-val font-mono text-muted">${escapeHtml(ca.manifest_hash || '---')}</div>
-            </div>
-          </div>
-          ${ca.changed_files && ca.changed_files.length > 0 ? `
-            <div style="margin-top: 12px;">
-              <div class="meta-box-label" style="margin-bottom: 4px;">Changed Files (${ca.changed_files.length})</div>
-              <ul style="padding-left: 20px; font-family: var(--font-mono); font-size: 11px; color: var(--text-muted);">
-                ${ca.changed_files.map(f => `<li>${escapeHtml(f)}</li>`).join('')}
-              </ul>
-            </div>
-          ` : ''}
-        `;
-      } else {
-        summary.innerHTML = `<p class="text-muted">No candidate generation finalized yet.</p>`;
-      }
-    }
-
-    if (tbody) {
-      if (detail.candidate_history && detail.candidate_history.length > 0) {
-        tbody.innerHTML = detail.candidate_history.map(c => `
-          <tr>
-            <td><strong>gen-${c.generation}</strong></td>
-            <td><code class="code-sha">${escapeHtml(c.candidate_sha_short)}</code></td>
-            <td><code class="code-sha">${escapeHtml(c.base_sha_short)}</code></td>
-            <td>${c.is_superseded ? '<span class="badge badge-not-ready">SUPERSEDED</span>' : '<span class="badge badge-ready">CURRENT</span>'}</td>
-            <td class="font-mono text-muted">${escapeHtml(c.manifest_hash ? c.manifest_hash.substring(0, 10) + '...' : '---')}</td>
-          </tr>
-        `).join('');
-      } else {
-        tbody.innerHTML = `<tr><td colspan="5" class="table-empty">No hay historial de candidatos.</td></tr>`;
-      }
-    }
+    renderCandidateEvidence({
+      summary: document.getElementById('candidateAuthSummary'),
+      history: document.getElementById('candidateHistoryTbody'),
+      detail,
+    });
   }
 
   function renderChecksTab(checks) {
-    const countSpan = document.getElementById('checksTabCount');
-    const container = document.getElementById('checksListContainer');
-    if (countSpan) countSpan.textContent = Array.isArray(checks) ? String(checks.length) : '—';
-
-    if (!container) return;
-    if (!checks || checks.length === 0) {
-      container.innerHTML = `<p class="text-muted">No hay resultados de verificaciones determinísticas.</p>`;
-      return;
-    }
-
-    container.innerHTML = checks.map(c => {
-      const isPass = c.status === 'PASS' || c.exit_code === 0;
-      return `
-        <div class="check-item">
-          <div class="check-item-left">
-            <div class="check-item-title">${escapeHtml(c.check_name)}</div>
-            <div class="check-item-cmd">${escapeHtml(c.command)}</div>
-            ${c.diagnostic_snippet ? `<div style="font-size: 11px; color: var(--color-danger); margin-top: 4px;">${escapeHtml(c.diagnostic_snippet)}</div>` : ''}
-          </div>
-          <div class="check-item-meta">
-            <span class="text-muted" style="font-size: 11px;">${c.duration_ms ? `${c.duration_ms}ms` : ''}</span>
-            <span class="badge ${isPass ? 'badge-ready' : 'badge-failed'}">${isPass ? 'PASS' : 'FAIL'}</span>
-          </div>
-        </div>
-      `;
-    }).join('');
+    renderChecksEvidence({
+      count: document.getElementById('checksTabCount'),
+      container: document.getElementById('checksListContainer'),
+      checks,
+    });
   }
 
   function renderReviewTab(review, candidate) {
-    const container = document.getElementById('reviewContentContainer');
-    if (!container) return;
-
-    if (!review || review.status === 'not_started') {
-      container.innerHTML = `<p class="text-muted">La revisión complementaria aún no se ha ejecutado.</p>`;
-      return;
-    }
-
-    const candidateBound = Boolean(review.candidate_sha && candidate?.candidate_sha
-      && review.candidate_sha === candidate.candidate_sha);
-    const stale = review.is_stale_to_current_candidate === true
-      || Boolean(review.candidate_sha && candidate?.candidate_sha && review.candidate_sha !== candidate.candidate_sha);
-    const isPass = review.verdict === 'READY_TO_MERGE' && candidateBound && !stale;
-    const bindingLabel = candidateBound ? 'VIGENTE' : stale ? 'OBSOLETA' : 'DESCONOCIDA';
-    container.innerHTML = `
-      <div class="overview-meta-grid" style="margin-bottom: 12px;">
-        <div class="meta-box">
-          <div class="meta-box-label">Rol del revisor</div>
-          <div class="meta-box-val">${escapeHtml(review.reviewer_role || 'No informado')}</div>
-        </div>
-        <div class="meta-box">
-          <div class="meta-box-label">Veredicto</div>
-          <div class="meta-box-val"><span class="badge ${isPass ? 'badge-ready' : 'badge-failed'}">${escapeHtml(review.verdict || review.status)}</span></div>
-        </div>
-        <div class="meta-box">
-          <div class="meta-box-label">Hallazgos relevantes</div>
-          <div class="meta-box-val">${escapeHtml(review.material_findings_count ?? '—')}</div>
-        </div>
-        <div class="meta-box">
-          <div class="meta-box-label">Vinculación del candidato</div>
-          <div class="meta-box-val"><code class="code-sha">${escapeHtml(review.candidate_sha ? review.candidate_sha.substring(0, 8) : '—')}</code> <span class="badge ${candidateBound ? 'badge-ready' : stale ? 'badge-warning' : 'badge-muted'}">${bindingLabel}</span></div>
-        </div>
-      </div>
-      ${review.summary ? `
-        <div class="meta-box" style="margin-bottom: 12px;">
-          <div class="meta-box-label">Resumen de la revisión</div>
-          <p style="margin-top: 4px; font-size: 12px;">${escapeHtml(review.summary)}</p>
-        </div>
-      ` : ''}
-      ${review.findings && review.findings.length > 0 ? `
-        <div class="meta-box-label" style="margin-bottom: 6px;">Hallazgos (${review.findings.length})</div>
-        <div class="checks-list">
-          ${review.findings.map(f => `
-            <div class="check-item">
-              <div class="check-item-left">
-                <div class="check-item-title">${escapeHtml(f.severity)}: ${escapeHtml(f.location || 'Codebase')}</div>
-                <div style="font-size: 11px; color: var(--text-muted);">${escapeHtml(f.violated_requirement || f.expected_correction || '')}</div>
-              </div>
-              <span class="badge ${f.severity === 'BLOCKER' ? 'badge-failed' : 'badge-waiting'}">${escapeHtml(f.severity)}</span>
-            </div>
-          `).join('')}
-        </div>
-      ` : '<p class="text-muted" style="font-size: 12px;">No se informaron hallazgos.</p>'}
-    `;
+    renderReviewEvidence({ container: document.getElementById('reviewContentContainer'), review, candidate });
   }
 
   function renderAuditTab(audit, candidate) {
-    const container = document.getElementById('auditContentContainer');
-    if (!container) return;
-
-    if (!audit || audit.status === 'not_started') {
-        container.innerHTML = `<p class="text-muted">La auditoría independiente aún no se ha ejecutado.</p>`;
-      return;
-    }
-
-    const isLowRisk = audit.risk === 'low';
-    const auditCandidateBound = Boolean(audit.candidate_sha && candidate?.candidate_sha
-      && audit.candidate_sha === candidate.candidate_sha);
-    const auditStale = audit.is_stale_to_current_candidate === true
-      || Boolean(audit.candidate_sha && candidate?.candidate_sha && audit.candidate_sha !== candidate.candidate_sha);
-    container.innerHTML = `
-      <div class="overview-meta-grid" style="margin-bottom: 12px;">
-        <div class="meta-box">
-          <div class="meta-box-label">Auditor</div>
-          <div class="meta-box-val">${escapeHtml(audit.provider || 'No informado')} / ${escapeHtml(audit.model || 'No informado')}</div>
-        </div>
-        <div class="meta-box">
-          <div class="meta-box-label">Nivel de riesgo</div>
-          <div class="meta-box-val"><span class="badge ${isLowRisk ? 'badge-ready' : audit.risk ? 'badge-failed' : 'badge-muted'}">RIESGO: ${escapeHtml(audit.risk || 'DESCONOCIDO')}</span></div>
-        </div>
-        <div class="meta-box">
-          <div class="meta-box-label">Hallazgos relevantes</div>
-          <div class="meta-box-val">${escapeHtml(audit.material_findings_count ?? '—')}</div>
-        </div>
-        <div class="meta-box">
-          <div class="meta-box-label">Vinculación del candidato</div>
-          <div class="meta-box-val"><code class="code-sha">${escapeHtml(audit.candidate_sha ? audit.candidate_sha.substring(0, 8) : '—')}</code> <span class="badge ${auditCandidateBound ? 'badge-ready' : auditStale ? 'badge-warning' : 'badge-muted'}">${auditCandidateBound ? 'VIGENTE' : auditStale ? 'OBSOLETA' : 'DESCONOCIDA'}</span></div>
-        </div>
-      </div>
-      ${audit.summary ? `
-        <div class="meta-box" style="margin-bottom: 12px;">
-          <div class="meta-box-label">Resumen de auditoría</div>
-          <p style="margin-top: 4px; font-size: 12px;">${escapeHtml(audit.summary)}</p>
-        </div>
-      ` : ''}
-      ${audit.findings && audit.findings.length > 0 ? `
-        <div class="meta-box-label" style="margin-bottom: 6px;">Hallazgos de auditoría (${audit.findings.length})</div>
-        <div class="checks-list">
-          ${audit.findings.map(f => `
-            <div class="check-item">
-              <div class="check-item-left">
-                <div class="check-item-title">${escapeHtml(f.severity.toUpperCase())}: ${escapeHtml(f.category || 'General')}</div>
-                <div style="font-size: 11px; color: var(--text-muted);">${escapeHtml(f.message || '')}</div>
-              </div>
-              <span class="badge ${f.severity === 'critical' || f.severity === 'high' ? 'badge-failed' : 'badge-waiting'}">${escapeHtml(f.severity.toUpperCase())}</span>
-            </div>
-          `).join('')}
-        </div>
-      ` : '<p class="text-muted" style="font-size: 12px;">No se informaron hallazgos de seguridad o integridad.</p>'}
-    `;
+    renderAuditEvidence({ container: document.getElementById('auditContentContainer'), audit, candidate });
   }
 
   function renderPreviewTab(previewVal, detail) {

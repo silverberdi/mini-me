@@ -18,7 +18,7 @@ MINIME_RUNTIME_ROOT=/tmp/minime-pwa-test-runtime pytest -q \
   tests/test_systemd_scheduler_observer.py tests/test_pwa_desktop_layout.py
 ```
 
-Result: **59 passed, 4 warnings**. This includes real-Chrome tests at the five required viewport sizes, offline/reconnect, auth expiry, cache inspection and two-operator cache isolation; PWA/API/Control Plane regressions; systemd projection and observer timeout/freshness/fail-closed cases. A separate baseline/current comparison subset passed the five order-sensitive full-suite failures when run together on the current candidate. The focused systemd/OpenSpec contract follow-up passed **11 passed**. After extracting Backlog rendering to `views/backlog_view.js`, its real-Chrome rendering/escaping test plus assets, UI and service-worker checks passed **8 passed**.
+Result: **59 passed, 4 warnings**. This includes real-Chrome tests at the five required viewport sizes, offline/reconnect, auth expiry, cache inspection and two-operator cache isolation; PWA/API/Control Plane regressions; systemd projection and observer timeout/freshness/fail-closed cases. A separate baseline/current comparison subset passed the five order-sensitive full-suite failures when run together on the current candidate. The focused systemd/OpenSpec contract follow-up passed **11 passed**. After extracting Backlog and candidate/review/check evidence rendering to live view modules, focused Chrome rendering, assets/import-graph, service-worker and PWA contract checks passed **11 passed**.
 
 The test census surfaced two stale static PWA assertions that still expected scheduler and stage labels to live in the old dashboard module. They were updated to assert the modular API/view contracts and the backend's actual six pipeline phases. `tests/test_pwa_contract.py`: **3 passed** after correction.
 
@@ -58,7 +58,7 @@ The fixed-target read-only D-Bus observer is deterministic-test verified for act
 
 ## Remaining implementation / acceptance limits
 
-- Frontend convergence/removal is incomplete: `dashboard.js` remains a large legacy implementation (2,236 lines after the Backlog view extraction) and owns significant UI workflows. Modules extracted so far are live imports, but complete consumer parity and Removal Ledger proof are not established. Do not mark tasks 5.1–5.3 complete or claim architectural convergence.
+- Frontend convergence/removal is incomplete: `dashboard.js` remains a large coordinator (2,029 lines after Backlog/evidence view extraction) and owns significant UI workflows. Modules extracted so far are live imports, but complete consumer parity and Removal Ledger proof are not established. Do not mark tasks 5.1–5.3 complete or claim architectural convergence.
 - The five viewport checks do not complete the eight approved visual states, keyboard/accessibility audit, or human validation.
 - Authenticated preview/container E2E, governed action lifecycle E2E, complete-value states (including an authoritative deliberate PAUSED source), post-merge/deployment verification, and real Linux systemd observation remain pending.
 - No task requiring human approval, merge or deployment is complete.

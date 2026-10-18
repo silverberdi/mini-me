@@ -990,6 +990,37 @@ async def test_real_browser_backlog_view_uses_explicit_evidence_and_escapes_cont
 
 
 @pytest.mark.asyncio
+async def test_real_browser_candidate_review_and_check_views_preserve_identity_states(
+    browser_test_env: dict[str, Any],
+) -> None:
+    client = ChromeCDPClient(browser_test_env["ws_url"])
+    await client.connect()
+    try:
+        await client.navigate(f"{browser_test_env['server_url']}/")
+        rendered = await client.eval_js("""
+          (async () => {
+            const views = await import('/static/js/views/evidence_views.js');
+            const node = () => ({innerHTML:'',textContent:'',style:{}});
+            const review = node(), audit = node(), candidate = node(), history = node(), checks = node(), count = node();
+            views.renderReviewEvidence({container:review,review:{status:'completed',verdict:'READY_FOR_HUMAN_MERGE',candidate_sha:'old-sha'},candidate:{candidate_sha:'new-sha'}});
+            views.renderAuditEvidence({container:audit,audit:{status:'completed',risk:null,findings:[]},candidate:{candidate_sha:'new-sha'}});
+            views.renderCandidateEvidence({summary:candidate,history,detail:{candidate_authority:null,candidate_history:[]}});
+            views.renderChecksEvidence({count,container:checks,checks:null});
+            return {review:review.innerHTML,audit:audit.innerHTML,candidate:candidate.innerHTML,checks:checks.innerHTML,count:count.textContent};
+          })()
+        """)
+        assert "OBSOLETA" in rendered["review"]
+        assert 'class="badge badge-ready"' not in rendered["review"]
+        assert "DESCONOCIDA" in rendered["audit"]
+        assert "RIESGO: UNKNOWN" in rendered["audit"]
+        assert "No hay una generación de candidato finalizada" in rendered["candidate"]
+        assert "No hay resultados de verificaciones determinísticas" in rendered["checks"]
+        assert rendered["count"] == "—"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_real_browser_interactive_features(browser_test_env: dict[str, Any]) -> None:
     """Verify interactive workflows: tab switching, theme toggle, and operator confirmation dialog."""
     client = ChromeCDPClient(browser_test_env["ws_url"])
