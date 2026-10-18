@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from minime.domain.enums import (
     AuditRiskLevel,
     AuditStatus,
@@ -26,6 +28,15 @@ from minime.domain.models import (
     Review,
 )
 from minime.services.dashboard_service import OperationsDashboardService
+from minime.services.systemd_scheduler_observer import SchedulerServiceObservation
+
+
+class StaticSchedulerObserver:
+    def __init__(self, observation: SchedulerServiceObservation) -> None:
+        self.observation = observation
+
+    def observe(self) -> SchedulerServiceObservation:
+        return self.observation
 
 
 def test_dashboard_overview_empty_state(in_memory_uow: PersistenceUnitOfWork) -> None:
@@ -33,12 +44,38 @@ def test_dashboard_overview_empty_state(in_memory_uow: PersistenceUnitOfWork) ->
 
     overview = service.get_overview()
     assert overview.system_status.healthy is True
+    assert overview.system_status.database_healthy is None
     assert overview.system_status.active_runs_count == 0
+    assert overview.system_status.recent_completions_count == 0
     assert overview.system_status.total_changes_count == 0
     assert overview.system_status.attention_runs_count == 0
     assert overview.attention_items == []
     assert overview.active_executions == []
     assert overview.changes == []
+
+
+def test_scheduler_service_projection_is_independent_of_logical_mode(
+    in_memory_uow: PersistenceUnitOfWork,
+) -> None:
+    observation = SchedulerServiceObservation(
+        active_state="INACTIVE",
+        sub_state="dead",
+        enabled_state="DISABLED",
+        observed_at=datetime.now(UTC),
+        age_seconds=0.1,
+        freshness="FRESH",
+        reason="observed",
+    )
+    overview = OperationsDashboardService(
+        in_memory_uow, scheduler_observer=StaticSchedulerObserver(observation)
+    ).get_overview()
+
+    projected = overview.system_status.scheduler_service
+    assert projected.active_state == "INACTIVE"
+    assert projected.sub_state == "dead"
+    assert projected.enabled_state == "DISABLED"
+    assert projected.freshness == "FRESH"
+    assert overview.system_status.scheduler_mode == "RUN"
 
 
 def test_dashboard_overview_with_runs_and_attention(

@@ -1,9 +1,18 @@
-/**
- * mini me — Operations Dashboard Application Logic
- */
+import { api } from "./services/api_client.js";
+import { renderProviders } from "./components/provider_grid.js";
+import { renderQueue } from "./components/queue_table.js";
+import { setOfflineBanner } from "./components/offline_banner.js";
+import { initDesktopPaneLayout } from "./desktop_pane_layout.js";
 
-(function () {
-  'use strict';
+/** Single native-module coordinator for the existing Control Center workflows. */
+// Operational and authenticated responses must never be read from the HTTP cache.
+const fetch = (input, init = {}) => {
+  const method = String(init.method || "GET").toUpperCase();
+  if (method !== "GET" && navigator.onLine === false) {
+    return Promise.reject(Object.assign(new Error("Sin conexión; no se envió la acción."), { status: 503 }));
+  }
+  return window.fetch(input, { ...init, cache: "no-store", credentials: "same-origin" });
+};
 
   // Safe Storage Helpers
   function safeGetStorage(key, defaultVal) {
@@ -22,7 +31,13 @@
 
   // State
   let overviewData = null;
+  let queueData = null;
+  let providerData = null;
+  let healthData = null;
   let selectedChange = null;
+  let detailRequestSequence = 0;
+  let refreshInProgress = false;
+  let refreshPending = false;
   let initialSelected = false;
   let activeFilter = 'ALL';
   let searchQuery = '';
@@ -152,9 +167,12 @@
   const logoutBtn = document.getElementById('logoutBtn');
 
   // Initialization
-  async function init() {
+  export async function initDashboard() {
     setupTheme();
     setupEventListeners();
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("/sw.js").catch(() => {});
+    }
     const authenticated = await checkAuth();
     if (authenticated) {
       await fetchProjects();
@@ -172,6 +190,7 @@
         const data = await resp.json();
         if (data.authenticated && data.operator) {
           currentUser = data.operator;
+          void initDesktopPaneLayout(currentUser.email);
           showAuthenticatedUI();
           return true;
         }
@@ -200,6 +219,19 @@
     if (operatorProfileGroup) operatorProfileGroup.style.display = 'none';
     if (loginSection) loginSection.style.display = 'flex';
     clearInterval(countdownInterval);
+    overviewData = null;
+    queueData = null;
+    providerData = null;
+    healthData = null;
+    selectedChange = null;
+    renderOverview();
+    renderOperationalPanels({
+      overviewResult: { status: "rejected" },
+      queueResult: { status: "rejected" },
+      providerResult: { status: "rejected" },
+      healthResult: { status: "rejected" },
+    });
+    setOfflineBanner(false);
   }
 
   async function handleLogout() {
@@ -238,6 +270,27 @@
 
   // Event Listeners
   function setupEventListeners() {
+    window.addEventListener('resize', () => {
+      const executions = document.getElementById('viewExecutions');
+      if (executions?.classList.contains('active')) {
+        executions.style.display = window.matchMedia('(min-width: 1200px)').matches ? 'grid' : 'block';
+      }
+    }, { passive: true });
+    window.addEventListener('offline', () => {
+      setOfflineBanner(true);
+      ["overviewFreshness", "queueFreshness", "providerFreshness", "healthFreshness"].forEach((id) => {
+        const node = document.getElementById(id);
+        if (node) {
+          node.textContent = "Sin conexión: la última lectura puede estar desactualizada.";
+          node.dataset.state = "STALE";
+        }
+      });
+    });
+    window.addEventListener('online', () => {
+      if (currentMainView === 'viewBacklog') fetchBacklog(currentProjectId);
+      else if (currentMainView === 'viewProjects') fetchProjects();
+      fetchOverview();
+    });
     // 021 Main View Navigation
     mainNavTabs.forEach((tab) => {
       tab.addEventListener('click', () => {
@@ -245,12 +298,28 @@
         if (targetView) switchMainView(targetView);
       });
     });
+    document.querySelectorAll('.bottom-nav [data-main-view]').forEach((tab) => {
+      tab.addEventListener('click', () => {
+        const targetView = tab.getAttribute('data-main-view');
+        if (targetView) switchMainView(targetView);
+      });
+    });
+    document.querySelectorAll('.bottom-nav [data-scroll-to]').forEach((button) => {
+      button.addEventListener('click', () => {
+        switchMainView('viewExecutions');
+        const target = document.getElementById(button.getAttribute('data-scroll-to'));
+        target?.scrollIntoView({
+          behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+          block: 'start',
+        });
+      });
+    });
 
     if (projectSelect) {
       projectSelect.addEventListener('change', (e) => {
         currentProjectId = e.target.value;
         if (backlogProjectDisplay) {
-          backlogProjectDisplay.textContent = `Project: ${currentProjectId}`;
+          backlogProjectDisplay.textContent = `Proyecto: ${currentProjectId}`;
         }
         if (currentMainView === 'viewBacklog') {
           fetchBacklog(currentProjectId);
@@ -414,7 +483,7 @@
           setupAutoRefresh();
         } else {
           clearInterval(countdownInterval);
-          if (refreshTimer) refreshTimer.textContent = 'off';
+          if (refreshTimer) refreshTimer.textContent = 'desactivada';
         }
       });
     }
@@ -517,89 +586,208 @@
 
   // API Fetching
   async function fetchOverview() {
+    if (refreshInProgress) {
+      refreshPending = true;
+      return;
+    }
+    refreshInProgress = true;
     try {
-      const resp = await fetch('/api/v1/dashboard/overview');
-      if (resp.status === 401) {
-        showLoginUI();
-        return;
-      }
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      overviewData = await resp.json();
-      renderOverview();
-      if (selectedChange) {
-        fetchChangeDetail(selectedChange.project_id, selectedChange.change_name);
-      }
-    } catch (err) {
-      console.error('Failed to fetch overview:', err);
+      do {
+        refreshPending = false;
+        await fetchOverviewOnce();
+      } while (refreshPending);
+    } finally {
+      refreshInProgress = false;
     }
   }
 
+  async function fetchOverviewOnce() {
+    const [overviewResult, queueResult, providerResult, healthResult] = await Promise.allSettled([
+      api.overview(), api.queue(), api.providers(), api.health(),
+    ]);
+    const unauthorized = [overviewResult, queueResult, providerResult, healthResult]
+      .some((result) => result.status === "rejected" && [401, 403].includes(result.reason?.status));
+    if (unauthorized) {
+      overviewData = null;
+      queueData = null;
+      providerData = null;
+      healthData = null;
+      showLoginUI();
+      renderOverview();
+      renderOperationalPanels({ overviewResult, queueResult, providerResult, healthResult });
+      return;
+    }
+    if (overviewResult.status === "rejected") {
+      if ([401, 403].includes(overviewResult.reason?.status)) showLoginUI();
+      overviewData = null;
+    } else {
+      overviewData = overviewResult.value;
+    }
+    queueData = queueResult.status === "fulfilled" ? queueResult.value : null;
+    providerData = providerResult.status === "fulfilled" ? providerResult.value : null;
+    healthData = healthResult.status === "fulfilled" ? healthResult.value : null;
+    renderOverview();
+    renderOperationalPanels({ overviewResult, queueResult, providerResult, healthResult });
+    if (selectedChange && overviewData) {
+      fetchChangeDetail(selectedChange.project_id, selectedChange.change_name);
+    }
+  }
+
+  function updateFreshness(elementId, result, sourceTime = null) {
+    const node = document.getElementById(elementId);
+    if (!node) return;
+    if (result.status !== "fulfilled") {
+      node.textContent = "No disponible";
+      node.dataset.state = "UNKNOWN";
+      return;
+    }
+    if (!sourceTime || Number.isNaN(Date.parse(sourceTime))) {
+      node.textContent = "Antigüedad desconocida: la fuente no informa hora de observación";
+      node.dataset.state = "UNKNOWN";
+      return;
+    }
+    node.textContent = `Observado ${formatRelativeTime(sourceTime)}`;
+    node.dataset.state = "OBSERVED";
+  }
+
+  function latestTimestamp(records, fields) {
+    if (!Array.isArray(records)) return null;
+    const timestamps = records.flatMap((record) => fields.map((field) => record?.[field]))
+      .filter((value) => typeof value === "string" && !Number.isNaN(Date.parse(value)));
+    return timestamps.sort((a, b) => Date.parse(b) - Date.parse(a))[0] || null;
+  }
+
+  function renderOperationalPanels(results) {
+    renderQueue(document.getElementById("queueList"), queueData, (projectId, changeName) => {
+      selectChange(projectId, changeName);
+    });
+    renderProviders(document.getElementById("providerGrid"), providerData);
+    updateFreshness("overviewFreshness", results.overviewResult, overviewData?.observed_at);
+    updateFreshness("queueFreshness", results.queueResult, latestTimestamp(queueData, ["last_evaluated_at"]));
+    updateFreshness("providerFreshness", results.providerResult, latestTimestamp(providerData, ["last_probe_at", "updated_at"]));
+    updateFreshness("healthFreshness", results.healthResult, healthData?.observed_at);
+    if (dbHealthBadge) {
+      const healthy = healthData?.database?.healthy;
+      dbHealthBadge.textContent = healthy === true ? "Base de datos disponible"
+        : healthy === false ? "Base de datos no disponible" : "Estado de base de datos desconocido";
+      dbHealthBadge.dataset.state = healthy === true ? "HEALTHY" : healthy === false ? "UNHEALTHY" : "UNKNOWN";
+    }
+    if (kpiSystemStateVal) {
+      const healthy = healthData?.database?.healthy;
+      kpiSystemStateVal.textContent = healthy === true ? "Saludable"
+        : healthy === false ? "Degradado" : "Desconocido";
+      kpiSystemStateVal.className = `kpi-value ${healthy === true ? "text-success" : healthy === false ? "text-danger" : "text-muted"}`;
+    }
+  }
+
+  function updateSchedulerObservation(systemStatus) {
+    const node = document.getElementById("schedulerServiceBadge");
+    const observation = systemStatus?.scheduler_service;
+    if (!node) return;
+    const fresh = observation?.freshness === "FRESH";
+    const active = fresh ? observation.active_state : "UNKNOWN";
+    const enabled = fresh ? observation.enabled_state : "UNKNOWN";
+    const sub = fresh ? observation.sub_state : "UNKNOWN";
+    node.textContent = `Servicio: ${active}${sub !== "UNKNOWN" ? ` (${sub})` : ""} · Arranque: ${enabled}`;
+    node.dataset.state = fresh ? active : "UNKNOWN";
+    node.title = fresh && observation.observed_at
+      ? `Origen: ${observation.source}; observado: ${observation.observed_at}; antigüedad: ${observation.age_seconds ?? "desconocida"} s`
+      : `Observación systemd no disponible: ${observation?.reason || "UNKNOWN"}`;
+  }
+
   async function fetchChangeDetail(projectId, changeName) {
+    const requestSequence = ++detailRequestSequence;
     try {
       const resp = await fetch(`/api/v1/dashboard/changes/${encodeURIComponent(projectId)}/${encodeURIComponent(changeName)}`);
-      if (resp.status === 401) {
+      if ([401, 403].includes(resp.status)) {
         showLoginUI();
         return;
       }
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const detailData = await resp.json();
+      if (requestSequence !== detailRequestSequence
+          || selectedChange?.project_id !== projectId
+          || selectedChange?.change_name !== changeName) return;
+      if (detailData.project_id !== projectId || detailData.change_name !== changeName) {
+        throw new Error('La respuesta no coincide con la identidad del cambio seleccionado.');
+      }
       renderDetail(detailData);
     } catch (err) {
-      console.error('Failed to fetch change detail:', err);
+      if (requestSequence === detailRequestSequence) {
+        console.error('No se pudo consultar el detalle del cambio:', err);
+        if (detailContent) detailContent.style.display = 'none';
+        if (detailPlaceholder) {
+          detailPlaceholder.style.display = 'block';
+          detailPlaceholder.textContent = 'Detalle no disponible; vuelve a actualizar cuando se recupere la conexión.';
+        }
+      }
     }
   }
 
   // Rendering
   function renderOverview() {
-    if (!overviewData) return;
+    if (!overviewData) {
+      setOfflineBanner(typeof navigator !== "undefined" && navigator.onLine === false);
+      updateSchedulerObservation(null);
+      [kpiSystemStateVal, kpiAttentionVal, kpiActiveVal, kpiCompletedVal].forEach((node) => {
+        if (node) node.textContent = "—";
+      });
+      if (attentionItemsContainer) attentionItemsContainer.replaceChildren();
+      if (attentionBanner) attentionBanner.style.display = "none";
+      if (changesTableBody) changesTableBody.innerHTML = '<tr><td colspan="6" class="table-empty">Datos operacionales no disponibles; se requiere una lectura autenticada reciente.</td></tr>';
+      if (detailContent) detailContent.style.display = "none";
+      if (detailPlaceholder) {
+        detailPlaceholder.style.display = "block";
+        detailPlaceholder.textContent = "Detalle no disponible hasta recuperar una lectura autenticada reciente.";
+      }
+      return;
+    }
+    setOfflineBanner(false);
 
-    const { system_status, attention_items, active_executions, recent_completions, changes } = overviewData;
+    const { system_status, attention_items, changes } = overviewData;
 
     // Header Indicators
     if (schedulerModeBadge) {
-      schedulerModeBadge.innerHTML = `<span class="dot ${system_status.scheduler_mode === 'RUN' ? 'dot-success' : 'dot-warning'}"></span> MODE: ${system_status.scheduler_mode}`;
+      const mode = system_status.scheduler_mode || "UNKNOWN";
+      schedulerModeBadge.textContent = `Admisión lógica: ${mode}`;
+      schedulerModeBadge.dataset.state = mode;
     }
-    if (dbHealthBadge) {
-      dbHealthBadge.innerHTML = `<span class="dot ${system_status.database_healthy ? 'dot-success' : 'dot-danger'}"></span> DB: ${system_status.database_healthy ? 'HEALTHY' : 'UNHEALTHY'}`;
-    }
+    updateSchedulerObservation(system_status);
 
     // KPI Cards
-    if (kpiSystemStateVal) {
-      kpiSystemStateVal.textContent = system_status.healthy ? 'HEALTHY' : 'DEGRADED';
-      kpiSystemStateVal.className = `kpi-value ${system_status.healthy ? 'text-success' : 'text-danger'}`;
-    }
     if (kpiSystemStateSub) {
-      kpiSystemStateSub.textContent = `Scheduler in active ${system_status.scheduler_mode} mode`;
+      kpiSystemStateSub.textContent = `API/PostgreSQL · admisión: ${system_status.scheduler_mode || 'UNKNOWN'}`;
     }
 
     if (kpiAttentionVal) {
-      const count = attention_items ? attention_items.length : 0;
+      const count = system_status.attention_runs_count;
       kpiAttentionVal.textContent = count;
       kpiAttentionVal.className = `kpi-value ${count > 0 ? 'text-warning' : 'text-muted'}`;
     }
     if (kpiAttentionSub) {
-      kpiAttentionSub.textContent = `${attention_items ? attention_items.length : 0} human gates / blockers`;
+      const count = system_status.attention_runs_count;
+      kpiAttentionSub.textContent = `${count} ejecución${count === 1 ? "" : "es"} requiere${count === 1 ? "" : "n"} atención`;
     }
 
     if (kpiActiveVal) {
-      kpiActiveVal.textContent = active_executions ? active_executions.length : 0;
+      kpiActiveVal.textContent = system_status.active_runs_count;
     }
     if (kpiActiveSub) {
-      kpiActiveSub.textContent = `${active_executions ? active_executions.length : 0} changes currently in-flight`;
+      kpiActiveSub.textContent = `${system_status.active_runs_count} ejecuciones activas informadas`;
     }
 
     if (kpiCompletedVal) {
-      const completedCount = changes.filter(c => c.status === 'COMPLETED').length;
-      kpiCompletedVal.textContent = completedCount;
+      const completedCount = system_status.recent_completions_count;
+      kpiCompletedVal.textContent = completedCount === null ? '—' : completedCount;
     }
     if (kpiCompletedSub) {
-      kpiCompletedSub.textContent = `Total discovered: ${changes.length}`;
+      kpiCompletedSub.textContent = 'Finalizaciones recientes informadas por el servidor';
     }
 
     // Attention Banner
     if (attention_items && attention_items.length > 0) {
       attentionBanner.style.display = 'block';
-      attentionCountText.textContent = `${attention_items.length} run${attention_items.length > 1 ? 's' : ''}`;
+      attentionCountText.textContent = `${attention_items.length} ejecución${attention_items.length === 1 ? "" : "es"}`;
       attentionItemsContainer.innerHTML = attention_items.map(item => `
         <div class="attention-item-card" data-project-id="${escapeHtml(item.project_id)}" data-change-name="${escapeHtml(item.change_name)}">
           <div class="attention-item-left">
@@ -643,7 +831,7 @@
     }
 
     if (list.length === 0) {
-      changesTableBody.innerHTML = `<tr><td colspan="6" class="table-empty">No matching changes found.</td></tr>`;
+      changesTableBody.innerHTML = `<tr><td colspan="6" class="table-empty">No hay cambios que coincidan con la búsqueda.</td></tr>`;
       return;
     }
 
@@ -675,6 +863,11 @@
   // Global Change Selector
   window.selectChange = function (projectId, changeName) {
     selectedChange = { project_id: projectId, change_name: changeName };
+    if (detailContent) detailContent.style.display = 'none';
+    if (detailPlaceholder) {
+      detailPlaceholder.style.display = 'block';
+      detailPlaceholder.textContent = 'Cargando evidencia del cambio seleccionado…';
+    }
     renderChangesTable();
     fetchChangeDetail(projectId, changeName);
   };
@@ -763,12 +956,12 @@
     try {
       const response = await fetch(`/api/v1/control-plane/actions/available?run_id=${encodeURIComponent(runId)}`);
       if (!response.ok) {
-        toolbar.innerHTML = '<span class="text-muted">No actions available</span>';
+        toolbar.innerHTML = '<span class="text-muted">No hay acciones disponibles</span>';
         return;
       }
       const actions = await response.json();
       if (!actions || !actions.length) {
-        toolbar.innerHTML = '<span class="text-muted">No actions available</span>';
+        toolbar.innerHTML = '<span class="text-muted">No hay acciones disponibles</span>';
         return;
       }
       toolbar.innerHTML = actions.map(action => {
@@ -789,7 +982,7 @@
         });
       });
     } catch (err) {
-      toolbar.innerHTML = '<span class="text-muted">Operator actions unavailable</span>';
+      toolbar.innerHTML = '<span class="text-muted">Acciones del operador no disponibles</span>';
     }
   }
 
@@ -1034,13 +1227,13 @@
     const container = document.getElementById('efficiencyContentContainer');
     if (!container) return;
     if (!projectId || !changeName) {
-      container.innerHTML = '<p class="table-empty">No telemetry recorded for this change.</p>';
+      container.innerHTML = '<p class="table-empty">No hay telemetría registrada para este cambio.</p>';
       return;
     }
     try {
       const resp = await fetch(`/api/v1/efficiency/${encodeURIComponent(projectId)}/${encodeURIComponent(changeName)}`);
       if (!resp.ok) {
-        container.innerHTML = '<p class="table-empty">No provider efficiency telemetry recorded for this change.</p>';
+        container.innerHTML = '<p class="table-empty">No hay telemetría de eficiencia de proveedores para este cambio.</p>';
         return;
       }
       const data = await resp.json();
@@ -1091,7 +1284,7 @@
         </div>
       `;
     } catch (err) {
-      container.innerHTML = '<p class="table-empty">Failed loading efficiency telemetry.</p>';
+      container.innerHTML = '<p class="table-empty">No se pudo cargar la telemetría de eficiencia.</p>';
     }
   }
 
@@ -1099,18 +1292,18 @@
     const container = document.getElementById('actionHistoryContentContainer');
     if (!container) return;
     if (!runId) {
-      container.innerHTML = '<p class="table-empty">No action history for this execution run.</p>';
+      container.innerHTML = '<p class="table-empty">No hay historial de acciones para esta ejecución.</p>';
       return;
     }
     try {
       const resp = await fetch(`/api/v1/runs/${encodeURIComponent(runId)}/actions/history`);
       if (!resp.ok) {
-        container.innerHTML = '<p class="table-empty">No operator actions have been performed on this run.</p>';
+        container.innerHTML = '<p class="table-empty">No se han realizado acciones del operador en este Run.</p>';
         return;
       }
       const history = await resp.json();
       if (!history || !history.length) {
-        container.innerHTML = '<p class="table-empty">No operator actions recorded for this run yet.</p>';
+        container.innerHTML = '<p class="table-empty">Aún no hay acciones del operador registradas para este Run.</p>';
         return;
       }
       container.innerHTML = `
@@ -1143,7 +1336,7 @@
         </table>
       `;
     } catch (err) {
-      container.innerHTML = '<p class="table-empty">Failed loading action audit trail.</p>';
+      container.innerHTML = '<p class="table-empty">No se pudo cargar la trazabilidad de acciones.</p>';
     }
   }
 
@@ -1265,7 +1458,7 @@
           </tr>
         `).join('');
       } else {
-        tbody.innerHTML = `<tr><td colspan="5" class="table-empty">No candidate history.</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="5" class="table-empty">No hay historial de candidatos.</td></tr>`;
       }
     }
   }
@@ -1277,7 +1470,7 @@
 
     if (!container) return;
     if (!checks || checks.length === 0) {
-      container.innerHTML = `<p class="text-muted">No deterministic check results recorded.</p>`;
+      container.innerHTML = `<p class="text-muted">No hay resultados de verificaciones determinísticas.</p>`;
       return;
     }
 
@@ -1304,7 +1497,7 @@
     if (!container) return;
 
     if (!review || review.status === 'not_started') {
-      container.innerHTML = `<p class="text-muted">Complementary review has not executed yet.</p>`;
+      container.innerHTML = `<p class="text-muted">La revisión complementaria aún no se ha ejecutado.</p>`;
       return;
     }
 
@@ -1356,7 +1549,7 @@
     if (!container) return;
 
     if (!audit || audit.status === 'not_started') {
-      container.innerHTML = `<p class="text-muted">DeepSeek Direct audit has not executed yet.</p>`;
+        container.innerHTML = `<p class="text-muted">La auditoría independiente aún no se ha ejecutado.</p>`;
       return;
     }
 
@@ -1684,7 +1877,7 @@
     if (!container) return;
 
     if (!github || (!github.issue_number && !github.pr_number)) {
-      container.innerHTML = `<p class="text-muted">No GitHub Issue or Pull Request bound to this change.</p>`;
+      container.innerHTML = `<p class="text-muted">No hay un Issue o Pull Request de GitHub vinculado a este cambio.</p>`;
       return;
     }
 
@@ -1715,7 +1908,7 @@
     if (!container) return;
 
     if (!timeline || timeline.length === 0) {
-      container.innerHTML = `<p class="text-muted">No lifecycle events recorded for this change.</p>`;
+      container.innerHTML = `<p class="text-muted">No hay eventos del ciclo de vida para este cambio.</p>`;
       return;
     }
 
@@ -1734,15 +1927,22 @@
 
   function switchMainView(viewName) {
     currentMainView = viewName;
-    mainNavTabs.forEach((tab) => {
+    document.querySelectorAll('[data-main-view]').forEach((tab) => {
       const isTarget = tab.getAttribute('data-main-view') === viewName;
       tab.classList.toggle('active', isTarget);
-      tab.setAttribute('aria-selected', isTarget ? 'true' : 'false');
+      if (tab.hasAttribute('aria-selected')) {
+        tab.setAttribute('aria-selected', isTarget ? 'true' : 'false');
+      }
+      if (tab.hasAttribute('aria-current')) {
+        if (isTarget) tab.setAttribute('aria-current', 'page');
+        else tab.removeAttribute('aria-current');
+      }
     });
 
     mainViewPanes.forEach((pane) => {
       if (pane.id === viewName) {
-        pane.style.display = 'block';
+        pane.style.display = viewName === 'viewExecutions'
+          && window.matchMedia('(min-width: 1200px)').matches ? 'grid' : 'block';
         pane.classList.add('active');
       } else {
         pane.style.display = 'none';
@@ -1763,7 +1963,7 @@
   async function fetchProjects() {
     try {
       const resp = await fetch('/api/v1/projects');
-      if (resp.status === 401) {
+      if ([401, 403].includes(resp.status)) {
         showLoginUI();
         return;
       }
@@ -1983,7 +2183,7 @@
       }
 
       const resp = await fetch(`/api/v1/projects/${encodeURIComponent(projectId)}/backlog`);
-      if (resp.status === 401) {
+      if ([401, 403].includes(resp.status)) {
         showLoginUI();
         return;
       }
@@ -2480,10 +2680,10 @@
     try {
       const dt = new Date(isoStr);
       const diffSec = Math.floor((Date.now() - dt.getTime()) / 1000);
-      if (diffSec < 60) return `${diffSec}s ago`;
-      if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
-      if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
-      return `${Math.floor(diffSec / 86400)}d ago`;
+      if (diffSec < 60) return `hace ${diffSec} s`;
+      if (diffSec < 3600) return `hace ${Math.floor(diffSec / 60)} min`;
+      if (diffSec < 86400) return `hace ${Math.floor(diffSec / 3600)} h`;
+      return `hace ${Math.floor(diffSec / 86400)} d`;
     } catch {
       return isoStr;
     }
@@ -2499,6 +2699,4 @@
     }
   }
 
-  // Start Application
-  document.addEventListener('DOMContentLoaded', init);
-})();
+  // The ES-module bootstrap in app.js is the only initialization owner.

@@ -35,10 +35,11 @@ def test_pwa_client_contracts_and_accessible_shell() -> None:
     assert 'id="offlineBanner"' in index and 'id="actionDialog"' in index
     assert "/api/v1/dashboard/overview" in client
     assert "/api/v1/queue" in client
-    assert (
-        "Backend Disconnected" in (STATIC / "js" / "components" / "offline_banner.js").read_text()
-    )
-    assert "/api/" in sw and "cache" in sw.lower()
+    offline_banner = (STATIC / "js" / "components" / "offline_banner.js").read_text()
+    assert "datos operacionales no están actualizados" in offline_banner
+    assert "CACHEABLE_PATHS" in sw and "SHELL_ASSETS" in sw
+    assert 'const CACHE_PREFIX = "minime-pwa-shell-"' in sw
+    assert "/api/" not in sw
 
 
 def test_canonical_pipeline_has_nine_stages() -> None:

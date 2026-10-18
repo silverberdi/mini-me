@@ -45,8 +45,10 @@ class HeaderWidget(Widget):
 
         db_text = (
             Text(" PostgreSQL ✓ ", style="bold black on green")
-            if status.database_healthy
+            if status.database_healthy is True
             else Text(" DB DOWN ✗ ", style="bold white on red")
+            if status.database_healthy is False
+            else Text(" PostgreSQL ? ", style="bold black on yellow")
         )
 
         sched_style = (

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import shutil
@@ -366,8 +367,10 @@ def browser_test_env():
 
     op_svc = AuthorizedOperatorService(uow)
     op_svc.seed_operator("operator@example.com", display_name="Lead Operator")
+    op_svc.seed_operator("second-operator@example.com", display_name="Second Operator")
     session_mgr = SessionManager(uow)
     raw_token, _ = session_mgr.create_session("operator@example.com")
+    second_token, _ = session_mgr.create_session("second-operator@example.com")
 
     server_port = find_free_port()
     cdp_port = find_free_port()
@@ -436,6 +439,8 @@ def browser_test_env():
         "ws_url": ws_url,
         "user_data_dir": user_data_dir,
         "session_token": raw_token,
+        "second_session_token": second_token,
+        "uow": uow,
     }
 
     # Teardown
@@ -530,7 +535,9 @@ async def test_real_browser_desktop_standard_inspection(browser_test_env: dict[s
         )
 
         # 5. Verify Queue prioritization table
-        queue_items = await client.eval_js("document.querySelectorAll('.queue-explain').length")
+        queue_items = await client.eval_js(
+            "document.querySelectorAll('#queueList .queue-item').length"
+        )
         assert queue_items >= 2, f"Expected >=2 queue candidates, found {queue_items}"
 
     finally:
@@ -649,6 +656,59 @@ async def test_real_browser_mobile_inspection(browser_test_env: dict[str, Any]) 
 
 
 @pytest.mark.asyncio
+async def test_control_center_viewport_evidence(browser_test_env: dict[str, Any]) -> None:
+    """Capture real-Chrome layout evidence; seeded operational values are test-only."""
+    client = ChromeCDPClient(browser_test_env["ws_url"])
+    await client.connect()
+    try:
+        from minime.services.auth_service import SessionManager
+
+        session_mgr = SessionManager(browser_test_env["uow"])
+        session_token, _ = session_mgr.create_session("operator@example.com")
+        await authenticate_browser(client, browser_test_env["server_url"], session_token)
+        await client.eval_js("document.getElementById('navTabExecutions').click()")
+        evidence_dir = (
+            Path(__file__).parents[1]
+            / "openspec/changes/pwa-control-center-ux-convergence/evidence/browser"
+        )
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        viewports = (
+            (1440, 900, False, "desktop-1440x900-mock-seeded.png"),
+            (1024, 768, False, "tablet-1024x768-mock-seeded.png"),
+            (768, 1024, True, "tablet-768x1024-mock-seeded.png"),
+            (390, 844, True, "mobile-390x844-mock-seeded.png"),
+            (360, 800, True, "mobile-360x800-mock-seeded.png"),
+        )
+        for width, height, mobile, filename in viewports:
+            await client.set_viewport(width, height, mobile=mobile)
+            await asyncio.sleep(0.2)
+            overflow = await client.eval_js(
+                "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+            )
+            assert overflow is True, f"Horizontal overflow at {width}x{height}"
+            if width < 768:
+                layout = await client.eval_js(
+                    "(() => { const split = document.querySelector('#viewExecutions .content-split'); "
+                    "return {display: getComputedStyle(split).display, "
+                    "detail: split.querySelector('.detail-panel').getBoundingClientRect().top, "
+                    "master: split.querySelector('.master-panel').getBoundingClientRect().top}; })()"
+                )
+                assert layout["display"] == "flex" and layout["detail"] < layout["master"], (
+                    f"Mobile must prioritize the execution detail: {layout}"
+                )
+                toolbar_visible = await client.eval_js(
+                    "getComputedStyle(document.querySelector('#viewExecutions #actionToolbar')).display !== 'none'"
+                )
+                assert toolbar_visible is False, "Mobile must not expose direct operator actions"
+            screenshot = await client.send_cmd(
+                "Page.captureScreenshot", {"format": "png", "captureBeyondViewport": False}
+            )
+            (evidence_dir / filename).write_bytes(base64.b64decode(screenshot["data"]))
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_real_browser_pwa_manifest_and_sw_inspection(
     browser_test_env: dict[str, Any],
 ) -> None:
@@ -684,6 +744,152 @@ async def test_real_browser_pwa_manifest_and_sw_inspection(
         has_sw = await client.eval_js("'serviceWorker' in navigator")
         assert has_sw is True, "Service Worker API not available in browser"
 
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_real_browser_api_cache_isolation_across_operator_sessions(
+    browser_test_env: dict[str, Any],
+) -> None:
+    client = ChromeCDPClient(browser_test_env["ws_url"])
+    await client.connect()
+    try:
+        await authenticate_browser(
+            client, browser_test_env["server_url"], browser_test_env["session_token"]
+        )
+        cached = await client.eval_js("navigator.serviceWorker.ready.then(() => true)")
+        assert cached is True
+        overview_status = await client.eval_js(
+            "fetch('/api/v1/dashboard/overview', {credentials:'same-origin',cache:'no-store'})"
+            ".then(response => response.status)"
+        )
+        assert overview_status == 200
+        paths = await client.eval_js("""
+            caches.keys().then(async names => {
+              const owned = names.filter(name => name.startsWith('minime-pwa-shell-'));
+              const entries = await Promise.all(owned.map(async name =>
+                (await caches.open(name)).keys().then(requests => requests.map(request => new URL(request.url).pathname))
+              ));
+              return {owned, paths: entries.flat()};
+            })
+        """)
+        assert paths["owned"]
+        assert any(path.startswith("/static/") for path in paths["paths"])
+        assert not any(path.startswith("/api/") for path in paths["paths"])
+
+        await client.eval_js("document.getElementById('logoutBtn').click()")
+        await asyncio.sleep(0.2)
+        await client.eval_js(
+            f"document.cookie = 'minime_session={browser_test_env['second_session_token']}; path=/;'"
+        )
+        await client.navigate(f"{browser_test_env['server_url']}/")
+        await asyncio.sleep(0.3)
+        operator = await client.eval_js("document.getElementById('operatorEmailText').textContent")
+        assert operator == "second-operator@example.com"
+        final_paths = await client.eval_js("""
+            caches.keys().then(async names => {
+              const entries = await Promise.all(names.filter(name => name.startsWith('minime-pwa-shell-')).map(async name =>
+                (await caches.open(name)).keys().then(requests => requests.map(request => new URL(request.url).pathname))
+              ));
+              return entries.flat();
+            })
+        """)
+        assert not any(path.startswith("/api/") for path in final_paths)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_real_browser_offline_state_and_reconnection_refresh(
+    browser_test_env: dict[str, Any],
+) -> None:
+    client = ChromeCDPClient(browser_test_env["ws_url"])
+    await client.connect()
+    try:
+        await authenticate_browser(
+            client, browser_test_env["server_url"], browser_test_env["session_token"]
+        )
+        await client.send_cmd("Network.enable", {})
+        await client.send_cmd(
+            "Network.emulateNetworkConditions",
+            {"offline": True, "latency": 0, "downloadThroughput": 0, "uploadThroughput": 0},
+        )
+        await asyncio.sleep(0.2)
+        offline = await client.eval_js(
+            "({online: navigator.onLine, banner: document.getElementById('offlineBanner').classList.contains('is-visible'), state: document.getElementById('overviewFreshness').dataset.state})"
+        )
+        assert offline == {"online": False, "banner": True, "state": "STALE"}
+
+        mutation = await client.eval_js("""
+          window.__requestCount = 0;
+          const originalFetch = window.fetch;
+          window.fetch = (...args) => { window.__requestCount += 1; return originalFetch(...args); };
+          import('/static/js/services/api_client.js').then(({api}) =>
+            api.execute('run-offline-test', {action: 'CONTINUE'})
+              .then(() => ({status: 200, requests: window.__requestCount}))
+              .catch(error => ({status: error.status, requests: window.__requestCount}))
+          )
+        """)
+        assert mutation == {"status": 503, "requests": 0}
+
+        await client.send_cmd(
+            "Network.emulateNetworkConditions",
+            {
+                "offline": False,
+                "latency": 0,
+                "downloadThroughput": 10_000_000,
+                "uploadThroughput": 10_000_000,
+            },
+        )
+        await asyncio.sleep(0.8)
+        recovered = await client.eval_js(
+            "({online: navigator.onLine, banner: document.getElementById('offlineBanner').classList.contains('is-visible'), state: document.getElementById('overviewFreshness').dataset.state})"
+        )
+        assert recovered["online"] is True
+        assert recovered["banner"] is False
+        assert recovered["state"] == "OBSERVED"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_real_browser_auth_expiry_hides_operational_state(
+    browser_test_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MINIME_AUTH_ENABLED", "true")
+    client = ChromeCDPClient(browser_test_env["ws_url"])
+    await client.connect()
+    try:
+        from minime.services.auth_service import SessionManager
+
+        session_mgr = SessionManager(browser_test_env["uow"])
+        session_token, _ = session_mgr.create_session("operator@example.com")
+        await authenticate_browser(client, browser_test_env["server_url"], session_token)
+        before = "none"
+        for _ in range(20):
+            before = await client.eval_js(
+                "window.getComputedStyle(document.getElementById('authenticatedContent')).display"
+            )
+            if before != "none":
+                break
+            await asyncio.sleep(0.1)
+        assert before != "none"
+
+        assert session_mgr.revoke_session_by_token(session_token)
+        auth_status = await client.eval_js(
+            "fetch('/api/v1/dashboard/overview').then(response => response.status)"
+        )
+        assert auth_status in {401, 403}
+        await client.eval_js("document.getElementById('refreshBtn').click()")
+        await asyncio.sleep(0.5)
+        state = await client.eval_js(
+            "({content: getComputedStyle(document.getElementById('authenticatedContent')).display, login: getComputedStyle(document.getElementById('loginSection')).display, active: document.getElementById('kpiActiveVal').textContent})"
+        )
+        assert state["content"] == "none"
+        assert state["login"] != "none"
+        assert state["active"] == "—"
     finally:
         await client.close()
 

@@ -30,6 +30,7 @@ def test_ui_assets_exist_and_are_complete() -> None:
     assert "@media" in css_content
 
     js_content = js_file.read_text(encoding="utf-8")
-    assert "/api/v1/dashboard/overview" in js_content
+    api_client = (static_dir / "js" / "services" / "api_client.js").read_text(encoding="utf-8")
+    assert "/api/v1/dashboard/overview" in api_client
     assert "renderPipelineStepper" in js_content
     assert "toggleTheme" in js_content

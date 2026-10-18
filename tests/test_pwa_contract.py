@@ -11,6 +11,9 @@ def read(path: str) -> str:
 
 def test_shell_exposes_observability_and_responsive_surfaces() -> None:
     index = read("index.html")
+    assert '<html lang="es">' in index
+    assert '<script src="/static/js/dashboard.js"></script>' not in index
+    assert index.count('<script type="module" src="/static/js/app.js"></script>') == 1
     for marker in (
         "schedulerModeBadge",
         "dbHealthBadge",
@@ -46,7 +49,13 @@ def test_telemetry_and_control_plane_clients_use_canonical_routes() -> None:
         "/api/v1/validations/submit",
     ):
         assert route in client
-    assert "autoRefresh" in read("js/app.js")
+    assert "initDashboard" in read("js/app.js")
+    dashboard = read("js/dashboard.js")
+    assert "setupAutoRefresh" in dashboard
+    assert 'cache: "no-store"' in dashboard
+    assert 'credentials: "same-origin"' in dashboard
+    assert "scheduler_service" in dashboard
+    assert "initDashboard" in dashboard
 
 
 def test_evidence_and_preview_contracts_are_explicit() -> None:
@@ -58,5 +67,7 @@ def test_evidence_and_preview_contracts_are_explicit() -> None:
         "js/app.js"
     )
     sw = read("sw.js")
-    assert "cache-first" in sw.lower() or "caches.match" in sw
-    assert "/api/" in sw and "503" in sw
+    assert "CACHEABLE_PATHS" in sw and "SHELL_ASSETS" in sw
+    assert 'const CACHE_PREFIX = "minime-pwa-shell-"' in sw
+    assert "CACHE_NAME = `${CACHE_PREFIX}v2`" in sw
+    assert "503" not in sw

@@ -35,6 +35,9 @@ from minime.logging import redact_secrets
 from minime.services.capacity_lifecycle_service import CapacityLifecycleService
 from minime.services.efficiency_telemetry_service import EfficiencyTelemetryService
 from minime.services.provider_health_service import ProviderHealthService
+from minime.services.systemd_scheduler_observer import (
+    SystemdSchedulerObserver,
+)
 from minime.services.validation_authority_service import ValidationAuthorityService
 
 logger = logging.getLogger(__name__)
@@ -86,15 +89,28 @@ class ManagedProjectStatusDTO(BaseModel):
     denied_mutation_breakdown: dict[str, int] = Field(default_factory=dict)
 
 
+class SchedulerServiceStatusDTO(BaseModel):
+    active_state: str = "UNKNOWN"
+    sub_state: str = "UNKNOWN"
+    enabled_state: str = "UNKNOWN"
+    source: str = "systemd-dbus-read-only"
+    observed_at: str | None = None
+    age_seconds: float | None = None
+    freshness: str = "UNKNOWN"
+    reason: str = "unavailable"
+
+
 class SystemStatusDTO(BaseModel):
     healthy: bool = True
     database_engine: str = "PostgreSQL"
-    database_healthy: bool = True
-    database_message: str = "Connected"
+    database_healthy: bool | None = None
+    database_message: str = "No observado en esta proyección"
     scheduler_mode: str = SchedulerMode.RUN.value
+    scheduler_service: SchedulerServiceStatusDTO = Field(default_factory=SchedulerServiceStatusDTO)
     queue_depth: int = 0
     github_app_health: str = "HEALTHY"
     active_runs_count: int = 0
+    recent_completions_count: int = 0
     total_changes_count: int = 0
     attention_runs_count: int = 0
     is_runtime_isolated: bool = True
@@ -313,6 +329,7 @@ class TimelineEventDTO(BaseModel):
 
 
 class DashboardOverviewResponse(BaseModel):
+    observed_at: str | None = None
     system_status: SystemStatusDTO
     attention_items: list[AttentionItemDTO] = Field(default_factory=list)
     active_executions: list[ActiveExecutionDTO] = Field(default_factory=list)
@@ -348,14 +365,20 @@ class DashboardChangeDetailResponse(BaseModel):
 class OperationsDashboardService:
     """Read-model projection and query service for mini me operational surface."""
 
-    def __init__(self, uow: PersistenceUnitOfWork) -> None:
+    def __init__(
+        self,
+        uow: PersistenceUnitOfWork,
+        scheduler_observer: SystemdSchedulerObserver | None = None,
+    ) -> None:
         self.uow = uow
+        self.scheduler_observer = scheduler_observer or SystemdSchedulerObserver()
 
     def get_overview(self) -> DashboardOverviewResponse:
         """Construct high-level operational overview."""
         # 1. Capacity & Scheduler Status
         cap_service = CapacityLifecycleService(self.uow)
         sched_status = cap_service.get_scheduler_status_pure()
+        scheduler_service = self.scheduler_observer.observe()
 
         # 2. Provider Health
         health_service = ProviderHealthService(self.uow)
@@ -842,12 +865,23 @@ class OperationsDashboardService:
         system_status = SystemStatusDTO(
             healthy=is_overall_healthy,
             database_engine="PostgreSQL",
-            database_healthy=True,
-            database_message="PostgreSQL operational",
+            database_healthy=None,
+            database_message="Consultar la lectura independiente de /health",
             scheduler_mode=sched_status.mode.value,
+            scheduler_service=SchedulerServiceStatusDTO(
+                active_state=scheduler_service.active_state,
+                sub_state=scheduler_service.sub_state,
+                enabled_state=scheduler_service.enabled_state,
+                source=scheduler_service.source,
+                observed_at=_format_dt(scheduler_service.observed_at),
+                age_seconds=scheduler_service.age_seconds,
+                freshness=scheduler_service.freshness,
+                reason=scheduler_service.reason,
+            ),
             queue_depth=sum(1 for c in all_changes if c.status == ChangeStatus.READY),
             github_app_health=github_health_status,
             active_runs_count=len(active_executions),
+            recent_completions_count=len(recent_completions),
             total_changes_count=len(change_summaries),
             attention_runs_count=len(attention_items),
             is_runtime_isolated=overall_isolated,
@@ -860,6 +894,7 @@ class OperationsDashboardService:
         )
 
         return DashboardOverviewResponse(
+            observed_at=_format_dt(utc_now()) or "",
             system_status=system_status,
             attention_items=attention_items,
             active_executions=active_executions,
