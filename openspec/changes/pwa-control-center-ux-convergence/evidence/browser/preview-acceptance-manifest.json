@@ -1,0 +1,27 @@
+{
+  "base_sha": "8564afc51069bd334a67fd19a2a4f51cc0659f5e",
+  "candidate_source_sha": "94267a842a2259ee75b067931228d417bf3ff16b",
+  "change_name": "control-center-action-f58f04633dde",
+  "classification": "QA-seeded disposable PostgreSQL preview; not production evidence",
+  "database": "minime_pwa_control_center_final_20261018 (disposable; loopback host + private Docker bridge)",
+  "durable_states_observed": [
+    "IMPLEMENTING/RUNNING",
+    "CANCELLED"
+  ],
+  "image_digest": "sha256:14987a30f2c419bd3149b349882825c4ad66f3d580e8baedbf03ee9734427ea9",
+  "job_id": "qa-job-f58f04633dde",
+  "project_id": "qa-pwa-f58f04633dde",
+  "run_id": "qa-run-f58f04633dde",
+  "screenshots": [
+    "preview-active-desktop-1440x900-qa-seeded.png",
+    "preview-active-tablet-1024x768-qa-seeded.png",
+    "preview-active-tablet-768x1024-qa-seeded.png",
+    "preview-active-mobile-390x844-qa-seeded.png",
+    "preview-active-mobile-360x800-qa-seeded.png",
+    "preview-cancelled-desktop-1440x900-qa-seeded.png",
+    "preview-cancelled-tablet-1024x768-qa-seeded.png",
+    "preview-cancelled-tablet-768x1024-qa-seeded.png",
+    "preview-cancelled-mobile-390x844-qa-seeded.png",
+    "preview-cancelled-mobile-360x800-qa-seeded.png"
+  ]
+}
