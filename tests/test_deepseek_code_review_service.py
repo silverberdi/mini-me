@@ -534,3 +534,158 @@ async def test_ambiguous_dispatch_is_not_replayed_or_reserved_twice(
     assert not second.accepted and "CHECKPOINT_EXISTS" in second.reason
     assert runner.calls == 1
     assert in_memory_uow.budget_reservations.list_by_project(project.project_id) == reservations
+
+
+@pytest.mark.asyncio
+async def test_code_review_excludes_unchanged_static_documentation_and_reduces_tokens(
+    in_memory_uow, monkeypatch, tmp_path
+):
+    runner = _ReviewRunner()
+    project, run, job, candidate, manifest, repo, _, _, auth, service = await _fixture(
+        tmp_path, monkeypatch, in_memory_uow, runner=runner
+    )
+
+    # Commit large static documentation in base branch
+    docs_dir = repo / "docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    for i in range(10):
+        (docs_dir / f"manual_{i}.md").write_text("# Extensive Manual\n" + ("Lorem ipsum dolor sit amet. " * 300), encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "docs"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "add docs"], check=True)
+    base_sha = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+    # Now make small functional change in candidate
+    (repo / "feature.py").write_text("def my_feature():\n    return 42\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "feature.py"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "feat: my feature"], check=True)
+    candidate_sha = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+    # Generate new manifest and update candidate/run/job
+    manifest = CandidateManifestService().generate_manifest(repo, candidate_sha, job.job_id)
+    candidate.base_sha = base_sha
+    candidate.candidate_sha = candidate_sha
+    candidate.manifest_id = manifest.manifest_id
+    candidate.manifest_hash = manifest.manifest_hash
+    run.base_sha = base_sha
+    run.current_candidate_sha = candidate_sha
+    job.base_sha = base_sha
+    job.candidate_sha = candidate_sha
+    in_memory_uow.jobs.save(job)
+    in_memory_uow.orchestration_runs.save(run)
+    in_memory_uow.candidate_manifests.save(manifest)
+    in_memory_uow.orchestration_candidates.save(candidate)
+    in_memory_uow.check_results.save(
+        CheckResult(
+            job_id=job.job_id,
+            check_name="pytest",
+            command="pytest -q",
+            exit_code=0,
+            duration_ms=12,
+            output_snippet="1 passed",
+            candidate_sha=candidate_sha,
+            candidate_generation=candidate.generation,
+        )
+    )
+
+    result = await service.review_candidate(
+        project=project,
+        run=run,
+        job=job,
+        candidate=candidate,
+        manifest=manifest,
+        candidate_worktree=repo,
+        authorship_evidence={},
+    )
+    assert result.accepted
+    payload = json.loads(runner.request or "{}")
+
+    # The payload MUST include the modified feature.py and git diff
+    paths_in_payload = {item["path"] for item in payload.get("files", [])}
+    assert "feature.py" in paths_in_payload
+    assert "git_diff" in payload
+    assert "def my_feature" in payload["git_diff"]
+
+    # Large unchanged docs MUST be excluded from the review files payload
+    for i in range(10):
+        assert f"docs/manual_{i}.md" not in paths_in_payload
+
+    # Manifest hash remains full-tree bound
+    assert payload["manifest_hash"] == manifest.manifest_hash
+    # Prompt payload is compact (under 5,000 tokens ≈ under 20,000 characters)
+    assert len(runner.request or "") < 20000
+
+
+@pytest.mark.asyncio
+async def test_code_review_unconditionally_includes_security_policy_modifications(
+    in_memory_uow, monkeypatch, tmp_path
+):
+    runner = _ReviewRunner()
+    project, run, job, candidate, manifest, repo, _, _, auth, service = await _fixture(
+        tmp_path, monkeypatch, in_memory_uow, runner=runner
+    )
+
+    # Base commit with an agent skill policy
+    agent_dir = repo / ".agent" / "skills" / "security"
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / "SKILL.md").write_text("# Safe Security Policy\nenforce_safe = True\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", ".agent"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "base security policy"], check=True)
+    base_sha = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+    # Adversarial change: modifies agent security policy
+    (agent_dir / "SKILL.md").write_text("# Bypassed Security Policy\nenforce_safe = False\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", ".agent"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "evil security tweak"], check=True)
+    candidate_sha = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+    manifest = CandidateManifestService().generate_manifest(repo, candidate_sha, job.job_id)
+    candidate.base_sha = base_sha
+    candidate.candidate_sha = candidate_sha
+    candidate.manifest_id = manifest.manifest_id
+    candidate.manifest_hash = manifest.manifest_hash
+    run.base_sha = base_sha
+    run.current_candidate_sha = candidate_sha
+    job.base_sha = base_sha
+    job.candidate_sha = candidate_sha
+    in_memory_uow.jobs.save(job)
+    in_memory_uow.orchestration_runs.save(run)
+    in_memory_uow.candidate_manifests.save(manifest)
+    in_memory_uow.orchestration_candidates.save(candidate)
+    in_memory_uow.check_results.save(
+        CheckResult(
+            job_id=job.job_id,
+            check_name="pytest",
+            command="pytest -q",
+            exit_code=0,
+            duration_ms=12,
+            output_snippet="1 passed",
+            candidate_sha=candidate_sha,
+            candidate_generation=candidate.generation,
+        )
+    )
+
+    result = await service.review_candidate(
+        project=project,
+        run=run,
+        job=job,
+        candidate=candidate,
+        manifest=manifest,
+        candidate_worktree=repo,
+        authorship_evidence={},
+    )
+    assert result.accepted
+    payload = json.loads(runner.request or "{}")
+
+    # .agent/skills/security/SKILL.md MUST be included unconditionally!
+    paths_in_payload = {item["path"] for item in payload.get("files", [])}
+    assert ".agent/skills/security/SKILL.md" in paths_in_payload
+    assert "enforce_safe = False" in payload["git_diff"]
+

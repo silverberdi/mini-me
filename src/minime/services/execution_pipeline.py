@@ -1038,7 +1038,9 @@ class ExecutionPipelineService:
                             for c in failing_checks
                         ]
                         corrective_prompt = (
-                            "CORRECTIVE GUIDANCE (Failing Deterministic Checks to Fix):\n"
+                            "TARGETED REMEDIATION DIRECTIVE (Preserve Valid Working Code):\n"
+                            "Valid incremental code in the worktree has been preserved. Do NOT reset or rewrite passing implementations.\n"
+                            "Address exclusively the failing checks below:\n"
                             + "\n".join(lines)
                         )
 
@@ -1920,6 +1922,9 @@ class ExecutionPipelineService:
                         else:
                             same_blocker_fingerprint_streak = 1
                         previous_blocker_fp = blocker_claim.blocker_fingerprint
+                        if same_blocker_fingerprint_streak >= 3:
+                            reason = "REPETITIVE_LOOP_DETECTED: consecutive identical blocker streak >= 3"
+                            return self._transition(job, JobStatus.NEEDS_HUMAN, reason)
                     else:
                         same_blocker_fingerprint_streak = 0
                         previous_blocker_fp = None

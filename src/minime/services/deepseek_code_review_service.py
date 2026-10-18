@@ -107,14 +107,16 @@ class DeepSeekCodeReviewService:
                 reason=("CODE_REVIEW_CANDIDATE_IDENTITY_MISMATCH:" + ",".join(identity_mismatches)),
             )
         try:
-            source_files = self._read_exact_candidate(candidate_worktree, candidate, manifest)
+            source_files, git_diff = self._read_exact_candidate(
+                candidate_worktree, candidate, manifest, change_name=job.change_name
+            )
             checks = self._read_exact_checks(job, candidate)
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             return CodeReviewResult(
                 False, None, sha, reason=f"CODE_REVIEW_PREFLIGHT_BLOCKED:{type(exc).__name__}"
             )
 
-        surviving_paths = {item["path"] for item in source_files if item.get("path")}
+        surviving_paths = {entry["path"] for entry in manifest.tracked_files if entry.get("path")}
         canonical_authorship = self.authorship.evaluate_reviewer_authorship(
             job_id=job.job_id,
             reviewer_role="deepseek",
@@ -226,6 +228,7 @@ class DeepSeekCodeReviewService:
                 "manifest_hash": manifest.manifest_hash,
                 "checks": checks,
                 "authorship": canonical_authorship,
+                "git_diff": git_diff,
                 "files": source_files,
                 "required_output": {
                     "verdict": ["READY_TO_MERGE", "CHANGES_REQUIRED"],
@@ -559,8 +562,11 @@ class DeepSeekCodeReviewService:
 
     @staticmethod
     def _read_exact_candidate(
-        worktree: str | Path, candidate: OrchestrationCandidate, manifest: CandidateManifest
-    ) -> list[dict[str, str]]:
+        worktree: str | Path,
+        candidate: OrchestrationCandidate,
+        manifest: CandidateManifest,
+        change_name: str | None = None,
+    ) -> tuple[list[dict[str, str]], str]:
         root = Path(worktree).resolve(strict=True)
         repository_root = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
@@ -598,6 +604,74 @@ class DeepSeekCodeReviewService:
             or observed_manifest.deleted_files != manifest.deleted_files
         ):
             raise ValueError("candidate manifest does not describe the complete observed Git tree")
+
+        # Determine base commit for git diff
+        diff_base = None
+        has_base = False
+        if candidate.base_sha:
+            has_base = (
+                subprocess.run(
+                    ["git", "cat-file", "-e", f"{candidate.base_sha}^{{commit}}"],
+                    cwd=root,
+                    capture_output=True,
+                ).returncode
+                == 0
+            )
+            if has_base:
+                diff_base = candidate.base_sha
+
+        if not diff_base:
+            has_parent = (
+                subprocess.run(
+                    ["git", "cat-file", "-e", f"{candidate.candidate_sha}^^{{commit}}"],
+                    cwd=root,
+                    capture_output=True,
+                ).returncode
+                == 0
+            )
+            if has_parent:
+                diff_base = f"{candidate.candidate_sha}^"
+            else:
+                # 4b825dc642cb6eb9a060e54bf8d69288fbee4904 is the empty tree SHA
+                diff_base = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+        diff_text = subprocess.run(
+            ["git", "diff", f"{diff_base}..{candidate.candidate_sha}"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+
+        name_status_lines = subprocess.run(
+            ["git", "diff", "--name-status", f"{diff_base}..{candidate.candidate_sha}"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.splitlines()
+
+        diff_changed: set[str] = set()
+        diff_deleted: set[str] = set()
+        for line in name_status_lines:
+            parts = line.split("\t")
+            if not parts:
+                continue
+            code = parts[0]
+            if code.startswith("D"):
+                diff_deleted.add(parts[1].strip())
+            elif code.startswith("R"):
+                diff_deleted.add(parts[1].strip())
+                if len(parts) > 2:
+                    diff_changed.add(parts[2].strip())
+            else:
+                if len(parts) > 1:
+                    diff_changed.add(parts[1].strip())
+
+        active_change_prefix = f"openspec/changes/{change_name}/" if change_name else None
+        active_change_dot_prefix = f".openspec/changes/{change_name}/" if change_name else None
+        is_empty_diff = not diff_changed and not diff_deleted
+
         items = []
         size = 0
         seen: set[str] = set()
@@ -614,6 +688,18 @@ class DeepSeekCodeReviewService:
                 for token in (".env", "credential", "secret", "id_rsa", ".pem", ".key")
             ):
                 raise ValueError("candidate contains a sensitive-path artifact")
+
+            # Selection rule: only candidate-modified/added files, active change specs,
+            # or all files if the diff against base was completely empty.
+            is_candidate_changed = rel in diff_changed
+            is_active_change_spec = bool(
+                (active_change_prefix and rel.startswith(active_change_prefix))
+                or (active_change_dot_prefix and rel.startswith(active_change_dot_prefix))
+            )
+            # Security-critical paths touched by candidate are included by virtue of being in diff_changed.
+            if not (is_candidate_changed or is_active_change_spec or is_empty_diff):
+                continue
+
             path = root.joinpath(*posix.parts)
             if path.is_symlink() or not path.is_file():
                 raise ValueError("candidate file is absent, non-regular, or a symlink")
@@ -634,16 +720,32 @@ class DeepSeekCodeReviewService:
             if size > MAX_REVIEW_INPUT_BYTES:
                 raise ValueError("candidate source exceeds review input bound")
             items.append({"path": rel, "sha256": entry["sha256"], "content": safe_content})
-        for rel in manifest.deleted_files:
+
+        all_deleted = sorted(diff_deleted | set(manifest.deleted_files))
+        for rel in all_deleted:
             posix = PurePosixPath(rel)
             if posix.is_absolute() or any(part in {"", ".", ".."} for part in posix.parts):
                 raise ValueError("deleted candidate path is unsafe")
             if root.joinpath(*posix.parts).exists():
                 raise ValueError("manifest marks an existing candidate file deleted")
-            items.append({"path": rel, "deleted": "true", "content": ""})
+            deletion_context = ""
+            if has_base:
+                try:
+                    cat_proc = subprocess.run(
+                        ["git", "show", f"{candidate.base_sha}:{rel}"],
+                        cwd=root,
+                        capture_output=True,
+                        text=True,
+                    )
+                    if cat_proc.returncode == 0:
+                        deletion_context = redact_secrets(cat_proc.stdout[:2000])
+                except Exception:
+                    pass
+            items.append({"path": rel, "deleted": "true", "content": deletion_context})
+
         if not items:
             raise ValueError("frozen candidate has no reviewable files")
-        return items
+        return items, diff_text
 
     def _read_exact_checks(
         self, job: Job, candidate: OrchestrationCandidate
