@@ -326,6 +326,7 @@ const showToast = createToastController();
         startButton: bkStartBtn,
         needsHumanCard: bkNeedsHumanCard,
         humanQuestionsList: bkHumanQuestionsList,
+        answerTarget: answerQuestionTarget,
         description: bkDescriptionPreview,
         criteria: bkCriteriaList,
         dorOverall: bkDorOverallPill,
@@ -420,8 +421,12 @@ const showToast = createToastController();
       deleteButton: bkDeleteBtn,
       answerForm: answerQuestionForm,
       answerInput: humanAnswerInput,
+      answerTarget: answerQuestionTarget,
       runArtifact: bkArtRun,
-      clearAnswer: () => { if (humanAnswerInput) humanAnswerInput.value = ''; },
+      clearAnswer: () => {
+        if (humanAnswerInput) humanAnswerInput.value = '';
+        if (answerQuestionTarget) answerQuestionTarget.value = '';
+      },
     });
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.register("/sw.js").catch(() => {});

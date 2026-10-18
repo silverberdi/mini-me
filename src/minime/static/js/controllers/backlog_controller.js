@@ -42,11 +42,16 @@ export function createBacklogController({ fetchRequest, notify, getProjectId, re
     } catch (error) { notify(`No se pudo iniciar el trabajo: ${error.message}`, 'error'); return null; }
   }
 
-  async function answer(itemKey, answerText) {
+  async function answer(itemKey, question, answerText) {
+    const normalizedQuestion = String(question || "").trim();
+    const normalizedAnswer = String(answerText || "").trim();
+    if (!normalizedQuestion || !normalizedAnswer) return false;
     const projectId = getProjectId();
     try {
       await request(`/api/v1/projects/${encodeURIComponent(projectId)}/backlog/${encodeURIComponent(itemKey)}/answer`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ answer: answerText }),
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: normalizedQuestion, answer: normalizedAnswer }),
       }, 'Aclaración registrada; se volverá a evaluar la preparación.');
       await load(projectId);
       selectItem(itemKey);
@@ -274,6 +279,7 @@ export function createBacklogController({ fetchRequest, notify, getProjectId, re
     deleteButton,
     answerForm,
     answerInput,
+    answerTarget,
     runArtifact,
     clearAnswer,
   }) {
@@ -328,7 +334,8 @@ export function createBacklogController({ fetchRequest, notify, getProjectId, re
       event.preventDefault();
       const item = selectedItem;
       const answerText = answerInput?.value.trim();
-      if (item && answerText && await answer(item.item_key, answerText)) clearAnswer();
+      const question = answerTarget?.value.trim() || item?.human_questions?.[0];
+      if (item && question && answerText && await answer(item.item_key, question, answerText)) clearAnswer();
     });
     runArtifact?.addEventListener('click', (event) => {
       if (event.target.closest('[data-open-run]')) onOpenRun();

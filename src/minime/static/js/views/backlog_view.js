@@ -103,6 +103,7 @@ export function renderBacklogDetail({
   if (elements.needsHumanCard) {
     const hasQuestions = item.status === "NEEDS_HUMAN" || item.human_questions?.length > 0;
     elements.needsHumanCard.style.display = hasQuestions ? "block" : "none";
+    if (elements.answerTarget) elements.answerTarget.value = item.human_questions?.[0] || "";
     if (hasQuestions && elements.humanQuestionsList) {
       elements.humanQuestionsList.innerHTML = questions.map((question) => `<div class="question-item"><span class="question-icon">❓</span><span class="question-text">${escapeHtml(question)}</span></div>`).join("");
     }

@@ -1412,6 +1412,65 @@ async def test_real_browser_backlog_controller_owns_work_item_form_and_submissio
 
 
 @pytest.mark.asyncio
+async def test_real_browser_backlog_clarification_submits_question_and_answer_to_authority(
+    browser_test_env: dict[str, Any],
+) -> None:
+    client = ChromeCDPClient(browser_test_env["ws_url"])
+    await client.connect()
+    try:
+        await client.navigate(f"{browser_test_env['server_url']}/")
+        result = await client.eval_js("""
+          (async () => {
+            const {createBacklogController} = await import('/static/js/controllers/backlog_controller.js');
+            const question = 'Which supported base branch should this use?';
+            let current = {item_key:'needs-clarification',title:'Clarify an intake decision',status:'NEEDS_HUMAN',human_questions:[question],description:'The base branch is ambiguous.'};
+            const calls = [];
+            const fetchRequest = async (url, init={}) => {
+              calls.push({url,init});
+              if (url.endsWith('/projects/project-bound')) return {ok:true,json:async()=>({auto_prepare:false,auto_admit:false,max_concurrent_jobs:2})};
+              if (url.endsWith('/backlog') && !init.method) return {ok:true,json:async()=>[current]};
+              if (url.endsWith('/answer') && init.method === 'POST') {
+                const payload = JSON.parse(init.body);
+                current = {...current,status:'PREPARING',human_questions:[],human_answers:[payload]};
+                return {ok:true,json:async()=>current};
+              }
+              throw new Error(`Unexpected request ${init.method || 'GET'} ${url}`);
+            };
+            const form = document.createElement('form');
+            const answerInput = document.createElement('textarea');
+            const answerTarget = document.createElement('input');
+            const tableBody = document.createElement('tbody');
+            const placeholder = document.createElement('div');
+            const content = document.createElement('section');
+            const notices = [];
+            const controller = createBacklogController({
+              fetchRequest, notify:(message,kind)=>notices.push({message,kind}),
+              getProjectId:()=> 'project-bound', refreshProjects:async()=>{}, onUnauthorized:()=>{},
+              onStarted:()=>{}, confirmAction:()=>true, escapeHtml:value=>String(value??''),
+              sanitizeUrl:value=>value, getStatusBadgeClass:()=> 'badge-muted', onOpenRun:()=>{},
+              elements:{tableBody,placeholder,detail:{content,answerTarget}}, workItemForm:null,
+            });
+            await controller.load();
+            controller.bindEvents({searchInput:null,statusPills:[],tableBody,newItemButton:null,cancelButton:null,itemModal:null,itemForm:null,discoverButton:null,prepareButton:null,startButton:null,editButton:null,deleteButton:null,answerForm:form,answerInput,answerTarget,runArtifact:null,clearAnswer:()=>{answerInput.value='';answerTarget.value='';}});
+            answerInput.value = 'Use main after confirming the repository binding.';
+            form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));
+            for (let index=0; index<20 && controller.getSelectedItem()?.status !== 'PREPARING'; index++) await new Promise(resolve=>setTimeout(resolve,10));
+            const posted = calls.find(call=>call.url.endsWith('/answer'));
+            return {questionTarget:answerTarget.value,payload:posted && JSON.parse(posted.init.body),status:controller.getSelectedItem()?.status,notices};
+          })()
+        """)
+        assert result["payload"] == {
+            "question": "Which supported base branch should this use?",
+            "answer": "Use main after confirming the repository binding.",
+        }
+        assert result["status"] == "PREPARING"
+        assert result["questionTarget"] == ""
+        assert result["notices"][-1]["message"].startswith("Aclaración registrada")
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_real_browser_status_view_keeps_authoritative_states_distinct(
     browser_test_env: dict[str, Any],
 ) -> None:

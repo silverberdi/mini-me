@@ -161,6 +161,8 @@ The same previously recorded limits remain: call-graph and before/after behavior
 
 ## Final continuation check after operational controller extraction and orphan retirement
 
+After discovering that the Backlog clarification frontend omitted the required `question` field from the existing API request, the controller now submits both the currently selected human question and the operator answer, clears the form target after success, and refreshes the authoritative item. The real-Chrome controller test passed alone (1 passed in 5.14s). A shared-fixture attempt to exercise the full API answer→re-prepare lifecycle correctly failed closed because its seeded project has no canonical `ProjectManagedRepositoryBinding`; no fixture authority was fabricated. The consolidated affected group was rerun after the code correction and passed **113 passed, 4 warnings in 81.64s**. It includes all prior PWA/API/Control Plane/security/systemd observer tests plus the clarification serialization test.
+
 After the Projects/Backlog browser test was extended to verify logout clears its project and detail state, one consolidated run exposed that the test also revoked the module-scoped session token used by a later selected-Change browser case. The test now creates a fresh session only after the logout-clearing assertions; it does not weaken revocation or cache-isolation checks. The ordered pair passed **2 passed in 10.33s**, followed by the complete affected group:
 
 ```text
