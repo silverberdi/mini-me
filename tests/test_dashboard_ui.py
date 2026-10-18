@@ -46,7 +46,17 @@ def test_ui_assets_exist_and_are_complete() -> None:
     js_content = js_file.read_text(encoding="utf-8")
     api_client = (static_dir / "js" / "services" / "api_client.js").read_text(encoding="utf-8")
     assert "/api/v1/dashboard/overview" in api_client
-    assert "renderPipelineStepper" in js_content
+    detail_view = (static_dir / "js" / "controllers" / "detail_view_controller.js").read_text(
+        encoding="utf-8"
+    )
+    assert "createDetailViewController" in js_content
+    assert "renderPipelineStepper" in detail_view
+    execution_view = (static_dir / "js" / "controllers" / "execution_view_controller.js").read_text(
+        encoding="utf-8"
+    )
+    assert "createExecutionViewController" in js_content
+    assert "function refreshOnce()" in execution_view
+    assert "let overviewData" not in js_content
     assert "createThemeController" in js_content
     assert "createNavigationController" in js_content
     navigation_controller = (
@@ -54,12 +64,32 @@ def test_ui_assets_exist_and_are_complete() -> None:
     ).read_text(encoding="utf-8")
     assert "let currentView = 'viewExecutions'" in navigation_controller
     assert "function switchView(viewName)" in navigation_controller
-    assert "project?.auto_prepare" in js_content
-    assert "project?.auto_admit" in js_content
-    assert "project?.max_concurrent_jobs" in js_content
+    backlog_controller = (static_dir / "js" / "controllers" / "backlog_controller.js").read_text(
+        encoding="utf-8"
+    )
+    assert "project?.auto_prepare" in backlog_controller
+    assert "project?.auto_admit" in backlog_controller
+    assert "project?.max_concurrent_jobs" in backlog_controller
+    assert not (static_dir / "js" / "state" / "store.js").exists()
+    assert "state/store.js" not in (static_dir / "sw.js").read_text(encoding="utf-8")
+    assert "AppState" not in js_content
+    for retired in (
+        "js/components/attention_banner.js",
+        "js/components/efficiency_panel.js",
+        "js/components/runs_table.js",
+        "js/views/history_view.js",
+        "js/views/settings_view.js",
+    ):
+        assert not (static_dir / retired).exists()
+        assert retired not in (static_dir / "sw.js").read_text(encoding="utf-8")
     assert "head_sha: candSha || 'HEAD'" not in js_content
     assert "base_sha: baseSha || 'main'" not in js_content
-    assert "const previewIdentityValid" in js_content
+    preview_view = (static_dir / "js" / "views" / "preview_view.js").read_text(encoding="utf-8")
+    assert "const identityValid" in preview_view
+    assert "session.head_sha === headSha" in preview_view
+    assert "session.base_sha === baseSha" in preview_view
+    assert "session.candidate_generation" in preview_view
+    assert "previewActions.submitValidation" in preview_view
     assert "window.minime" not in js_content
     assert "window.selectChange" not in js_content
     assert "onclick=" not in js_content

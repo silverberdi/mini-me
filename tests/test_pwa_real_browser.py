@@ -1294,6 +1294,119 @@ async def test_real_browser_projects_domain_navigation_and_context_use_authorita
         assert selected_view["backlogActive"] is True
         assert selected_view["selectedProject"] == "mini-me"
         assert selected_view["displayedProject"] == "Proyecto: mini-me"
+
+        await client.eval_js("document.getElementById('logoutBtn').click()")
+        await asyncio.sleep(0.1)
+        cleared = await client.eval_js("""
+          (() => ({
+            loginVisible: document.getElementById('loginSection').style.display !== 'none',
+            selectedProject: document.getElementById('projectSelect').value,
+            projectCards: document.querySelectorAll('#projectsGridContainer .project-card').length,
+            backlogText: document.getElementById('backlogTableBody').textContent,
+            backlogPrivateTitle: document.getElementById('bkTitle').textContent,
+          }))()
+        """)
+        assert cleared["loginVisible"] is True
+        assert cleared["selectedProject"] == ""
+        assert cleared["projectCards"] == 0
+        assert "selecciona un proyecto autorizado" in cleared["backlogText"].lower()
+        assert cleared["backlogPrivateTitle"] == "—"
+        # This module-scoped browser fixture is shared by later tests. The
+        # logout above correctly revokes its original session; issue a fresh
+        # test session only after asserting that protected state was cleared.
+        from minime.services.auth_service import SessionManager
+
+        next_token, _ = SessionManager(browser_test_env["uow"]).create_session(
+            "operator@example.com"
+        )
+        browser_test_env["session_token"] = next_token
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_real_browser_backlog_controller_owns_work_item_form_and_submission(
+    browser_test_env: dict[str, Any],
+) -> None:
+    client = ChromeCDPClient(browser_test_env["ws_url"])
+    await client.connect()
+    try:
+        await client.navigate(f"{browser_test_env['server_url']}/")
+        result = await client.eval_js("""
+          (async () => {
+            const {createBacklogController} = await import('/static/js/controllers/backlog_controller.js');
+            const modal = document.createElement('dialog');
+            const form = document.createElement('form');
+            const button = document.createElement('button');
+            const field = () => document.createElement('input');
+            const title = field();
+            const key = field();
+            const priority = field();
+            const description = field();
+            const criteria = document.createElement('textarea');
+            const heading = document.createElement('h2');
+            const submit = document.createElement('button');
+            submit.type = 'submit';
+            form.append(title,key,priority,description,criteria,submit);
+            modal.append(heading,form);
+            document.body.append(modal);
+            const calls = {requests:[],selected:[],notices:[]};
+            const tableBody = document.createElement('tbody');
+            const placeholder = document.createElement('div');
+            const detailContent = document.createElement('section');
+            const controller = createBacklogController({
+              fetchRequest: async (url,init) => {
+                calls.requests.push({url,init});
+                const body = init?.method === 'POST'
+                  ? {item_key:'new-work'}
+                  : url.endsWith('/backlog')
+                    ? [{item_key:'new-work',title:'A bounded operational item',priority:'HIGH',status:'BACKLOG',acceptance_criteria:['first condition','second condition']}]
+                    : {auto_prepare:false,auto_admit:false,max_concurrent_jobs:2};
+                return {ok:true,status:200,json:async () => body};
+              },
+              notify: (message,kind) => calls.notices.push({message,kind}),
+              getProjectId: () => 'project-bound',
+              refreshProjects: async () => {}, onUnauthorized: () => {}, onStarted: () => {}, confirmAction: () => true,
+              escapeHtml: value => String(value ?? ''), sanitizeUrl: value => value,
+              getStatusBadgeClass: () => 'badge-muted', onOpenRun: () => {},
+              elements:{tableBody,placeholder,detail:{content:detailContent}},
+              workItemForm:{modal,form,title:heading,itemTitle:title,itemKey:key,priority,description,criteria},
+            });
+            const eventBindings = {
+              searchInput:null,statusPills:[],tableBody,newItemButton:button,cancelButton:null,
+              itemModal:modal,itemForm:form,discoverButton:null,prepareButton:null,startButton:null,
+              editButton:null,deleteButton:null,answerForm:null,answerInput:null,runArtifact:null,
+              clearAnswer:()=>{},
+            };
+            controller.bindEvents(eventBindings);
+            controller.bindEvents(eventBindings);
+            button.click();
+            title.value = 'A bounded operational item';
+            key.value = 'bounded-item';
+            priority.value = 'HIGH';
+            description.value = 'deterministic description';
+            criteria.value = '- first condition\\n- second condition';
+            form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));
+            await new Promise(resolve => setTimeout(resolve,20));
+            const call = calls.requests[0];
+            return {calls,heading:heading.textContent,modalOpen:modal.open,payload:JSON.parse(call.init.body),selected:controller.getSelectedItem()?.item_key};
+          })()
+        """)
+        assert result["heading"] == "Crear trabajo"
+        assert result["selected"] == "new-work"
+        assert [call["url"] for call in result["calls"]["requests"]] == [
+            "/api/v1/projects/project-bound/backlog",
+            "/api/v1/projects/project-bound",
+            "/api/v1/projects/project-bound/backlog",
+        ]
+        assert result["calls"]["requests"][0]["url"] == "/api/v1/projects/project-bound/backlog"
+        assert result["payload"] == {
+            "item_key": "bounded-item",
+            "title": "A bounded operational item",
+            "priority": "HIGH",
+            "description": "deterministic description",
+            "acceptance_criteria": ["first condition", "second condition"],
+        }
     finally:
         await client.close()
 
@@ -1554,6 +1667,137 @@ async def test_real_browser_action_controller_owns_discovery_toolbar_and_single_
         assert request["run_id"] == "run-owned"
         assert request["action_type"] == "CONTINUE"
         assert result["buttonsAfterRace"] == ["CONTINUE"]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_real_browser_toast_controller_owns_safe_message_and_single_timer(
+    browser_test_env: dict[str, Any],
+) -> None:
+    client = ChromeCDPClient(browser_test_env["ws_url"])
+    await client.connect()
+    try:
+        await client.navigate(f"{browser_test_env['server_url']}/")
+        outcome = await client.eval_js("""
+          (async () => {
+            const {createToastController} = await import('/static/js/components/toast.js');
+            const toast = document.getElementById('toastNotification') || document.createElement('div');
+            if (!toast.isConnected) {
+              toast.id = 'toastNotification';
+              document.body.appendChild(toast);
+            }
+            const timers = new Map();
+            const cleared = [];
+            let nextTimer = 0;
+            const windowRef = {
+              setTimeout(callback, delay) { const id = ++nextTimer; timers.set(id, {callback, delay}); return id; },
+              clearTimeout(id) { cleared.push(id); timers.delete(id); },
+            };
+            const showToast = createToastController({documentRef: document, windowRef});
+            showToast('<img src=x onerror=alert(1)>', 'error');
+            const firstText = toast.textContent;
+            const firstHtml = toast.innerHTML;
+            showToast('Actualizado', 'success');
+            return {
+              firstText, firstHtml, text:toast.textContent, className:toast.className,
+              display:toast.style.display, timerCount:timers.size,
+              timerDelay:[...timers.values()][0]?.delay, cleared,
+            };
+          })()
+        """)
+        assert outcome["firstText"] == "<img src=x onerror=alert(1)>"
+        assert "<img" not in outcome["firstHtml"]
+        assert outcome["text"] == "Actualizado"
+        assert outcome["className"] == "toast-notification toast-success"
+        assert outcome["display"] == "block"
+        assert outcome["timerCount"] == 1
+        assert outcome["timerDelay"] == 4000
+        assert outcome["cleared"] == [1]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_real_browser_execution_view_controller_ignores_stale_change_detail_response(
+    browser_test_env: dict[str, Any],
+) -> None:
+    client = ChromeCDPClient(browser_test_env["ws_url"])
+    await client.connect()
+    try:
+        await client.navigate(f"{browser_test_env['server_url']}/")
+        result = await client.eval_js("""
+          (async () => {
+            const {createExecutionViewController} = await import('/static/js/controllers/execution_view_controller.js');
+            const content = document.createElement('section');
+            const placeholder = document.createElement('div');
+            const rendered = [];
+            let releaseOld;
+            const controller = createExecutionViewController({
+              fetchRequest: url => url.includes('/old-change')
+                ? new Promise(resolve => { releaseOld = resolve; })
+                : Promise.resolve({ok:true,status:200,json:async () => ({project_id:'project',change_name:'new-change'})}),
+              elements:{detailContent:content,detailPlaceholder:placeholder},
+              setOfflineBanner:()=>{},onUnauthorized:()=>{},getNavigationState:()=>null,
+              renderDetail:detail=>rendered.push(detail.change_name),statusClass:()=>'',formatRelativeTime:()=>'',
+            });
+            controller.selectChange('project','old-change');
+            await Promise.resolve();
+            controller.selectChange('project','new-change');
+            await new Promise(resolve => setTimeout(resolve,0));
+            releaseOld({ok:true,status:200,json:async () => ({project_id:'project',change_name:'old-change'})});
+            await new Promise(resolve => setTimeout(resolve,0));
+            return {rendered,selected:controller.selectedChange};
+          })()
+        """)
+        assert result == {
+            "rendered": ["new-change"],
+            "selected": {"project_id": "project", "change_name": "new-change"},
+        }
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_real_browser_detail_telemetry_ignores_responses_for_previous_selection(
+    browser_test_env: dict[str, Any],
+) -> None:
+    client = ChromeCDPClient(browser_test_env["ws_url"])
+    await client.connect()
+    try:
+        await client.navigate(f"{browser_test_env['server_url']}/")
+        outcome = await client.eval_js("""
+          (async () => {
+            const {createDetailTelemetryController} = await import('/static/js/controllers/detail_telemetry_controller.js');
+            const efficiency = document.createElement('div');
+            const history = document.createElement('div');
+            let finishOldEfficiency;
+            let finishOldHistory;
+            const controller = createDetailTelemetryController({
+              efficiencyContainer: efficiency,
+              historyContainer: history,
+              formatTimestamp: value => value || '—',
+              fetchRequest: url => {
+                if (url.includes('/old-change')) return new Promise(resolve => { finishOldEfficiency = resolve; });
+                return Promise.resolve({ok:true,json:async () => ({total_attempts:2, primary_model:'new-model', evaluated_at:'now'})});
+              },
+              loadActionHistory: runId => runId === 'old-run'
+                ? new Promise(resolve => { finishOldHistory = resolve; })
+                : Promise.resolve([{action_type:'CONTINUE', actor_identity:'new-operator', status:'SUCCESS'}]),
+            });
+            const oldRender = controller.renderFor({project_id:'p',change_name:'old-change',run_id:'old-run'});
+            await Promise.resolve();
+            await controller.renderFor({project_id:'p',change_name:'new-change',run_id:'new-run'});
+            finishOldEfficiency({ok:true,json:async () => ({total_attempts:999,primary_model:'stale-model'})});
+            finishOldHistory([{action_type:'STALE_ACTION',actor_identity:'stale-operator',status:'SUCCESS'}]);
+            await oldRender;
+            return {efficiency:efficiency.textContent,history:history.textContent,html:efficiency.innerHTML};
+          })()
+        """)
+        assert "new-model" in outcome["efficiency"]
+        assert "999" not in outcome["efficiency"]
+        assert "new-operator" in outcome["history"]
+        assert "stale-operator" not in outcome["history"]
     finally:
         await client.close()
 

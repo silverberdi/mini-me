@@ -24,6 +24,7 @@ export function createProjectsController({
 }) {
   let projects = [];
   let bound = false;
+  let projectFetchSequence = 0;
 
   function renderContextReport(report) {
     const { discoveredFacts, inferredStructure, missingContext } = contextNodes;
@@ -49,24 +50,42 @@ export function createProjectsController({
   }
 
   async function fetchProjects() {
+    const requestSequence = ++projectFetchSequence;
     try {
       const response = await fetchRequest('/projects');
       if ([401, 403].includes(response.status)) {
-        onUnauthorized();
+        if (requestSequence === projectFetchSequence) onUnauthorized();
         return [];
       }
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      projects = await response.json();
+      const result = await response.json();
+      if (requestSequence !== projectFetchSequence) return [];
+      projects = result;
       const currentId = renderProjectSelect(projectSelect, projects, projectSelect?.value || getCurrentProjectId());
       if (backlogProjectDisplay) backlogProjectDisplay.textContent = `Proyecto: ${currentId || 'DESCONOCIDO'}`;
       if (currentId !== getCurrentProjectId()) setCurrentProjectId(currentId);
       if (getCurrentView() === 'viewProjects') renderProjectsGrid(projectGrid, projects, currentId);
       return projects;
     } catch (error) {
+      if (requestSequence !== projectFetchSequence) return [];
       console.error('Failed to fetch projects:', error);
       notify(`No se pudieron cargar los proyectos: ${error.message}`, 'error');
       return [];
     }
+  }
+
+  function clear() {
+    projectFetchSequence += 1;
+    projects = [];
+    setCurrentProjectId(null);
+    if (projectSelect) {
+      projectSelect.replaceChildren();
+      projectSelect.value = '';
+    }
+    if (backlogProjectDisplay) backlogProjectDisplay.textContent = 'Proyecto: DESCONOCIDO';
+    if (projectGrid) projectGrid.replaceChildren();
+    contextModal?.close();
+    Object.values(contextNodes).forEach((node) => { if (node) node.replaceChildren(); });
   }
 
   async function submitOnboarding() {
@@ -152,7 +171,7 @@ export function createProjectsController({
     closeContextButton?.addEventListener('click', () => contextModal?.close());
   }
 
-  return { fetchProjects, inspectContext, bindEvents, get projects() { return projects; } };
+  return { fetchProjects, inspectContext, bindEvents, clear, get projects() { return projects; } };
 }
 
 function escapeHtml(value) {

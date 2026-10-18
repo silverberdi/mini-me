@@ -24,10 +24,10 @@ tests/test_dashboard_security.py tests/test_dashboard_stale_isolation.py
 tests/test_dashboard_service.py tests/test_preview_api_endpoints.py
 tests/test_control_plane_api.py tests/test_control_plane_service.py
 tests/test_pwa_desktop_layout.py tests/test_systemd_scheduler_observer.py
-108 passed, 4 warnings in 76.46s
+109 passed, 4 warnings in 81.37s
 ```
 
-The four warnings are existing Starlette/httpx deprecation and duplicate FastAPI OpenAPI operation IDs. The action-controller migration was part of this run. This is a focused affected-group result, not a post-correction repository-wide pytest run.
+The four warnings are existing Starlette/httpx deprecation and duplicate FastAPI OpenAPI operation IDs. The action-controller, detail-telemetry, preview-view, GitHub and timeline migrations were part of this run. This is a focused affected-group result, not a post-correction repository-wide pytest run.
 
 ## Focused validation after implementation fixes
 
@@ -116,7 +116,79 @@ The fixed-target read-only D-Bus observer is deterministic-test verified for act
 
 ## Remaining implementation / acceptance limits
 
-- Frontend convergence/removal is incomplete: `dashboard.js` remains a large coordinator (2,029 lines after Backlog/evidence view extraction) and owns significant UI workflows. Modules extracted so far are live imports, but complete consumer parity and Removal Ledger proof are not established. Do not mark tasks 5.1–5.3 complete or claim architectural convergence.
+- Frontend convergence/removal was incomplete at the prior recorded checkpoint; the current continuation migrates execution reads/selection and Backlog/detail rendering and removes proven orphan modules. Full consumer parity and legacy-removal proof are still not established. Do not mark tasks 5.1–5.3 complete or claim architectural convergence.
 - The five viewport checks do not complete the eight approved visual states, keyboard/accessibility audit, or human validation. Task 7.3 is now verified; tasks 4.1, 4.2, 7.2 and human visual acceptance remain open.
 - Authenticated preview/container E2E, governed action lifecycle E2E, complete-value states (including an authoritative deliberate PAUSED source), post-merge/deployment verification, and real Linux systemd observation remain pending.
 - No task requiring human approval, merge or deployment is complete.
+
+## Continuation from PR #156 `f4147eae044149775e7034d159b4967dc132d72b`
+
+This continuation was performed on the same isolated branch/worktree. `src/minime/static/js/dashboard.js` is now 495 lines and serves as native ES-module composition root imported by the single guarded `app.js` bootstrap, not the former classic IIFE. The new `controllers/execution_view_controller.js` owns operational overview/queue/provider/health snapshots, refresh and selected Change identity; this is not complete consumer convergence because cross-domain composition and some session/project identity wiring remain in the root module.
+
+Additional migrations in this continuation:
+
+- Backlog controller now owns authenticated project/backlog reads, project-scoped stale-response suppression, Backlog item/selection state, admission-fact projection, detail/table selection rendering, form serialization and existing mutations. The dashboard retains only the shared project identity and provides coordinator callbacks.
+- `controllers/detail_view_controller.js` owns exact Run/Job identity header and composes evidence, candidate-bound preview, GitHub, telemetry, timeline and action-toolbar modules.
+- `controllers/execution_view_controller.js` owns overview/queue/provider/health read-model snapshots, overlap-coalesced refresh, exact Change selection, detail response identity validation and stale response suppression.
+- `components/toast.js` now owns the accessible text-only toast surface and single dismissal timer.
+- An initial source/import census found `state/store.js` (`AppState`) had no consumers. It was removed with its owned Service Worker asset entry; a later census found and removed five additional unreferenced presentation helpers, described in the final continuation check below.
+
+The post-retirement consolidated affected validation was first run with **110 passed / 1 failed** because `tests/test_pwa_assets.py` still required the now-retired unreferenced `state/store.js`. That asset expectation was corrected to match the runtime import/cache inventory and the same consolidated command was rerun once:
+
+```text
+tests/test_pwa_real_browser.py
+tests/test_pwa_service_worker.py
+tests/test_pwa_assets.py
+tests/test_pwa_contract.py
+tests/test_dashboard_ui.py
+tests/test_dashboard_api.py
+tests/test_dashboard_security.py
+tests/test_dashboard_stale_isolation.py
+tests/test_dashboard_service.py
+tests/test_preview_api_endpoints.py
+tests/test_control_plane_api.py
+tests/test_control_plane_service.py
+tests/test_pwa_desktop_layout.py
+tests/test_systemd_scheduler_observer.py
+111 passed, 4 warnings in 79.32s
+```
+
+The four warnings are one pre-existing Starlette/httpx deprecation and three duplicate FastAPI OpenAPI operation IDs. At this point in the work the consolidation was post-`AppState` removal; a later post-orphan-removal 112-test consolidation is recorded below. Neither run is post-removal of the legacy dashboard coordinator; neither satisfies task 5.3. The earlier full repository result remains the sole full-suite run (**1797 passed, 16 skipped, 10 failed**, before later targeted corrections); no post-checkpoint full-suite PASS is claimed.
+
+Static validation was rerun after the final orphan retirement: `ruff check src tests` PASS; Ruff format check for the changed Python tests PASS; Node syntax checks for changed modules and service worker PASS; `openspec validate pwa-control-center-ux-convergence --strict` PASS; `git diff --check` PASS.
+
+The same previously recorded limits remain: call-graph and before/after behavior parity for every listed consumer is incomplete, so tasks 5.1–5.3 remain open; the complete eight-state visual comparison and human sign-off, preview/action full-value E2E, Linux D-Bus observation, accessibility audit, full suite after final migration, merge/deployment and post-deployment gates remain pending. No production, N01 or scheduler state was accessed or changed.
+
+## Final continuation check after operational controller extraction and orphan retirement
+
+After the Projects/Backlog browser test was extended to verify logout clears its project and detail state, one consolidated run exposed that the test also revoked the module-scoped session token used by a later selected-Change browser case. The test now creates a fresh session only after the logout-clearing assertions; it does not weaken revocation or cache-isolation checks. The ordered pair passed **2 passed in 10.33s**, followed by the complete affected group:
+
+```text
+112 passed, 4 warnings in 85.35s
+```
+
+The four warnings remain the known Starlette/httpx deprecation and three duplicate FastAPI OpenAPI operation IDs. This result is the latest affected-group run.
+
+A source/import/asset census also proved no runtime or test consumer for these obsolete files: `components/attention_banner.js`, `components/efficiency_panel.js`, `components/runs_table.js`, `views/history_view.js`, and `views/settings_view.js`. The retired efficiency helper had unsupported fallback values (`100%` and zero counts); it was not used by the active, API-backed telemetry path. Those five files and the Service Worker cache entries for the two cached modules were removed. Static regression asserts the obsolete paths are absent and not cached. No active renderer, API contract, permission gate, or operator-visible behavior was removed.
+
+After this retirement, the changed controller wiring, and adding the Chrome stale-detail response test, the final consolidated affected group passed:
+
+```text
+tests/test_pwa_real_browser.py
+tests/test_pwa_service_worker.py
+tests/test_pwa_assets.py
+tests/test_pwa_contract.py
+tests/test_dashboard_ui.py
+tests/test_dashboard_api.py
+tests/test_dashboard_security.py
+tests/test_dashboard_stale_isolation.py
+tests/test_dashboard_service.py
+tests/test_preview_api_endpoints.py
+tests/test_control_plane_api.py
+tests/test_control_plane_service.py
+tests/test_pwa_desktop_layout.py
+tests/test_systemd_scheduler_observer.py
+112 passed, 4 warnings in 89.02s
+```
+
+This is the post-orphan-removal regression group; it is not the full repository suite and does not complete tasks 5.1–5.3 because the complete consumer matrix and legacy-coordinator removal have not occurred. Latest static checks were run before this final small orphan retirement; they must be rerun on the candidate before commit. The earlier full suite result and its baseline attribution remain unchanged and are not represented as post-change PASS.

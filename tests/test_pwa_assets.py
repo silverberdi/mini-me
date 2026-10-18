@@ -11,7 +11,6 @@ def test_pwa_shell_assets_and_manifest() -> None:
         STATIC / "css" / "layout.css",
         STATIC / "css" / "components.css",
         STATIC / "js" / "app.js",
-        STATIC / "js" / "state" / "store.js",
         STATIC / "js" / "services" / "api_client.js",
         STATIC / "js" / "components" / "pipeline_stepper.js",
         STATIC / "manifest.webmanifest",
