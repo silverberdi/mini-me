@@ -7,10 +7,19 @@ The orchestration driver SHALL support entering `RUNNING_CHECKS` from an in-prog
 - **WHEN** `drive_coordinator()` is invoked with a valid claim context and an explicit checks-only directive
 - **AND** the active job has a verified `candidate_sha` and worktree HEAD match
 - **THEN** the coordinator SHALL transition directly to `RUNNING_CHECKS`
-- **AND** the coordinator SHALL execute deterministic checks using `ChecksRunner`
+- **AND** the coordinator SHALL consume the verified check results executed by the checks-only pipeline
 - **AND** the coordinator SHALL NOT execute `pipeline.execute_queued_job()` or dispatch new implementer attempts.
 
-#### Scenario: Checks pass and coordinator advances to freeze and review
+#### Scenario: Checks pass and coordinator advances to freeze candidate
 - **WHEN** `RUNNING_CHECKS` completes successfully under checks-only continuation
 - **THEN** the driver SHALL advance the run to `FREEZING_CANDIDATE`
-- **AND** subsequent execution SHALL follow canonical candidate manifest generation, complementary code review, and PR preparation.
+- **AND** the driver SHALL materialize the candidate manifest and persist the `OrchestrationCandidate` row.
+
+### Requirement: Review Hold Without Automated Model Dispatch
+When executing checks-only recovery, the coordinator SHALL halt execution immediately following candidate freezing, establishing a durable review-pending checkpoint without dispatching reviewer or auditor models.
+
+#### Scenario: Candidate frozen halts at review hold
+- **WHEN** candidate freezing completes under checks-only recovery
+- **THEN** the driver SHALL stop with `stop_outcome=NEEDS_HUMAN` and `human_gate=REVIEW_PENDING` (or stop details indicating review authorization required)
+- **AND** the driver SHALL NOT invoke DeepSeek or Antigravity code review or audit runners
+- **AND** subsequent review execution SHALL require separate human authorization.
