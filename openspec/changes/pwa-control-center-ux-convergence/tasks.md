@@ -9,7 +9,7 @@
 
 - [ ] 2.1 Implement the single Spanish shell and coherent navigation using the existing FastAPI route, CSS tokens, theme support and native module stack; preserve current Backlog, Projects and execution workflows.
 - [ ] 2.2 Bind overview, queue, attention, providers, activity and metrics to the existing authenticated APIs; show freshness and explicit UNKNOWN/stale/error states without client-side admission, capacity, cost or status calculations.
-- [ ] 2.3 Add only the additive dashboard read-model fields proven necessary by task 1.3; include auth/permission and stale-evidence contract tests; do not add a persistence migration unless OpenSpec update approves a demonstrated need.
+- [x] 2.3 Add only the additive dashboard read-model fields proven necessary by task 1.3; include auth/permission and stale-evidence contract tests; do not add a persistence migration unless OpenSpec update approves a demonstrated need. Evidence: `DashboardChangeDetailResponse.repository_identity` and `repository_binding_state` are additive projections of the exact project/change `ProjectBinding`; invalid, contradictory, or absent bindings suppress the raw identity as INVALID/UNKNOWN. `tests/test_dashboard_api.py::test_api_dashboard_change_detail`, `test_api_dashboard_detail_hides_invalid_repository_identity`, and OpenAPI field assertion verify the contract; `tests/test_dashboard_stale_isolation.py`, `tests/test_pwa_real_browser.py::test_real_browser_auth_expiry_hides_operational_state`, and session-isolation coverage verify stale/auth denial behavior. No persistence change or migration.
 
 ## 3. Run/Job detail and governed operator actions
 

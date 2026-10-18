@@ -340,6 +340,8 @@ class DashboardOverviewResponse(BaseModel):
 class DashboardChangeDetailResponse(BaseModel):
     project_id: str
     change_name: str
+    repository_identity: str | None = None
+    repository_binding_state: str = "UNKNOWN"
     status: str
     run_id: str | None = None
     job_id: str | None = None
@@ -921,6 +923,14 @@ class OperationsDashboardService:
             selected_run = self._select_authoritative_run(change, runs)
 
         binding = self.uow.bindings.get_by_project_and_change(project_id, change_name)
+        repository_binding_state = "UNKNOWN"
+        repository_identity = None
+        if binding is not None:
+            if binding.is_valid and not binding.mismatch_reasons and binding.repository.strip():
+                repository_binding_state = "VALID"
+                repository_identity = binding.repository.strip()
+            else:
+                repository_binding_state = "INVALID"
 
         status_val = self._derive_canonical_change_status(change, selected_run)
 
@@ -985,6 +995,8 @@ class OperationsDashboardService:
         return DashboardChangeDetailResponse(
             project_id=project_id,
             change_name=change_name,
+            repository_identity=repository_identity,
+            repository_binding_state=repository_binding_state,
             status=status_val,
             run_id=selected_run.run_id if selected_run else None,
             job_id=selected_run.active_job_id if selected_run else None,

@@ -46,6 +46,7 @@ from minime.domain.models import (
     OrchestrationRun,
     PreviewSession,
     Project,
+    ProjectBinding,
     ProviderHealth,
     Review,
     WorkQueueItem,
@@ -112,6 +113,14 @@ def create_seeded_uow() -> InMemoryPersistenceUnitOfWork:
     uow.changes.save(c1)
     uow.changes.save(c2)
     uow.changes.save(c3)
+    for change_name in (c1.name, c2.name, c3.name):
+        uow.bindings.save(
+            ProjectBinding(
+                project_id="mini-me",
+                repository="silverberdi/mini-me",
+                openspec_change_name=change_name,
+            )
+        )
 
     # 3. Runs
     run1 = OrchestrationRun(
@@ -534,6 +543,11 @@ async def test_real_browser_desktop_standard_inspection(browser_test_env: dict[s
         assert master_displayed and detail_displayed, (
             "Master and Detail panels should both be visible"
         )
+        repository_identity = await client.eval_js("""
+            ({name: document.getElementById('dtRepository').textContent,
+              state: document.getElementById('dtRepository').dataset.state})
+        """)
+        assert repository_identity == {"name": "silverberdi/mini-me", "state": "VALID"}
 
         # 5. Verify Queue prioritization table
         queue_items = await client.eval_js(

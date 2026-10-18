@@ -24,7 +24,7 @@ The test census surfaced two stale static PWA assertions that still expected sch
 
 ## Follow-up: tablet layout and desktop preference proof
 
-At commit `2a69f94cd4cb96020554e0b4cd1705dfc70169fd`, the affected group was rerun after adding tablet navigation/queue styling and browser evidence for desktop preferences:
+At commit `eae8e6e` plus the read-model follow-up, the affected group was rerun after adding tablet navigation/queue styling, browser evidence for desktop preferences, and repository binding identity projection:
 
 ```text
 tests/test_pwa_real_browser.py tests/test_pwa_desktop_layout.py
@@ -32,10 +32,10 @@ tests/test_dashboard_ui.py tests/test_pwa_assets.py tests/test_pwa_contract.py
 tests/test_pwa_service_worker.py tests/test_dashboard_api.py tests/test_dashboard_security.py
 tests/test_dashboard_stale_isolation.py tests/test_control_plane_api.py
 tests/test_dashboard_service.py tests/test_systemd_scheduler_observer.py
-62 passed, 4 warnings in 61.18s
+63 passed, 4 warnings in 65.03s
 ```
 
-Chrome exercises an authenticated two-operator session: keyboard resize respects 240px/70% pane bounds; only a digest namespace and `{version, ratio, collapsed}` are persisted; a malformed second-account preference falls back to default; first-account collapse survives reload; resetting the second account preserves the first preference; tablet/mobile do not inherit desktop width/collapse and mobile remains detail-first. This supports task 7.3 only, not eight-state visual acceptance.
+Chrome exercises an authenticated two-operator session: keyboard resize respects 240px/70% pane bounds; only a digest namespace and `{version, ratio, collapsed}` are persisted; a malformed second-account preference falls back to default; first-account collapse survives reload; resetting the second account preserves the first preference; tablet/mobile do not inherit desktop width/collapse and mobile remains detail-first. This supports task 7.3, not eight-state visual acceptance.
 
 The browser cache/session security subset was then extended and rerun after adding an authenticated Control Plane POST, explicit 401/403 observations and logout response synchronization:
 
@@ -48,6 +48,12 @@ tests/test_pwa_service_worker.py
 ```
 
 The authenticated Control Plane POST is rejected by request validation without executing an action; revoked sessions receive 401 and a session for a non-allowlisted identity receives 403. After logout, CacheStorage still contains no `/api/*` resources; login as a different authorized operator updates the visible operator identity. The route behavior uses the isolated in-memory UOW and local test server only.
+
+## Follow-up: exact repository identity in the Run/Job read model
+
+Task 2.3 required a backend-authoritative repository identity in the contextual drawer; the prior detail DTO exposed project/change/Run/Job/candidate IDs but not the exact bound repository. `DashboardChangeDetailResponse` now projects the matching durable `ProjectBinding` as `repository_identity` only when the row is valid, has no mismatch reasons and contains a non-empty repository. Invalid bindings expose state `INVALID` but suppress their raw repository value; absent bindings remain `UNKNOWN`. The UI displays this projection from `renderDetail`; there is no repo inference from project display name or Change text.
+
+Focused API, stale-candidate isolation, dashboard security, browser detail binding, and PWA contract group: **19 passed, 4 warnings in 7.60s**. This includes exact valid binding, invalid binding suppression, OpenAPI schema, stale Review/Audit generation isolation and browser drawer rendering. No DB schema change or migration was required.
 
 ## One repository-wide test run and attribution
 

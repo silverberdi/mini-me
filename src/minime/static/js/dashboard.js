@@ -160,6 +160,7 @@ const fetch = (input, init = {}) => {
   const dtChangeName = document.getElementById('dtChangeName');
   const dtStatusBadge = document.getElementById('dtStatusBadge');
   const dtProject = document.getElementById('dtProject');
+  const dtRepository = document.getElementById('dtRepository');
   const dtStage = document.getElementById('dtStage');
   const dtGeneration = document.getElementById('dtGeneration');
   const dtCandidateSha = document.getElementById('dtCandidateSha');
@@ -722,6 +723,11 @@ const fetch = (input, init = {}) => {
     dtStatusBadge.textContent = detail.status;
     dtStatusBadge.className = `badge ${getStatusBadgeClass(detail.status)}`;
     dtProject.textContent = detail.project_id;
+    const bindingState = detail.repository_binding_state || 'UNKNOWN';
+    dtRepository.textContent = bindingState === 'VALID'
+      ? (detail.repository_identity || 'UNKNOWN')
+      : bindingState === 'INVALID' ? 'Vínculo inválido' : 'UNKNOWN';
+    dtRepository.dataset.state = bindingState;
     dtStage.textContent = detail.current_stage || '---';
 
     const gen = detail.candidate_authority ? `gen-${detail.candidate_authority.generation}` : '---';

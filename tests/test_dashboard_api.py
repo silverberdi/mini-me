@@ -18,6 +18,7 @@ from minime.domain.models import (
     OrchestrationRun,
     OrchestrationStageEvent,
     Project,
+    ProjectBinding,
 )
 
 
@@ -55,6 +56,8 @@ def test_openapi_read_models_expose_observed_control_center_fields() -> None:
     assert {
         "project_id",
         "change_name",
+        "repository_identity",
+        "repository_binding_state",
         "run_id",
         "job_id",
         "candidate_authority",
@@ -155,6 +158,13 @@ def test_api_dashboard_change_detail(
         last_readiness_status=ReadinessState.READY,
     )
     in_memory_uow.changes.save(change)
+    in_memory_uow.bindings.save(
+        ProjectBinding(
+            project_id="mini-me",
+            repository="silverberdi/mini-me",
+            openspec_change_name="012-execution-operations-dashboard",
+        )
+    )
 
     run = OrchestrationRun(
         run_id="run-012",
@@ -176,9 +186,34 @@ def test_api_dashboard_change_detail(
     data = resp.json()
     assert data["project_id"] == "mini-me"
     assert data["change_name"] == "012-execution-operations-dashboard"
+    assert data["repository_identity"] == "silverberdi/mini-me"
+    assert data["repository_binding_state"] == "VALID"
     assert data["status"] == "RUNNING"
     assert len(data["pipeline"]) == 6
     assert data["candidate_authority"]["candidate_sha"] == "abc1234567890"
+
+
+def test_api_dashboard_detail_hides_invalid_repository_identity(
+    in_memory_uow: PersistenceUnitOfWork,
+) -> None:
+    in_memory_uow.projects.save(
+        Project(project_id="mini-me", display_name="mini me", repository="silverberdi/other")
+    )
+    in_memory_uow.changes.save(Change(project_id="mini-me", name="013-invalid-binding"))
+    in_memory_uow.bindings.save(
+        ProjectBinding(
+            project_id="mini-me",
+            repository="silverberdi/untrusted",
+            openspec_change_name="013-invalid-binding",
+            is_valid=False,
+            mismatch_reasons=["repository mismatch"],
+        )
+    )
+    app.dependency_overrides[get_uow] = lambda: in_memory_uow
+    response = TestClient(app).get("/api/v1/dashboard/changes/mini-me/013-invalid-binding")
+    assert response.status_code == 200
+    assert response.json()["repository_identity"] is None
+    assert response.json()["repository_binding_state"] == "INVALID"
 
 
 def test_api_dashboard_run_detail(
