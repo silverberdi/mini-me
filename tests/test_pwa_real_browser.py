@@ -729,9 +729,14 @@ async def test_control_center_viewport_evidence(browser_test_env: dict[str, Any]
         session_token, _ = session_mgr.create_session("operator@example.com")
         await authenticate_browser(client, browser_test_env["server_url"], session_token)
         await client.eval_js("document.getElementById('navTabExecutions').click()")
-        evidence_dir = (
-            Path(__file__).parents[1]
-            / "openspec/changes/pwa-control-center-ux-convergence/evidence/browser"
+        evidence_dir = Path(
+            os.environ.get(
+                "MINIME_PWA_EVIDENCE_DIR",
+                str(
+                    Path(__file__).parents[1]
+                    / "openspec/changes/pwa-control-center-ux-convergence/evidence/browser"
+                ),
+            )
         )
         evidence_dir.mkdir(parents=True, exist_ok=True)
         viewports = (
