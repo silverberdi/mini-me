@@ -2224,7 +2224,7 @@ async def test_real_browser_authenticated_control_plane_cancel_persists_in_dispo
     assert parsed.host in {"127.0.0.1", "localhost"}, (
         "Refusing to use a non-loopback or non-disposable PostgreSQL target."
     )
-    assert parsed.database == "minime_pwa_e2e" and parsed.database != "minime"
+    assert parsed.database.startswith("minime_pwa_") and parsed.database != "minime"
     postgres_container = os.environ.get("MINIME_TEST_POSTGRES_CONTAINER", "")
     assert postgres_container.startswith("minime-pwa-acceptance-"), (
         "A test-owned disposable PostgreSQL container is required for the container preview."
@@ -2377,7 +2377,7 @@ async def test_real_browser_authenticated_control_plane_cancel_persists_in_dispo
             internal_port=8787,
             env_vars={
                 "MINIME_DATABASE_URL": container_database_url,
-                "MINIME_EXPECTED_DATABASE": "minime_pwa_e2e",
+                "MINIME_EXPECTED_DATABASE": parsed.database,
                 "MINIME_AUTH_ENABLED": "true",
                 "MINIME_AUTHORIZED_OPERATORS": "",
                 "MINIME_RUNTIME_ROOT": "/tmp/minime-preview-runtime",
@@ -2638,6 +2638,7 @@ async def test_real_browser_authenticated_control_plane_cancel_persists_in_dispo
             )
             for width, height, mobile, filename in preview_viewports:
                 await client.set_viewport(width, height, mobile=mobile)
+                await client.eval_js("window.scrollTo({top:0,behavior:'instant'})")
                 await asyncio.sleep(0.15)
                 capture = await client.send_cmd(
                     "Page.captureScreenshot", {"format": "png", "captureBeyondViewport": False}
@@ -2842,6 +2843,7 @@ async def test_real_browser_authenticated_control_plane_cancel_persists_in_dispo
             )
             for width, height, mobile, filename in cancelled_viewports:
                 await client.set_viewport(width, height, mobile=mobile)
+                await client.eval_js("window.scrollTo({top:0,behavior:'instant'})")
                 await asyncio.sleep(0.15)
                 capture = await client.send_cmd(
                     "Page.captureScreenshot", {"format": "png", "captureBeyondViewport": False}
@@ -2854,7 +2856,7 @@ async def test_real_browser_authenticated_control_plane_cancel_persists_in_dispo
                 "candidate_source_sha": candidate_source_sha,
                 "base_sha": base_sha,
                 "image_digest": image_digest,
-                "database": "minime_pwa_e2e (disposable; loopback host + private Docker bridge)",
+                "database": f"{parsed.database} (disposable; loopback host + private Docker bridge)",
                 "run_id": run_id,
                 "job_id": job_id,
                 "project_id": project_id,
