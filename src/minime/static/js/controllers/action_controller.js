@@ -44,8 +44,10 @@ export function createActionController({
     const runId = detail?.run_id;
     displayedDetail = detail || null;
     displayedActions = [];
+    toolbar.innerHTML = runId
+      ? '<span class="text-muted" role="status">Cargando acciones…</span>'
+      : '';
     if (!runId) {
-      toolbar.replaceChildren();
       return;
     }
     try {

@@ -131,6 +131,11 @@ const showToast = createToastController();
 
   const detailPlaceholder = document.getElementById('detailPlaceholder');
   const detailContent = document.getElementById('detailContent');
+  const detailPanel = document.getElementById('detailPanel');
+  const detailDrawerBackdrop = document.getElementById('detailDrawerBackdrop');
+  const closeDetailDrawerButton = document.getElementById('closeDetailDrawer');
+  let detailDrawerReturnFocus = null;
+  let detailDrawerReturnIdentity = null;
   const dtChangeName = document.getElementById('dtChangeName');
   const dtStatusBadge = document.getElementById('dtStatusBadge');
   const dtProject = document.getElementById('dtProject');
@@ -270,6 +275,8 @@ const showToast = createToastController();
       overviewFreshness: document.getElementById("overviewFreshness"),
       queueFreshness: document.getElementById("queueFreshness"),
       providerFreshness: document.getElementById("providerFreshness"),
+      activityFreshness: document.getElementById("activityFreshness"),
+      activityList: document.getElementById("activityList"),
       healthFreshness: document.getElementById("healthFreshness"),
       dbHealthBadge,
       kpiGrid: document.getElementById("operationalKpis"),
@@ -289,6 +296,21 @@ const showToast = createToastController();
       changesTableBody,
       detailContent,
       detailPlaceholder,
+    },
+    setDetailDrawerOpen: (open, identity = null) => {
+      const desktop = window.matchMedia('(min-width: 1200px)').matches;
+      const isOpen = Boolean(open && desktop);
+      if (isOpen && !detailPanel?.classList.contains('drawer-open')) {
+        detailDrawerReturnFocus = document.activeElement;
+        detailDrawerReturnIdentity = identity ? {
+          projectId: identity.project_id,
+          changeName: identity.change_name,
+        } : null;
+      }
+      detailPanel?.classList.toggle('drawer-open', isOpen);
+      document.body.classList.toggle('detail-drawer-open', isOpen);
+      if (detailDrawerBackdrop) detailDrawerBackdrop.hidden = !isOpen;
+      if (isOpen) window.requestAnimationFrame(() => closeDetailDrawerButton?.focus());
     },
     setOfflineBanner,
     onUnauthorized: () => sessionController.showLogin(),
@@ -389,6 +411,30 @@ const showToast = createToastController();
     changesTableBody,
     attentionItemsContainer,
     copyShaButton: copyShaBtn,
+    detailCloseButton: closeDetailDrawerButton,
+    detailBackdrop: detailDrawerBackdrop,
+    closeDetailDrawer: () => {
+      if (!detailPanel?.classList.contains('drawer-open')) return false;
+      detailPanel.classList.remove('drawer-open');
+      document.body.classList.remove('detail-drawer-open');
+      if (detailDrawerBackdrop) detailDrawerBackdrop.hidden = true;
+      window.requestAnimationFrame(() => {
+        if (detailDrawerReturnIdentity) {
+          const returnTarget = document.querySelector('#changesTableBody tr.selected')
+            || [...document.querySelectorAll('[data-project-id][data-change-name]')]
+            .find((node) => node.dataset.projectId === detailDrawerReturnIdentity.projectId
+              && node.dataset.changeName === detailDrawerReturnIdentity.changeName);
+          if (returnTarget) {
+            returnTarget.focus();
+            return;
+          }
+        }
+        if (detailDrawerReturnFocus instanceof HTMLElement && detailDrawerReturnFocus.isConnected) {
+          detailDrawerReturnFocus.focus();
+        }
+      });
+      return true;
+    },
     candidateShaNode: dtCandidateSha,
     fetchBacklog: () => currentProjectId ? fetchBacklog(currentProjectId) : backlogController.renderUnavailable(),
     fetchProjects,

@@ -12,6 +12,7 @@ export function createExecutionViewController({
   onUnauthorized,
   getNavigationState,
   renderDetail,
+  setDetailDrawerOpen = () => {},
   statusClass,
   formatRelativeTime,
 }) {
@@ -19,6 +20,7 @@ export function createExecutionViewController({
   let queueData = null;
   let providerData = null;
   let healthData = null;
+  let activityData = null;
   let selectedChange = null;
   let detailRequestSequence = 0;
   let refreshInProgress = false;
@@ -27,12 +29,13 @@ export function createExecutionViewController({
 
   function renderOperationalPanels(results) {
     renderOperationalPanelsView({
-      data: { overview: overviewData, queue: queueData, providers: providerData, health: healthData },
+      data: { overview: overviewData, queue: queueData, providers: providerData, health: healthData, activity: activityData },
       results: {
         overview: results.overviewResult,
         queue: results.queueResult,
         providers: results.providerResult,
         health: results.healthResult,
+        activity: results.activityResult,
       },
       elements: {
         queueList: elements.queueList,
@@ -41,6 +44,8 @@ export function createExecutionViewController({
         queueFreshness: elements.queueFreshness,
         providerFreshness: elements.providerFreshness,
         healthFreshness: elements.healthFreshness,
+        activityFreshness: elements.activityFreshness,
+        activityList: elements.activityList,
         dbHealthBadge: elements.dbHealthBadge,
         kpiSystemStateVal: elements.kpiSystemStateVal,
       },
@@ -124,8 +129,9 @@ export function createExecutionViewController({
     }
   }
 
-  function selectChange(projectId, changeName) {
+  function selectChange(projectId, changeName, options = {}) {
     selectedChange = { project_id: projectId, change_name: changeName };
+    setDetailDrawerOpen(options.openDrawer !== false, selectedChange);
     if (elements.detailContent) elements.detailContent.style.display = "none";
     if (elements.detailPlaceholder) {
       elements.detailPlaceholder.style.display = "block";
@@ -136,23 +142,24 @@ export function createExecutionViewController({
   }
 
   async function refreshOnce() {
-    const [overviewResult, queueResult, providerResult, healthResult] = await Promise.allSettled([
-      readApi.overview(), readApi.queue(), readApi.providers(), readApi.health(),
+    const [overviewResult, queueResult, providerResult, healthResult, activityResult] = await Promise.allSettled([
+      readApi.overview(), readApi.queue(), readApi.providers(), readApi.health(), readApi.events(),
     ]);
-    const unauthorized = [overviewResult, queueResult, providerResult, healthResult]
+    const unauthorized = [overviewResult, queueResult, providerResult, healthResult, activityResult]
       .some((result) => result.status === "rejected" && [401, 403].includes(result.reason?.status));
     if (unauthorized) {
       clear();
       onUnauthorized();
-      renderOperationalPanels({ overviewResult, queueResult, providerResult, healthResult });
+      renderOperationalPanels({ overviewResult, queueResult, providerResult, healthResult, activityResult });
       return;
     }
     overviewData = overviewResult.status === "fulfilled" ? overviewResult.value : null;
     queueData = queueResult.status === "fulfilled" ? queueResult.value : null;
     providerData = providerResult.status === "fulfilled" ? providerResult.value : null;
     healthData = healthResult.status === "fulfilled" ? healthResult.value : null;
+    activityData = activityResult.status === "fulfilled" ? activityResult.value : null;
     renderOverview();
-    renderOperationalPanels({ overviewResult, queueResult, providerResult, healthResult });
+    renderOperationalPanels({ overviewResult, queueResult, providerResult, healthResult, activityResult });
     if (selectedChange && overviewData) void fetchChangeDetail(selectedChange.project_id, selectedChange.change_name);
   }
 
@@ -177,11 +184,13 @@ export function createExecutionViewController({
     queueData = null;
     providerData = null;
     healthData = null;
+    activityData = null;
     selectedChange = null;
+    setDetailDrawerOpen(false);
     detailRequestSequence += 1;
     renderOverview();
     const rejected = { status: "rejected" };
-    renderOperationalPanels({ overviewResult: rejected, queueResult: rejected, providerResult: rejected, healthResult: rejected });
+    renderOperationalPanels({ overviewResult: rejected, queueResult: rejected, providerResult: rejected, healthResult: rejected, activityResult: rejected });
   }
 
   return {

@@ -32,7 +32,7 @@ export function renderChangesView({ root, changes, filter, query, selected, alre
   }).join("");
 
   if (!alreadyAutoSelected && !selected) {
-    onSelect(visible[0].project_id, visible[0].change_name);
+    onSelect(visible[0].project_id, visible[0].change_name, { openDrawer: false });
     return true;
   }
   return alreadyAutoSelected;

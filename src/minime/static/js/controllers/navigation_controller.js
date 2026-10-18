@@ -13,6 +13,9 @@ export function createNavigationController({
   changesTableBody,
   attentionItemsContainer,
   copyShaButton,
+  detailCloseButton,
+  detailBackdrop,
+  closeDetailDrawer = () => false,
   candidateShaNode,
   fetchBacklog,
   fetchProjects,
@@ -41,7 +44,7 @@ export function createNavigationController({
     mainViewPanes.forEach((pane) => {
       const selected = pane.id === viewName;
       pane.style.display = selected
-        ? (viewName === 'viewExecutions' && windowRef.matchMedia('(min-width: 1200px)').matches ? 'grid' : 'block')
+        ? (viewName === 'viewExecutions' && windowRef.matchMedia('(min-width: 768px)').matches ? 'grid' : 'block')
         : 'none';
       pane.classList.toggle('active', selected);
     });
@@ -76,6 +79,14 @@ export function createNavigationController({
       const view = tab.getAttribute('data-main-view');
       if (view) switchView(view);
     }));
+    const closeDrawer = () => {
+      closeDetailDrawer();
+    };
+    detailCloseButton?.addEventListener('click', closeDrawer);
+    detailBackdrop?.addEventListener('click', closeDrawer);
+    documentRef.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') closeDrawer();
+    });
     scrollButtons.forEach((button) => button.addEventListener('click', () => {
       switchView('viewExecutions');
       documentRef.getElementById(button.getAttribute('data-scroll-to'))?.scrollIntoView({
@@ -126,7 +137,10 @@ export function createNavigationController({
     });
     changesTableBody?.addEventListener('click', (event) => {
       const row = event.target.closest('[data-project-id]');
-      if (row) selectChange(row.getAttribute('data-project-id'), row.getAttribute('data-change-name'));
+      if (row) {
+        row.focus();
+        selectChange(row.getAttribute('data-project-id'), row.getAttribute('data-change-name'));
+      }
     });
     changesTableBody?.addEventListener('keydown', (event) => {
       if (event.key !== 'Enter' && event.key !== ' ') return;

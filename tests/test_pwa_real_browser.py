@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import ipaddress
 import json
 import os
 import re
@@ -12,6 +13,7 @@ import socket
 import subprocess
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -746,20 +748,73 @@ async def test_control_center_viewport_evidence(browser_test_env: dict[str, Any]
                 "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
             )
             assert overflow is True, f"Horizontal overflow at {width}x{height}"
+            clipped = await client.eval_js("""
+              (() => [...document.querySelectorAll(`#detailPanel h1, #detailPanel h2, #detailPanel .step-label,
+                  #detailPanel .badge, #viewExecutions .attention-banner h2`)]
+                .filter(node => node.getClientRects().length)
+                .filter(node => {
+                  const style = getComputedStyle(node);
+                  return (style.textOverflow === 'ellipsis' || style.overflowX === 'hidden')
+                    && node.scrollWidth > node.clientWidth + 1;
+                }).map(node => ({selector:node.tagName.toLowerCase() + '.' + node.className,
+                  text:node.innerText, width:node.clientWidth, scrollWidth:node.scrollWidth})) )()
+            """)
+            assert clipped == [], (
+                f"Essential text is destructively clipped at {width}x{height}: {clipped}"
+            )
+            geometry = await client.eval_js(
+                "(() => { const rect = selector => { const node = document.querySelector(selector); "
+                "const box = node.getBoundingClientRect(); return {top: box.top, left: box.left, "
+                "width: box.width, height: box.height, display: getComputedStyle(node).display}; }; "
+                "return {detail: rect('#viewExecutions .detail-panel'), "
+                "attention: rect('#viewExecutions .attention-banner'), "
+                "queue: rect('#viewExecutions .queue-panel')}; })()"
+            )
+            assert geometry["detail"]["display"] != "none" and geometry["detail"]["height"] > 0, (
+                f"Selected Run detail must remain visible at {width}x{height}: {geometry}"
+            )
+            if width >= 1200:
+                assert geometry["detail"]["top"] < geometry["queue"]["top"], (
+                    f"Desktop Run hero must precede queue and attention panels: {geometry}"
+                )
+            if width < 768:
+                assert (
+                    geometry["detail"]["top"]
+                    < geometry["attention"]["top"]
+                    < geometry["queue"]["top"]
+                ), f"Mobile must prioritize the selected Run before attention and queue: {geometry}"
             if 768 <= width < 1200:
                 tablet = await client.eval_js(
                     "(() => { const rail = document.querySelector('.main-nav-tabs'); "
                     "const split = document.querySelector('#viewExecutions .content-split'); "
-                    "return {rail: rail.getBoundingClientRect().width, position: getComputedStyle(rail).position, "
+                    "const view = document.getElementById('viewExecutions'); "
+                    "return {viewDisplay: getComputedStyle(view).display, inlineDisplay: view.style.display, "
+                    "rail: rail.getBoundingClientRect().width, position: getComputedStyle(rail).position, "
                     "display: getComputedStyle(split).display, master: split.querySelector('.master-panel').getBoundingClientRect().left, "
                     "detail: split.querySelector('.detail-panel').getBoundingClientRect().left}; })()"
                 )
                 assert tablet["rail"] == 64 and tablet["position"] == "fixed", (
                     f"Tablet navigation must use the compact fixed rail: {tablet}"
                 )
-                assert tablet["display"] == "grid" and tablet["detail"] > tablet["master"], (
-                    f"Tablet must preserve master-detail operation: {tablet}"
-                )
+                assert (
+                    tablet["viewDisplay"] == "grid"
+                    and tablet["display"] == "contents"
+                    and tablet["detail"] > tablet["master"]
+                ), f"Tablet must preserve master-detail operation: {tablet}"
+                if width < 1200:
+                    compact_list = await client.eval_js("""
+                      (() => ({tableWidth: document.getElementById('changesTable').clientWidth,
+                        tableScrollWidth: document.getElementById('changesTable').scrollWidth,
+                        header: getComputedStyle(document.querySelector('#changesTable thead')).display,
+                        projectColumn: getComputedStyle(document.querySelector('#changesTableBody tr[data-project-id] td:nth-child(3)')).display,
+                        nameColumn: getComputedStyle(document.querySelector('#changesTableBody tr[data-project-id] td:nth-child(2)')).display}))()
+                    """)
+                    assert compact_list["tableScrollWidth"] <= compact_list["tableWidth"]
+                    assert (
+                        compact_list["header"] == "none"
+                        and compact_list["projectColumn"] == "none"
+                        and compact_list["nameColumn"] != "none"
+                    ), compact_list
             if width < 768:
                 layout = await client.eval_js(
                     "(() => { const split = document.querySelector('#viewExecutions .content-split'); "
@@ -767,7 +822,7 @@ async def test_control_center_viewport_evidence(browser_test_env: dict[str, Any]
                     "detail: split.querySelector('.detail-panel').getBoundingClientRect().top, "
                     "master: split.querySelector('.master-panel').getBoundingClientRect().top}; })()"
                 )
-                assert layout["display"] == "flex" and layout["detail"] < layout["master"], (
+                assert layout["display"] == "contents" and layout["detail"] < layout["master"], (
                     f"Mobile must prioritize the execution detail: {layout}"
                 )
                 toolbar_visible = await client.eval_js(
@@ -778,6 +833,57 @@ async def test_control_center_viewport_evidence(browser_test_env: dict[str, Any]
                 "Page.captureScreenshot", {"format": "png", "captureBeyondViewport": False}
             )
             (evidence_dir / filename).write_bytes(base64.b64decode(screenshot["data"]))
+
+        await client.set_viewport(1440, 900)
+        selected_row = await client.eval_js("""
+          (() => { const row = [...document.querySelectorAll('#changesTableBody tr[data-project-id]')]
+            .find(item => item.dataset.changeName === '017-pwa-control-center');
+            row?.click(); return Boolean(row); })()
+        """)
+        assert selected_row, "The active Change fixture should provide an inspectable Run drawer."
+        drawer = None
+        for _ in range(30):
+            drawer = await client.eval_js("""
+              (() => { const node = document.getElementById('detailPanel'); const rect = node.getBoundingClientRect();
+                return {open: node.classList.contains('drawer-open'), left: rect.left, width: rect.width,
+                  viewport: innerWidth, backdrop: !document.getElementById('detailDrawerBackdrop').hidden}; })()
+            """)
+            if drawer["open"]:
+                break
+            await asyncio.sleep(0.05)
+        assert (
+            drawer["open"]
+            and drawer["backdrop"]
+            and drawer["width"] <= drawer["viewport"] * 0.56 + 1
+        ), drawer
+        assert drawer["left"] >= drawer["viewport"] * 0.44 - 1, drawer
+        for _ in range(30):
+            toolbar_text = await client.eval_js(
+                "document.getElementById('actionToolbar').innerText"
+            )
+            if "Cargando acciones" not in toolbar_text:
+                break
+            await asyncio.sleep(0.05)
+        drawer_capture = await client.send_cmd(
+            "Page.captureScreenshot", {"format": "png", "captureBeyondViewport": False}
+        )
+        (evidence_dir / "desktop-running-run-drawer-mock-seeded.png").write_bytes(
+            base64.b64decode(drawer_capture["data"])
+        )
+        await client.eval_js("document.getElementById('closeDetailDrawer').click()")
+        closed = None
+        for _ in range(20):
+            closed = await client.eval_js("""
+              ({open: document.getElementById('detailPanel').classList.contains('drawer-open'),
+                backdrop: !document.getElementById('detailDrawerBackdrop').hidden,
+                focus: document.activeElement.getAttribute('data-change-name')})
+            """)
+            if closed["focus"]:
+                break
+            await asyncio.sleep(0.02)
+        assert closed == {"open": False, "backdrop": False, "focus": "017-pwa-control-center"}, (
+            closed
+        )
     finally:
         await client.close()
 
@@ -1851,6 +1957,552 @@ async def test_real_browser_keyboard_tabs_focus_names_and_reduced_motion(
     finally:
         await client.send_cmd("Emulation.setEmulatedMedia", {"features": []})
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_control_center_accessibility_and_theme_contrast_at_approved_viewports(
+    browser_test_env: dict[str, Any],
+) -> None:
+    client = ChromeCDPClient(browser_test_env["ws_url"])
+    await client.connect()
+    try:
+        await authenticate_browser(
+            client, browser_test_env["server_url"], browser_test_env["session_token"]
+        )
+        await client.eval_js("document.getElementById('navTabExecutions').click()")
+        viewports = (
+            (1440, 900, False),
+            (1024, 768, False),
+            (768, 1024, True),
+            (390, 844, True),
+            (360, 800, True),
+        )
+        for width, height, mobile in viewports:
+            await client.set_viewport(width, height, mobile=mobile)
+            for theme in ("theme-dark", "theme-light"):
+                await client.eval_js(
+                    f"document.body.classList.remove('theme-dark','theme-light'); "
+                    f"document.body.classList.add('{theme}')"
+                )
+                findings = await client.eval_js("""
+                  (() => {
+                    const visible = node => !!node.getClientRects().length
+                      && getComputedStyle(node).visibility !== 'hidden';
+                    const unnamed = [...document.querySelectorAll('button,input,select,textarea,a[href],[role="separator"]')]
+                      .filter(visible).filter(node => !node.getAttribute('aria-hidden')
+                        && !(node.getAttribute('aria-label') || node.getAttribute('aria-labelledby')
+                          || node.title || node.labels?.length || node.innerText?.trim() || node.alt))
+                      .map(node => `${node.tagName.toLowerCase()}#${node.id}.${node.className}`);
+                    const linear = channel => channel <= .04045 ? channel / 12.92 : ((channel + .055) / 1.055) ** 2.4;
+                    const rgb = value => {
+                      if (value.startsWith('#')) {
+                        const hex = value.slice(1);
+                        const full = hex.length === 3 ? [...hex].map(char => char + char).join('') : hex;
+                        return [0,2,4].map(index => linear(parseInt(full.slice(index,index + 2),16) / 255));
+                      }
+                      return value.match(/[\\d.]+/g).slice(0,3).map(Number).map(channel => {
+                        return linear(channel / 255);
+                      });
+                    };
+                    const ratio = (foreground, background) => {
+                      const [f,b] = [rgb(foreground), rgb(background)].map(channels =>
+                        channels[0] * .2126 + channels[1] * .7152 + channels[2] * .0722);
+                      return (Math.max(f,b) + .05) / (Math.min(f,b) + .05);
+                    };
+                    const root = getComputedStyle(document.body);
+                    const main = root.getPropertyValue('--text-main').trim();
+                    const muted = root.getPropertyValue('--text-muted').trim();
+                    const background = root.getPropertyValue('--bg-card').trim();
+                    const contrast = {main: ratio(main, background), muted: ratio(muted, background)};
+                    const targets = [...document.querySelectorAll('.bottom-nav button')].filter(visible)
+                      .map(node => ({label: node.getAttribute('aria-label') || node.innerText.trim(),
+                        height: node.getBoundingClientRect().height, width: node.getBoundingClientRect().width}));
+                    return {unnamed, contrast, targets,
+                      noHorizontalOverflow: document.documentElement.scrollWidth <= document.documentElement.clientWidth,
+                      mainLandmark: document.querySelectorAll('main[role="main"]').length};
+                  })()
+                """)
+                assert findings["unnamed"] == [], (
+                    f"Unnamed controls at {width}x{height}/{theme}: {findings}"
+                )
+                assert findings["noHorizontalOverflow"] and findings["mainLandmark"] == 1
+                assert min(findings["contrast"].values()) >= 4.5, (
+                    f"Theme token text contrast below WCAG AA at {width}x{height}/{theme}: {findings}"
+                )
+                if mobile:
+                    assert all(target["height"] >= 44 for target in findings["targets"]), (
+                        f"Mobile bottom-nav target below 44px at {width}x{height}/{theme}: {findings}"
+                    )
+
+        # Reflow checks at 200%-equivalent CSS widths for the two larger target
+        # viewports. Mobile already exercises the 320-CSS-pixel reflow floor.
+        for width, height in ((720, 450), (512, 384), (320, 800)):
+            await client.set_viewport(width, height, mobile=width <= 390)
+            reflow = await client.eval_js("""
+              (() => {
+                const visible = node => node.getClientRects().length > 0;
+                const main = document.querySelector('main[role="main"]');
+                const namedControls = [...document.querySelectorAll('button, input, select, a[href]')]
+                  .filter(visible).filter(node => !node.getAttribute('aria-hidden'));
+                const tabStrip = document.querySelector('.detail-tabs');
+                return {
+                  width: document.documentElement.clientWidth,
+                  scrollWidth: document.documentElement.scrollWidth,
+                  mainVisible: Boolean(main && visible(main)),
+                  controlsOutsideViewport: namedControls.filter(node => {
+                    if (node.closest('.detail-tabs')) return false;
+                    const rect = node.getBoundingClientRect();
+                    return rect.left < 0 || rect.right > document.documentElement.clientWidth;
+                  }).map(node => `${node.tagName.toLowerCase()}#${node.id}.${node.className}`),
+                  tabStripIsScrollable: Boolean(tabStrip && getComputedStyle(tabStrip).overflowX === 'auto'
+                    && tabStrip.scrollWidth >= tabStrip.clientWidth),
+                };
+              })()
+            """)
+            assert reflow["scrollWidth"] <= reflow["width"] and reflow["mainVisible"], reflow
+            assert reflow["controlsOutsideViewport"] == [], reflow
+            assert reflow["tabStripIsScrollable"], reflow
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_real_browser_authenticated_control_plane_cancel_persists_in_disposable_postgres(
+    browser_test_env: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exercise authenticated UI + Control Plane against isolated durable PostgreSQL."""
+    from sqlalchemy.engine import make_url
+
+    from minime.db.repository import PostgresPersistenceUnitOfWork
+    from minime.db.session import db_manager, verify_physical_schema_invariants
+    from minime.domain.enums import ChangeStatus, JobStatus, OrchestrationStage, ReadinessState
+    from minime.domain.models import Change, Job, OrchestrationRun, Project, ProjectBinding
+    from minime.services.auth_service import AuthorizedOperatorService, SessionManager
+    from minime.services.container_preview_service import ContainerPreviewService
+
+    database_url = os.environ.get("MINIME_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("A disposable PostgreSQL URL is required for the authenticated browser E2E.")
+    parsed = make_url(database_url)
+    assert parsed.host in {"127.0.0.1", "localhost"}, (
+        "Refusing to use a non-loopback or non-disposable PostgreSQL target."
+    )
+    assert parsed.database == "minime_pwa_e2e" and parsed.database != "minime"
+    postgres_container = os.environ.get("MINIME_TEST_POSTGRES_CONTAINER", "")
+    assert postgres_container.startswith("minime-pwa-acceptance-"), (
+        "A test-owned disposable PostgreSQL container is required for the container preview."
+    )
+    inspect_db = subprocess.run(
+        [
+            "docker",
+            "inspect",
+            "--format",
+            "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+            postgres_container,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    container_db_host = inspect_db.stdout.strip()
+    assert ipaddress.ip_address(container_db_host).is_private, (
+        "The preview database must be reachable only through a private Docker bridge address."
+    )
+    container_database_url = parsed.set(host=container_db_host, port=5432).render_as_string(
+        hide_password=False
+    )
+
+    old_url = db_manager._database_url
+    old_engine = db_manager._engine
+    old_sessionmaker = db_manager._sessionmaker
+    old_overrides = dict(app.dependency_overrides)
+    preview_service = ContainerPreviewService()
+    preview_session = None
+    if old_engine is not None:
+        old_engine.dispose()
+    db_manager._engine = None
+    db_manager._sessionmaker = None
+    db_manager._database_url = database_url
+    monkeypatch.setenv("MINIME_DATABASE_URL", database_url)
+    monkeypatch.setenv("MINIME_AUTH_ENABLED", "true")
+    monkeypatch.setenv("MINIME_AUTHORIZED_OPERATORS", "")
+
+    try:
+        engine = db_manager.engine
+        schema = verify_physical_schema_invariants(engine)
+        assert schema.valid, f"Disposable PostgreSQL schema is not at the canonical head: {schema}"
+
+        seed_session = db_manager.sessionmaker()
+        uow = PostgresPersistenceUnitOfWork(seed_session)
+        suffix = uuid.uuid4().hex[:12]
+        project_id = f"qa-pwa-{suffix}"
+        change_name = f"control-center-action-{suffix}"
+        run_id = f"qa-run-{suffix}"
+        job_id = f"qa-job-{suffix}"
+        operator_email = f"pwa-e2e-{suffix}@example.invalid"
+        base_sha = "a" * 40
+        uow.projects.save(
+            Project(
+                project_id=project_id,
+                display_name=f"PWA disposable acceptance {suffix}",
+                repository=f"silverberdi/pwa-acceptance-{suffix}",
+                base_branch="main",
+            )
+        )
+        uow.changes.save(
+            Change(
+                project_id=project_id,
+                name=change_name,
+                status=ChangeStatus.IN_PROGRESS,
+                last_readiness_status=ReadinessState.READY,
+            )
+        )
+        uow.bindings.save(
+            ProjectBinding(
+                project_id=project_id,
+                repository=f"silverberdi/pwa-acceptance-{suffix}",
+                openspec_change_name=change_name,
+            )
+        )
+        uow.jobs.save(
+            Job(
+                job_id=job_id,
+                project_id=project_id,
+                change_name=change_name,
+                status=JobStatus.RUNNING,
+                implementer_role="codex",
+                current_executor="codex",
+                base_sha=base_sha,
+            )
+        )
+        uow.orchestration_runs.save(
+            OrchestrationRun(
+                run_id=run_id,
+                project_id=project_id,
+                change_name=change_name,
+                base_sha=base_sha,
+                current_stage=OrchestrationStage.IMPLEMENTING,
+                active_job_id=job_id,
+                is_active=True,
+            )
+        )
+        AuthorizedOperatorService(uow).seed_operator(operator_email, display_name="Disposable QA")
+        session_token, _ = SessionManager(uow).create_session(operator_email)
+        forbidden_token, _ = SessionManager(uow).create_session(
+            f"not-allowlisted-{suffix}@example.invalid"
+        )
+        uow.commit()
+        persisted_seed = uow.orchestration_runs.get_by_id(run_id)
+        assert persisted_seed is not None and persisted_seed.is_active
+        assert persisted_seed.current_stage == OrchestrationStage.IMPLEMENTING
+        seed_session.close()
+
+        candidate_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True, timeout=10
+        ).strip()
+        base_sha = subprocess.check_output(
+            ["git", "merge-base", "HEAD", "origin/main"], text=True, timeout=10
+        ).strip()
+        image_tag = f"minime-pwa-e2e:{candidate_sha[:12]}"
+        image_digest = await preview_service.build_image(Path(__file__).parents[1], image_tag)
+        preview_session = PreviewSession(
+            preview_id=f"pwa-e2e-{suffix}",
+            project_id=project_id,
+            change_name=change_name,
+            run_id=run_id,
+            job_id=job_id,
+            candidate_generation=1,
+            head_sha=candidate_sha,
+            base_sha=base_sha,
+            image_digest=image_digest,
+            container_name=f"minime-pwa-e2e-{suffix}",
+        )
+        container_id, preview_url, host_port = await preview_service.start_preview_container(
+            preview_session,
+            image_digest,
+            internal_port=8787,
+            env_vars={
+                "MINIME_DATABASE_URL": container_database_url,
+                "MINIME_EXPECTED_DATABASE": "minime_pwa_e2e",
+                "MINIME_AUTH_ENABLED": "true",
+                "MINIME_AUTHORIZED_OPERATORS": "",
+                "MINIME_RUNTIME_ROOT": "/tmp/minime-preview-runtime",
+            },
+        )
+        preview_session.container_id = container_id
+        preview_session.preview_url = preview_url
+        preview_session.allocated_port = host_port
+        preview_healthy = await preview_service.probe_health(
+            preview_url, health_path="/health", max_attempts=40
+        )
+        if not preview_healthy:
+            preview_logs = subprocess.run(
+                ["docker", "logs", container_id],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            sanitized_logs = preview_service._sanitize_text(
+                (preview_logs.stdout + "\n" + preview_logs.stderr)[-6000:]
+            )
+            raise AssertionError(f"Candidate container did not become healthy:\n{sanitized_logs}")
+        image_user = subprocess.run(
+            ["docker", "inspect", "--format", "{{.Config.User}}", container_id],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout.strip()
+        assert image_user == "minime", (
+            f"Preview must run as its dedicated non-root user: {image_user!r}"
+        )
+
+        # Exercise the production dependency/middleware path: both close their own
+        # sessions instead of retaining test-managed UoWs across browser requests.
+        app.dependency_overrides.pop(get_uow, None)
+        client = ChromeCDPClient(browser_test_env["ws_url"])
+        await client.connect()
+        try:
+            await client.navigate(preview_url + "/")
+            await authenticate_browser(client, preview_url, session_token)
+            api_identity = await client.eval_js(
+                """
+              (async () => {
+                const [overview, detail, unauthenticated] = await Promise.all([
+                  fetch('/api/v1/dashboard/overview', {cache:'no-store'}),
+                  fetch('/api/v1/dashboard/runs/%s', {cache:'no-store'}),
+                  fetch('/api/v1/dashboard/overview', {credentials:'omit',cache:'no-store'})
+                ]);
+                const [overviewBody, detailBody] = await Promise.all([overview.json(), detail.json()]);
+                const forbidden = await fetch('/api/v1/dashboard/overview', {
+                  credentials:'omit',cache:'no-store',headers:{Authorization:'Bearer %s'}
+                });
+                return {overviewStatus:overview.status, projects:overviewBody.changes?.filter(item=>item.project_id === '%s').map(item=>item.project_id) || [],
+                  detailStatus:detail.status, runId:detailBody.run_id, projectId:detailBody.project_id,
+                  changeName:detailBody.change_name, candidate:detailBody.candidate_authority?.candidate_sha || null,
+                  schedulerFreshness:overviewBody.system_status?.scheduler_service?.freshness,
+                  schedulerActive:overviewBody.system_status?.scheduler_service?.active_state,
+                  unauthenticatedStatus:unauthenticated.status, forbiddenStatus:forbidden.status};
+              })()
+            """
+                % (run_id, forbidden_token, project_id)
+            )
+            assert api_identity == {
+                "overviewStatus": 200,
+                "projects": [project_id],
+                "detailStatus": 200,
+                "runId": run_id,
+                "projectId": project_id,
+                "changeName": change_name,
+                "candidate": None,
+                "schedulerFreshness": "UNKNOWN",
+                "schedulerActive": "UNKNOWN",
+                "unauthenticatedStatus": 401,
+                "forbiddenStatus": 403,
+            }, api_identity
+
+            # Exercise offline degradation on the actual containerized FastAPI
+            # preview. The backend observation is UNKNOWN in this container,
+            # and no offline mutation may be queued or replayed after reconnect.
+            await client.send_cmd("Network.enable", {})
+            await client.send_cmd(
+                "Network.emulateNetworkConditions",
+                {"offline": True, "latency": 0, "downloadThroughput": 0, "uploadThroughput": 0},
+            )
+            await asyncio.sleep(0.2)
+            offline_state = await client.eval_js("""
+              (() => ({online:navigator.onLine,
+                banner:document.getElementById('offlineBanner').classList.contains('is-visible'),
+                freshness:document.getElementById('overviewFreshness').dataset.state}))()
+            """)
+            assert offline_state == {"online": False, "banner": True, "freshness": "STALE"}, (
+                offline_state
+            )
+            offline_mutation = await client.eval_js(
+                """
+              fetch('/api/v1/runs/%s/actions/CANCEL', {method:'POST',
+                credentials:'same-origin',headers:{'Content-Type':'application/json'},body:'{}'})
+                .then(response=>({status:response.status}))
+                .catch(error=>({failed:true,name:error.name}))
+            """
+                % run_id
+            )
+            assert offline_mutation.get("failed") is True, offline_mutation
+            await client.send_cmd(
+                "Network.emulateNetworkConditions",
+                {"offline": False, "latency": 0, "downloadThroughput": -1, "uploadThroughput": -1},
+            )
+            refreshed = None
+            for _ in range(40):
+                refreshed = await client.eval_js("""
+                  ({online:navigator.onLine,
+                    freshness:document.getElementById('overviewFreshness').dataset.state,
+                    banner:document.getElementById('offlineBanner').classList.contains('is-visible')})
+                """)
+                if refreshed == {"online": True, "freshness": "OBSERVED", "banner": False}:
+                    break
+                await asyncio.sleep(0.1)
+            assert refreshed == {"online": True, "freshness": "OBSERVED", "banner": False}, (
+                refreshed
+            )
+            verify_offline_session = db_manager.sessionmaker()
+            offline_uow = PostgresPersistenceUnitOfWork(verify_offline_session)
+            offline_run = offline_uow.orchestration_runs.get_by_id(run_id)
+            offline_actions = offline_uow.operator_actions.list_by_run(run_id, limit=10)
+            verify_offline_session.close()
+            assert offline_run is not None and offline_run.is_active
+            assert offline_actions == [], "Offline mutation must not replay after reconnect."
+
+            await client.eval_js("document.getElementById('navTabExecutions').click()")
+            selected = await client.eval_js(
+                """
+              (() => { const row = [...document.querySelectorAll('#viewExecutions .master-panel tr')]
+                .find(item => item.innerText.includes('%s'));
+                if (row) row.click();
+                return Boolean(row); })()
+            """
+                % change_name
+            )
+            assert selected, {
+                "error": "The real PostgreSQL-backed Change row was not rendered/selectable.",
+                "master": await client.eval_js(
+                    "document.querySelector('#viewExecutions .master-panel')?.innerText || 'missing master panel'"
+                ),
+                "overview": await client.eval_js(
+                    "fetch('/api/v1/dashboard/overview').then(async r=>({status:r.status,body:await r.text()}))"
+                ),
+                "runs": await client.eval_js(
+                    "fetch('/api/v1/orchestration/runs').then(async r=>({status:r.status,body:await r.text()}))"
+                ),
+                "body": await client.eval_js(
+                    "document.getElementById('authenticatedContent').innerText.slice(0,1000)"
+                ),
+            }
+
+            selected_detail = ""
+            for _ in range(40):
+                selected_detail = await client.eval_js(
+                    "document.getElementById('detailPanel').innerText"
+                )
+                if change_name in selected_detail and run_id in selected_detail:
+                    break
+                await asyncio.sleep(0.1)
+            assert change_name in selected_detail and run_id in selected_detail, (
+                "The UI did not bind detail/actions to the selected durable Run identity."
+            )
+
+            action_button = None
+            for _ in range(40):
+                action_button = await client.eval_js("""
+                  (() => { const button = document.querySelector('#actionToolbar [data-action="CANCEL"]');
+                    return button ? {text: button.innerText, disabled: button.disabled, title: button.title} : null; })()
+                """)
+                if action_button and not action_button["disabled"]:
+                    break
+                await asyncio.sleep(0.1)
+            assert (
+                action_button
+                and action_button["text"] == "Cancel Run"
+                and not action_button["disabled"]
+            ), {
+                "action": action_button,
+                "cancel_descriptor": await client.eval_js(
+                    "fetch('/api/v1/runs/%s/actions').then(async r=>(await r.json()).find(a=>a.action==='CANCEL'))"
+                    % run_id
+                ),
+                "run_state": await client.eval_js(
+                    "fetch('/api/v1/orchestration/%s/status').then(async r=>{const d=await r.json(); "
+                    "return {run_id:d.run_id,current_stage:d.current_stage,is_active:d.is_active,"
+                    "stop_outcome:d.stop_outcome}})" % run_id
+                ),
+            }
+            confirmation_opened = await client.eval_js("""
+              (() => { document.querySelector('#actionToolbar [data-action="CANCEL"]').click();
+                const dialog = document.getElementById('actionDialog');
+                return {open:dialog.open, title:dialog.querySelector('[data-dialog-title]').textContent}; })()
+            """)
+            assert confirmation_opened == {"open": True, "title": "Cancel Run"}, confirmation_opened
+            await client.eval_js("document.getElementById('confirmActionBtn').click()")
+
+            final_state = None
+            for _ in range(40):
+                final_state = await client.eval_js("""
+                  ({toast: document.getElementById('toastNotification').textContent,
+                    badge: document.querySelector('#viewExecutions .detail-panel .badge')?.textContent || '',
+                    status: document.querySelector('#viewExecutions .detail-panel')?.innerText || ''})
+                """)
+                verify_session = db_manager.sessionmaker()
+                verify_uow = PostgresPersistenceUnitOfWork(verify_session)
+                run = verify_uow.orchestration_runs.get_by_id(run_id)
+                job = verify_uow.jobs.get_by_id(job_id)
+                records = verify_uow.operator_actions.list_by_run(run_id, limit=1)
+                record = records[0] if records else None
+                verify_session.close()
+                if run and not run.is_active:
+                    break
+                await asyncio.sleep(0.1)
+
+            for _ in range(40):
+                if "Ejecutando" not in final_state["toast"] and (
+                    "CANCELLED" in final_state["status"] or "CANCELLED" in final_state["toast"]
+                ):
+                    break
+                await asyncio.sleep(0.1)
+                final_state = await client.eval_js("""
+                  ({toast: document.getElementById('toastNotification').textContent,
+                    status: document.querySelector('#viewExecutions .detail-panel')?.innerText || ''})
+                """)
+
+            assert (
+                run is not None and not run.is_active and run.stop_outcome.value == "CANCELLED"
+            ), {
+                "run_active": run.is_active if run else None,
+                "run_outcome": run.stop_outcome.value if run and run.stop_outcome else None,
+                "job_status": job.status.value if job else None,
+                "action_record": record.model_dump(mode="json") if record else None,
+                "toast": final_state["toast"],
+                "dialog_open": await client.eval_js("document.getElementById('actionDialog').open"),
+                "action_button": action_button,
+            }
+            assert job is not None and job.status == JobStatus.CANCELLED
+            assert (
+                record is not None
+                and record.run_id == run_id
+                and record.status.value == "COMPLETED"
+            )
+            assert "Acción CANCEL completada" in final_state["toast"]
+            assert "CANCELLED" in final_state["status"] or "CANCELLED" in final_state["toast"]
+
+            stale = await client.eval_js(
+                """
+              (async () => {
+                const response = await fetch('/api/v1/runs/%s/actions/CANCEL', {
+                  method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json'},
+                  body: JSON.stringify({action_request_id: crypto.randomUUID(), project_id:'%s',
+                    change_name:'%s', run_id:'%s', action_type:'CANCEL', parameters:{},
+                    actor_identity:'pwa-e2e', source_interface:'pwa', expected_stage:'IMPLEMENTING',
+                    expected_generation:1})
+                });
+                return {http:response.status, body:await response.json()};
+              })()
+            """
+                % (run_id, project_id, change_name, run_id)
+            )
+            assert stale["http"] == 200 and stale["body"]["status"] != "COMPLETED", stale
+        finally:
+            await client.close()
+    finally:
+        if preview_session is not None:
+            await preview_service.teardown_preview(preview_session)
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(old_overrides)
+        if db_manager._engine is not None:
+            db_manager._engine.dispose()
+        db_manager._engine = old_engine
+        db_manager._sessionmaker = old_sessionmaker
+        db_manager._database_url = old_url
 
 
 @pytest.mark.asyncio

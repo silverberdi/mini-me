@@ -39,6 +39,9 @@ minime = "minime.cli.main:app"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+minime = ["static/*", "static/**/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = [".", "src"]

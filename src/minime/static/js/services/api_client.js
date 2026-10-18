@@ -23,6 +23,7 @@ export const json = async (url, options = {}) => {
 export const api = {
   health: () => json("/health"),
   overview: () => json("/api/v1/dashboard/overview"),
+  events: () => json("/api/v1/dashboard/events?limit=8"),
   queue: () => json("/api/v1/queue"),
   scheduler: () => json("/api/v1/scheduler/status"),
   runs: () => json("/api/v1/orchestration/runs"),

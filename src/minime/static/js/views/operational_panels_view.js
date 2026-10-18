@@ -42,6 +42,13 @@ export function renderOperationalPanels({ data, results, elements, selectChange,
     formatRelativeTime,
   );
   updateFreshness(elements.healthFreshness, results.health, data.health?.observed_at, formatRelativeTime);
+  updateFreshness(
+    elements.activityFreshness,
+    results.activity,
+    latestTimestamp(data.activity, ["timestamp"]),
+    formatRelativeTime,
+  );
+  renderActivity(elements.activityList, data.activity, results.activity);
 
   const healthy = data.health?.database?.healthy;
   if (elements.dbHealthBadge) {
@@ -55,6 +62,30 @@ export function renderOperationalPanels({ data, results, elements, selectChange,
       ? "Saludable" : healthy === false ? "Degradado" : "Desconocido";
     elements.kpiSystemStateVal.className = `kpi-value ${healthy === true ? "text-success" : healthy === false ? "text-danger" : "text-muted"}`;
   }
+}
+
+function renderActivity(root, events, result) {
+  if (!root) return;
+  if (result?.status !== "fulfilled" || !Array.isArray(events)) {
+    root.innerHTML = '<li class="table-empty" data-state="UNKNOWN">Actividad no disponible; no se conserva una lectura anterior como actual.</li>';
+    return;
+  }
+  if (!events.length) {
+    root.innerHTML = '<li class="table-empty">El servidor no informó eventos recientes.</li>';
+    return;
+  }
+  root.innerHTML = events.map((event) => `<li class="activity-item">
+    <time datetime="${escapeHtml(event.timestamp)}">${escapeHtml(event.timestamp)}</time>
+    <span class="activity-event">${escapeHtml(event.event_type)}</span>
+    <span class="activity-summary">${escapeHtml(event.summary)}</span>
+    <span class="activity-actor">${escapeHtml(event.actor || "system")}</span>
+  </li>`).join("");
+}
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  })[character]);
 }
 
 export function updateSchedulerServiceObservation(node, systemStatus) {

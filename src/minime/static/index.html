@@ -302,6 +302,7 @@
       <!-- VIEW 3: PIPELINE & EXECUTIONS (EXISTING 012-020 OPERATIONAL VIEW) -->
       <!-- ================================================================= -->
       <div id="viewExecutions" class="main-view-pane active" role="tabpanel" aria-labelledby="navTabExecutions" aria-label="Centro de Control operacional">
+        <button type="button" id="detailDrawerBackdrop" class="detail-drawer-backdrop" aria-label="Cerrar detalle de ejecución" hidden></button>
         <!-- KPI Summary Grid -->
         <section class="kpi-grid" id="operationalKpis" aria-label="Indicadores operacionales">
           <div class="kpi-card" id="kpiSystemStatus">
@@ -348,6 +349,16 @@
         <section class="panel provider-panel" aria-label="Estado observado de proveedores">
           <div class="panel-header"><h2 class="panel-title">Proveedores</h2><span class="text-muted" id="providerFreshness">Esperando lectura</span></div>
           <div id="providerGrid" class="provider-grid"><p class="table-empty">Cargando observaciones…</p></div>
+        </section>
+
+        <section class="panel activity-panel" id="activityPanel" aria-label="Actividad operacional reciente">
+          <div class="panel-header">
+            <h2 class="panel-title">Actividad operacional</h2>
+            <span class="text-muted" id="activityFreshness" role="status">Esperando lectura</span>
+          </div>
+          <ol id="activityList" class="activity-list" aria-live="polite">
+            <li class="table-empty">Cargando eventos observados…</li>
+          </ol>
         </section>
 
         <!-- Master-Detail Content Layout -->
@@ -412,6 +423,7 @@
                   <div class="title-row">
                     <h3 class="detail-title" id="dtChangeName">---</h3>
                     <span class="badge" id="dtStatusBadge">RUNNING</span>
+                    <button type="button" id="closeDetailDrawer" class="btn btn-secondary detail-drawer-close" aria-label="Cerrar detalle de ejecución">Cerrar</button>
                   </div>
                   <div class="detail-meta">
             <span class="meta-item">Proyecto: <strong id="dtProject">—</strong></span>
