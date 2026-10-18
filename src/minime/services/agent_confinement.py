@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import platform
 import shutil
@@ -12,6 +13,7 @@ import signal
 import stat
 import subprocess
 import tempfile
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,6 +21,8 @@ from typing import Iterator, Sequence
 
 from minime.domain.enums import ExternalOutcome, ExternalReasonCode
 from minime.domain.models import ExternalActionResult
+
+logger = logging.getLogger(__name__)
 
 
 class AgentConfinementError(RuntimeError):
@@ -804,20 +808,82 @@ class AgentProcessConfinement:
                     env=runtime_state.environment,
                     start_new_session=True,
                 )
+                from minime.services.progress_watchdog import (
+                    ProgressWatchdog,
+                    WatchdogSignal,
+                    WatchdogState,
+                )
+
+                watchdog = ProgressWatchdog(
+                    worktree_path=self.allowed_worktree_path,
+                    inactivity_threshold_seconds=min(180.0, float(timeout_seconds)),
+                    stall_timeout_seconds=float(timeout_seconds),
+                )
                 timed_out = False
+                stdout_chunks: list[bytes] = []
+                stderr_chunks: list[bytes] = []
+
+                async def _read_stream(stream: asyncio.StreamReader | None, chunks: list[bytes], sig: WatchdogSignal):
+                    if not stream:
+                        return
+                    while True:
+                        line = await stream.readline()
+                        if not line:
+                            break
+                        chunks.append(line)
+                        watchdog.record_activity(sig)
+
+                if input_bytes and process.stdin:
+                    process.stdin.write(input_bytes)
+                    await process.stdin.drain()
+                    process.stdin.close()
+
+                stdout_task = asyncio.create_task(_read_stream(process.stdout, stdout_chunks, WatchdogSignal.STDOUT_EMISSION))
+                stderr_task = asyncio.create_task(_read_stream(process.stderr, stderr_chunks, WatchdogSignal.STDERR_EMISSION))
+
+                start_time = time.monotonic()
                 try:
-                    stdout, stderr = await asyncio.wait_for(
-                        process.communicate(input_bytes), timeout=timeout_seconds
-                    )
-                except asyncio.TimeoutError:
-                    timed_out = True
-                    await self._terminate_process_group(process)
-                    stdout = stderr = b""
+                    while True:
+                        if process.returncode is not None:
+                            break
+                        try:
+                            await asyncio.wait_for(process.wait(), timeout=watchdog.check_interval_seconds)
+                            break
+                        except asyncio.TimeoutError:
+                            state = watchdog.evaluate_tick(process.pid)
+                            if state == WatchdogState.STALLED:
+                                timed_out = True
+                                logger.warning(
+                                    f"Process PID {process.pid} confirmed stalled ({watchdog.diagnostic_reason or 'inactivity'}). Terminating process group."
+                                )
+                                await self._terminate_process_group(process)
+                                break
+
+                            # Explicit authorized security condition: confinement hard timeout exceeded
+                            elapsed = time.monotonic() - start_time
+                            if timeout_seconds and elapsed >= float(timeout_seconds):
+                                timed_out = True
+                                logger.warning(
+                                    f"Process PID {process.pid} exceeded authorized confinement security timeout "
+                                    f"({elapsed:.1f}s >= {timeout_seconds}s). Terminating process group."
+                                )
+                                await self._terminate_process_group(process)
+                                break
+
+                            if state == WatchdogState.SUSPECTED_STALL and watchdog.diagnostic_reason:
+                                logger.debug(
+                                    f"Process PID {process.pid} inactive ({watchdog.diagnostic_reason}); preserving process under uncertainty."
+                                )
+                    await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+                    stdout = b"".join(stdout_chunks)
+                    stderr = b"".join(stderr_chunks)
                 except BaseException:
                     task = asyncio.current_task()
                     was_cancelled = task is not None and task.cancelling() > 0
                     if was_cancelled:
                         task.uncancel()
+                    stdout_task.cancel()
+                    stderr_task.cancel()
                     try:
                         await self._terminate_process_group(process)
                     finally:

@@ -76,6 +76,31 @@ class LightweightReconciliationService:
         tracker = OpenSpecTaskTracker(root)
         reconciled_task_ids: list[str] = []
 
+        # Enforce implementation evidence: checkbox updates must be backed by non-planning functional code
+        if changed_files is not None:
+            functional_changes = [
+                f
+                for f in changed_files
+                if not (
+                    f.startswith(openspec_path)
+                    or f.startswith(".openspec")
+                    or f.endswith("tasks.md")
+                    or f.endswith("proposal.md")
+                    or f.endswith("design.md")
+                )
+            ]
+            if not functional_changes:
+                logger.warning(
+                    "Lightweight reconciliation rejected: no functional implementation evidence."
+                )
+                return {
+                    "success": False,
+                    "reconciled_tasks": [],
+                    "tasks_reconciled_count": 0,
+                    "method": "REJECTED_IMPLEMENTATION_EVIDENCE_MISSING",
+                    "reason": "IMPLEMENTATION_EVIDENCE_MISSING",
+                }
+
         # 1. Reconcile tasks.md checkboxes
         tasks_file = tracker.tasks_path(openspec_path, change_name)
         if tasks_file.exists() and checks_passed:

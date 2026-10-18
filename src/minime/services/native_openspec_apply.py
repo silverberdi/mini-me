@@ -70,6 +70,13 @@ class NativeOpenSpecApplyWorkflow:
                 "implementation prompt or guessed OpenSpec shell command.",
                 "Use only the candidate workspace named below. Do not claim the workflow ran "
                 "unless the corresponding tool execution is observable.",
+                "ATOMIC FIRST-PASS DELIVERY DIRECTIVE:",
+                "In this single execution pass, you must deliver all vertical delivery components:",
+                "1. Implement functional code in src/ adhering strictly to change specifications.",
+                "2. Write comprehensive automated tests in tests/ validating all requirements.",
+                "3. Execute deterministic checks (e.g. pytest tests/ -q) and verify they pass with exit code 0.",
+                "4. Update tasks.md marking completed tasks [-] -> [x] backed strictly by implementation and test evidence.",
+                "Do not stop after only creating planning artifacts or checking boxes without accompanying functional code.",
             ]
         )
 

@@ -417,6 +417,7 @@ class VerifyGate(LifecycleGate):
                         "tasks_count": tasks_count,
                         "tasks_remaining": tasks_remaining,
                         "changed_paths": changed_paths,
+                        "diagnostic_code": "IMPLEMENTATION_EVIDENCE_MISSING",
                     },
                 ),
             )

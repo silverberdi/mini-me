@@ -14,6 +14,10 @@ import httpx
 from pydantic import ValidationError
 
 from minime.adapters.provider_adapter import get_provider_adapter
+from minime.adapters.resilient_transport import (
+    ResilientTransport,
+    TransportClassificationError,
+)
 from minime.config import (
     AppConfig,
     OpenSpecStage,
@@ -37,6 +41,7 @@ from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
     ContractReviewVerdictPayload,
     Event,
+    EvidenceDiagnostic,
     Job,
     OrchestrationRun,
     Project,
@@ -110,6 +115,8 @@ class DeepSeekResponseDiagnostics:
     completion_tokens: int | None = None
     total_tokens: int | None = None
     usage_valid: bool = False
+    transport_retry_count: int = 0
+    transport_stall_ms: int = 0
 
 
 _SAFE_PROVIDER_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
@@ -130,10 +137,18 @@ def _bounded_provider_id(value: object) -> str | None:
 
 
 def _response_diagnostics(
-    status_code: int, body: object, requested_model: str
+    status_code: int,
+    body: object,
+    requested_model: str,
+    transport_retry_count: int = 0,
+    transport_stall_ms: int = 0,
 ) -> DeepSeekResponseDiagnostics:
     if not isinstance(body, dict):
-        return DeepSeekResponseDiagnostics(http_status=status_code)
+        return DeepSeekResponseDiagnostics(
+            http_status=status_code,
+            transport_retry_count=transport_retry_count,
+            transport_stall_ms=transport_stall_ms,
+        )
 
     returned_model = _bounded_provider_id(body.get("model"))
     choices = body.get("choices")
@@ -189,6 +204,8 @@ def _response_diagnostics(
         completion_tokens=completion_tokens,
         total_tokens=total_tokens,
         usage_valid=usage_valid,
+        transport_retry_count=transport_retry_count,
+        transport_stall_ms=transport_stall_ms,
     )
 
 
@@ -222,6 +239,25 @@ def persist_deepseek_response_diagnostic(
             },
         )
     )
+    if hasattr(uow, "evidence_diagnostics") and uow.evidence_diagnostics:
+        diag = EvidenceDiagnostic(
+            job_id=review.job_id,
+            stage_type=review.review_stage,
+            check_name="deepseek_review_transport",
+            diagnostic_status="PASS" if diagnostic.http_status == 200 else "FAIL",
+            environment_identity="deepseek_direct",
+            candidate_sha=review.candidate_sha or review.contract_hash or "",
+            reason=f"DeepSeek {review.review_stage} HTTP transport response (status={diagnostic.http_status})",
+            evidence_reference={
+                "transport_retry_count": getattr(diagnostic, "transport_retry_count", 0),
+                "transport_stall_ms": getattr(diagnostic, "transport_stall_ms", 0),
+                "prompt_tokens": getattr(diagnostic, "prompt_tokens", None),
+                "completion_tokens": getattr(diagnostic, "completion_tokens", None),
+                "http_status": getattr(diagnostic, "http_status", 200),
+                "run_id": review.orchestration_run_id,
+            },
+        )
+        uow.evidence_diagnostics.save(diag)
     uow.commit()
 
 
@@ -268,9 +304,14 @@ class DeepSeekContractReviewRunner:
         }
         client = self.client or httpx.AsyncClient(timeout=timeout_seconds)
         owned = self.client is None
-        diagnostics = DeepSeekResponseDiagnostics(http_status=0)
-        try:
-            response = await client.post(
+        transport = ResilientTransport(
+            max_retries=4,
+            base_delay_seconds=0.5,
+            max_delay_seconds=10.0,
+        )
+
+        async def _do_post() -> httpx.Response:
+            return await client.post(
                 self.endpoint,
                 headers={
                     "Authorization": f"Bearer {self.api_key}",
@@ -278,7 +319,16 @@ class DeepSeekContractReviewRunner:
                 },
                 json=payload,
             )
-            diagnostics = DeepSeekResponseDiagnostics(http_status=response.status_code)
+
+        try:
+            response = await transport.execute_with_retry(_do_post, is_idempotent=False)
+            transport_retry_count = transport.total_retries
+            transport_stall_ms = int(transport.cumulative_stall_seconds * 1000)
+            diagnostics = DeepSeekResponseDiagnostics(
+                http_status=response.status_code,
+                transport_retry_count=transport_retry_count,
+                transport_stall_ms=transport_stall_ms,
+            )
             if response.status_code != 200:
                 return DeepSeekReviewResponse(
                     response.status_code,
@@ -287,10 +337,16 @@ class DeepSeekContractReviewRunner:
                     None,
                     None,
                     f"HTTP {response.status_code}",
-                    DeepSeekResponseDiagnostics(http_status=response.status_code),
+                    diagnostics,
                 )
             body = response.json()
-            diagnostics = _response_diagnostics(response.status_code, body, self.model)
+            diagnostics = _response_diagnostics(
+                response.status_code,
+                body,
+                self.model,
+                transport_retry_count=transport_retry_count,
+                transport_stall_ms=transport_stall_ms,
+            )
             if not isinstance(body, dict):
                 return DeepSeekReviewResponse(
                     0,
@@ -345,7 +401,15 @@ class DeepSeekContractReviewRunner:
                 response_error,
                 diagnostics,
             )
-        except (httpx.HTTPError, ValueError, TypeError) as exc:
+        except (httpx.HTTPError, ValueError, TypeError, TransportClassificationError) as exc:
+            transport_retry_count = transport.total_retries
+            transport_stall_ms = int(transport.cumulative_stall_seconds * 1000)
+            if diagnostics is None:
+                diagnostics = DeepSeekResponseDiagnostics(
+                    http_status=0,
+                    transport_retry_count=transport_retry_count,
+                    transport_stall_ms=transport_stall_ms,
+                )
             return DeepSeekReviewResponse(
                 0, None, None, None, None, type(exc).__name__, diagnostics
             )

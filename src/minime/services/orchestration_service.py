@@ -40,6 +40,7 @@ from minime.domain.models import (
     Change,
     Event,
     Job,
+    MetricFact,
     OrchestrationCandidate,
     OrchestrationRun,
     OrchestrationStageEvent,
@@ -3024,6 +3025,8 @@ class OrchestrationService:
         }
         if existing_event:
             existing_evidence = existing_event.evidence_references or {}
+            if "stage_duration_ms" in existing_evidence:
+                requested_evidence["stage_duration_ms"] = existing_evidence["stage_duration_ms"]
             if (
                 existing_event.run_id != run.run_id
                 or existing_event.from_stage != from_stage
@@ -3040,6 +3043,16 @@ class OrchestrationService:
                 )
                 _sync_orig()
                 raise ValueError(conflict)
+        else:
+            now = utc_now()
+            prior_events = self.uow.orchestration_stage_events.list_by_run(run.run_id)
+            if prior_events:
+                last_time = prior_events[-1].created_at
+                duration_ms = max(0, int((now - last_time).total_seconds() * 1000))
+                requested_evidence["stage_duration_ms"] = duration_ms
+            elif getattr(run, "started_at", None):
+                duration_ms = max(0, int((now - run.started_at).total_seconds() * 1000))
+                requested_evidence["stage_duration_ms"] = duration_ms
 
         if claim_context is not None and hasattr(self.uow.orchestration_runs, "update_stage"):
             self.uow.orchestration_runs.update_stage(
@@ -3071,6 +3084,24 @@ class OrchestrationService:
                     created_at=utc_now(),
                 )
             )
+            if "stage_duration_ms" in requested_evidence and hasattr(self.uow, "metrics"):
+                try:
+                    self.uow.metrics.save(
+                        MetricFact(
+                            metric_name="stage_duration_ms",
+                            project_id=run.project_id,
+                            change_id=run.change_name,
+                            stage=from_stage.value,
+                            duration_ms=requested_evidence["stage_duration_ms"],
+                            details={
+                                "run_id": run.run_id,
+                                "from_stage": from_stage.value,
+                                "to_stage": to_stage.value,
+                            },
+                        )
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed recording stage_duration_ms metric fact: {e}")
         self.uow.commit()
 
         try:

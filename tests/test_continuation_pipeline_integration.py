@@ -1010,6 +1010,7 @@ async def test_post_reassignment_capacity_check_uses_effective_executor(
         task_tracker=mock_task_tracker,
         outcome_governance=mock_outcome_gov,
     )
+    pipeline.code_review_service = MagicMock()
 
     # Codex is exhausted, but Antigravity is available; DeepSeek is exhausted for review
     def mock_get_health(provider):
