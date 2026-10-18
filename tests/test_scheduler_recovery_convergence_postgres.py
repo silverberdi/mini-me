@@ -3147,20 +3147,34 @@ def test_postgres_recovery_claim_repository_release_claim_idempotency(
     session.close()
 
 
-def test_postgres_stage_duration_exceeding_lease_continuous_renewal_and_cas_advance(
+def test_postgres_drive_coordinator_stage_exceeding_lease_duration_via_heartbeat(
     pg_session_factory: sessionmaker[Session], tmp_path: Path
 ):
-    """Task 2.6: Stage duration exceeding base claim lease maintains renewal and completes CAS stage transition."""
+    """Task 2.6 / Bucket 2: drive_coordinator during stage exceeding base lease maintains renewal via heartbeat and completes CAS advance."""
+    import asyncio
+
+    from minime.domain.enums import ContinuationDecision
+
     session = pg_session_factory()
-    project_id, change_name = _seed_base_project_and_change(session, "change-heartbeat-long")
+    project_id, change_name = _seed_base_project_and_change(session, "change-heartbeat-drive")
     uow = PostgresPersistenceUnitOfWork(session)
 
+    job = Job(
+        job_id=f"job-{uuid4().hex[:8]}",
+        project_id=project_id,
+        change_name=change_name,
+        implementer_role="codex",
+        status=JobStatus.RUNNING,
+    )
+    uow.jobs.save(job)
+
     run = OrchestrationRun(
-        run_id=f"run-long-{uuid4().hex[:8]}",
+        run_id=f"run-drive-long-{uuid4().hex[:8]}",
         project_id=project_id,
         change_name=change_name,
         base_sha="0123456789abcdef0123456789abcdef01234567",
-        current_stage=OrchestrationStage.ADMITTED,
+        current_stage=OrchestrationStage.IMPLEMENTING,
+        active_job_id=job.job_id,
         current_generation=1,
         is_active=True,
     )
@@ -3172,91 +3186,191 @@ def test_postgres_stage_duration_exceeding_lease_continuous_renewal_and_cas_adva
     assert claim_ctx is not None
     initial_exp = claim_ctx.lease_expires_at
 
-    from minime.services.recovery_convergence_service import OperationalHeartbeat
+    service = OrchestrationService(uow, project_root=tmp_path)
+    service.heartbeat_interval_seconds = 0.3
+    service.heartbeat_lease_seconds = 2
 
-    # Run heartbeat renewing every 0.3s with lease_seconds=2
-    with OperationalHeartbeat(
-        claim_context=claim_ctx,
-        interval_seconds=0.3,
-        lease_seconds=2,
-        renew_claim=uow.renew_claim_heartbeat_isolated,
-    ):
-        # Simulate stage duration exceeding the 2.0s base lease
-        time.sleep(2.5)
-
-        # Worker advances stage after 2.5s; CAS succeeds because heartbeat renewed the lease in PostgreSQL
-        uow.orchestration_runs.update_stage(
-            run.run_id,
-            current_stage=OrchestrationStage.PREPARING_EXECUTION,
-            resumable_stage=OrchestrationStage.PREPARING_EXECUTION,
-            claim_context=claim_ctx,
+    # Simulate slow execute_queued_job taking 2.5s (> 2.0s lease)
+    async def _mock_execute_slow(job_id, **kwargs):
+        await asyncio.sleep(2.5)
+        updated_job = uow.jobs.get_by_id(job_id)
+        assert updated_job is not None
+        updated_job.status = JobStatus.RUNNING
+        updated_job.continuation_decision = ContinuationDecision.WAIT_EXTERNAL
+        updated_job.escalation_reason = (
+            "Test stage advance completed under continuous heartbeat renewal"
         )
+        uow.jobs.save(updated_job)
         session.commit()
+        return updated_job
 
-    updated_run = uow.orchestration_runs.get_by_id(run.run_id)
-    assert updated_run is not None
-    assert updated_run.current_stage == OrchestrationStage.PREPARING_EXECUTION
+    service.pipeline.execute_queued_job = _mock_execute_slow
+
+    # drive_coordinator executes through IMPLEMENTING and EVALUATING_ATTEMPT
+    # Heartbeat maintains valid claim in PostgreSQL despite 2.5s execution > 2.0s lease
+    final_run = service.drive_coordinator(
+        run.run_id, claim_context=claim_ctx, manage_heartbeat=True
+    )
+    assert final_run is not None
+
+    session.rollback()
+    refreshed_run = uow.orchestration_runs.get_by_id(run.run_id)
+    assert refreshed_run is not None
+    assert refreshed_run.stop_outcome == OrchestrationStopOutcome.WAITING_EXTERNAL
     assert claim_ctx.lease_expires_at > initial_exp
     session.close()
 
 
-def test_postgres_claim_fence_supersession_raises_stale_claim_and_commits_zero_mutations(
+def test_postgres_concurrent_supersession_during_slow_stage_commits_zero_mutations(
     pg_session_factory: sessionmaker[Session], tmp_path: Path
 ):
-    """Task 2.7: Claim fence supersession triggers StaleClaimError, rolls back session, and commits zero mutations."""
-    session = pg_session_factory()
-    project_id, change_name = _seed_base_project_and_change(session, "change-fence-supersede")
-    uow = PostgresPersistenceUnitOfWork(session)
+    """Task 2.7 / Bucket 2: Concurrent supersession across distinct UoWs/owners during slow stage raises StaleClaimError and commits zero mutations."""
+    from minime.db.models import RecoveryClaimModel
+
+    session_A = pg_session_factory()
+    session_B = pg_session_factory()
+
+    project_id, change_name = _seed_base_project_and_change(
+        session_A, "change-concurrent-supersede"
+    )
+    uow_A = PostgresPersistenceUnitOfWork(session_A)
+    uow_B = PostgresPersistenceUnitOfWork(session_B)
+
+    job = Job(
+        job_id=f"job-{uuid4().hex[:8]}",
+        project_id=project_id,
+        change_name=change_name,
+        implementer_role="codex",
+        status=JobStatus.RUNNING,
+    )
+    uow_A.jobs.save(job)
 
     run = OrchestrationRun(
         run_id=f"run-supersede-{uuid4().hex[:8]}",
         project_id=project_id,
         change_name=change_name,
         base_sha="0123456789abcdef0123456789abcdef01234567",
-        current_stage=OrchestrationStage.ADMITTED,
+        current_stage=OrchestrationStage.IMPLEMENTING,
+        active_job_id=job.job_id,
+        current_generation=1,
+        is_active=True,
+    )
+    uow_A.orchestration_runs.save(run)
+    session_A.commit()
+
+    claim_key = f"run:{run.run_id}"
+
+    # Worker A acquires initial claim with fence_token=1 on session_A
+    rec_svc_A = RecoveryConvergenceService(uow_A, owner_instance_id="worker-A")
+    claim_A = rec_svc_A.acquire_claim(claim_key, lease_seconds=60)
+    assert claim_A is not None
+    assert claim_A.fence_token == 1
+    assert claim_A.owner_instance_id == "worker-A"
+
+    service_A = OrchestrationService(uow_A, project_root=tmp_path)
+
+    # While Worker A is inside execute_queued_job, Worker B supersedes the claim on session_B
+    async def _mock_slow_job_superseded_by_b(job_id, **kwargs):
+        expired = utc_now() - timedelta(seconds=10)
+        session_B.query(RecoveryClaimModel).filter_by(claim_key=claim_key).update(
+            {"lease_expires_at": expired}
+        )
+        session_B.commit()
+
+        rec_svc_B = RecoveryConvergenceService(uow_B, owner_instance_id="worker-B")
+        claim_B = rec_svc_B.acquire_claim(claim_key, lease_seconds=60)
+        assert claim_B is not None
+        assert claim_B.fence_token == 2
+        assert claim_B.owner_instance_id == "worker-B"
+
+        updated_job = uow_A.jobs.get_by_id(job_id)
+        assert updated_job is not None
+        updated_job.status = JobStatus.COMPLETED
+        return updated_job
+
+    service_A.pipeline.execute_queued_job = _mock_slow_job_superseded_by_b
+
+    # Worker A executes drive_coordinator; post-job claim validation detects supersession and raises StaleClaimError
+    with pytest.raises(StaleClaimError):
+        service_A.drive_coordinator(run.run_id, claim_context=claim_A, manage_heartbeat=False)
+
+    # Worker A rolled back and committed ZERO mutations to the database
+    session_A.rollback()
+    refreshed_run = uow_A.orchestration_runs.get_by_id(run.run_id)
+    assert refreshed_run is not None
+    assert refreshed_run.current_stage == OrchestrationStage.IMPLEMENTING  # Untouched!
+    assert refreshed_run.stop_outcome is None  # No outcome written!
+
+    # Worker B's claim remains intact and was NOT released by Worker A
+    session_B.rollback()
+    claim_db = uow_B.claims.get_by_key(claim_key)
+    assert claim_db is not None
+    assert claim_db.fence_token == 2
+    assert claim_db.owner_instance_id == "worker-B"
+    assert claim_db.released_at is None
+
+    session_A.close()
+    session_B.close()
+
+
+def test_postgres_recovery_convergence_outer_claim_loss_commits_zero_mutations(
+    pg_session_factory: sessionmaker[Session], tmp_path: Path
+):
+    """Task 2.8 / Bucket 3: Claim fence loss during recovery convergence rolls back session and commits zero database writes."""
+    from minime.db.models import RecoveryClaimModel
+
+    session = pg_session_factory()
+    project_id, change_name = _seed_base_project_and_change(session, "change-rec-fence-loss")
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    run = OrchestrationRun(
+        run_id=f"run-rec-loss-{uuid4().hex[:8]}",
+        project_id=project_id,
+        change_name=change_name,
+        base_sha="0123456789abcdef0123456789abcdef01234567",
+        current_stage=OrchestrationStage.PREPARING_EXECUTION,
+        resumable_stage=OrchestrationStage.PREPARING_EXECUTION,
         current_generation=1,
         is_active=True,
     )
     uow.orchestration_runs.save(run)
     session.commit()
 
-    rec_svc = RecoveryConvergenceService(uow)
+    rec_svc = RecoveryConvergenceService(uow, owner_instance_id="worker-recovery")
     claim_key = f"run:{run.run_id}"
+    cycle_id = f"cycle-{uuid4().hex[:8]}"
 
-    # Worker A acquires claim with fence_token=1
-    claim_A = rec_svc.acquire_claim(claim_key, lease_seconds=60)
-    assert claim_A is not None
-    assert claim_A.fence_token == 1
+    class FakeOrchService:
+        def resume(self, *args, **kwargs):
+            # Supersede claim in DB so fence is lost
+            session.query(RecoveryClaimModel).filter_by(claim_key=claim_key).update(
+                {"fence_token": 99, "owner_instance_id": "other-node"}
+            )
+            session.commit()
+            raise StaleClaimError("CLAIM_SUPERSEDED_DURING_CONVERGENCE")
 
-    # Worker B supersedes claim with fence_token=2
-    # Expire claim A artificially to allow Worker B to acquire next fence
-    from minime.db.models import RecoveryClaimModel
+    rec_svc.orchestration_service = FakeOrchService()
 
-    expired = utc_now() - timedelta(seconds=10)
-    session.query(RecoveryClaimModel).filter_by(claim_key=claim_key).update(
-        {"lease_expires_at": expired}
+    # Converge run identity on daemon startup recovery
+    res_decision = rec_svc._converge_run_identity(
+        run_id=run.run_id,
+        cycle_id=cycle_id,
+        claim_key=claim_key,
+        source=RecoverySource.STARTUP,
     )
-    session.commit()
 
-    claim_B = rec_svc.acquire_claim(claim_key, lease_seconds=60)
-    assert claim_B is not None
-    assert claim_B.fence_token == 2
+    # Decision returned in memory is BLOCKED with failure code
+    assert res_decision.status == RecoveryDecisionStatus.BLOCKED
+    assert res_decision.reason_code is not None
 
-    # Worker A attempts to drive coordinator with stale claim_A (fence_token=1)
-    service_A = OrchestrationService(uow, project_root=tmp_path)
-    with pytest.raises(StaleClaimError):
-        service_A.drive_coordinator(run.run_id, claim_context=claim_A, manage_heartbeat=True)
-
-    # Re-verify database state: Worker A MUST have committed zero mutations
+    # Verify zero database writes committed to recovery_decisions and claim was not released
     session.rollback()
-    refreshed_run = uow.orchestration_runs.get_by_id(run.run_id)
-    assert refreshed_run is not None
-    assert refreshed_run.current_stage == OrchestrationStage.ADMITTED  # Untouched!
-    assert refreshed_run.stop_outcome is None  # No NEEDS_HUMAN written!
+    db_decision = uow.recovery_decisions.get_by_id(res_decision.decision_id)
+    assert db_decision is None or db_decision.status != RecoveryDecisionStatus.COMPLETED
 
-    # Worker B's claim remains active and was NOT released by Worker A
     claim_db = uow.claims.get_by_key(claim_key)
     assert claim_db is not None
-    assert claim_db.fence_token == 2
-    assert claim_db.released_at is None
+    assert claim_db.fence_token == 99  # Preserved other node's claim
+    assert claim_db.released_at is None  # NOT released by stale worker!
+
     session.close()

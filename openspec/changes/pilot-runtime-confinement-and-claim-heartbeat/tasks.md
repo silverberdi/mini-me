@@ -15,6 +15,7 @@
 - [x] 2.5 Verify that `PostgresRecoveryClaimRepository.release_claim()` is strictly idempotent, safely returning `False` when releasing an already released, expired, or non-owned claim without exceptions.
 - [x] 2.6 Add PostgreSQL integration test simulating a stage duration exceeding the base claim lease, asserting continuous lease renewal via `renew_claim_heartbeat_isolated` and successful CAS stage transition.
 - [x] 2.7 Add PostgreSQL integration test simulating claim fence supersession, asserting that the stale worker raises `StaleClaimError`, rolls back the transaction, and commits zero mutations to the database.
+- [x] 2.8 In `src/minime/services/recovery_convergence_service.py`, enforce zero database writes on claim loss during recovery convergence (`_converge_run_identity`), verifying no `_update_decision` or claim release occurs when fence is lost.
 
 ## 3. Verification and OpenSpec Strict Validation
 

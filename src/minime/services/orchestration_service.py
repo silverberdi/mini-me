@@ -178,6 +178,8 @@ class OrchestrationService:
         self.task_classifier = TaskClassifier()
         self.provider_policy = ProviderPolicyService(self.uow)
         self.reconciliation_service = LightweightReconciliationService(self.uow)
+        self.heartbeat_interval_seconds: float = 15.0
+        self.heartbeat_lease_seconds: int = 60
         self.saga_engine = saga_engine or SagaEngine(self.uow)
 
     def _admit_change_in_transaction(
@@ -1585,12 +1587,21 @@ class OrchestrationService:
 
             heartbeat = OperationalHeartbeat(
                 claim_context=claim_context,
-                interval_seconds=15,
-                lease_seconds=60,
+                interval_seconds=getattr(self, "heartbeat_interval_seconds", 15.0),
+                lease_seconds=getattr(self, "heartbeat_lease_seconds", 60),
                 renew_claim=renew_claim,
             )
             heartbeat.start()
             should_release_claim = True
+
+        _orig_stop_run = self._stop_run
+
+        def _fenced_stop_run(*args, **kwargs):
+            if "claim_context" not in kwargs and claim_context is not None:
+                kwargs["claim_context"] = claim_context
+            return _orig_stop_run(*args, **kwargs)
+
+        self._stop_run = _fenced_stop_run
 
         try:
             while True:
@@ -2560,8 +2571,15 @@ class OrchestrationService:
             self.uow.rollback()
             raise
         finally:
+            self._stop_run = _orig_stop_run
             if heartbeat is not None:
-                heartbeat.stop()
+                stopped_cleanly = heartbeat.stop(timeout=5.0)
+                if not stopped_cleanly or heartbeat.is_alive:
+                    should_release_claim = False
+                    logger.warning(
+                        "Heartbeat thread did not terminate cleanly; suppressing claim release for '%s'.",
+                        claim_context.claim_key if claim_context else "unknown",
+                    )
             if (
                 should_release_claim
                 and claim_context is not None
@@ -3291,23 +3309,14 @@ class OrchestrationService:
         human_gate: HumanGate | None = None,
         stop_reason: str | None = None,
         stop_details: dict[str, Any] | None = None,
+        claim_context: RecoveryClaimContext | None = None,
     ) -> None:
-        """Stop run at a legitimate stop outcome, with optional human gate."""
-        # Pipeline stages can durably freeze a candidate before returning a
-        # waiting result. The coordinator's local ``run`` is then stale; saving
-        # it wholesale would erase the candidate binding and make the exact
-        # Control Plane review authorization impossible (or authorize stale
-        # state). Apply only stop fields to the latest durable Run row.
-        latest_run = self.uow.orchestration_runs.get_for_update(run.run_id)
-        if latest_run is None:
-            latest_run = self.uow.orchestration_runs.get_by_id(run.run_id)
-        if latest_run is not None:
-            if latest_run.project_id != run.project_id or latest_run.change_name != run.change_name:
-                raise ValueError("Cannot stop an orchestration Run with conflicting identity.")
-            run = latest_run
-        run.stop_outcome = stop_outcome
-        run.human_gate = human_gate
-        run.stop_reason = stop_reason
+        """Stop run at a legitimate stop outcome, with optional human gate and fenced persistence."""
+        from minime.domain.models import validate_claim_context_authoritative
+
+        if claim_context is not None:
+            validate_claim_context_authoritative(self.uow, claim_context)
+
         details = dict(stop_details or {})
         if stop_outcome in {
             OrchestrationStopOutcome.WAITING_CAPACITY,
@@ -3315,13 +3324,47 @@ class OrchestrationService:
         }:
             if "waiting_since" not in details:
                 details["waiting_since"] = utc_now().isoformat()
-        run.stop_details = details
-        run.is_active = stop_outcome in {
+        is_active = stop_outcome in {
             OrchestrationStopOutcome.WAITING_CAPACITY,
             OrchestrationStopOutcome.WAITING_EXTERNAL,
         }
-        run.updated_at = utc_now()
-        self.uow.orchestration_runs.save(run)
+
+        if claim_context is not None and hasattr(
+            self.uow.orchestration_runs, "update_stop_outcome"
+        ):
+            self.uow.orchestration_runs.update_stop_outcome(
+                run_id=run.run_id,
+                stop_outcome=stop_outcome,
+                human_gate=human_gate,
+                stop_reason=stop_reason,
+                stop_details=details,
+                is_active=is_active,
+                claim_context=claim_context,
+            )
+            run.stop_outcome = stop_outcome
+            run.human_gate = human_gate
+            run.stop_reason = stop_reason
+            run.stop_details = details
+            run.is_active = is_active
+            run.updated_at = utc_now()
+        else:
+            latest_run = self.uow.orchestration_runs.get_for_update(run.run_id)
+            if latest_run is None:
+                latest_run = self.uow.orchestration_runs.get_by_id(run.run_id)
+            if latest_run is not None:
+                if (
+                    latest_run.project_id != run.project_id
+                    or latest_run.change_name != run.change_name
+                ):
+                    raise ValueError("Cannot stop an orchestration Run with conflicting identity.")
+                run = latest_run
+            run.stop_outcome = stop_outcome
+            run.human_gate = human_gate
+            run.stop_reason = stop_reason
+            run.stop_details = details
+            run.is_active = is_active
+            run.updated_at = utc_now()
+            self.uow.orchestration_runs.save(run)
 
         # Synchronize associated BacklogItem status for genuine lifecycle stop outcomes
         if hasattr(self.uow, "backlog_items"):
