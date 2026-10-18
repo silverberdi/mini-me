@@ -152,9 +152,9 @@ def test_unsafe_or_symlinked_credential_source_fails_closed(tmp_path: Path):
 
 def test_antigravity_auth_source_resolves_actual_cli_oauth_path(tmp_path: Path):
     host_home = tmp_path / "service-home"
-    assert AgentProcessConfinement.antigravity_auth_source(
-        {"HOME": str(host_home)}
-    ) == str(host_home / ".gemini" / "antigravity-cli" / "antigravity-oauth-token")
+    assert AgentProcessConfinement.antigravity_auth_source({"HOME": str(host_home)}) == str(
+        host_home / ".gemini" / "antigravity-cli" / "antigravity-oauth-token"
+    )
 
 
 def test_antigravity_auth_is_projected_as_one_private_file_and_rotation_is_not_persisted(
@@ -192,9 +192,7 @@ def test_antigravity_auth_is_projected_as_one_private_file_and_rotation_is_not_p
         assert stat.S_IMODE(private_gemini_home.stat().st_mode) == 0o700
         assert stat.S_IMODE(private_cli_home.stat().st_mode) == 0o700
         assert {path.name for path in private_gemini_home.iterdir()} == {"antigravity-cli"}
-        assert {path.name for path in private_cli_home.iterdir()} == {
-            "antigravity-oauth-token"
-        }
+        assert {path.name for path in private_cli_home.iterdir()} == {"antigravity-oauth-token"}
         assert "opaque-authentication-token-for-test" in runtime.sensitive_values
         projected.write_text("rotated-private-token", encoding="utf-8")
         assert runtime.observe_credential_state() is True
@@ -233,9 +231,12 @@ def test_antigravity_oauth_rotation_classifier_accepts_access_refresh_only(chang
     original = _fake_antigravity_oauth()
     changed = json.loads(json.dumps(original))
     changed["token"].update(change)
-    assert AgentRuntimeState._is_access_refresh_only(
-        json.dumps(original).encode(), json.dumps(changed).encode()
-    ) is expected
+    assert (
+        AgentRuntimeState._is_access_refresh_only(
+            json.dumps(original).encode(), json.dumps(changed).encode()
+        )
+        is expected
+    )
 
 
 def test_antigravity_access_refresh_detection_keeps_persistent_source_unchanged(tmp_path: Path):
@@ -451,9 +452,29 @@ def test_bubblewrap_command_binds_only_worktree_and_private_state(tmp_path: Path
         for i in range(len(command) - 2)
         if command[i] == "--ro-bind" and command[i + 1] == str(runtime_root.resolve())
     ][0]
+    ro_root_idx = [
+        i
+        for i in range(len(command) - 2)
+        if command[i] == "--ro-bind" and command[i + 1] == "/" and command[i + 2] == "/"
+    ][0]
+    assert command[ro_root_idx + 3 : ro_root_idx + 5] == ["--dev", "/dev"]
+    assert ["--dev", "/dev"] == command[command.index("--dev") : command.index("--dev") + 2]
     assert ["--tmpfs", "/run"] == command[command.index("--tmpfs") : command.index("--tmpfs") + 2]
     assert "--unshare-pid" in command
     assert "/global" not in " ".join(command)
+
+    command_no_runtime = confinement.wrap_command(["/usr/bin/true"])
+    assert ["--dev", "/dev"] == command_no_runtime[
+        command_no_runtime.index("--dev") : command_no_runtime.index("--dev") + 2
+    ]
+    ro_root_no_rt = [
+        i
+        for i in range(len(command_no_runtime) - 2)
+        if command_no_runtime[i] == "--ro-bind"
+        and command_no_runtime[i + 1] == "/"
+        and command_no_runtime[i + 2] == "/"
+    ][0]
+    assert command_no_runtime[ro_root_no_rt + 3 : ro_root_no_rt + 5] == ["--dev", "/dev"]
 
 
 def test_resolver_projection_only_exposes_verified_target_under_private_run(tmp_path: Path):
@@ -938,3 +959,129 @@ def test_real_codex_app_server_initialize_only_under_bubblewrap(tmp_path: Path):
     output = response.decode(errors="replace") + stderr.decode(errors="replace")
     assert "EROFS" not in output and "read-only file system" not in output.lower()
     assert response and b'"id":1' in response.replace(b" ", b"")
+
+
+def test_deterministic_wrap_command_dev_null_flag_injection(tmp_path: Path):
+    """Task 1.2: Deterministic verification that Bubblewrap command includes --dev /dev directly after root mount."""
+    confinement, _worktree, _runtime = _confinement(tmp_path)
+    confinement.confinement_mechanism = "bubblewrap"
+
+    cmd_list = confinement.wrap_command(["pytest", "-q"])
+    ro_idx = [
+        i
+        for i in range(len(cmd_list) - 2)
+        if cmd_list[i] == "--ro-bind" and cmd_list[i + 1] == "/" and cmd_list[i + 2] == "/"
+    ][0]
+    assert cmd_list[ro_idx + 3 : ro_idx + 5] == ["--dev", "/dev"]
+
+    cmd_str = confinement.wrap_command("pytest -q")
+    ro_idx_str = [
+        i
+        for i in range(len(cmd_str) - 2)
+        if cmd_str[i] == "--ro-bind" and cmd_str[i + 1] == "/" and cmd_str[i + 2] == "/"
+    ][0]
+    assert cmd_str[ro_idx_str + 3 : ro_idx_str + 5] == ["--dev", "/dev"]
+
+
+@pytest.mark.skipif(
+    platform.system().lower() != "linux" or not shutil.which("bwrap"),
+    reason="real Bubblewrap device access proof requires Linux with Bubblewrap",
+)
+def test_real_bubblewrap_dev_null_access(tmp_path: Path):
+    """Task 1.3: Deterministic execution test verifying subprocesses can open /dev/null without Errno 13."""
+    confinement, worktree, _runtime = _confinement(tmp_path)
+    code = (
+        "import sys\n"
+        "with open('/dev/null', 'rb') as f:\n"
+        "    f.read()\n"
+        "with open('/dev/null', 'wb') as f:\n"
+        "    f.write(b'ok')\n"
+        "sys.stdout.write('DEV_NULL_SUCCESS')\n"
+    )
+    cmd = [sys.executable, "-c", code]
+    wrapped = confinement.wrap_command(cmd)
+    res = subprocess.run(
+        wrapped,
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode == 0, f"Process failed: {res.stderr}"
+    assert "DEV_NULL_SUCCESS" in res.stdout
+    assert "PermissionError" not in res.stderr
+    assert "Errno 13" not in res.stderr
+
+
+@pytest.mark.skipif(
+    platform.system().lower() != "linux" or not shutil.which("bwrap"),
+    reason="real ChecksRunner execution under Bubblewrap requires Linux with Bubblewrap",
+)
+def test_real_bubblewrap_checks_runner_execution(tmp_path: Path):
+    """Task 1.4: Real Linux Bubblewrap integration test executing ChecksRunner on a sample test suite."""
+    from minime.services.checks_runner import ChecksRunner
+
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir()
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    sample_test = worktree / "test_sample.py"
+    sample_test.write_text(
+        "def test_sample():\n"
+        "    with open('/dev/null', 'wb') as f:\n"
+        "        f.write(b'sample')\n"
+        "    assert 1 + 1 == 2\n",
+        encoding="utf-8",
+    )
+
+    runner = ChecksRunner(runtime_root=str(runtime_root))
+    result = asyncio.run(
+        runner.run(
+            job_id="job-test-checks-bwrap",
+            checks=[
+                {
+                    "name": "sample_suite",
+                    "command": f"{sys.executable} -m pytest {sample_test.name} -q",
+                }
+            ],
+            worktree_path=worktree,
+        )
+    )
+    assert len(result.results) == 1
+    assert result.results[0].exit_code == 0, f"Checks failed: {result.results[0].output_snippet}"
+    assert "PermissionError" not in result.results[0].output_snippet
+    assert "Errno 13" not in result.results[0].output_snippet
+    assert "passed" in result.results[0].output_snippet.lower()
+
+
+@pytest.mark.skipif(
+    platform.system().lower() != "linux" or not shutil.which("bwrap"),
+    reason="real write-denial proof requires Linux with Bubblewrap",
+)
+def test_real_bubblewrap_negative_confinement_system_paths(tmp_path: Path):
+    """Task 1.5: Real negative confinement test under Bubblewrap asserting writes outside worktree fail."""
+    confinement, worktree, _runtime = _confinement(tmp_path)
+    for system_target in [
+        "/etc/minime_escape_probe",
+        "/usr/minime_escape_probe",
+        "/opt/minime_escape_probe",
+    ]:
+        code = (
+            f"import sys\n"
+            f"try:\n"
+            f"    with open('{system_target}', 'w') as f:\n"
+            f"        f.write('escape')\n"
+            f"    sys.exit(0)\n"
+            f"except OSError:\n"
+            f"    sys.exit(42)\n"
+        )
+        cmd = [sys.executable, "-c", code]
+        wrapped = confinement.wrap_command(cmd)
+        res = subprocess.run(
+            wrapped,
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert res.returncode == 42, f"System path write unexpectedly succeeded to {system_target}"

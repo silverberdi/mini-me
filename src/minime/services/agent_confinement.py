@@ -152,9 +152,19 @@ class AgentProcessConfinement:
         self.allowed_worktree_path = self._canonical_directory(
             allowed_worktree_path, "assigned worktree"
         )
+        default_root = os.environ.get("MINIME_RUNTIME_ROOT")
+        if not default_root:
+            cwd_minime = os.path.join(os.getcwd(), ".minime")
+            if os.path.isdir(cwd_minime):
+                default_root = cwd_minime
+            elif os.path.isdir("/opt/minime/runtime"):
+                default_root = "/opt/minime/runtime"
+            elif os.path.isdir("/opt/minime/app/.minime"):
+                default_root = "/opt/minime/app/.minime"
+            else:
+                default_root = cwd_minime
         self.runtime_root = self._canonical_directory(
-            runtime_root
-            or os.environ.get("MINIME_RUNTIME_ROOT", os.path.join(os.getcwd(), ".minime")),
+            runtime_root or default_root,
             "runtime root",
         )
         if self._is_path_inside(
@@ -731,6 +741,8 @@ class AgentProcessConfinement:
                 "--ro-bind",
                 "/",
                 "/",
+                "--dev",
+                "/dev",
                 "--bind",
                 self.allowed_worktree_path,
                 self.allowed_worktree_path,
@@ -823,7 +835,9 @@ class AgentProcessConfinement:
                 stdout_chunks: list[bytes] = []
                 stderr_chunks: list[bytes] = []
 
-                async def _read_stream(stream: asyncio.StreamReader | None, chunks: list[bytes], sig: WatchdogSignal):
+                async def _read_stream(
+                    stream: asyncio.StreamReader | None, chunks: list[bytes], sig: WatchdogSignal
+                ):
                     if not stream:
                         return
                     while True:
@@ -838,8 +852,12 @@ class AgentProcessConfinement:
                     await process.stdin.drain()
                     process.stdin.close()
 
-                stdout_task = asyncio.create_task(_read_stream(process.stdout, stdout_chunks, WatchdogSignal.STDOUT_EMISSION))
-                stderr_task = asyncio.create_task(_read_stream(process.stderr, stderr_chunks, WatchdogSignal.STDERR_EMISSION))
+                stdout_task = asyncio.create_task(
+                    _read_stream(process.stdout, stdout_chunks, WatchdogSignal.STDOUT_EMISSION)
+                )
+                stderr_task = asyncio.create_task(
+                    _read_stream(process.stderr, stderr_chunks, WatchdogSignal.STDERR_EMISSION)
+                )
 
                 start_time = time.monotonic()
                 try:
@@ -847,7 +865,9 @@ class AgentProcessConfinement:
                         if process.returncode is not None:
                             break
                         try:
-                            await asyncio.wait_for(process.wait(), timeout=watchdog.check_interval_seconds)
+                            await asyncio.wait_for(
+                                process.wait(), timeout=watchdog.check_interval_seconds
+                            )
                             break
                         except asyncio.TimeoutError:
                             state = watchdog.evaluate_tick(process.pid)
@@ -870,7 +890,10 @@ class AgentProcessConfinement:
                                 await self._terminate_process_group(process)
                                 break
 
-                            if state == WatchdogState.SUSPECTED_STALL and watchdog.diagnostic_reason:
+                            if (
+                                state == WatchdogState.SUSPECTED_STALL
+                                and watchdog.diagnostic_reason
+                            ):
                                 logger.debug(
                                     f"Process PID {process.pid} inactive ({watchdog.diagnostic_reason}); preserving process under uncertainty."
                                 )
