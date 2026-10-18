@@ -79,3 +79,41 @@ Given the service worker installs or fetches same-origin resources
 When a request is for an allowlisted static shell asset versus a dynamic route, API path, cross-origin URL, or non-GET method
 Then it MAY cache only the allowlisted static asset
 And SHALL bypass CacheStorage for every other request.
+
+## ADDED Requirements
+
+### Requirement: Resizable Desktop Panels and Scoped Layout Preferences
+On desktop layouts, the Control Center SHALL allow relevant panels or split panes to be resized and collapsed/restored where this matches the approved visual hierarchy. Resizable panes SHALL respect declared layout bounds (minimum 240 CSS px per pane in a multi-column layout and maximum 70% of available content width while preserving adjacent-pane minimums), SHALL NOT overlap or clip essential controls, and SHALL expose keyboard-operable separators with accessible names/current values plus visible resize, collapse, restore and reset controls. The PWA SHALL persist only versioned layout preferences in browser-local storage scoped to the authenticated operator and device/browser profile. It SHALL NOT persist identity values, operational evidence, credentials, or action state. Missing identity, unavailable storage, or invalid/unknown preference version or bounds SHALL fall back to the approved default layout and SHALL NOT load preferences belonging to another operator. Tablet master-detail and mobile supervision-first layouts SHALL remain unchanged and SHALL NOT inherit desktop geometry.
+
+#### Scenario: Resize, collapse and restore desktop panels
+Given the operator is viewing a desktop Control Center with a resizable multi-panel layout
+When the operator resizes a separator using pointer or keyboard, collapses a supported panel, or restores it
+Then pane sizes SHALL remain within the declared minimum/maximum bounds without overlap or essential-content clipping
+And controls SHALL expose accessible names, focus, current size/state and a reset-to-default action.
+
+#### Scenario: Persist layout per authorized operator and device
+Given `/api/v1/auth/me` identifies an authorized operator and browser storage is available
+When the operator changes the desktop layout and reloads the PWA in the same browser profile
+Then the versioned layout preference SHALL be restored for that operator on that device
+And another operator identity SHALL resolve a distinct preference namespace without exposing or reusing the first operator's layout record.
+
+#### Scenario: Invalid or unavailable layout preference falls back safely
+Given browser storage is denied, operator identity is unavailable, or a stored layout has an unknown version or out-of-range pane values
+When the Control Center initializes
+Then it SHALL use the approved default layout without throwing or applying invalid geometry
+And SHALL NOT use another identity's preference as a fallback; reset SHALL clear only the current operator/device layout preference.
+
+#### Scenario: Tablet and mobile hierarchy is not altered by desktop preference
+Given the operator has a saved desktop layout preference
+When the Control Center is viewed at tablet master-detail or mobile supervision breakpoints
+Then those layouts SHALL follow their approved responsive hierarchy independently
+And desktop panel dimensions SHALL NOT cause overflow, hidden controls or inaccessible navigation.
+
+### Requirement: Approved Stitch Wireframe References
+The Change SHALL include and reference all eight owner-approved Stitch wireframes as versioned files under `docs/design/`: `01-desktop-active-control-center.png`, `02-desktop-paused-control-center.png`, `03-desktop-running-run-drawer.png`, `04-desktop-human-merge-drawer.png`, `05-tablet-active-master-detail.png`, `06-tablet-human-review-master-detail.png`, `07-mobile-active-supervision.png`, and `08-mobile-paused-human-attention.png`. Human visual acceptance SHALL compare each state against its corresponding file. The references define hierarchy and interaction appearance only; screenshot metrics, statuses, SHAs, providers and costs SHALL NOT be treated as operational facts.
+
+#### Scenario: Validate implementation against all approved wireframes
+Given the candidate preview and the versioned approved reference images are available
+When the human performs candidate-bound visual validation at the applicable desktop, tablet and mobile viewports
+Then all eight named files SHALL be present in the candidate checkout and each state SHALL be compared to its corresponding image with deviations and evidence recorded
+And illustrative screenshot values SHALL NOT appear as live application data or defaults.

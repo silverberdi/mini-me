@@ -1,9 +1,9 @@
 ## 1. Baseline and contract verification
 
-- [ ] 1.1 Capture the isolated worktree base/head SHAs, current PWA routes, schemas, auth behavior, every loaded script/style and DOM/event/API consumer, module imports, duplicate refresh/listener owners, service-worker cache behavior and relevant tests; attach the inventory to Change evidence without unrelated application changes.
+- [ ] 1.1 Capture the isolated worktree base/head SHAs, current PWA routes, schemas, auth behavior, every loaded script/style and DOM/event/API consumer, module imports, duplicate refresh/listener owners, service-worker cache behavior and relevant tests; verify the eight approved PNGs are present and tracked in this Change, and attach the inventory to Change evidence without unrelated application changes.
 - [ ] 1.2 Implement the owner's approved backend-only observer for the fixed `minime-scheduler.service` using existing unprivileged read-only systemd access; report active/substate, boot enablement and logical admission separately, with source/time/age. Prove one-second timeout, 30-second freshness, UNKNOWN on inaccessible/stale/unsupported evidence, and no caller-selected unit, command execution, added privilege or control operation.
 - [ ] 1.3 Validate actual dashboard, queue, scheduler, provider, budget, efficiency, actions, preview, validation and auth response schemas against OpenAPI/Pydantic and write field-to-view mappings; reject any field without an authoritative source.
-- [ ] 1.4 Before implementation, verify MM-R03–MM-R06 dependency contracts/read models are stable; if they are not complete, preserve this Change as a proposal and do not begin apply or duplicate their authorities.
+- [ ] 1.4 Map every planned view/action to its existing API/read-model and Control Plane contract. Continue implementation for independent existing capabilities; gate only the exact dependent view/action when an MM-R03–MM-R06 contract is genuinely absent, render it unavailable/UNKNOWN, and do not invent a new authority or block unrelated UI convergence.
 
 ## 2. Converged Control Center shell and read models
 
@@ -20,7 +20,7 @@
 
 ## 4. Responsive, accessible and privacy-safe PWA
 
-- [ ] 4.1 Implement the approved desktop, tablet and mobile information hierarchy and interaction patterns at 1440×900, 1024×768, 768×1024, 390×844 and 360×800, retaining both supported themes and Spanish labels.
+- [ ] 4.1 Implement the approved desktop, tablet and mobile information hierarchy and interaction patterns at 1440×900, 1024×768, 768×1024, 390×844 and 360×800, retaining both supported themes and Spanish labels. Compare the eight named versioned `docs/design/01..08-*.png` references at their matching states; never use screenshot values as live data.
 - [ ] 4.2 Verify keyboard order, visible focus, dialog focus behavior, accessible names/landmarks, text-plus-icon states, contrast, zoom/reflow, reduced motion, touch targets and no destructive truncation at every target viewport.
 - [ ] 4.3 Change the service worker to an explicit safe static-resource allowlist, stop all `/api/*` and authenticated/Control Plane CacheStorage reads/writes and offline replay, invalidate only its owned old shell cache, and verify offline/reconnect/auth expiry/logout plus two-session isolation and per-panel freshness in a real browser.
 
@@ -43,3 +43,4 @@
 
 - [ ] 7.1 Exercise backend scheduler projection against active/enabled and inactive/disabled observations, verifying independent logical admission mode and source timestamps; inject inaccessible, stale, timeout, unsupported, malformed and contradictory observations and prove `UNKNOWN` without inferring from API/PostgreSQL health.
 - [ ] 7.2 In a real browser, inspect CacheStorage and network behavior for static shell, authenticated GETs, `/api/v1/auth/*`, Control Plane actions, 401/403, offline, reconnect and logout/login across two sessions; prove only allowlisted static assets persist and operational values remain unavailable until fresh reads.
+- [ ] 7.3 Implement and verify desktop resize/collapse/reset with bounded panes, keyboard-accessible separators, safe default fallback, versioned preference persistence isolated by authenticated operator and browser profile, and no stored identity/evidence/credential/action data; prove tablet/mobile layouts ignore desktop geometry.

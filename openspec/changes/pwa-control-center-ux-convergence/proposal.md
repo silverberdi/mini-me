@@ -4,10 +4,11 @@ mini me ya sirve una PWA operacional, pero su superficie actual combina un dashb
 
 ## What Changes
 
-- Moderniza el shell existente en español y sus vistas de Centro de Control, Backlog/Cola, Runs, Proyectos, Proveedores, Actividad y Métricas, siguiendo las ocho capturas y tres composiciones aprobadas.
+- Moderniza el shell existente en español y sus vistas de Centro de Control, Backlog/Cola, Runs, Proyectos, Proveedores, Actividad y Métricas, siguiendo las ocho capturas Stitch aprobadas y versionadas junto al Change.
 - Unifica la lectura de RUNNING, pausa deliberada, espera de capacidad, recuperación, autenticación requerida, `NEEDS_HUMAN`, `UNKNOWN` y `READY_FOR_HUMAN_MERGE`; distingue la observación de solo lectura del servicio `minime-scheduler.service`, su habilitación de arranque y el modo lógico de admisión.
 - Converge el detalle Run/Job en una vista contextual con pipeline, candidato, checks, review, actividad, GitHub, coste y acciones que el backend autorice dinámicamente.
 - Entrega layouts de escritorio de alta densidad, tablet master-detail y móvil de supervisión/atención, conservando el shell PWA y los temas existentes con accesibilidad y degradación segura; el service worker conserva únicamente recursos estáticos seguros y nunca respuestas operacionales o autenticadas.
+- Añade paneles desktop redimensionables/colapsables donde la jerarquía lo permita y preferencias de layout locales al dispositivo y aisladas por operador; son preferencias inocuas, nunca evidencia operacional ni credenciales.
 - Añade solo los campos/read-models de API que el censo demuestre imprescindibles para representar hechos reales; no añade autoridad de orquestación ni estado paralelo al cliente.
 - Migra y retira dentro del Change los entrypoints/código de UI que efectivamente queden reemplazados, incluidos los dos controladores actuales `dashboard.js`/`app.js`, después de asignar un único propietario de refresco/listeners, demostrar paridad de cada consumidor y repetir las regresiones.
 
@@ -31,4 +32,4 @@ Impacta `src/minime/static/index.html`, `src/minime/static/js/`, `src/minime/sta
 
 No-goals: segunda aplicación/dashboard, chat de agentes, orquestación en el browser, acceso directo a PostgreSQL, invocación de CLI/Git/systemd/proveedores desde el cliente, cambios de política de scheduler/cuotas, telemetría ficticia, reanudación impulsiva en móvil, auto-merge o sustitución del TUI.
 
-Dependencias de secuencia: implementar después de las capacidades MM-R03–MM-R06 indicadas por `docs/backlog/MM-R07.md`, una vez que los contratos de read model y acciones que este Control Center presentará sean estables. La propuesta no modifica ni amplía el Change R01 actualmente en curso, que excluye explícitamente el rediseño del dashboard.
+Independencia y dependencias: la convergencia visual puede avanzar en paralelo reutilizando los read models y operaciones que ya existen. Las fichas MM-R03–MM-R06 de `docs/backlog/MM-R07.md` son dependencias únicamente para comportamientos nuevos que carezcan de un contrato/API existente; el gate se limita a la vista o acción afectada, que permanecerá `UNKNOWN`/no disponible, mientras el resto continúa. No se inventarán operaciones, cálculos ni autoridades para evitar ese gate. La propuesta no modifica ni amplía el Change R01 actualmente en curso, que excluye explícitamente el rediseño del dashboard.
