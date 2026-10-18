@@ -767,6 +767,142 @@ async def test_control_center_viewport_evidence(browser_test_env: dict[str, Any]
 
 
 @pytest.mark.asyncio
+async def test_real_browser_desktop_layout_preferences_are_bounded_and_operator_scoped(
+    browser_test_env: dict[str, Any],
+) -> None:
+    client = ChromeCDPClient(browser_test_env["ws_url"])
+    await client.connect()
+    try:
+        await client.set_viewport(1440, 900)
+        await authenticate_browser(
+            client, browser_test_env["server_url"], browser_test_env["session_token"]
+        )
+
+        first_operator = await client.eval_js("""
+          (() => {
+            const grid = document.querySelector('#viewExecutions .content-split:not(.backlog-split)');
+            const separator = document.getElementById('paneSeparator');
+            separator.focus();
+            separator.dispatchEvent(new KeyboardEvent('keydown', {key:'ArrowRight', bubbles:true}));
+            const width = parseFloat(getComputedStyle(grid).getPropertyValue('--master-pane-width'));
+            const available = grid.clientWidth - 52;
+            const keys = Object.keys(localStorage).filter(key => key.startsWith('minime:desktop-layout:v1:'));
+            return {width, available, keys, saved: keys.map(key => JSON.parse(localStorage.getItem(key)))};
+          })()
+        """)
+        assert first_operator["width"] >= 240
+        assert first_operator["width"] <= first_operator["available"] * 0.7
+        assert len(first_operator["keys"]) == 1
+        assert "operator@example.com" not in first_operator["keys"][0]
+        assert set(first_operator["saved"][0]) == {"version", "ratio", "collapsed"}
+        first_key = first_operator["keys"][0]
+
+        await client.eval_js("document.getElementById('collapseMasterPane').click()")
+        assert (
+            await client.eval_js(
+                "document.querySelector('#viewExecutions .content-split').classList.contains('master-collapsed')"
+            )
+            is True
+        )
+        await client.eval_js("""
+          (async () => {
+            const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('second-operator@example.com'));
+            const namespace = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+            localStorage.setItem(`minime:desktop-layout:v1:${namespace}`, JSON.stringify({version:99, ratio:0.99, collapsed:true}));
+          })()
+        """)
+        await authenticate_browser(
+            client, browser_test_env["server_url"], browser_test_env["second_session_token"]
+        )
+        second_operator = await client.eval_js("""
+          (() => {
+            const grid = document.querySelector('#viewExecutions .content-split:not(.backlog-split)');
+            const keys = Object.keys(localStorage).filter(key => key.startsWith('minime:desktop-layout:v1:'));
+            return {email: document.getElementById('operatorEmailText').textContent,
+              collapsed: grid.classList.contains('master-collapsed'), keys,
+              width: parseFloat(getComputedStyle(grid).getPropertyValue('--master-pane-width')),
+              available: grid.clientWidth - 52,
+              saved: keys.map(key => JSON.parse(localStorage.getItem(key)))};
+          })()
+        """)
+        assert second_operator["email"] == "second-operator@example.com", second_operator
+        assert second_operator["collapsed"] is False
+        assert second_operator["width"] >= 240
+        assert second_operator["width"] <= second_operator["available"] * 0.7
+        await client.eval_js("""
+          (() => {
+            const separator = document.getElementById('paneSeparator');
+            separator.focus();
+            separator.dispatchEvent(new KeyboardEvent('keydown', {key:'ArrowLeft', bubbles:true}));
+          })()
+        """)
+        second_keys = await client.eval_js(
+            "Object.keys(localStorage).filter(key => key.startsWith('minime:desktop-layout:v1:'))"
+        )
+        assert len(second_keys) == 2 and first_key in second_keys
+        second_key = next(key for key in second_keys if key != first_key)
+        await client.eval_js("document.getElementById('resetPaneLayout').click()")
+        remaining_keys = await client.eval_js(
+            "Object.keys(localStorage).filter(key => key.startsWith('minime:desktop-layout:v1:'))"
+        )
+        assert remaining_keys == [first_key]
+
+        assert second_key != first_key
+        assert all(
+            set(item) == {"version", "ratio", "collapsed"} for item in second_operator["saved"]
+        )
+
+        await authenticate_browser(
+            client, browser_test_env["server_url"], browser_test_env["session_token"]
+        )
+        assert (
+            await client.eval_js(
+                "document.querySelector('#viewExecutions .content-split').classList.contains('master-collapsed')"
+            )
+            is True
+        )
+        await client.eval_js("document.getElementById('collapseMasterPane').click()")
+        assert (
+            await client.eval_js(
+                "document.querySelector('#viewExecutions .content-split').classList.contains('master-collapsed')"
+            )
+            is False
+        )
+        await client.set_viewport(1024, 768)
+        await asyncio.sleep(0.2)
+        tablet = await client.eval_js("""
+          (() => {
+            const grid = document.querySelector('#viewExecutions .content-split:not(.backlog-split)');
+            return {collapsed: grid.classList.contains('master-collapsed'),
+              customWidth: grid.style.getPropertyValue('--master-pane-width'),
+              detailLeft: grid.querySelector('.detail-panel').getBoundingClientRect().left,
+              masterLeft: grid.querySelector('.master-panel').getBoundingClientRect().left};
+          })()
+        """)
+        assert tablet["collapsed"] is False
+        assert tablet["customWidth"] == ""
+        assert tablet["detailLeft"] > tablet["masterLeft"]
+
+        await client.set_viewport(390, 844, mobile=True)
+        await asyncio.sleep(0.2)
+        mobile = await client.eval_js("""
+          (() => {
+            const grid = document.querySelector('#viewExecutions .content-split:not(.backlog-split)');
+            return {collapsed: grid.classList.contains('master-collapsed'),
+              customWidth: grid.style.getPropertyValue('--master-pane-width'),
+              display: getComputedStyle(grid).display,
+              detailTop: grid.querySelector('.detail-panel').getBoundingClientRect().top,
+              masterTop: grid.querySelector('.master-panel').getBoundingClientRect().top};
+          })()
+        """)
+        assert mobile["collapsed"] is False
+        assert mobile["customWidth"] == ""
+        assert mobile["display"] == "flex" and mobile["detailTop"] < mobile["masterTop"]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_real_browser_pwa_manifest_and_sw_inspection(
     browser_test_env: dict[str, Any],
 ) -> None:

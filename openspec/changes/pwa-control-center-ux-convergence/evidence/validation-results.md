@@ -22,6 +22,21 @@ Result: **59 passed, 4 warnings**. This includes real-Chrome tests at the five r
 
 The test census surfaced two stale static PWA assertions that still expected scheduler and stage labels to live in the old dashboard module. They were updated to assert the modular API/view contracts and the backend's actual six pipeline phases. `tests/test_pwa_contract.py`: **3 passed** after correction.
 
+## Follow-up: tablet layout and desktop preference proof
+
+At commit `2a69f94cd4cb96020554e0b4cd1705dfc70169fd`, the affected group was rerun after adding tablet navigation/queue styling and browser evidence for desktop preferences:
+
+```text
+tests/test_pwa_real_browser.py tests/test_pwa_desktop_layout.py
+tests/test_dashboard_ui.py tests/test_pwa_assets.py tests/test_pwa_contract.py
+tests/test_pwa_service_worker.py tests/test_dashboard_api.py tests/test_dashboard_security.py
+tests/test_dashboard_stale_isolation.py tests/test_control_plane_api.py
+tests/test_dashboard_service.py tests/test_systemd_scheduler_observer.py
+62 passed, 4 warnings in 61.18s
+```
+
+Chrome exercises an authenticated two-operator session: keyboard resize respects 240px/70% pane bounds; only a digest namespace and `{version, ratio, collapsed}` are persisted; a malformed second-account preference falls back to default; first-account collapse survives reload; resetting the second account preserves the first preference; tablet/mobile do not inherit desktop width/collapse and mobile remains detail-first. This supports task 7.3 only, not eight-state visual acceptance.
+
 ## One repository-wide test run and attribution
 
 One full `pytest -q` run, with the isolated runtime root configured, completed before the final small corrections to stale PWA assertions and contradictory systemd-state validation:
@@ -50,7 +65,7 @@ The five order-sensitive nodes passed again in an isolated targeted group. Do no
 - `git diff --check`: passed after task/evidence updates.
 - Real Chrome captured five fixture-seeded viewport screenshots under `evidence/browser/*-mock-seeded.png`. They are seeded test fixtures, not production-state evidence or human visual approval. They do not establish visual parity against all eight Stitch states.
 - The eight approved Stitch PNGs remain the visual baseline. Human comparison/acceptance and the remaining three-state visual evidence are pending.
-- A visual inspection of those captures against the approved references found material hierarchy gaps: tablet still uses the broad top-navigation/stacked-dashboard layout rather than the approved compact icon-rail master/detail; mobile shows desktop-style KPI and run-detail content instead of the approved concise supervision/attention cards; the candidate desktop lacks the reference's prominent pipeline/planner region. The screenshots therefore document progress, not visual acceptance.
+- Tablet now uses a compact icon rail, a wrapping status/action toolbar at narrow tablet widths, structured queue cards, and master-detail at both tablet target sizes; browser checks assert no horizontal page overflow. Visual acceptance remains pending: mobile retains more KPI/detail density than the approved supervision-first references, desktop hierarchy does not yet match all reference states, and only the active mock-seeded state is captured at five sizes.
 
 ## Scheduler observation limits
 
@@ -59,6 +74,6 @@ The fixed-target read-only D-Bus observer is deterministic-test verified for act
 ## Remaining implementation / acceptance limits
 
 - Frontend convergence/removal is incomplete: `dashboard.js` remains a large coordinator (2,029 lines after Backlog/evidence view extraction) and owns significant UI workflows. Modules extracted so far are live imports, but complete consumer parity and Removal Ledger proof are not established. Do not mark tasks 5.1–5.3 complete or claim architectural convergence.
-- The five viewport checks do not complete the eight approved visual states, keyboard/accessibility audit, or human validation.
+- The five viewport checks do not complete the eight approved visual states, keyboard/accessibility audit, or human validation. Task 7.3 is now verified; tasks 4.1, 4.2, 7.2 and human visual acceptance remain open.
 - Authenticated preview/container E2E, governed action lifecycle E2E, complete-value states (including an authoritative deliberate PAUSED source), post-merge/deployment verification, and real Linux systemd observation remain pending.
 - No task requiring human approval, merge or deployment is complete.
