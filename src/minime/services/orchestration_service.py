@@ -39,6 +39,7 @@ from minime.domain.interfaces import PersistenceUnitOfWork
 from minime.domain.models import (
     AdmissionResult,
     Change,
+    CheckResult,
     Event,
     Job,
     MetricFact,
@@ -2022,51 +2023,59 @@ class OrchestrationService:
                         )
                         break
 
-                    # ExecutionPipelineService owns deterministic check execution.  It persists
-                    # those results before cleaning up its worktree, so orchestration must consume
-                    # that authority rather than rerun checks against a path that no longer exists.
-                    checks_to_run = project.checks if project and project.checks else []
-                    persisted_checks = [
-                        result
-                        for result in self.uow.check_results.list_by_job(job.job_id)
-                        if result.candidate_sha == job.candidate_sha
-                        and result.candidate_generation == run.current_generation
-                    ]
-                    checks_by_name = {result.check_name: result for result in persisted_checks}
-                    missing_checks = [
-                        check.get("name")
-                        for check in checks_to_run
-                        if check.get("name") not in checks_by_name
-                    ]
-                    if missing_checks:
-                        _stop_coordinator_run(
-                            run,
-                            stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
-                            human_gate=HumanGate.NEEDS_HUMAN,
-                            stop_reason="Execution pipeline did not persist results for every configured check.",
-                            stop_details={
-                                "code": "INCOMPLETE_AUTHORITATIVE_CHECKS",
-                                "missing_checks": missing_checks,
-                            },
-                        )
-                        break
+                    is_checks_only = bool(checks_only)
 
-                    all_passed = all(
-                        checks_by_name[check.get("name")].exit_code == 0 for check in checks_to_run
+                    # Enforce single invocation/batch authorization: exact configured name+command pairs,
+                    # no duplicates, timestamp clustering, all exit_code == 0, and job.status == CHECKS_PASSED.
+                    valid_batch, batch_err, _ = self._validate_current_checks_batch(
+                        job, run, project
                     )
-                    if not all_passed:
+                    if not valid_batch:
+                        if is_checks_only:
+                            _stop_coordinator_run(
+                                run,
+                                stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+                                human_gate=HumanGate.NEEDS_HUMAN,
+                                stop_reason=f"Authoritative checks batch validation failed: {batch_err}",
+                                stop_details={
+                                    "code": "INCOMPLETE_AUTHORITATIVE_CHECKS",
+                                    "error": batch_err,
+                                },
+                            )
+                            break
                         if job.status not in {JobStatus.CHECKS_FAILED, JobStatus.FAILED}:
                             self.uow.jobs.transition(
                                 job.job_id,
                                 JobStatus.CHECKS_FAILED.value,
-                                error_message="Deterministic checks failed.",
+                                error_message=batch_err or "Deterministic checks batch invalid.",
+                                claim_context=claim_context,
                             )
+                        self._advance_stage(
+                            run, OrchestrationStage.EVALUATING_ATTEMPT, claim_context=claim_context
+                        )
+                        break
+
+                    # Batch passed; ensure job.status is not already failed
+                    if job.status in {JobStatus.CHECKS_FAILED, JobStatus.FAILED}:
+                        if is_checks_only:
+                            _stop_coordinator_run(
+                                run,
+                                stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+                                human_gate=HumanGate.NEEDS_HUMAN,
+                                stop_reason=f"Cannot advance with job status {job.status.value}.",
+                                stop_details={"code": "CHECKS_JOB_STATUS_FAILED"},
+                            )
+                            break
                         self._advance_stage(
                             run, OrchestrationStage.EVALUATING_ATTEMPT, claim_context=claim_context
                         )
                     else:
                         if job.status in {JobStatus.RUNNING, JobStatus.CHECKS_RUNNING}:
-                            self.uow.jobs.transition(job.job_id, JobStatus.CHECKS_PASSED.value)
+                            self.uow.jobs.transition(
+                                job.job_id,
+                                JobStatus.CHECKS_PASSED.value,
+                                claim_context=claim_context,
+                            )
                         self._advance_stage(
                             run, OrchestrationStage.FREEZING_CANDIDATE, claim_context=claim_context
                         )
@@ -3294,27 +3303,15 @@ class OrchestrationService:
         if to_stage == OrchestrationStage.FREEZING_CANDIDATE:
             if not job:
                 return "Cannot freeze candidate without an active job."
-            checks = [
-                result
-                for result in self.uow.check_results.list_by_job(job.job_id)
-                if result.candidate_sha == job.candidate_sha
-                and result.candidate_generation == run.current_generation
-            ]
+            if job.status != JobStatus.CHECKS_PASSED:
+                return f"Cannot freeze candidate when job status is {job.status.value}; expected CHECKS_PASSED."
             project = self.uow.projects.get_by_id(run.project_id)
-            if project and project.checks:
-                latest_by_name: dict[str, Any] = {}
-                for r in checks:
-                    if (
-                        r.check_name not in latest_by_name
-                        or r.created_at > latest_by_name[r.check_name].created_at
-                    ):
-                        latest_by_name[r.check_name] = r
-                if not latest_by_name or any(
-                    latest_by_name.get(c.get("name")) is None
-                    or latest_by_name[c.get("name")].exit_code != 0
-                    for c in project.checks
-                ):
-                    return "Cannot freeze candidate without authoritative passing checks."
+            valid_batch, batch_err, _ = self._validate_current_checks_batch(job, run, project)
+            if not valid_batch:
+                return (
+                    batch_err
+                    or "Cannot freeze candidate without authoritative passing checks batch."
+                )
         elif to_stage == OrchestrationStage.COMPLEMENTARY_REVIEW:
             cand = candidate or (
                 self.uow.orchestration_candidates.get_latest_for_run(run.run_id) if run else None
@@ -3358,6 +3355,91 @@ class OrchestrationService:
             ):
                 return "Cannot prepare human merge gate without reconciled push and exact PR head evidence."
         return None
+
+    def _validate_current_checks_batch(
+        self, job: Job, run: OrchestrationRun, project: Project | None
+    ) -> tuple[bool, str | None, list[CheckResult]]:
+        """Validate that the latest execution batch for candidate/generation is complete and passed."""
+        if not project or not project.checks:
+            return True, None, []
+
+        expected_checks = [c for c in project.checks if isinstance(c, dict) and c.get("name")]
+        if not expected_checks:
+            return True, None, []
+
+        k = len(expected_checks)
+        all_results = [
+            r
+            for r in self.uow.check_results.list_by_job(job.job_id)
+            if r.candidate_sha == job.candidate_sha
+            and r.candidate_generation == run.current_generation
+        ]
+        if not all_results:
+            return False, "No deterministic check results found for current candidate.", []
+
+        if len(all_results) < k:
+            return (
+                False,
+                f"Insufficient check results for candidate: got {len(all_results)}, expected at least {k}.",
+                [],
+            )
+
+        # Sort descending by created_at (newest first)
+        sorted_results = sorted(
+            all_results, key=lambda r: (r.created_at, r.result_id), reverse=True
+        )
+        latest_batch = sorted_results[:k]
+
+        # 1. Check names must match expected_checks 1-to-1 with no duplicates
+        expected_names = [c["name"] for c in expected_checks]
+        expected_commands = {c["name"]: str(c.get("command") or "") for c in expected_checks}
+
+        batch_names = [r.check_name for r in latest_batch]
+        if len(set(batch_names)) != k:
+            return (
+                False,
+                f"Latest checks batch has duplicate or missing check names: {batch_names}",
+                [],
+            )
+
+        if set(batch_names) != set(expected_names):
+            missing = set(expected_names) - set(batch_names)
+            unexpected = set(batch_names) - set(expected_names)
+            return (
+                False,
+                f"Latest checks batch does not match configured checks. Missing: {missing}, unexpected: {unexpected}",
+                [],
+            )
+
+        # 2. Check commands must match configured commands
+        for r in latest_batch:
+            expected_cmd = expected_commands.get(r.check_name, "")
+            if r.command != expected_cmd:
+                return (
+                    False,
+                    f"Check '{r.check_name}' command mismatch: expected '{expected_cmd}', got '{r.command}'.",
+                    [],
+                )
+
+        # 3. Check timestamp clustering: all results in batch must have run within a reasonable batch window
+        min_ts = min(r.created_at for r in latest_batch)
+        max_ts = max(r.created_at for r in latest_batch)
+        total_duration_sec = sum(r.duration_ms for r in latest_batch) / 1000.0
+        max_allowed_spread = max(60.0, total_duration_sec + 60.0)
+        spread_sec = (max_ts - min_ts).total_seconds()
+        if spread_sec > max_allowed_spread:
+            return (
+                False,
+                f"Latest checks batch timestamp spread ({spread_sec:.1f}s) exceeds allowable window ({max_allowed_spread:.1f}s).",
+                [],
+            )
+
+        # 4. All checks in the batch must have exit_code == 0
+        failed_checks = [r.check_name for r in latest_batch if r.exit_code != 0]
+        if failed_checks:
+            return False, f"Checks in latest batch failed: {failed_checks}", latest_batch
+
+        return True, None, latest_batch
 
     def _bind_current_authority_records(
         self, run: OrchestrationRun, job: Job, candidate: OrchestrationCandidate

@@ -646,15 +646,23 @@ class RecoveryConvergenceService:
             )
 
     def _validate_checks_only_eligibility(
-        self, run: OrchestrationRun, job: Job, worktree_path: Path, force: bool = False
+        self, run: OrchestrationRun, job: Job, worktree_path: Path
     ) -> None:
-        """Validate authoritative durable tuple and runner environmental fault before checks-only bypass."""
-        if not run.is_active and not force:
+        """Validate authoritative durable tuple, managed binding, and runner environmental fault before checks-only bypass."""
+        from minime.services.workspace_guard import is_binding_fully_valid
+
+        if not run.is_active:
             raise ValueError("Run is not active.")
+        if run.current_stage != OrchestrationStage.IMPLEMENTING:
+            raise ValueError(
+                f"Run current_stage is '{run.current_stage.value}', expected IMPLEMENTING."
+            )
         if run.active_job_id != job.job_id:
             raise ValueError(
                 f"Run active_job_id '{run.active_job_id}' does not match job '{job.job_id}'."
             )
+        if job.status != JobStatus.CHECKS_FAILED:
+            raise ValueError(f"Job status is '{job.status.value}', expected CHECKS_FAILED.")
         if run.project_id != job.project_id:
             raise ValueError("Run project_id does not match job project_id.")
         if run.change_name != job.change_name:
@@ -666,9 +674,33 @@ class RecoveryConvergenceService:
         if not job.candidate_sha:
             raise ValueError("Job has no authoritative candidate_sha.")
 
+        # Validate durable managed repository binding
+        binding_repo = getattr(self.uow, "project_managed_repository_bindings", None)
+        if not binding_repo:
+            raise ValueError("project_managed_repository_bindings repository is missing in uow.")
+        binding = binding_repo.get_by_project_id(job.project_id)
+        if not binding or not is_binding_fully_valid(binding):
+            mismatches = (
+                getattr(binding, "mismatch_reasons", []) if binding else ["binding missing"]
+            )
+            raise ValueError(
+                f"No valid durable managed repository binding for project '{job.project_id}': {mismatches}"
+            )
+
+        # Validate worktree ownership if tracked
+        ownership_repo = getattr(self.uow, "orchestration_worktree_ownerships", None)
+        if ownership_repo and hasattr(ownership_repo, "get_by_job_id"):
+            ow = ownership_repo.get_by_job_id(job.job_id)
+            if ow and ow.run_id and ow.run_id != run.run_id:
+                raise ValueError(
+                    f"Worktree ownership run_id '{ow.run_id}' does not match run '{run.run_id}'."
+                )
+
         # Validate worktree directory existence and git HEAD matching candidate_sha
-        if not worktree_path.exists():
-            raise ValueError(f"Preserved worktree path does not exist: {worktree_path}")
+        if not worktree_path.exists() or not worktree_path.is_dir():
+            raise ValueError(
+                f"Preserved worktree path does not exist or is not a directory: {worktree_path}"
+            )
 
         head_res = subprocess.run(
             ["git", "-C", str(worktree_path), "rev-parse", "HEAD"],
@@ -692,14 +724,68 @@ class RecoveryConvergenceService:
         if status_res.returncode != 0 or status_res.stdout.strip():
             raise ValueError("Preserved worktree is not clean.")
 
-        # Validate that prior check failure diagnostics substantiate a proven runner environmental fault
+        # Verify candidate and latest attempt alignment
+        attempts = (
+            self.uow.job_attempts.list_by_job(job.job_id)
+            if hasattr(self.uow, "job_attempts")
+            else []
+        )
+        if attempts:
+            attempts.sort(key=lambda a: a.attempt_number)
+            latest_att = attempts[-1]
+            if latest_att.end_sha and latest_att.end_sha != job.candidate_sha:
+                raise ValueError(
+                    f"Latest attempt end_sha '{latest_att.end_sha}' does not match job candidate_sha '{job.candidate_sha}'."
+                )
+
+        # Collect diagnostics and check results for this candidate
         diagnostics = (
             self.uow.evidence_diagnostics.list_by_job(job.job_id)
             if hasattr(self.uow, "evidence_diagnostics")
             else []
         )
+        cand_diags = [d for d in diagnostics if d.candidate_sha == job.candidate_sha]
+
+        check_results = (
+            self.uow.check_results.list_by_job(job.job_id)
+            if hasattr(self.uow, "check_results")
+            else []
+        )
+        cand_crs = [
+            cr
+            for cr in check_results
+            if cr.candidate_sha == job.candidate_sha
+            and (
+                cr.candidate_generation is None or cr.candidate_generation == run.current_generation
+            )
+        ]
+
+        # Fail-closed rejection of application code errors
+        code_error_signals = [
+            "assertionerror",
+            "assertion error",
+            "syntaxerror",
+            "indentationerror",
+            "nameerror",
+            "attributeerror",
+        ]
+        for diag in cand_diags:
+            reason = (diag.reason or "").lower()
+            details_str = str(diag.evidence_reference or "").lower()
+            if any(sig in reason or sig in details_str for sig in code_error_signals):
+                raise ValueError(
+                    "Prior check failure is an application code error, not a proven runner environmental fault."
+                )
+        for cr in cand_crs:
+            snippet = (cr.output_snippet or "").lower()
+            if any(sig in snippet for sig in code_error_signals):
+                raise ValueError(
+                    "Prior check failure is an application code error, not a proven runner environmental fault."
+                )
+
+        # Require positive proof of runner environmental fault
         environmental_proven = False
-        for diag in diagnostics:
+        for diag in cand_diags:
             reason = (diag.reason or "").lower()
             details_str = str(diag.evidence_reference or "").lower()
             combined = f"{reason} {details_str}"
@@ -712,13 +798,7 @@ class RecoveryConvergenceService:
                 break
 
         if not environmental_proven:
-            # Check check_results output snippets if diagnostic records didn't capture the error text
-            check_results = (
-                self.uow.check_results.list_by_job(job.job_id)
-                if hasattr(self.uow, "check_results")
-                else []
-            )
-            for cr in check_results:
+            for cr in cand_crs:
                 snippet = (cr.output_snippet or "").lower()
                 if ("permissionerror" in snippet and "/dev/null" in snippet) or (
                     "[errno 13]" in snippet and "/dev/null" in snippet
@@ -809,18 +889,22 @@ class RecoveryConvergenceService:
             self.release_claim(context)
             return decision
 
-        # Resolve preserved worktree path
+        # Resolve preserved worktree path strictly via WorktreeManager and durable managed binding
         root = Path(project_root).resolve() if project_root else self.project_root
         wt_manager = WorktreeManager(project_root=root, uow=self.uow)
         try:
             worktree_path = wt_manager.worktree_path(job.job_id, project_id=job.project_id)
-        except Exception:
-            # Fallback to local default worktrees/<job_id>
-            worktree_path = root / "worktrees" / job.job_id
+        except Exception as wt_err:
+            decision.status = RecoveryDecisionStatus.BLOCKED
+            decision.reason_code = f"PREFLIGHT_REJECTED: Worktree resolution failed: {wt_err}"[:128]
+            self._update_decision(decision)
+            self.uow.commit()
+            self.release_claim(context)
+            return decision
 
         # Preflight verification
         try:
-            self._validate_checks_only_eligibility(run, job, worktree_path, force=force)
+            self._validate_checks_only_eligibility(run, job, worktree_path)
         except Exception as preflight_err:
             logger.warning(
                 "Preflight checks-only eligibility rejected for run '%s': %s",
@@ -869,7 +953,7 @@ class RecoveryConvergenceService:
                 orchestration_svc.resume(
                     run_id=run.run_id,
                     project_root=root,
-                    force=force,
+                    force=False,
                     claim_context=context,
                     manage_heartbeat=False,
                     checks_only=True,
@@ -891,23 +975,59 @@ class RecoveryConvergenceService:
             self.uow.rollback()
             decision.status = RecoveryDecisionStatus.BLOCKED
             decision.reason_code = f"STALE_CLAIM: {exc}"[:128]
+            # ZERO DATABASE WRITES after claim loss: do not persist decision, do not commit, do not release claim
             return decision
         except Exception as exc:
-            logger.exception(
-                "Unexpected error in recover_checks_only for '%s': %s", run.run_id, exc
-            )
-            decision.status = RecoveryDecisionStatus.BLOCKED
-            decision.reason_code = f"ERROR: {exc}"[:128]
-        finally:
-            self._update_decision(decision)
-            self.uow.commit()
-            if not (
+            if (
                 heartbeat.heartbeat_failed
                 or not heartbeat.stopped_cleanly
                 or heartbeat.is_alive
                 or heartbeat.is_renewing
             ):
-                self.release_claim(context)
+                logger.warning(
+                    "Heartbeat failed during recover_checks_only for '%s': %s",
+                    run.run_id,
+                    exc,
+                )
+                self.uow.rollback()
+                decision.status = RecoveryDecisionStatus.BLOCKED
+                decision.reason_code = self._bounded_decision_failure_code(exc)
+                return decision
+            logger.exception(
+                "Unexpected error in recover_checks_only for '%s': %s", run.run_id, exc
+            )
+            decision.status = RecoveryDecisionStatus.BLOCKED
+            decision.reason_code = f"ERROR: {exc}"[:128]
+
+        # Before writing decision or releasing claim, verify heartbeat terminated cleanly
+        if (
+            heartbeat.heartbeat_failed
+            or not heartbeat.stopped_cleanly
+            or heartbeat.is_alive
+            or heartbeat.is_renewing
+        ):
+            self.uow.rollback()
+            decision.status = RecoveryDecisionStatus.BLOCKED
+            decision.reason_code = "HEARTBEAT_THREAD_TEARDOWN_FAILED"
+            return decision
+
+        try:
+            # Atomic point-of-persistence fencing: update decision with claim fence check, then release claim
+            self._update_decision(decision, claim_context=context)
+            released = self.release_claim(context)
+            if not released:
+                raise StaleClaimError("FAILED_TO_RELEASE_CLAIM_ATOMICALLY")
+            self.uow.commit()
+        except StaleClaimError as exc:
+            logger.warning(
+                "Claim fence lost during final decision persistence for '%s': %s",
+                run.run_id,
+                exc,
+            )
+            self.uow.rollback()
+            decision.status = RecoveryDecisionStatus.BLOCKED
+            decision.reason_code = f"STALE_CLAIM: {exc}"[:128]
+            return decision
 
         return decision
 
