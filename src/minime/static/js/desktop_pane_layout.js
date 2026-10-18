@@ -36,8 +36,12 @@ export async function initDesktopPaneLayout(email) {
   if (storageKey) {
     try {
       const stored = JSON.parse(localStorage.getItem(storageKey) || "null");
-      if (stored?.version === STORAGE_VERSION && typeof stored.ratio === "number"
-          && stored.ratio >= 0.3 && stored.ratio <= MAX_RATIO
+      const available = paneSpace(grid);
+      const storedWidth = Number.isFinite(stored?.ratio) ? stored.ratio * available : NaN;
+      const boundedStoredWidth = boundedWidth(storedWidth, available);
+      if (stored?.version === STORAGE_VERSION && Number.isFinite(stored.ratio)
+          && stored.ratio > 0 && stored.ratio <= MAX_RATIO
+          && boundedStoredWidth !== null && Math.abs(storedWidth - boundedStoredWidth) < 1
           && typeof stored.collapsed === "boolean") preference = stored;
     } catch (_) {
       // Invalid or inaccessible preference falls back to a safe default.

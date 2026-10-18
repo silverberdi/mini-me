@@ -1897,16 +1897,24 @@ body.theme-light {
   .nav-controls { margin-left: 176px; width: calc(100% - 176px); }
   .dashboard-main { margin-left: 176px; width: calc(100% - 176px); }
   #viewExecutions { display: grid !important; grid-template-columns: minmax(0, 1.65fr) minmax(300px, 1fr); gap: 12px; align-items: start; }
-  #viewExecutions > .content-split { display: contents !important; }
-  #viewExecutions .pane-divider { display: none !important; }
-  #viewExecutions > .content-split > .detail-panel { grid-column: 1 / -1; grid-row: 1; order: 0; }
+  #viewExecutions > .content-split {
+    display: grid !important;
+    grid-column: 1 / -1;
+    grid-row: 1;
+    grid-template-columns: minmax(240px, var(--master-pane-width, 42%)) 28px minmax(240px, 1fr);
+    gap: 12px;
+    min-width: 0;
+    align-items: start;
+  }
+  #viewExecutions > .content-split > .master-panel { grid-column: 1; grid-row: 1; }
+  #viewExecutions > .content-split > .pane-divider { grid-column: 2; grid-row: 1; display: flex !important; }
+  #viewExecutions > .content-split > .detail-panel { grid-column: 3; grid-row: 1; order: 0; }
   #viewExecutions > .attention-banner { grid-column: 2; grid-row: 2; order: 2; }
   #viewExecutions > .queue-panel { grid-column: 1; grid-row: 2; order: 1; }
   #viewExecutions > .activity-panel { grid-column: 1; grid-row: 3; order: 3; }
   #viewExecutions > .provider-panel { grid-column: 2; grid-row: 3; order: 4; }
   #viewExecutions > .kpi-grid { grid-column: 1 / -1; grid-row: 4; order: 5; }
   #viewExecutions > #overviewFreshness, #viewExecutions > #healthFreshness { grid-column: 1 / -1; order: 6; }
-  #viewExecutions > .content-split > .master-panel { grid-column: 1 / -1; grid-row: 7; order: 7; }
   #viewExecutions > .kpi-grid .kpi-card { min-height: 88px; padding: 12px 14px; }
 }
 
@@ -1948,17 +1956,6 @@ body.theme-light {
   .activity-item time { grid-column: 1; }
   .activity-event { grid-column: 2; }
   .activity-summary, .activity-actor { grid-column: 1 / -1; }
-}
-
-/* Ensure the grid items promoted by display:contents override the legacy splitter columns. */
-@media (min-width: 1200px) {
-  #viewExecutions .content-split:not(.backlog-split) > .detail-panel {
-    grid-column: 1 / -1 !important;
-    grid-row: 1;
-  }
-  #viewExecutions .content-split:not(.backlog-split) > .master-panel {
-    grid-column: 1 / -1 !important;
-  }
 }
 
 @media (min-width: 768px) and (max-width: 1199px) {

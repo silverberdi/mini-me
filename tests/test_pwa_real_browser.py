@@ -909,20 +909,109 @@ async def test_real_browser_desktop_layout_preferences_are_bounded_and_operator_
           (() => {
             const grid = document.querySelector('#viewExecutions .content-split:not(.backlog-split)');
             const separator = document.getElementById('paneSeparator');
+            const visible = getComputedStyle(separator).display !== 'none' && !separator.hidden;
+            const display = getComputedStyle(grid).display;
+            const clientWidth = grid.clientWidth;
             separator.focus();
             separator.dispatchEvent(new KeyboardEvent('keydown', {key:'ArrowRight', bubbles:true}));
             const width = parseFloat(getComputedStyle(grid).getPropertyValue('--master-pane-width'));
             const available = grid.clientWidth - 52;
             const keys = Object.keys(localStorage).filter(key => key.startsWith('minime:desktop-layout:v1:'));
-            return {width, available, keys, saved: keys.map(key => JSON.parse(localStorage.getItem(key)))};
+            return {width, available, keys, visible, display, clientWidth,
+              ariaNow: Number(separator.getAttribute('aria-valuenow')),
+              saved: keys.map(key => JSON.parse(localStorage.getItem(key)))};
           })()
         """)
+        assert first_operator["display"] == "grid" and first_operator["clientWidth"] > 1000
+        assert first_operator["visible"] is True
         assert first_operator["width"] >= 240
         assert first_operator["width"] <= first_operator["available"] * 0.7
+        assert first_operator["ariaNow"] == first_operator["width"]
         assert len(first_operator["keys"]) == 1
         assert "operator@example.com" not in first_operator["keys"][0]
         assert set(first_operator["saved"][0]) == {"version", "ratio", "collapsed"}
         first_key = first_operator["keys"][0]
+
+        home_width = await client.eval_js("""
+          (() => { const separator = document.getElementById('paneSeparator');
+            separator.focus(); separator.dispatchEvent(new KeyboardEvent('keydown', {key:'Home', bubbles:true}));
+            return {width:Number(separator.getAttribute('aria-valuenow')), min:Number(separator.getAttribute('aria-valuemin'))}; })()
+        """)
+        assert home_width["width"] == home_width["min"] == 240
+        end_width = await client.eval_js("""
+          (() => { const separator = document.getElementById('paneSeparator');
+            separator.focus(); separator.dispatchEvent(new KeyboardEvent('keydown', {key:'End', bubbles:true}));
+            const grid = document.querySelector('#viewExecutions .content-split:not(.backlog-split)');
+            return {width:Number(separator.getAttribute('aria-valuenow')),
+              max:Number(separator.getAttribute('aria-valuemax')), available:grid.clientWidth - 52}; })()
+        """)
+        assert end_width["width"] == end_width["max"]
+        assert end_width["width"] <= end_width["available"] * 0.7 + 1
+
+        await client.eval_js("""
+          (() => { const separator = document.getElementById('paneSeparator');
+            separator.focus(); separator.dispatchEvent(new KeyboardEvent('keydown', {key:'Home', bubbles:true})); })()
+        """)
+        pointer_start = await client.eval_js("""
+          (() => { const node = document.getElementById('paneSeparator');
+            window.__pointerEvents = {down:0,move:0,up:0};
+            node.addEventListener('pointerdown', () => window.__pointerEvents.down++);
+            node.addEventListener('pointermove', () => window.__pointerEvents.move++);
+            node.addEventListener('pointerup', () => window.__pointerEvents.up++);
+            const rect = node.getBoundingClientRect();
+            return {x:rect.left + rect.width / 2, y:rect.top + Math.min(60, rect.height / 2),
+              before:Number(node.getAttribute('aria-valuenow')),rect:{left:rect.left,top:rect.top,width:rect.width,height:rect.height},
+              hit:document.elementFromPoint(rect.left + rect.width / 2, rect.top + Math.min(60, rect.height / 2))?.id,
+              visible:getComputedStyle(node).display,hidden:node.hidden}; })()
+        """)
+        await client.send_cmd(
+            "Input.dispatchMouseEvent",
+            {"type": "mouseMoved", "x": pointer_start["x"], "y": pointer_start["y"]},
+        )
+        await client.send_cmd(
+            "Input.dispatchMouseEvent",
+            {
+                "type": "mousePressed",
+                "x": pointer_start["x"],
+                "y": pointer_start["y"],
+                "button": "left",
+                "clickCount": 1,
+            },
+        )
+        await client.send_cmd(
+            "Input.dispatchMouseEvent",
+            {
+                "type": "mouseMoved",
+                "x": pointer_start["x"] + 96,
+                "y": pointer_start["y"],
+                "button": "left",
+                "buttons": 1,
+            },
+        )
+        await client.send_cmd(
+            "Input.dispatchMouseEvent",
+            {
+                "type": "mouseReleased",
+                "x": pointer_start["x"] + 96,
+                "y": pointer_start["y"],
+                "button": "left",
+                "clickCount": 1,
+            },
+        )
+        pointer_width = await client.eval_js(
+            "Number(document.getElementById('paneSeparator').getAttribute('aria-valuenow'))"
+        )
+        pointer_events = await client.eval_js("window.__pointerEvents")
+        assert pointer_width > pointer_start["before"], {
+            "start": pointer_start,
+            "after": pointer_width,
+            "events": pointer_events,
+        }
+        assert (
+            pointer_events["down"] >= 1
+            and pointer_events["move"] >= 1
+            and pointer_events["up"] >= 1
+        )
 
         await client.eval_js("document.getElementById('collapseMasterPane').click()")
         assert (
@@ -931,6 +1020,16 @@ async def test_real_browser_desktop_layout_preferences_are_bounded_and_operator_
             )
             is True
         )
+        await client.navigate(f"{browser_test_env['server_url']}/")
+        await asyncio.sleep(0.5)
+        first_operator_reload = await client.eval_js("""
+          (() => ({email:document.getElementById('operatorEmailText').textContent,
+            collapsed:document.querySelector('#viewExecutions .content-split').classList.contains('master-collapsed'),
+            preference:JSON.parse(localStorage.getItem(Object.keys(localStorage).find(key => key.startsWith('minime:desktop-layout:v1:')) || 'null'))}))()
+        """)
+        assert first_operator_reload["email"] == "operator@example.com"
+        assert first_operator_reload["collapsed"] is True
+        assert first_operator_reload["preference"]["collapsed"] is True
         await client.eval_js("""
           (async () => {
             const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('second-operator@example.com'));
@@ -1010,6 +1109,31 @@ async def test_real_browser_desktop_layout_preferences_are_bounded_and_operator_
         assert tablet["customWidth"] == ""
         assert tablet["detailLeft"] > tablet["masterLeft"]
 
+        await client.set_viewport(1920, 1080)
+        await asyncio.sleep(0.2)
+        ultrawide = await client.eval_js("""
+          (() => { const grid = document.querySelector('#viewExecutions .content-split:not(.backlog-split)');
+            const separator = document.getElementById('paneSeparator');
+            return {width:Number(separator.getAttribute('aria-valuenow')),
+              available:grid.clientWidth - 52, display:getComputedStyle(grid).display,
+              visible:getComputedStyle(separator).display !== 'none' && !separator.hidden}; })()
+        """)
+        assert ultrawide["display"] == "grid" and ultrawide["visible"] is True
+        assert 240 <= ultrawide["width"] <= ultrawide["available"] * 0.7 + 1
+
+        await client.set_viewport(768, 1024, mobile=True)
+        await asyncio.sleep(0.2)
+        portrait_tablet = await client.eval_js("""
+          (() => { const grid = document.querySelector('#viewExecutions .content-split:not(.backlog-split)');
+            return {customWidth:grid.style.getPropertyValue('--master-pane-width'),
+              display:getComputedStyle(grid).display, separatorHidden:document.getElementById('paneSeparator').hidden}; })()
+        """)
+        assert portrait_tablet == {
+            "customWidth": "",
+            "display": "contents",
+            "separatorHidden": True,
+        }
+
         await client.set_viewport(390, 844, mobile=True)
         await asyncio.sleep(0.2)
         mobile = await client.eval_js("""
@@ -1024,7 +1148,15 @@ async def test_real_browser_desktop_layout_preferences_are_bounded_and_operator_
         """)
         assert mobile["collapsed"] is False
         assert mobile["customWidth"] == ""
-        assert mobile["display"] == "flex" and mobile["detailTop"] < mobile["masterTop"]
+        assert mobile["display"] == "contents" and mobile["detailTop"] < mobile["masterTop"]
+
+        await client.set_viewport(360, 800, mobile=True)
+        phone_small = await client.eval_js("""
+          (() => { const grid = document.querySelector('#viewExecutions .content-split:not(.backlog-split)');
+            return {customWidth:grid.style.getPropertyValue('--master-pane-width'),
+              display:getComputedStyle(grid).display, separatorHidden:document.getElementById('paneSeparator').hidden}; })()
+        """)
+        assert phone_small == {"customWidth": "", "display": "contents", "separatorHidden": True}
     finally:
         await client.close()
 
@@ -2143,6 +2275,7 @@ async def test_real_browser_authenticated_control_plane_cancel_persists_in_dispo
         suffix = uuid.uuid4().hex[:12]
         project_id = f"qa-pwa-{suffix}"
         change_name = f"control-center-action-{suffix}"
+        secondary_change_name = f"control-center-read-integrity-{suffix}"
         run_id = f"qa-run-{suffix}"
         job_id = f"qa-job-{suffix}"
         operator_email = f"pwa-e2e-{suffix}@example.invalid"
@@ -2163,11 +2296,26 @@ async def test_real_browser_authenticated_control_plane_cancel_persists_in_dispo
                 last_readiness_status=ReadinessState.READY,
             )
         )
+        uow.changes.save(
+            Change(
+                project_id=project_id,
+                name=secondary_change_name,
+                status=ChangeStatus.IN_PROGRESS,
+                last_readiness_status=ReadinessState.READY,
+            )
+        )
         uow.bindings.save(
             ProjectBinding(
                 project_id=project_id,
                 repository=f"silverberdi/pwa-acceptance-{suffix}",
                 openspec_change_name=change_name,
+            )
+        )
+        uow.bindings.save(
+            ProjectBinding(
+                project_id=project_id,
+                repository=f"silverberdi/pwa-acceptance-{suffix}",
+                openspec_change_name=secondary_change_name,
             )
         )
         uow.jobs.save(
@@ -2270,6 +2418,37 @@ async def test_real_browser_authenticated_control_plane_cancel_persists_in_dispo
         client = ChromeCDPClient(browser_test_env["ws_url"])
         await client.connect()
         try:
+            await client.send_cmd(
+                "Page.addScriptToEvaluateOnNewDocument",
+                {
+                    "source": f"""
+              (() => {{
+                const state = window.__pwaReadIntegrity = {{mode:'normal', path:null, releaseDelayed:null}};
+                const originalFetch = window.fetch.bind(window);
+                window.fetch = (input, init) => {{
+                  const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+                  const responsePromise = originalFetch(input, init);
+                  if (url.pathname !== state.path) return responsePromise;
+                  if (state.mode === 'malformed') {{
+                    state.mode = 'normal';
+                    return responsePromise.then(async response => {{
+                      await response.clone().arrayBuffer();
+                      return new Response(JSON.stringify({{project_id:'{project_id}',change_name:'{secondary_change_name}'}}),
+                        {{status:200,headers:{{'Content-Type':'application/json'}}}});
+                    }});
+                  }}
+                  if (state.mode === 'delay') {{
+                    state.mode = 'delaying';
+                    return responsePromise.then(response => new Promise(resolve => {{
+                      state.releaseDelayed = () => {{ state.releaseDelayed = null; state.mode = 'normal'; resolve(response); }};
+                    }}));
+                  }}
+                  return responsePromise;
+                }};
+              }})();
+            """
+                },
+            )
             await client.navigate(preview_url + "/")
             await authenticate_browser(client, preview_url, session_token)
             api_identity = await client.eval_js(
@@ -2296,7 +2475,7 @@ async def test_real_browser_authenticated_control_plane_cancel_persists_in_dispo
             )
             assert api_identity == {
                 "overviewStatus": 200,
-                "projects": [project_id],
+                "projects": [project_id, project_id],
                 "detailStatus": 200,
                 "runId": run_id,
                 "projectId": project_id,
@@ -2307,6 +2486,51 @@ async def test_real_browser_authenticated_control_plane_cancel_persists_in_dispo
                 "unauthenticatedStatus": 401,
                 "forbiddenStatus": 403,
             }, api_identity
+
+            # A malformed authenticated 200 for the overview cannot be treated
+            # as fresh data or leave operational rows from the prior read visible.
+            await client.eval_js("""
+              (() => { window.__pwaReadIntegrity.path = '/api/v1/dashboard/overview';
+                window.__pwaReadIntegrity.mode = 'malformed';
+                document.getElementById('refreshBtn').click(); })()
+            """)
+            malformed_overview = None
+            for _ in range(40):
+                malformed_overview = await client.eval_js("""
+                  (() => ({freshness:document.getElementById('overviewFreshness').dataset.state,
+                    rows:document.getElementById('changesTableBody').innerText,
+                    detail:document.getElementById('detailPanel').innerText,
+                    contentDisplay:getComputedStyle(document.getElementById('detailContent')).display}))()
+                """)
+                if malformed_overview["freshness"] == "UNKNOWN":
+                    break
+                await asyncio.sleep(0.05)
+            assert malformed_overview and malformed_overview["freshness"] == "UNKNOWN", (
+                malformed_overview
+            )
+            assert "Datos operacionales no disponibles" in malformed_overview["rows"]
+            assert (
+                run_id not in malformed_overview["detail"]
+                and job_id not in malformed_overview["detail"]
+            )
+            assert malformed_overview["contentDisplay"] == "none"
+            await client.eval_js("""window.__pwaReadIntegrity.path = null;
+              document.getElementById('refreshBtn').click();""")
+            for _ in range(40):
+                restored_overview = await client.eval_js("""
+                  ({freshness:document.getElementById('overviewFreshness').dataset.state,
+                    rows:document.getElementById('changesTableBody').innerText})
+                """)
+                if (
+                    restored_overview["freshness"] == "OBSERVED"
+                    and change_name in restored_overview["rows"]
+                ):
+                    break
+                await asyncio.sleep(0.05)
+            assert (
+                restored_overview["freshness"] == "OBSERVED"
+                and change_name in restored_overview["rows"]
+            ), restored_overview
 
             # Exercise offline degradation on the actual containerized FastAPI
             # preview. The backend observation is UNKNOWN in this container,
@@ -2397,6 +2621,118 @@ async def test_real_browser_authenticated_control_plane_cancel_persists_in_dispo
             assert change_name in selected_detail and run_id in selected_detail, (
                 "The UI did not bind detail/actions to the selected durable Run identity."
             )
+
+            # Capture exact-candidate screenshots from the authenticated container
+            # preview before exercising malformed/stale response fault injection.
+            # The rows are disposable QA records, not production observations.
+            preview_evidence_dir = Path(__file__).parents[1] / (
+                "openspec/changes/pwa-control-center-ux-convergence/evidence/browser"
+            )
+            preview_evidence_dir.mkdir(parents=True, exist_ok=True)
+            preview_viewports = (
+                (1440, 900, False, "preview-active-desktop-1440x900-qa-seeded.png"),
+                (1024, 768, False, "preview-active-tablet-1024x768-qa-seeded.png"),
+                (768, 1024, True, "preview-active-tablet-768x1024-qa-seeded.png"),
+                (390, 844, True, "preview-active-mobile-390x844-qa-seeded.png"),
+                (360, 800, True, "preview-active-mobile-360x800-qa-seeded.png"),
+            )
+            for width, height, mobile, filename in preview_viewports:
+                await client.set_viewport(width, height, mobile=mobile)
+                await asyncio.sleep(0.15)
+                capture = await client.send_cmd(
+                    "Page.captureScreenshot", {"format": "png", "captureBeyondViewport": False}
+                )
+                (preview_evidence_dir / filename).write_bytes(base64.b64decode(capture["data"]))
+            await client.set_viewport(1440, 900)
+
+            # A malformed authenticated 200 response must not leave the previously
+            # selected Run/Job visible or create a plausible partial detail.
+            read_path = f"/api/v1/dashboard/changes/{project_id}/{secondary_change_name}"
+            await client.eval_js(f"""
+              (() => {{ window.__pwaReadIntegrity.path = {json.dumps(read_path)};
+                window.__pwaReadIntegrity.mode = 'malformed';
+                const row = [...document.querySelectorAll('#changesTableBody tr[data-project-id]')]
+                  .find(item => item.dataset.changeName === {json.dumps(secondary_change_name)});
+                row?.click(); return Boolean(row); }})()
+            """)
+            malformed_state = None
+            for _ in range(40):
+                malformed_state = await client.eval_js("""
+                  (() => ({contentDisplay:getComputedStyle(document.getElementById('detailContent')).display,
+                    placeholder:document.getElementById('detailPlaceholder').textContent,
+                    detail:document.getElementById('detailPanel').innerText,
+                    runId:document.getElementById('dtChangeName').textContent}))()
+                """)
+                if "Detalle no disponible" in malformed_state["placeholder"]:
+                    break
+                await asyncio.sleep(0.05)
+            assert malformed_state and "Detalle no disponible" in malformed_state["placeholder"], (
+                malformed_state
+            )
+            assert malformed_state["contentDisplay"] == "none"
+            assert (
+                run_id not in malformed_state["detail"] and job_id not in malformed_state["detail"]
+            )
+
+            # Hold a real authenticated response for the old selection while a
+            # second real read wins. Releasing the old response cannot restore it.
+            original_path = f"/api/v1/dashboard/changes/{project_id}/{change_name}"
+            await client.eval_js(f"""
+              (() => {{ window.__pwaReadIntegrity.path = {json.dumps(original_path)};
+                window.__pwaReadIntegrity.mode = 'delay';
+                const row = [...document.querySelectorAll('#changesTableBody tr[data-project-id]')]
+                  .find(item => item.dataset.changeName === {json.dumps(change_name)});
+                row?.click(); return Boolean(row); }})()
+            """)
+            delayed_started = False
+            for _ in range(40):
+                delayed_started = await client.eval_js(
+                    "Boolean(window.__pwaReadIntegrity.releaseDelayed)"
+                )
+                if delayed_started:
+                    break
+                await asyncio.sleep(0.05)
+            assert delayed_started, "Expected authenticated old-selection response was not delayed."
+            await client.eval_js(f"""
+              (() => {{ window.__pwaReadIntegrity.path = null;
+                const row = [...document.querySelectorAll('#changesTableBody tr[data-project-id]')]
+                  .find(item => item.dataset.changeName === {json.dumps(secondary_change_name)});
+                row?.click(); return Boolean(row); }})()
+            """)
+            second_selection = None
+            for _ in range(40):
+                second_selection = await client.eval_js("""
+                  (() => ({title:document.getElementById('dtChangeName').textContent,
+                    detail:document.getElementById('detailPanel').innerText,
+                    placeholder:document.getElementById('detailPlaceholder').textContent}))()
+                """)
+                if secondary_change_name in second_selection["detail"]:
+                    break
+                await asyncio.sleep(0.05)
+            assert second_selection and secondary_change_name in second_selection["detail"], (
+                second_selection
+            )
+            await client.eval_js("window.__pwaReadIntegrity.releaseDelayed()")
+            await asyncio.sleep(0.1)
+            final_selection = await client.eval_js("""
+              (() => ({title:document.getElementById('dtChangeName').textContent,
+                detail:document.getElementById('detailPanel').innerText}))()
+            """)
+            assert secondary_change_name in final_selection["detail"]
+            assert (
+                run_id not in final_selection["detail"] and job_id not in final_selection["detail"]
+            )
+            await client.eval_js(f"""
+              (() => [...document.querySelectorAll('#changesTableBody tr[data-project-id]')]
+                .find(item => item.dataset.changeName === {json.dumps(change_name)})?.click())()
+            """)
+            for _ in range(40):
+                selected_detail = await client.eval_js(
+                    "document.getElementById('detailPanel').innerText"
+                )
+                if change_name in selected_detail and run_id in selected_detail:
+                    break
+                await asyncio.sleep(0.05)
 
             action_button = None
             for _ in range(40):
@@ -2496,6 +2832,41 @@ async def test_real_browser_authenticated_control_plane_cancel_persists_in_dispo
                 % (run_id, project_id, change_name, run_id)
             )
             assert stale["http"] == 200 and stale["body"]["status"] != "COMPLETED", stale
+
+            cancelled_viewports = (
+                (1440, 900, False, "preview-cancelled-desktop-1440x900-qa-seeded.png"),
+                (1024, 768, False, "preview-cancelled-tablet-1024x768-qa-seeded.png"),
+                (768, 1024, True, "preview-cancelled-tablet-768x1024-qa-seeded.png"),
+                (390, 844, True, "preview-cancelled-mobile-390x844-qa-seeded.png"),
+                (360, 800, True, "preview-cancelled-mobile-360x800-qa-seeded.png"),
+            )
+            for width, height, mobile, filename in cancelled_viewports:
+                await client.set_viewport(width, height, mobile=mobile)
+                await asyncio.sleep(0.15)
+                capture = await client.send_cmd(
+                    "Page.captureScreenshot", {"format": "png", "captureBeyondViewport": False}
+                )
+                (preview_evidence_dir / filename).write_bytes(base64.b64decode(capture["data"]))
+            candidate_source_sha = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], text=True, timeout=10
+            ).strip()
+            preview_manifest = {
+                "candidate_source_sha": candidate_source_sha,
+                "base_sha": base_sha,
+                "image_digest": image_digest,
+                "database": "minime_pwa_e2e (disposable; loopback host + private Docker bridge)",
+                "run_id": run_id,
+                "job_id": job_id,
+                "project_id": project_id,
+                "change_name": change_name,
+                "durable_states_observed": ["IMPLEMENTING/RUNNING", "CANCELLED"],
+                "screenshots": [filename for _, _, _, filename in preview_viewports]
+                + [filename for _, _, _, filename in cancelled_viewports],
+                "classification": "QA-seeded disposable PostgreSQL preview; not production evidence",
+            }
+            (preview_evidence_dir / "preview-acceptance-manifest.json").write_text(
+                json.dumps(preview_manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
         finally:
             await client.close()
     finally:
@@ -2782,11 +3153,14 @@ async def test_real_browser_execution_view_controller_ignores_stale_change_detai
             const content = document.createElement('section');
             const placeholder = document.createElement('div');
             const rendered = [];
+            const validDetail = (change_name) => ({project_id:'project',change_name,status:'UNKNOWN',
+              run_id:null,job_id:null,pipeline:[],candidate_history:[],checks:[],timeline:[],blocker_details:[],
+              candidate_authority:null,review:{},audit:{},github:{},preview_validation:{}});
             let releaseOld;
             const controller = createExecutionViewController({
               fetchRequest: url => url.includes('/old-change')
                 ? new Promise(resolve => { releaseOld = resolve; })
-                : Promise.resolve({ok:true,status:200,json:async () => ({project_id:'project',change_name:'new-change'})}),
+                : Promise.resolve({ok:true,status:200,json:async () => validDetail('new-change')}),
               elements:{detailContent:content,detailPlaceholder:placeholder},
               setOfflineBanner:()=>{},onUnauthorized:()=>{},getNavigationState:()=>null,
               renderDetail:detail=>rendered.push(detail.change_name),statusClass:()=>'',formatRelativeTime:()=>'',
@@ -2795,7 +3169,7 @@ async def test_real_browser_execution_view_controller_ignores_stale_change_detai
             await Promise.resolve();
             controller.selectChange('project','new-change');
             await new Promise(resolve => setTimeout(resolve,0));
-            releaseOld({ok:true,status:200,json:async () => ({project_id:'project',change_name:'old-change'})});
+            releaseOld({ok:true,status:200,json:async () => validDetail('old-change')});
             await new Promise(resolve => setTimeout(resolve,0));
             return {rendered,selected:controller.selectedChange};
           })()
@@ -2972,6 +3346,10 @@ async def test_real_browser_selected_change_renders_candidate_bound_preview_and_
         assert identity["repository"] == detail["repository_identity"]
         assert identity["change"] == detail["change_name"]
         assert detail["run_id"] in identity["run"] and detail["job_id"] in identity["job"]
+        assert "Ejecutor asignado" in identity["run"]
+        assert detail["current_executor"] in identity["run"]
+        assert "Rama destino" in identity["run"]
+        assert "Gate humano" in identity["run"]
         assert identity["generation"] == f"gen-{detail['candidate_authority']['generation']}"
         assert identity["candidate"] == detail["candidate_authority"]["candidate_sha"]
         assert identity["pipeline"].strip()

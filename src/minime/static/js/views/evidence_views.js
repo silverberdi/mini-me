@@ -32,7 +32,10 @@ export function renderRunOverview({ metaGrid, blockerSection, blockersList, deta
       <div class="meta-box"><div class="meta-box-label">Etapa actual</div><div class="meta-box-val">${escapeHtml(detail.current_stage || "UNKNOWN")}</div></div>
       <div class="meta-box"><div class="meta-box-label">Resultado de detención</div><div class="meta-box-val">${escapeHtml(detail.stop_outcome || "UNKNOWN")}</div></div>
       <div class="meta-box"><div class="meta-box-label">ID de Run</div><div class="meta-box-val font-mono text-muted">${escapeHtml(detail.run_id || "—")}</div></div>
-      <div class="meta-box"><div class="meta-box-label">ID de Job activo</div><div class="meta-box-val font-mono text-muted">${escapeHtml(detail.job_id || "—")}</div></div>`;
+      <div class="meta-box"><div class="meta-box-label">ID de Job activo</div><div class="meta-box-val font-mono text-muted">${escapeHtml(detail.job_id || "—")}</div></div>
+      <div class="meta-box"><div class="meta-box-label">Ejecutor asignado</div><div class="meta-box-val">${escapeHtml(detail.current_executor || "UNKNOWN")}</div></div>
+      <div class="meta-box"><div class="meta-box-label">Rama destino</div><div class="meta-box-val font-mono">${escapeHtml(detail.target_branch || "UNKNOWN")}</div></div>
+      <div class="meta-box"><div class="meta-box-label">Gate humano</div><div class="meta-box-val">${escapeHtml(detail.human_gate || "UNKNOWN")}</div></div>`;
   }
   const blockers = Array.isArray(detail.blocker_details) ? detail.blocker_details : [];
   if (blockerSection) blockerSection.style.display = blockers.length ? "block" : "none";
