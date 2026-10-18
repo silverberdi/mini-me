@@ -452,6 +452,7 @@ class OrchestrationService:
         drain_mode: bool = False,
         claim_context: RecoveryClaimContext | None = None,
         manage_heartbeat: bool = True,
+        checks_only: bool = False,
     ) -> OrchestrationRun:
         """Resume an orchestration run from its persisted resumable checkpoint."""
         from minime.domain.models import validate_claim_context_authoritative
@@ -576,6 +577,7 @@ class OrchestrationService:
             project_root=project_root,
             claim_context=claim_context,
             manage_heartbeat=manage_heartbeat,
+            checks_only=checks_only,
         )
 
     def resolve_preserved_candidate(
@@ -1557,6 +1559,7 @@ class OrchestrationService:
         project_root: str | Path | None = None,
         claim_context: RecoveryClaimContext | None = None,
         manage_heartbeat: bool = True,
+        checks_only: bool = False,
     ) -> OrchestrationRun:
         """Drive the deterministic stage state machine until a legitimate stop outcome."""
         root = Path(project_root).resolve() if project_root else self.project_root
@@ -1716,6 +1719,54 @@ class OrchestrationService:
                             stop_details={"code": "JOB_NOT_FOUND"},
                         )
                         break
+
+                    if checks_only:
+                        # Authoritative checks-only recovery: advance directly to RUNNING_CHECKS via narrow edge
+                        # and invoke pipeline.run_checks_only() without calling execute_queued_job or dispatching models.
+                        self._advance_stage(
+                            run,
+                            OrchestrationStage.RUNNING_CHECKS,
+                            claim_context=claim_context,
+                            checks_only=True,
+                        )
+                        try:
+                            job = run_coroutine_sync(
+                                self.pipeline.run_checks_only(
+                                    job.job_id,
+                                    candidate_generation=run.current_generation,
+                                    claim_context=claim_context,
+                                )
+                            )
+                        except Exception as exc:
+                            if isinstance(exc, StaleClaimError) or (
+                                heartbeat is not None and heartbeat.heartbeat_failed
+                            ):
+                                should_release_claim = False
+                                self.uow.rollback()
+                                raise (
+                                    exc
+                                    if isinstance(exc, StaleClaimError)
+                                    else StaleClaimError(str(exc))
+                                )
+                            redacted_error = redact_secrets(str(exc))
+                            logger.exception(
+                                "Error executing checks-only pipeline for run '%s': %s",
+                                run.run_id,
+                                redacted_error,
+                            )
+                            _stop_coordinator_run(
+                                run,
+                                stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+                                human_gate=HumanGate.NEEDS_HUMAN,
+                                stop_reason="Checks-only pipeline execution failed.",
+                                stop_details={
+                                    "code": "CHECKS_ONLY_PIPELINE_EXCEPTION",
+                                    "exception_type": type(exc).__name__,
+                                    "error": redacted_error,
+                                },
+                            )
+                            break
+                        continue
 
                     # Execute attempt via pipeline
 
@@ -2034,6 +2085,22 @@ class OrchestrationService:
 
                     current_candidate = self._freeze_candidate_if_needed(run, job)
                     if not current_candidate:
+                        break
+
+                    if checks_only:
+                        # Authoritative review hold: stop without dispatching reviewer or auditor models.
+                        # Zero model inference (no Codex, Antigravity, DeepSeek, OpenRouter) and zero code mutation.
+                        _stop_coordinator_run(
+                            run,
+                            stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+                            human_gate=HumanGate.NEEDS_HUMAN,
+                            stop_reason="Checks-only recovery completed; candidate frozen and awaiting review authorization.",
+                            stop_details={
+                                "code": "REVIEW_AUTHORIZATION_PENDING",
+                                "candidate_sha": current_candidate.candidate_sha,
+                                "generation": current_candidate.generation,
+                            },
+                        )
                         break
 
                     self._advance_stage(
@@ -3047,6 +3114,7 @@ class OrchestrationService:
         to_stage: OrchestrationStage,
         correlation_id: str | None = None,
         claim_context: RecoveryClaimContext | None = None,
+        checks_only: bool = False,
     ) -> None:
         """Advance run to next stage with finite graph validation and deterministic transition events."""
         orig_run = run
@@ -3073,7 +3141,16 @@ class OrchestrationService:
             _sync_orig()
             return
 
-        allowed = ALLOWED_STAGE_TRANSITIONS.get(from_stage, set())
+        allowed = set(ALLOWED_STAGE_TRANSITIONS.get(from_stage, set()))
+        if (
+            checks_only
+            and from_stage == OrchestrationStage.IMPLEMENTING
+            and to_stage == OrchestrationStage.RUNNING_CHECKS
+            and claim_context is not None
+        ):
+            # Explicit narrow checks-only authorized edge gated by claim fencing
+            allowed.add(OrchestrationStage.RUNNING_CHECKS)
+
         if to_stage not in allowed:
             error_msg = f"Illegal stage transition from '{from_stage.value}' to '{to_stage.value}'."
             logger.error(error_msg)
@@ -3224,12 +3301,20 @@ class OrchestrationService:
                 and result.candidate_generation == run.current_generation
             ]
             project = self.uow.projects.get_by_id(run.project_id)
-            if (
-                project
-                and project.checks
-                and (not checks or any(result.exit_code != 0 for result in checks))
-            ):
-                return "Cannot freeze candidate without authoritative passing checks."
+            if project and project.checks:
+                latest_by_name: dict[str, Any] = {}
+                for r in checks:
+                    if (
+                        r.check_name not in latest_by_name
+                        or r.created_at > latest_by_name[r.check_name].created_at
+                    ):
+                        latest_by_name[r.check_name] = r
+                if not latest_by_name or any(
+                    latest_by_name.get(c.get("name")) is None
+                    or latest_by_name[c.get("name")].exit_code != 0
+                    for c in project.checks
+                ):
+                    return "Cannot freeze candidate without authoritative passing checks."
         elif to_stage == OrchestrationStage.COMPLEMENTARY_REVIEW:
             cand = candidate or (
                 self.uow.orchestration_candidates.get_latest_for_run(run.run_id) if run else None

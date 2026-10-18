@@ -6,7 +6,7 @@ The orchestration driver SHALL support entering `RUNNING_CHECKS` from an in-prog
 #### Scenario: Driver receives checks-only continuation directive
 - **WHEN** `drive_coordinator()` is invoked with a valid claim context and an explicit checks-only directive
 - **AND** the active job has a verified `candidate_sha` and worktree HEAD match
-- **THEN** the coordinator SHALL transition directly to `RUNNING_CHECKS`
+- **THEN** the coordinator SHALL transition directly to `RUNNING_CHECKS` via an authorized, fenced checks-only edge
 - **AND** the coordinator SHALL consume the verified check results executed by the checks-only pipeline
 - **AND** the coordinator SHALL NOT execute `pipeline.execute_queued_job()` or dispatch new implementer attempts.
 
@@ -20,6 +20,7 @@ When executing checks-only recovery, the coordinator SHALL halt execution immedi
 
 #### Scenario: Candidate frozen halts at review hold
 - **WHEN** candidate freezing completes under checks-only recovery
-- **THEN** the driver SHALL stop with `stop_outcome=NEEDS_HUMAN` and `human_gate=REVIEW_PENDING` (or stop details indicating review authorization required)
+- **THEN** the driver SHALL stop with `stop_outcome=NEEDS_HUMAN`, `human_gate=HumanGate.NEEDS_HUMAN`, and `stop_details.code=REVIEW_AUTHORIZATION_PENDING`
 - **AND** the driver SHALL NOT invoke DeepSeek or Antigravity code review or audit runners
-- **AND** subsequent review execution SHALL require separate human authorization.
+- **AND** the driver SHALL set `is_active=False` and set BacklogItem status to `NEEDS_HUMAN`
+- **AND** subsequent review execution SHALL require separate human authorization without replaying APPLY.

@@ -43,6 +43,7 @@ from minime.domain.models import (
     ExternalActionAttempt,
     Job,
     OrchestrationExternalAction,
+    OrchestrationRun,
     RecoveryClaimContext,
     RecoveryDecision,
     generate_uuid,
@@ -644,6 +645,272 @@ class RecoveryConvergenceService:
                 )
             )
 
+    def _validate_checks_only_eligibility(
+        self, run: OrchestrationRun, job: Job, worktree_path: Path, force: bool = False
+    ) -> None:
+        """Validate authoritative durable tuple and runner environmental fault before checks-only bypass."""
+        if not run.is_active and not force:
+            raise ValueError("Run is not active.")
+        if run.active_job_id != job.job_id:
+            raise ValueError(
+                f"Run active_job_id '{run.active_job_id}' does not match job '{job.job_id}'."
+            )
+        if run.project_id != job.project_id:
+            raise ValueError("Run project_id does not match job project_id.")
+        if run.change_name != job.change_name:
+            raise ValueError("Run change_name does not match job change_name.")
+        if run.base_sha != job.base_sha:
+            raise ValueError(
+                f"Run base_sha '{run.base_sha}' does not match job base_sha '{job.base_sha}'."
+            )
+        if not job.candidate_sha:
+            raise ValueError("Job has no authoritative candidate_sha.")
+
+        # Validate worktree directory existence and git HEAD matching candidate_sha
+        if not worktree_path.exists():
+            raise ValueError(f"Preserved worktree path does not exist: {worktree_path}")
+
+        head_res = subprocess.run(
+            ["git", "-C", str(worktree_path), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if head_res.returncode != 0:
+            raise ValueError(f"Failed to resolve git HEAD in worktree: {head_res.stderr.strip()}")
+        if head_res.stdout.strip() != job.candidate_sha:
+            raise ValueError(
+                f"Worktree HEAD '{head_res.stdout.strip()}' does not match job candidate_sha '{job.candidate_sha}'."
+            )
+
+        status_res = subprocess.run(
+            ["git", "-C", str(worktree_path), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if status_res.returncode != 0 or status_res.stdout.strip():
+            raise ValueError("Preserved worktree is not clean.")
+
+        # Validate that prior check failure diagnostics substantiate a proven runner environmental fault
+        diagnostics = (
+            self.uow.evidence_diagnostics.list_by_job(job.job_id)
+            if hasattr(self.uow, "evidence_diagnostics")
+            else []
+        )
+        environmental_proven = False
+        for diag in diagnostics:
+            reason = (diag.reason or "").lower()
+            details_str = str(diag.evidence_reference or "").lower()
+            combined = f"{reason} {details_str}"
+            if (
+                ("permissionerror" in combined and "/dev/null" in combined)
+                or ("[errno 13]" in combined and "/dev/null" in combined)
+                or ("confinement preflight" in combined or "runner environmental fault" in combined)
+            ):
+                environmental_proven = True
+                break
+
+        if not environmental_proven:
+            # Check check_results output snippets if diagnostic records didn't capture the error text
+            check_results = (
+                self.uow.check_results.list_by_job(job.job_id)
+                if hasattr(self.uow, "check_results")
+                else []
+            )
+            for cr in check_results:
+                snippet = (cr.output_snippet or "").lower()
+                if ("permissionerror" in snippet and "/dev/null" in snippet) or (
+                    "[errno 13]" in snippet and "/dev/null" in snippet
+                ):
+                    environmental_proven = True
+                    break
+
+        if not environmental_proven:
+            raise ValueError(
+                "Prior check failure does not substantiate a proven runner environmental fault (/dev/null or confinement preflight error)."
+            )
+
+    def recover_checks_only(
+        self,
+        run_id: str,
+        project_root: str | Path | None = None,
+        force: bool = False,
+    ) -> RecoveryDecision:
+        """Execute narrow, fenced checks-only checkpoint recovery of a preserved candidate."""
+        from minime.services.worktree_manager import WorktreeManager
+
+        cycle_id = generate_uuid()
+        claim_key = f"run:{run_id}"
+        source = RecoverySource.CLI
+
+        claim = self.acquire_claim(claim_key=claim_key, lease_seconds=self.lease_seconds)
+        if not claim:
+            decision = RecoveryDecision(
+                cycle_id=cycle_id,
+                claim_key=claim_key,
+                identity_type="RUN",
+                identity_id=run_id,
+                source=source,
+                classification=RecoveryClassification.CLAIMED_ELSEWHERE,
+                planned_action="NO_ACTION",
+                status=RecoveryDecisionStatus.NO_ACTION,
+                reason_code="CLAIMED_ELSEWHERE",
+            )
+            self._create_decision(decision)
+            self.uow.commit()
+            return decision
+
+        context = RecoveryClaimContext(
+            claim_key=claim.claim_key,
+            owner_instance_id=claim.owner_instance_id,
+            fence_token=claim.fence_token,
+            lease_expires_at=claim.lease_expires_at,
+        )
+
+        decision = RecoveryDecision(
+            cycle_id=cycle_id,
+            claim_key=claim_key,
+            identity_type="RUN",
+            identity_id=run_id,
+            source=source,
+            fence_token=context.fence_token,
+            classification=RecoveryClassification.RESUME_SAFE_CHECKPOINT,
+            planned_action="RECOVER_CHECKS_ONLY",
+            status=RecoveryDecisionStatus.EXECUTING,
+            reason_code="CHECKS_ONLY_RECOVERY",
+        )
+        self._create_decision(decision)
+        self.uow.commit()
+
+        run = self.uow.orchestration_runs.get_by_id(run_id)
+        if not run:
+            decision.status = RecoveryDecisionStatus.NO_ACTION
+            decision.reason_code = "RUN_NOT_FOUND"
+            self._update_decision(decision)
+            self.uow.commit()
+            self.release_claim(context)
+            return decision
+
+        if not run.active_job_id:
+            decision.status = RecoveryDecisionStatus.BLOCKED
+            decision.reason_code = "NO_ACTIVE_JOB"
+            self._update_decision(decision)
+            self.uow.commit()
+            self.release_claim(context)
+            return decision
+
+        job = self.uow.jobs.get_by_id(run.active_job_id)
+        if not job:
+            decision.status = RecoveryDecisionStatus.BLOCKED
+            decision.reason_code = "JOB_NOT_FOUND"
+            self._update_decision(decision)
+            self.uow.commit()
+            self.release_claim(context)
+            return decision
+
+        # Resolve preserved worktree path
+        root = Path(project_root).resolve() if project_root else self.project_root
+        wt_manager = WorktreeManager(project_root=root, uow=self.uow)
+        try:
+            worktree_path = wt_manager.worktree_path(job.job_id, project_id=job.project_id)
+        except Exception:
+            # Fallback to local default worktrees/<job_id>
+            worktree_path = root / "worktrees" / job.job_id
+
+        # Preflight verification
+        try:
+            self._validate_checks_only_eligibility(run, job, worktree_path, force=force)
+        except Exception as preflight_err:
+            logger.warning(
+                "Preflight checks-only eligibility rejected for run '%s': %s",
+                run.run_id,
+                preflight_err,
+            )
+            decision.status = RecoveryDecisionStatus.BLOCKED
+            decision.reason_code = f"PREFLIGHT_REJECTED: {preflight_err}"[:128]
+            self._update_decision(decision)
+            self.uow.commit()
+            self.release_claim(context)
+            return decision
+
+        # Setup and drive coordinator under single heartbeat ownership
+        if self.orchestration_service is None:
+            from minime.services.orchestration_service import OrchestrationService
+
+            orchestration_svc = OrchestrationService(self.uow, project_root=root)
+        else:
+            orchestration_svc = self.orchestration_service
+
+        renew_claim = getattr(self.uow, "renew_claim_heartbeat_isolated", None)
+        if renew_claim is None:
+
+            def renew_claim(claim_context: RecoveryClaimContext, lease_seconds: int) -> bool:
+                renewed = self.uow.claims.renew_heartbeat(
+                    claim_key=claim_context.claim_key,
+                    owner_instance_id=claim_context.owner_instance_id,
+                    fence_token=claim_context.fence_token,
+                    lease_seconds=lease_seconds,
+                )
+                if renewed:
+                    self.uow.commit()
+                return renewed
+
+        heartbeat = OperationalHeartbeat(
+            claim_context=context,
+            interval_seconds=self.heartbeat_seconds,
+            lease_seconds=self.lease_seconds,
+            renew_claim=renew_claim,
+            stop_timeout=getattr(self, "heartbeat_stop_timeout", 5.0),
+        )
+
+        try:
+            with heartbeat:
+                orchestration_svc.resume(
+                    run_id=run.run_id,
+                    project_root=root,
+                    force=force,
+                    claim_context=context,
+                    manage_heartbeat=False,
+                    checks_only=True,
+                )
+            if (
+                heartbeat.heartbeat_failed
+                or not heartbeat.stopped_cleanly
+                or heartbeat.is_alive
+                or heartbeat.is_renewing
+            ):
+                raise StaleClaimError("CLAIM_HEARTBEAT_RENEWAL_FAILED_OR_THREAD_ALIVE")
+            decision.status = RecoveryDecisionStatus.COMPLETED
+        except StaleClaimError as exc:
+            logger.warning(
+                "Run continuation fence lost during recover_checks_only for '%s': %s",
+                run.run_id,
+                exc,
+            )
+            self.uow.rollback()
+            decision.status = RecoveryDecisionStatus.BLOCKED
+            decision.reason_code = f"STALE_CLAIM: {exc}"[:128]
+            return decision
+        except Exception as exc:
+            logger.exception(
+                "Unexpected error in recover_checks_only for '%s': %s", run.run_id, exc
+            )
+            decision.status = RecoveryDecisionStatus.BLOCKED
+            decision.reason_code = f"ERROR: {exc}"[:128]
+        finally:
+            self._update_decision(decision)
+            self.uow.commit()
+            if not (
+                heartbeat.heartbeat_failed
+                or not heartbeat.stopped_cleanly
+                or heartbeat.is_alive
+                or heartbeat.is_renewing
+            ):
+                self.release_claim(context)
+
+        return decision
+
     def request_run_continuation(
         self,
         run_id: str,
@@ -721,7 +988,10 @@ class RecoveryConvergenceService:
         self, decision: RecoveryDecision, claim_context: RecoveryClaimContext | None = None
     ) -> None:
         if hasattr(self.uow, "recovery_decisions") and self.uow.recovery_decisions is not None:
-            self.uow.recovery_decisions.update_decision(decision, claim_context=claim_context)
+            try:
+                self.uow.recovery_decisions.update_decision(decision, claim_context=claim_context)
+            except TypeError:
+                self.uow.recovery_decisions.update_decision(decision)
 
     def acquire_claim(self, claim_key: str, lease_seconds: int = 60) -> RecoveryClaimContext | None:
         """Acquire or re-acquire a claim for this owner instance."""

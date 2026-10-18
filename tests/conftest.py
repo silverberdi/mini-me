@@ -127,6 +127,7 @@ from minime.domain.models import (
     ProviderEfficiencyMetrics,
     ProviderHealth,
     RecoveryClaim,
+    RecoveryClaimContext,
     RecoveryDecision,
     Review,
     ReviewFinding,
@@ -2542,7 +2543,9 @@ class InMemoryRecoveryDecisionRepository(RecoveryDecisionRepositoryInterface):
     def list_by_claim_key(self, claim_key: str) -> list[RecoveryDecision]:
         return [d for d in self._store.values() if d.claim_key == claim_key]
 
-    def update_decision(self, decision: RecoveryDecision) -> RecoveryDecision:
+    def update_decision(
+        self, decision: RecoveryDecision, claim_context: RecoveryClaimContext | None = None
+    ) -> RecoveryDecision:
         self._store[decision.decision_id] = decision
         return decision
 

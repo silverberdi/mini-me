@@ -31,12 +31,12 @@ PR #158 resolved the Bubblewrap `/dev` virtual device mounting and coordinator c
 
 ## Decisions
 
-### Decision 1: Domain State & Authoritative Authority Tuple (P1)
+### Decision 1: Domain State & Authoritative Authority Tuple (P1, A, B)
 - **Model Constraints**:
   - `Job` in `src/minime/domain/models.py` possesses no `candidate_generation` attribute. Generation authority is sourced strictly from `run.current_generation`.
   - Enum distinctions: `JobStatus.CHECKS_RUNNING` and `OrchestrationStage.RUNNING_CHECKS` are distinct enums. Valid transitions in `PostgresJobRepository.VALID_TRANSITIONS` are:
     `JobStatus.CHECKS_FAILED -> JobStatus.CHECKS_RUNNING -> JobStatus.CHECKS_PASSED / JobStatus.CHECKS_FAILED`.
-  - The Run stage transitions from `OrchestrationStage.IMPLEMENTING` to `OrchestrationStage.RUNNING_CHECKS`.
+  - Allowed Stage Graph: `ALLOWED_STAGE_TRANSITIONS` allows `IMPLEMENTING -> EVALUATING_ATTEMPT -> RUNNING_CHECKS`. To support checks-only recovery without running attempt evaluation or implementer logic, the coordinator uses an explicit, narrow checks-only authorized edge `IMPLEMENTING -> RUNNING_CHECKS` gated strictly by valid claim fencing, preflight tuple verification, and `checks_only=True`, or follows two deterministic transitions without entering normal implementer logic. Graph validation is preserved for all other callers.
 - **Preflight Gating**:
   - `run.is_active` is True and `run.active_job_id == job.id`.
   - `run.base_sha == job.base_sha`.
@@ -44,40 +44,48 @@ PR #158 resolved the Bubblewrap `/dev` virtual device mounting and coordinator c
   - Worktree working tree is clean (`git status --porcelain` is empty).
   - Pre-freeze characterization: verifies that the candidate code exists at `job.candidate_sha` in the worktree, while honestly recognizing that no `OrchestrationCandidate` row or review manifest exists yet.
 
-### Decision 2: Canonical Checks-Only Pipeline Execution & Manifest Materialization (P2)
+### Decision 2: Canonical Checks-Only Pipeline Execution & Manifest Materialization (P2, C)
 - **Problem**:
-  In `drive_coordinator`, the `RUNNING_CHECKS` stage does not invoke `ChecksRunner` directly; it reads persisted `check_results` written by the pipeline. Furthermore, downstream `FREEZING_CANDIDATE` calls `_freeze_candidate_if_needed`, which requires a `CandidateManifest` matching the candidate SHA, base SHA, and generation (`MISSING_AUTHORITATIVE_MANIFEST` failure if absent).
+  In `drive_coordinator`, the `RUNNING_CHECKS` stage does not invoke `ChecksRunner` directly; it reads persisted `check_results` written by the pipeline. Furthermore, downstream `FREEZING_CANDIDATE` calls `_freeze_candidate_if_needed`, which requires a `CandidateManifest` matching the candidate SHA (`MISSING_AUTHORITATIVE_MANIFEST` failure if absent).
+- **Existing Schema Adherence**:
+  - Existing `CandidateManifest` schema contains `job_id`, `attempt_id`, `candidate_sha`, `manifest_hash`, etc., but has **no** `base_sha` or `candidate_generation` columns. Base SHA and generation are bound using the validated `run.base_sha`, `run.current_generation`, and the resulting `OrchestrationCandidate` row after freeze, not fictional manifest columns.
+  - Manifest reuse: If an exact, non-empty manifest already exists for `(job.job_id, job.candidate_sha)`, reuse it; otherwise materialize it via `CandidateManifestService.generate_manifest(...)` without mutating the worktree.
 - **Approach**:
   - Add `ExecutionPipelineService.run_checks_only(job_id, candidate_generation, claim_context)`:
     1. Validates worktree HEAD against `job.candidate_sha`.
-    2. Materializes and persists a deterministic `CandidateManifest` using `CandidateManifestService.generate_manifest(...)` for the unmutated candidate, bound to `candidate_sha`, `base_sha`, and `candidate_generation`.
+    2. Reuses existing or materializes and persists a deterministic `CandidateManifest` using `CandidateManifestService.generate_manifest(...)` for the unmutated candidate.
     3. Transitions `job.status = JobStatus.CHECKS_RUNNING`.
     4. Executes `ChecksRunner.run(...)` under Bubblewrap on the preserved worktree.
     5. Persists fresh `check_results` and `evidence_diagnostics` bound to `candidate_sha` and `candidate_generation`.
     6. If all checks pass: transitions `job.status = JobStatus.CHECKS_PASSED`.
     7. If any check fails: transitions `job.status = JobStatus.CHECKS_FAILED`.
   - In `drive_coordinator()`:
-    When invoked under checks-only recovery, the coordinator transitions from `IMPLEMENTING` directly to `RUNNING_CHECKS`, calls `run_checks_only()`, consumes the verified check results, advances to `FREEZING_CANDIDATE`, materializes the `OrchestrationCandidate` row, and halts at review hold.
+    When invoked under checks-only recovery, the coordinator transitions to `RUNNING_CHECKS` via the authorized narrow edge, calls `run_checks_only()`, consumes the verified check results, advances to `FREEZING_CANDIDATE`, materializes the `OrchestrationCandidate` row, and halts at review hold.
 
-### Decision 3: Atomic Recovery Check Batch Completeness & Census (P3)
+### Decision 3: Atomic Recovery Check Batch Completeness & Census (P3, C)
 - **Problem**:
-  `PostgresCheckResultRepository.list_by_job` returns all historical records. Filtering by candidate SHA and generation alone could allow a partial re-run to count passing results from a previous run or mix results from distinct attempts.
+  `PostgresCheckResultRepository.list_by_job` returns all historical records. CheckResult has `candidate_sha`, `candidate_generation`, and `created_at` but **no** `batch_id` column.
 - **Approach**:
-  - Assign a unique batch identifier or batch execution timestamp to the recovery execution.
+  - Define enforceable *single recovery-batch* identity through the current invocation results and execution timestamp boundaries: only check results produced during the current recovery execution run are accepted.
   - Require a complete census: every check command defined in `project.checks` must have a passing result (return code 0) executed within that **exact recovery check execution**.
   - If a check run crashes or fails midway, `job.status` remains `CHECKS_FAILED`; no check from that run can be combined with subsequent runs.
   - All historical records in `check_results` and `evidence_diagnostics` are retained for audit and lineage.
 
-### Decision 4: Single Heartbeat Ownership & Zero Inference Review Hold (P4)
+### Decision 4: Single Heartbeat Ownership & Review Hold with Zero Models (P4, A, D)
 - **Heartbeat Contract**:
   - `RecoveryConvergenceService.recover_checks_only` acquires the claim (`run:<run_id>`) and runs `OperationalHeartbeat`.
   - It invokes `orchestration_service.resume(..., manage_heartbeat=False, claim_context=claim_context)`.
   - The coordinator does not instantiate an inner heartbeat and does not release the claim.
   - `recover_checks_only` stops the heartbeat cleanly and releases the claim idempotently in its `finally` block (or suppresses release on failure).
-- **Zero Inference Guarantee & Review Hold**:
-  - This recovery operation guarantees **zero model inference** of any kind (neither implementer nor reviewer/auditor models).
-  - Immediately following candidate freezing in `FREEZING_CANDIDATE`, execution stops with `stop_outcome=NEEDS_HUMAN` and `human_gate=REVIEW_PENDING` (or stop details indicating review authorization required).
-  - Subsequent complementary review is a separately governed, capacity-aware operation requiring explicit human authorization.
+- **Review Hold with Existing Enum (A)**:
+  - `HumanGate` enum has only `NEEDS_HUMAN` and `READY_FOR_HUMAN_MERGE`.
+  - Immediately following candidate freezing in `FREEZING_CANDIDATE`, execution stops with `stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN`, `human_gate=HumanGate.NEEDS_HUMAN`, and `stop_details={"code": "REVIEW_AUTHORIZATION_PENDING"}`.
+  - `_stop_run()` makes the Run inactive (`is_active=False`) and updates the BacklogItem status to `NEEDS_HUMAN`.
+  - Subsequent review continuation is a distinct human-governed operation requiring explicit authority without replaying APPLY or using unconstrained `--force`.
+- **Zero Models & Agent-Authorship Invariant (D)**:
+  - mini me exclusively orchestrates; mini me is NEVER the programmer.
+  - This recovery operation guarantees **zero model inference** (zero calls to Codex, Antigravity, DeepSeek, or OpenRouter) and **zero agent authorship/code mutation**.
+  - It does NOT author, edit, or patch source code, does NOT run OpenSpec APPLY, does NOT create new implementer attempts, and does NOT automatically dispatch review/audit models.
 - **Environmental Fault Gating**:
   - Prior failure evidence is verified specifically from the latest attempt diagnostics for this candidate, requiring exact runner fault proof (`PermissionError: [Errno 13] Permission denied: '/dev/null'` or confinement preflight error). Any application test assertion, compilation, or syntax error causes immediate fail-closed rejection.
 
