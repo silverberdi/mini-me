@@ -3303,8 +3303,8 @@ class OrchestrationService:
         if to_stage == OrchestrationStage.FREEZING_CANDIDATE:
             if not job:
                 return "Cannot freeze candidate without an active job."
-            if job.status != JobStatus.CHECKS_PASSED:
-                return f"Cannot freeze candidate when job status is {job.status.value}; expected CHECKS_PASSED."
+            if job.status not in {JobStatus.CHECKS_PASSED, JobStatus.READY_TO_MERGE}:
+                return f"Cannot freeze candidate when job status is {job.status.value}; expected CHECKS_PASSED or READY_TO_MERGE."
             project = self.uow.projects.get_by_id(run.project_id)
             valid_batch, batch_err, _ = self._validate_current_checks_batch(job, run, project)
             if not valid_batch:

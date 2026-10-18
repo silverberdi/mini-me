@@ -865,3 +865,324 @@ def test_pilot_checks_recovery_happy_path(
     # Ensure claim was released
     claim = uow.claims.get_by_key(f"run:{run.run_id}")
     assert claim is None or claim.released_at is not None
+    session.close()
+
+
+# ============================================================================
+# Blocker 1: Fenced persistence supersession before commit rolls back all
+# ============================================================================
+def test_fenced_persistence_supersession_right_before_commit_rolls_back_all(
+    pg_session_factory: sessionmaker[Session], tmp_path: Path
+):
+    """Verify that if Worker 1 executes checks, but Worker 2 supersedes the claim fence
+    after check execution right before evidence/manifest commit, Worker 1's transition fails CAS,
+    all uncommitted writes (check results, metrics, manifest) are rolled back, and zero rows commit.
+    """
+    session1 = pg_session_factory()
+    repo_dir, wt_dir, base_sha, candidate_sha, test_id = _setup_repo_and_worktree(tmp_path)
+    _project, run, job = _seed_pilot_state(
+        session1, repo_dir, wt_dir, base_sha, candidate_sha, test_id
+    )
+
+    uow1 = PostgresPersistenceUnitOfWork(session1)
+    rec_svc1 = RecoveryConvergenceService(uow1, project_root=repo_dir, owner_instance_id="worker-1")
+
+    mock_passing_results = [
+        CheckResult(
+            job_id=job.job_id,
+            check_name="pytest",
+            command="pytest tests/ -v",
+            exit_code=0,
+            duration_ms=100,
+            output_snippet="Passed",
+            candidate_sha=candidate_sha,
+            candidate_generation=1,
+        ),
+        CheckResult(
+            job_id=job.job_id,
+            check_name="ruff",
+            command="ruff check .",
+            exit_code=0,
+            duration_ms=50,
+            output_snippet="Passed",
+            candidate_sha=candidate_sha,
+            candidate_generation=1,
+        ),
+    ]
+
+    # Hook manifest generation (which occurs after checks and right before CHECKS_PASSED transition/commit)
+    # to simulate Worker 2 superseding the fence token in PostgreSQL
+    from minime.services.candidate_manifest import CandidateManifestService
+
+    orig_generate_manifest = CandidateManifestService.generate_manifest
+
+    def supersede_fence_during_manifest(self, *args, **kwargs):
+        # Worker 2 increments fence_token and takes claim ownership in a distinct session
+        session2 = pg_session_factory()
+        session2.execute(
+            text(
+                "UPDATE recovery_claims SET fence_token = fence_token + 1, owner_instance_id = 'worker-2' WHERE claim_key = :k"
+            ),
+            {"k": f"run:{run.run_id}"},
+        )
+        session2.commit()
+        session2.close()
+        return orig_generate_manifest(self, *args, **kwargs)
+
+    with (
+        patch(
+            "minime.services.checks_runner.ChecksRunner.run",
+            new=AsyncMock(
+                return_value=ChecksRunResult(
+                    passed=True, results=mock_passing_results, diagnostics=[]
+                )
+            ),
+        ),
+        patch(
+            "minime.services.candidate_manifest.CandidateManifestService.generate_manifest",
+            supersede_fence_during_manifest,
+        ),
+    ):
+        decision = rec_svc1.recover_checks_only(run.run_id, project_root=repo_dir)
+
+    # Worker 1 was blocked due to CAS stale fence on transition/commit
+    assert decision.status == RecoveryDecisionStatus.BLOCKED
+    assert "STALE_CLAIM" in decision.reason_code or "stale" in decision.reason_code.lower()
+
+    # Re-inspect DB in a fresh third session to verify ZERO post-loss writes were committed by Worker 1
+    session3 = pg_session_factory()
+    uow3 = PostgresPersistenceUnitOfWork(session3)
+
+    refreshed_job = uow3.jobs.get_by_id(job.job_id)
+    assert refreshed_job is not None
+    # Transition to CHECKS_PASSED was rolled back upon losing claim fence
+    assert refreshed_job.status != JobStatus.CHECKS_PASSED
+    assert refreshed_job.status == JobStatus.CHECKS_RUNNING
+
+    # No candidate manifest committed by Worker 1
+    manifest = uow3.candidate_manifests.get_by_candidate_sha(job.job_id, candidate_sha)
+    assert manifest is None
+
+    # Check results in DB are only the historical failure from seed, not the passing results from Worker 1
+    crs = uow3.check_results.list_by_job(job.job_id)
+    assert not any(cr.exit_code == 0 for cr in crs)
+
+    # Metrics for recovery duration were rolled back
+    metrics = session3.execute(
+        text(
+            "SELECT * FROM metric_facts WHERE project_id = :p AND metric_name = 'checks_duration_ms'"
+        ),
+        {"p": job.project_id},
+    ).fetchall()
+    assert len(metrics) == 0
+
+    session3.close()
+
+
+# ============================================================================
+# Blocker 2: Historical sandbox error with later code failure rejected
+# ============================================================================
+def test_historical_sandbox_error_with_later_code_failure_rejected(
+    pg_session_factory: sessionmaker[Session], tmp_path: Path
+):
+    """Verify that if Attempt 1 had an environmental /dev/null failure, but Attempt 2
+    failed due to a real code failure (e.g. Ruff lint failure or test assertion error),
+    checks-only recovery is strictly rejected fail-closed without inheriting Attempt 1's diagnostic.
+    """
+    session = pg_session_factory()
+    repo_dir, wt_dir, base_sha, candidate_sha, test_id = _setup_repo_and_worktree(tmp_path)
+    _project, run, job = _seed_pilot_state(
+        session, repo_dir, wt_dir, base_sha, candidate_sha, test_id
+    )
+    uow = PostgresPersistenceUnitOfWork(session)
+    rec_svc = RecoveryConvergenceService(uow, project_root=repo_dir)
+
+    from minime.domain.enums import ExecutionOutcome
+    from minime.domain.models import JobAttempt
+
+    att1_time = utc_now() - timedelta(minutes=10)
+    # Age historical diagnostic and check result from seed to Attempt 1's timestamp
+    for d in uow.evidence_diagnostics.list_by_job(job.job_id):
+        d.created_at = att1_time
+        uow.evidence_diagnostics.save(d)
+    for c in uow.check_results.list_by_job(job.job_id):
+        c.created_at = att1_time
+        uow.check_results.save(c)
+
+    att1 = JobAttempt(
+        job_id=job.job_id,
+        attempt_number=1,
+        executor_role="codex",
+        model_identity="codex",
+        normalized_outcome=ExecutionOutcome.PROVIDER_FAILURE,
+        end_sha=candidate_sha,
+        created_at=att1_time,
+    )
+    uow.job_attempts.save(att1)
+
+    # Create Attempt 2: later execution (5 minutes ago)
+    att2_time = utc_now() - timedelta(minutes=1)
+    att2 = JobAttempt(
+        job_id=job.job_id,
+        attempt_number=2,
+        executor_role="codex",
+        model_identity="codex",
+        normalized_outcome=ExecutionOutcome.COMPLETED,
+        end_sha=candidate_sha,
+        created_at=att2_time,
+    )
+    uow.job_attempts.save(att2)
+
+    # Add check results for Attempt 2: check failed due to Ruff lint error (not environmental) at latest_ts
+    cr_att2 = CheckResult(
+        job_id=job.job_id,
+        check_name="ruff",
+        command="ruff check .",
+        exit_code=1,
+        duration_ms=50,
+        output_snippet="src/foo.py:1:1: F401 'sys' imported but unused\nFound 1 error.",
+        candidate_sha=candidate_sha,
+        candidate_generation=1,
+        created_at=utc_now(),
+    )
+    uow.check_results.save(cr_att2)
+    session.commit()
+
+    # Attempt checks-only recovery
+    decision = rec_svc.recover_checks_only(run.run_id, project_root=repo_dir)
+    assert decision.status == RecoveryDecisionStatus.BLOCKED
+    assert (
+        "not a proven runner environmental fault in latest execution" in decision.reason_code
+        or "application code error" in decision.reason_code
+    )
+
+    # Re-verify that job status remains CHECKS_FAILED and candidate is not frozen
+    refreshed_job = uow.jobs.get_by_id(job.job_id)
+    assert refreshed_job is not None
+    assert refreshed_job.status == JobStatus.CHECKS_FAILED
+    cand = uow.orchestration_candidates.get_latest_for_run(run.run_id)
+    assert cand is None or cand.is_frozen is False
+    session.close()
+
+
+def test_historical_sandbox_error_with_later_attempt_lacking_checks_rejected(
+    pg_session_factory: sessionmaker[Session], tmp_path: Path
+):
+    """Verify that if Attempt 2 was created after Attempt 1's checks but has no checks of its own,
+    historical checks from Attempt 1 are not accepted and checks-only is rejected.
+    """
+    session = pg_session_factory()
+    repo_dir, wt_dir, base_sha, candidate_sha, test_id = _setup_repo_and_worktree(tmp_path)
+    _project, run, job = _seed_pilot_state(
+        session, repo_dir, wt_dir, base_sha, candidate_sha, test_id
+    )
+    uow = PostgresPersistenceUnitOfWork(session)
+    rec_svc = RecoveryConvergenceService(uow, project_root=repo_dir)
+
+    from minime.domain.enums import ExecutionOutcome
+    from minime.domain.models import JobAttempt
+
+    # Attempt 2 created 10 minutes after the seed checks
+    att2 = JobAttempt(
+        job_id=job.job_id,
+        attempt_number=2,
+        executor_role="codex",
+        model_identity="codex",
+        normalized_outcome=ExecutionOutcome.COMPLETED,
+        end_sha=candidate_sha,
+        created_at=utc_now() + timedelta(minutes=10),
+    )
+    uow.job_attempts.save(att2)
+    session.commit()
+
+    decision = rec_svc.recover_checks_only(run.run_id, project_root=repo_dir)
+    assert decision.status == RecoveryDecisionStatus.BLOCKED
+    assert "Latest attempt has no check results or diagnostics" in decision.reason_code
+    session.close()
+
+
+# ============================================================================
+# Full route E2E with real ChecksRunner against disposable PostgreSQL
+# ============================================================================
+def test_pilot_checks_recovery_full_route_real_checks_runner(
+    pg_session_factory: sessionmaker[Session], tmp_path: Path
+):
+    """Execute the complete recover_checks_only route using the real ChecksRunner
+    without mocking ChecksRunner.run, proving end-to-end execution, manifest generation,
+    atomic transition to CHECKS_PASSED, candidate freeze, and review pause.
+    """
+    session = pg_session_factory()
+    repo_dir, wt_dir, base_sha, candidate_sha, test_id = _setup_repo_and_worktree(tmp_path)
+    project, run, job = _seed_pilot_state(
+        session, repo_dir, wt_dir, base_sha, candidate_sha, test_id
+    )
+
+    # Configure project with real deterministic check commands that pass cleanly in the worktree
+    uow = PostgresPersistenceUnitOfWork(session)
+    project.checks = [
+        {"name": "echo-test", "command": "python3 -c \"print('confinement-ok')\""},
+        {"name": "true-test", "command": 'python3 -c "import sys; sys.exit(0)"'},
+    ]
+    uow.projects.save(project)
+    session.commit()
+
+    rec_svc = RecoveryConvergenceService(uow, project_root=repo_dir)
+
+    with (
+        patch.object(
+            ExecutionPipelineService,
+            "execute_queued_job",
+            new=AsyncMock(
+                side_effect=AssertionError(
+                    "execute_queued_job must NEVER be called in checks-only recovery!"
+                )
+            ),
+        ),
+        patch(
+            "minime.services.deepseek_code_review_service.DeepSeekCodeReviewService.review_candidate",
+            new=AsyncMock(side_effect=AssertionError("Review model must NEVER be dispatched!")),
+        ),
+    ):
+        decision = rec_svc.recover_checks_only(run.run_id, project_root=repo_dir)
+
+    assert decision.status == RecoveryDecisionStatus.COMPLETED
+
+    # Assert durable PostgreSQL state
+    refreshed_run = uow.orchestration_runs.get_by_id(run.run_id)
+    assert refreshed_run is not None
+    assert refreshed_run.is_active is False
+    assert refreshed_run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
+    assert refreshed_run.human_gate == HumanGate.NEEDS_HUMAN
+    assert refreshed_run.stop_details.get("code") == "REVIEW_AUTHORIZATION_PENDING"
+
+    refreshed_job = uow.jobs.get_by_id(job.job_id)
+    assert refreshed_job is not None
+    assert refreshed_job.status == JobStatus.CHECKS_PASSED
+
+    # Candidate record exists and is frozen
+    frozen_cand = uow.orchestration_candidates.get_latest_for_run(run.run_id)
+    assert frozen_cand is not None
+    assert frozen_cand.candidate_sha == candidate_sha
+    assert frozen_cand.is_frozen is True
+
+    # Real CandidateManifest was generated and stored
+    manifest = uow.candidate_manifests.get_by_candidate_sha(job.job_id, candidate_sha)
+    assert manifest is not None
+    assert manifest.manifest_hash != ""
+    assert manifest.total_files_count > 0
+
+    # Real check results exist in DB
+    crs = uow.check_results.list_by_job(job.job_id)
+    passing_crs = [cr for cr in crs if cr.exit_code == 0]
+    assert len(passing_crs) == 2
+    assert {cr.check_name for cr in passing_crs} == {"echo-test", "true-test"}
+
+    # BacklogItem updated to NEEDS_HUMAN
+    bk_item = uow.backlog_items.get_by_project_and_key(project.project_id, run.change_name)
+    assert bk_item is not None
+    assert bk_item.status == WorkItemStatus.NEEDS_HUMAN
+
+    # Claim released
+    claim = uow.claims.get_by_key(f"run:{run.run_id}")
+    assert claim is None or claim.released_at is not None
+    session.close()

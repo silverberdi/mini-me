@@ -43,7 +43,7 @@ class ChecksRunner:
     ) -> ChecksRunResult:
         results: list[CheckResult] = []
         diagnostics: list[EvidenceDiagnostic] = []
-        env_identity = str(worktree_path)
+        env_identity = str(worktree_path)[-128:]
 
         for index, check in enumerate(checks, start=1):
             name = str(check.get("name") or f"check-{index}")

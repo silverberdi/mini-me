@@ -711,107 +711,113 @@ class ExecutionPipelineService:
             ) from fence_exc
 
         # Persist results and diagnostics bound to candidate_sha and candidate_generation
-        check_run_results = check_run.results
-        for index, check_result in enumerate(check_run.results):
-            if (
-                check_result.candidate_sha != (job.candidate_sha or "")
-                or check_result.candidate_generation != candidate_generation
-            ):
-                check_result = check_result.model_copy(
-                    update={
-                        "candidate_sha": job.candidate_sha or "",
-                        "candidate_generation": candidate_generation,
-                    }
+        try:
+            check_run_results = check_run.results
+            for index, check_result in enumerate(check_run.results):
+                if (
+                    check_result.candidate_sha != (job.candidate_sha or "")
+                    or check_result.candidate_generation != candidate_generation
+                ):
+                    check_result = check_result.model_copy(
+                        update={
+                            "candidate_sha": job.candidate_sha or "",
+                            "candidate_generation": candidate_generation,
+                        }
+                    )
+                check_run_results[index] = check_result
+                self.uow.check_results.save(check_result)
+
+            for diag in check_run.diagnostics:
+                self.uow.evidence_diagnostics.save(diag)
+
+            checks_duration = int((utc_now() - checks_started).total_seconds() * 1000)
+            self.uow.metrics.save(
+                MetricFact(
+                    metric_name="checks_duration_ms",
+                    project_id=job.project_id,
+                    change_id=job.change_name,
+                    duration_ms=checks_duration,
+                    details={"job_id": job.job_id, "recovery": True},
                 )
-            check_run_results[index] = check_result
-            self.uow.check_results.save(check_result)
-
-        for diag in check_run.diagnostics:
-            self.uow.evidence_diagnostics.save(diag)
-
-        checks_duration = int((utc_now() - checks_started).total_seconds() * 1000)
-        self.uow.metrics.save(
-            MetricFact(
-                metric_name="checks_duration_ms",
-                project_id=job.project_id,
-                change_id=job.change_name,
-                duration_ms=checks_duration,
-                details={"job_id": job.job_id, "recovery": True},
             )
-        )
-        self.uow.commit()
 
-        # Enforce single recovery batch completeness: all configured checks must be present,
-        # exact name+command matches, no duplicates, and all exit_code == 0 in this batch
-        configured_checks = project.checks or []
-        configured_names = [c.get("name") for c in configured_checks if c.get("name")]
-        executed_names = [r.check_name for r in check_run_results]
+            # Enforce single recovery batch completeness: all configured checks must be present,
+            # exact name+command matches, no duplicates, and all exit_code == 0 in this batch
+            configured_checks = project.checks or []
+            configured_names = [c.get("name") for c in configured_checks if c.get("name")]
+            executed_names = [r.check_name for r in check_run_results]
 
-        if not configured_checks:
-            err = "Project has no checks configured."
-            job = self._transition(
-                job, JobStatus.CHECKS_FAILED, error_message=err, claim_context=claim_context
+            if not configured_checks:
+                err = "Project has no checks configured."
+                job = self._transition(
+                    job, JobStatus.CHECKS_FAILED, error_message=err, claim_context=claim_context
+                )
+                return self._require_job(job.job_id)
+
+            if len(configured_names) != len(set(configured_names)):
+                err = "Configuration error: duplicate check names configured in project."
+                job = self._transition(
+                    job, JobStatus.CHECKS_FAILED, error_message=err, claim_context=claim_context
+                )
+                return self._require_job(job.job_id)
+
+            if len(executed_names) != len(set(executed_names)):
+                err = "Execution error: duplicate check results in batch."
+                job = self._transition(
+                    job, JobStatus.CHECKS_FAILED, error_message=err, claim_context=claim_context
+                )
+                return self._require_job(job.job_id)
+
+            missing_in_batch = set(configured_names) - set(executed_names)
+            command_by_name = {
+                c["name"]: c.get("command") for c in configured_checks if c.get("name")
+            }
+            commands_match = all(
+                r.command == command_by_name.get(r.check_name) for r in check_run_results
             )
+
+            all_passed = (
+                check_run.passed
+                and not missing_in_batch
+                and commands_match
+                and all(r.exit_code == 0 for r in check_run_results)
+            )
+
+            if not all_passed:
+                err = f"Deterministic checks failed or incomplete (missing={sorted(list(missing_in_batch))}, commands_match={commands_match})."
+                job = self._transition(
+                    job, JobStatus.CHECKS_FAILED, error_message=err, claim_context=claim_context
+                )
+                return self._require_job(job.job_id)
+
+            # Materialize CandidateManifest strictly within schema after successful checks
+            manifest = self.uow.candidate_manifests.get_by_candidate_sha(
+                job.job_id, job.candidate_sha
+            )
+            if not manifest or not manifest.manifest_hash or manifest.total_files_count <= 0:
+                validate_claim_context_authoritative(self.uow, claim_context)
+                manifest = self.manifest_service.generate_manifest(
+                    worktree_path,
+                    job.candidate_sha,
+                    job.job_id,
+                )
+                validate_claim_context_authoritative(self.uow, claim_context)
+                self.uow.candidate_manifests.save(manifest)
+                self._save_event(
+                    EventType.CANDIDATE_MANIFEST_CREATED,
+                    job,
+                    {
+                        "manifest_hash": manifest.manifest_hash,
+                        "total_files": manifest.total_files_count,
+                        "source": "checks_only_recovery",
+                    },
+                )
+
+            job = self._transition(job, JobStatus.CHECKS_PASSED, claim_context=claim_context)
             return self._require_job(job.job_id)
-
-        if len(configured_names) != len(set(configured_names)):
-            err = "Configuration error: duplicate check names configured in project."
-            job = self._transition(
-                job, JobStatus.CHECKS_FAILED, error_message=err, claim_context=claim_context
-            )
-            return self._require_job(job.job_id)
-
-        if len(executed_names) != len(set(executed_names)):
-            err = "Execution error: duplicate check results in batch."
-            job = self._transition(
-                job, JobStatus.CHECKS_FAILED, error_message=err, claim_context=claim_context
-            )
-            return self._require_job(job.job_id)
-
-        missing_in_batch = set(configured_names) - set(executed_names)
-        command_by_name = {c["name"]: c.get("command") for c in configured_checks if c.get("name")}
-        commands_match = all(
-            r.command == command_by_name.get(r.check_name) for r in check_run_results
-        )
-
-        all_passed = (
-            check_run.passed
-            and not missing_in_batch
-            and commands_match
-            and all(r.exit_code == 0 for r in check_run_results)
-        )
-
-        if not all_passed:
-            err = f"Deterministic checks failed or incomplete (missing={sorted(list(missing_in_batch))}, commands_match={commands_match})."
-            job = self._transition(
-                job, JobStatus.CHECKS_FAILED, error_message=err, claim_context=claim_context
-            )
-            return self._require_job(job.job_id)
-
-        # Materialize CandidateManifest strictly within schema after successful checks
-        manifest = self.uow.candidate_manifests.get_by_candidate_sha(job.job_id, job.candidate_sha)
-        if not manifest or not manifest.manifest_hash or manifest.total_files_count <= 0:
-            validate_claim_context_authoritative(self.uow, claim_context)
-            manifest = self.manifest_service.generate_manifest(
-                worktree_path,
-                job.candidate_sha,
-                job.job_id,
-            )
-            validate_claim_context_authoritative(self.uow, claim_context)
-            self.uow.candidate_manifests.save(manifest)
-            self._save_event(
-                EventType.CANDIDATE_MANIFEST_CREATED,
-                job,
-                {
-                    "manifest_hash": manifest.manifest_hash,
-                    "total_files": manifest.total_files_count,
-                    "source": "checks_only_recovery",
-                },
-            )
-            self.uow.commit()
-
-        job = self._transition(job, JobStatus.CHECKS_PASSED, claim_context=claim_context)
-        return self._require_job(job.job_id)
+        except Exception:
+            self.uow.rollback()
+            raise
 
     async def execute_queued_job(
         self,

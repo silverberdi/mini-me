@@ -730,6 +730,7 @@ class RecoveryConvergenceService:
             if hasattr(self.uow, "job_attempts")
             else []
         )
+        latest_att = None
         if attempts:
             attempts.sort(key=lambda a: a.attempt_number)
             latest_att = attempts[-1]
@@ -760,7 +761,45 @@ class RecoveryConvergenceService:
             )
         ]
 
-        # Fail-closed rejection of application code errors
+        cand_all_ts = [d.created_at for d in cand_diags if getattr(d, "created_at", None)] + [
+            cr.created_at for cr in cand_crs if getattr(cr, "created_at", None)
+        ]
+        if not cand_all_ts:
+            raise ValueError("No check results or evidence diagnostics found for candidate.")
+
+        latest_ts = max(cand_all_ts)
+
+        # If attempts exist, ensure evidence is from the latest attempt, not older attempts
+        if latest_att is not None and getattr(latest_att, "created_at", None):
+            if latest_ts < latest_att.created_at - timedelta(seconds=5):
+                raise ValueError(
+                    "Latest attempt has no check results or diagnostics; historical failures cannot substantiate recovery."
+                )
+
+        # Isolate the authoritative latest execution batch within a 60-second window of the latest record
+        window_start = latest_ts - timedelta(seconds=60)
+
+        # If attempt_id is tracked on diagnostics, prefer diagnostics matching the latest attempt
+        if latest_att is not None and any(
+            getattr(d, "attempt_id", None) == latest_att.attempt_id for d in cand_diags
+        ):
+            batch_diags = [
+                d for d in cand_diags if getattr(d, "attempt_id", None) == latest_att.attempt_id
+            ]
+        else:
+            batch_diags = [
+                d
+                for d in cand_diags
+                if getattr(d, "created_at", None) and d.created_at >= window_start
+            ]
+
+        batch_crs = [
+            cr
+            for cr in cand_crs
+            if getattr(cr, "created_at", None) and cr.created_at >= window_start
+        ]
+
+        # Fail-closed rejection of application code errors in the latest execution
         code_error_signals = [
             "assertionerror",
             "assertion error",
@@ -768,47 +807,59 @@ class RecoveryConvergenceService:
             "indentationerror",
             "nameerror",
             "attributeerror",
+            "typeerror",
+            "valueerror",
+            "importerror",
+            "modulenotfounderror",
+            "failed (failures=",
+            "failed (errors=",
+            "ruff failed",
+            "lint error",
         ]
-        for diag in cand_diags:
+        for diag in batch_diags:
             reason = (diag.reason or "").lower()
             details_str = str(diag.evidence_reference or "").lower()
             if any(sig in reason or sig in details_str for sig in code_error_signals):
                 raise ValueError(
-                    "Prior check failure is an application code error, not a proven runner environmental fault."
+                    "Prior check failure is an application code error, not a proven runner environmental fault in latest execution."
                 )
-        for cr in cand_crs:
+        for cr in batch_crs:
             snippet = (cr.output_snippet or "").lower()
             if any(sig in snippet for sig in code_error_signals):
                 raise ValueError(
-                    "Prior check failure is an application code error, not a proven runner environmental fault."
+                    "Prior check failure is an application code error, not a proven runner environmental fault in latest execution."
                 )
 
-        # Require positive proof of runner environmental fault
-        environmental_proven = False
-        for diag in cand_diags:
-            reason = (diag.reason or "").lower()
-            details_str = str(diag.evidence_reference or "").lower()
-            combined = f"{reason} {details_str}"
-            if (
-                ("permissionerror" in combined and "/dev/null" in combined)
-                or ("[errno 13]" in combined and "/dev/null" in combined)
-                or ("confinement preflight" in combined or "runner environmental fault" in combined)
-            ):
-                environmental_proven = True
-                break
+        def _is_environmental_proven(text: str) -> bool:
+            t = text.lower()
+            return (
+                ("/dev/null" in t)
+                and ("permissionerror" in t or "[errno 13]" in t or "permission denied" in t)
+            ) or ("confinement preflight" in t or "runner environmental fault" in t)
 
-        if not environmental_proven:
-            for cr in cand_crs:
-                snippet = (cr.output_snippet or "").lower()
-                if ("permissionerror" in snippet and "/dev/null" in snippet) or (
-                    "[errno 13]" in snippet and "/dev/null" in snippet
-                ):
-                    environmental_proven = True
-                    break
+        # In the authoritative latest execution, verify that every failed check was due to an environmental fault
+        failed_crs = [cr for cr in batch_crs if cr.exit_code != 0]
+        for cr in failed_crs:
+            snippet = cr.output_snippet or ""
+            matching_diags = [d for d in batch_diags if d.check_name == cr.check_name]
+            cr_env_proven = _is_environmental_proven(snippet) or any(
+                _is_environmental_proven(f"{d.reason or ''} {str(d.evidence_reference or '')}")
+                for d in matching_diags
+            )
+            if not cr_env_proven:
+                raise ValueError(
+                    f"Prior check failure for '{cr.check_name}' (exit code {cr.exit_code}) is not a proven runner environmental fault in latest execution."
+                )
+
+        # Require at least one positive proof of runner environmental fault across the latest execution batch
+        environmental_proven = any(
+            _is_environmental_proven(f"{diag.reason or ''} {str(diag.evidence_reference or '')}")
+            for diag in batch_diags
+        ) or any(_is_environmental_proven(cr.output_snippet or "") for cr in batch_crs)
 
         if not environmental_proven:
             raise ValueError(
-                "Prior check failure does not substantiate a proven runner environmental fault (/dev/null or confinement preflight error)."
+                "Prior check failure does not substantiate a proven runner environmental fault (/dev/null or confinement preflight error) in latest execution."
             )
 
     def recover_checks_only(
