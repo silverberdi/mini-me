@@ -186,3 +186,31 @@ def test_dashboard_redacts_api_keys_and_tokens(
     assert secret_pat not in detail_json
     assert secret_pem not in detail_json
     assert "[REDACTED" in detail_json
+
+    active_change = Change(
+        project_id="secure-proj",
+        name="013-active-secret-test",
+        status=ChangeStatus.IN_PROGRESS,
+        last_readiness_status=ReadinessState.READY,
+    )
+    active_job = Job(
+        job_id="job-active-sec",
+        project_id="secure-proj",
+        change_name=active_change.name,
+        implementer_role="codex",
+    )
+    active_run = OrchestrationRun(
+        run_id="run-active-sec",
+        project_id="secure-proj",
+        change_name=active_change.name,
+        active_job_id=active_job.job_id,
+        base_sha="base-sec",
+        current_stage=OrchestrationStage.IMPLEMENTING,
+        is_active=True,
+        stop_reason=f"provider initialization failed token={secret_key}",
+    )
+    in_memory_uow.changes.save(active_change)
+    in_memory_uow.jobs.save(active_job)
+    in_memory_uow.orchestration_runs.save(active_run)
+    active_overview_json = service.get_overview().model_dump_json()
+    assert secret_key not in active_overview_json

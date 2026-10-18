@@ -8,6 +8,7 @@ from minime.domain.enums import (
     AuditRiskLevel,
     AuditStatus,
     ChangeStatus,
+    ExecutionOutcome,
     HumanGate,
     JobStatus,
     OrchestrationStage,
@@ -161,6 +162,104 @@ def test_dashboard_overview_with_runs_and_attention(
     assert "test_safety" in overview.attention_items[0].reason
 
 
+def test_dashboard_status_projection_preserves_durable_state_and_unknown(
+    in_memory_uow: PersistenceUnitOfWork,
+) -> None:
+    service = OperationsDashboardService(in_memory_uow)
+    in_memory_uow.projects.save(
+        Project(
+            project_id="state-proj",
+            display_name="State projection",
+            repository="owner/state-proj",
+            base_branch="main",
+            openspec_path="openspec",
+        )
+    )
+    cases = (
+        ("running", True, None, JobStatus.RUNNING, None, "RUNNING"),
+        (
+            "capacity",
+            True,
+            OrchestrationStopOutcome.WAITING_CAPACITY,
+            JobStatus.WAITING_CAPACITY,
+            None,
+            "WAITING_CAPACITY",
+        ),
+        (
+            "human",
+            False,
+            OrchestrationStopOutcome.NEEDS_HUMAN,
+            JobStatus.NEEDS_HUMAN,
+            None,
+            "NEEDS_HUMAN",
+        ),
+        (
+            "recovery",
+            False,
+            OrchestrationStopOutcome.NEEDS_HUMAN,
+            JobStatus.RECOVERY_BLOCKED,
+            None,
+            "RECOVERY",
+        ),
+        (
+            "auth",
+            False,
+            OrchestrationStopOutcome.NEEDS_HUMAN,
+            JobStatus.FAILED,
+            ExecutionOutcome.AUTH_REQUIRED,
+            "AUTH_REQUIRED",
+        ),
+        (
+            "human-merge",
+            False,
+            OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE,
+            JobStatus.READY_TO_MERGE,
+            None,
+            "READY_FOR_HUMAN_MERGE",
+        ),
+        ("failed", False, OrchestrationStopOutcome.FAILED, JobStatus.FAILED, None, "FAILED"),
+        ("missing-authority", False, None, JobStatus.RUNNING, None, "UNKNOWN"),
+    )
+    expected: dict[str, str] = {}
+    for suffix, active, outcome, job_status, latest_outcome, expected_status in cases:
+        change_name = f"change-{suffix}"
+        change = Change(
+            project_id="state-proj",
+            name=change_name,
+            status=ChangeStatus.IN_PROGRESS,
+            last_readiness_status=ReadinessState.READY,
+        )
+        job = Job(
+            job_id=f"job-{suffix}",
+            project_id="state-proj",
+            change_name=change_name,
+            implementer_role="codex",
+            status=job_status,
+            latest_outcome=latest_outcome,
+        )
+        run = OrchestrationRun(
+            run_id=f"run-{suffix}",
+            project_id="state-proj",
+            change_name=change_name,
+            active_job_id=job.job_id,
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            stop_outcome=outcome,
+            is_active=active,
+            base_sha="base-state",
+        )
+        in_memory_uow.changes.save(change)
+        in_memory_uow.jobs.save(job)
+        in_memory_uow.orchestration_runs.save(run)
+        expected[change_name] = expected_status
+
+    projected = {item.change_name: item.status for item in service.get_overview().changes}
+    for change_name, status in expected.items():
+        assert projected[change_name] == status
+
+    # No orchestration model or outcome is an authority for an intentional pause today.
+    assert "PAUSED" not in projected.values()
+
+
 def test_dashboard_change_detail_pipeline_phases(
     in_memory_uow: PersistenceUnitOfWork,
 ) -> None:
@@ -276,7 +375,7 @@ def test_dashboard_change_detail_pipeline_phases(
 
     detail = service.get_change_detail("test-proj", "003-audited-feature")
 
-    assert detail.status == "COMPLETED"
+    assert detail.status == "READY_FOR_HUMAN_MERGE"
     assert detail.run_id == "run-3"
     assert len(detail.pipeline) == 6
 

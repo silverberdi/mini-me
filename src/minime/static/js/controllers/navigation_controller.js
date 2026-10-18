@@ -32,6 +32,7 @@ export function createNavigationController({
       const selected = tab.getAttribute('data-main-view') === viewName;
       tab.classList.toggle('active', selected);
       if (tab.hasAttribute('aria-selected')) tab.setAttribute('aria-selected', selected ? 'true' : 'false');
+      if (tab.getAttribute('role') === 'tab') tab.tabIndex = selected ? 0 : -1;
       if (tab.hasAttribute('aria-current')) {
         if (selected) tab.setAttribute('aria-current', 'page');
         else tab.removeAttribute('aria-current');
@@ -52,6 +53,21 @@ export function createNavigationController({
   function bind() {
     if (bound) return;
     bound = true;
+    mainNavTabs.forEach((tab) => {
+      tab.tabIndex = tab.getAttribute('aria-selected') === 'true' ? 0 : -1;
+      tab.addEventListener('keydown', (event) => {
+        const tabs = Array.from(mainNavTabs);
+        const current = tabs.indexOf(tab);
+        const next = event.key === 'ArrowRight' ? (current + 1) % tabs.length
+          : event.key === 'ArrowLeft' ? (current - 1 + tabs.length) % tabs.length
+            : event.key === 'Home' ? 0
+              : event.key === 'End' ? tabs.length - 1 : current;
+        if (next === current) return;
+        event.preventDefault();
+        tabs[next].focus();
+        tabs[next].click();
+      });
+    });
     mainNavTabs.forEach((tab) => tab.addEventListener('click', () => {
       const view = tab.getAttribute('data-main-view');
       if (view) switchView(view);
@@ -81,12 +97,29 @@ export function createNavigationController({
       detailTabs.forEach((entry) => {
         entry.classList.remove('active');
         entry.setAttribute('aria-selected', 'false');
+        entry.tabIndex = -1;
       });
       tabPanes.forEach((pane) => pane.classList.remove('active'));
       tab.classList.add('active');
       tab.setAttribute('aria-selected', 'true');
+      tab.tabIndex = 0;
       documentRef.getElementById(tab.getAttribute('data-tab'))?.classList.add('active');
     }));
+    detailTabs.forEach((tab) => {
+      tab.tabIndex = tab.getAttribute('aria-selected') === 'true' ? 0 : -1;
+      tab.addEventListener('keydown', (event) => {
+        const tabs = Array.from(detailTabs);
+        const current = tabs.indexOf(tab);
+        const next = event.key === 'ArrowRight' ? (current + 1) % tabs.length
+          : event.key === 'ArrowLeft' ? (current - 1 + tabs.length) % tabs.length
+            : event.key === 'Home' ? 0
+              : event.key === 'End' ? tabs.length - 1 : current;
+        if (next === current) return;
+        event.preventDefault();
+        tabs[next].focus();
+        tabs[next].click();
+      });
+    });
     attentionItemsContainer?.addEventListener('click', (event) => {
       const card = event.target.closest('[data-project-id]');
       if (card) selectChange(card.getAttribute('data-project-id'), card.getAttribute('data-change-name'));

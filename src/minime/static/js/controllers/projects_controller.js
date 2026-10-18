@@ -101,7 +101,7 @@ export function createProjectsController({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           project_id: value('onboardProjectId') || undefined,
-          name: value('onboardProjectName') || undefined,
+          display_name: value('onboardDisplayName') || undefined,
           repository,
           base_branch: value('onboardBaseBranch') || 'main',
           openspec_path: value('onboardOpenSpecPath') || 'openspec',
@@ -114,11 +114,11 @@ export function createProjectsController({
         throw new Error(body.detail || `HTTP ${response.status}`);
       }
       const result = await response.json();
-      notify(`Project '${result.project.name}' onboarded successfully! Discovered ${result.discovered_items_count} backlog items.`, 'success');
+      notify(`Proyecto '${result.project.display_name}' registrado. Elementos descubiertos: ${result.discovered_items_count}.`, 'success');
       onboardingModal?.close();
       await fetchProjects();
-      setCurrentProjectId(result.project.id);
-      if (projectSelect) projectSelect.value = result.project.id;
+      setCurrentProjectId(result.project.project_id);
+      if (projectSelect) projectSelect.value = result.project.project_id;
       openBacklog();
     } catch (error) {
       console.error('Failed onboarding project:', error);

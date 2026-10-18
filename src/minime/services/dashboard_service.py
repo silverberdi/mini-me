@@ -14,6 +14,8 @@ from minime.domain.enums import (
     AuditRiskLevel,
     AuditStatus,
     ChangeStatus,
+    ExecutionOutcome,
+    HumanGate,
     JobStatus,
     OrchestrationStage,
     OrchestrationStopOutcome,
@@ -178,7 +180,7 @@ class RecentCompletionDTO(BaseModel):
 class ChangeSummaryDTO(BaseModel):
     project_id: str
     change_name: str
-    status: str  # DISCOVERED, NOT_READY, READY, RUNNING, WAITING, NEEDS_HUMAN, COMPLETED, FAILED
+    status: str  # Exact observed lifecycle state; unsupported or missing authority is UNKNOWN.
     schema_name: str = "spec-driven"
     current_run_id: str | None = None
     active_job_id: str | None = None
@@ -558,7 +560,7 @@ class OperationsDashboardService:
                         job_id=r.active_job_id,
                         stage=r.current_stage.value if r.current_stage else "UNKNOWN",
                         stop_outcome=r.stop_outcome.value if r.stop_outcome else None,
-                        stop_reason=r.stop_reason,
+                        stop_reason=redact_secrets(r.stop_reason) if r.stop_reason else None,
                         waiting_since=waiting_since_str,
                         last_capacity_check=_format_dt(r.updated_at),
                         next_capacity_check=_format_dt(utc_now()),
@@ -658,7 +660,14 @@ class OperationsDashboardService:
             binding = self.uow.bindings.get_by_project_and_change(change.project_id, change.name)
 
             # Determine composite canonical status
-            status_val = self._derive_canonical_change_status(change, authoritative_run)
+            job_for_latest = (
+                jobs_map.get(authoritative_run.active_job_id)
+                if (authoritative_run and authoritative_run.active_job_id)
+                else None
+            )
+            status_val = self._derive_canonical_change_status(
+                change, authoritative_run, job_for_latest
+            )
 
             is_terminally_completed = change.status == ChangeStatus.DONE or (
                 authoritative_run is not None
@@ -668,11 +677,6 @@ class OperationsDashboardService:
                 )
             )
 
-            job_for_latest = (
-                jobs_map.get(authoritative_run.active_job_id)
-                if (authoritative_run and authoritative_run.active_job_id)
-                else None
-            )
             executor = (
                 (job_for_latest.current_executor or job_for_latest.implementer_role)
                 if job_for_latest
@@ -933,7 +937,14 @@ class OperationsDashboardService:
             else:
                 repository_binding_state = "INVALID"
 
-        status_val = self._derive_canonical_change_status(change, selected_run)
+        project = self.uow.projects.get_by_id(project_id)
+        job = (
+            self.uow.jobs.get_by_id(selected_run.active_job_id)
+            if (selected_run and selected_run.active_job_id)
+            else None
+        )
+
+        status_val = self._derive_canonical_change_status(change, selected_run, job)
 
         is_terminally_completed = (change and change.status == ChangeStatus.DONE) or (
             selected_run is not None
@@ -943,12 +954,6 @@ class OperationsDashboardService:
             )
         )
 
-        project = self.uow.projects.get_by_id(project_id)
-        job = (
-            self.uow.jobs.get_by_id(selected_run.active_job_id)
-            if (selected_run and selected_run.active_job_id)
-            else None
-        )
         target_branch = project.base_branch if project else None
         current_executor = (job.current_executor or job.implementer_role) if job else None
 
@@ -1074,9 +1079,9 @@ class OperationsDashboardService:
         )[0]
 
     def _derive_canonical_change_status(
-        self, change: Change | None, run: OrchestrationRun | None
+        self, change: Change | None, run: OrchestrationRun | None, job: Job | None = None
     ) -> str:
-        """Derive the canonical high-level status for a change."""
+        """Project the exact durable state; do not infer FAILED or PAUSED from missing facts."""
         # 1. Change-level terminal authority has highest precedence
         if change:
             if change.status == ChangeStatus.DONE:
@@ -1091,32 +1096,36 @@ class OperationsDashboardService:
                 return "READY"
             return "NOT_READY"
 
+        if job and job.latest_outcome == ExecutionOutcome.AUTH_REQUIRED:
+            return "AUTH_REQUIRED"
+
+        if job and job.status == JobStatus.RECOVERY_BLOCKED:
+            return "RECOVERY"
+
+        if (
+            run.stop_outcome == OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE
+            or run.human_gate == HumanGate.READY_FOR_HUMAN_MERGE
+        ):
+            return "READY_FOR_HUMAN_MERGE"
+
+        if run.stop_outcome == OrchestrationStopOutcome.WAITING_CAPACITY:
+            return "WAITING_CAPACITY"
+        if run.stop_outcome == OrchestrationStopOutcome.WAITING_EXTERNAL:
+            return "WAITING_EXTERNAL"
+
         if run.is_active:
-            if run.stop_outcome in {
-                OrchestrationStopOutcome.WAITING_CAPACITY,
-                OrchestrationStopOutcome.WAITING_EXTERNAL,
-            }:
-                return "WAITING"
             return "RUNNING"
 
         # 2. Run terminal / merge states
         if run.stop_outcome in {
             OrchestrationStopOutcome.COMPLETED,
-            OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE,
         } or run.current_stage in {
             OrchestrationStage.COMPLETED,
-            OrchestrationStage.PR_PREPARED,
-            OrchestrationStage.POST_MERGE_RECONCILING,
         }:
             return "COMPLETED"
 
         if run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN:
             return "NEEDS_HUMAN"
-        if run.stop_outcome in {
-            OrchestrationStopOutcome.WAITING_CAPACITY,
-            OrchestrationStopOutcome.WAITING_EXTERNAL,
-        }:
-            return "WAITING"
         if run.current_stage in {
             OrchestrationStage.ADMITTED,
             OrchestrationStage.PREPARING_EXECUTION,
@@ -1125,7 +1134,14 @@ class OperationsDashboardService:
         if run.stop_outcome == OrchestrationStopOutcome.CANCELLED:
             return "CANCELLED"
 
-        return "FAILED"
+        if run.stop_outcome == OrchestrationStopOutcome.FAILED or (
+            job and job.status in {JobStatus.FAILED, JobStatus.CHECKS_FAILED}
+        ):
+            return "FAILED"
+
+        # There is no durable intentional-pause authority in current orchestration models.
+        # Likewise, a stage with no matching outcome is insufficient to claim failure.
+        return "UNKNOWN"
 
     def _project_pipeline_phases(
         self,

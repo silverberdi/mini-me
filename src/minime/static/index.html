@@ -23,13 +23,13 @@
 
     <!-- Main View Navigation Tabs -->
     <nav class="main-nav-tabs" role="tablist" aria-label="Navegación principal">
-      <button class="main-tab-btn active" id="navTabExecutions" role="tab" aria-label="Centro de Control" aria-selected="true" data-main-view="viewExecutions">
+      <button class="main-tab-btn active" id="navTabExecutions" role="tab" aria-label="Centro de Control" aria-controls="viewExecutions" aria-selected="true" tabindex="0" data-main-view="viewExecutions">
         <span class="tab-icon" aria-hidden="true">⚡</span> Centro de Control
       </button>
-      <button class="main-tab-btn" id="navTabBacklog" role="tab" aria-label="Trabajo" aria-selected="false" data-main-view="viewBacklog">
+      <button class="main-tab-btn" id="navTabBacklog" role="tab" aria-label="Trabajo" aria-controls="viewBacklog" aria-selected="false" tabindex="-1" data-main-view="viewBacklog">
         <span class="tab-icon" aria-hidden="true">📥</span> Trabajo
       </button>
-      <button class="main-tab-btn" id="navTabProjects" role="tab" aria-label="Proyectos" aria-selected="false" data-main-view="viewProjects">
+      <button class="main-tab-btn" id="navTabProjects" role="tab" aria-label="Proyectos" aria-controls="viewProjects" aria-selected="false" tabindex="-1" data-main-view="viewProjects">
         <span class="tab-icon" aria-hidden="true">📁</span> Proyectos
       </button>
     </nav>
@@ -115,7 +115,7 @@
       <!-- ================================================================= -->
       <!-- VIEW 1: BACKLOG & WORK INTAKE (PRIMARY 021 PRODUCT SURFACE)       -->
       <!-- ================================================================= -->
-  <div id="viewBacklog" class="main-view-pane" style="display: none;" aria-label="Trabajo pendiente y admisión">
+  <div id="viewBacklog" class="main-view-pane" style="display: none;" role="tabpanel" aria-labelledby="navTabBacklog" aria-label="Trabajo pendiente y admisión">
         
         <!-- Backlog Top Toolbar -->
         <div class="backlog-toolbar-card">
@@ -280,7 +280,7 @@
       <!-- ================================================================= -->
       <!-- VIEW 2: PROJECTS MANAGEMENT & ONBOARDING (021.1)                  -->
       <!-- ================================================================= -->
-      <div id="viewProjects" class="main-view-pane" style="display: none;" aria-label="Gestión de proyectos">
+      <div id="viewProjects" class="main-view-pane" style="display: none;" role="tabpanel" aria-labelledby="navTabProjects" aria-label="Gestión de proyectos">
         <div class="projects-toolbar-card">
           <div>
             <h2 class="view-title">Proyectos registrados</h2>
@@ -301,7 +301,7 @@
       <!-- ================================================================= -->
       <!-- VIEW 3: PIPELINE & EXECUTIONS (EXISTING 012-020 OPERATIONAL VIEW) -->
       <!-- ================================================================= -->
-      <div id="viewExecutions" class="main-view-pane active" aria-label="Centro de Control operacional">
+      <div id="viewExecutions" class="main-view-pane active" role="tabpanel" aria-labelledby="navTabExecutions" aria-label="Centro de Control operacional">
         <!-- KPI Summary Grid -->
         <section class="kpi-grid" id="operationalKpis" aria-label="Indicadores operacionales">
           <div class="kpi-card" id="kpiSystemStatus">
@@ -431,20 +431,20 @@
 
               <!-- Detail Navigation Tabs -->
               <nav class="detail-tabs" role="tablist" aria-label="Secciones del detalle">
-                <button class="tab-btn active" role="tab" aria-selected="true" data-tab="overviewTab">Resumen y atención</button>
-                <button class="tab-btn" role="tab" aria-selected="false" data-tab="candidateTab">Identidad del candidato</button>
-                <button class="tab-btn" role="tab" aria-selected="false" data-tab="checksTab">Verificaciones (<span id="checksTabCount">0</span>)</button>
-                <button class="tab-btn" role="tab" aria-selected="false" data-tab="reviewTab">Revisión</button>
-                <button class="tab-btn" role="tab" aria-selected="false" data-tab="auditTab">Auditoría independiente</button>
-                <button class="tab-btn" role="tab" aria-selected="false" data-tab="previewTab">Vista previa y validación</button>
-                <button class="tab-btn" role="tab" aria-selected="false" data-tab="githubTab">GitHub y PR</button>
-                <button class="tab-btn" role="tab" aria-selected="false" data-tab="efficiencyTab">Eficiencia y telemetría</button>
-                <button class="tab-btn" role="tab" aria-selected="false" data-tab="actionHistoryTab">Historial de acciones</button>
-                <button class="tab-btn" role="tab" aria-selected="false" data-tab="timelineTab">Cronología</button>
+                <button id="tabOverview" class="tab-btn active" role="tab" aria-controls="overviewTab" aria-selected="true" tabindex="0" data-tab="overviewTab">Resumen y atención</button>
+                <button id="tabCandidate" class="tab-btn" role="tab" aria-controls="candidateTab" aria-selected="false" tabindex="-1" data-tab="candidateTab">Identidad del candidato</button>
+                <button id="tabChecks" class="tab-btn" role="tab" aria-controls="checksTab" aria-selected="false" tabindex="-1" data-tab="checksTab">Verificaciones (<span id="checksTabCount">0</span>)</button>
+                <button id="tabReview" class="tab-btn" role="tab" aria-controls="reviewTab" aria-selected="false" tabindex="-1" data-tab="reviewTab">Revisión</button>
+                <button id="tabAudit" class="tab-btn" role="tab" aria-controls="auditTab" aria-selected="false" tabindex="-1" data-tab="auditTab">Auditoría independiente</button>
+                <button id="tabPreview" class="tab-btn" role="tab" aria-controls="previewTab" aria-selected="false" tabindex="-1" data-tab="previewTab">Vista previa y validación</button>
+                <button id="tabGitHub" class="tab-btn" role="tab" aria-controls="githubTab" aria-selected="false" tabindex="-1" data-tab="githubTab">GitHub y PR</button>
+                <button id="tabEfficiency" class="tab-btn" role="tab" aria-controls="efficiencyTab" aria-selected="false" tabindex="-1" data-tab="efficiencyTab">Eficiencia y telemetría</button>
+                <button id="tabActionHistory" class="tab-btn" role="tab" aria-controls="actionHistoryTab" aria-selected="false" tabindex="-1" data-tab="actionHistoryTab">Historial de acciones</button>
+                <button id="tabTimeline" class="tab-btn" role="tab" aria-controls="timelineTab" aria-selected="false" tabindex="-1" data-tab="timelineTab">Cronología</button>
               </nav>
 
               <!-- Tab 1: Overview & Attention -->
-              <div class="tab-pane active" id="overviewTab" role="tabpanel">
+              <div class="tab-pane active" id="overviewTab" role="tabpanel" aria-labelledby="tabOverview" tabindex="0">
                 <div class="section-card" id="overviewAttentionSection">
                   <h4 class="section-title">Estado actual de la ejecución</h4>
                   <div class="overview-meta-grid" id="overviewMetaGrid"></div>
@@ -456,7 +456,7 @@
               </div>
 
               <!-- Tab 2: Candidate Authority -->
-              <div class="tab-pane" id="candidateTab" role="tabpanel">
+              <div class="tab-pane" id="candidateTab" role="tabpanel" aria-labelledby="tabCandidate" tabindex="0">
                 <div class="section-card">
                   <h4 class="section-title">Identidad durable del candidato y generaciones</h4>
                   <div id="candidateDetailsContainer"></div>
@@ -470,7 +470,7 @@
               </div>
 
               <!-- Tab 3: Checks -->
-              <div class="tab-pane" id="checksTab" role="tabpanel">
+              <div class="tab-pane" id="checksTab" role="tabpanel" aria-labelledby="tabChecks" tabindex="0">
                 <div class="section-card">
                   <h4 class="section-title">Pruebas y verificaciones determinísticas</h4>
                   <div id="checksListContainer"></div>
@@ -478,7 +478,7 @@
               </div>
 
               <!-- Tab 4: Review -->
-              <div class="tab-pane" id="reviewTab" role="tabpanel">
+              <div class="tab-pane" id="reviewTab" role="tabpanel" aria-labelledby="tabReview" tabindex="0">
                 <div class="section-card">
                   <h4 class="section-title">Autoridad de revisión complementaria</h4>
                   <div id="reviewDetailsContainer"></div>
@@ -486,7 +486,7 @@
               </div>
 
               <!-- Tab 5: DeepSeek Audit -->
-              <div class="tab-pane" id="auditTab" role="tabpanel">
+              <div class="tab-pane" id="auditTab" role="tabpanel" aria-labelledby="tabAudit" tabindex="0">
                 <div class="section-card">
                   <h4 class="section-title">Auditoría independiente de seguridad y arquitectura</h4>
                   <div id="auditDetailsContainer"></div>
@@ -494,7 +494,7 @@
               </div>
 
               <!-- Tab 6: Preview & Validation -->
-              <div class="tab-pane" id="previewTab" role="tabpanel">
+              <div class="tab-pane" id="previewTab" role="tabpanel" aria-labelledby="tabPreview" tabindex="0">
                 <div class="section-card" id="previewContainer">
                   <div id="previewContainerStatus" aria-live="polite"></div>
                 </div>
@@ -505,7 +505,7 @@
               </div>
 
               <!-- Tab 7: GitHub & PR -->
-              <div class="tab-pane" id="githubTab" role="tabpanel">
+              <div class="tab-pane" id="githubTab" role="tabpanel" aria-labelledby="tabGitHub" tabindex="0">
                 <div class="section-card">
                   <h4 class="section-title">Integración y autoridad de Pull Request en GitHub</h4>
                   <div id="githubDetailsContainer"></div>
@@ -513,7 +513,7 @@
               </div>
 
               <!-- Tab 8: Efficiency & Telemetry -->
-              <div class="tab-pane" id="efficiencyTab" role="tabpanel">
+              <div class="tab-pane" id="efficiencyTab" role="tabpanel" aria-labelledby="tabEfficiency" tabindex="0">
                 <div class="section-card">
                   <h4 class="section-title">Eficiencia de proveedores e independencia del revisor</h4>
                   <div id="efficiencyDetailsContainer"></div>
@@ -521,7 +521,7 @@
               </div>
 
               <!-- Tab 9: Action History -->
-              <div class="tab-pane" id="actionHistoryTab" role="tabpanel">
+              <div class="tab-pane" id="actionHistoryTab" role="tabpanel" aria-labelledby="tabActionHistory" tabindex="0">
                 <div class="section-card">
                   <h4 class="section-title">Trazabilidad de acciones gobernadas</h4>
                   <div id="actionHistoryContentContainer"></div>
@@ -529,7 +529,7 @@
               </div>
 
               <!-- Tab 10: Timeline -->
-              <div class="tab-pane" id="timelineTab" role="tabpanel">
+              <div class="tab-pane" id="timelineTab" role="tabpanel" aria-labelledby="tabTimeline" tabindex="0">
                 <div class="section-card">
                   <h4 class="section-title">Eventos cronológicos del ciclo de vida</h4>
                   <div class="timeline-container" id="timelineListContainer"></div>
@@ -545,9 +545,9 @@
   </main>
 
   <nav class="bottom-nav" aria-label="Navegación móvil">
-    <button type="button" id="mbNavBacklog" class="active" data-main-view="viewBacklog">Trabajo</button>
+    <button type="button" id="mbNavBacklog" data-main-view="viewBacklog">Trabajo</button>
     <button type="button" id="mbNavProjects" data-main-view="viewProjects">Proyectos</button>
-    <button type="button" id="mbNavRuns" data-main-view="viewExecutions">Ejecuciones</button>
+    <button type="button" id="mbNavRuns" class="active" data-main-view="viewExecutions">Ejecuciones</button>
     <button type="button" id="mbNavQueue" data-scroll-to="queue">Cola</button>
   </nav>
 

@@ -21,7 +21,7 @@ import uvicorn
 import websockets
 from tests.conftest import InMemoryPersistenceUnitOfWork
 
-from minime.api.app import app, get_uow
+from minime.api.app import app, get_intake_service, get_onboarding_service, get_uow
 from minime.domain.enums import (
     AuditRiskLevel,
     AuditStatus,
@@ -568,6 +568,7 @@ async def test_authenticated_landing_is_operational_center_with_unknown_policy_u
     client = ChromeCDPClient(browser_test_env["ws_url"])
     await client.connect()
     try:
+        await client.set_viewport(1440, 900)
         await authenticate_browser(
             client, browser_test_env["server_url"], browser_test_env["session_token"]
         )
@@ -1325,6 +1326,168 @@ async def test_real_browser_projects_domain_navigation_and_context_use_authorita
 
 
 @pytest.mark.asyncio
+async def test_real_browser_onboarding_creates_canonical_disposable_binding(
+    browser_test_env: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real Projects form must onboard a local Git remote through canonical services."""
+    from tests.conftest import InMemoryPersistenceUnitOfWork, ReadinessGitHubStub
+
+    from minime.services.auth_service import AuthorizedOperatorService, SessionManager
+    from minime.services.intake_service import IntakeService
+    from minime.services.project_onboarding_service import ProjectOnboardingService
+    from minime.services.workspace_guard import ManagedWorkspaceGuard
+
+    runtime_root = tmp_path / "runtime"
+    (runtime_root / "openspec").mkdir(parents=True)
+    (runtime_root / "docs").mkdir()
+    (runtime_root / "docs" / "ROADMAP.md").write_text("# Runtime roadmap\n", encoding="utf-8")
+    trusted_root = tmp_path / "managed"
+    trusted_root.mkdir()
+    remote_bare = tmp_path / "e2e-project.git"
+    seed_repository = tmp_path / "seed"
+    subprocess.run(
+        ["git", "init", "--bare", "--initial-branch=main", str(remote_bare)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "clone", str(remote_bare), str(seed_repository)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(["git", "config", "user.name", "PWA E2E"], cwd=seed_repository, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "pwa-e2e@example.test"], cwd=seed_repository, check=True
+    )
+    (seed_repository / "README.md").write_text("# Disposable project\n", encoding="utf-8")
+    (seed_repository / "openspec").mkdir()
+    (seed_repository / "docs").mkdir()
+    (seed_repository / "docs" / "ROADMAP.md").write_text(
+        "# Roadmap\n- e2e-onboarding: Exercise canonical onboarding\n", encoding="utf-8"
+    )
+    subprocess.run(["git", "add", "README.md", "openspec", "docs"], cwd=seed_repository, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "Seed disposable PWA onboarding repository"],
+        cwd=seed_repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "push", "origin", "main"],
+        cwd=seed_repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    uow = InMemoryPersistenceUnitOfWork()
+    AuthorizedOperatorService(uow).seed_operator("operator@example.com", display_name="E2E")
+    session_token, _ = SessionManager(uow).create_session("operator@example.com")
+    github_stub = ReadinessGitHubStub()
+    service = ProjectOnboardingService(
+        uow,
+        project_root=runtime_root,
+        github_adapter=github_stub,
+        trusted_managed_root=trusted_root,
+    )
+    intake_service = IntakeService(uow, project_root=runtime_root, github_adapter=github_stub)
+    monkeypatch.setenv("MINIME_RUNTIME_ROOT", str(runtime_root))
+    monkeypatch.setitem(app.dependency_overrides, get_uow, lambda: uow)
+    monkeypatch.setitem(app.dependency_overrides, get_onboarding_service, lambda: service)
+    monkeypatch.setitem(app.dependency_overrides, get_intake_service, lambda: intake_service)
+
+    client = ChromeCDPClient(browser_test_env["ws_url"])
+    await client.connect()
+    try:
+        await authenticate_browser(client, browser_test_env["server_url"], session_token)
+        await client.eval_js("document.getElementById('navTabProjects').click()")
+        await client.eval_js("document.getElementById('onboardProjectBtn').click()")
+        await client.eval_js("document.getElementById('onboardProjectId').value='pwa-binding-e2e'")
+        await client.eval_js(
+            "document.getElementById('onboardDisplayName').value='PWA Binding E2E'"
+        )
+        await client.eval_js(
+            f"document.getElementById('onboardRepository').value={json.dumps(str(remote_bare))}"
+        )
+        await client.eval_js("document.getElementById('onboardProjectForm').requestSubmit()")
+        for _ in range(50):
+            state = await client.eval_js("""
+              ({card: document.querySelector('#projectsGridContainer .project-card')?.innerText || '',
+                toast: document.getElementById('toastNotification').textContent,
+                selected: document.getElementById('projectSelect').value})
+            """)
+            if "PWA Binding E2E" in state["card"]:
+                break
+            await asyncio.sleep(0.1)
+
+        binding = uow.project_managed_repository_bindings.get_by_project_id("pwa-binding-e2e")
+        managed_root = trusted_root / "pwa-binding-e2e"
+        assert binding is not None and binding.is_valid
+        assert Path(binding.managed_repository_root) == managed_root
+        assert Path(binding.worktree_parent_dir) == managed_root / ".minime" / "worktrees"
+        assert state["selected"] == "pwa-binding-e2e"
+        assert "PWA Binding E2E" in state["card"]
+        assert "registrado" in state["toast"].lower()
+        assert (managed_root / binding.ownership_marker_filename).is_file()
+        guard = ManagedWorkspaceGuard(
+            uow, runtime_root=runtime_root, trusted_managed_root=trusted_root
+        )
+        marker_valid, marker_reason, _, _ = guard.verify_managed_repository_ownership_marker(
+            managed_root,
+            "pwa-binding-e2e",
+            str(remote_bare),
+            binding.ownership_marker_filename,
+        )
+        assert marker_valid, marker_reason
+        marker_data = json.loads((managed_root / binding.ownership_marker_filename).read_text())
+        assert marker_data["project_id"] == "pwa-binding-e2e"
+        assert marker_data["canonical_repository_identity"] == str(remote_bare)
+        assert subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=managed_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip() == str(remote_bare)
+
+        await client.eval_js("document.getElementById('navTabBacklog').click()")
+        await client.eval_js("document.getElementById('newWorkItemBtn').click()")
+        await client.eval_js(
+            "document.getElementById('newWorkItemTitle').value='Bound intake item'"
+        )
+        await client.eval_js("document.getElementById('newWorkItemKey').value='bound-intake-item'")
+        await client.eval_js(
+            "document.getElementById('newWorkItemDescription').value='Created through the authenticated UI.'"
+        )
+        await client.eval_js(
+            "document.getElementById('newWorkItemCriteria').value='- Visible in authoritative backlog'"
+        )
+        await client.eval_js("document.getElementById('newWorkItemForm').requestSubmit()")
+        for _ in range(50):
+            created = uow.backlog_items.get_by_project_and_key(
+                "pwa-binding-e2e", "bound-intake-item"
+            )
+            if created:
+                break
+            await asyncio.sleep(0.1)
+        assert created is not None
+        assert created.title == "Bound intake item"
+        for _ in range(50):
+            rendered_backlog = await client.eval_js(
+                "document.getElementById('backlogTableBody').textContent"
+            )
+            if "bound-intake-item" in rendered_backlog:
+                break
+            await asyncio.sleep(0.1)
+        assert "bound-intake-item" in rendered_backlog
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_real_browser_backlog_controller_owns_work_item_form_and_submission(
     browser_test_env: dict[str, Any],
 ) -> None:
@@ -1480,13 +1643,13 @@ async def test_real_browser_status_view_keeps_authoritative_states_distinct(
         await client.navigate(f"{browser_test_env['server_url']}/")
         states = [
             "RUNNING",
-            "PAUSED",
             "WAITING_CAPACITY",
             "NEEDS_HUMAN",
             "UNKNOWN",
             "AUTH_REQUIRED",
             "RECOVERY",
             "READY_FOR_HUMAN_MERGE",
+            "<img src=x onerror=alert(1)>",
         ]
         rendered = await client.eval_js(f"""
           (async () => {{
@@ -1496,19 +1659,27 @@ async def test_real_browser_status_view_keeps_authoritative_states_distinct(
             const states = {json.dumps(states)};
             renderChangesView({{
               root,
-              changes: states.map((status, index) => ({{project_id:'p',change_name:`c-${{index}}`,status}})),
+              changes: [...states.map((status, index) => ({{project_id:'p',change_name:`c-${{index}}`,status}})), {{project_id:'p',change_name:'missing-status'}}],
               filter: 'ALL', query: '', selected: null, alreadyAutoSelected: true,
               statusClass: getStatusBadgeClass, formatTime: () => 'hace 0 s', onSelect: () => {{}}
             }});
-            return [...root.querySelectorAll('tr[data-project-id]')].map(row => ({{
+            const rows = [...root.querySelectorAll('tr[data-project-id]')].map(row => ({{
               status: row.querySelector('.badge').textContent,
               className: row.querySelector('.badge').className,
             }}));
+            const attentionRoot = document.createElement('tbody');
+            renderChangesView({{root:attentionRoot,changes:[
+              {{project_id:'p',change_name:'capacity',status:'WAITING_CAPACITY'}},
+              {{project_id:'p',change_name:'recovery',status:'RECOVERY'}},
+              {{project_id:'p',change_name:'running',status:'RUNNING'}}
+            ],filter:'ATTENTION',query:'',selected:null,alreadyAutoSelected:true,statusClass:getStatusBadgeClass,formatTime:()=>'',onSelect:()=>{{}}}});
+            return {{rows, escapedElements:root.querySelectorAll('img').length, attention:[...attentionRoot.querySelectorAll('tr[data-project-id]')].map(row=>row.dataset.changeName)}};
           }})()
         """)
-        assert [item["status"] for item in rendered] == states
-        by_state = {item["status"]: item["className"] for item in rendered}
-        assert "badge-paused" in by_state["PAUSED"]
+        assert [item["status"] for item in rendered["rows"]] == [*states, "UNKNOWN"]
+        assert rendered["escapedElements"] == 0
+        assert set(rendered["attention"]) == {"capacity", "recovery"}
+        by_state = {item["status"]: item["className"] for item in rendered["rows"]}
         assert "badge-unknown" in by_state["UNKNOWN"]
         assert "badge-recovery" in by_state["RECOVERY"]
         assert "badge-needs-human" in by_state["AUTH_REQUIRED"]
@@ -1516,6 +1687,169 @@ async def test_real_browser_status_view_keeps_authoritative_states_distinct(
         assert by_state["WAITING_CAPACITY"] != by_state["RUNNING"]
         assert by_state["READY_FOR_HUMAN_MERGE"] != by_state["NEEDS_HUMAN"]
     finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_real_browser_keyboard_tabs_focus_names_and_reduced_motion(
+    browser_test_env: dict[str, Any],
+) -> None:
+    client = ChromeCDPClient(browser_test_env["ws_url"])
+    await client.connect()
+    try:
+        await client.set_viewport(1440, 900)
+        await authenticate_browser(
+            client, browser_test_env["server_url"], browser_test_env["session_token"]
+        )
+        names = await client.eval_js("""
+          (() => Array.from(document.querySelectorAll('button, input, select, textarea, a[href], [role="separator"]'))
+            .filter(node => node.getClientRects().length)
+            .filter(node => {
+              if (node.getAttribute('aria-hidden') === 'true') return false;
+              const labelled = node.getAttribute('aria-label') || node.getAttribute('aria-labelledby')
+                || node.title || node.labels?.length || node.innerText?.trim() || node.alt;
+              return !labelled;
+            }).map(node => `${node.tagName.toLowerCase()}#${node.id}.${node.className}`))()
+        """)
+        assert names == [], f"Visible controls without an accessible name: {names}"
+
+        focus_start = await client.eval_js("""
+          (() => { const tab = document.getElementById('navTabExecutions'); tab.focus();
+            return {active: document.activeElement.id, display: getComputedStyle(tab).display,
+              authenticated: getComputedStyle(document.getElementById('authenticatedContent')).display}; })()
+        """)
+        assert focus_start["active"] == "navTabExecutions" and focus_start["display"] != "none"
+        assert focus_start["authenticated"] == "block"
+        await client.send_cmd(
+            "Input.dispatchKeyEvent",
+            {
+                "type": "rawKeyDown",
+                "key": "ArrowRight",
+                "code": "ArrowRight",
+                "windowsVirtualKeyCode": 39,
+            },
+        )
+        await client.send_cmd(
+            "Input.dispatchKeyEvent",
+            {
+                "type": "keyUp",
+                "key": "ArrowRight",
+                "code": "ArrowRight",
+                "windowsVirtualKeyCode": 39,
+            },
+        )
+        main_tab = await client.eval_js("""
+          ({id: document.activeElement.id, selected: document.activeElement.getAttribute('aria-selected'),
+            tabIndex: document.activeElement.tabIndex,
+            focused: getComputedStyle(document.activeElement).boxShadow !== 'none'})
+        """)
+        assert main_tab == {
+            "id": "navTabBacklog",
+            "selected": "true",
+            "tabIndex": 0,
+            "focused": True,
+        }
+
+        await client.eval_js(
+            "document.getElementById('navTabExecutions').click(); document.getElementById('tabOverview').focus()"
+        )
+        await client.send_cmd(
+            "Input.dispatchKeyEvent",
+            {
+                "type": "rawKeyDown",
+                "key": "ArrowRight",
+                "code": "ArrowRight",
+                "windowsVirtualKeyCode": 39,
+            },
+        )
+        await client.send_cmd(
+            "Input.dispatchKeyEvent",
+            {
+                "type": "keyUp",
+                "key": "ArrowRight",
+                "code": "ArrowRight",
+                "windowsVirtualKeyCode": 39,
+            },
+        )
+        detail_tab = await client.eval_js("""
+          ({id: document.activeElement.id, selected: document.activeElement.getAttribute('aria-selected'),
+            tabIndex: document.activeElement.tabIndex,
+            controls: document.activeElement.getAttribute('aria-controls'),
+            panelLabel: document.getElementById(document.activeElement.getAttribute('aria-controls'))
+              ?.getAttribute('aria-labelledby')})
+        """)
+        assert detail_tab == {
+            "id": "tabCandidate",
+            "selected": "true",
+            "tabIndex": 0,
+            "controls": "candidateTab",
+            "panelLabel": "tabCandidate",
+        }
+
+        await client.send_cmd(
+            "Emulation.setEmulatedMedia",
+            {
+                "features": [{"name": "prefers-reduced-motion", "value": "reduce"}],
+            },
+        )
+        motion = await client.eval_js("""
+          (() => {
+            const node = document.createElement('div');
+            node.className = 'pipeline-nine-stage';
+            node.innerHTML = '<span class="step is-active">Active</span>';
+            document.body.append(node);
+            const style = getComputedStyle(node.firstElementChild);
+            return {reduced: matchMedia('(prefers-reduced-motion: reduce)').matches,
+              animation: parseFloat(style.animationDuration), transition: parseFloat(style.transitionDuration)};
+          })()
+        """)
+        assert motion["reduced"] is True
+        assert motion["animation"] <= 0.00001 and motion["transition"] <= 0.00001
+
+        await client.eval_js("document.getElementById('navTabExecutions').focus()")
+        dialog_state = await client.eval_js("""
+          (async () => {
+            const {openConfirmModal} = await import('/static/js/components/action_dialog.js');
+            const opened = openConfirmModal({title:'Confirmar', description:'Acción de prueba',
+              warning:'Solo demostración', meta:{run_id:'qa-run'}, onConfirm:()=>{}});
+            const dialog = document.getElementById('actionDialog');
+            return {opened, modal:dialog.open && dialog.matches(':modal'),
+              focusedInside:dialog.contains(document.activeElement),
+              labelledBy:dialog.getAttribute('aria-labelledby'),
+              initialFocus:document.activeElement.matches('[data-cancel], [data-confirm]')};
+          })()
+        """)
+        assert dialog_state == {
+            "opened": True,
+            "modal": True,
+            "focusedInside": True,
+            "labelledBy": "actionDialogTitle",
+            "initialFocus": True,
+        }
+        await client.send_cmd(
+            "Input.dispatchKeyEvent",
+            {
+                "type": "rawKeyDown",
+                "key": "Escape",
+                "code": "Escape",
+                "windowsVirtualKeyCode": 27,
+            },
+        )
+        await client.send_cmd(
+            "Input.dispatchKeyEvent",
+            {
+                "type": "keyUp",
+                "key": "Escape",
+                "code": "Escape",
+                "windowsVirtualKeyCode": 27,
+            },
+        )
+        focus_restored = await client.eval_js(
+            "({closed:!document.getElementById('actionDialog').open, focused:document.activeElement.id})"
+        )
+        assert focus_restored == {"closed": True, "focused": "navTabExecutions"}
+    finally:
+        await client.send_cmd("Emulation.setEmulatedMedia", {"features": []})
         await client.close()
 
 

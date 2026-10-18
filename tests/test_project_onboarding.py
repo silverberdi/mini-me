@@ -204,14 +204,19 @@ def test_registered_canonical_identity_completes_onboarding_with_github_transpor
 
 
 def test_onboard_new_project_success(
-    in_memory_uow: InMemoryPersistenceUnitOfWork, tmp_path: Path
+    in_memory_uow: InMemoryPersistenceUnitOfWork, tmp_path: Path, monkeypatch
 ) -> None:
     # Setup temporary project repository
-    repo_dir = tmp_path / "test-repo"
+    runtime_root = tmp_path / "runtime"
+    (runtime_root / "openspec").mkdir(parents=True)
+    monkeypatch.setenv("MINIME_RUNTIME_ROOT", str(runtime_root))
+    trusted_root = tmp_path / "trusted_managed_root"
+    trusted_root.mkdir()
+    repo_dir = trusted_root / "test-repo"
     repo_dir.mkdir()
     (repo_dir / "docs").mkdir()
     (repo_dir / "docs" / "ROADMAP.md").write_text(
-        "# Test Roadmap\n- 001-initial-work (BACKLOG): First task\n"
+        "# Test Roadmap\n- 001-initial-work: First task (BACKLOG)\n"
     )
     (repo_dir / "openspec").mkdir()
     import subprocess
@@ -223,16 +228,17 @@ def test_onboard_new_project_success(
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
     subprocess.run(["git", "add", "."], cwd=repo_dir, check=True)
     subprocess.run(["git", "commit", "-m", "initial commit"], cwd=repo_dir, check=True)
-
-    trusted_root = tmp_path / "trusted_managed_root"
-    trusted_root.mkdir()
+    subprocess.run(["git", "remote", "add", "origin", str(repo_dir)], cwd=repo_dir, check=True)
 
     from tests.conftest import ReadinessGitHubStub
 
+    from minime.services.context_discovery_service import ContextDiscoveryService
+
     service = ProjectOnboardingService(
         in_memory_uow,
-        project_root=repo_dir,
+        project_root=runtime_root,
         github_adapter=ReadinessGitHubStub(),
+        context_discovery_service=ContextDiscoveryService(in_memory_uow, project_root=repo_dir),
         trusted_managed_root=trusted_root,
     )
 
@@ -244,6 +250,7 @@ def test_onboard_new_project_success(
         openspec_path="openspec",
         roadmap_path="docs/ROADMAP.md",
         backlog_path="docs/ROADMAP.md",
+        managed_repository_root=str(repo_dir),
     )
 
     result = service.onboard_project(input_data, operator_email="operator@example.com")
@@ -367,11 +374,22 @@ def test_existing_matching_project_resumes_managed_workspace_bootstrap_idempoten
         "project_id": "existing-project",
         "canonical_repository_identity": str(source_repo),
     }
-    assert subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=binding.managed_repository_root, check=True, capture_output=True, text=True
-    ).stdout.strip() == subprocess.run(
-        ["git", "rev-parse", "origin/main"], cwd=binding.managed_repository_root, check=True, capture_output=True, text=True
-    ).stdout.strip()
+    assert (
+        subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=binding.managed_repository_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        == subprocess.run(
+            ["git", "rev-parse", "origin/main"],
+            cwd=binding.managed_repository_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    )
 
     second = service.onboard_project(request)
     repeated_binding = in_memory_uow.project_managed_repository_bindings.get_by_project_id(
