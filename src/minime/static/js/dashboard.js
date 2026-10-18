@@ -1,8 +1,16 @@
 import { api } from "./services/api_client.js";
-import { renderProviders } from "./components/provider_grid.js";
-import { renderQueue } from "./components/queue_table.js";
 import { setOfflineBanner } from "./components/offline_banner.js";
 import { initDesktopPaneLayout } from "./desktop_pane_layout.js";
+import { openConfirmModal, openParamModal } from "./components/action_dialog.js";
+import { createThemeController } from "./components/theme_controller.js";
+import { createSessionController } from "./services/session_controller.js";
+import { renderOperationalPanels as renderOperationalPanelsView, updateSchedulerServiceObservation } from "./views/operational_panels_view.js";
+import { renderOverviewView } from "./views/overview_view.js";
+import { renderProjectSelect as renderProjectSelectView, renderProjectsGrid as renderProjectsGridView } from "./views/projects_view.js";
+import { renderPipelineStepper as renderPipelineStepperView } from "./components/pipeline_stepper.js";
+import { renderBacklogDetail as renderBacklogDetailView, renderBacklogTable as renderBacklogTableView } from "./views/backlog_view.js";
+import { actionHistory, discoverActions, executeAction } from "./services/control_plane_client.js";
+import { renderChangesView } from "./views/runs_view.js";
 
 /** Single native-module coordinator for the existing Control Center workflows. */
 // Operational and authenticated responses must never be read from the HTTP cache.
@@ -46,8 +54,8 @@ const fetch = (input, init = {}) => {
   let countdownInterval = null;
 
   // 021 Intake & Projects State
-  let currentMainView = 'viewBacklog';
-  let currentProjectId = 'mini-me';
+  let currentMainView = 'viewExecutions';
+  let currentProjectId = null;
   let projectsList = [];
   let backlogItems = [];
   let selectedBacklogItem = null;
@@ -60,8 +68,10 @@ const fetch = (input, init = {}) => {
   const schedulerModeBadge = document.getElementById('schedulerModeBadge');
   const dbHealthBadge = document.getElementById('dbHealthBadge');
   const refreshBtn = document.getElementById('refreshBtn');
-  const themeToggleBtn = document.getElementById('themeToggleBtn');
-  const themeIcon = document.getElementById('themeIcon');
+  const themeController = createThemeController(
+    document.getElementById('themeToggleBtn'),
+    document.getElementById('themeIcon'),
+  );
   const autoRefreshToggle = document.getElementById('autoRefreshToggle');
   const refreshIntervalSelect = document.getElementById('refreshIntervalSelect');
   const refreshTimer = document.getElementById('refreshTimer');
@@ -159,112 +169,49 @@ const fetch = (input, init = {}) => {
   const tabPanes = document.querySelectorAll('.tab-pane');
 
   // Auth DOM Elements
-  let currentUser = null;
   const loginSection = document.getElementById('loginSection');
   const authenticatedContent = document.getElementById('authenticatedContent');
   const operatorProfileGroup = document.getElementById('operatorProfileGroup');
   const operatorEmailText = document.getElementById('operatorEmailText');
   const logoutBtn = document.getElementById('logoutBtn');
+  const sessionController = createSessionController({
+    fetch,
+    loginSection,
+    authenticatedContent,
+    profileGroup: operatorProfileGroup,
+    emailNode: operatorEmailText,
+    onAuthenticated: (operator) => { void initDesktopPaneLayout(operator.email); },
+    onUnauthenticated: () => {
+      clearInterval(countdownInterval);
+      overviewData = null;
+      queueData = null;
+      providerData = null;
+      healthData = null;
+      selectedChange = null;
+      renderOverview();
+      renderOperationalPanels({
+        overviewResult: { status: "rejected" },
+        queueResult: { status: "rejected" },
+        providerResult: { status: "rejected" },
+        healthResult: { status: "rejected" },
+      });
+      setOfflineBanner(false);
+    },
+  });
 
   // Initialization
   export async function initDashboard() {
-    setupTheme();
+    themeController.initialize();
+    sessionController.bindLogout(logoutBtn);
     setupEventListeners();
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.register("/sw.js").catch(() => {});
     }
-    const authenticated = await checkAuth();
+    const authenticated = await sessionController.checkAuth();
     if (authenticated) {
       await fetchProjects();
-      await fetchBacklog(currentProjectId);
-      fetchOverview();
+      switchMainView('viewExecutions');
       setupAutoRefresh();
-    }
-  }
-
-  // Authentication State Management
-  async function checkAuth() {
-    try {
-      const resp = await fetch('/api/v1/auth/me');
-      if (resp.ok) {
-        const data = await resp.json();
-        if (data.authenticated && data.operator) {
-          currentUser = data.operator;
-          void initDesktopPaneLayout(currentUser.email);
-          showAuthenticatedUI();
-          return true;
-        }
-      }
-    } catch (e) {
-      console.error('Failed checking authentication:', e);
-    }
-    showLoginUI();
-    return false;
-  }
-
-  function showAuthenticatedUI() {
-    if (loginSection) loginSection.style.display = 'none';
-    if (authenticatedContent) authenticatedContent.style.display = 'block';
-    if (operatorProfileGroup) {
-      operatorProfileGroup.style.display = 'flex';
-      if (operatorEmailText && currentUser) {
-        operatorEmailText.textContent = currentUser.email;
-      }
-    }
-  }
-
-  function showLoginUI() {
-    currentUser = null;
-    if (authenticatedContent) authenticatedContent.style.display = 'none';
-    if (operatorProfileGroup) operatorProfileGroup.style.display = 'none';
-    if (loginSection) loginSection.style.display = 'flex';
-    clearInterval(countdownInterval);
-    overviewData = null;
-    queueData = null;
-    providerData = null;
-    healthData = null;
-    selectedChange = null;
-    renderOverview();
-    renderOperationalPanels({
-      overviewResult: { status: "rejected" },
-      queueResult: { status: "rejected" },
-      providerResult: { status: "rejected" },
-      healthResult: { status: "rejected" },
-    });
-    setOfflineBanner(false);
-  }
-
-  async function handleLogout() {
-    try {
-      await fetch('/api/v1/auth/logout', { method: 'POST' });
-    } catch (err) {
-      console.error('Logout error:', err);
-    }
-    showLoginUI();
-  }
-
-  // Theme Handling
-  function setupTheme() {
-    let savedTheme = safeGetStorage('minime_theme', null);
-    if (!savedTheme) {
-      const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-      savedTheme = prefersDark ? 'theme-dark' : 'theme-light';
-    }
-    document.body.className = savedTheme;
-    updateThemeIcon(savedTheme);
-  }
-
-  function toggleTheme() {
-    const isDark = document.body.classList.contains('theme-dark');
-    const newTheme = isDark ? 'theme-light' : 'theme-dark';
-    document.body.className = newTheme;
-    safeSetStorage('minime_theme', newTheme);
-    updateThemeIcon(newTheme);
-  }
-
-  function updateThemeIcon(theme) {
-    if (themeIcon) {
-      themeIcon.textContent = theme === 'theme-light' ? '🌙' : '☀️';
     }
   }
 
@@ -346,6 +293,14 @@ const fetch = (input, init = {}) => {
 
     if (backlogTableBody) {
       backlogTableBody.addEventListener('click', (e) => {
+        const actionButton = e.target.closest('[data-backlog-action]');
+        if (actionButton) {
+          e.stopPropagation();
+          const itemKey = actionButton.dataset.itemKey;
+          if (actionButton.dataset.backlogAction === 'prepare') void prepareBacklogItem(itemKey);
+          if (actionButton.dataset.backlogAction === 'start') void startBacklogItem(itemKey);
+          return;
+        }
         const row = e.target.closest('[data-item-key]');
         if (row) {
           const itemKey = row.getAttribute('data-item-key');
@@ -353,6 +308,24 @@ const fetch = (input, init = {}) => {
         }
       });
     }
+
+    projectsGridContainer?.addEventListener('click', (event) => {
+      const button = event.target.closest('[data-project-action][data-project-id]');
+      if (!button) return;
+      const projectId = button.dataset.projectId;
+      if (button.dataset.projectAction === 'inspect') void inspectContext(projectId);
+      else if (button.dataset.projectAction === 'discover') void discoverBacklogContext(projectId);
+      else if (button.dataset.projectAction === 'backlog') {
+        currentProjectId = projectId;
+        if (projectSelect) projectSelect.value = projectId;
+        switchMainView('viewBacklog');
+      }
+    });
+
+    bkArtRun?.addEventListener('click', (event) => {
+      const button = event.target.closest('[data-open-run]');
+      if (button?.dataset.openRun) switchMainView('viewExecutions');
+    });
 
     // Backlog Action Buttons & Forms
     if (newWorkItemBtn) {
@@ -463,10 +436,6 @@ const fetch = (input, init = {}) => {
       });
     }
 
-    if (themeToggleBtn) {
-      themeToggleBtn.addEventListener('click', toggleTheme);
-    }
-
     if (refreshIntervalSelect) {
       refreshIntervalSelect.value = String(refreshIntervalSeconds);
       refreshIntervalSelect.addEventListener('change', (e) => {
@@ -554,11 +523,6 @@ const fetch = (input, init = {}) => {
       });
     }
 
-    if (logoutBtn) {
-      logoutBtn.addEventListener('click', () => {
-        handleLogout();
-      });
-    }
   }
 
   // Auto-Refresh
@@ -612,13 +576,13 @@ const fetch = (input, init = {}) => {
       queueData = null;
       providerData = null;
       healthData = null;
-      showLoginUI();
+      sessionController.showLogin();
       renderOverview();
       renderOperationalPanels({ overviewResult, queueResult, providerResult, healthResult });
       return;
     }
     if (overviewResult.status === "rejected") {
-      if ([401, 403].includes(overviewResult.reason?.status)) showLoginUI();
+      if ([401, 403].includes(overviewResult.reason?.status)) sessionController.showLogin();
       overviewData = null;
     } else {
       overviewData = overviewResult.value;
@@ -633,66 +597,28 @@ const fetch = (input, init = {}) => {
     }
   }
 
-  function updateFreshness(elementId, result, sourceTime = null) {
-    const node = document.getElementById(elementId);
-    if (!node) return;
-    if (result.status !== "fulfilled") {
-      node.textContent = "No disponible";
-      node.dataset.state = "UNKNOWN";
-      return;
-    }
-    if (!sourceTime || Number.isNaN(Date.parse(sourceTime))) {
-      node.textContent = "Antigüedad desconocida: la fuente no informa hora de observación";
-      node.dataset.state = "UNKNOWN";
-      return;
-    }
-    node.textContent = `Observado ${formatRelativeTime(sourceTime)}`;
-    node.dataset.state = "OBSERVED";
-  }
-
-  function latestTimestamp(records, fields) {
-    if (!Array.isArray(records)) return null;
-    const timestamps = records.flatMap((record) => fields.map((field) => record?.[field]))
-      .filter((value) => typeof value === "string" && !Number.isNaN(Date.parse(value)));
-    return timestamps.sort((a, b) => Date.parse(b) - Date.parse(a))[0] || null;
-  }
-
   function renderOperationalPanels(results) {
-    renderQueue(document.getElementById("queueList"), queueData, (projectId, changeName) => {
-      selectChange(projectId, changeName);
+    renderOperationalPanelsView({
+      data: { overview: overviewData, queue: queueData, providers: providerData, health: healthData },
+      results: {
+        overview: results.overviewResult,
+        queue: results.queueResult,
+        providers: results.providerResult,
+        health: results.healthResult,
+      },
+      elements: {
+        queueList: document.getElementById("queueList"),
+        providerGrid: document.getElementById("providerGrid"),
+        overviewFreshness: document.getElementById("overviewFreshness"),
+        queueFreshness: document.getElementById("queueFreshness"),
+        providerFreshness: document.getElementById("providerFreshness"),
+        healthFreshness: document.getElementById("healthFreshness"),
+        dbHealthBadge,
+        kpiSystemStateVal,
+      },
+      selectChange,
+      formatRelativeTime,
     });
-    renderProviders(document.getElementById("providerGrid"), providerData);
-    updateFreshness("overviewFreshness", results.overviewResult, overviewData?.observed_at);
-    updateFreshness("queueFreshness", results.queueResult, latestTimestamp(queueData, ["last_evaluated_at"]));
-    updateFreshness("providerFreshness", results.providerResult, latestTimestamp(providerData, ["last_probe_at", "updated_at"]));
-    updateFreshness("healthFreshness", results.healthResult, healthData?.observed_at);
-    if (dbHealthBadge) {
-      const healthy = healthData?.database?.healthy;
-      dbHealthBadge.textContent = healthy === true ? "Base de datos disponible"
-        : healthy === false ? "Base de datos no disponible" : "Estado de base de datos desconocido";
-      dbHealthBadge.dataset.state = healthy === true ? "HEALTHY" : healthy === false ? "UNHEALTHY" : "UNKNOWN";
-    }
-    if (kpiSystemStateVal) {
-      const healthy = healthData?.database?.healthy;
-      kpiSystemStateVal.textContent = healthy === true ? "Saludable"
-        : healthy === false ? "Degradado" : "Desconocido";
-      kpiSystemStateVal.className = `kpi-value ${healthy === true ? "text-success" : healthy === false ? "text-danger" : "text-muted"}`;
-    }
-  }
-
-  function updateSchedulerObservation(systemStatus) {
-    const node = document.getElementById("schedulerServiceBadge");
-    const observation = systemStatus?.scheduler_service;
-    if (!node) return;
-    const fresh = observation?.freshness === "FRESH";
-    const active = fresh ? observation.active_state : "UNKNOWN";
-    const enabled = fresh ? observation.enabled_state : "UNKNOWN";
-    const sub = fresh ? observation.sub_state : "UNKNOWN";
-    node.textContent = `Servicio: ${active}${sub !== "UNKNOWN" ? ` (${sub})` : ""} · Arranque: ${enabled}`;
-    node.dataset.state = fresh ? active : "UNKNOWN";
-    node.title = fresh && observation.observed_at
-      ? `Origen: ${observation.source}; observado: ${observation.observed_at}; antigüedad: ${observation.age_seconds ?? "desconocida"} s`
-      : `Observación systemd no disponible: ${observation?.reason || "UNKNOWN"}`;
   }
 
   async function fetchChangeDetail(projectId, changeName) {
@@ -700,7 +626,7 @@ const fetch = (input, init = {}) => {
     try {
       const resp = await fetch(`/api/v1/dashboard/changes/${encodeURIComponent(projectId)}/${encodeURIComponent(changeName)}`);
       if ([401, 403].includes(resp.status)) {
-        showLoginUI();
+        sessionController.showLogin();
         return;
       }
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -728,140 +654,52 @@ const fetch = (input, init = {}) => {
   function renderOverview() {
     if (!overviewData) {
       setOfflineBanner(typeof navigator !== "undefined" && navigator.onLine === false);
-      updateSchedulerObservation(null);
-      [kpiSystemStateVal, kpiAttentionVal, kpiActiveVal, kpiCompletedVal].forEach((node) => {
-        if (node) node.textContent = "—";
-      });
-      if (attentionItemsContainer) attentionItemsContainer.replaceChildren();
-      if (attentionBanner) attentionBanner.style.display = "none";
-      if (changesTableBody) changesTableBody.innerHTML = '<tr><td colspan="6" class="table-empty">Datos operacionales no disponibles; se requiere una lectura autenticada reciente.</td></tr>';
-      if (detailContent) detailContent.style.display = "none";
-      if (detailPlaceholder) {
-        detailPlaceholder.style.display = "block";
-        detailPlaceholder.textContent = "Detalle no disponible hasta recuperar una lectura autenticada reciente.";
-      }
-      return;
-    }
-    setOfflineBanner(false);
-
-    const { system_status, attention_items, changes } = overviewData;
-
-    // Header Indicators
-    if (schedulerModeBadge) {
-      const mode = system_status.scheduler_mode || "UNKNOWN";
-      schedulerModeBadge.textContent = `Admisión lógica: ${mode}`;
-      schedulerModeBadge.dataset.state = mode;
-    }
-    updateSchedulerObservation(system_status);
-
-    // KPI Cards
-    if (kpiSystemStateSub) {
-      kpiSystemStateSub.textContent = `API/PostgreSQL · admisión: ${system_status.scheduler_mode || 'UNKNOWN'}`;
-    }
-
-    if (kpiAttentionVal) {
-      const count = system_status.attention_runs_count;
-      kpiAttentionVal.textContent = count;
-      kpiAttentionVal.className = `kpi-value ${count > 0 ? 'text-warning' : 'text-muted'}`;
-    }
-    if (kpiAttentionSub) {
-      const count = system_status.attention_runs_count;
-      kpiAttentionSub.textContent = `${count} ejecución${count === 1 ? "" : "es"} requiere${count === 1 ? "" : "n"} atención`;
-    }
-
-    if (kpiActiveVal) {
-      kpiActiveVal.textContent = system_status.active_runs_count;
-    }
-    if (kpiActiveSub) {
-      kpiActiveSub.textContent = `${system_status.active_runs_count} ejecuciones activas informadas`;
-    }
-
-    if (kpiCompletedVal) {
-      const completedCount = system_status.recent_completions_count;
-      kpiCompletedVal.textContent = completedCount === null ? '—' : completedCount;
-    }
-    if (kpiCompletedSub) {
-      kpiCompletedSub.textContent = 'Finalizaciones recientes informadas por el servidor';
-    }
-
-    // Attention Banner
-    if (attention_items && attention_items.length > 0) {
-      attentionBanner.style.display = 'block';
-      attentionCountText.textContent = `${attention_items.length} ejecución${attention_items.length === 1 ? "" : "es"}`;
-      attentionItemsContainer.innerHTML = attention_items.map(item => `
-        <div class="attention-item-card" data-project-id="${escapeHtml(item.project_id)}" data-change-name="${escapeHtml(item.change_name)}">
-          <div class="attention-item-left">
-            <span class="attention-item-name">${escapeHtml(item.project_id)} / ${escapeHtml(item.change_name)}</span>
-            <span class="attention-item-reason">${escapeHtml(item.reason)}</span>
-          </div>
-          <span class="badge badge-needs-human">${escapeHtml(item.stop_outcome || item.stage)}</span>
-        </div>
-      `).join('');
     } else {
-      attentionBanner.style.display = 'none';
+      setOfflineBanner(false);
     }
-
-    // Changes Table
-    renderChangesTable();
+    renderOverviewView({
+      data: overviewData,
+      elements: {
+        kpiGrid: document.getElementById("operationalKpis"),
+        schedulerServiceBadge: document.getElementById("schedulerServiceBadge"),
+        schedulerModeBadge,
+        kpiSystemStateVal,
+        kpiSystemStateSub,
+        kpiAttentionVal,
+        kpiAttentionSub,
+        kpiActiveVal,
+        kpiActiveSub,
+        kpiCompletedVal,
+        kpiCompletedSub,
+        attentionBanner,
+        attentionCountText,
+        attentionItemsContainer,
+        changesTableBody,
+        detailContent,
+        detailPlaceholder,
+      },
+      escapeHtml,
+      updateSchedulerServiceObservation,
+      renderChanges: renderChangesTable,
+    });
   }
 
   function renderChangesTable() {
     if (!overviewData || !overviewData.changes) return;
-
-    let list = overviewData.changes;
-
-    // Apply Filter
-    if (activeFilter === 'ATTENTION') {
-      list = list.filter(c => c.status === 'NEEDS_HUMAN' || c.status === 'WAITING');
-    } else if (activeFilter === 'RUNNING') {
-      list = list.filter(c => c.status === 'RUNNING');
-    } else if (activeFilter === 'READY') {
-      list = list.filter(c => c.status === 'READY');
-    } else if (activeFilter === 'COMPLETED') {
-      list = list.filter(c => c.status === 'COMPLETED');
-    }
-
-    // Apply Search
-    if (searchQuery) {
-      list = list.filter(c =>
-        c.change_name.toLowerCase().includes(searchQuery) ||
-        c.project_id.toLowerCase().includes(searchQuery) ||
-        c.status.toLowerCase().includes(searchQuery)
-      );
-    }
-
-    if (list.length === 0) {
-      changesTableBody.innerHTML = `<tr><td colspan="6" class="table-empty">No hay cambios que coincidan con la búsqueda.</td></tr>`;
-      return;
-    }
-
-    changesTableBody.innerHTML = list.map(c => {
-      const isSelected = selectedChange && selectedChange.project_id === c.project_id && selectedChange.change_name === c.change_name;
-      const statusClass = getStatusBadgeClass(c.status);
-      const shortSha = c.candidate_sha_short || '---';
-      const updated = formatRelativeTime(c.updated_at);
-
-      return `
-        <tr class="${isSelected ? 'selected' : ''}" data-project-id="${escapeHtml(c.project_id)}" data-change-name="${escapeHtml(c.change_name)}">
-          <td><span class="badge ${statusClass}">${escapeHtml(c.status)}</span></td>
-          <td><strong>${escapeHtml(c.change_name)}</strong></td>
-          <td>${escapeHtml(c.project_id)}</td>
-          <td><span class="text-muted">${escapeHtml(c.stop_outcome || c.current_stage || '---')}</span></td>
-          <td><code class="code-sha">${escapeHtml(shortSha)}</code></td>
-          <td class="text-muted">${escapeHtml(updated)}</td>
-        </tr>
-      `;
-    }).join('');
-
-    // Auto-select first change only on initial page load if none selected
-    if (!initialSelected && !selectedChange && list.length > 0) {
-      initialSelected = true;
-      selectChange(list[0].project_id, list[0].change_name);
-    }
+    initialSelected = renderChangesView({
+      root: changesTableBody,
+      changes: overviewData.changes,
+      filter: activeFilter,
+      query: searchQuery,
+      selected: selectedChange,
+      alreadyAutoSelected: initialSelected,
+      statusClass: getStatusBadgeClass,
+      formatTime: formatRelativeTime,
+      onSelect: selectChange,
+    });
   }
 
-  // Global Change Selector
-  window.selectChange = function (projectId, changeName) {
+  function selectChange(projectId, changeName) {
     selectedChange = { project_id: projectId, change_name: changeName };
     if (detailContent) detailContent.style.display = 'none';
     if (detailPlaceholder) {
@@ -870,7 +708,7 @@ const fetch = (input, init = {}) => {
     }
     renderChangesTable();
     fetchChangeDetail(projectId, changeName);
-  };
+  }
 
   function renderDetail(detail) {
     if (!detail) return;
@@ -910,10 +748,10 @@ const fetch = (input, init = {}) => {
     renderChecksTab(detail.checks);
 
     // Tab 4: Review
-    renderReviewTab(detail.review);
+    renderReviewTab(detail.review, detail.candidate_authority);
 
     // Tab 5: Audit
-    renderAuditTab(detail.audit);
+    renderAuditTab(detail.audit, detail.candidate_authority);
 
     // Tab 6: Container Preview & Guided Validation
     renderPreviewTab(detail.preview_validation, detail);
@@ -954,12 +792,7 @@ const fetch = (input, init = {}) => {
       return;
     }
     try {
-      const response = await fetch(`/api/v1/control-plane/actions/available?run_id=${encodeURIComponent(runId)}`);
-      if (!response.ok) {
-        toolbar.innerHTML = '<span class="text-muted">No hay acciones disponibles</span>';
-        return;
-      }
-      const actions = await response.json();
+      const actions = await discoverActions(runId);
       if (!actions || !actions.length) {
         toolbar.innerHTML = '<span class="text-muted">No hay acciones disponibles</span>';
         return;
@@ -991,24 +824,24 @@ const fetch = (input, init = {}) => {
 
     if (actionType === 'reassign') {
       openParamModal({
-        title: 'Reassign Executor',
-        description: `Select target execution provider for '${detail.change_name}'.`,
+        title: 'Reasignar ejecutor',
+        description: `Selecciona el proveedor de ejecución para «${detail.change_name}».`,
         fields: [
           {
             name: 'executor',
-            label: 'Target Executor',
+            label: 'Ejecutor de destino',
             type: 'select',
             options: [
-              { value: 'codex', label: 'Codex (Routine Implementation Workhorse)' },
-              { value: 'antigravity', label: 'Antigravity (Supervisor & Governor)' }
+              { value: 'codex', label: 'Codex (implementación)' },
+              { value: 'antigravity', label: 'Antigravity (supervisión)' }
             ],
             default: 'codex'
           },
           {
             name: 'rationale',
-            label: 'Reassignment Rationale (Optional)',
+            label: 'Motivo de la reasignación (opcional)',
             type: 'text',
-            placeholder: 'Reason for handoff...'
+            placeholder: 'Explica el motivo del relevo…'
           }
         ],
         onSubmit: (params) => {
@@ -1020,25 +853,25 @@ const fetch = (input, init = {}) => {
       });
     } else if (actionType === 'resolve_gate') {
       openParamModal({
-        title: 'Resolve Human Gate',
-        description: `Resolve gate for '${detail.change_name}' (Current Gate: ${detail.human_gate || 'Attention'}).`,
+        title: 'Resolver compuerta humana',
+        description: `Resolver la compuerta de «${detail.change_name}» (${detail.human_gate || 'desconocida'}).`,
         fields: [
           {
             name: 'resolution',
-            label: 'Decision',
+            label: 'Decisión',
             type: 'select',
             options: [
-              { value: 'APPROVED', label: 'Approve (Proceed to next stage)' },
-              { value: 'REJECTED', label: 'Reject (Require changes)' },
-              { value: 'OVERRIDDEN', label: 'Override Gate' }
+              { value: 'APPROVED', label: 'Aprobar (continuar)' },
+              { value: 'REJECTED', label: 'Rechazar (solicitar cambios)' },
+              { value: 'OVERRIDDEN', label: 'Anular compuerta' }
             ],
             default: 'APPROVED'
           },
           {
             name: 'notes',
-            label: 'Resolution Notes',
+            label: 'Notas de la decisión',
             type: 'textarea',
-            placeholder: 'Enter notes or reason for resolution...'
+            placeholder: 'Añade notas o el motivo de la decisión…'
           }
         ],
         onSubmit: (params) => {
@@ -1050,14 +883,14 @@ const fetch = (input, init = {}) => {
       });
     } else if (actionType === 'retry') {
       openParamModal({
-        title: 'Retry Stage',
-        description: `Retry execution stage for '${detail.change_name}'.`,
+        title: 'Reintentar etapa',
+        description: `Reintentar la etapa de «${detail.change_name}».`,
         fields: [
           {
             name: 'reason',
-            label: 'Retry Reason (Optional)',
+            label: 'Motivo del reintento (opcional)',
             type: 'text',
-            placeholder: 'Reason for stage retry...'
+            placeholder: 'Motivo del reintento…'
           }
         ],
         onSubmit: (params) => {
@@ -1070,12 +903,12 @@ const fetch = (input, init = {}) => {
       openConfirmModal({
         title: action.display_name || `Confirm ${actionType.toUpperCase()}`,
         description: action.confirmation_prompt || action.description || `Confirm execution of ${action.display_name || actionType}.`,
-        warning: actionType === 'cancel' ? 'This will immediately abort the active run and clean active resources.' : (actionType === 'recover_locks' ? 'This will recover any stale locks held for this run.' : ''),
+        warning: actionType === 'cancel' ? 'Esto cancelará la ejecución activa y liberará sus recursos gobernados.' : (actionType === 'recover_locks' ? 'Esto intentará recuperar los bloqueos obsoletos de esta ejecución.' : ''),
         meta: {
           'Change': detail.change_name,
           'Run ID': detail.run_id ? detail.run_id.slice(0, 8) + '...' : '---',
-          'Current Stage': detail.current_stage || '---',
-          'Risk Level': action.risk_level || 'STANDARD'
+          'Etapa actual': detail.current_stage || '—',
+          'Nivel de riesgo': action.risk_level || 'UNKNOWN'
         },
         onConfirm: () => {
           executeOperatorAction(detail, action.action || action.action_type);
@@ -1086,98 +919,10 @@ const fetch = (input, init = {}) => {
     }
   }
 
-  function openConfirmModal({ title, description, warning, meta, onConfirm }) {
-    const dialog = document.getElementById('actionDialog');
-    if (!dialog) return onConfirm();
-    dialog.querySelector('[data-dialog-title]').textContent = title;
-    dialog.querySelector('[data-dialog-description]').textContent = description;
-
-    const warnBanner = document.getElementById('dialogWarningBanner');
-    if (warnBanner) {
-      if (warning) {
-        warnBanner.textContent = '⚠️ ' + warning;
-        warnBanner.style.display = 'block';
-      } else {
-        warnBanner.style.display = 'none';
-      }
-    }
-
-    const metaBox = document.getElementById('dialogMetaInfo');
-    if (metaBox) {
-      if (meta && Object.keys(meta).length > 0) {
-        metaBox.innerHTML = Object.entries(meta).map(([k, v]) => `<div><strong>${escapeHtml(k)}:</strong> ${escapeHtml(v)}</div>`).join('');
-        metaBox.style.display = 'grid';
-      } else {
-        metaBox.style.display = 'none';
-      }
-    }
-
-    dialog.showModal();
-    const confirmBtn = document.getElementById('confirmActionBtn');
-    confirmBtn.onclick = () => {
-      dialog.close();
-      onConfirm();
-    };
-    dialog.querySelector('[data-cancel]').onclick = () => dialog.close();
-  }
-
-  function openParamModal({ title, description, fields, onSubmit }) {
-    const dialog = document.getElementById('actionParamDialog');
-    if (!dialog) return;
-    document.getElementById('paramDialogTitle').textContent = title;
-    const body = document.getElementById('paramDialogBody');
-    body.innerHTML = `
-      <p class="dialog-desc">${escapeHtml(description)}</p>
-      <form id="paramModalForm" class="param-form">
-        ${fields.map(f => {
-          if (f.type === 'select') {
-            return `
-              <div class="form-group">
-                <label for="field_${f.name}">${escapeHtml(f.label)}</label>
-                <select id="field_${f.name}" name="${f.name}" class="form-control">
-                  ${f.options.map(opt => `<option value="${opt.value}" ${opt.value === f.default ? 'selected' : ''}>${escapeHtml(opt.label)}</option>`).join('')}
-                </select>
-              </div>
-            `;
-          } else if (f.type === 'textarea') {
-            return `
-              <div class="form-group">
-                <label for="field_${f.name}">${escapeHtml(f.label)}</label>
-                <textarea id="field_${f.name}" name="${f.name}" class="form-control" rows="3" placeholder="${escapeHtml(f.placeholder || '')}"></textarea>
-              </div>
-            `;
-          } else {
-            return `
-              <div class="form-group">
-                <label for="field_${f.name}">${escapeHtml(f.label)}</label>
-                <input type="text" id="field_${f.name}" name="${f.name}" class="form-control" placeholder="${escapeHtml(f.placeholder || '')}" value="${escapeHtml(f.default || '')}">
-              </div>
-            `;
-          }
-        }).join('')}
-      </form>
-    `;
-
-    dialog.showModal();
-    const submitBtn = document.getElementById('submitParamActionBtn');
-    submitBtn.onclick = (e) => {
-      e.preventDefault();
-      const form = document.getElementById('paramModalForm');
-      const formData = new FormData(form);
-      const params = {};
-      for (const [k, v] of formData.entries()) {
-        params[k] = v;
-      }
-      dialog.close();
-      onSubmit(params);
-    };
-    dialog.querySelector('[data-param-cancel]').onclick = () => dialog.close();
-  }
-
   async function executeOperatorAction(detail, actionType, parameters = {}) {
     const runId = detail?.run_id;
     if (!runId) {
-      showToast('Cannot execute action: No active run for this change.', 'error');
+      showToast('No se puede ejecutar la acción: el cambio no tiene un Run activo.', 'error');
       return;
     }
     const payload = {
@@ -1187,7 +932,7 @@ const fetch = (input, init = {}) => {
       run_id: runId,
       action_type: actionType.toUpperCase(),
       parameters: parameters,
-      actor_identity: currentUser?.email || 'operator',
+      actor_identity: sessionController.currentUser?.email || 'operator',
       source_interface: 'pwa',
       expected_stage: detail.current_stage || null,
       expected_generation: detail.candidate_authority?.generation || (detail.generation || null),
@@ -1197,29 +942,26 @@ const fetch = (input, init = {}) => {
     };
 
     try {
-      showToast(`Executing ${actionType}...`, 'info');
-      const response = await fetch('/api/v1/control-plane/actions/execute', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      const result = await response.json();
-      if (response.ok && (result.status === 'SUCCESS' || result.status === 'COMPLETED' || result.status === 'ACCEPTED' || result.success === true)) {
-        showToast(`Action ${actionType} succeeded: ${result.summary || result.message || 'Execution completed'}`, 'success');
+      showToast(`Ejecutando ${actionType}…`, 'info');
+      const result = await executeAction(runId, payload);
+      if (result.status === 'SUCCESS' || result.status === 'COMPLETED' || result.status === 'ACCEPTED' || result.success === true) {
+        showToast(`Acción ${actionType} completada: ${result.summary || result.message || 'Ejecución finalizada'}`, 'success');
         await fetchOverview();
         if (selectedChange && selectedChange.projectId && selectedChange.changeName) {
           await fetchChangeDetail(selectedChange.projectId, selectedChange.changeName);
         }
       } else {
-        const errMsg = result.summary || result.error_message || result.error_code || result.detail || result.message || 'Action rejected or failed.';
-        showToast(`Action failed: ${errMsg}`, 'error');
+        const errMsg = result.summary || result.error_message || result.error_code || result.detail || result.message || 'La acción fue rechazada o falló.';
+        showToast(`Falló la acción: ${errMsg}`, 'error');
         await fetchOverview();
         if (selectedChange && selectedChange.projectId && selectedChange.changeName) {
           await fetchChangeDetail(selectedChange.projectId, selectedChange.changeName);
         }
       }
     } catch (err) {
-      showToast(`Network error executing action: ${err.message}`, 'error');
+      const message = err.payload?.summary || err.payload?.error_message || err.payload?.error_code || err.message;
+      showToast(`Falló la acción: ${message}`, 'error');
+      await fetchOverview();
     }
   }
 
@@ -1238,36 +980,36 @@ const fetch = (input, init = {}) => {
       }
       const data = await resp.json();
       const metrics = data.metrics || data;
-      const productive = metrics.productive_attempt_count ?? (data.productive_attempt_ratio ? 1 : 0);
-      const noProgress = metrics.no_progress_attempt_count ?? 0;
-      const total = productive + noProgress;
-      const ratio = total > 0 ? ((productive / total) * 100).toFixed(0) + '%' : (data.productive_attempt_ratio !== undefined ? (Number(data.productive_attempt_ratio) * 100).toFixed(0) + '%' : '100%');
-      const attempts = total > 0 ? total : (data.total_attempts ?? 1);
-      const reworks = metrics.corrective_retry_count ?? (data.rework_attempts ?? 0);
-      const model = data.primary_model || (data.provider_summary?.[0]?.provider || 'codex');
-      const reviewerModel = data.reviewer_model || (data.provider_summary?.[1]?.provider || 'antigravity');
-      const indStatus = data.reviewer_independence !== false ? 'PASS' : 'INDEPENDENT';
-      const selfHost = metrics.self_hosting_percentage !== undefined ? `${metrics.self_hosting_percentage.toFixed(0)}%` : '100%';
+      const ratio = data.productive_attempt_ratio !== undefined
+        ? `${(Number(data.productive_attempt_ratio) * 100).toFixed(0)}%` : 'No informado';
+      const attempts = data.total_attempts ?? 'No informado';
+      const reworks = metrics.corrective_retry_count ?? data.rework_attempts ?? 'No informado';
+      const model = data.primary_model || data.provider_summary?.[0]?.provider || 'No informado';
+      const reviewerModel = data.reviewer_model || data.provider_summary?.[1]?.provider || 'No informado';
+      const indStatus = data.reviewer_independence === true ? 'VERIFICADA'
+        : data.reviewer_independence === false ? 'NO VERIFICADA' : 'DESCONOCIDA';
+      const selfHost = metrics.self_hosting_percentage !== undefined
+        ? `${metrics.self_hosting_percentage.toFixed(0)}%` : 'No informado';
 
       container.innerHTML = `
         <div class="efficiency-kpi-grid">
           <div class="stat-card">
-            <div class="stat-label">PRODUCTIVE ATTEMPTS</div>
+            <div class="stat-label">INTENTOS PRODUCTIVOS</div>
             <div class="stat-value text-success">${escapeHtml(ratio)}</div>
-            <div class="stat-sub">${attempts} total attempts (${reworks} corrective retries)</div>
+            <div class="stat-sub">${attempts} intentos en total (${reworks} reintentos correctivos)</div>
           </div>
           <div class="stat-card">
-            <div class="stat-label">PRIMARY IMPLEMENTER</div>
+            <div class="stat-label">IMPLEMENTADOR PRINCIPAL</div>
             <div class="stat-value">${escapeHtml(model)}</div>
-            <div class="stat-sub">Routine workhorse</div>
+            <div class="stat-sub">Proveedor de implementación</div>
           </div>
           <div class="stat-card">
-            <div class="stat-label">COMPLEMENTARY REVIEWER</div>
+            <div class="stat-label">REVISOR COMPLEMENTARIO</div>
             <div class="stat-value">${escapeHtml(reviewerModel)}</div>
-            <div class="stat-sub">Independence: <strong class="text-success">${escapeHtml(indStatus)}</strong></div>
+            <div class="stat-sub">Independencia: <strong class="text-success">${escapeHtml(indStatus)}</strong></div>
           </div>
           <div class="stat-card">
-            <div class="stat-label">SELF-HOSTING NATIVE</div>
+            <div class="stat-label">EJECUCIÓN NATIVA</div>
             <div class="stat-value text-primary">${escapeHtml(selfHost)}</div>
             <div class="stat-sub">Telemetry verified</div>
           </div>
@@ -1296,12 +1038,7 @@ const fetch = (input, init = {}) => {
       return;
     }
     try {
-      const resp = await fetch(`/api/v1/runs/${encodeURIComponent(runId)}/actions/history`);
-      if (!resp.ok) {
-        container.innerHTML = '<p class="table-empty">No se han realizado acciones del operador en este Run.</p>';
-        return;
-      }
-      const history = await resp.json();
+      const history = await actionHistory(runId);
       if (!history || !history.length) {
         container.innerHTML = '<p class="table-empty">Aún no hay acciones del operador registradas para este Run.</p>';
         return;
@@ -1342,26 +1079,7 @@ const fetch = (input, init = {}) => {
 
 
   function renderPipelineStepper(pipeline) {
-    if (!pipelineStepper || !pipeline) return;
-
-    const icons = {
-      readiness: '📋',
-      implementation: '⚙️',
-      checks: '🧪',
-      review: '👥',
-      audit: '🛡️',
-      pr_merge: '🚀'
-    };
-
-    pipelineStepper.innerHTML = pipeline.map((phase, idx) => {
-      const stepClass = phase.status; // passed, running, failed, blocked, waiting, not_started
-      return `
-        <div class="step-item ${stepClass}">
-          <div class="step-bubble" title="${escapeHtml(phase.summary)}">${icons[phase.name] || (idx + 1)}</div>
-          <div class="step-label">${escapeHtml(phase.display_name)}</div>
-        </div>
-      `;
-    }).join('');
+    renderPipelineStepperView(pipelineStepper, pipeline);
   }
 
   function renderOverviewTab(detail) {
@@ -1372,12 +1090,12 @@ const fetch = (input, init = {}) => {
     if (metaGrid) {
       metaGrid.innerHTML = `
         <div class="meta-box">
-          <div class="meta-box-label">Current Stage</div>
-          <div class="meta-box-val">${escapeHtml(detail.current_stage || 'DISCOVERED')}</div>
+          <div class="meta-box-label">Etapa actual</div>
+          <div class="meta-box-val">${escapeHtml(detail.current_stage || 'UNKNOWN')}</div>
         </div>
         <div class="meta-box">
           <div class="meta-box-label">Stop Outcome</div>
-          <div class="meta-box-val">${escapeHtml(detail.stop_outcome || 'NONE')}</div>
+          <div class="meta-box-val">${escapeHtml(detail.stop_outcome || 'UNKNOWN')}</div>
         </div>
         <div class="meta-box">
           <div class="meta-box-label">Run ID</div>
@@ -1466,7 +1184,7 @@ const fetch = (input, init = {}) => {
   function renderChecksTab(checks) {
     const countSpan = document.getElementById('checksTabCount');
     const container = document.getElementById('checksListContainer');
-    if (countSpan) countSpan.textContent = checks ? checks.length : 0;
+    if (countSpan) countSpan.textContent = Array.isArray(checks) ? String(checks.length) : '—';
 
     if (!container) return;
     if (!checks || checks.length === 0) {
@@ -1492,7 +1210,7 @@ const fetch = (input, init = {}) => {
     }).join('');
   }
 
-  function renderReviewTab(review) {
+  function renderReviewTab(review, candidate) {
     const container = document.getElementById('reviewContentContainer');
     if (!container) return;
 
@@ -1501,34 +1219,39 @@ const fetch = (input, init = {}) => {
       return;
     }
 
-    const isPass = review.verdict === 'READY_TO_MERGE';
+    const candidateBound = Boolean(review.candidate_sha && candidate?.candidate_sha
+      && review.candidate_sha === candidate.candidate_sha);
+    const stale = review.is_stale_to_current_candidate === true
+      || Boolean(review.candidate_sha && candidate?.candidate_sha && review.candidate_sha !== candidate.candidate_sha);
+    const isPass = review.verdict === 'READY_TO_MERGE' && candidateBound && !stale;
+    const bindingLabel = candidateBound ? 'VIGENTE' : stale ? 'OBSOLETA' : 'DESCONOCIDA';
     container.innerHTML = `
       <div class="overview-meta-grid" style="margin-bottom: 12px;">
         <div class="meta-box">
-          <div class="meta-box-label">Reviewer Role</div>
-          <div class="meta-box-val">${escapeHtml(review.reviewer_role || 'antigravity')}</div>
+          <div class="meta-box-label">Rol del revisor</div>
+          <div class="meta-box-val">${escapeHtml(review.reviewer_role || 'No informado')}</div>
         </div>
         <div class="meta-box">
-          <div class="meta-box-label">Verdict</div>
+          <div class="meta-box-label">Veredicto</div>
           <div class="meta-box-val"><span class="badge ${isPass ? 'badge-ready' : 'badge-failed'}">${escapeHtml(review.verdict || review.status)}</span></div>
         </div>
         <div class="meta-box">
-          <div class="meta-box-label">Material Findings</div>
-          <div class="meta-box-val">${review.material_findings_count}</div>
+          <div class="meta-box-label">Hallazgos relevantes</div>
+          <div class="meta-box-val">${escapeHtml(review.material_findings_count ?? '—')}</div>
         </div>
         <div class="meta-box">
-          <div class="meta-box-label">Candidate Binding</div>
-          <div class="meta-box-val"><code class="code-sha">${escapeHtml(review.candidate_sha ? review.candidate_sha.substring(0, 8) : '---')}</code> ${review.is_stale_to_current_candidate ? '<span class="badge badge-warning">STALE</span>' : ''}</div>
+          <div class="meta-box-label">Vinculación del candidato</div>
+          <div class="meta-box-val"><code class="code-sha">${escapeHtml(review.candidate_sha ? review.candidate_sha.substring(0, 8) : '—')}</code> <span class="badge ${candidateBound ? 'badge-ready' : stale ? 'badge-warning' : 'badge-muted'}">${bindingLabel}</span></div>
         </div>
       </div>
       ${review.summary ? `
         <div class="meta-box" style="margin-bottom: 12px;">
-          <div class="meta-box-label">Review Summary</div>
+          <div class="meta-box-label">Resumen de la revisión</div>
           <p style="margin-top: 4px; font-size: 12px;">${escapeHtml(review.summary)}</p>
         </div>
       ` : ''}
       ${review.findings && review.findings.length > 0 ? `
-        <div class="meta-box-label" style="margin-bottom: 6px;">Findings (${review.findings.length})</div>
+        <div class="meta-box-label" style="margin-bottom: 6px;">Hallazgos (${review.findings.length})</div>
         <div class="checks-list">
           ${review.findings.map(f => `
             <div class="check-item">
@@ -1540,11 +1263,11 @@ const fetch = (input, init = {}) => {
             </div>
           `).join('')}
         </div>
-      ` : '<p class="text-muted" style="font-size: 12px;">No findings reported.</p>'}
+      ` : '<p class="text-muted" style="font-size: 12px;">No se informaron hallazgos.</p>'}
     `;
   }
 
-  function renderAuditTab(audit) {
+  function renderAuditTab(audit, candidate) {
     const container = document.getElementById('auditContentContainer');
     if (!container) return;
 
@@ -1553,34 +1276,38 @@ const fetch = (input, init = {}) => {
       return;
     }
 
-    const isLowRisk = audit.risk === 'low' || audit.risk === null;
+    const isLowRisk = audit.risk === 'low';
+    const auditCandidateBound = Boolean(audit.candidate_sha && candidate?.candidate_sha
+      && audit.candidate_sha === candidate.candidate_sha);
+    const auditStale = audit.is_stale_to_current_candidate === true
+      || Boolean(audit.candidate_sha && candidate?.candidate_sha && audit.candidate_sha !== candidate.candidate_sha);
     container.innerHTML = `
       <div class="overview-meta-grid" style="margin-bottom: 12px;">
         <div class="meta-box">
           <div class="meta-box-label">Auditor</div>
-          <div class="meta-box-val">${escapeHtml(audit.provider || 'deepseek')} / ${escapeHtml(audit.model || 'deepseek-chat')}</div>
+          <div class="meta-box-val">${escapeHtml(audit.provider || 'No informado')} / ${escapeHtml(audit.model || 'No informado')}</div>
         </div>
         <div class="meta-box">
-          <div class="meta-box-label">Risk Level</div>
-          <div class="meta-box-val"><span class="badge ${isLowRisk ? 'badge-ready' : 'badge-failed'}">RISK: ${escapeHtml(audit.risk || 'NONE')}</span></div>
+          <div class="meta-box-label">Nivel de riesgo</div>
+          <div class="meta-box-val"><span class="badge ${isLowRisk ? 'badge-ready' : audit.risk ? 'badge-failed' : 'badge-muted'}">RIESGO: ${escapeHtml(audit.risk || 'DESCONOCIDO')}</span></div>
         </div>
         <div class="meta-box">
-          <div class="meta-box-label">Material Findings</div>
-          <div class="meta-box-val">${audit.material_findings_count}</div>
+          <div class="meta-box-label">Hallazgos relevantes</div>
+          <div class="meta-box-val">${escapeHtml(audit.material_findings_count ?? '—')}</div>
         </div>
         <div class="meta-box">
-          <div class="meta-box-label">Candidate Binding</div>
-          <div class="meta-box-val"><code class="code-sha">${escapeHtml(audit.candidate_sha ? audit.candidate_sha.substring(0, 8) : '---')}</code> ${audit.is_stale_to_current_candidate ? '<span class="badge badge-warning">STALE</span>' : ''}</div>
+          <div class="meta-box-label">Vinculación del candidato</div>
+          <div class="meta-box-val"><code class="code-sha">${escapeHtml(audit.candidate_sha ? audit.candidate_sha.substring(0, 8) : '—')}</code> <span class="badge ${auditCandidateBound ? 'badge-ready' : auditStale ? 'badge-warning' : 'badge-muted'}">${auditCandidateBound ? 'VIGENTE' : auditStale ? 'OBSOLETA' : 'DESCONOCIDA'}</span></div>
         </div>
       </div>
       ${audit.summary ? `
         <div class="meta-box" style="margin-bottom: 12px;">
-          <div class="meta-box-label">Audit Summary</div>
+          <div class="meta-box-label">Resumen de auditoría</div>
           <p style="margin-top: 4px; font-size: 12px;">${escapeHtml(audit.summary)}</p>
         </div>
       ` : ''}
       ${audit.findings && audit.findings.length > 0 ? `
-        <div class="meta-box-label" style="margin-bottom: 6px;">Audit Findings (${audit.findings.length})</div>
+        <div class="meta-box-label" style="margin-bottom: 6px;">Hallazgos de auditoría (${audit.findings.length})</div>
         <div class="checks-list">
           ${audit.findings.map(f => `
             <div class="check-item">
@@ -1592,7 +1319,7 @@ const fetch = (input, init = {}) => {
             </div>
           `).join('')}
         </div>
-      ` : '<p class="text-muted" style="font-size: 12px;">No security or integrity findings reported.</p>'}
+      ` : '<p class="text-muted" style="font-size: 12px;">No se informaron hallazgos de seguridad o integridad.</p>'}
     `;
   }
 
@@ -1609,8 +1336,12 @@ const fetch = (input, init = {}) => {
     const isRequired = previewVal ? previewVal.is_preview_required : false;
     const isAuthorized = previewVal ? previewVal.is_authorized : false;
     const isStale = previewVal ? previewVal.is_stale : false;
-    const candSha = detail.candidate_authority ? detail.candidate_authority.candidate_sha : '';
-    const baseSha = detail.candidate_authority ? detail.candidate_authority.base_sha : '';
+    const candSha = detail.candidate_authority?.candidate_sha || null;
+    const baseSha = detail.candidate_authority?.base_sha || null;
+    const candidateGeneration = detail.candidate_authority?.generation;
+    const previewIdentityValid = Boolean(
+      candSha && baseSha && Number.isInteger(candidateGeneration) && candidateGeneration > 0,
+    );
 
     // Action buttons visibility
     if (session && (session.status === 'READY' || session.status === 'STARTING' || session.status === 'PROBING')) {
@@ -1635,7 +1366,12 @@ const fetch = (input, init = {}) => {
       if (teardownBtn) teardownBtn.style.display = 'none';
       if (launchBtn) {
         launchBtn.style.display = 'inline-block';
+        launchBtn.disabled = !previewIdentityValid;
+        launchBtn.title = previewIdentityValid
+          ? 'Crear vista previa para la identidad exacta del candidato'
+          : 'No disponible: falta identidad verificable de candidato, base o generación';
         launchBtn.onclick = async () => {
+          if (!previewIdentityValid) return;
           launchBtn.disabled = true;
           launchBtn.textContent = 'Building...';
           try {
@@ -1646,9 +1382,9 @@ const fetch = (input, init = {}) => {
                 project_id: detail.project_id,
                 change_name: detail.change_name,
                 run_id: detail.run_id,
-                head_sha: candSha || 'HEAD',
-                base_sha: baseSha || 'main',
-                candidate_generation: detail.candidate_authority ? detail.candidate_authority.generation : 1,
+                head_sha: candSha,
+                base_sha: baseSha,
+                candidate_generation: candidateGeneration,
               })
             });
             if (!buildRes.ok) {
@@ -1951,7 +1687,8 @@ const fetch = (input, init = {}) => {
     });
 
     if (viewName === 'viewBacklog') {
-      fetchBacklog(currentProjectId);
+      if (currentProjectId) fetchBacklog(currentProjectId);
+      else renderBacklogUnavailable();
     } else if (viewName === 'viewProjects') {
       fetchProjects();
     } else if (viewName === 'viewExecutions') {
@@ -1962,9 +1699,9 @@ const fetch = (input, init = {}) => {
   // Projects Operations
   async function fetchProjects() {
     try {
-      const resp = await fetch('/api/v1/projects');
+      const resp = await fetch('/projects');
       if ([401, 403].includes(resp.status)) {
-        showLoginUI();
+        sessionController.showLogin();
         return;
       }
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -1980,70 +1717,18 @@ const fetch = (input, init = {}) => {
 
   function renderProjectSelect() {
     if (!projectSelect) return;
-    const currentVal = projectSelect.value || currentProjectId || 'mini-me';
-    projectSelect.innerHTML = projectsList.map((p) => `
-      <option value="${escapeHtml(p.id)}" ${p.id === currentVal ? 'selected' : ''}>${escapeHtml(p.name || p.id)}</option>
-    `).join('');
-    if (projectsList.length > 0 && !projectsList.some(p => p.id === currentVal)) {
-      currentProjectId = projectsList[0].id;
-      projectSelect.value = currentProjectId;
-    } else {
-      currentProjectId = currentVal;
-    }
+    currentProjectId = renderProjectSelectView(
+      projectSelect,
+      projectsList,
+      projectSelect.value || currentProjectId,
+    );
     if (backlogProjectDisplay) {
-      backlogProjectDisplay.textContent = `Project: ${currentProjectId}`;
+      backlogProjectDisplay.textContent = `Proyecto: ${currentProjectId || 'DESCONOCIDO'}`;
     }
   }
 
   function renderProjectsGrid() {
-    if (!projectsGridContainer) return;
-    if (!projectsList || projectsList.length === 0) {
-      projectsGridContainer.innerHTML = '<p class="text-muted">No projects registered yet. Click "Onboard Project" to bind your first repository.</p>';
-      return;
-    }
-
-    projectsGridContainer.innerHTML = projectsList.map((p) => {
-      const statusBadge = getProjectStatusBadge(p.onboarding_status);
-      const isCurrent = p.id === currentProjectId;
-      return `
-        <div class="project-card ${isCurrent ? 'active-project-card' : ''}">
-          <div class="project-card-header">
-            <div class="project-card-title-group">
-              <h3 class="project-name">${escapeHtml(p.name || p.id)}</h3>
-              <span class="project-id font-mono text-muted text-xs">ID: ${escapeHtml(p.id)}</span>
-            </div>
-            ${statusBadge}
-          </div>
-          <div class="project-card-meta">
-            <div class="meta-row"><strong>Repository:</strong> <span class="font-mono">${escapeHtml(p.repository)}</span></div>
-            <div class="meta-row"><strong>Base Branch:</strong> <span class="font-mono">${escapeHtml(p.base_branch || 'main')}</span></div>
-            <div class="meta-row"><strong>OpenSpec Path:</strong> <span class="font-mono">${escapeHtml(p.openspec_path || 'openspec')}</span></div>
-            <div class="meta-row"><strong>Roadmap:</strong> <span class="font-mono">${escapeHtml(p.roadmap_path || 'docs/ROADMAP.md')}</span></div>
-          </div>
-          <div class="project-card-actions">
-            <button class="btn btn-secondary btn-sm" onclick="window.minime.inspectContext('${escapeHtml(p.id)}')">
-              🔍 Inspect Context
-            </button>
-            <button class="btn btn-secondary btn-sm" onclick="window.minime.discoverContext('${escapeHtml(p.id)}')">
-              🔄 Discover
-            </button>
-            <button class="btn btn-primary btn-sm" onclick="window.minime.selectProjectAndGoBacklog('${escapeHtml(p.id)}')">
-              📥 Open Backlog
-            </button>
-          </div>
-        </div>
-      `;
-    }).join('');
-  }
-
-  function getProjectStatusBadge(status) {
-    switch (status) {
-      case 'READY_FOR_WORK': return '<span class="badge badge-ready">READY FOR WORK</span>';
-      case 'CONTEXT_INCOMPLETE': return '<span class="badge badge-waiting">CONTEXT INCOMPLETE</span>';
-      case 'BINDING': return '<span class="badge badge-running">BINDING</span>';
-      case 'BLOCKED': return '<span class="badge badge-failed">BLOCKED</span>';
-      default: return '<span class="badge badge-not-ready">UNBOUND</span>';
-    }
+    renderProjectsGridView(projectsGridContainer, projectsList, currentProjectId);
   }
 
   function openOnboardModal() {
@@ -2152,31 +1837,18 @@ const fetch = (input, init = {}) => {
 
   // Backlog Operations
   async function fetchBacklog(projectId) {
+    if (!projectId) {
+      renderBacklogUnavailable();
+      return;
+    }
+    updateAdmissionPolicy(null);
     try {
       // Fetch project details for admission policy
       try {
         const projResp = await fetch(`/api/v1/projects/${encodeURIComponent(projectId)}`);
         if (projResp.ok) {
           const proj = await projResp.json();
-          const autoPrep = proj.auto_prepare ?? true;
-          const autoAdmit = proj.auto_admit ?? true;
-          const maxConc = proj.max_concurrent_jobs ?? 1;
-
-          const badgePrep = document.getElementById('badgeAutoPrepare');
-          const badgeAdmit = document.getElementById('badgeAutoAdmit');
-          const badgeConc = document.getElementById('badgeConcurrency');
-
-          if (badgePrep) {
-            badgePrep.textContent = `Auto-Prepare: ${autoPrep ? 'ON' : 'OFF'}`;
-            badgePrep.className = `badge ${autoPrep ? 'badge-info' : 'badge-muted'}`;
-          }
-          if (badgeAdmit) {
-            badgeAdmit.textContent = `Auto-Admit: ${autoAdmit ? 'ON' : 'OFF'}`;
-            badgeAdmit.className = `badge ${autoAdmit ? 'badge-info' : 'badge-muted'}`;
-          }
-          if (badgeConc) {
-            badgeConc.textContent = `Concurrency: ${maxConc}`;
-          }
+          updateAdmissionPolicy(proj);
         }
       } catch (e) {
         // Non-blocking project info fetch
@@ -2184,7 +1856,7 @@ const fetch = (input, init = {}) => {
 
       const resp = await fetch(`/api/v1/projects/${encodeURIComponent(projectId)}/backlog`);
       if ([401, 403].includes(resp.status)) {
-        showLoginUI();
+        sessionController.showLogin();
         return;
       }
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -2208,78 +1880,50 @@ const fetch = (input, init = {}) => {
     }
   }
 
-  function renderBacklogTable() {
-    if (!backlogTableBody) return;
-
-    let filtered = backlogItems;
-    if (backlogFilter !== 'ALL') {
-      filtered = filtered.filter(i => {
-        if (backlogFilter === 'NEEDS_HUMAN') return i.status === 'NEEDS_HUMAN';
-        if (backlogFilter === 'READY') return i.status === 'READY';
-        if (backlogFilter === 'RUNNING') return i.status === 'RUNNING';
-        if (backlogFilter === 'COMPLETED') return i.status === 'COMPLETED';
-        if (backlogFilter === 'BACKLOG') return i.status === 'BACKLOG' || i.status === 'DRAFT' || i.status === 'PREPARING';
-        return true;
-      });
+  function renderBacklogUnavailable() {
+    backlogItems = [];
+    updateAdmissionPolicy(null);
+    if (backlogTableBody) {
+      backlogTableBody.innerHTML = '<tr><td colspan="6" class="table-empty">Selecciona un proyecto autorizado para consultar su trabajo.</td></tr>';
     }
-
-    if (backlogSearchQuery) {
-      filtered = filtered.filter(i =>
-        i.title.toLowerCase().includes(backlogSearchQuery) ||
-        i.item_key.toLowerCase().includes(backlogSearchQuery) ||
-        (i.description && i.description.toLowerCase().includes(backlogSearchQuery))
-      );
+    if (backlogPlaceholder) {
+      backlogPlaceholder.style.display = 'block';
+      backlogPlaceholder.textContent = 'Selecciona un proyecto autorizado o registra uno desde Proyectos.';
     }
-
-    if (!filtered || filtered.length === 0) {
-      backlogTableBody.innerHTML = `
-        <tr><td colspan="6" class="table-empty">No backlog items matching current filter.</td></tr>
-      `;
-      return;
-    }
-
-    backlogTableBody.innerHTML = filtered.map(item => {
-      const isSelected = selectedBacklogItem && selectedBacklogItem.item_key === item.item_key;
-      const statusClass = getStatusBadgeClass(item.status);
-      const priorityClass = getPriorityBadgeClass(item.priority);
-      const isReady = item.status === 'READY';
-
-      return `
-        <tr class="clickable-row ${isSelected ? 'selected-row' : ''}" data-item-key="${escapeHtml(item.item_key)}">
-          <td><span class="badge ${statusClass}">${escapeHtml(item.status)}</span></td>
-          <td>
-            <div class="bk-title font-semibold">${escapeHtml(item.title)}</div>
-            <div class="bk-key font-mono text-muted text-xs">${escapeHtml(item.item_key)}</div>
-          </td>
-          <td><span class="badge ${priorityClass}">${escapeHtml(item.priority || 'NORMAL')}</span></td>
-          <td><span class="badge badge-discovered">${escapeHtml(item.source || 'MANUAL')}</span></td>
-          <td>
-            <span class="dor-status-pill ${isReady ? 'pill-ready' : (item.status === 'NEEDS_HUMAN' ? 'pill-needs-human' : 'pill-not-ready')}">
-              ${isReady ? 'READY' : (item.status === 'NEEDS_HUMAN' ? 'NEEDS HUMAN' : 'NOT READY')}
-            </span>
-          </td>
-          <td>
-            <div class="action-btn-group">
-              ${!isReady && item.status !== 'RUNNING' && item.status !== 'COMPLETED' ? `
-                <button class="btn btn-secondary btn-xs" onclick="event.stopPropagation(); window.minime.prepareItem('${escapeHtml(item.item_key)}')">Prepare</button>
-              ` : ''}
-              ${isReady ? `
-                <button class="btn btn-primary btn-xs" onclick="event.stopPropagation(); window.minime.startItem('${escapeHtml(item.item_key)}')">🚀 Start</button>
-              ` : ''}
-            </div>
-          </td>
-        </tr>
-      `;
-    }).join('');
+    if (backlogDetailContent) backlogDetailContent.style.display = 'none';
   }
 
-  function getPriorityBadgeClass(priority) {
-    switch (priority) {
-      case 'CRITICAL': return 'badge-danger';
-      case 'HIGH': return 'badge-warning';
-      case 'LOW': return 'badge-muted';
-      default: return 'badge-info';
+  function updateAdmissionPolicy(project) {
+    const renderBoolean = (element, label, value) => {
+      if (!element) return;
+      const known = typeof value === 'boolean';
+      element.textContent = `${label}: ${known ? (value ? 'ACTIVADA' : 'DESACTIVADA') : 'DESCONOCIDO'}`;
+      element.dataset.state = known ? 'KNOWN' : 'UNKNOWN';
+      element.className = `badge ${known && value ? 'badge-info' : 'badge-muted'}`;
+    };
+    renderBoolean(document.getElementById('badgeAutoPrepare'), 'Preparación automática', project?.auto_prepare);
+    renderBoolean(document.getElementById('badgeAutoAdmit'), 'Admisión automática', project?.auto_admit);
+
+    const concurrency = document.getElementById('badgeConcurrency');
+    const limit = project?.max_concurrent_jobs;
+    const knownLimit = Number.isInteger(limit) && limit > 0;
+    if (concurrency) {
+      concurrency.textContent = `Concurrencia: ${knownLimit ? limit : 'DESCONOCIDO'}`;
+      concurrency.dataset.state = knownLimit ? 'KNOWN' : 'UNKNOWN';
+      concurrency.className = 'badge badge-muted';
     }
+  }
+
+  function renderBacklogTable() {
+    renderBacklogTableView({
+      root: backlogTableBody,
+      items: backlogItems,
+      filter: backlogFilter,
+      query: backlogSearchQuery,
+      selectedItem: selectedBacklogItem,
+      escapeHtml,
+      getStatusBadgeClass,
+    });
   }
 
   function selectBacklogItem(itemKey) {
@@ -2299,129 +1943,34 @@ const fetch = (input, init = {}) => {
   }
 
   function renderBacklogDetail(item) {
-    if (!item) {
-      if (backlogPlaceholder) backlogPlaceholder.style.display = 'flex';
-      if (backlogDetailContent) backlogDetailContent.style.display = 'none';
-      return;
-    }
-
-    if (backlogPlaceholder) backlogPlaceholder.style.display = 'none';
-    if (backlogDetailContent) backlogDetailContent.style.display = 'block';
-
-    if (bkTitle) bkTitle.textContent = item.title;
-    if (bkStatusBadge) {
-      bkStatusBadge.textContent = item.status;
-      bkStatusBadge.className = `badge ${getStatusBadgeClass(item.status)}`;
-    }
-    if (bkPriorityBadge) {
-      bkPriorityBadge.textContent = item.priority || 'NORMAL';
-      bkPriorityBadge.className = `badge ${getPriorityBadgeClass(item.priority)}`;
-    }
-    if (bkKey) bkKey.textContent = item.item_key;
-    if (bkSource) bkSource.textContent = item.source || 'MANUAL';
-    if (bkReadiness) bkReadiness.textContent = item.status === 'READY' ? 'READY' : (item.status === 'NEEDS_HUMAN' ? 'NEEDS_HUMAN' : 'NOT_READY');
-
-    // Action button state
-    if (bkStartBtn) {
-      bkStartBtn.disabled = item.status !== 'READY';
-      if (item.status === 'RUNNING') {
-        bkStartBtn.textContent = '⚡ Running...';
-      } else {
-        bkStartBtn.innerHTML = '<span class="btn-icon">🚀</span> Start Work';
-      }
-    }
-
-    // NEEDS_HUMAN Card
-    if (bkNeedsHumanCard) {
-      const hasQuestions = (item.status === 'NEEDS_HUMAN') || (item.human_questions && item.human_questions.length > 0);
-      if (hasQuestions) {
-        bkNeedsHumanCard.style.display = 'block';
-        if (bkHumanQuestionsList) {
-          const questions = item.human_questions && item.human_questions.length > 0
-            ? item.human_questions
-            : ['Please provide more functional details and observable acceptance criteria.'];
-          bkHumanQuestionsList.innerHTML = questions.map(q => `
-            <div class="question-item">
-              <span class="question-icon">❓</span>
-              <span class="question-text">${escapeHtml(q)}</span>
-            </div>
-          `).join('');
-        }
-      } else {
-        bkNeedsHumanCard.style.display = 'none';
-      }
-    }
-
-    // Description & Criteria
-    if (bkDescriptionPreview) {
-      bkDescriptionPreview.innerHTML = renderMarkdownText(item.description || 'No description provided.');
-    }
-    if (bkCriteriaList) {
-      if (item.acceptance_criteria && item.acceptance_criteria.length > 0) {
-        bkCriteriaList.innerHTML = item.acceptance_criteria.map(c => `
-          <li class="criteria-item">✓ ${escapeHtml(c)}</li>
-        `).join('');
-      } else {
-        bkCriteriaList.innerHTML = '<li class="text-muted">No explicit acceptance criteria specified.</li>';
-      }
-    }
-
-    // DoR Checklist (11 criteria)
-    renderDoRChecklist(item);
-
-    // Canonical Artifacts
-    if (bkArtOpenSpec) {
-      bkArtOpenSpec.innerHTML = item.openspec_change_name
-        ? `<span class="text-success font-mono">openspec/changes/${escapeHtml(item.openspec_change_name)}</span>`
-        : '<span class="text-muted">Not generated yet</span>';
-    }
-    if (bkArtIssue) {
-      bkArtIssue.innerHTML = item.github_issue_url
-        ? `<a href="${sanitizeUrl(item.github_issue_url)}" target="_blank" rel="noopener noreferrer" class="text-primary font-mono">#${item.github_issue_number} ↗</a>`
-        : (item.github_issue_number ? `#${item.github_issue_number}` : '<span class="text-muted">Not linked yet</span>');
-    }
-    if (bkArtProject) {
-      bkArtProject.innerHTML = item.github_project_item_id
-        ? `<span class="text-success font-mono">${escapeHtml(item.github_project_item_id)}</span>`
-        : '<span class="text-muted">Not synced yet</span>';
-    }
-    if (bkArtRun) {
-      bkArtRun.innerHTML = item.active_orchestration_run_id
-        ? `<span class="text-primary font-mono" style="cursor:pointer;" onclick="window.minime.goToExecution('${escapeHtml(item.active_orchestration_run_id)}')">${escapeHtml(item.active_orchestration_run_id)} ↗</span>`
-        : '<span class="text-muted">No active run</span>';
-    }
-  }
-
-  function renderDoRChecklist(item) {
-    if (!bkDorGrid) return;
-    const checklist = item.readiness_checklist || {};
-    const isReady = item.status === 'READY' || checklist.is_ready;
-
-    if (bkDorOverallPill) {
-      bkDorOverallPill.textContent = isReady ? 'READY FOR ADMISSION' : (item.status === 'NEEDS_HUMAN' ? 'NEEDS HUMAN' : 'NOT READY');
-      bkDorOverallPill.className = `dor-status-pill ${isReady ? 'pill-ready' : (item.status === 'NEEDS_HUMAN' ? 'pill-needs-human' : 'pill-not-ready')}`;
-    }
-
-    const dorRules = [
-      { key: 'repo_binding_valid', label: 'Repository Binding Valid', val: checklist.repo_binding_valid ?? !!item.project_id },
-      { key: 'item_identity_valid', label: 'Work Item Identity Valid', val: checklist.item_identity_valid ?? !!(item.item_key && item.title) },
-      { key: 'github_issue_linked', label: 'GitHub Issue Linked', val: checklist.github_issue_linked ?? !!item.github_issue_number },
-      { key: 'github_project_linked', label: 'GitHub Project Item Linked', val: checklist.github_project_linked ?? !!item.github_project_item_id },
-      { key: 'openspec_valid', label: 'OpenSpec Artifacts Generated', val: checklist.openspec_valid ?? !!item.openspec_change_name },
-      { key: 'acceptance_criteria_present', label: 'Acceptance Criteria Defined', val: checklist.acceptance_criteria_present ?? (item.acceptance_criteria && item.acceptance_criteria.length > 0) },
-      { key: 'dependencies_resolved', label: 'Dependencies Resolved', val: checklist.dependencies_resolved ?? true },
-      { key: 'security_requirements_identified', label: 'Security Requirements Identified', val: checklist.security_requirements_identified ?? true },
-      { key: 'ux_requirements_identified', label: 'UX / Preview Identified', val: checklist.ux_requirements_identified ?? true },
-      { key: 'no_unresolved_ambiguity', label: 'No Unresolved Ambiguity', val: checklist.no_unresolved_ambiguity ?? (item.status !== 'NEEDS_HUMAN') },
-      { key: 'definition_of_ready_met', label: 'Definition of Ready Met', val: isReady }
-    ];
-
-    bkDorGrid.innerHTML = dorRules.map(r => `
-      <div class="dor-item ${r.val ? 'dor-pass' : 'dor-fail'}">
-        <span class="dor-icon">${r.val ? '✓' : '✗'}</span>
-        <span class="dor-label">${escapeHtml(r.label)}</span>
-      </div>
-    `).join('');
+    renderBacklogDetailView({
+      item,
+      elements: {
+        placeholder: backlogPlaceholder,
+        content: backlogDetailContent,
+        title: bkTitle,
+        status: bkStatusBadge,
+        priority: bkPriorityBadge,
+        key: bkKey,
+        source: bkSource,
+        readiness: bkReadiness,
+        startButton: bkStartBtn,
+        needsHumanCard: bkNeedsHumanCard,
+        humanQuestionsList: bkHumanQuestionsList,
+        description: bkDescriptionPreview,
+        criteria: bkCriteriaList,
+        dorOverall: bkDorOverallPill,
+        dorGrid: bkDorGrid,
+        openSpec: bkArtOpenSpec,
+        issue: bkArtIssue,
+        projectItem: bkArtProject,
+        run: bkArtRun,
+      },
+      escapeHtml,
+      sanitizeUrl,
+      renderMarkdownText,
+      getStatusBadgeClass,
+    });
   }
 
   async function prepareBacklogItem(itemKey) {
@@ -2625,21 +2174,6 @@ const fetch = (input, init = {}) => {
   }
 
   // Expose helper functions globally for inline handlers
-  window.minime = {
-    inspectContext,
-    discoverContext: (projId) => discoverBacklogContext(projId),
-    selectProjectAndGoBacklog: (projId) => {
-      currentProjectId = projId;
-      if (projectSelect) projectSelect.value = projId;
-      switchMainView('viewBacklog');
-    },
-    prepareItem: (itemKey) => prepareBacklogItem(itemKey),
-    startItem: (itemKey) => startBacklogItem(itemKey),
-    goToExecution: (runId) => {
-      switchMainView('viewExecutions');
-    }
-  };
-
   // Utilities
   function getStatusBadgeClass(status) {
     switch (status) {

@@ -23,22 +23,22 @@
 
     <!-- Main View Navigation Tabs -->
     <nav class="main-nav-tabs" role="tablist" aria-label="Navegación principal">
-      <button class="main-tab-btn active" id="navTabBacklog" role="tab" aria-selected="true" data-main-view="viewBacklog">
+      <button class="main-tab-btn active" id="navTabExecutions" role="tab" aria-selected="true" data-main-view="viewExecutions">
+        <span class="tab-icon" aria-hidden="true">⚡</span> Centro de Control
+      </button>
+      <button class="main-tab-btn" id="navTabBacklog" role="tab" aria-selected="false" data-main-view="viewBacklog">
         <span class="tab-icon" aria-hidden="true">📥</span> Trabajo
       </button>
       <button class="main-tab-btn" id="navTabProjects" role="tab" aria-selected="false" data-main-view="viewProjects">
         <span class="tab-icon" aria-hidden="true">📁</span> Proyectos
-      </button>
-      <button class="main-tab-btn" id="navTabExecutions" role="tab" aria-selected="false" data-main-view="viewExecutions">
-        <span class="tab-icon" aria-hidden="true">⚡</span> Ejecuciones
       </button>
     </nav>
 
     <div class="nav-controls">
       <div class="project-selector-group">
         <label for="projectSelect" class="sr-only">Seleccionar proyecto</label>
-        <select id="projectSelect" class="project-select" title="Proyecto activo">
-          <option value="mini-me" selected>mini-me</option>
+        <select id="projectSelect" class="project-select" title="Proyecto autorizado activo">
+          <option value="" selected>Selecciona un proyecto…</option>
         </select>
       </div>
 
@@ -87,7 +87,7 @@
   <main class="dashboard-main" role="main">
 
     <!-- Login View (Shown when unauthenticated) -->
-    <section class="login-container" id="loginSection" style="display: flex;" aria-label="Operator Authentication">
+    <section class="login-container" id="loginSection" style="display: flex;" aria-label="Autenticación del operador">
       <div class="login-card">
         <div class="login-header">
           <span class="login-icon">⚡</span>
@@ -115,17 +115,17 @@
       <!-- ================================================================= -->
       <!-- VIEW 1: BACKLOG & WORK INTAKE (PRIMARY 021 PRODUCT SURFACE)       -->
       <!-- ================================================================= -->
-      <div id="viewBacklog" class="main-view-pane active" aria-label="Trabajo pendiente y admisión">
+  <div id="viewBacklog" class="main-view-pane" style="display: none;" aria-label="Trabajo pendiente y admisión">
         
         <!-- Backlog Top Toolbar -->
         <div class="backlog-toolbar-card">
           <div class="backlog-toolbar-left">
             <h2 class="view-title">Trabajo pendiente</h2>
-            <span class="text-muted" id="backlogProjectDisplay">Proyecto: mini-me</span>
+            <span class="text-muted" id="backlogProjectDisplay">Proyecto: DESCONOCIDO</span>
             <div class="policy-indicator-group" id="backlogPolicyGroup" style="display: inline-flex; gap: 6px; margin-left: 12px; font-size: 0.75rem;">
-              <span class="badge badge-info" id="badgeAutoPrepare" title="Generación automática de artefactos de intake y evaluación de preparación">Preparación automática: ON</span>
-              <span class="badge badge-info" id="badgeAutoAdmit" title="Admisión automática del trabajo READY al scheduler">Admisión automática: ON</span>
-              <span class="badge badge-muted" id="badgeConcurrency" title="Máximo de trabajos autónomos simultáneos del proyecto">Concurrencia: 1</span>
+              <span class="badge badge-muted" id="badgeAutoPrepare" data-state="UNKNOWN" title="Generación automática de artefactos de intake y evaluación de preparación">Preparación automática: DESCONOCIDO</span>
+              <span class="badge badge-muted" id="badgeAutoAdmit" data-state="UNKNOWN" title="Admisión automática del trabajo READY al scheduler">Admisión automática: DESCONOCIDO</span>
+              <span class="badge badge-muted" id="badgeConcurrency" data-state="UNKNOWN" title="Máximo de trabajos autónomos simultáneos del proyecto">Concurrencia: DESCONOCIDO</span>
             </div>
           </div>
           <div class="backlog-toolbar-actions">
@@ -184,15 +184,15 @@
               <!-- Header -->
               <div class="detail-header">
                 <div class="detail-title-group">
-                  <div class="title-row">
-                    <h3 class="detail-title" id="bkTitle">021 Work Intake</h3>
-                    <span class="badge" id="bkStatusBadge">BACKLOG</span>
-                    <span class="badge badge-priority" id="bkPriorityBadge">NORMAL</span>
+          <div class="title-row">
+                    <h3 class="detail-title" id="bkTitle">—</h3>
+                    <span class="badge" id="bkStatusBadge">UNKNOWN</span>
+                    <span class="badge badge-priority" id="bkPriorityBadge">—</span>
                   </div>
                   <div class="detail-meta">
-                    <span class="meta-item">Clave: <strong id="bkKey">021-work-intake</strong></span>
-                    <span class="meta-item">Origen: <strong id="bkSource">ROADMAP</strong></span>
-                    <span class="meta-item">Preparación: <strong id="bkReadiness">NOT_READY</strong></span>
+                    <span class="meta-item">Clave: <strong id="bkKey">—</strong></span>
+                    <span class="meta-item">Origen: <strong id="bkSource">—</strong></span>
+                    <span class="meta-item">Preparación: <strong id="bkReadiness">UNKNOWN</strong></span>
                   </div>
                 </div>
                 <div class="action-toolbar" id="backlogActionToolbar">
@@ -215,13 +215,13 @@
               <div class="needs-human-card" id="bkNeedsHumanCard" style="display: none;">
                 <div class="needs-human-header">
                   <span class="alert-icon">⚠️</span>
-                  <h4>Ambiguity / Product Question (NEEDS_HUMAN)</h4>
+                  <h4>Pregunta de producto o ambigüedad (NEEDS_HUMAN)</h4>
                 </div>
                 <div id="bkHumanQuestionsList" class="questions-list"></div>
                 <form id="answerQuestionForm" class="answer-form">
                   <input type="hidden" id="answerQuestionTarget" value="">
                   <label for="humanAnswerInput" class="form-label" id="answerQuestionPromptLabel">Proporciona la aclaración:</label>
-                  <textarea id="humanAnswerInput" class="form-textarea" rows="3" placeholder="Type clarification / acceptance criteria to resolve ambiguity..." required></textarea>
+                  <textarea id="humanAnswerInput" class="form-textarea" rows="3" placeholder="Aclara la ambigüedad o los criterios de aceptación…" required></textarea>
                   <div class="form-actions">
                     <button type="submit" class="btn btn-primary" id="submitAnswerBtn">Enviar aclaración</button>
                   </div>
@@ -240,7 +240,7 @@
               <!-- Definition of Ready (DoR) Checklist Card -->
               <div class="section-card" id="bkDorCard">
                 <div class="card-header-flex">
-                  <h4 class="section-title">Definition of Ready (DoR) Checklist</h4>
+                  <h4 class="section-title">Lista de preparación (DoR)</h4>
                   <span class="dor-status-pill" id="bkDorOverallPill">NOT READY</span>
                 </div>
                 <div class="dor-grid" id="bkDorGrid">
@@ -301,9 +301,9 @@
       <!-- ================================================================= -->
       <!-- VIEW 3: PIPELINE & EXECUTIONS (EXISTING 012-020 OPERATIONAL VIEW) -->
       <!-- ================================================================= -->
-      <div id="viewExecutions" class="main-view-pane" style="display: none;" aria-label="Pipeline y ejecuciones">
+      <div id="viewExecutions" class="main-view-pane active" aria-label="Centro de Control operacional">
         <!-- KPI Summary Grid -->
-        <section class="kpi-grid" aria-label="Indicadores operacionales">
+        <section class="kpi-grid" id="operationalKpis" aria-label="Indicadores operacionales">
           <div class="kpi-card" id="kpiSystemStatus">
             <div class="kpi-label">SALUD API / POSTGRESQL</div>
             <div class="kpi-value text-muted" id="kpiSystemStateVal">Desconocido</div>
@@ -312,19 +312,19 @@
 
           <div class="kpi-card" id="kpiAttention">
             <div class="kpi-label">REQUIERE ATENCIÓN</div>
-            <div class="kpi-value" id="kpiAttentionVal" data-kpi="blocked">0</div>
+            <div class="kpi-value" id="kpiAttentionVal" data-kpi="attention">—</div>
             <div class="kpi-sub" id="kpiAttentionSub">Sin lectura disponible</div>
           </div>
 
           <div class="kpi-card" id="kpiActive">
             <div class="kpi-label">EJECUCIONES ACTIVAS</div>
-            <div class="kpi-value text-primary" id="kpiActiveVal" data-kpi="active">0</div>
+            <div class="kpi-value text-primary" id="kpiActiveVal" data-kpi="active">—</div>
             <div class="kpi-sub" id="kpiActiveSub">Sin lectura disponible</div>
           </div>
 
           <div class="kpi-card" id="kpiCompleted">
             <div class="kpi-label">FINALIZACIONES RECIENTES</div>
-            <div class="kpi-value text-muted" id="kpiCompletedVal" data-kpi="queue">0</div>
+            <div class="kpi-value text-muted" id="kpiCompletedVal" data-kpi="completed">—</div>
             <div class="kpi-sub" id="kpiCompletedSub">Sin lectura disponible</div>
           </div>
         </section>
@@ -386,7 +386,7 @@
                   </tr>
                 </tbody>
               </table>
-              <div id="runsTableBody" class="runs-live-list" aria-label="Live orchestration runs"></div>
+              <div id="runsTableBody" class="runs-live-list" aria-label="Ejecuciones de orquestación en vivo"></div>
             </div>
           </section>
 
@@ -414,7 +414,7 @@
                     <span class="badge" id="dtStatusBadge">RUNNING</span>
                   </div>
                   <div class="detail-meta">
-                    <span class="meta-item">Proyecto: <strong id="dtProject">mini-me</strong></span>
+            <span class="meta-item">Proyecto: <strong id="dtProject">—</strong></span>
                     <span class="meta-item">Etapa: <strong id="dtStage">---</strong></span>
                     <span class="meta-item">Generación: <strong id="dtGeneration">---</strong></span>
                     <span class="meta-item" id="dtCandidateMeta">SHA: <code id="dtCandidateSha" class="code-sha">---</code> <button id="copyShaBtn" class="btn-tiny" title="Copiar SHA">📋</button></span>
@@ -622,11 +622,11 @@
       </div>
       <div class="form-group">
         <label for="newWorkItemDescription" class="form-label">Descripción / requisitos funcionales</label>
-        <textarea id="newWorkItemDescription" class="form-textarea" rows="3" placeholder="Describe the feature, bugfix, or functional scope..."></textarea>
+        <textarea id="newWorkItemDescription" class="form-textarea" rows="3" placeholder="Describe la funcionalidad, corrección o alcance…"></textarea>
       </div>
       <div class="form-group">
         <label for="newWorkItemCriteria" class="form-label">Criterios de aceptación observables (uno por línea)</label>
-        <textarea id="newWorkItemCriteria" class="form-textarea" rows="3" placeholder="- Returns HTTP 429 when rate limit is exceeded&#10;- Rate limit counter resets every 60 seconds&#10;- Unit tests verify concurrency protection"></textarea>
+        <textarea id="newWorkItemCriteria" class="form-textarea" rows="3" placeholder="- Devuelve HTTP 429 si se supera el límite&#10;- El contador se restablece cada 60 segundos&#10;- Las pruebas verifican el control de concurrencia"></textarea>
       </div>
       <div class="modal-footer action-group">
         <button type="button" class="btn btn-secondary" id="cancelWorkItemBtn">Cancelar</button>

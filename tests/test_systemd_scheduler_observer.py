@@ -41,7 +41,9 @@ def test_fixed_unit_and_independent_service_enablement_observation() -> None:
 def test_inactive_disabled_is_not_inferred_from_logical_mode() -> None:
     now = datetime.now(UTC)
     observation = SystemdSchedulerObserver(
-        lambda: _snapshot(now, active_state="inactive", unit_file_state="disabled"),
+        lambda: _snapshot(
+            now, active_state="inactive", sub_state="dead", unit_file_state="disabled"
+        ),
         now=lambda: now,
     ).observe()
 
@@ -62,6 +64,20 @@ def test_enablement_static_and_unsupported_active_values_stay_unknown() -> None:
     assert static_unit.enabled_state == "UNKNOWN"
     assert unsupported.active_state == "UNKNOWN"
     assert unsupported.freshness == "FRESH"
+
+
+def test_contradictory_active_and_substate_observation_is_unknown() -> None:
+    now = datetime.now(UTC)
+    observation = SystemdSchedulerObserver(
+        lambda: _snapshot(now, active_state="inactive", sub_state="running"),
+        now=lambda: now,
+    ).observe()
+
+    assert observation.active_state == "UNKNOWN"
+    assert observation.sub_state == "UNKNOWN"
+    assert observation.enabled_state == "UNKNOWN"
+    assert observation.freshness == "UNKNOWN"
+    assert observation.reason == "contradictory_active_sub_state"
 
 
 def test_stale_or_future_observation_is_unknown() -> None:

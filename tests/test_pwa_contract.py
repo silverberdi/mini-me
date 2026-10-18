@@ -52,15 +52,25 @@ def test_telemetry_and_control_plane_clients_use_canonical_routes() -> None:
     assert "initDashboard" in read("js/app.js")
     dashboard = read("js/dashboard.js")
     assert "setupAutoRefresh" in dashboard
-    assert 'cache: "no-store"' in dashboard
-    assert 'credentials: "same-origin"' in dashboard
-    assert "scheduler_service" in dashboard
     assert "initDashboard" in dashboard
+    assert 'cache: "no-store"' in client
+    assert 'credentials: "same-origin"' in client
+    assert "scheduler_service" in read("js/views/operational_panels_view.js")
 
 
 def test_evidence_and_preview_contracts_are_explicit() -> None:
-    assert "WORKTREE_SETUP" in read("js/components/pipeline_stepper.js")
-    assert "CLOSURE" in read("js/components/pipeline_stepper.js")
+    stepper = read("js/components/pipeline_stepper.js")
+    # DashboardService is the stage authority; the view must not synthesize
+    # legacy stages that are absent from that read model.
+    for stage in (
+        '"readiness"',
+        '"implementation"',
+        '"checks"',
+        '"review"',
+        '"audit"',
+        '"pr_merge"',
+    ):
+        assert stage in stepper
     assert "SUPERSEDED" in read("js/components/candidate_inspector.js")
     assert "STALE" in read("js/components/candidate_inspector.js")
     assert "image_digest" in read("js/components/preview_panel.js") or "image_digest" in read(

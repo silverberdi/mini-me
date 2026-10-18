@@ -10,8 +10,11 @@ export const json = async (url, options = {}) => {
     headers: { Accept: "application/json", ...(options.headers || {}) },
   });
   if (!response.ok) {
-    const error = new Error(`${response.status} ${response.statusText}`);
+    const payload = await response.json().catch(() => ({}));
+    const detail = payload.detail || payload.error_message || payload.message;
+    const error = new Error(detail || `${response.status} ${response.statusText}`);
     error.status = response.status;
+    error.payload = payload;
     throw error;
   }
   return response.json();

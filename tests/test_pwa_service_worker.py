@@ -24,6 +24,30 @@ def test_service_worker_allowlist_contains_only_existing_shell_resources() -> No
         assert (STATIC_ROOT / asset.removeprefix("/static/")).is_file(), asset
 
 
+def test_service_worker_allowlists_the_complete_live_module_import_graph() -> None:
+    source = SERVICE_WORKER.read_text(encoding="utf-8")
+    match = re.search(r"const SHELL_ASSETS = \[(.*?)\];", source, re.DOTALL)
+    assert match is not None
+    assets = set(re.findall(r'"([^\"]+)"', match.group(1)))
+    pending = [STATIC_ROOT / "js" / "app.js"]
+    visited: set[Path] = set()
+    while pending:
+        path = pending.pop()
+        if path in visited:
+            continue
+        visited.add(path)
+        module_source = path.read_text(encoding="utf-8")
+        for specifier in re.findall(r'from\s+["\']([^"\']+)["\']', module_source):
+            if not specifier.startswith("."):
+                continue
+            dependency = (path.parent / specifier).resolve()
+            assert dependency.is_relative_to(STATIC_ROOT.resolve())
+            pending.append(dependency)
+    for path in visited:
+        asset = "/static/" + path.relative_to(STATIC_ROOT).as_posix()
+        assert asset in assets, f"live module missing from offline shell allowlist: {asset}"
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required for SW contract test")
 def test_service_worker_caches_only_allowlisted_static_gets(tmp_path: Path) -> None:
     script = r"""

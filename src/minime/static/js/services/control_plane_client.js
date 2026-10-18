@@ -1,3 +1,6 @@
 import { api } from "./api_client.js";
+
+// Keep Control Plane transport in one client while preserving its server-owned request contract.
 export const discoverActions = (runId) => api.actions(runId);
-export const executeAction = (runId, actionType, extra = {}) => api.execute(runId, { run_id: runId, action_type: actionType, expected_run_updated_at: extra.expected_run_updated_at, idempotency_key: crypto.randomUUID(), parameters: extra.parameters || {} });
+export const executeAction = (runId, request) => api.execute(runId, request);
+export const actionHistory = (runId) => api.history(runId);

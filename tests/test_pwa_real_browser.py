@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -525,10 +526,10 @@ async def test_real_browser_desktop_standard_inspection(browser_test_env: dict[s
 
         # 4. Verify Master-Detail split layout is rendered
         master_displayed = await client.eval_js(
-            "document.querySelector('.master-panel').offsetParent !== null"
+            "document.querySelector('#viewExecutions .master-panel').offsetParent !== null"
         )
         detail_displayed = await client.eval_js(
-            "document.querySelector('.detail-panel').offsetParent !== null"
+            "document.querySelector('#viewExecutions .detail-panel').offsetParent !== null"
         )
         assert master_displayed and detail_displayed, (
             "Master and Detail panels should both be visible"
@@ -540,6 +541,49 @@ async def test_real_browser_desktop_standard_inspection(browser_test_env: dict[s
         )
         assert queue_items >= 2, f"Expected >=2 queue candidates, found {queue_items}"
 
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_authenticated_landing_is_operational_center_with_unknown_policy_until_read(
+    browser_test_env: dict[str, Any],
+) -> None:
+    """Initial navigation must not present the backlog or unobserved policy as current."""
+    client = ChromeCDPClient(browser_test_env["ws_url"])
+    await client.connect()
+    try:
+        await authenticate_browser(
+            client, browser_test_env["server_url"], browser_test_env["session_token"]
+        )
+        landing = await client.eval_js(
+            "({activeView: document.querySelector('.main-view-pane.active')?.id, "
+            "selectedTab: document.querySelector('.main-tab-btn[aria-selected=\\\"true\\\"]')?.id, "
+            "autoPrepare: document.getElementById('badgeAutoPrepare').dataset.state, "
+            "autoAdmit: document.getElementById('badgeAutoAdmit').dataset.state, "
+            "concurrency: document.getElementById('badgeConcurrency').dataset.state})"
+        )
+        assert landing["activeView"] == "viewExecutions"
+        assert landing["selectedTab"] == "navTabExecutions"
+        assert landing["autoPrepare"] == "UNKNOWN"
+        assert landing["autoAdmit"] == "UNKNOWN"
+        assert landing["concurrency"] == "UNKNOWN"
+
+        expected = await client.eval_js(
+            "fetch('/api/v1/projects/mini-me', {credentials: 'same-origin', cache: 'no-store'})"
+            ".then(response => response.json()).then(project => ({"
+            "autoPrepare: `Preparación automática: ${project.auto_prepare ? 'ACTIVADA' : 'DESACTIVADA'}`, "
+            "autoAdmit: `Admisión automática: ${project.auto_admit ? 'ACTIVADA' : 'DESACTIVADA'}`, "
+            "concurrency: `Concurrencia: ${project.max_concurrent_jobs}`}))"
+        )
+        await client.eval_js("document.getElementById('navTabBacklog').click()")
+        await asyncio.sleep(0.2)
+        actual = await client.eval_js(
+            "({autoPrepare: document.getElementById('badgeAutoPrepare').textContent, "
+            "autoAdmit: document.getElementById('badgeAutoAdmit').textContent, "
+            "concurrency: document.getElementById('badgeConcurrency').textContent})"
+        )
+        assert actual == expected
     finally:
         await client.close()
 
@@ -596,10 +640,10 @@ async def test_real_browser_tablet_inspection(browser_test_env: dict[str, Any]) 
 
         # 2. Verify detail panel and master panel fit without clipping
         master_rect = await client.eval_js(
-            "(() => { const r = document.querySelector('.master-panel').getBoundingClientRect(); return {right: r.right}; })()"
+            "(() => { const r = document.querySelector('#viewExecutions .master-panel').getBoundingClientRect(); return {right: r.right}; })()"
         )
         detail_rect = await client.eval_js(
-            "(() => { const r = document.querySelector('.detail-panel').getBoundingClientRect(); return {right: r.right}; })()"
+            "(() => { const r = document.querySelector('#viewExecutions .detail-panel').getBoundingClientRect(); return {right: r.right}; })()"
         )
         assert master_rect["right"] <= 1024, "Master panel extends beyond tablet viewport"
         assert detail_rect["right"] <= 1024, "Detail panel extends beyond tablet viewport"
@@ -758,8 +802,28 @@ async def test_real_browser_api_cache_isolation_across_operator_sessions(
         await authenticate_browser(
             client, browser_test_env["server_url"], browser_test_env["session_token"]
         )
-        cached = await client.eval_js("navigator.serviceWorker.ready.then(() => true)")
-        assert cached is True
+        cached = await client.eval_js(
+            "Promise.race([navigator.serviceWorker.ready.then(() => 'READY'), new Promise(resolve => setTimeout(() => resolve('TIMEOUT'), 5000))])"
+        )
+        registration_state = await client.eval_js(
+            "navigator.serviceWorker.getRegistration().then(async registration => ({registration: Boolean(registration), installing: registration?.installing?.state || null, waiting: registration?.waiting?.state || null, active: registration?.active?.state || null, workerStatus: await fetch('/sw.js').then(response => response.status)}))"
+        )
+        failed_assets = []
+        cache_add_all_result = None
+        if cached != "READY":
+            static_root = Path(__file__).parents[1] / "src" / "minime" / "static"
+            worker_source = (static_root / "sw.js").read_text(encoding="utf-8")
+            match = re.search(r"const SHELL_ASSETS = \[(.*?)\];", worker_source, re.DOTALL)
+            paths = re.findall(r'"([^\"]+)"', match.group(1)) if match else []
+            cache_add_all_result = await client.eval_js(
+                f"Promise.race([caches.open('minime-pwa-diagnostic').then(cache => cache.addAll({json.dumps(paths)}).then(() => 'OK').catch(error => `${{error.name}}: ${{error.message}}`)), new Promise(resolve => setTimeout(() => resolve('TIMEOUT'), 3000))])"
+            )
+            failed_assets = await client.eval_js(
+                f"(async () => {{ const cache = await caches.open('minime-pwa-diagnostic'); const result = await Promise.all({json.dumps(paths)}.map(async path => {{ try {{ const response = await fetch(path); if (!response.ok) throw new Error(`HTTP ${{response.status}}`); await cache.put(path, response.clone()); return null; }} catch (error) {{ return [path, error.name + ': ' + error.message]; }} }})); await caches.delete('minime-pwa-diagnostic'); return result.filter(Boolean); }})()"
+            )
+        assert cached == "READY", (
+            f"Service Worker did not become ready: {cached}; state={registration_state}; addAll={cache_add_all_result}; failed_assets={failed_assets}"
+        )
         overview_status = await client.eval_js(
             "fetch('/api/v1/dashboard/overview', {credentials:'same-origin',cache:'no-store'})"
             ".then(response => response.status)"
@@ -890,6 +954,37 @@ async def test_real_browser_auth_expiry_hides_operational_state(
         assert state["content"] == "none"
         assert state["login"] != "none"
         assert state["active"] == "—"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_real_browser_backlog_view_uses_explicit_evidence_and_escapes_content(
+    browser_test_env: dict[str, Any],
+) -> None:
+    client = ChromeCDPClient(browser_test_env["ws_url"])
+    await client.connect()
+    try:
+        await client.navigate(f"{browser_test_env['server_url']}/")
+        rendered = await client.eval_js("""
+          (async () => {
+            const {renderBacklogTable, renderBacklogDetail} = await import('/static/js/views/backlog_view.js');
+            const escapeHtml = value => String(value ?? '').replace(/[&<>\"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#039;'}[ch]));
+            const table = {innerHTML: ''};
+            const item = {item_key:'TASK-1', title:'<script>bad</script>', status:'BACKLOG', priority:'MEDIUM', source:'MANUAL', project_id:'project-1'};
+            renderBacklogTable({root:table,items:[item],filter:'ALL',query:'',selectedItem:null,escapeHtml,getStatusBadgeClass:()=>'badge-discovered'});
+            const element = () => ({textContent:'',innerHTML:'',className:'',style:{}});
+            const elements = Object.fromEntries(['placeholder','content','title','status','priority','key','source','readiness','startButton','needsHumanCard','humanQuestionsList','description','criteria','dorOverall','dorGrid','openSpec','issue','projectItem','run'].map(key => [key,element()]));
+            renderBacklogDetail({item,elements,escapeHtml,sanitizeUrl:()=> '#',renderMarkdownText:value=>escapeHtml(value),getStatusBadgeClass:()=>'badge-discovered'});
+            return {html:table.innerHTML, dor:elements.dorGrid.innerHTML, overview:elements.dorOverall.textContent};
+          })()
+        """)
+        assert "&lt;script&gt;bad&lt;/script&gt;" in rendered["html"]
+        assert "<script>" not in rendered["html"]
+        assert 'data-backlog-action="prepare"' in rendered["html"]
+        assert 'data-state="unknown"' in rendered["dor"]
+        assert "Definición de Ready satisfecha" in rendered["dor"]
+        assert rendered["overview"] == "ESTADO DESCONOCIDO"
     finally:
         await client.close()
 

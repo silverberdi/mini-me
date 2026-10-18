@@ -42,17 +42,15 @@ def test_pwa_client_contracts_and_accessible_shell() -> None:
     assert "/api/" not in sw
 
 
-def test_canonical_pipeline_has_nine_stages() -> None:
+def test_pipeline_view_matches_authoritative_dashboard_phases() -> None:
     source = (STATIC / "js" / "components" / "pipeline_stepper.js").read_text()
     for stage in (
-        "WORKTREE_SETUP",
-        "IMPLEMENTATION",
-        "CHECKS",
-        "REVIEW",
-        "AUDIT",
-        "PREVIEW",
-        "PR",
-        "MERGE_GATE",
-        "CLOSURE",
+        '"readiness"',
+        '"implementation"',
+        '"checks"',
+        '"review"',
+        '"audit"',
+        '"pr_merge"',
     ):
         assert stage in source
+    assert "Matches DashboardService._build_pipeline" in source

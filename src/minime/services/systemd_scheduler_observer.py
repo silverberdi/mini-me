@@ -86,6 +86,20 @@ class SystemdSchedulerObserver:
                 freshness="FRESH",
                 reason="unsupported_active_state",
             )
+        # These combinations cannot describe a coherent systemd unit snapshot.
+        # Keep the read model fail-closed rather than showing a stale/contradictory
+        # service state as operationally active.
+        if (
+            (raw_active == "inactive" and raw_sub == "running")
+            or (raw_active == "active" and raw_sub in {"dead", "failed"})
+            or (raw_active == "failed" and raw_sub != "failed")
+        ):
+            return SchedulerServiceObservation(
+                observed_at=observed_at,
+                age_seconds=max(age, 0.0),
+                freshness="UNKNOWN",
+                reason="contradictory_active_sub_state",
+            )
 
         return SchedulerServiceObservation(
             active_state=raw_active.upper(),

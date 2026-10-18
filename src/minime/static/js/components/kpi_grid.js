@@ -1,14 +1,17 @@
+function countOrUnknown(value) {
+  return Number.isInteger(value) && value >= 0 ? String(value) : "—";
+}
+
 export function renderKpis(root, metrics = {}) {
   if (!root) return;
   const values = {
-    active: metrics.active_runs_count ?? metrics.active ?? 0,
-    queue: metrics.queue_depth ?? metrics.queue ?? 0,
-    ready: metrics.ready_count ?? metrics.ready ?? 0,
-    blocked: metrics.blocked_count ?? metrics.blocked ?? metrics.attention_runs_count ?? 0,
+    active: countOrUnknown(metrics.active_runs_count),
+    attention: countOrUnknown(metrics.attention_runs_count),
+    completed: countOrUnknown(metrics.recent_completions_count),
   };
   root.querySelectorAll("[data-kpi]").forEach((node) => {
     const value = values[node.dataset.kpi];
-    if (value !== undefined) node.textContent = String(value);
+    if (value !== undefined) node.textContent = value;
   });
   root.dataset.metrics = JSON.stringify(values);
 }

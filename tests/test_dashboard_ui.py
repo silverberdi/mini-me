@@ -22,6 +22,20 @@ def test_ui_assets_exist_and_are_complete() -> None:
     assert "kpi-grid" in index_content
     assert "changesTable" in index_content
     assert "detailPanel" in index_content
+    first_navigation_tab = index_content.index('id="navTabExecutions"')
+    assert first_navigation_tab < index_content.index('id="navTabBacklog"')
+    assert (
+        'data-main-view="viewExecutions"'
+        in index_content[first_navigation_tab : first_navigation_tab + 250]
+    )
+    assert "Preparación automática: DESCONOCIDO" in index_content
+    assert "Admisión automática: DESCONOCIDO" in index_content
+    assert "Concurrencia: DESCONOCIDO" in index_content
+    assert 'value="mini-me" selected' not in index_content
+    assert 'data-kpi="active">0' not in index_content
+    assert 'data-kpi="queue">0' not in index_content
+    assert "Preparación automática: ON" not in index_content
+    assert "Admisión automática: ON" not in index_content
 
     css_content = css_file.read_text(encoding="utf-8")
     assert "theme-dark" in css_content
@@ -33,4 +47,17 @@ def test_ui_assets_exist_and_are_complete() -> None:
     api_client = (static_dir / "js" / "services" / "api_client.js").read_text(encoding="utf-8")
     assert "/api/v1/dashboard/overview" in api_client
     assert "renderPipelineStepper" in js_content
-    assert "toggleTheme" in js_content
+    assert "createThemeController" in js_content
+    assert "let currentMainView = 'viewExecutions'" in js_content
+    assert "project?.auto_prepare" in js_content
+    assert "project?.auto_admit" in js_content
+    assert "project?.max_concurrent_jobs" in js_content
+    assert "head_sha: candSha || 'HEAD'" not in js_content
+    assert "base_sha: baseSha || 'main'" not in js_content
+    assert "const previewIdentityValid" in js_content
+    assert "window.minime" not in js_content
+    assert "window.selectChange" not in js_content
+    assert "onclick=" not in js_content
+    assert "data-project-action" in (static_dir / "js" / "views" / "projects_view.js").read_text(
+        encoding="utf-8"
+    )
