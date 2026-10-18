@@ -27,9 +27,10 @@ export function renderCandidateEvidence({ summary, history, detail }) {
 }
 
 export function renderRunOverview({ metaGrid, blockerSection, blockersList, detail }) {
+  const cancelled = detail.stop_outcome === "CANCELLED";
   if (metaGrid) {
     metaGrid.innerHTML = `
-      <div class="meta-box"><div class="meta-box-label">Etapa actual</div><div class="meta-box-val">${escapeHtml(detail.current_stage || "UNKNOWN")}</div></div>
+      <div class="meta-box"><div class="meta-box-label">${cancelled ? "Última etapa observada" : "Etapa actual"}</div><div class="meta-box-val">${escapeHtml(detail.current_stage || "UNKNOWN")}</div></div>
       <div class="meta-box"><div class="meta-box-label">Resultado de detención</div><div class="meta-box-val">${escapeHtml(detail.stop_outcome || "UNKNOWN")}</div></div>
       <div class="meta-box"><div class="meta-box-label">ID de Run</div><div class="meta-box-val font-mono text-muted">${escapeHtml(detail.run_id || "—")}</div></div>
       <div class="meta-box"><div class="meta-box-label">ID de Job activo</div><div class="meta-box-val font-mono text-muted">${escapeHtml(detail.job_id || "—")}</div></div>

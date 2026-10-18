@@ -30,6 +30,7 @@ export function createDetailViewController({
       : bindingState === "INVALID" ? "Vínculo inválido" : "UNKNOWN";
     elements.repository.dataset.state = bindingState;
     elements.stage.textContent = detail.current_stage || "---";
+    if (elements.stageLabel) elements.stageLabel.textContent = detail.stop_outcome === "CANCELLED" ? "Última etapa:" : "Etapa:";
 
     elements.generation.textContent = detail.candidate_authority
       ? `gen-${detail.candidate_authority.generation}` : "---";
@@ -42,7 +43,7 @@ export function createDetailViewController({
       elements.copyShaButton.style.display = "none";
     }
 
-    renderPipelineStepper(elements.pipeline, detail.pipeline);
+    renderPipelineStepper(elements.pipeline, detail.pipeline, { stopOutcome: detail.stop_outcome });
     renderRunOverview({
       metaGrid: elements.overviewMeta,
       blockerSection: elements.blockerSection,

@@ -141,6 +141,7 @@ const showToast = createToastController();
   const dtProject = document.getElementById('dtProject');
   const dtRepository = document.getElementById('dtRepository');
   const dtStage = document.getElementById('dtStage');
+  const dtStageLabel = document.getElementById('dtStageLabel');
   const dtGeneration = document.getElementById('dtGeneration');
   const dtCandidateSha = document.getElementById('dtCandidateSha');
   const copyShaBtn = document.getElementById('copyShaBtn');
@@ -237,6 +238,7 @@ const showToast = createToastController();
       project: dtProject,
       repository: dtRepository,
       stage: dtStage,
+      stageLabel: dtStageLabel,
       generation: dtGeneration,
       candidateSha: dtCandidateSha,
       copyShaButton: copyShaBtn,
@@ -446,6 +448,18 @@ const showToast = createToastController();
 
   // Initialization
   export async function initDashboard() {
+    const pipelineDetails = document.getElementById('pipelineDetails');
+    if (pipelineDetails && window.matchMedia) {
+      const compactViewport = window.matchMedia('(max-width: 767px)');
+      let operatorChangedPipelineDisclosure = false;
+      pipelineDetails.open = !compactViewport.matches;
+      pipelineDetails.querySelector('summary')?.addEventListener('click', () => {
+        operatorChangedPipelineDisclosure = true;
+      });
+      compactViewport.addEventListener?.('change', (event) => {
+        if (!operatorChangedPipelineDisclosure) pipelineDetails.open = !event.matches;
+      });
+    }
     themeController.initialize();
     sessionController.bindLogout(logoutBtn);
     lifecycleController.bind();

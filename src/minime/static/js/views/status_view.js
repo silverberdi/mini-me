@@ -13,6 +13,7 @@ export function getStatusBadgeClass(status) {
     case 'UNKNOWN': return 'badge-unknown';
     case 'COMPLETED': return 'badge-completed';
     case 'FAILED': return 'badge-failed';
+    case 'CANCELLED': return 'badge-cancelled';
     case 'NOT_READY': return 'badge-not-ready';
     default: return 'badge-discovered';
   }

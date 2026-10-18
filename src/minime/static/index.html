@@ -422,24 +422,28 @@
                 <div class="detail-title-group">
                   <div class="title-row">
                     <h3 class="detail-title" id="dtChangeName">---</h3>
-                    <span class="badge" id="dtStatusBadge">RUNNING</span>
+                    <span class="badge badge-running" id="dtStatusBadge">RUNNING</span>
                     <button type="button" id="closeDetailDrawer" class="btn btn-secondary detail-drawer-close" aria-label="Cerrar detalle de ejecución">Cerrar</button>
                   </div>
                   <div class="detail-meta">
             <span class="meta-item">Proyecto: <strong id="dtProject">—</strong></span>
                     <span class="meta-item">Repositorio: <strong id="dtRepository" data-state="UNKNOWN">UNKNOWN</strong></span>
-                    <span class="meta-item">Etapa: <strong id="dtStage">---</strong></span>
+                    <span class="meta-item"><span id="dtStageLabel">Etapa:</span> <strong id="dtStage">---</strong></span>
                     <span class="meta-item">Generación: <strong id="dtGeneration">---</strong></span>
                     <span class="meta-item" id="dtCandidateMeta">SHA: <code id="dtCandidateSha" class="code-sha">---</code> <button id="copyShaBtn" class="btn-tiny" title="Copiar SHA">📋</button></span>
                   </div>
-                  <div id="actionToolbar" class="action-toolbar" aria-label="Acciones del operador"></div>
+                  <details id="operatorActions" class="operator-actions">
+                    <summary>Acciones disponibles</summary>
+                    <div id="actionToolbar" class="action-toolbar" aria-label="Acciones del operador"></div>
+                  </details>
                 </div>
               </div>
 
               <!-- 6-Phase Pipeline Stepper -->
-              <div class="pipeline-stepper-container" aria-label="Progreso del pipeline">
+              <details class="pipeline-stepper-container" id="pipelineDetails" open>
+                <summary>Progreso del pipeline</summary>
                 <div class="stepper" id="pipelineStepper"></div>
-              </div>
+              </details>
 
               <!-- Detail Navigation Tabs -->
               <nav class="detail-tabs" role="tablist" aria-label="Secciones del detalle">

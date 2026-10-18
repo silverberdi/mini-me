@@ -1892,12 +1892,14 @@ async def test_real_browser_status_view_keeps_authoritative_states_distinct(
             "AUTH_REQUIRED",
             "RECOVERY",
             "READY_FOR_HUMAN_MERGE",
+            "CANCELLED",
             "<img src=x onerror=alert(1)>",
         ]
         rendered = await client.eval_js(f"""
           (async () => {{
             const {{getStatusBadgeClass}} = await import('/static/js/views/status_view.js');
             const {{renderChangesView}} = await import('/static/js/views/runs_view.js');
+            const {{renderPipelineStepper}} = await import('/static/js/components/pipeline_stepper.js');
             const root = document.createElement('tbody');
             const states = {json.dumps(states)};
             renderChangesView({{
@@ -1916,7 +1918,16 @@ async def test_real_browser_status_view_keeps_authoritative_states_distinct(
               {{project_id:'p',change_name:'recovery',status:'RECOVERY'}},
               {{project_id:'p',change_name:'running',status:'RUNNING'}}
             ],filter:'ATTENTION',query:'',selected:null,alreadyAutoSelected:true,statusClass:getStatusBadgeClass,formatTime:()=>'',onSelect:()=>{{}}}});
-            return {{rows, escapedElements:root.querySelectorAll('img').length, attention:[...attentionRoot.querySelectorAll('tr[data-project-id]')].map(row=>row.dataset.changeName)}};
+            const pipelineRoot = document.createElement('div');
+            renderPipelineStepper(pipelineRoot, [
+              {{name:'implementation',display_name:'Implementation',status:'running'}},
+              {{name:'checks',display_name:'Checks',status:'not_started'}}
+            ], {{stopOutcome:'CANCELLED'}});
+            return {{rows, escapedElements:root.querySelectorAll('img').length,
+              attention:[...attentionRoot.querySelectorAll('tr[data-project-id]')].map(row=>row.dataset.changeName),
+              cancelledPipeline:{{active:pipelineRoot.querySelector('.step-item.running')?.innerText || '',
+                stopped:pipelineRoot.querySelector('.step-item.stopped')?.innerText || '',
+                phaseStatus:pipelineRoot.querySelector('.step-item.stopped')?.dataset.phaseStatus}}}};
           }})()
         """)
         assert [item["status"] for item in rendered["rows"]] == [*states, "UNKNOWN"]
@@ -1926,6 +1937,10 @@ async def test_real_browser_status_view_keeps_authoritative_states_distinct(
         assert "badge-unknown" in by_state["UNKNOWN"]
         assert "badge-recovery" in by_state["RECOVERY"]
         assert "badge-needs-human" in by_state["AUTH_REQUIRED"]
+        assert "badge-cancelled" in by_state["CANCELLED"]
+        assert rendered["cancelledPipeline"]["active"] == ""
+        assert "Implementation · última etapa" in rendered["cancelledPipeline"]["stopped"]
+        assert rendered["cancelledPipeline"]["phaseStatus"] == "running"
         # Text remains the canonical backend state even where visual tokens share a color family.
         assert by_state["WAITING_CAPACITY"] != by_state["RUNNING"]
         assert by_state["READY_FOR_HUMAN_MERGE"] != by_state["NEEDS_HUMAN"]
@@ -2584,6 +2599,7 @@ async def test_real_browser_authenticated_control_plane_cancel_persists_in_dispo
             assert offline_run is not None and offline_run.is_active
             assert offline_actions == [], "Offline mutation must not replay after reconnect."
 
+            await client.set_viewport(1440, 900)
             await client.eval_js("document.getElementById('navTabExecutions').click()")
             selected = await client.eval_js(
                 """
@@ -2625,16 +2641,52 @@ async def test_real_browser_authenticated_control_plane_cancel_persists_in_dispo
             # Capture exact-candidate screenshots from the authenticated container
             # preview before exercising malformed/stale response fault injection.
             # The rows are disposable QA records, not production observations.
-            preview_evidence_dir = Path(__file__).parents[1] / (
-                "openspec/changes/pwa-control-center-ux-convergence/evidence/browser"
+            preview_evidence_dir = Path(
+                os.environ.get(
+                    "MINIME_PWA_PREVIEW_EVIDENCE_DIR",
+                    str(
+                        Path(__file__).parents[1]
+                        / "openspec/changes/pwa-control-center-ux-convergence/evidence/browser"
+                    ),
+                )
             )
             preview_evidence_dir.mkdir(parents=True, exist_ok=True)
+            # Reference 01 is the operational landing with its selected real Run
+            # but without the contextual drawer; reference 03 is captured after
+            # explicitly reopening the same durable selection.
+            await client.eval_js("document.getElementById('closeDetailDrawer').click()")
+            await client.set_viewport(1440, 900)
+            await asyncio.sleep(0.15)
+            capture = await client.send_cmd(
+                "Page.captureScreenshot", {"format": "png", "captureBeyondViewport": False}
+            )
+            (
+                preview_evidence_dir / "visual-review-active-desktop-1440x900-landing.png"
+            ).write_bytes(base64.b64decode(capture["data"]))
+            await client.eval_js(f"""
+              (() => [...document.querySelectorAll('#changesTableBody tr[data-project-id]')]
+                .find(item => item.dataset.changeName === {json.dumps(change_name)})?.click())()
+            """)
+            for _ in range(40):
+                drawer_open = await client.eval_js(
+                    "document.getElementById('detailPanel').classList.contains('drawer-open')"
+                )
+                if drawer_open:
+                    break
+                await asyncio.sleep(0.05)
+            assert drawer_open, "Desktop reference drawer must open from the selected real Run."
+            await asyncio.sleep(0.15)
+            capture = await client.send_cmd(
+                "Page.captureScreenshot", {"format": "png", "captureBeyondViewport": False}
+            )
+            (preview_evidence_dir / "visual-review-active-desktop-1440x900-drawer.png").write_bytes(
+                base64.b64decode(capture["data"])
+            )
             preview_viewports = (
-                (1440, 900, False, "preview-active-desktop-1440x900-qa-seeded.png"),
-                (1024, 768, False, "preview-active-tablet-1024x768-qa-seeded.png"),
-                (768, 1024, True, "preview-active-tablet-768x1024-qa-seeded.png"),
-                (390, 844, True, "preview-active-mobile-390x844-qa-seeded.png"),
-                (360, 800, True, "preview-active-mobile-360x800-qa-seeded.png"),
+                (1024, 768, False, "visual-review-active-tablet-1024x768.png"),
+                (768, 1024, True, "visual-review-active-tablet-768x1024.png"),
+                (390, 844, True, "visual-review-active-mobile-390x844.png"),
+                (360, 800, True, "visual-review-active-mobile-360x800.png"),
             )
             for width, height, mobile, filename in preview_viewports:
                 await client.set_viewport(width, height, mobile=mobile)
@@ -2739,11 +2791,20 @@ async def test_real_browser_authenticated_control_plane_cancel_persists_in_dispo
             for _ in range(40):
                 action_button = await client.eval_js("""
                   (() => { const button = document.querySelector('#actionToolbar [data-action="CANCEL"]');
-                    return button ? {text: button.innerText, disabled: button.disabled, title: button.title} : null; })()
+                    return button ? {text: button.textContent.trim(), disabled: button.disabled, title: button.title} : null; })()
                 """)
                 if action_button and not action_button["disabled"]:
                     break
                 await asyncio.sleep(0.1)
+            action_disclosure = await client.eval_js("""
+              (() => ({open:document.getElementById('operatorActions').open,
+                summary:document.querySelector('#operatorActions summary').innerText,
+                buttons:[...document.querySelectorAll('#actionToolbar [data-action]')]
+                  .every(button => getComputedStyle(button).display !== 'none')}))()
+            """)
+            assert action_disclosure["open"] is False, action_disclosure
+            await client.eval_js("document.querySelector('#operatorActions summary').click()")
+            assert await client.eval_js("document.getElementById('operatorActions').open")
             assert (
                 action_button
                 and action_button["text"] == "Cancel Run"
@@ -2817,6 +2878,37 @@ async def test_real_browser_authenticated_control_plane_cancel_persists_in_dispo
             assert "Acción CANCEL completada" in final_state["toast"]
             assert "CANCELLED" in final_state["status"] or "CANCELLED" in final_state["toast"]
 
+            cancelled_presentation = await client.eval_js("""
+              (() => ({badgeClass:document.getElementById('dtStatusBadge').className,
+                stageLabel:document.getElementById('dtStageLabel').innerText,
+                overviewLabel:document.querySelector('#overviewMetaGrid .meta-box-label').innerText,
+                activePipeline:document.querySelector('#pipelineStepper .step-item.running')?.innerText || '',
+                lastPipeline:document.querySelector('#pipelineStepper .step-item.stopped')?.innerText || ''}))()
+            """)
+            assert "badge-cancelled" in cancelled_presentation["badgeClass"]
+            assert cancelled_presentation["stageLabel"] == "Última etapa:"
+            assert cancelled_presentation["overviewLabel"].lower() == "última etapa observada"
+            assert cancelled_presentation["activePipeline"] == ""
+            assert "última etapa" in cancelled_presentation["lastPipeline"].lower()
+
+            await client.set_viewport(390, 844, mobile=True)
+            await asyncio.sleep(0.12)
+            toast_geometry = await client.eval_js("""
+              (() => { const toast=document.getElementById('toastNotification').getBoundingClientRect();
+                const nav=document.querySelector('.bottom-nav').getBoundingClientRect();
+                return {toastBottom:toast.bottom, navTop:nav.top, visible:getComputedStyle(document.getElementById('toastNotification')).display !== 'none'}; })()
+            """)
+            assert (
+                toast_geometry["visible"]
+                and toast_geometry["toastBottom"] <= toast_geometry["navTop"]
+            ), toast_geometry
+            toast_capture = await client.send_cmd(
+                "Page.captureScreenshot", {"format": "png", "captureBeyondViewport": False}
+            )
+            (preview_evidence_dir / "visual-review-cancelled-mobile-390x844-toast.png").write_bytes(
+                base64.b64decode(toast_capture["data"])
+            )
+
             stale = await client.eval_js(
                 """
               (async () => {
@@ -2835,11 +2927,11 @@ async def test_real_browser_authenticated_control_plane_cancel_persists_in_dispo
             assert stale["http"] == 200 and stale["body"]["status"] != "COMPLETED", stale
 
             cancelled_viewports = (
-                (1440, 900, False, "preview-cancelled-desktop-1440x900-qa-seeded.png"),
-                (1024, 768, False, "preview-cancelled-tablet-1024x768-qa-seeded.png"),
-                (768, 1024, True, "preview-cancelled-tablet-768x1024-qa-seeded.png"),
-                (390, 844, True, "preview-cancelled-mobile-390x844-qa-seeded.png"),
-                (360, 800, True, "preview-cancelled-mobile-360x800-qa-seeded.png"),
+                (1440, 900, False, "visual-review-cancelled-desktop-1440x900.png"),
+                (1024, 768, False, "visual-review-cancelled-tablet-1024x768.png"),
+                (768, 1024, True, "visual-review-cancelled-tablet-768x1024.png"),
+                (390, 844, True, "visual-review-cancelled-mobile-390x844.png"),
+                (360, 800, True, "visual-review-cancelled-mobile-360x800.png"),
             )
             for width, height, mobile, filename in cancelled_viewports:
                 await client.set_viewport(width, height, mobile=mobile)
@@ -2862,7 +2954,12 @@ async def test_real_browser_authenticated_control_plane_cancel_persists_in_dispo
                 "project_id": project_id,
                 "change_name": change_name,
                 "durable_states_observed": ["IMPLEMENTING/RUNNING", "CANCELLED"],
-                "screenshots": [filename for _, _, _, filename in preview_viewports]
+                "screenshots": [
+                    "visual-review-active-desktop-1440x900-landing.png",
+                    "visual-review-active-desktop-1440x900-drawer.png",
+                    "visual-review-cancelled-mobile-390x844-toast.png",
+                ]
+                + [filename for _, _, _, filename in preview_viewports]
                 + [filename for _, _, _, filename in cancelled_viewports],
                 "classification": "QA-seeded disposable PostgreSQL preview; not production evidence",
             }
