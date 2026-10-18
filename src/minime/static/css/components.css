@@ -12,5 +12,16 @@
 dialog.action-dialog { background: var(--bg-panel); color: var(--text-main); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 20px; max-width: min(460px, calc(100vw - 32px)); } dialog.action-dialog::backdrop { background: rgb(0 0 0 / 65%); }
  .provider-card { display: grid; gap: 6px; padding: 12px; border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--bg-card); }
 .provider-card small { color: var(--text-muted); }
+.queue-list { display: grid; gap: 8px; min-width: 0; }
+.queue-item { display: grid; gap: 7px; min-width: 0; padding: 12px; border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--bg-card); }
+.queue-item-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; min-width: 0; }
+.queue-item-heading strong { min-width: 0; overflow-wrap: anywhere; }
+.queue-item p { margin: 0; color: var(--text-muted); overflow-wrap: anywhere; }
+.queue-item .queue-reason { padding-top: 5px; border-top: 1px solid var(--border-color); }
+.queue-item .status-badge { flex: 0 0 auto; }
+.queue-item [data-state="READY"], .queue-item [data-state="READY_FOR_WORK"] { color: var(--color-success); background: var(--color-success-bg); }
+.queue-item [data-state="NEEDS_HUMAN"], .queue-item [data-state="WAITING_CAPACITY"] { color: var(--color-warning); background: var(--color-warning-bg); }
+.queue-item [data-state="BLOCKED"], .queue-item [data-state="FAILED"] { color: var(--color-danger); background: var(--color-danger-bg); }
+.queue-item [data-state="UNKNOWN"] { color: var(--text-muted); background: var(--bg-hover); }
 .action-toolbar { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
 .action-toolbar button { min-height: 40px; }

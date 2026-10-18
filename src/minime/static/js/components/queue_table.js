@@ -26,10 +26,12 @@ export function renderQueue(root, items = [], onSelect = () => {}) {
     const state = item.readiness_state || "UNKNOWN";
     const priority = item.priority_score === null || item.priority_score === undefined
       ? "No informada"
-      : String(item.priority_score);
+      : Number.isFinite(Number(item.priority_score))
+        ? Number(item.priority_score).toLocaleString("es-CO", { maximumFractionDigits: 2 })
+        : "Desconocida";
     const reason = item.blocked_reason || (item.unmet_readiness_reasons || []).join(" · ") || "Sin explicación informada";
     return `<article class="queue-item" data-project-id="${escapeHtml(item.project_id)}" data-change-name="${escapeHtml(item.change_name)}">
-      <div class="queue-item-heading"><strong>${escapeHtml(item.github_issue_title || item.change_name)}</strong><span class="status-badge">${escapeHtml(state)}</span></div>
+      <div class="queue-item-heading"><strong>${escapeHtml(item.github_issue_title || item.change_name)}</strong><span class="status-badge" data-state="${escapeHtml(state)}">${escapeHtml(state)}</span></div>
       <p>${escapeHtml(eligibility)} · Prioridad informada: ${escapeHtml(priority)}</p>
       <p class="queue-reason">${escapeHtml(reason)}</p>
       <button type="button" class="btn btn-secondary" data-queue-open>Ver trabajo</button>

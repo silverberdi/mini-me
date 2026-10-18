@@ -730,6 +730,20 @@ async def test_control_center_viewport_evidence(browser_test_env: dict[str, Any]
                 "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
             )
             assert overflow is True, f"Horizontal overflow at {width}x{height}"
+            if 768 <= width < 1200:
+                tablet = await client.eval_js(
+                    "(() => { const rail = document.querySelector('.main-nav-tabs'); "
+                    "const split = document.querySelector('#viewExecutions .content-split'); "
+                    "return {rail: rail.getBoundingClientRect().width, position: getComputedStyle(rail).position, "
+                    "display: getComputedStyle(split).display, master: split.querySelector('.master-panel').getBoundingClientRect().left, "
+                    "detail: split.querySelector('.detail-panel').getBoundingClientRect().left}; })()"
+                )
+                assert tablet["rail"] == 64 and tablet["position"] == "fixed", (
+                    f"Tablet navigation must use the compact fixed rail: {tablet}"
+                )
+                assert tablet["display"] == "grid" and tablet["detail"] > tablet["master"], (
+                    f"Tablet must preserve master-detail operation: {tablet}"
+                )
             if width < 768:
                 layout = await client.eval_js(
                     "(() => { const split = document.querySelector('#viewExecutions .content-split'); "
