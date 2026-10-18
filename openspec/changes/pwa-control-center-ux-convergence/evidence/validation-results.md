@@ -37,6 +37,18 @@ tests/test_dashboard_service.py tests/test_systemd_scheduler_observer.py
 
 Chrome exercises an authenticated two-operator session: keyboard resize respects 240px/70% pane bounds; only a digest namespace and `{version, ratio, collapsed}` are persisted; a malformed second-account preference falls back to default; first-account collapse survives reload; resetting the second account preserves the first preference; tablet/mobile do not inherit desktop width/collapse and mobile remains detail-first. This supports task 7.3 only, not eight-state visual acceptance.
 
+The browser cache/session security subset was then extended and rerun after adding an authenticated Control Plane POST, explicit 401/403 observations and logout response synchronization:
+
+```text
+tests/test_pwa_real_browser.py::test_real_browser_api_cache_isolation_across_operator_sessions
+tests/test_pwa_real_browser.py::test_real_browser_auth_expiry_hides_operational_state
+tests/test_pwa_real_browser.py::test_real_browser_offline_state_and_reconnection_refresh
+tests/test_pwa_service_worker.py
+6 passed
+```
+
+The authenticated Control Plane POST is rejected by request validation without executing an action; revoked sessions receive 401 and a session for a non-allowlisted identity receives 403. After logout, CacheStorage still contains no `/api/*` resources; login as a different authorized operator updates the visible operator identity. The route behavior uses the isolated in-memory UOW and local test server only.
+
 ## One repository-wide test run and attribution
 
 One full `pytest -q` run, with the isolated runtime root configured, completed before the final small corrections to stale PWA assertions and contradictory systemd-state validation:

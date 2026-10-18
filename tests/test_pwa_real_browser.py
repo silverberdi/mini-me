@@ -945,7 +945,9 @@ async def test_real_browser_pwa_manifest_and_sw_inspection(
 @pytest.mark.asyncio
 async def test_real_browser_api_cache_isolation_across_operator_sessions(
     browser_test_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("MINIME_AUTH_ENABLED", "true")
     client = ChromeCDPClient(browser_test_env["ws_url"])
     await client.connect()
     try:
@@ -992,8 +994,51 @@ async def test_real_browser_api_cache_isolation_across_operator_sessions(
         assert any(path.startswith("/static/") for path in paths["paths"])
         assert not any(path.startswith("/api/") for path in paths["paths"])
 
-        await client.eval_js("document.getElementById('logoutBtn').click()")
-        await asyncio.sleep(0.2)
+        mutation_status = await client.eval_js("""
+          fetch('/api/v1/control-plane/actions/execute', {
+            method: 'POST', credentials: 'same-origin',
+            headers: {'Content-Type': 'application/json'}, body: '{}'
+          }).then(response => response.status)
+        """)
+        assert mutation_status == 422, (
+            "Control Plane mutation probe must reach authenticated API validation"
+        )
+
+        logout_status = await client.eval_js("""
+          (() => new Promise(resolve => {
+            const originalFetch = window.fetch.bind(window);
+            window.fetch = (input, init) => originalFetch(input, init).then(response => {
+              if (String(input).includes('/api/v1/auth/logout')) resolve(response.status);
+              return response;
+            });
+            document.getElementById('logoutBtn').click();
+            setTimeout(() => resolve(null), 3000);
+          }))()
+        """)
+        assert logout_status == 200
+        expired_status = await client.eval_js(
+            "fetch('/api/v1/dashboard/overview', {credentials:'same-origin'}).then(response => response.status)"
+        )
+        assert expired_status == 401
+        from minime.services.auth_service import SessionManager
+
+        unauthorized_token, _ = SessionManager(browser_test_env["uow"]).create_session(
+            "not-allowlisted@example.com"
+        )
+        await client.eval_js(f"document.cookie = 'minime_session={unauthorized_token}; path=/;'")
+        forbidden_status = await client.eval_js(
+            "fetch('/api/v1/dashboard/overview', {credentials:'same-origin'}).then(response => response.status)"
+        )
+        assert forbidden_status == 403
+        post_logout_paths = await client.eval_js("""
+          caches.keys().then(async names => {
+            const entries = await Promise.all(names.filter(name => name.startsWith('minime-pwa-shell-')).map(async name =>
+              (await caches.open(name)).keys().then(requests => requests.map(request => new URL(request.url).pathname))
+            ));
+            return entries.flat();
+          })
+        """)
+        assert not any(path.startswith("/api/") for path in post_logout_paths)
         await client.eval_js(
             f"document.cookie = 'minime_session={browser_test_env['second_session_token']}; path=/;'"
         )
