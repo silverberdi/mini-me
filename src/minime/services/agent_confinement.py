@@ -13,6 +13,7 @@ import signal
 import stat
 import subprocess
 import tempfile
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -840,6 +841,7 @@ class AgentProcessConfinement:
                 stdout_task = asyncio.create_task(_read_stream(process.stdout, stdout_chunks, WatchdogSignal.STDOUT_EMISSION))
                 stderr_task = asyncio.create_task(_read_stream(process.stderr, stderr_chunks, WatchdogSignal.STDERR_EMISSION))
 
+                start_time = time.monotonic()
                 try:
                     while True:
                         if process.returncode is not None:
@@ -852,10 +854,26 @@ class AgentProcessConfinement:
                             if state == WatchdogState.STALLED:
                                 timed_out = True
                                 logger.warning(
-                                    f"Process PID {process.pid} stalled ({watchdog.diagnostic_reason or 'inactivity'}). Terminating process group."
+                                    f"Process PID {process.pid} confirmed stalled ({watchdog.diagnostic_reason or 'inactivity'}). Terminating process group."
                                 )
                                 await self._terminate_process_group(process)
                                 break
+
+                            # Explicit authorized security condition: confinement hard timeout exceeded
+                            elapsed = time.monotonic() - start_time
+                            if timeout_seconds and elapsed >= float(timeout_seconds):
+                                timed_out = True
+                                logger.warning(
+                                    f"Process PID {process.pid} exceeded authorized confinement security timeout "
+                                    f"({elapsed:.1f}s >= {timeout_seconds}s). Terminating process group."
+                                )
+                                await self._terminate_process_group(process)
+                                break
+
+                            if state == WatchdogState.SUSPECTED_STALL and watchdog.diagnostic_reason:
+                                logger.debug(
+                                    f"Process PID {process.pid} inactive ({watchdog.diagnostic_reason}); preserving process under uncertainty."
+                                )
                     await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
                     stdout = b"".join(stdout_chunks)
                     stderr = b"".join(stderr_chunks)

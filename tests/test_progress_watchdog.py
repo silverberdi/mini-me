@@ -129,57 +129,68 @@ def test_watchdog_silence_alone_does_not_stall_when_process_actively_computing(t
     assert watchdog._deadlock_confirmation_count == 0
 
 
-def test_watchdog_requires_positive_deadlock_confirmation_probes(tmp_path: Path):
+@pytest.mark.asyncio
+async def test_watchdog_preserves_alive_silent_zero_cpu_process_without_termination(tmp_path: Path):
+    """Verify that a living process with zero stdout/stderr and zero CPU is preserved under uncertainty."""
     watchdog = ProgressWatchdog(
         worktree_path=tmp_path,
         inactivity_threshold_seconds=0.05,
         stall_timeout_seconds=0.1,
         check_interval_seconds=0.02,
-        min_deadlock_confirmation_probes=3,
     )
-    # Simulate a deadlocked/hung process with 0 activity
-    watchdog.check_process_tree_activity = lambda pid: False
+    # Start a real process that sleeps silently without CPU consumption or IO
+    proc = await asyncio.create_subprocess_exec(
+        "python3",
+        "-c",
+        "import time\ntime.sleep(2.0)\n",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        # Sleep beyond the stall timeout
+        await asyncio.sleep(0.15)
 
-    # Sleep past stall_timeout
-    time.sleep(0.12)
+        # Evaluate watchdog across multiple consecutive ticks
+        for _ in range(5):
+            state = watchdog.evaluate_tick(proc.pid)
+            # Must remain in SUSPECTED_STALL, NOT transition to STALLED
+            assert state == WatchdogState.SUSPECTED_STALL
+            # Inactivity diagnostic must be recorded
+            assert watchdog.diagnostic_reason is not None
+            assert "INACTIVITY_STALL_DIAGNOSED" in watchdog.diagnostic_reason
+            # The process must NOT have been terminated
+            assert proc.returncode is None
 
-    # Probe 1: stall timeout reached, but cannot terminate on duration/silence alone
-    state1 = watchdog.evaluate_tick(pid=99999)
-    assert state1 == WatchdogState.SUSPECTED_STALL
-    assert watchdog._deadlock_confirmation_count == 1
-
-    # Probe 2: still suspecting, still confirming deadlock
-    state2 = watchdog.evaluate_tick(pid=99999)
-    assert state2 == WatchdogState.SUSPECTED_STALL
-    assert watchdog._deadlock_confirmation_count == 2
-
-    # Probe 3: positive deadlock confirmed across 3 consecutive probes
-    state3 = watchdog.evaluate_tick(pid=99999)
-    assert state3 == WatchdogState.STALLED
-    assert watchdog._deadlock_confirmation_count == 3
-    assert "positive deadlock confirmed" in (watchdog.diagnostic_reason or "")
+        # Process is alive and intact throughout
+        assert proc.returncode is None
+    finally:
+        try:
+            proc.terminate()
+            await proc.wait()
+        except OSError:
+            pass
 
 
-def test_watchdog_deadlock_confirmation_resets_if_activity_resumes(tmp_path: Path):
+def test_watchdog_terminates_only_on_positive_verifiable_deadlock(tmp_path: Path):
+    """Verify that STALLED is authorized only upon positive verifiable deadlock evidence."""
     watchdog = ProgressWatchdog(
         worktree_path=tmp_path,
         inactivity_threshold_seconds=0.05,
         stall_timeout_seconds=0.1,
         check_interval_seconds=0.02,
-        min_deadlock_confirmation_probes=3,
     )
-    active = False
-    watchdog.check_process_tree_activity = lambda pid: active
-
     time.sleep(0.12)
-    # Probes 1 and 2 observe silence/inactivity
-    assert watchdog.evaluate_tick(pid=88888) == WatchdogState.SUSPECTED_STALL
-    assert watchdog.evaluate_tick(pid=88888) == WatchdogState.SUSPECTED_STALL
-    assert watchdog._deadlock_confirmation_count == 2
 
-    # Before probe 3, process resumes computing / emits progress
-    active = True
-    assert watchdog.evaluate_tick(pid=88888) == WatchdogState.RUNNING
-    assert watchdog._deadlock_confirmation_count == 0
-    assert watchdog.state == WatchdogState.RUNNING
+    # Alive process without positive deadlock is NOT marked STALLED under silence
+    watchdog.detect_positive_deadlock = lambda pid: (False, "normal sleep")
+    state = watchdog.evaluate_tick(pid=12345)
+    assert state == WatchdogState.SUSPECTED_STALL
+    assert "INACTIVITY_STALL_DIAGNOSED" in (watchdog.diagnostic_reason or "")
+
+    # When positive deadlock evidence is verified (e.g. defunct/zombie in tree)
+    watchdog.detect_positive_deadlock = lambda pid: (True, "zombie/defunct process detected in tree (count=1)")
+    state_deadlock = watchdog.evaluate_tick(pid=12345)
+    assert state_deadlock == WatchdogState.STALLED
+    assert "POSITIVE_DEADLOCK_CONFIRMED" in (watchdog.diagnostic_reason or "")
+
 

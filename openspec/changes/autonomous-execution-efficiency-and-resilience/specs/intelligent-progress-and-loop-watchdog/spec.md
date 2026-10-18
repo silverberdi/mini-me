@@ -27,8 +27,9 @@ The system SHALL detect repetitive non-convergent loops by tracking blocker fing
 - **THEN** the watchdog marks the state as `STALLED` with diagnostic code `REPETITIVE_LOOP_DETECTED`
 - **AND** triggers controlled recovery or stops at `NEEDS_HUMAN` without burning additional inference budget on identical cycles.
 
-#### Scenario: Deadlock or frozen sub-process requires positive deadlock confirmation before termination
-- **GIVEN** an execution sub-process exceeding the stall timeout
-- **WHEN** consecutive diagnostic probes confirm zero CPU activity, zero CPU time delta, and zero open network sockets across the process tree
-- **THEN** only after positive deadlock confirmation across multiple consecutive probes does the watchdog confirm `STALLED`
-- **AND** the system cleanly terminates the subprocess group (SIGTERM followed by SIGKILL), records `WATCHDOG_HANG_TERMINATED` with process diagnostics, and preserves candidate and worktree state for safe recovery.
+#### Scenario: Process preservation under uncertainty and positive deadlock confirmation
+- **GIVEN** an execution sub-process exceeding the stall timeout without observable CPU, sockets, or IO
+- **WHEN** the process is alive in normal wait state without positive proof of an irrecoverable deadlock
+- **THEN** the watchdog maintains diagnostic records of the inactivity stall in `SUSPECTED_STALL`
+- **AND** the system SHALL NOT send SIGTERM/SIGKILL or terminate the process based solely on absence of activity
+- **AND** automatic termination is permitted ONLY upon positive and verifiable evidence of an irrecoverable deadlock or explicitly authorized security condition.

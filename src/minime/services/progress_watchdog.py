@@ -98,6 +98,8 @@ class ProgressWatchdog:
         self.diagnostic_reason: str | None = None
         self._deadlock_confirmation_count: int = 0
         self._last_process_cputimes: dict[int, float] = {}
+        self._explicit_positive_deadlock: bool = False
+        self._explicit_deadlock_reason: str | None = None
 
     def _get_max_worktree_mtime(self) -> float:
         max_mtime = 0.0
@@ -179,7 +181,7 @@ class ProgressWatchdog:
 
             try:
                 proc = subprocess.run(
-                    ["ps", "-p", str(p), "-o", "%cpu=,stat=,cputime="],
+                    ["ps", "-p", str(p), "-o", "stat=,cputime="],
                     capture_output=True,
                     text=True,
                     timeout=1.0,
@@ -188,12 +190,11 @@ class ProgressWatchdog:
                     parts = proc.stdout.strip().split()
                     if parts:
                         try:
-                            cpu = float(parts[0])
-                            stat = parts[1] if len(parts) > 1 else ""
-                            cputime_str = parts[2] if len(parts) > 2 else ""
+                            stat = parts[0]
+                            cputime_str = parts[1] if len(parts) > 1 else ""
 
-                            # 1. Direct active CPU or executing thread state (R=running, D=disk wait)
-                            if cpu > 0.0 or ("R" in stat or "D" in stat):
+                            # 1. Executing thread state (R=running on CPU, D=disk wait)
+                            if "R" in stat or "D" in stat:
                                 activity_detected = True
 
                             # 2. Cumulative CPU time advance
@@ -233,14 +234,82 @@ class ProgressWatchdog:
         """Backward-compatible process polling checking whether process tree has consumed compute."""
         return self.check_process_tree_activity(pid)
 
+    def mark_positive_deadlock(self, reason: str) -> None:
+        """Explicitly record an authorized irrecoverable deadlock condition."""
+        self._explicit_positive_deadlock = True
+        self._explicit_deadlock_reason = reason
+
+    def detect_positive_deadlock(self, pid: int) -> tuple[bool, str]:
+        """Detect positive, verifiable evidence of irrecoverable deadlock.
+
+        Absence of activity, CPU consumption, or open sockets is negative evidence
+        (uncertainty) and is never treated as a deadlock. Legitimate inference calls
+        or IO waits may be silent without consuming CPU.
+
+        Positive deadlock evidence requires verifiable proof such as:
+        - Zombie / defunct child processes in the tree that cannot make progress (state 'Z')
+        - Persistent uninterruptible kernel disk sleep across the entire tree (state 'D')
+        - An explicitly marked irrecoverable deadlock condition or cyclic stagnation.
+        """
+        if self._explicit_positive_deadlock:
+            return True, self._explicit_deadlock_reason or "explicitly authorized deadlock condition"
+
+        tree = self.get_process_tree_pids(pid)
+        if not tree:
+            return False, "no process tree"
+
+        any_alive = False
+        zombie_count = 0
+        uninterruptible_count = 0
+        total_procs = 0
+
+        for p in tree:
+            try:
+                os.kill(p, 0)
+                any_alive = True
+            except OSError:
+                continue
+
+            total_procs += 1
+            try:
+                proc = subprocess.run(
+                    ["ps", "-p", str(p), "-o", "stat="],
+                    capture_output=True,
+                    text=True,
+                    timeout=1.0,
+                )
+                if proc.returncode == 0 and proc.stdout.strip():
+                    stat = proc.stdout.strip()
+                    if "Z" in stat:
+                        zombie_count += 1
+                    elif "D" in stat:
+                        uninterruptible_count += 1
+            except Exception:
+                pass
+
+        if not any_alive:
+            return False, "process already terminated"
+
+        if zombie_count > 0:
+            return True, f"zombie/defunct process detected in tree (count={zombie_count})"
+
+        if total_procs > 0 and uninterruptible_count == total_procs:
+            return True, f"entire process tree stuck in uninterruptible sleep (count={uninterruptible_count})"
+
+        return False, "process tree alive in normal wait state; absence of activity is not deadlock"
+
     def evaluate_tick(self, pid: int | None = None) -> WatchdogState:
         """Evaluate state machine progression: RUNNING -> SUSPECTED_STALL -> STALLED.
 
-        Silence and duration alone are never sufficient to transition to STALLED
-        when an attached process is running. The watchdog inspects the full process
-        tree (CPU, state, CPU-time advances, sockets) and requires positive confirmation
-        of an irrecoverable deadlock across multiple consecutive probes before
-        authorizing termination.
+        Silence and duration alone are never sufficient to transition to STALLED or
+        terminate an attached living process. Absence of activity (CPU, IO, sockets)
+        is negative evidence and reflects uncertainty (e.g. an inference model awaiting
+        upstream response or an IO wait).
+
+        Under uncertainty, the watchdog maintains diagnostic records of the stall,
+        preserves the process and durable state without sending SIGTERM/SIGKILL, and
+        only authorizes STALLED when positive, verifiable evidence of an irrecoverable
+        deadlock is confirmed.
         """
         self.check_filesystem_activity()
         inactivity = time.monotonic() - self.last_activity_at
@@ -263,16 +332,19 @@ class ProgressWatchdog:
 
         # Inactivity has reached or exceeded stall_timeout_seconds
         if pid is not None:
-            # Require positive deadlock confirmation across multiple consecutive probes
-            self._deadlock_confirmation_count += 1
-            if self._deadlock_confirmation_count < self.min_deadlock_confirmation_probes:
-                self.state = WatchdogState.SUSPECTED_STALL
+            # Check for positive, verifiable evidence of an irrecoverable deadlock
+            is_deadlock, deadlock_reason = self.detect_positive_deadlock(pid)
+            if is_deadlock:
+                self.state = WatchdogState.STALLED
+                self.diagnostic_reason = f"POSITIVE_DEADLOCK_CONFIRMED: {deadlock_reason}"
                 return self.state
 
-            self.state = WatchdogState.STALLED
+            # Under uncertainty (process alive but silent without CPU consumption),
+            # preserve process and durable state without authorizing termination.
+            self.state = WatchdogState.SUSPECTED_STALL
             self.diagnostic_reason = (
-                f"WATCHDOG_HANG_TERMINATED: positive deadlock confirmed over "
-                f"{self._deadlock_confirmation_count} probes"
+                f"INACTIVITY_STALL_DIAGNOSED: PID {pid} silent for {inactivity:.1f}s "
+                f"without observable compute/IO; preserving process under uncertainty"
             )
             return self.state
 
