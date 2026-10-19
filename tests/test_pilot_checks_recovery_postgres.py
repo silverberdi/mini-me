@@ -43,6 +43,7 @@ from minime.domain.models import (
     Project,
     ProjectBinding,
     ProjectManagedRepositoryBinding,
+    RecoveryClaimContext,
     utc_now,
 )
 from minime.services.checks_runner import ChecksRunner, ChecksRunResult
@@ -1582,5 +1583,392 @@ def test_reentry_from_running_checks_executes_fresh_batch(
     assert r3.stop_details.get("code") == "REVIEW_AUTHORIZATION_PENDING"
     assert r3.current_candidate_sha == candidate_sha
     sess3.close()
+    session.close()
+
+
+def test_atomic_stop_fault_injection_prevents_partial_commit(
+    pg_session_factory: sessionmaker[Session],
+    tmp_path: Path,
+):
+    """Test A01: Fault injection before atomic commit guarantees ZERO partial state committed.
+
+    Proves in an independent PostgreSQL readback session that if a failure occurs between
+    runner exception and the atomic commit of Run stop outcome, Job is NOT committed to
+    CHECKS_FAILED while Run remains RUNNING_CHECKS.
+    """
+    session = pg_session_factory()
+    repo_dir, wt_dir, base_sha, candidate_sha, test_id = _setup_repo_and_worktree(tmp_path)
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    project_id = f"test-proj-fault-{test_id}"
+    change_name = f"test-change-fault-{test_id}"
+    run_id = f"run-fault-{test_id}"
+    job_id = wt_dir.name
+
+    proj = Project(
+        project_id=project_id,
+        name="Test Fault",
+        display_name="Test Fault",
+        repository=str(repo_dir),
+        base_branch="main",
+        checks=[{"name": "check-1", "command": "echo 1"}],
+    )
+    uow.projects.save(proj)
+
+    binding = ProjectManagedRepositoryBinding(
+        project_id=project_id,
+        managed_repository_root=str(repo_dir),
+        canonical_repository_identity=str(repo_dir),
+        remote_name="origin",
+        default_base_branch="main",
+        worktree_parent_dir=str(wt_dir.parent),
+        is_valid=True,
+    )
+    uow.project_managed_repository_bindings.save(binding)
+
+    job = Job(
+        job_id=job_id,
+        project_id=project_id,
+        change_name=change_name,
+        status=JobStatus.CHECKS_RUNNING,
+        base_sha=base_sha,
+        candidate_sha=candidate_sha,
+        implementer_role="codex",
+    )
+    uow.jobs.save(job)
+
+    run = OrchestrationRun(
+        run_id=run_id,
+        project_id=project_id,
+        change_name=change_name,
+        base_sha=base_sha,
+        current_candidate_sha=candidate_sha,
+        current_stage=OrchestrationStage.RUNNING_CHECKS,
+        resumable_stage=OrchestrationStage.RUNNING_CHECKS,
+        active_job_id=job_id,
+        is_active=True,
+    )
+    uow.orchestration_runs.save(run)
+    uow.commit()
+
+    rec_svc = RecoveryConvergenceService(uow=uow, project_root=repo_dir)
+    claim = rec_svc.acquire_claim(claim_key=f"run:{run_id}", lease_seconds=60)
+    assert claim is not None
+    claim_context = RecoveryClaimContext(
+        claim_key=claim.claim_key,
+        owner_instance_id=claim.owner_instance_id,
+        fence_token=claim.fence_token,
+        lease_expires_at=claim.lease_expires_at,
+    )
+
+    pipeline = ExecutionPipelineService(uow=uow, project_root=repo_dir)
+
+    # Mock checks_runner to raise an environmental error
+    pipeline.checks_runner = ChecksRunner()
+    pipeline.checks_runner.run = AsyncMock(
+        side_effect=PermissionError("[Errno 13] Permission denied: '/tmp/minime_pycache/fault'")
+    )
+
+    # Call run_checks_only directly: verify that it updates Job in session (auto_commit=False)
+    # but does NOT commit to PostgreSQL when raising runner_exc!
+    with pytest.raises(PermissionError):
+        import asyncio
+
+        asyncio.run(pipeline.run_checks_only(job_id, candidate_generation=1, claim_context=claim_context))
+
+    # Read back from an INDEPENDENT PostgreSQL session:
+    # Proves zero two-phase commit gap: Job is STILL CHECKS_RUNNING in the committed database!
+    read_sess = pg_session_factory()
+    read_uow = PostgresPersistenceUnitOfWork(read_sess)
+    committed_job = read_uow.jobs.get_by_id(job_id)
+    assert committed_job is not None
+    assert committed_job.status == JobStatus.CHECKS_RUNNING, (
+        "Job MUST NOT be committed to CHECKS_FAILED before Run is stopped! Found partial commit."
+    )
+    committed_run = read_uow.orchestration_runs.get_by_id(run_id)
+    assert committed_run is not None
+    assert committed_run.is_active is True
+    assert committed_run.stop_outcome is None
+
+    # Roll back the staged uncommitted pipeline changes
+    uow.rollback()
+    read_sess.close()
+    session.close()
+
+
+def test_runner_typeerror_invoked_exactly_once(
+    pg_session_factory: sessionmaker[Session],
+    tmp_path: Path,
+):
+    """Test A02: Internal TypeError in ChecksRunner.run is invoked EXACTLY ONCE and not retried."""
+    session = pg_session_factory()
+    repo_dir, wt_dir, base_sha, candidate_sha, test_id = _setup_repo_and_worktree(tmp_path)
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    project_id = f"test-proj-typeerr-{test_id}"
+    change_name = f"test-change-typeerr-{test_id}"
+    run_id = f"run-typeerr-{test_id}"
+    job_id = wt_dir.name
+
+    proj = Project(
+        project_id=project_id,
+        name="Test TypeError",
+        display_name="Test TypeError",
+        repository=str(repo_dir),
+        base_branch="main",
+        checks=[{"name": "check-1", "command": "echo 1"}],
+    )
+    uow.projects.save(proj)
+
+    binding = ProjectManagedRepositoryBinding(
+        project_id=project_id,
+        managed_repository_root=str(repo_dir),
+        canonical_repository_identity=str(repo_dir),
+        remote_name="origin",
+        default_base_branch="main",
+        worktree_parent_dir=str(wt_dir.parent),
+        is_valid=True,
+    )
+    uow.project_managed_repository_bindings.save(binding)
+
+    job = Job(
+        job_id=job_id,
+        project_id=project_id,
+        change_name=change_name,
+        status=JobStatus.CHECKS_RUNNING,
+        base_sha=base_sha,
+        candidate_sha=candidate_sha,
+        implementer_role="codex",
+    )
+    uow.jobs.save(job)
+    uow.commit()
+
+    rec_svc = RecoveryConvergenceService(uow=uow, project_root=repo_dir)
+    claim = rec_svc.acquire_claim(claim_key=f"run:{run_id}", lease_seconds=60)
+    assert claim is not None
+    claim_context = RecoveryClaimContext(
+        claim_key=claim.claim_key,
+        owner_instance_id=claim.owner_instance_id,
+        fence_token=claim.fence_token,
+        lease_expires_at=claim.lease_expires_at,
+    )
+
+    pipeline = ExecutionPipelineService(uow=uow, project_root=repo_dir)
+
+    call_count = 0
+
+    async def mock_run_with_internal_type_error(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        # Raise a real internal TypeError from inside runner logic
+        raise TypeError("Unexpected NoneType encountered in runner argument unpacking")
+
+    pipeline.checks_runner = ChecksRunner()
+    pipeline.checks_runner.run = mock_run_with_internal_type_error
+
+    with pytest.raises(TypeError) as exc_info:
+        import asyncio
+
+        asyncio.run(pipeline.run_checks_only(job_id, candidate_generation=1, claim_context=claim_context))
+
+    assert "Unexpected NoneType" in str(exc_info.value)
+    assert call_count == 1, (
+        f"ChecksRunner MUST be invoked exactly once, but was called {call_count} times!"
+    )
+    uow.rollback()
+    session.close()
+
+
+def test_cache_confinement_trusted_path_validation_and_lifecycle(tmp_path: Path):
+    """Test A03: validate_secure_cache_path and confinement wrap_command deny untrusted/insecure paths."""
+    from minime.services.agent_confinement import (
+        AgentConfinementError,
+        AgentProcessConfinement,
+        validate_secure_cache_path,
+    )
+
+    current_uid = os.getuid()
+
+    # 1. Deny path outside authorized roots (e.g. /etc)
+    with pytest.raises(PermissionError) as exc_info:
+        validate_secure_cache_path(Path("/etc"))
+    assert (
+        "outside authorized roots" in str(exc_info.value)
+        or "cannot be a symlink" in str(exc_info.value)
+        or "mode must be strictly 0700" in str(exc_info.value)
+    )
+
+    # 2. Deny authorized root itself
+    with pytest.raises(PermissionError) as exc_info:
+        validate_secure_cache_path(Path.home())
+    assert "root directory" in str(exc_info.value) or "mode must be strictly 0700" in str(
+        exc_info.value
+    )
+
+    # 3. Deny insecure permissions (mode 0777 or 0755)
+    insecure_dir = tmp_path / "insecure_cache"
+    insecure_dir.mkdir(mode=0o755)
+    os.chmod(insecure_dir, 0o755)
+    with pytest.raises(PermissionError) as exc_info:
+        validate_secure_cache_path(insecure_dir, expected_uid=current_uid)
+    assert "mode must be strictly 0700" in str(exc_info.value)
+
+    # 4. Deny symlink cache path
+    target_dir = tmp_path / "real_cache"
+    target_dir.mkdir(mode=0o700)
+    os.chmod(target_dir, 0o700)
+    symlink_path = tmp_path / "symlink_cache"
+    symlink_path.symlink_to(target_dir)
+    with pytest.raises(PermissionError) as exc_info:
+        validate_secure_cache_path(symlink_path, expected_uid=current_uid)
+    assert "cannot be a symlink" in str(exc_info.value)
+
+    # 5. Deny wrong UID
+    with pytest.raises(PermissionError) as exc_info:
+        validate_secure_cache_path(target_dir, expected_uid=current_uid + 999)
+    assert "owned by UID" in str(exc_info.value)
+
+    # 6. Valid cache directory succeeds
+    valid_path = validate_secure_cache_path(target_dir, expected_uid=current_uid)
+    assert valid_path == target_dir.resolve()
+
+    # 7. AgentProcessConfinement.wrap_command strictly rejects insecure cache paths
+    confinement = AgentProcessConfinement(
+        allowed_worktree_path=str(tmp_path),
+    )
+    if confinement.is_confinement_available():
+        with pytest.raises(AgentConfinementError) as conf_exc:
+            confinement.wrap_command(["echo", "hi"], secure_cache_path=insecure_dir)
+        assert "Secure cache path rejected by confinement" in str(conf_exc.value)
+
+    # 8. Test ChecksRunner ephemeral cache cleanup lifecycle
+    import tempfile
+
+    runner = ChecksRunner()
+    fake_job_id = f"cleanuptest_{uuid.uuid4().hex[:8]}"
+    # Force attempt 1 to fail by pointing XDG_CACHE_HOME to an insecure path
+    os.environ["XDG_CACHE_HOME"] = str(insecure_dir)
+    try:
+        import asyncio
+
+        asyncio.run(
+            runner.run(
+                job_id=fake_job_id,
+                checks=[{"name": "test-cleanup", "command": "echo clean"}],
+                worktree_path=tmp_path,
+            )
+        )
+    finally:
+        os.environ.pop("XDG_CACHE_HOME", None)
+
+    # Verify that no leftover temporary directory matching the job_id remains in /tmp
+    temp_dir = Path(tempfile.gettempdir())
+    leftovers = list(temp_dir.glob(f"minime_cache_*_{fake_job_id}"))
+    assert len(leftovers) == 0, f"Ephemeral cache directory leaked: {leftovers}"
+
+
+def test_anti_spoofing_rejects_mismatched_candidate_and_serial_repeats(
+    pg_session_factory: sessionmaker[Session],
+    tmp_path: Path,
+):
+    """Test A04: _validate_checks_only_eligibility rejects spoofed stop_details and serial repeats."""
+    session = pg_session_factory()
+    repo_dir, wt_dir, base_sha, candidate_sha, test_id = _setup_repo_and_worktree(tmp_path)
+    uow = PostgresPersistenceUnitOfWork(session)
+    rec_svc = RecoveryConvergenceService(uow=uow, project_root=repo_dir)
+
+    project_id = f"test-proj-spoof-{test_id}"
+    change_name = f"test-change-spoof-{test_id}"
+    run_id = f"run-spoof-{test_id}"
+    job_id = wt_dir.name
+
+    proj = Project(
+        project_id=project_id,
+        name="Test Spoof",
+        display_name="Test Spoof",
+        repository=str(repo_dir),
+        base_branch="main",
+        checks=[{"name": "check-1", "command": "echo 1"}],
+    )
+    uow.projects.save(proj)
+
+    binding = ProjectManagedRepositoryBinding(
+        project_id=project_id,
+        managed_repository_root=str(repo_dir),
+        canonical_repository_identity=str(repo_dir),
+        remote_name="origin",
+        default_base_branch="main",
+        worktree_parent_dir=str(wt_dir.parent),
+        is_valid=True,
+    )
+    uow.project_managed_repository_bindings.save(binding)
+
+    job = Job(
+        job_id=job_id,
+        project_id=project_id,
+        change_name=change_name,
+        status=JobStatus.CHECKS_FAILED,
+        base_sha=base_sha,
+        candidate_sha=candidate_sha,
+        implementer_role="codex",
+    )
+    uow.jobs.save(job)
+
+    # 1. Test spoofed candidate_sha in stop_details
+    run = OrchestrationRun(
+        run_id=run_id,
+        project_id=project_id,
+        change_name=change_name,
+        base_sha=base_sha,
+        current_candidate_sha=candidate_sha,
+        current_stage=OrchestrationStage.RUNNING_CHECKS,
+        resumable_stage=OrchestrationStage.RUNNING_CHECKS,
+        active_job_id=job_id,
+        is_active=False,
+        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+        human_gate=HumanGate.NEEDS_HUMAN,
+        stop_reason="Checks-only pipeline execution failed.",
+        stop_details={
+            "code": "CHECKS_ONLY_PIPELINE_EXCEPTION",
+            "exception_type": "PermissionError",
+            "error": "[Errno 13] Permission denied: '/tmp/minime_pycache/spoof'",
+            "candidate_sha": "0000000000000000000000000000000000000000",  # Spoofed!
+        },
+    )
+    uow.orchestration_runs.save(run)
+    uow.commit()
+
+    decision = rec_svc.recover_checks_only(run.run_id, project_root=repo_dir)
+    assert decision.status == RecoveryDecisionStatus.BLOCKED
+    assert "does not match job candidate_sha" in decision.reason_code
+
+    # 2. Test application code error in stop_details
+    run.stop_details = {
+        "code": "CHECKS_ONLY_PIPELINE_EXCEPTION",
+        "exception_type": "PermissionError",
+        "error": "AssertionError: expected 1 got 2",
+        "candidate_sha": candidate_sha,
+    }
+    uow.orchestration_runs.save(run)
+    uow.commit()
+
+    decision2 = rec_svc.recover_checks_only(run.run_id, project_root=repo_dir)
+    assert decision2.status == RecoveryDecisionStatus.BLOCKED
+    assert "application code error" in decision2.reason_code
+
+    # 3. Test serial repeat prevention when candidate already passed
+    run.stop_details = {
+        "code": "REVIEW_AUTHORIZATION_PENDING",
+        "candidate_sha": candidate_sha,
+    }
+    job.status = JobStatus.CHECKS_PASSED
+    uow.jobs.save(job)
+    uow.orchestration_runs.save(run)
+    uow.commit()
+
+    decision3 = rec_svc.recover_checks_only(run.run_id, project_root=repo_dir)
+    assert decision3.status == RecoveryDecisionStatus.BLOCKED
+    assert "Checks have already succeeded" in decision3.reason_code
+
     session.close()
 

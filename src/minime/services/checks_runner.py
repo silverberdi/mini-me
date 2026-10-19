@@ -44,308 +44,300 @@ class ChecksRunner:
         results: list[CheckResult] = []
         diagnostics: list[EvidenceDiagnostic] = []
         env_identity = str(worktree_path)[-128:]
+        ephemeral_caches: list[Path] = []
 
-        for index, check in enumerate(checks, start=1):
-            name = str(check.get("name") or f"check-{index}")
-            command = str(check.get("command") or "")
-            if not command:
+        try:
+            for index, check in enumerate(checks, start=1):
+                name = str(check.get("name") or f"check-{index}")
+                command = str(check.get("command") or "")
+                if not command:
+                    result = CheckResult(
+                        job_id=job_id,
+                        check_name=name,
+                        command=command,
+                        exit_code=2,
+                        duration_ms=0,
+                        output_snippet="Missing check command.",
+                        candidate_sha=candidate_sha,
+                        candidate_generation=candidate_generation,
+                    )
+                    results.append(result)
+                    diag = EvidenceDiagnostic(
+                        job_id=job_id,
+                        attempt_id=attempt_id,
+                        stage_type="CHECKS",
+                        check_name=name,
+                        diagnostic_status=EvidenceDiagnosticStatus.FAIL,
+                        environment_identity=env_identity,
+                        candidate_sha=candidate_sha,
+                        reason="Missing check command.",
+                        evidence_reference={"exit_code": 2},
+                    )
+                    diagnostics.append(diag)
+                    continue
+
+                env = os.environ.copy()
+                inherited_database_url = env.pop("MINIME_DATABASE_URL", None)
+                env.pop("MINIME_EXPECTED_DATABASE", None)
+
+                # Isolate bytecode compilation to a secure, process-private directory outside candidate worktree
+                import tempfile
+
+                from minime.services.agent_confinement import validate_secure_cache_path
+
+                current_uid = os.getuid()
+                pycache_dir: Path | None = None
+
+                # Attempt 1: XDG_CACHE_HOME or ~/.cache/minime/pycache/<job_id>
+                candidate_base = os.environ.get("XDG_CACHE_HOME")
+                if candidate_base:
+                    base_path = Path(candidate_base).expanduser()
+                else:
+                    base_path = Path.home() / ".cache"
+
+                try:
+                    target = base_path / "minime" / "pycache" / job_id
+                    target.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    os.chmod(target, 0o700)
+                    pycache_dir = validate_secure_cache_path(target, expected_uid=current_uid)
+                except (OSError, PermissionError):
+                    pycache_dir = None
+
+                # Attempt 2: Fallback to securely generated private temporary directory (0700)
+                if pycache_dir is None:
+                    tmp_dir = tempfile.mkdtemp(prefix=f"minime_cache_{current_uid}_", suffix=f"_{job_id}")
+                    os.chmod(tmp_dir, 0o700)
+                    target = Path(tmp_dir)
+                    pycache_dir = validate_secure_cache_path(target, expected_uid=current_uid)
+                    if pycache_dir not in ephemeral_caches:
+                        ephemeral_caches.append(pycache_dir)
+
+                env["PYTHONPYCACHEPREFIX"] = str(pycache_dir.resolve())
+
+                wt_path = Path(worktree_path)
+                wt_venv_bin = wt_path / ".venv" / "bin"
+                repo_venv_bin = Path.cwd() / ".venv" / "bin"
+                standard_paths = [
+                    str(wt_venv_bin),
+                    str(repo_venv_bin),
+                    "/Users/silveriobernal/.local/bin",
+                    "/opt/homebrew/bin",
+                    "/usr/local/bin",
+                    "/usr/bin",
+                    "/bin",
+                ]
+                current_path = env.get("PATH", "")
+                env["PATH"] = (
+                    ":".join(p for p in standard_paths if p not in current_path) + ":" + current_path
+                )
+                current_pythonpath = env.get("PYTHONPATH", "")
+                pythonpath_dirs = [
+                    str(wt_path),
+                    str(wt_path / "src"),
+                    str(Path.cwd()),
+                    str(Path.cwd() / "src"),
+                ]
+                env["PYTHONPATH"] = ":".join(
+                    p for p in pythonpath_dirs if p not in current_pythonpath
+                ) + (":" + current_pythonpath if current_pythonpath else "")
+                if "VIRTUAL_ENV" not in env:
+                    if wt_venv_bin.parent.exists():
+                        env["VIRTUAL_ENV"] = str(wt_venv_bin.parent)
+                    elif repo_venv_bin.parent.exists():
+                        env["VIRTUAL_ENV"] = str(repo_venv_bin.parent)
+                if check.get("disposable_postgres") is True:
+                    expected = str(
+                        check.get("expected_database") or check.get("expected_db") or ""
+                    ).strip()
+                    database_url = str(
+                        check.get("database_url") or inherited_database_url or ""
+                    ).strip()
+                    actual = (
+                        (urlparse(database_url).path or "").lstrip("/").split("/", 1)[0]
+                        if database_url
+                        else ""
+                    )
+                    if (
+                        not expected
+                        or not database_url
+                        or not database_url.startswith(("postgresql://", "postgresql+"))
+                        or actual.lower() == "minime"
+                        or actual != expected
+                    ):
+                        reason = "Disposable PostgreSQL check rejected: expected_database must be non-empty and database URL must target a non-canonical database with the exact expected name."
+                        result = CheckResult(
+                            job_id=job_id,
+                            check_name=name,
+                            command=command,
+                            exit_code=126,
+                            duration_ms=0,
+                            output_snippet=reason,
+                            candidate_sha=candidate_sha,
+                            candidate_generation=candidate_generation,
+                        )
+                        results.append(result)
+                        diagnostics.append(
+                            EvidenceDiagnostic(
+                                job_id=job_id,
+                                attempt_id=attempt_id,
+                                stage_type="CHECKS",
+                                check_name=name,
+                                diagnostic_status=EvidenceDiagnosticStatus.FAIL,
+                                environment_identity=env_identity,
+                                candidate_sha=candidate_sha,
+                                reason=reason,
+                                evidence_reference={"exit_code": 126},
+                            )
+                        )
+                        continue
+                    env["MINIME_DATABASE_URL"] = database_url
+                    env["MINIME_EXPECTED_DATABASE"] = expected
+
+                cmd_to_run = command
+                if "pytest" in command and "-o pythonpath" not in command:
+                    cmd_to_run = f'{command} -o pythonpath=". src"'
+
+                start = asyncio.get_running_loop().time()
+                proc = None
+                try:
+                    from minime.services.agent_confinement import AgentProcessConfinement
+
+                    confinement = AgentProcessConfinement(
+                        allowed_worktree_path=str(worktree_path),
+                        runtime_root=self.runtime_root,
+                    )
+                    preflight = confinement.validate_command_preflight(cwd=str(worktree_path))
+                    if (
+                        not confinement.is_confinement_available()
+                        or preflight.outcome != ExternalOutcome.SUCCESS
+                    ):
+                        reason = f"Check environment unavailable: Process confinement failed: {preflight.error_message if preflight.outcome != ExternalOutcome.SUCCESS else 'Agent process confinement capability unavailable.'}"
+                        result = CheckResult(
+                            job_id=job_id,
+                            check_name=name,
+                            command=command,
+                            exit_code=126,
+                            duration_ms=0,
+                            output_snippet=reason,
+                            candidate_sha=candidate_sha,
+                            candidate_generation=candidate_generation,
+                        )
+                        results.append(result)
+                        diagnostics.append(
+                            EvidenceDiagnostic(
+                                job_id=job_id,
+                                attempt_id=attempt_id,
+                                stage_type="CHECKS",
+                                check_name=name,
+                                diagnostic_status=EvidenceDiagnosticStatus.ENVIRONMENT_UNAVAILABLE,
+                                environment_identity=env_identity,
+                                candidate_sha=candidate_sha,
+                                reason=reason,
+                                evidence_reference={"exit_code": 126, "command": command},
+                            )
+                        )
+                        continue
+
+                    wrapped_cmd = confinement.wrap_command(
+                        cmd_to_run,
+                        secure_cache_path=pycache_dir,
+                    )
+                    proc = await asyncio.create_subprocess_exec(
+                        *wrapped_cmd,
+                        cwd=str(worktree_path),
+                        env=env,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        start_new_session=True,
+                    )
+                    stdout, stderr = await asyncio.wait_for(
+                        proc.communicate(), timeout=self.timeout_seconds
+                    )
+                    duration_ms = int((asyncio.get_running_loop().time() - start) * 1000)
+                    output = (stdout + stderr).decode(errors="replace")
+                    exit_code = proc.returncode or 0
+                except asyncio.TimeoutError:
+                    duration_ms = int((asyncio.get_running_loop().time() - start) * 1000)
+                    if proc and proc.returncode is None:
+                        try:
+                            os.killpg(proc.pid, signal.SIGKILL)
+                        except OSError:
+                            pass
+                    output = (
+                        f"Environment execution failure: Check timed out after {self.timeout_seconds}s"
+                    )
+                    exit_code = 124
+                except Exception as err:
+                    duration_ms = int((asyncio.get_running_loop().time() - start) * 1000)
+                    if proc and proc.returncode is None:
+                        try:
+                            os.killpg(proc.pid, signal.SIGKILL)
+                        except OSError:
+                            pass
+                    output = f"Environment execution failure: {err}"
+                    exit_code = 127
+                except BaseException:
+                    if proc and proc.returncode is None:
+                        try:
+                            os.killpg(proc.pid, signal.SIGKILL)
+                        except OSError:
+                            pass
+                    raise
+
+                snippet = redact_secrets(output)[-self.output_limit :]
                 result = CheckResult(
                     job_id=job_id,
                     check_name=name,
                     command=command,
-                    exit_code=2,
-                    duration_ms=0,
-                    output_snippet="Missing check command.",
+                    exit_code=exit_code,
+                    duration_ms=duration_ms,
+                    output_snippet=snippet,
                     candidate_sha=candidate_sha,
                     candidate_generation=candidate_generation,
                 )
                 results.append(result)
+
+                # Classify diagnostic
+                if exit_code == 0:
+                    diag_status = EvidenceDiagnosticStatus.PASS
+                    reason = "Check passed successfully."
+                elif (
+                    exit_code in (126, 127)
+                    or "command not found" in snippet.lower()
+                    or "no such file or directory" in snippet.lower()
+                ):
+                    diag_status = EvidenceDiagnosticStatus.ENVIRONMENT_UNAVAILABLE
+                    reason = f"Check environment unavailable: {snippet}"
+                else:
+                    diag_status = EvidenceDiagnosticStatus.FAIL
+                    reason = f"Check failed: {snippet}"
+
                 diag = EvidenceDiagnostic(
                     job_id=job_id,
                     attempt_id=attempt_id,
                     stage_type="CHECKS",
                     check_name=name,
-                    diagnostic_status=EvidenceDiagnosticStatus.FAIL,
+                    diagnostic_status=diag_status,
                     environment_identity=env_identity,
                     candidate_sha=candidate_sha,
-                    reason="Missing check command.",
-                    evidence_reference={"exit_code": 2},
+                    reason=reason,
+                    evidence_reference={"exit_code": exit_code, "command": command},
                 )
                 diagnostics.append(diag)
-                continue
 
-            env = os.environ.copy()
-            inherited_database_url = env.pop("MINIME_DATABASE_URL", None)
-            env.pop("MINIME_EXPECTED_DATABASE", None)
+            # Post-check worktree hygiene: purge any transient untracked runtime artifacts
+            from minime.services.candidate_manifest import purge_transient_generated_artifacts
 
-            # Isolate bytecode compilation to a secure, process-private directory outside candidate worktree
-            import stat
-            import tempfile
+            purge_transient_generated_artifacts(worktree_path)
 
-            current_uid = os.getuid()
-            pycache_dir: Path | None = None
-
-            # Attempt 1: XDG_CACHE_HOME or ~/.cache/minime/pycache/<job_id>
-            candidate_base = os.environ.get("XDG_CACHE_HOME")
-            if candidate_base:
-                base_path = Path(candidate_base).expanduser()
-            else:
-                base_path = Path.home() / ".cache"
-
-            try:
-                # Validate trusted ownership of base path if exists
-                if base_path.exists():
-                    st = os.stat(base_path)
-                    if not os.path.islink(base_path) and st.st_uid == current_uid:
-                        target = base_path / "minime" / "pycache" / job_id
-                        target.mkdir(parents=True, exist_ok=True, mode=0o700)
-                        if not os.path.islink(target) and os.stat(target).st_uid == current_uid:
-                            os.chmod(target, 0o700)
-                            pycache_dir = target
-                else:
-                    target = base_path / "minime" / "pycache" / job_id
-                    target.mkdir(parents=True, exist_ok=True, mode=0o700)
-                    if not os.path.islink(target) and os.stat(target).st_uid == current_uid:
-                        os.chmod(target, 0o700)
-                        pycache_dir = target
-            except (OSError, PermissionError):
-                pycache_dir = None
-
-            # Attempt 2: Fallback to securely generated private temporary directory (0700)
-            if pycache_dir is None:
-                tmp_dir = tempfile.mkdtemp(prefix=f"minime_cache_{current_uid}_", suffix=f"_{job_id}")
-                os.chmod(tmp_dir, 0o700)
-                pycache_dir = Path(tmp_dir)
-
-            # Strict verification: no-follow, current UID ownership, mode 0700
-            st_cache = os.stat(pycache_dir)
-            if os.path.islink(pycache_dir) or st_cache.st_uid != current_uid:
-                raise PermissionError(
-                    f"Refusing to use insecure or unowned bytecode cache path: {pycache_dir}"
-                )
-            if stat.S_IMODE(st_cache.st_mode) & 0o077 != 0:
-                os.chmod(pycache_dir, 0o700)
-
-            env["PYTHONPYCACHEPREFIX"] = str(pycache_dir.resolve())
-
-            wt_path = Path(worktree_path)
-            wt_venv_bin = wt_path / ".venv" / "bin"
-            repo_venv_bin = Path.cwd() / ".venv" / "bin"
-            standard_paths = [
-                str(wt_venv_bin),
-                str(repo_venv_bin),
-                "/Users/silveriobernal/.local/bin",
-                "/opt/homebrew/bin",
-                "/usr/local/bin",
-                "/usr/bin",
-                "/bin",
-            ]
-            current_path = env.get("PATH", "")
-            env["PATH"] = (
-                ":".join(p for p in standard_paths if p not in current_path) + ":" + current_path
+            return ChecksRunResult(
+                passed=all(result.exit_code == 0 for result in results),
+                results=results,
+                diagnostics=diagnostics,
             )
-            current_pythonpath = env.get("PYTHONPATH", "")
-            pythonpath_dirs = [
-                str(wt_path),
-                str(wt_path / "src"),
-                str(Path.cwd()),
-                str(Path.cwd() / "src"),
-            ]
-            env["PYTHONPATH"] = ":".join(
-                p for p in pythonpath_dirs if p not in current_pythonpath
-            ) + (":" + current_pythonpath if current_pythonpath else "")
-            if "VIRTUAL_ENV" not in env:
-                if wt_venv_bin.parent.exists():
-                    env["VIRTUAL_ENV"] = str(wt_venv_bin.parent)
-                elif repo_venv_bin.parent.exists():
-                    env["VIRTUAL_ENV"] = str(repo_venv_bin.parent)
-            if check.get("disposable_postgres") is True:
-                expected = str(
-                    check.get("expected_database") or check.get("expected_db") or ""
-                ).strip()
-                database_url = str(
-                    check.get("database_url") or inherited_database_url or ""
-                ).strip()
-                actual = (
-                    (urlparse(database_url).path or "").lstrip("/").split("/", 1)[0]
-                    if database_url
-                    else ""
-                )
-                if (
-                    not expected
-                    or not database_url
-                    or not database_url.startswith(("postgresql://", "postgresql+"))
-                    or actual.lower() == "minime"
-                    or actual != expected
-                ):
-                    reason = "Disposable PostgreSQL check rejected: expected_database must be non-empty and database URL must target a non-canonical database with the exact expected name."
-                    result = CheckResult(
-                        job_id=job_id,
-                        check_name=name,
-                        command=command,
-                        exit_code=126,
-                        duration_ms=0,
-                        output_snippet=reason,
-                        candidate_sha=candidate_sha,
-                        candidate_generation=candidate_generation,
-                    )
-                    results.append(result)
-                    diagnostics.append(
-                        EvidenceDiagnostic(
-                            job_id=job_id,
-                            attempt_id=attempt_id,
-                            stage_type="CHECKS",
-                            check_name=name,
-                            diagnostic_status=EvidenceDiagnosticStatus.FAIL,
-                            environment_identity=env_identity,
-                            candidate_sha=candidate_sha,
-                            reason=reason,
-                            evidence_reference={"exit_code": 126},
-                        )
-                    )
-                    continue
-                env["MINIME_DATABASE_URL"] = database_url
-                env["MINIME_EXPECTED_DATABASE"] = expected
+        finally:
+            for c_path in ephemeral_caches:
+                if c_path.exists():
+                    import shutil
 
-            cmd_to_run = command
-            if "pytest" in command and "-o pythonpath" not in command:
-                cmd_to_run = f'{command} -o pythonpath=". src"'
-
-            start = asyncio.get_running_loop().time()
-            proc = None
-            try:
-                from minime.services.agent_confinement import AgentProcessConfinement
-
-                confinement = AgentProcessConfinement(
-                    allowed_worktree_path=str(worktree_path),
-                    runtime_root=self.runtime_root,
-                )
-                preflight = confinement.validate_command_preflight(cwd=str(worktree_path))
-                if (
-                    not confinement.is_confinement_available()
-                    or preflight.outcome != ExternalOutcome.SUCCESS
-                ):
-                    reason = f"Check environment unavailable: Process confinement failed: {preflight.error_message if preflight.outcome != ExternalOutcome.SUCCESS else 'Agent process confinement capability unavailable.'}"
-                    result = CheckResult(
-                        job_id=job_id,
-                        check_name=name,
-                        command=command,
-                        exit_code=126,
-                        duration_ms=0,
-                        output_snippet=reason,
-                        candidate_sha=candidate_sha,
-                        candidate_generation=candidate_generation,
-                    )
-                    results.append(result)
-                    diagnostics.append(
-                        EvidenceDiagnostic(
-                            job_id=job_id,
-                            attempt_id=attempt_id,
-                            stage_type="CHECKS",
-                            check_name=name,
-                            diagnostic_status=EvidenceDiagnosticStatus.ENVIRONMENT_UNAVAILABLE,
-                            environment_identity=env_identity,
-                            candidate_sha=candidate_sha,
-                            reason=reason,
-                            evidence_reference={"exit_code": 126, "command": command},
-                        )
-                    )
-                    continue
-
-                wrapped_cmd = confinement.wrap_command(
-                    cmd_to_run,
-                    secure_cache_path=pycache_dir,
-                )
-                proc = await asyncio.create_subprocess_exec(
-                    *wrapped_cmd,
-                    cwd=str(worktree_path),
-                    env=env,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    start_new_session=True,
-                )
-                stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(), timeout=self.timeout_seconds
-                )
-                duration_ms = int((asyncio.get_running_loop().time() - start) * 1000)
-                output = (stdout + stderr).decode(errors="replace")
-                exit_code = proc.returncode or 0
-            except asyncio.TimeoutError:
-                duration_ms = int((asyncio.get_running_loop().time() - start) * 1000)
-                if proc and proc.returncode is None:
-                    try:
-                        os.killpg(proc.pid, signal.SIGKILL)
-                    except OSError:
-                        pass
-                output = (
-                    f"Environment execution failure: Check timed out after {self.timeout_seconds}s"
-                )
-                exit_code = 124
-            except Exception as err:
-                duration_ms = int((asyncio.get_running_loop().time() - start) * 1000)
-                if proc and proc.returncode is None:
-                    try:
-                        os.killpg(proc.pid, signal.SIGKILL)
-                    except OSError:
-                        pass
-                output = f"Environment execution failure: {err}"
-                exit_code = 127
-            except BaseException:
-                if proc and proc.returncode is None:
-                    try:
-                        os.killpg(proc.pid, signal.SIGKILL)
-                    except OSError:
-                        pass
-                raise
-
-            snippet = redact_secrets(output)[-self.output_limit :]
-            result = CheckResult(
-                job_id=job_id,
-                check_name=name,
-                command=command,
-                exit_code=exit_code,
-                duration_ms=duration_ms,
-                output_snippet=snippet,
-                candidate_sha=candidate_sha,
-                candidate_generation=candidate_generation,
-            )
-            results.append(result)
-
-            # Classify diagnostic
-            if exit_code == 0:
-                diag_status = EvidenceDiagnosticStatus.PASS
-                reason = "Check passed successfully."
-            elif (
-                exit_code in (126, 127)
-                or "command not found" in snippet.lower()
-                or "no such file or directory" in snippet.lower()
-            ):
-                diag_status = EvidenceDiagnosticStatus.ENVIRONMENT_UNAVAILABLE
-                reason = f"Check environment unavailable: {snippet}"
-            else:
-                diag_status = EvidenceDiagnosticStatus.FAIL
-                reason = f"Check failed: {snippet}"
-
-            diag = EvidenceDiagnostic(
-                job_id=job_id,
-                attempt_id=attempt_id,
-                stage_type="CHECKS",
-                check_name=name,
-                diagnostic_status=diag_status,
-                environment_identity=env_identity,
-                candidate_sha=candidate_sha,
-                reason=reason,
-                evidence_reference={"exit_code": exit_code, "command": command},
-            )
-            diagnostics.append(diag)
-
-        # Post-check worktree hygiene: purge any transient untracked runtime artifacts
-        from minime.services.candidate_manifest import purge_transient_generated_artifacts
-
-        purge_transient_generated_artifacts(worktree_path)
-
-        return ChecksRunResult(
-            passed=all(result.exit_code == 0 for result in results),
-            results=results,
-            diagnostics=diagnostics,
-        )
+                    shutil.rmtree(c_path, ignore_errors=True)

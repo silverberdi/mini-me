@@ -137,6 +137,88 @@ class AgentRuntimeState:
         return False
 
 
+def validate_secure_cache_path(path: str | Path, expected_uid: int | None = None) -> Path:
+    """Strictly validate a private bytecode cache path and all its ancestor components.
+
+    Enforces:
+    - Path exists, is a directory, and is NOT a symlink.
+    - Owner strictly matches expected_uid (defaults to current process UID).
+    - Permissions are strictly 0700 (no group or others permissions).
+    - Path is located inside an authorized base root (user home or system temp directory).
+    - Path is not an allowed root itself.
+    - Every ancestor component up to root:
+      - Must NOT be a symlink.
+      - If under user home: must be owned by expected_uid and not group/world writable.
+      - If system temp: must be sticky (+t) if world-writable.
+    """
+    raw_path = Path(path)
+    if raw_path.is_symlink() or os.path.islink(raw_path):
+        raise PermissionError(f"Secure cache path cannot be a symlink: {raw_path}")
+    p = raw_path.resolve()
+    target_uid = os.getuid() if expected_uid is None else expected_uid
+
+    if not p.exists() or not p.is_dir():
+        raise PermissionError(f"Secure cache path does not exist or is not a directory: {p}")
+
+    # Allowed roots containment
+    home_root = Path.home().resolve()
+    temp_roots = [Path(tempfile.gettempdir()).resolve(), Path("/tmp").resolve()]
+    allowed_roots = [home_root] + temp_roots
+
+    if p in allowed_roots:
+        raise PermissionError(f"Cache path cannot be a root directory: {p}")
+
+    is_under_allowed = False
+    for root in allowed_roots:
+        if root in p.parents:
+            is_under_allowed = True
+            break
+
+    if not is_under_allowed:
+        raise PermissionError(
+            f"Refusing to mount cache path outside authorized roots (~/.cache or /tmp): {p}"
+        )
+
+    st = os.stat(p)
+    if st.st_uid != target_uid:
+        raise PermissionError(
+            f"Secure cache path '{p}' owned by UID {st.st_uid}, expected {target_uid}."
+        )
+    if stat.S_IMODE(st.st_mode) & 0o077 != 0:
+        raise PermissionError(
+            f"Secure cache path '{p}' mode must be strictly 0700, got {oct(stat.S_IMODE(st.st_mode))}."
+        )
+
+    for ancestor in p.parents:
+        if ancestor == Path("/"):
+            continue
+        if os.path.islink(ancestor):
+            raise PermissionError(f"Secure cache path ancestor is a symlink: {ancestor}")
+        try:
+            st_anc = os.stat(ancestor)
+        except OSError as e:
+            raise PermissionError(f"Failed to stat cache path ancestor '{ancestor}': {e}") from e
+
+        if home_root in ancestor.parents or ancestor == home_root:
+            if st_anc.st_uid != target_uid:
+                raise PermissionError(
+                    f"Secure cache ancestor '{ancestor}' owned by UID {st_anc.st_uid}, expected {target_uid}."
+                )
+            if stat.S_IMODE(st_anc.st_mode) & 0o022 != 0:
+                raise PermissionError(
+                    f"Secure cache ancestor '{ancestor}' has insecure permissions (group or world writable)."
+                )
+
+        if any(ancestor == tr for tr in temp_roots):
+            mode = stat.S_IMODE(st_anc.st_mode)
+            if (mode & 0o002 != 0) and not (st_anc.st_mode & stat.S_ISVTX):
+                raise PermissionError(
+                    f"World-writable temporary ancestor '{ancestor}' lacks sticky bit (+t)."
+                )
+
+    return p
+
+
 class AgentProcessConfinement:
     """Enforce OS-level write confinement with attempt-private non-code state."""
 
@@ -736,6 +818,18 @@ class AgentProcessConfinement:
             )
         command_args = ["sh", "-c", cmd] if isinstance(cmd, str) else list(cmd)
 
+        validated_cache: Path | None = None
+        if secure_cache_path is not None:
+            try:
+                validated_cache = validate_secure_cache_path(
+                    secure_cache_path, expected_uid=os.getuid()
+                )
+            except (PermissionError, ValueError, OSError) as err:
+                raise AgentConfinementError(
+                    f"Secure cache path rejected by confinement: {err}",
+                    environment_unavailable=True,
+                ) from err
+
         if self.confinement_mechanism == "bubblewrap":
             wrapped = [
                 "bwrap",
@@ -751,8 +845,8 @@ class AgentProcessConfinement:
                 self.runtime_root,
                 self.runtime_root,
             ]
-            if secure_cache_path is not None:
-                cache_str = str(Path(secure_cache_path).resolve())
+            if validated_cache is not None:
+                cache_str = str(validated_cache)
                 wrapped.extend(["--dir", cache_str, "--bind", cache_str, cache_str])
             if runtime_state is not None:
                 wrapped.extend(

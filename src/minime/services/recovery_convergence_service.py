@@ -16,6 +16,7 @@ from minime.domain.enums import (
     AuditStatus,
     ChangeStatus,
     EventType,
+    EvidenceDiagnosticStatus,
     ExternalActionObservation,
     ExternalActionStatus,
     ExternalActionType,
@@ -668,6 +669,15 @@ class RecoveryConvergenceService:
             raise ValueError(
                 f"Run active_job_id '{run.active_job_id}' does not match job '{job.job_id}'."
             )
+        if (
+            (run.stop_details or {}).get("code") == "REVIEW_AUTHORIZATION_PENDING"
+            or job.status == JobStatus.CHECKS_PASSED
+            or run.current_stage == OrchestrationStage.FREEZING_CANDIDATE
+        ):
+            raise ValueError(
+                "Checks have already succeeded for this candidate and the run is awaiting review authorization; "
+                "repeated checks recovery is disallowed without explicit operator authorization."
+            )
         if job.status not in {JobStatus.CHECKS_FAILED, JobStatus.CHECKS_RUNNING}:
             raise ValueError(
                 f"Job status is '{job.status.value}', expected CHECKS_FAILED or CHECKS_RUNNING."
@@ -770,8 +780,12 @@ class RecoveryConvergenceService:
             )
         ]
 
-        # Inspect if latest failure was a pre-check environmental failure recorded in Run.stop_details
         stop_details = run.stop_details or {}
+        if stop_details.get("candidate_sha") and stop_details.get("candidate_sha") != job.candidate_sha:
+            raise ValueError(
+                f"Stop details candidate_sha '{stop_details.get('candidate_sha')}' does not match job candidate_sha '{job.candidate_sha}'."
+            )
+
         is_precheck_failure = (
             stop_details.get("code") == "CHECKS_ONLY_PIPELINE_EXCEPTION"
             and stop_details.get("exception_type") in {"PermissionError", "AgentConfinementError", "OSError"}
@@ -781,21 +795,55 @@ class RecoveryConvergenceService:
             cr.created_at for cr in cand_crs if getattr(cr, "created_at", None)
         ]
 
+        # Fail-closed rejection of application code errors in the latest execution or stop_details
+        code_error_signals = [
+            "assertionerror",
+            "assertion error",
+            "syntaxerror",
+            "indentationerror",
+            "nameerror",
+            "attributeerror",
+            "typeerror",
+            "valueerror",
+            "importerror",
+            "modulenotfounderror",
+            "failed (failures=",
+            "failed (errors=",
+            "ruff failed",
+            "lint error",
+            "found 1 error",
+            "found ",
+            "imported but unused",
+            "unused import",
+        ]
+
         if is_precheck_failure:
-            # Pre-check failure occurred before a new batch of results could be saved.
-            # Validate that stop_details proves an allowlisted runner environmental fault.
             err_text = str(stop_details.get("error") or "").lower()
-            if not (
-                ("permissionerror" in err_text or "[errno 13]" in err_text or "permission denied" in err_text)
-                or "confinement" in err_text
-                or "minime_pycache" in err_text
-            ):
+            if any(sig in err_text for sig in code_error_signals):
                 raise ValueError(
-                    f"Pre-check pipeline failure is not a recognized runner environmental fault: {err_text}"
+                    "Prior check failure is an application code error, not a proven runner environmental fault in latest execution."
                 )
-            return
 
         if not cand_all_ts:
+            if is_precheck_failure:
+                # Pre-check failure occurred before check results could be saved.
+                # Verify temporal alignment: stop_details cannot be stale compared to latest attempt
+                if latest_att is not None and getattr(latest_att, "created_at", None):
+                    ref_time = run.updated_at or run.created_at
+                    if ref_time and ref_time < latest_att.created_at - timedelta(seconds=5):
+                        raise ValueError(
+                            "Latest attempt has no check results or diagnostics; historical failures cannot substantiate recovery."
+                        )
+                err_text = str(stop_details.get("error") or "").lower()
+                if not (
+                    ("permissionerror" in err_text or "[errno 13]" in err_text or "permission denied" in err_text)
+                    or "confinement" in err_text
+                    or ("minime_pycache" in err_text or "minime_cache" in err_text)
+                ):
+                    raise ValueError(
+                        f"Pre-check pipeline failure is not a recognized runner environmental fault: {err_text}"
+                    )
+                return
             raise ValueError("No check results or evidence diagnostics found for candidate.")
 
         latest_ts = max(cand_all_ts)
@@ -830,23 +878,6 @@ class RecoveryConvergenceService:
             if getattr(cr, "created_at", None) and cr.created_at >= window_start
         ]
 
-        # Fail-closed rejection of application code errors in the latest execution
-        code_error_signals = [
-            "assertionerror",
-            "assertion error",
-            "syntaxerror",
-            "indentationerror",
-            "nameerror",
-            "attributeerror",
-            "typeerror",
-            "valueerror",
-            "importerror",
-            "modulenotfounderror",
-            "failed (failures=",
-            "failed (errors=",
-            "ruff failed",
-            "lint error",
-        ]
         for diag in batch_diags:
             reason = (diag.reason or "").lower()
             details_str = str(diag.evidence_reference or "").lower()
@@ -864,33 +895,54 @@ class RecoveryConvergenceService:
         def _is_environmental_proven(text: str) -> bool:
             t = text.lower()
             return (
-                ("/dev/null" in t)
-                and ("permissionerror" in t or "[errno 13]" in t or "permission denied" in t)
-            ) or ("confinement preflight" in t or "runner environmental fault" in t)
-
-        # In the authoritative latest execution, verify that every failed check was due to an environmental fault
-        failed_crs = [cr for cr in batch_crs if cr.exit_code != 0]
-        for cr in failed_crs:
-            snippet = cr.output_snippet or ""
-            matching_diags = [d for d in batch_diags if d.check_name == cr.check_name]
-            cr_env_proven = _is_environmental_proven(snippet) or any(
-                _is_environmental_proven(f"{d.reason or ''} {str(d.evidence_reference or '')}")
-                for d in matching_diags
+                (("/dev/null" in t) and ("permissionerror" in t or "[errno 13]" in t or "permission denied" in t))
+                or ("confinement preflight" in t or "runner environmental fault" in t)
+                or ("minime_pycache" in t or "minime_cache" in t)
             )
-            if not cr_env_proven:
-                raise ValueError(
-                    f"Prior check failure for '{cr.check_name}' (exit code {cr.exit_code}) is not a proven runner environmental fault in latest execution."
+
+        # Check for proven pipeline runner diagnostic
+        pipeline_runner_diags = [
+            d
+            for d in batch_diags
+            if d.check_name == "checks_runner_pipeline"
+            and d.diagnostic_status == EvidenceDiagnosticStatus.ENVIRONMENT_UNAVAILABLE
+        ]
+        has_proven_pipeline_env_diag = False
+        for pdiag in pipeline_runner_diags:
+            diag_text = f"{pdiag.reason or ''} {str(pdiag.evidence_reference or '')}"
+            if _is_environmental_proven(diag_text):
+                has_proven_pipeline_env_diag = True
+                break
+
+        # Check for proven check results
+        failed_crs = [cr for cr in batch_crs if cr.exit_code != 0]
+        all_failed_crs_env = True
+        has_proven_cr_env = False
+        if failed_crs:
+            for cr in failed_crs:
+                snippet = cr.output_snippet or ""
+                matching_diags = [d for d in batch_diags if d.check_name == cr.check_name]
+                cr_env_proven = _is_environmental_proven(snippet) or any(
+                    _is_environmental_proven(f"{d.reason or ''} {str(d.evidence_reference or '')}")
+                    for d in matching_diags
                 )
+                if not cr_env_proven:
+                    all_failed_crs_env = False
+                    break
+                has_proven_cr_env = True
+        else:
+            all_failed_crs_env = False
 
-        # Require at least one positive proof of runner environmental fault across the latest execution batch
-        environmental_proven = any(
-            _is_environmental_proven(f"{diag.reason or ''} {str(diag.evidence_reference or '')}")
-            for diag in batch_diags
-        ) or any(_is_environmental_proven(cr.output_snippet or "") for cr in batch_crs)
+        # If a precheck pipeline failure is recorded on the run, verify it as an environmental fault
+        has_proven_precheck = False
+        if is_precheck_failure:
+            err_text = str(stop_details.get("error") or "").lower()
+            if _is_environmental_proven(err_text):
+                has_proven_precheck = True
 
-        if not environmental_proven:
+        if not (has_proven_pipeline_env_diag or has_proven_precheck or (all_failed_crs_env and has_proven_cr_env)):
             raise ValueError(
-                "Prior check failure does not substantiate a proven runner environmental fault (/dev/null or confinement preflight error) in latest execution."
+                "Prior check failure does not substantiate a proven runner environmental fault (/dev/null, minime_pycache, or confinement preflight error) in latest execution."
             )
 
     def recover_checks_only(

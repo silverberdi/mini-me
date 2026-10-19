@@ -2017,6 +2017,17 @@ class OrchestrationService:
                                 run.run_id,
                                 redacted_error,
                             )
+                            current_job = self.uow.jobs.get_by_id(job.job_id)
+                            if current_job and current_job.status not in {
+                                JobStatus.CHECKS_FAILED,
+                                JobStatus.FAILED,
+                            }:
+                                self.uow.jobs.transition(
+                                    job.job_id,
+                                    JobStatus.CHECKS_FAILED.value,
+                                    error_message=redacted_error,
+                                    claim_context=claim_context,
+                                )
                             _stop_coordinator_run(
                                 run,
                                 stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
@@ -2026,6 +2037,8 @@ class OrchestrationService:
                                     "code": "CHECKS_ONLY_PIPELINE_EXCEPTION",
                                     "exception_type": type(exc).__name__,
                                     "error": redacted_error,
+                                    "candidate_sha": job.candidate_sha,
+                                    "generation": run.current_generation,
                                 },
                             )
                             break
@@ -2036,6 +2049,13 @@ class OrchestrationService:
                         job, run, project
                     )
                     if not valid_batch:
+                        if job.status not in {JobStatus.CHECKS_FAILED, JobStatus.FAILED}:
+                            self.uow.jobs.transition(
+                                job.job_id,
+                                JobStatus.CHECKS_FAILED.value,
+                                error_message=batch_err or "Deterministic checks batch invalid.",
+                                claim_context=claim_context,
+                            )
                         if is_checks_only:
                             _stop_coordinator_run(
                                 run,
@@ -2045,6 +2065,8 @@ class OrchestrationService:
                                 stop_details={
                                     "code": "INCOMPLETE_AUTHORITATIVE_CHECKS",
                                     "error": batch_err,
+                                    "candidate_sha": job.candidate_sha,
+                                    "generation": run.current_generation,
                                 },
                             )
                             break

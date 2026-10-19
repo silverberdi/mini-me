@@ -9,6 +9,7 @@ import re
 import subprocess
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 from minime.adapters.openrouter_adapter import OpenRouterAdapter, OpenRouterRequest
 from minime.config import (
@@ -79,7 +80,7 @@ from minime.services.candidate_manifest import (
     CandidateManifestService,
 )
 from minime.services.capacity_lifecycle_service import CapacityLifecycleService
-from minime.services.checks_runner import ChecksRunner
+from minime.services.checks_runner import ChecksRunner, ChecksRunResult
 from minime.services.cli_preflight import preflight_cli_invocation
 from minime.services.complementary_policy import validate_complementary_pair
 from minime.services.continuation_engine import (
@@ -686,20 +687,13 @@ class ExecutionPipelineService:
         checks_started = utc_now()
         job = self._transition(job, JobStatus.CHECKS_RUNNING, claim_context=claim_context)
         try:
-            try:
-                check_run = await self.checks_runner.run(
-                    job.job_id,
-                    project.checks or [],
-                    worktree_path,
-                    candidate_sha=job.candidate_sha,
-                    candidate_generation=candidate_generation,
-                )
-            except TypeError:
-                check_run = await self.checks_runner.run(
-                    job.job_id,
-                    project.checks or [],
-                    worktree_path,
-                )
+            check_run = await self._invoke_checks_runner(
+                job.job_id,
+                project.checks or [],
+                worktree_path,
+                candidate_sha=job.candidate_sha,
+                candidate_generation=candidate_generation,
+            )
         except Exception as runner_exc:
             # Runner or environment failure before CheckRunResult was produced.
             # Check if fence is still valid. If fence lost -> rollback with zero writes.
@@ -711,13 +705,16 @@ class ExecutionPipelineService:
                     f"Claim fence lost during checks runner failure for job '{job.job_id}': {fence_exc}"
                 ) from fence_exc
 
-            # Fence is valid: commit CHECKS_FAILED and diagnostic evidence atomically
+            # Fence is valid: stage CHECKS_FAILED and diagnostic evidence without committing here.
+            # The caller (drive_coordinator) transitions Run to NEEDS_HUMAN and commits both
+            # Job and Run atomically in a single PostgreSQL transaction with zero two-phase commit gap.
             redacted_err = redact_secrets(str(runner_exc))
             job = self._transition(
                 job,
                 JobStatus.CHECKS_FAILED,
                 error_message=redacted_err,
                 claim_context=claim_context,
+                auto_commit=False,
             )
             self.uow.evidence_diagnostics.save(
                 EvidenceDiagnostic(
@@ -725,6 +722,7 @@ class ExecutionPipelineService:
                     stage_type="CHECKS",
                     check_name="checks_runner_pipeline",
                     diagnostic_status=EvidenceDiagnosticStatus.ENVIRONMENT_UNAVAILABLE,
+                    environment_identity=str(worktree_path)[-128:],
                     candidate_sha=job.candidate_sha,
                     candidate_generation=candidate_generation,
                     reason=f"Runner execution failed: {type(runner_exc).__name__}: {redacted_err}",
@@ -732,10 +730,10 @@ class ExecutionPipelineService:
                         "exception_type": type(runner_exc).__name__,
                         "error": redacted_err,
                         "checks_only_recovery": True,
+                        "fault_source": "runner_setup_or_confinement",
                     },
                 )
             )
-            self.uow.commit()
             raise
 
         # POST-CHECKS FENCE REVALIDATION: verify claim is still valid before writing ANY results
@@ -2372,21 +2370,14 @@ class ExecutionPipelineService:
             # Deterministic checks stage
             checks_started = utc_now()
             job = self._transition(job, JobStatus.CHECKS_RUNNING)
-            try:
-                check_run = await self.checks_runner.run(
-                    job.job_id,
-                    project.checks,
-                    worktree.path,
-                    candidate_sha=job.candidate_sha or "",
-                    candidate_generation=candidate_generation,
-                    attempt_id=active_attempt.attempt_id if active_attempt else None,
-                )
-            except TypeError:
-                check_run = await self.checks_runner.run(
-                    job.job_id,
-                    project.checks,
-                    worktree.path,
-                )
+            check_run = await self._invoke_checks_runner(
+                job.job_id,
+                project.checks,
+                worktree.path,
+                candidate_sha=job.candidate_sha or "",
+                candidate_generation=candidate_generation,
+                attempt_id=active_attempt.attempt_id if active_attempt else None,
+            )
             check_run_results = check_run.results
             for index, check_result in enumerate(check_run.results):
                 if (
@@ -3666,12 +3657,41 @@ class ExecutionPipelineService:
             raise ValueError(f"Job '{job_id}' not found.")
         return job
 
+    async def _invoke_checks_runner(
+        self,
+        job_id: str,
+        checks: list[dict[str, Any]],
+        worktree_path: Path,
+        *,
+        candidate_sha: str | None = None,
+        candidate_generation: int | None = None,
+        attempt_id: str | None = None,
+    ) -> ChecksRunResult:
+        """Invoke checks runner exactly once after pre-inspecting accepted signature parameters."""
+        import inspect
+
+        sig = inspect.signature(self.checks_runner.run)
+        kwargs: dict[str, Any] = {}
+        if "candidate_sha" in sig.parameters and candidate_sha is not None:
+            kwargs["candidate_sha"] = candidate_sha
+        if "candidate_generation" in sig.parameters and candidate_generation is not None:
+            kwargs["candidate_generation"] = candidate_generation
+        if "attempt_id" in sig.parameters and attempt_id is not None:
+            kwargs["attempt_id"] = attempt_id
+        return await self.checks_runner.run(
+            job_id,
+            checks,
+            worktree_path,
+            **kwargs,
+        )
+
     def _transition(
         self,
         job: Job,
         status: JobStatus,
         error_message: str | None = None,
         claim_context: RecoveryClaimContext | None = None,
+        auto_commit: bool = True,
     ) -> Job:
         updated = self.uow.jobs.transition(
             job.job_id, status.value, error_message=error_message, claim_context=claim_context
@@ -3682,7 +3702,8 @@ class ExecutionPipelineService:
             from minime.domain.models import validate_claim_context_authoritative
 
             validate_claim_context_authoritative(self.uow, claim_context)
-        self.uow.commit()
+        if auto_commit:
+            self.uow.commit()
         return updated
 
     def _save_event(self, event_type: EventType, job: Job, payload: dict) -> None:
