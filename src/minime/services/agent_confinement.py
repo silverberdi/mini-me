@@ -727,6 +727,7 @@ class AgentProcessConfinement:
         runtime_state: AgentRuntimeState | None = None,
         *,
         unshare_network: bool = False,
+        secure_cache_path: str | Path | None = None,
     ) -> list[str]:
         """Wrap a process and bind only its assigned worktree plus private state."""
         if not self.is_confinement_available():
@@ -750,6 +751,9 @@ class AgentProcessConfinement:
                 self.runtime_root,
                 self.runtime_root,
             ]
+            if secure_cache_path is not None:
+                cache_str = str(Path(secure_cache_path).resolve())
+                wrapped.extend(["--dir", cache_str, "--bind", cache_str, cache_str])
             if runtime_state is not None:
                 wrapped.extend(
                     [

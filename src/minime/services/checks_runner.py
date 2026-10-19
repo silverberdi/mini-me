@@ -78,12 +78,55 @@ class ChecksRunner:
             inherited_database_url = env.pop("MINIME_DATABASE_URL", None)
             env.pop("MINIME_EXPECTED_DATABASE", None)
 
-            # Isolate bytecode compilation to an ephemeral directory outside the candidate worktree
+            # Isolate bytecode compilation to a secure, process-private directory outside candidate worktree
+            import stat
             import tempfile
 
-            pycache_dir = Path(tempfile.gettempdir()) / "minime_pycache" / job_id
-            pycache_dir.mkdir(parents=True, exist_ok=True)
-            env["PYTHONPYCACHEPREFIX"] = str(pycache_dir)
+            current_uid = os.getuid()
+            pycache_dir: Path | None = None
+
+            # Attempt 1: XDG_CACHE_HOME or ~/.cache/minime/pycache/<job_id>
+            candidate_base = os.environ.get("XDG_CACHE_HOME")
+            if candidate_base:
+                base_path = Path(candidate_base).expanduser()
+            else:
+                base_path = Path.home() / ".cache"
+
+            try:
+                # Validate trusted ownership of base path if exists
+                if base_path.exists():
+                    st = os.stat(base_path)
+                    if not os.path.islink(base_path) and st.st_uid == current_uid:
+                        target = base_path / "minime" / "pycache" / job_id
+                        target.mkdir(parents=True, exist_ok=True, mode=0o700)
+                        if not os.path.islink(target) and os.stat(target).st_uid == current_uid:
+                            os.chmod(target, 0o700)
+                            pycache_dir = target
+                else:
+                    target = base_path / "minime" / "pycache" / job_id
+                    target.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    if not os.path.islink(target) and os.stat(target).st_uid == current_uid:
+                        os.chmod(target, 0o700)
+                        pycache_dir = target
+            except (OSError, PermissionError):
+                pycache_dir = None
+
+            # Attempt 2: Fallback to securely generated private temporary directory (0700)
+            if pycache_dir is None:
+                tmp_dir = tempfile.mkdtemp(prefix=f"minime_cache_{current_uid}_", suffix=f"_{job_id}")
+                os.chmod(tmp_dir, 0o700)
+                pycache_dir = Path(tmp_dir)
+
+            # Strict verification: no-follow, current UID ownership, mode 0700
+            st_cache = os.stat(pycache_dir)
+            if os.path.islink(pycache_dir) or st_cache.st_uid != current_uid:
+                raise PermissionError(
+                    f"Refusing to use insecure or unowned bytecode cache path: {pycache_dir}"
+                )
+            if stat.S_IMODE(st_cache.st_mode) & 0o077 != 0:
+                os.chmod(pycache_dir, 0o700)
+
+            env["PYTHONPYCACHEPREFIX"] = str(pycache_dir.resolve())
 
             wt_path = Path(worktree_path)
             wt_venv_bin = wt_path / ".venv" / "bin"
@@ -209,7 +252,10 @@ class ChecksRunner:
                     )
                     continue
 
-                wrapped_cmd = confinement.wrap_command(cmd_to_run)
+                wrapped_cmd = confinement.wrap_command(
+                    cmd_to_run,
+                    secure_cache_path=pycache_dir,
+                )
                 proc = await asyncio.create_subprocess_exec(
                     *wrapped_cmd,
                     cwd=str(worktree_path),

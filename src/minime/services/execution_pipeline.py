@@ -683,23 +683,60 @@ class ExecutionPipelineService:
         if status_res.returncode != 0 or status_res.stdout.strip():
             raise ValueError("Preserved worktree is not clean.")
 
-        # Deterministic checks execution with fenced state transition
         checks_started = utc_now()
         job = self._transition(job, JobStatus.CHECKS_RUNNING, claim_context=claim_context)
         try:
-            check_run = await self.checks_runner.run(
-                job.job_id,
-                project.checks or [],
-                worktree_path,
-                candidate_sha=job.candidate_sha,
-                candidate_generation=candidate_generation,
+            try:
+                check_run = await self.checks_runner.run(
+                    job.job_id,
+                    project.checks or [],
+                    worktree_path,
+                    candidate_sha=job.candidate_sha,
+                    candidate_generation=candidate_generation,
+                )
+            except TypeError:
+                check_run = await self.checks_runner.run(
+                    job.job_id,
+                    project.checks or [],
+                    worktree_path,
+                )
+        except Exception as runner_exc:
+            # Runner or environment failure before CheckRunResult was produced.
+            # Check if fence is still valid. If fence lost -> rollback with zero writes.
+            try:
+                validate_claim_context_authoritative(self.uow, claim_context, for_update=True)
+            except Exception as fence_exc:
+                self.uow.rollback()
+                raise StaleClaimError(
+                    f"Claim fence lost during checks runner failure for job '{job.job_id}': {fence_exc}"
+                ) from fence_exc
+
+            # Fence is valid: commit CHECKS_FAILED and diagnostic evidence atomically
+            redacted_err = redact_secrets(str(runner_exc))
+            job = self._transition(
+                job,
+                JobStatus.CHECKS_FAILED,
+                error_message=redacted_err,
+                claim_context=claim_context,
             )
-        except TypeError:
-            check_run = await self.checks_runner.run(
-                job.job_id,
-                project.checks or [],
-                worktree_path,
+            self.uow.evidence_diagnostics.save(
+                EvidenceDiagnostic(
+                    job_id=job.job_id,
+                    stage_type="CHECKS",
+                    check_name="checks_runner_pipeline",
+                    diagnostic_status=EvidenceDiagnosticStatus.ENVIRONMENT_UNAVAILABLE,
+                    candidate_sha=job.candidate_sha,
+                    candidate_generation=candidate_generation,
+                    reason=f"Runner execution failed: {type(runner_exc).__name__}: {redacted_err}",
+                    evidence_reference={
+                        "exception_type": type(runner_exc).__name__,
+                        "error": redacted_err,
+                        "checks_only_recovery": True,
+                    },
+                )
             )
+            self.uow.commit()
+            raise
 
         # POST-CHECKS FENCE REVALIDATION: verify claim is still valid before writing ANY results
         # Acquire short row lock on recovery claim to serialize evidence publication through commit

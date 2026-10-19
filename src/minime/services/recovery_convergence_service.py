@@ -652,17 +652,26 @@ class RecoveryConvergenceService:
         from minime.services.workspace_guard import is_binding_fully_valid
 
         if not run.is_active:
-            raise ValueError("Run is not active.")
-        if run.current_stage != OrchestrationStage.IMPLEMENTING:
+            # Allow inactive runs if stopped with NEEDS_HUMAN from an interrupted checks-only execution
+            is_valid_interrupted_run = (
+                run.current_stage in {OrchestrationStage.IMPLEMENTING, OrchestrationStage.RUNNING_CHECKS}
+                and run.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
+                and run.human_gate == HumanGate.NEEDS_HUMAN
+            )
+            if not is_valid_interrupted_run:
+                raise ValueError("Run is not active.")
+        if run.current_stage not in {OrchestrationStage.IMPLEMENTING, OrchestrationStage.RUNNING_CHECKS}:
             raise ValueError(
-                f"Run current_stage is '{run.current_stage.value}', expected IMPLEMENTING."
+                f"Run current_stage is '{run.current_stage.value}', expected IMPLEMENTING or RUNNING_CHECKS."
             )
         if run.active_job_id != job.job_id:
             raise ValueError(
                 f"Run active_job_id '{run.active_job_id}' does not match job '{job.job_id}'."
             )
-        if job.status != JobStatus.CHECKS_FAILED:
-            raise ValueError(f"Job status is '{job.status.value}', expected CHECKS_FAILED.")
+        if job.status not in {JobStatus.CHECKS_FAILED, JobStatus.CHECKS_RUNNING}:
+            raise ValueError(
+                f"Job status is '{job.status.value}', expected CHECKS_FAILED or CHECKS_RUNNING."
+            )
         if run.project_id != job.project_id:
             raise ValueError("Run project_id does not match job project_id.")
         if run.change_name != job.change_name:
@@ -761,9 +770,31 @@ class RecoveryConvergenceService:
             )
         ]
 
+        # Inspect if latest failure was a pre-check environmental failure recorded in Run.stop_details
+        stop_details = run.stop_details or {}
+        is_precheck_failure = (
+            stop_details.get("code") == "CHECKS_ONLY_PIPELINE_EXCEPTION"
+            and stop_details.get("exception_type") in {"PermissionError", "AgentConfinementError", "OSError"}
+        )
+
         cand_all_ts = [d.created_at for d in cand_diags if getattr(d, "created_at", None)] + [
             cr.created_at for cr in cand_crs if getattr(cr, "created_at", None)
         ]
+
+        if is_precheck_failure:
+            # Pre-check failure occurred before a new batch of results could be saved.
+            # Validate that stop_details proves an allowlisted runner environmental fault.
+            err_text = str(stop_details.get("error") or "").lower()
+            if not (
+                ("permissionerror" in err_text or "[errno 13]" in err_text or "permission denied" in err_text)
+                or "confinement" in err_text
+                or "minime_pycache" in err_text
+            ):
+                raise ValueError(
+                    f"Pre-check pipeline failure is not a recognized runner environmental fault: {err_text}"
+                )
+            return
+
         if not cand_all_ts:
             raise ValueError("No check results or evidence diagnostics found for candidate.")
 

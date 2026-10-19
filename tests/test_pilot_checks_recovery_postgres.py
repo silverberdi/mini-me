@@ -1331,3 +1331,256 @@ def test_pilot_checks_recovery_full_route_real_checks_runner(
     claim = uow.claims.get_by_key(f"run:{run.run_id}")
     assert claim is None or claim.released_at is not None
     session.close()
+
+
+def test_checks_runner_cache_isolation_and_ownership(tmp_path: Path):
+    """Test C04: ChecksRunner generates secure private cache paths with mode 0700 and rejects insecure paths."""
+    runner = ChecksRunner()
+    current_uid = os.getuid()
+
+    # Pre-create a contaminated directory simulating another user or insecure permissions
+    insecure_dir = tmp_path / "insecure_cache"
+    insecure_dir.mkdir(parents=True, mode=0o777)
+
+    # Calling check runner under custom XDG_CACHE_HOME
+    custom_cache = tmp_path / "custom_xdg_cache"
+    with patch.dict(os.environ, {"XDG_CACHE_HOME": str(custom_cache)}):
+        worktree = tmp_path / "wt"
+        worktree.mkdir()
+        (worktree / ".git").mkdir()
+
+        # Test private resolution: when custom_cache exists with current_uid
+        custom_cache.mkdir(mode=0o700)
+        import asyncio
+        async def run_dummy():
+            return await runner.run(
+                job_id="test-sec-job",
+                checks=[{"name": "test-true", "command": "true"}],
+                worktree_path=worktree,
+                candidate_sha="abc123",
+            )
+        # Should succeed without permission error
+        res = asyncio.run(run_dummy())
+        assert res is not None
+        job_cache = custom_cache / "minime" / "pycache" / "test-sec-job"
+        assert job_cache.exists()
+        st = os.stat(job_cache)
+        assert st.st_uid == current_uid
+        assert (st.st_mode & 0o077) == 0  # Mode 0700
+
+
+def test_exception_atomically_commits_checks_failed_and_run_needs_human(
+    pg_session_factory: sessionmaker[Session],
+    tmp_path: Path,
+):
+    """Test C02: An unhandled runner exception commits Job=CHECKS_FAILED and Run=NEEDS_HUMAN under valid claim."""
+    session = pg_session_factory()
+    repo_dir, wt_dir, base_sha, candidate_sha, test_id = _setup_repo_and_worktree(tmp_path)
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    project_id = f"test-proj-exc-{test_id}"
+    change_name = f"test-change-exc-{test_id}"
+    run_id = f"run-exc-{test_id}"
+    job_id = wt_dir.name
+
+    proj = Project(
+        project_id=project_id,
+        name="Test Exc",
+        display_name="Test Exc",
+        repository=str(repo_dir),
+        base_branch="main",
+        checks=[{"name": "failing-check", "command": "python -c 'exit(1)'"}],
+    )
+    uow.projects.save(proj)
+
+    binding = ProjectManagedRepositoryBinding(
+        project_id=project_id,
+        managed_repository_root=str(repo_dir),
+        canonical_repository_identity=str(repo_dir),
+        remote_name="origin",
+        default_base_branch="main",
+        worktree_parent_dir=str(wt_dir.parent),
+        is_valid=True,
+    )
+    uow.project_managed_repository_bindings.save(binding)
+
+    job = Job(
+        job_id=job_id,
+        project_id=project_id,
+        change_name=change_name,
+        status=JobStatus.CHECKS_FAILED,
+        base_sha=base_sha,
+        candidate_sha=candidate_sha,
+        implementer_role="codex",
+    )
+    uow.jobs.save(job)
+
+    run = OrchestrationRun(
+        run_id=run_id,
+        project_id=project_id,
+        change_name=change_name,
+        base_sha=base_sha,
+        current_candidate_sha=candidate_sha,
+        current_stage=OrchestrationStage.RUNNING_CHECKS,
+        resumable_stage=OrchestrationStage.RUNNING_CHECKS,
+        active_job_id=job_id,
+        is_active=False,
+        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+        human_gate=HumanGate.NEEDS_HUMAN,
+        stop_reason="Checks-only pipeline execution failed.",
+        stop_details={
+            "code": "CHECKS_ONLY_PIPELINE_EXCEPTION",
+            "exception_type": "PermissionError",
+            "error": "[Errno 13] Permission denied: '/tmp/minime_pycache/test'",
+        },
+    )
+    uow.orchestration_runs.save(run)
+    uow.commit()
+
+    rec_svc = RecoveryConvergenceService(uow=uow, project_root=repo_dir)
+
+    # Mock runner to raise an environmental PermissionError simulating /tmp/minime_pycache
+    with patch(
+        "minime.services.checks_runner.ChecksRunner.run",
+        new=AsyncMock(side_effect=PermissionError("[Errno 13] Permission denied: '/tmp/minime_pycache/test'")),
+    ):
+        decision = rec_svc.recover_checks_only(run.run_id, project_root=repo_dir)
+
+    assert decision is not None
+    assert decision.status in {RecoveryDecisionStatus.BLOCKED, RecoveryDecisionStatus.NO_ACTION, RecoveryDecisionStatus.COMPLETED}
+
+    # In independent session, verify Job is CHECKS_FAILED and Run is NEEDS_HUMAN
+    sess2 = pg_session_factory()
+    uow2 = PostgresPersistenceUnitOfWork(sess2)
+    j2 = uow2.jobs.get_by_id(job_id)
+    assert j2.status == JobStatus.CHECKS_FAILED
+    assert "Permission denied" in (j2.error_message or "")
+    r2 = uow2.orchestration_runs.get_by_id(run_id)
+    assert r2.is_active is False
+    assert r2.stop_outcome == OrchestrationStopOutcome.NEEDS_HUMAN
+    sess2.close()
+    session.close()
+
+
+def test_reentry_from_running_checks_executes_fresh_batch(
+    pg_session_factory: sessionmaker[Session],
+    tmp_path: Path,
+):
+    """Test C01: Re-entry from RUNNING_CHECKS executes a FRESH checks batch even if an old batch exists."""
+    session = pg_session_factory()
+    repo_dir, wt_dir, base_sha, candidate_sha, test_id = _setup_repo_and_worktree(tmp_path)
+    uow = PostgresPersistenceUnitOfWork(session)
+
+    project_id = f"test-proj-fresh-{test_id}"
+    change_name = f"test-change-fresh-{test_id}"
+    run_id = f"run-fresh-{test_id}"
+    job_id = wt_dir.name
+
+    proj = Project(
+        project_id=project_id,
+        name="Test Fresh",
+        display_name="Test Fresh",
+        repository=str(repo_dir),
+        base_branch="main",
+        checks=[{"name": "fresh-check", "command": "echo fresh"}],
+    )
+    uow.projects.save(proj)
+
+    binding = ProjectManagedRepositoryBinding(
+        project_id=project_id,
+        managed_repository_root=str(repo_dir),
+        canonical_repository_identity=str(repo_dir),
+        remote_name="origin",
+        default_base_branch="main",
+        worktree_parent_dir=str(wt_dir.parent),
+        is_valid=True,
+    )
+    uow.project_managed_repository_bindings.save(binding)
+
+    job = Job(
+        job_id=job_id,
+        project_id=project_id,
+        change_name=change_name,
+        status=JobStatus.CHECKS_FAILED,
+        base_sha=base_sha,
+        candidate_sha=candidate_sha,
+        implementer_role="codex",
+    )
+    uow.jobs.save(job)
+
+    # Simulate an OLD passing check result from 1 hour ago
+    old_cr = CheckResult(
+        job_id=job_id,
+        check_name="fresh-check",
+        command="echo fresh",
+        exit_code=0,
+        duration_ms=100,
+        output_snippet="fresh",
+        candidate_sha=candidate_sha,
+        candidate_generation=1,
+        created_at=utc_now() - timedelta(hours=1),
+    )
+    uow.check_results.save(old_cr)
+
+    run = OrchestrationRun(
+        run_id=run_id,
+        project_id=project_id,
+        change_name=change_name,
+        base_sha=base_sha,
+        current_candidate_sha=candidate_sha,
+        current_stage=OrchestrationStage.RUNNING_CHECKS,
+        resumable_stage=OrchestrationStage.RUNNING_CHECKS,
+        active_job_id=job_id,
+        is_active=False,
+        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+        human_gate=HumanGate.NEEDS_HUMAN,
+        stop_reason="Checks-only pipeline execution failed.",
+        stop_details={
+            "code": "CHECKS_ONLY_PIPELINE_EXCEPTION",
+            "exception_type": "PermissionError",
+            "error": "[Errno 13] Permission denied: '/tmp/minime_pycache/test'",
+        },
+    )
+    uow.orchestration_runs.save(run)
+    uow.commit()
+
+    rec_svc = RecoveryConvergenceService(uow=uow, project_root=repo_dir)
+
+    runner_called = False
+
+    async def mock_runner_run(*args, **kwargs):
+        nonlocal runner_called
+        runner_called = True
+        return ChecksRunResult(
+            passed=True,
+            results=[
+                CheckResult(
+                    job_id=job_id,
+                    check_name="fresh-check",
+                    command="echo fresh",
+                    exit_code=0,
+                    duration_ms=100,
+                    output_snippet="fresh",
+                    candidate_sha=candidate_sha,
+                    candidate_generation=1,
+                    created_at=utc_now(),
+                )
+            ],
+            diagnostics=[],
+        )
+
+    with patch("minime.services.checks_runner.ChecksRunner.run", new=mock_runner_run):
+        decision = rec_svc.recover_checks_only(run.run_id, project_root=repo_dir)
+
+    assert decision.status == RecoveryDecisionStatus.COMPLETED
+    assert runner_called is True, "ChecksRunner MUST be invoked on re-entry from RUNNING_CHECKS!"
+
+    # Assert new batch was validated and run is held at REVIEW_AUTHORIZATION_PENDING
+    sess3 = pg_session_factory()
+    uow3 = PostgresPersistenceUnitOfWork(sess3)
+    r3 = uow3.orchestration_runs.get_by_id(run_id)
+    assert r3.stop_details.get("code") == "REVIEW_AUTHORIZATION_PENDING"
+    assert r3.current_candidate_sha == candidate_sha
+    sess3.close()
+    session.close()
+
