@@ -115,8 +115,23 @@ def test_native_module_runtime_has_one_bootstrap_and_no_orphaned_javascript_asse
     assert '<script src="/static/js/dashboard.js"></script>' not in index
     assert bootstrap.count('import { initDashboard } from "./dashboard.js";') == 1
     assert "let initialized = false;" in bootstrap
+    assert bootstrap.count("function bootstrap()") == 1
+    assert "if (initialized) return;" in bootstrap
+    assert bootstrap.count("void initDashboard();") == 1
     assert bootstrap.count("DOMContentLoaded") == 1
-    assert "addEventListener" not in read("js/dashboard.js")
+    dashboard = read("js/dashboard.js")
+    assert len(re.findall(r"\bexport\s+async\s+function\s+initDashboard\s*\(", dashboard)) == 1
+    dashboard_without_initializer = re.sub(
+        r"\bexport\s+async\s+function\s+initDashboard\s*\([^)]*\)",
+        "",
+        dashboard,
+        count=1,
+    )
+    assert not re.search(r"\binitDashboard\s*\(", dashboard_without_initializer)
+    assert not re.search(
+        r"\b(?:document|window)\.addEventListener\s*\(\s*['\"](?:DOMContentLoaded|load)['\"]",
+        dashboard,
+    )
 
     import_pattern = re.compile(r"(?:from|import)\s*\(?\s*[\"']([^\"']+\.js)[\"']")
     reachable: set[Path] = set()
