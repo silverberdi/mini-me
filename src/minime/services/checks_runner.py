@@ -246,6 +246,7 @@ class ChecksRunner:
                     wrapped_cmd = confinement.wrap_command(
                         cmd_to_run,
                         secure_cache_path=pycache_dir,
+                        job_id=job_id,
                     )
                     proc = await asyncio.create_subprocess_exec(
                         *wrapped_cmd,

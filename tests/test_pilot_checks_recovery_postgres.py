@@ -1439,9 +1439,21 @@ def test_exception_atomically_commits_checks_failed_and_run_needs_human(
             "code": "CHECKS_ONLY_PIPELINE_EXCEPTION",
             "exception_type": "PermissionError",
             "error": "[Errno 13] Permission denied: '/tmp/minime_pycache/test'",
+            "candidate_sha": candidate_sha,
         },
     )
     uow.orchestration_runs.save(run)
+    stop_event = OrchestrationStageEvent(
+        run_id=run_id,
+        from_stage=OrchestrationStage.RUNNING_CHECKS,
+        to_stage=OrchestrationStage.RUNNING_CHECKS,
+        event_type=EventType.ORCHESTRATION_STOPPED.value,
+        transition_key=f"{run_id}:STOP:NEEDS_HUMAN:gen1",
+        evidence_references={"reason": "Checks-only pipeline execution failed."},
+        actor="system",
+        created_at=utc_now(),
+    )
+    uow.orchestration_stage_events.save(stop_event)
     uow.commit()
 
     rec_svc = RecoveryConvergenceService(uow=uow, project_root=repo_dir)
@@ -1827,70 +1839,134 @@ def test_cache_confinement_trusted_path_validation_and_lifecycle(tmp_path: Path)
         assert "not an authorized dedicated minime bytecode cache path shape" in str(exc_info.value)
 
     # 4. Deny insecure permissions on authorized shape (mode 0755)
-    insecure_dir = tmp_path / "minime" / "pycache" / "insecure_job"
-    insecure_dir.mkdir(parents=True, mode=0o755)
-    os.chmod(insecure_dir, 0o755)
-    with pytest.raises(PermissionError) as exc_info:
-        validate_secure_cache_path(insecure_dir, expected_uid=current_uid, job_id="insecure_job")
-    assert "mode must be strictly 0700" in str(exc_info.value)
-
-    # 5. Existing target directory with 0755 mode: safe_prepare_cache_dir fails closed without chmod repair
-    with pytest.raises(PermissionError) as exc_info:
-        safe_prepare_cache_dir(insecure_dir, expected_uid=current_uid, job_id="insecure_job")
-    assert "mode must be strictly 0700" in str(exc_info.value)
-
-    # 6. Deny symlink cache path
-    target_dir = tmp_path / "minime" / "pycache" / "real_job"
-    target_dir.mkdir(parents=True, mode=0o700)
-    os.chmod(target_dir, 0o700)
-    symlink_path = tmp_path / "minime" / "pycache" / "symlink_job"
-    symlink_path.symlink_to(target_dir)
-    with pytest.raises(PermissionError) as exc_info:
-        validate_secure_cache_path(symlink_path, expected_uid=current_uid, job_id="symlink_job")
-    assert "cannot be a symlink" in str(exc_info.value)
-
-    # 7. Deny symlink intermediate ancestor under /tmp
-    temp_dir = Path(tempfile.gettempdir())
-    real_anc = temp_dir / f"minime_real_anc_{uuid.uuid4().hex[:6]}"
-    real_anc.mkdir(mode=0o700)
-    sym_anc = temp_dir / f"minime_sym_anc_{uuid.uuid4().hex[:6]}"
-    sym_anc.symlink_to(real_anc)
+    os.environ["XDG_CACHE_HOME"] = str(tmp_path)
     try:
-        sym_cache_target = sym_anc / "minime" / "pycache" / "job_anc"
+        insecure_dir = tmp_path / "minime" / "pycache" / "insecure_job"
+        insecure_dir.mkdir(parents=True, mode=0o755)
+        os.chmod(insecure_dir, 0o755)
         with pytest.raises(PermissionError) as exc_info:
-            safe_prepare_cache_dir(sym_cache_target, expected_uid=current_uid, job_id="job_anc")
-        assert "component cannot be a symlink" in str(exc_info.value)
+            validate_secure_cache_path(insecure_dir, expected_uid=current_uid, job_id="insecure_job")
+        assert "mode must be strictly 0700" in str(exc_info.value)
+
+        # 5. Existing target directory with 0755 mode: safe_prepare_cache_dir fails closed without chmod repair
+        with pytest.raises(PermissionError) as exc_info:
+            safe_prepare_cache_dir(insecure_dir, expected_uid=current_uid, job_id="insecure_job")
+        assert "mode must be strictly 0700" in str(exc_info.value)
+
+        # 6. Deny symlink cache path
+        target_dir = tmp_path / "minime" / "pycache" / "real_job"
+        target_dir.mkdir(parents=True, mode=0o700)
+        os.chmod(target_dir, 0o700)
+        symlink_path = tmp_path / "minime" / "pycache" / "symlink_job"
+        symlink_path.symlink_to(target_dir)
+        with pytest.raises(PermissionError) as exc_info:
+            validate_secure_cache_path(symlink_path, expected_uid=current_uid, job_id="symlink_job")
+        assert "cannot be a symlink" in str(exc_info.value)
+
+        # 7. Deny symlink intermediate ancestor under primary cache and leaf under /tmp
+        temp_dir = Path(tempfile.gettempdir())
+        real_anc = temp_dir / f"minime_real_anc_{uuid.uuid4().hex[:6]}"
+        real_anc.mkdir(mode=0o700)
+        sym_leaf = temp_dir / f"minime_cache_{current_uid}_symleaf"
+        sym_leaf.symlink_to(real_anc)
+        try:
+            with pytest.raises(PermissionError) as exc_info:
+                validate_secure_cache_path(sym_leaf, expected_uid=current_uid, job_id="symleaf")
+            assert "cannot be a symlink" in str(exc_info.value)
+
+            # Intermediate component symlink in primary hierarchy
+            sym_cache_root = tmp_path / "sym_cache_root"
+            sym_cache_root.mkdir(mode=0o700)
+            sym_minime = sym_cache_root / "minime"
+            sym_minime.symlink_to(real_anc)
+            os.environ["XDG_CACHE_HOME"] = str(sym_cache_root)
+            sym_cache_target = sym_cache_root / "minime" / "pycache" / "job_anc"
+            with pytest.raises(PermissionError) as exc_info:
+                safe_prepare_cache_dir(sym_cache_target, expected_uid=current_uid, job_id="job_anc")
+            assert "component cannot be a symlink" in str(exc_info.value)
+        finally:
+            os.environ["XDG_CACHE_HOME"] = str(tmp_path)
+            if sym_leaf.is_symlink() or sym_leaf.exists():
+                sym_leaf.unlink(missing_ok=True)
+            if real_anc.exists():
+                shutil.rmtree(real_anc, ignore_errors=True)
+
+        # 8. Deny wrong UID
+        with pytest.raises(PermissionError) as exc_info:
+            validate_secure_cache_path(target_dir, expected_uid=current_uid + 999, job_id="real_job")
+        assert "owned by UID" in str(exc_info.value)
+
+        # 9. Valid primary cache directory succeeds
+        valid_path = safe_prepare_cache_dir(target_dir, expected_uid=current_uid, job_id="real_job")
+        assert valid_path == target_dir.resolve()
+
+        # 9b. Valid ephemeral cache directory succeeds
+        ephemeral_target = temp_dir / f"minime_cache_{current_uid}_ephem_job"
+        ephemeral_target.mkdir(mode=0o700, exist_ok=True)
+        os.chmod(ephemeral_target, 0o700)
+        try:
+            valid_ephem = validate_secure_cache_path(
+                ephemeral_target, expected_uid=current_uid, job_id="ephem_job"
+            )
+            assert valid_ephem == ephemeral_target.resolve()
+        finally:
+            shutil.rmtree(ephemeral_target, ignore_errors=True)
+
+        # 9c. Adversarial B01 shapes: reject non-compliant nesting or spoofed locations
+        with pytest.raises(PermissionError) as exc_info:
+            validate_secure_cache_path(Path("/tmp/other/minime/pycache/real_job"), expected_uid=current_uid)
+        assert "not an authorized dedicated minime bytecode cache path shape" in str(exc_info.value)
+
+        with pytest.raises(PermissionError) as exc_info:
+            validate_secure_cache_path(tmp_path / "other" / "minime" / "pycache" / "real_job", expected_uid=current_uid)
+        assert "not an authorized dedicated minime bytecode cache path shape" in str(exc_info.value)
+
+        with pytest.raises(PermissionError) as exc_info:
+            validate_secure_cache_path(temp_dir / f"minime_cache_{current_uid}_real_job" / "nested", expected_uid=current_uid)
+        assert "not an authorized dedicated minime bytecode cache path shape" in str(exc_info.value)
+
+        # 9d. Adversarial B01: World-writable ancestor lacking sticky bit (+t) must be rejected
+        nosticky_root = tmp_path / "nosticky_root"
+        nosticky_root.mkdir(mode=0o700)
+        nosticky_minime = nosticky_root / "minime"
+        nosticky_minime.mkdir(mode=0o777)
+        os.chmod(nosticky_minime, 0o777)
+        os.environ["XDG_CACHE_HOME"] = str(nosticky_root)
+        try:
+            bad_cache = nosticky_root / "minime" / "pycache" / "badsticky"
+            with pytest.raises(PermissionError) as exc_info:
+                safe_prepare_cache_dir(bad_cache, expected_uid=current_uid, job_id="badsticky")
+            assert "lacks sticky bit" in str(exc_info.value)
+        finally:
+            os.environ["XDG_CACHE_HOME"] = str(tmp_path)
+
+        # 10. AgentProcessConfinement.wrap_command strictly rejects non-cache, insecure, and mismatched job_id
+        confinement = AgentProcessConfinement(
+            allowed_worktree_path=str(tmp_path),
+        )
+        if confinement.is_confinement_available():
+            with pytest.raises(AgentConfinementError) as conf_exc:
+                confinement.wrap_command(["echo", "hi"], secure_cache_path=noncache_dir)
+            assert "Secure cache path rejected by confinement" in str(conf_exc.value)
+
+            with pytest.raises(AgentConfinementError) as conf_exc2:
+                confinement.wrap_command(["echo", "hi"], secure_cache_path=insecure_dir)
+            assert "Secure cache path rejected by confinement" in str(conf_exc2.value)
+
+            # Mismatched job_id rejected
+            with pytest.raises(AgentConfinementError) as conf_exc3:
+                confinement.wrap_command(
+                    ["echo", "hi"], secure_cache_path=valid_path, job_id="wrong_job_id"
+                )
+            assert "Secure cache path rejected by confinement" in str(conf_exc3.value)
+
+            # Valid cache mounts safely
+            wrapped = confinement.wrap_command(
+                ["echo", "hi"], secure_cache_path=valid_path, job_id="real_job"
+            )
+            assert len(wrapped) > 0
     finally:
-        if sym_anc.is_symlink() or sym_anc.exists():
-            sym_anc.unlink(missing_ok=True)
-        if real_anc.exists():
-            shutil.rmtree(real_anc, ignore_errors=True)
-
-    # 8. Deny wrong UID
-    with pytest.raises(PermissionError) as exc_info:
-        validate_secure_cache_path(target_dir, expected_uid=current_uid + 999, job_id="real_job")
-    assert "owned by UID" in str(exc_info.value)
-
-    # 9. Valid cache directory succeeds
-    valid_path = safe_prepare_cache_dir(target_dir, expected_uid=current_uid, job_id="real_job")
-    assert valid_path == target_dir.resolve()
-
-    # 10. AgentProcessConfinement.wrap_command strictly rejects non-cache and insecure cache paths
-    confinement = AgentProcessConfinement(
-        allowed_worktree_path=str(tmp_path),
-    )
-    if confinement.is_confinement_available():
-        with pytest.raises(AgentConfinementError) as conf_exc:
-            confinement.wrap_command(["echo", "hi"], secure_cache_path=noncache_dir)
-        assert "Secure cache path rejected by confinement" in str(conf_exc.value)
-
-        with pytest.raises(AgentConfinementError) as conf_exc2:
-            confinement.wrap_command(["echo", "hi"], secure_cache_path=insecure_dir)
-        assert "Secure cache path rejected by confinement" in str(conf_exc2.value)
-
-        # Valid cache mounts safely
-        wrapped = confinement.wrap_command(["echo", "hi"], secure_cache_path=valid_path)
-        assert len(wrapped) > 0
+        os.environ.pop("XDG_CACHE_HOME", None)
 
     # 11. Test ChecksRunner ephemeral cache cleanup lifecycle with hostile XDG_CACHE_HOME
     runner = ChecksRunner()
@@ -2067,34 +2143,103 @@ def test_anti_spoofing_rejects_mismatched_candidate_and_serial_repeats(
     assert decision_missing_cand.status == RecoveryDecisionStatus.BLOCKED
     assert "Stop details missing candidate_sha" in decision_missing_cand.reason_code
 
-    # 7. Test historical legacy N01 stop exception (missing candidate_sha, literal /tmp/minime_pycache, durable stop event)
-    stop_event = OrchestrationStageEvent(
-        run_id=run.run_id,
-        from_stage=OrchestrationStage.RUNNING_CHECKS,
-        to_stage=OrchestrationStage.RUNNING_CHECKS,
-        event_type=EventType.ORCHESTRATION_STOPPED.value,
-        transition_key=f"{run.run_id}:STOP:NEEDS_HUMAN:gen1",
-        evidence_references={"reason": "Checks-only pipeline execution failed."},
-        actor="system",
-        created_at=utc_now(),
-    )
-    uow.orchestration_stage_events.save(stop_event)
+    # 6b. Reject arbitrary candidate attempting to bypass candidate_sha by mentioning /tmp/minime_pycache
     run.stop_details = {
         "code": "CHECKS_ONLY_PIPELINE_EXCEPTION",
         "exception_type": "PermissionError",
-        "error": "[Errno 13] Permission denied: '/tmp/minime_pycache/test'",
+        "error": "[Errno 13] Permission denied: '/tmp/minime_pycache/fake'",
     }
     uow.orchestration_runs.save(run)
     uow.commit()
 
-    decision_legacy = rec_svc.recover_checks_only(run.run_id, project_root=repo_dir)
-    # The legacy N01 stop is recognized and admitted
+    decision_fake_pycache = rec_svc.recover_checks_only(run.run_id, project_root=repo_dir)
+    assert decision_fake_pycache.status == RecoveryDecisionStatus.BLOCKED
+    assert "Stop details missing candidate_sha" in decision_fake_pycache.reason_code
+
+    # 6c. Missing stop event on any run (even without attempts) must be rejected
+    run.stop_details = {
+        "code": "CHECKS_ONLY_PIPELINE_EXCEPTION",
+        "exception_type": "PermissionError",
+        "error": "[Errno 13] Permission denied: '/tmp/minime_pycache/nostop'",
+        "candidate_sha": candidate_sha,
+    }
+    uow.orchestration_runs.save(run)
+    uow.commit()
+
+    decision_no_stop = rec_svc.recover_checks_only(run.run_id, project_root=repo_dir)
+    assert decision_no_stop.status == RecoveryDecisionStatus.BLOCKED
+    assert "No immutable stop event found" in decision_no_stop.reason_code
+
+    # 7. Test historical legacy N01 stop exception (run_id 8e7ebec8, candidate 2fcad0, durable stop event, reconcile current_candidate_sha)
+    legacy_run_id = "8e7ebec8-9eff-478b-bae3-cf686ea91be2"
+    legacy_cand_sha = "2fcad0ef73eb4766ca1bb6249a081cb4070ecced"
+    job.candidate_sha = legacy_cand_sha
+    uow.jobs.save(job)
+    run_legacy = OrchestrationRun(
+        run_id=legacy_run_id,
+        project_id=project_id,
+        change_name=change_name,
+        base_sha=base_sha,
+        current_candidate_sha=None,  # Missing in historical DB row; must be reconciled!
+        current_stage=OrchestrationStage.RUNNING_CHECKS,
+        resumable_stage=OrchestrationStage.RUNNING_CHECKS,
+        active_job_id=job.job_id,
+        is_active=False,
+        current_generation=1,
+        stop_outcome=OrchestrationStopOutcome.NEEDS_HUMAN,
+        human_gate=HumanGate.NEEDS_HUMAN,
+        stop_reason="Checks-only pipeline execution failed.",
+        stop_details={
+            "code": "CHECKS_ONLY_PIPELINE_EXCEPTION",
+            "exception_type": "PermissionError",
+            "error": "[Errno 13] Permission denied: '/tmp/minime_pycache/test'",
+        },
+    )
+    uow.orchestration_runs.save(run_legacy)
+    stop_event_legacy = OrchestrationStageEvent(
+        run_id=legacy_run_id,
+        from_stage=OrchestrationStage.RUNNING_CHECKS,
+        to_stage=OrchestrationStage.RUNNING_CHECKS,
+        event_type=EventType.ORCHESTRATION_STOPPED.value,
+        transition_key=f"{legacy_run_id}:STOP:NEEDS_HUMAN:gen1",
+        evidence_references={"reason": "Checks-only pipeline execution failed."},
+        actor="system",
+        created_at=utc_now(),
+    )
+    uow.orchestration_stage_events.save(stop_event_legacy)
+    uow.commit()
+
+    with patch("subprocess.run") as mock_subproc:
+        def fake_git(cmd, *args, **kwargs):
+            from unittest.mock import MagicMock
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                m = MagicMock()
+                m.returncode = 0
+                m.stdout = f"{legacy_cand_sha}\n"
+                return m
+            elif isinstance(cmd, list) and "status" in cmd:
+                m = MagicMock()
+                m.returncode = 0
+                m.stdout = ""
+                return m
+            return subprocess.run.__wrapped__(cmd, *args, **kwargs) if hasattr(subprocess.run, "__wrapped__") else subprocess.run(cmd, *args, **kwargs)
+
+        mock_subproc.side_effect = fake_git
+        with patch("minime.services.checks_runner.ChecksRunner.run", new=AsyncMock(return_value=ChecksRunResult(passed=True, results=[], diagnostics=[]))):
+            decision_legacy = rec_svc.recover_checks_only(legacy_run_id, project_root=repo_dir)
+
     assert decision_legacy.status in {
         RecoveryDecisionStatus.EXECUTING,
         RecoveryDecisionStatus.COMPLETED,
     }
+    # Verify current_candidate_sha was durably reconciled
+    reconciled_run = uow.orchestration_runs.get_by_id(legacy_run_id)
+    assert reconciled_run.current_candidate_sha == legacy_cand_sha
 
     # 8. Test latest-attempt temporal drift (attempt created after stop event)
+    job.candidate_sha = candidate_sha
+    job.status = JobStatus.CHECKS_FAILED
+    uow.jobs.save(job)
     run.current_stage = OrchestrationStage.RUNNING_CHECKS
     run.stop_outcome = OrchestrationStopOutcome.NEEDS_HUMAN
     run.human_gate = HumanGate.NEEDS_HUMAN
@@ -2104,9 +2249,18 @@ def test_anti_spoofing_rejects_mismatched_candidate_and_serial_repeats(
         "error": "[Errno 13] Permission denied: '/tmp/minime_pycache/test'",
         "candidate_sha": candidate_sha,
     }
-    job.status = JobStatus.CHECKS_FAILED
-    uow.jobs.save(job)
     uow.orchestration_runs.save(run)
+    stop_event_drift = OrchestrationStageEvent(
+        run_id=run.run_id,
+        from_stage=OrchestrationStage.RUNNING_CHECKS,
+        to_stage=OrchestrationStage.RUNNING_CHECKS,
+        event_type=EventType.ORCHESTRATION_STOPPED.value,
+        transition_key=f"{run.run_id}:STOP:NEEDS_HUMAN:gen1",
+        evidence_references={"reason": "Checks-only pipeline execution failed."},
+        actor="system",
+        created_at=utc_now(),
+    )
+    uow.orchestration_stage_events.save(stop_event_drift)
     drift_attempt = JobAttempt(
         job_id=job.job_id,
         attempt_number=2,

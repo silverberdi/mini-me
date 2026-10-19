@@ -144,25 +144,54 @@ def is_authorized_cache_shape(
 
     Authorized shapes:
     1. Primary under ~/.cache (or XDG_CACHE_HOME):
-       Must contain 'minime/pycache' in components, and if job_id is provided, match that job_id.
+       Must be strictly <user_cache_root>/minime/pycache/<job_id>.
     2. Ephemeral under /tmp or gettempdir():
-       A directory component must start with 'minime_cache_{expected_uid}_', and if job_id is provided, contain job_id.
+       Parent must be strictly one of the allowed temp roots, and filename must be
+       minime_cache_{expected_uid}_{job_id}.
     """
     raw_path = Path(path)
-    parts = raw_path.parts
+    temp_roots = [
+        Path(tempfile.gettempdir()),
+        Path(tempfile.gettempdir()).resolve(),
+        Path("/tmp"),
+        Path("/tmp").resolve(),
+    ]
+    user_cache_roots = [
+        Path.home() / ".cache",
+        (Path.home() / ".cache").resolve(),
+    ]
+    if os.environ.get("XDG_CACHE_HOME"):
+        user_cache_roots.append(Path(os.environ["XDG_CACHE_HOME"]).expanduser())
+        user_cache_roots.append(Path(os.environ["XDG_CACHE_HOME"]).expanduser().resolve())
 
-    # Ephemeral check
-    prefix = f"minime_cache_{expected_uid}_"
-    for part in parts:
-        if part.startswith(prefix):
-            if job_id is None or job_id in part:
-                return True
+    # Primary check: strictly <user_cache_root>/minime/pycache/<job_id>
+    for uc_root in user_cache_roots:
+        for p in (raw_path, raw_path.resolve()):
+            try:
+                rel = p.relative_to(uc_root)
+                if len(rel.parts) == 3 and rel.parts[0] == "minime" and rel.parts[1] == "pycache":
+                    leaf = rel.parts[2]
+                    if job_id is None:
+                        if leaf:
+                            return True
+                    elif leaf == job_id:
+                        return True
+            except ValueError:
+                pass
 
-    # Primary check: 'minime' followed by 'pycache'
-    for i in range(len(parts) - 2):
-        if parts[i] == "minime" and parts[i + 1] == "pycache":
-            if job_id is None or parts[i + 2] == job_id or job_id in parts[i + 2]:
-                return True
+    # Ephemeral check: strictly <temp_root>/minime_cache_{expected_uid}_{job_id}
+    for tr in temp_roots:
+        for p in (raw_path, raw_path.resolve()):
+            if p.parent == tr:
+                name = p.name
+                prefix = f"minime_cache_{expected_uid}_"
+                if name.startswith(prefix):
+                    leaf = name[len(prefix):]
+                    if job_id is None:
+                        if leaf:
+                            return True
+                    elif leaf == job_id or leaf.endswith(f"_{job_id}"):
+                        return True
 
     return False
 
@@ -208,6 +237,12 @@ def validate_secure_cache_path(
             raise PermissionError(f"Failed to lstat cache path component '{current_walk}': {e}") from e
 
         if stat.S_ISLNK(st.st_mode):
+            if (
+                platform.system().lower() == "darwin"
+                and current_walk in (Path("/var"), Path("/tmp"))
+                and os.readlink(current_walk) in ("private/var", "private/tmp", "/private/var", "/private/tmp")
+            ):
+                continue
             raise PermissionError(f"Secure cache path component cannot be a symlink: '{current_walk}'")
 
         try:
@@ -215,21 +250,20 @@ def validate_secure_cache_path(
         except OSError:
             resolved_walk = current_walk
 
+        mode = stat.S_IMODE(st.st_mode)
+        if (mode & 0o002 != 0) and not (st.st_mode & stat.S_ISVTX):
+            raise PermissionError(
+                f"World-writable ancestor directory '{current_walk}' lacks sticky bit (+t)."
+            )
+
         if home_root in resolved_walk.parents or resolved_walk == home_root:
             if st.st_uid != target_uid:
                 raise PermissionError(
                     f"Secure cache ancestor '{current_walk}' owned by UID {st.st_uid}, expected {target_uid}."
                 )
-            if stat.S_IMODE(st.st_mode) & 0o022 != 0:
+            if mode & 0o022 != 0:
                 raise PermissionError(
                     f"Secure cache ancestor '{current_walk}' has insecure permissions (group or world writable)."
-                )
-
-        if any(resolved_walk == tr or current_walk == tr for tr in temp_roots):
-            mode = stat.S_IMODE(st.st_mode)
-            if (mode & 0o002 != 0) and not (st.st_mode & stat.S_ISVTX):
-                raise PermissionError(
-                    f"World-writable temporary ancestor '{current_walk}' lacks sticky bit (+t)."
                 )
 
     if not raw_path.exists() or not raw_path.is_dir():
@@ -292,7 +326,7 @@ def safe_prepare_cache_dir(
     - Existing components must be owned by expected_uid with secure permissions.
     - If the target directory already exists: must be owned by expected_uid and mode 0700. If not, fail-closed
       without modifying or repairing foreign/unsafe directories.
-    - Missing components are created component-by-component with mode 0700 and verified via lstat.
+    - Missing components are created component-by-component with mode 0700 and verified via fd-based operations with O_NOFOLLOW.
     """
     raw_path = Path(target_path)
     target_uid = expected_uid
@@ -303,8 +337,11 @@ def safe_prepare_cache_dir(
         )
 
     current_walk = Path(raw_path.parts[0]) if raw_path.is_absolute() else Path.cwd()
-    temp_roots = [Path(tempfile.gettempdir()).resolve(), Path("/tmp").resolve()]
     home_root = Path.home().resolve()
+
+    open_dir_flags = os.O_RDONLY | os.O_NOFOLLOW
+    if hasattr(os, "O_DIRECTORY"):
+        open_dir_flags |= os.O_DIRECTORY
 
     for part in raw_path.parts[1:]:
         current_walk = current_walk / part
@@ -318,29 +355,44 @@ def safe_prepare_cache_dir(
 
         if exists:
             if stat.S_ISLNK(st.st_mode):
+                if (
+                    platform.system().lower() == "darwin"
+                    and current_walk in (Path("/var"), Path("/tmp"))
+                    and os.readlink(current_walk) in ("private/var", "private/tmp", "/private/var", "/private/tmp")
+                ):
+                    continue
                 raise PermissionError(f"Secure cache path component cannot be a symlink: '{current_walk}'")
             if not stat.S_ISDIR(st.st_mode):
                 raise PermissionError(f"Secure cache path component is not a directory: '{current_walk}'")
+
+            try:
+                fd = os.open(current_walk, open_dir_flags)
+            except OSError as exc:
+                raise PermissionError(f"Failed to open cache component '{current_walk}' with O_NOFOLLOW: {exc}") from exc
+            try:
+                st = os.fstat(fd)
+            finally:
+                os.close(fd)
 
             try:
                 resolved_walk = current_walk.resolve()
             except OSError:
                 resolved_walk = current_walk
 
+            mode = stat.S_IMODE(st.st_mode)
+            if (mode & 0o002 != 0) and not (st.st_mode & stat.S_ISVTX):
+                raise PermissionError(
+                    f"World-writable ancestor directory '{current_walk}' lacks sticky bit (+t)."
+                )
+
             if home_root in resolved_walk.parents or resolved_walk == home_root:
                 if st.st_uid != target_uid:
                     raise PermissionError(
                         f"Secure cache ancestor '{current_walk}' owned by UID {st.st_uid}, expected {target_uid}."
                     )
-                if stat.S_IMODE(st.st_mode) & 0o022 != 0:
+                if mode & 0o022 != 0:
                     raise PermissionError(
                         f"Secure cache ancestor '{current_walk}' has insecure permissions."
-                    )
-            if any(resolved_walk == tr or current_walk == tr for tr in temp_roots):
-                mode = stat.S_IMODE(st.st_mode)
-                if (mode & 0o002 != 0) and not (st.st_mode & stat.S_ISVTX):
-                    raise PermissionError(
-                        f"World-writable temporary ancestor '{current_walk}' lacks sticky bit (+t)."
                     )
 
             if current_walk == raw_path:
@@ -350,19 +402,27 @@ def safe_prepare_cache_dir(
                     raise PermissionError(
                         f"Existing cache directory '{current_walk}' owned by UID {st.st_uid}, expected {target_uid}."
                     )
-                if stat.S_IMODE(st.st_mode) & 0o077 != 0:
+                if mode & 0o077 != 0:
                     raise PermissionError(
-                        f"Existing cache directory '{current_walk}' mode must be strictly 0700, got {oct(stat.S_IMODE(st.st_mode))}."
+                        f"Existing cache directory '{current_walk}' mode must be strictly 0700, got {oct(mode)}."
                     )
         else:
             # Component does not exist: create with mode 0700
             try:
                 os.mkdir(current_walk, mode=0o700)
-                os.chmod(current_walk, 0o700)
             except OSError as exc:
                 raise PermissionError(f"Failed to create secure cache directory '{current_walk}': {exc}") from exc
 
-            st = os.lstat(current_walk)
+            try:
+                fd = os.open(current_walk, open_dir_flags)
+            except OSError as exc:
+                raise PermissionError(f"Failed to open created cache directory '{current_walk}' with O_NOFOLLOW: {exc}") from exc
+            try:
+                os.fchmod(fd, 0o700)
+                st = os.fstat(fd)
+            finally:
+                os.close(fd)
+
             if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
                 raise PermissionError(f"Created cache component is not a directory: '{current_walk}'")
             if st.st_uid != target_uid:
@@ -962,6 +1022,7 @@ class AgentProcessConfinement:
         *,
         unshare_network: bool = False,
         secure_cache_path: str | Path | None = None,
+        job_id: str | None = None,
     ) -> list[str]:
         """Wrap a process and bind only its assigned worktree plus private state."""
         if not self.is_confinement_available():
@@ -974,7 +1035,7 @@ class AgentProcessConfinement:
         if secure_cache_path is not None:
             try:
                 validated_cache = validate_secure_cache_path(
-                    secure_cache_path, expected_uid=os.getuid()
+                    secure_cache_path, expected_uid=os.getuid(), job_id=job_id
                 )
             except (PermissionError, ValueError, OSError) as err:
                 raise AgentConfinementError(
