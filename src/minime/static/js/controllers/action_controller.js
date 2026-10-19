@@ -1,6 +1,22 @@
 /** Owns the request/result lifecycle for governed Control Plane actions. */
 const humanOnlyActionTypes = new Set(['merge', 'merge_pr', 'merge_pull_request', 'merge_github_pr']);
 
+function completedActionMessage(actionType, result) {
+  const type = String(actionType || '').toUpperCase();
+  if (type === 'CANCEL') {
+    return result.status === 'COMPLETED' ? 'Ejecución cancelada.' : 'Solicitud de cancelación aceptada.';
+  }
+  const messages = {
+    CONTINUE: 'Continuación solicitada.',
+    REASSIGN: 'Reasignación completada.',
+    RETRY: 'Reintento solicitado.',
+    RESOLVE_GATE: 'Decisión registrada.',
+    START_PREVIEW: 'Vista previa solicitada.',
+    TEARDOWN_PREVIEW: 'Cierre de vista previa solicitado.',
+  };
+  return messages[type] || 'Acción completada.';
+}
+
 export function visibleControlPlaneActions(actions) {
   return (Array.isArray(actions) ? actions : []).filter((action) => {
     const actionType = String(action.action || action.action_type || '').trim().toLowerCase();
@@ -16,6 +32,7 @@ export function createActionController({
   refreshSelectedDetail,
   getActor,
   toolbar,
+  mobileNextStep,
   escapeHtml = (value) => String(value ?? '').replace(/[&<>\"']/g, (character) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', "'": '&#39;',
   })[character]),
@@ -38,6 +55,28 @@ export function createActionController({
     });
   }
 
+  function renderMobileActions(actions) {
+    if (!mobileNextStep) return;
+    const enabled = actions.filter((action) => action.enabled === true);
+    const labels = enabled.map((action) => {
+      const type = String(action.action || action.action_type || '').toUpperCase();
+      const knownLabels = {
+        CANCEL: 'Cancelar ejecución',
+        CONTINUE: 'Continuar ejecución',
+        REASSIGN: 'Reasignar ejecutor',
+        RETRY: 'Reintentar etapa',
+        RESOLVE_GATE: 'Resolver decisión humana',
+        RECOVER_LOCKS: 'Recuperar bloqueos',
+        AUTHORIZE_DEEPSEEK_REVIEW: 'Autorizar revisión del contrato',
+        AUTHORIZE_DEEPSEEK_CODE_REVIEW: 'Autorizar revisión del código',
+      };
+      return knownLabels[type] || action.display_name || type;
+    });
+    mobileNextStep.textContent = labels.length
+      ? `Acciones habilitadas por Control Plane: ${labels.join(' · ')}`
+      : 'Siguiente paso: el Control Plane no informa acciones habilitadas.';
+  }
+
   async function renderToolbar(detail) {
     if (!toolbar) return;
     const requestSequence = ++toolbarRenderSequence;
@@ -47,6 +86,11 @@ export function createActionController({
     toolbar.innerHTML = runId
       ? '<span class="text-muted" role="status">Cargando acciones…</span>'
       : '';
+    if (mobileNextStep) {
+      mobileNextStep.textContent = runId
+        ? 'Siguiente paso: consultando acciones autorizadas…'
+        : 'Siguiente paso: no disponible para este cambio.';
+    }
     if (!runId) {
       return;
     }
@@ -54,6 +98,7 @@ export function createActionController({
       const actions = visibleControlPlaneActions(await discover(runId));
       if (requestSequence !== toolbarRenderSequence || displayedDetail?.run_id !== runId) return;
       displayedActions = actions;
+      renderMobileActions(displayedActions);
       if (!displayedActions.length) {
         toolbar.innerHTML = '<span class="text-muted">No hay acciones disponibles</span>';
         return;
@@ -71,6 +116,7 @@ export function createActionController({
     } catch {
       if (requestSequence !== toolbarRenderSequence) return;
       displayedActions = [];
+      if (mobileNextStep) mobileNextStep.textContent = 'Siguiente paso: acciones no disponibles.';
       toolbar.innerHTML = '<span class="text-muted">Acciones del operador no disponibles</span>';
     }
   }
@@ -158,7 +204,7 @@ export function createActionController({
       const result = await execute(runId, payload);
       const accepted = ['SUCCESS', 'COMPLETED', 'ACCEPTED'].includes(result.status) || result.success === true;
       if (accepted) {
-        notify(`Acción ${actionType} completada: ${result.summary || result.message || 'Ejecución finalizada'}`, 'success');
+        notify(completedActionMessage(actionType, result), 'success');
       } else {
         const message = result.summary || result.error_message || result.error_code || result.detail || result.message || 'La acción fue rechazada o falló.';
         notify(`Falló la acción: ${message}`, 'error');

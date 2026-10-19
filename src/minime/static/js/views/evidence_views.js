@@ -26,8 +26,34 @@ export function renderCandidateEvidence({ summary, history, detail }) {
   }
 }
 
-export function renderRunOverview({ metaGrid, blockerSection, blockersList, detail }) {
+const mobileRunStateLabels = Object.freeze({
+  RUNNING: "Ejecución en curso",
+  WAITING_CAPACITY: "En espera de capacidad",
+  NEEDS_HUMAN: "Requiere atención humana",
+  RECOVERY: "En recuperación",
+  PAUSED: "En pausa",
+  READY_FOR_HUMAN_MERGE: "Listo para revisión humana del merge",
+  CANCELLED: "Ejecución cancelada",
+  COMPLETED: "Ejecución completada",
+  FAILED: "Ejecución fallida",
+  AUTH_REQUIRED: "Autenticación requerida",
+  UNKNOWN: "Estado no disponible",
+});
+
+export function renderRunOverview({
+  metaGrid,
+  blockerSection,
+  blockersList,
+  mobileState,
+  mobileAttention,
+  detail,
+}) {
   const cancelled = detail.stop_outcome === "CANCELLED";
+  const status = String(detail.status || "UNKNOWN").toUpperCase();
+  if (mobileState) {
+    const label = mobileRunStateLabels[status] || "Estado observado";
+    mobileState.textContent = `${label} · ${status}`;
+  }
   if (metaGrid) {
     metaGrid.innerHTML = `
       <div class="meta-box"><div class="meta-box-label">${cancelled ? "Última etapa observada" : "Etapa actual"}</div><div class="meta-box-val">${escapeHtml(detail.current_stage || "UNKNOWN")}</div></div>
@@ -39,6 +65,13 @@ export function renderRunOverview({ metaGrid, blockerSection, blockersList, deta
       <div class="meta-box"><div class="meta-box-label">Gate humano</div><div class="meta-box-val">${escapeHtml(detail.human_gate || "UNKNOWN")}</div></div>`;
   }
   const blockers = Array.isArray(detail.blocker_details) ? detail.blocker_details : [];
+  if (mobileAttention) {
+    const firstReason = blockers.find((blocker) => blocker.reason || blocker.description);
+    const reason = firstReason?.reason || firstReason?.description || detail.stop_reason || detail.human_gate;
+    mobileAttention.textContent = reason
+      ? `Atención: ${reason}`
+      : "Atención: sin bloqueo informado por la lectura actual.";
+  }
   if (blockerSection) blockerSection.style.display = blockers.length ? "block" : "none";
   if (blockersList) blockersList.innerHTML = blockers.map((blocker) => `
     <div class="attention-item-card"><div class="attention-item-left"><span class="attention-item-name">${escapeHtml(blocker.type || blocker.claim_type || "BLOCKER")}</span><span class="attention-item-reason">${escapeHtml(blocker.reason || blocker.description || "")}</span></div>${blocker.human_gate ? `<span class="badge badge-needs-human">${escapeHtml(blocker.human_gate)}</span>` : ""}</div>`).join("");

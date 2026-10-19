@@ -439,6 +439,12 @@
                 </div>
               </div>
 
+              <section class="mobile-supervision-glance" id="mobileSupervisionGlance" aria-label="Resumen de supervisión" aria-live="polite">
+                <div class="mobile-supervision-state" id="mobileRunState">Estado: UNKNOWN</div>
+                <p id="mobileRunAttention">Atención: esperando una lectura autenticada.</p>
+                <p id="mobileRunNextStep">Acciones autorizadas: consultando Control Plane…</p>
+              </section>
+
               <!-- 6-Phase Pipeline Stepper -->
               <details class="pipeline-stepper-container" id="pipelineDetails" open>
                 <summary>Progreso del pipeline</summary>
@@ -463,7 +469,10 @@
               <div class="tab-pane active" id="overviewTab" role="tabpanel" aria-labelledby="tabOverview" tabindex="0">
                 <div class="section-card" id="overviewAttentionSection">
                   <h4 class="section-title">Estado actual de la ejecución</h4>
-                  <div class="overview-meta-grid" id="overviewMetaGrid"></div>
+                  <details class="run-technical-details" id="runTechnicalDetails" open>
+                    <summary>Detalles técnicos y de ejecución</summary>
+                    <div class="overview-meta-grid" id="overviewMetaGrid"></div>
+                  </details>
                 </div>
                 <div class="section-card" id="overviewBlockerSection" style="display: none;">
                   <h4 class="section-title text-warning">Bloqueos y claims activos</h4>

@@ -2701,6 +2701,37 @@ async def test_real_browser_authenticated_control_plane_cancel_persists_in_dispo
             (
                 preview_evidence_dir / "visual-review-active-desktop-1440x900-landing.png"
             ).write_bytes(base64.b64decode(capture["data"]))
+            desktop_hierarchy = await client.eval_js("""
+              (() => {
+                const brand = document.querySelector('.nav-brand');
+                const title = document.querySelector('.brand-title');
+                const queue = document.querySelector('#viewExecutions > .queue-panel');
+                const executions = document.getElementById('viewExecutions');
+                const groups = [...document.querySelectorAll('.nav-controls > .project-selector-group, .nav-controls > .status-indicator-group, .nav-controls > .action-group')];
+                const groupRects = groups.map(node => node.getBoundingClientRect());
+                return {
+                  brandWidth: brand.getBoundingClientRect().width,
+                  brandTitleFits: title.scrollWidth <= title.clientWidth,
+                  brandSubVisible: getComputedStyle(document.querySelector('.brand-sub')).display !== 'none',
+                  projectLabelVisuallyHidden: getComputedStyle(document.querySelector('.project-selector-group .sr-only')).position === 'absolute',
+                  queueWidth: queue.getBoundingClientRect().width,
+                  executionsWidth: executions.getBoundingClientRect().width,
+                  queueGridColumn: getComputedStyle(queue).gridColumn,
+                  headerOverflow: document.querySelector('.nav-controls').getBoundingClientRect().right > innerWidth,
+                  headerGroupsOverlap: groupRects.some((rect, index) => index > 0 && rect.left < groupRects[index - 1].right - 1),
+                };
+              })()
+            """)
+            assert desktop_hierarchy["brandWidth"] == 224, desktop_hierarchy
+            assert desktop_hierarchy["brandTitleFits"] and desktop_hierarchy["brandSubVisible"], (
+                desktop_hierarchy
+            )
+            assert desktop_hierarchy["projectLabelVisuallyHidden"], desktop_hierarchy
+            assert desktop_hierarchy["queueWidth"] >= desktop_hierarchy["executionsWidth"] * 0.95, (
+                desktop_hierarchy
+            )
+            assert not desktop_hierarchy["headerOverflow"], desktop_hierarchy
+            assert not desktop_hierarchy["headerGroupsOverlap"], desktop_hierarchy
             await client.eval_js(f"""
               (() => [...document.querySelectorAll('#changesTableBody tr[data-project-id]')]
                 .find(item => item.dataset.changeName === {json.dumps(change_name)})?.click())()
@@ -2735,6 +2766,42 @@ async def test_real_browser_authenticated_control_plane_cancel_persists_in_dispo
                 await client.set_viewport(width, height, mobile=mobile)
                 await client.eval_js("window.scrollTo({top:0,behavior:'instant'})")
                 await asyncio.sleep(0.15)
+                if width < 768:
+                    mobile_hierarchy = await client.eval_js("""
+                      (() => {
+                        const detail = document.getElementById('detailPanel');
+                        const glance = document.getElementById('mobileSupervisionGlance');
+                        const technical = document.getElementById('runTechnicalDetails');
+                        const activeText = detail.innerText;
+                        const nav = document.querySelector('.bottom-nav').getBoundingClientRect();
+                        return {
+                          glanceVisible: getComputedStyle(glance).display !== 'none',
+                          state: document.getElementById('mobileRunState').textContent,
+                          attention: document.getElementById('mobileRunAttention').textContent,
+                          nextStep: document.getElementById('mobileRunNextStep').textContent,
+                          technicalOpen: technical.open,
+                          visibleText: activeText,
+                          runId: document.querySelector('#overviewMetaGrid .meta-box:nth-child(3) .meta-box-val')?.textContent || '',
+                          jobId: document.querySelector('#overviewMetaGrid .meta-box:nth-child(4) .meta-box-val')?.textContent || '',
+                          navVisible: nav.height > 0,
+                        };
+                      })()
+                    """)
+                    assert mobile_hierarchy["glanceVisible"], mobile_hierarchy
+                    assert "Ejecución en curso · RUNNING" in mobile_hierarchy["state"], (
+                        mobile_hierarchy
+                    )
+                    assert (
+                        "Acciones habilitadas por Control Plane: Cancelar ejecución"
+                        in mobile_hierarchy["nextStep"]
+                    ), mobile_hierarchy
+                    assert "Autorizar revisión del contrato" in mobile_hierarchy["nextStep"], (
+                        mobile_hierarchy
+                    )
+                    assert not mobile_hierarchy["technicalOpen"], mobile_hierarchy
+                    assert mobile_hierarchy["runId"] not in mobile_hierarchy["visibleText"]
+                    assert mobile_hierarchy["jobId"] not in mobile_hierarchy["visibleText"]
+                    assert mobile_hierarchy["navVisible"], mobile_hierarchy
                 capture = await client.send_cmd(
                     "Page.captureScreenshot", {"format": "png", "captureBeyondViewport": False}
                 )
@@ -2918,7 +2985,8 @@ async def test_real_browser_authenticated_control_plane_cancel_persists_in_dispo
                 and record.run_id == run_id
                 and record.status.value == "COMPLETED"
             )
-            assert "Acción CANCEL completada" in final_state["toast"]
+            assert final_state["toast"] == "Ejecución cancelada.", final_state
+            assert run_id not in final_state["toast"] and job_id not in final_state["toast"]
             assert "CANCELLED" in final_state["status"] or "CANCELLED" in final_state["toast"]
 
             cancelled_presentation = await client.eval_js("""

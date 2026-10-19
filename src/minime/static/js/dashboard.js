@@ -213,6 +213,7 @@ const showToast = createToastController();
     refreshSelectedDetail: () => executionViewController?.refreshSelectedDetail(),
     getActor: () => sessionController.currentUser?.email,
     toolbar: document.getElementById('actionToolbar'),
+    mobileNextStep: document.getElementById('mobileRunNextStep'),
     escapeHtml,
     openParameters: openParamModal,
     openConfirmation: openConfirmModal,
@@ -246,6 +247,8 @@ const showToast = createToastController();
       overviewMeta: document.getElementById('overviewMetaGrid'),
       blockerSection: document.getElementById('overviewBlockerSection'),
       blockers: document.getElementById('overviewBlockersList'),
+      mobileRunState: document.getElementById('mobileRunState'),
+      mobileRunAttention: document.getElementById('mobileRunAttention'),
       candidate: document.getElementById('candidateDetailsContainer'),
       candidateHistory: document.getElementById('candidateHistoryBody'),
       checkCount: document.getElementById('checksTabCount'),
@@ -460,6 +463,14 @@ const showToast = createToastController();
       });
       compactViewport.addEventListener?.('change', (event) => {
         if (!operatorChangedPipelineDisclosure) pipelineDetails.open = !event.matches;
+      });
+    }
+    const technicalDetails = document.getElementById('runTechnicalDetails');
+    if (technicalDetails && window.matchMedia) {
+      const compactViewport = window.matchMedia('(max-width: 767px)');
+      technicalDetails.open = !compactViewport.matches;
+      compactViewport.addEventListener?.('change', (event) => {
+        technicalDetails.open = !event.matches;
       });
     }
     themeController.initialize();

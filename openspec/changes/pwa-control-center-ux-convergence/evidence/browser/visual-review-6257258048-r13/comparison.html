@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Comparación visual R13 — Control Center</title>
+<style>
+*{box-sizing:border-box}body{margin:0;padding:24px;color:#e6edf3;background:#0d1117;font:16px/1.45 system-ui,sans-serif}h1{margin:0 0 8px;font-size:26px}.note{margin:0 0 22px;color:#9da7b3}section{margin:0 0 24px;padding:16px;border:1px solid #30363d;border-radius:12px;background:#161b22}h2{margin:0 0 12px;font-size:18px}.pair{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}figure{min-width:0;margin:0}figcaption{margin:0 0 8px;color:#9da7b3;font-size:13px}img{display:block;max-width:100%;max-height:700px;margin:0 auto;object-fit:contain;object-position:top center;background:#0d1117;border:1px solid #30363d}.mobile img{max-height:700px}.toast{display:grid;grid-template-columns:210px 1fr;gap:18px;align-items:center}.toast img{max-height:520px}.toast p{color:#c9d1d9}code{color:#79c0ff}@media(max-width:900px){body{padding:12px}.pair,.toast{grid-template-columns:1fr}}
+</style></head><body>
+<h1>Control Center — comparación visual R13</h1>
+<p class="note">Referencias Stitch aprobadas, sin cambios, junto a capturas Chrome del preview autenticado con PostgreSQL desechable. Datos QA, no observaciones de producción. La aceptación visual humana sigue pendiente.</p>
+<section><h2>Desktop — encabezado y densidad operacional · 1440×900</h2><div class="pair">
+<figure><figcaption>Diseño aprobado · 01 desktop active Control Center</figcaption><img src="../../../../../../docs/design/01-desktop-active-control-center.png" alt="Referencia aprobada desktop"></figure>
+<figure><figcaption>Chrome preview · landing autenticada</figcaption><img src="visual-review-active-desktop-1440x900-landing.png" alt="Captura actual desktop"></figure></div></section>
+<section><h2>Móvil — supervisión y jerarquía · 390×844</h2><div class="pair mobile">
+<figure><figcaption>Diseño aprobado · 07 mobile active supervision</figcaption><img src="../../../../../../docs/design/07-mobile-active-supervision.png" alt="Referencia aprobada móvil"></figure>
+<figure><figcaption>Chrome preview · estado, atención y siguiente paso antes del detalle técnico</figcaption><img src="visual-review-active-mobile-390x844.png" alt="Captura actual móvil"></figure></div></section>
+<section><h2>Resultado terminal — toast de cancelación</h2><div class="toast">
+<img src="visual-review-cancelled-mobile-390x844-toast.png" alt="Toast terminal conciso sobre vista móvil">
+<p>La acción canónica quedó persistida como <code>CANCELLED</code> en PostgreSQL desechable. El toast muestra “Ejecución cancelada.”; identidad y motivo detallado permanecen en la vista/historial autorizados, no en la notificación.</p></div></section>
+</body></html>

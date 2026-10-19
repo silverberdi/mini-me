@@ -48,6 +48,8 @@ export function createDetailViewController({
       metaGrid: elements.overviewMeta,
       blockerSection: elements.blockerSection,
       blockersList: elements.blockers,
+      mobileState: elements.mobileRunState,
+      mobileAttention: elements.mobileRunAttention,
       detail,
     });
     renderCandidateEvidence({ summary: elements.candidate, history: elements.candidateHistory, detail });
