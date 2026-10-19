@@ -1,0 +1,36 @@
+{
+  "base_sha": "8564afc51069bd334a67fd19a2a4f51cc0659f5e",
+  "source_base_sha": "7052b6db02fb3d508470fecfce8652a5fe5e08de",
+  "source_and_test_worktree_patch_sha256": "fe2265139cc79a3edc92f64f043e7cfb61a46dd2e703cf1bb055f676b7c89c88",
+  "change_name": "control-center-action-91d503b62324",
+  "classification": "QA-seeded disposable PostgreSQL preview; not production evidence",
+  "chrome_postgres_e2e": {
+    "test": "tests/test_pwa_real_browser.py::test_real_browser_authenticated_control_plane_cancel_persists_in_disposable_postgres",
+    "result": "PASSED",
+    "isolated_database_migrated_to_head": true
+  },
+  "database": "minime_pwa_visual_review_20261018_r13 (disposable; loopback host + private Docker bridge)",
+  "durable_states_observed": [
+    "IMPLEMENTING/RUNNING",
+    "CANCELLED"
+  ],
+  "image_digest": "sha256:6ab91632d40990b286c9cd6c9854fdee51950ab8db59aeb89abb07cb13140621",
+  "job_id": "qa-job-91d503b62324",
+  "project_id": "qa-pwa-91d503b62324",
+  "run_id": "qa-run-91d503b62324",
+  "screenshots": [
+    "comparison-board.png",
+    "visual-review-active-desktop-1440x900-landing.png",
+    "visual-review-active-desktop-1440x900-drawer.png",
+    "visual-review-cancelled-mobile-390x844-toast.png",
+    "visual-review-active-tablet-1024x768.png",
+    "visual-review-active-tablet-768x1024.png",
+    "visual-review-active-mobile-390x844.png",
+    "visual-review-active-mobile-360x800.png",
+    "visual-review-cancelled-desktop-1440x900.png",
+    "visual-review-cancelled-tablet-1024x768.png",
+    "visual-review-cancelled-tablet-768x1024.png",
+    "visual-review-cancelled-mobile-390x844.png",
+    "visual-review-cancelled-mobile-360x800.png"
+  ]
+}

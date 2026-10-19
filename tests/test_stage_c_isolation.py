@@ -4767,7 +4767,7 @@ def test_onboard_project_unobservable_remote_fails_closed(tmp_path):
     assert uow.project_managed_repository_bindings.get_by_project_id("proj-unobservable") is None
 
 
-def test_onboard_project_rejects_runtime_collision(tmp_path):
+def test_onboard_project_rejects_runtime_collision(tmp_path, monkeypatch):
     """Verify onboarding fails closed when target repository overlaps runtime root."""
     from tests.conftest import ReadinessGitHubStub
 
@@ -4775,9 +4775,11 @@ def test_onboard_project_rejects_runtime_collision(tmp_path):
     from minime.services.project_onboarding_service import ProjectOnboardingService
 
     uow = MockUOW()
-    runtime_root = tmp_path / "runtime"
-    runtime_root.mkdir(parents=True, exist_ok=True)
     trusted_root = tmp_path / "trusted"
+    trusted_root.mkdir(parents=True, exist_ok=True)
+    runtime_root = trusted_root / "runtime"
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("MINIME_RUNTIME_ROOT", str(runtime_root))
 
     service = ProjectOnboardingService(
         uow=uow,

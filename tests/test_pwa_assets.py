@@ -11,7 +11,6 @@ def test_pwa_shell_assets_and_manifest() -> None:
         STATIC / "css" / "layout.css",
         STATIC / "css" / "components.css",
         STATIC / "js" / "app.js",
-        STATIC / "js" / "state" / "store.js",
         STATIC / "js" / "services" / "api_client.js",
         STATIC / "js" / "components" / "pipeline_stepper.js",
         STATIC / "manifest.webmanifest",
@@ -35,23 +34,22 @@ def test_pwa_client_contracts_and_accessible_shell() -> None:
     assert 'id="offlineBanner"' in index and 'id="actionDialog"' in index
     assert "/api/v1/dashboard/overview" in client
     assert "/api/v1/queue" in client
-    assert (
-        "Backend Disconnected" in (STATIC / "js" / "components" / "offline_banner.js").read_text()
-    )
-    assert "/api/" in sw and "cache" in sw.lower()
+    offline_banner = (STATIC / "js" / "components" / "offline_banner.js").read_text()
+    assert "datos operacionales no están actualizados" in offline_banner
+    assert "CACHEABLE_PATHS" in sw and "SHELL_ASSETS" in sw
+    assert 'const CACHE_PREFIX = "minime-pwa-shell-"' in sw
+    assert "/api/" not in sw
 
 
-def test_canonical_pipeline_has_nine_stages() -> None:
+def test_pipeline_view_matches_authoritative_dashboard_phases() -> None:
     source = (STATIC / "js" / "components" / "pipeline_stepper.js").read_text()
     for stage in (
-        "WORKTREE_SETUP",
-        "IMPLEMENTATION",
-        "CHECKS",
-        "REVIEW",
-        "AUDIT",
-        "PREVIEW",
-        "PR",
-        "MERGE_GATE",
-        "CLOSURE",
+        '"readiness"',
+        '"implementation"',
+        '"checks"',
+        '"review"',
+        '"audit"',
+        '"pr_merge"',
     ):
         assert stage in source
+    assert "Matches DashboardService._build_pipeline" in source

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, Generator
 
@@ -433,6 +434,7 @@ def get_health() -> dict[str, Any]:
     healthy, message = db_manager.check_health()
     return {
         "status": "healthy" if healthy else "unhealthy",
+        "observed_at": datetime.now(UTC).isoformat(),
         "database": {
             "engine": "PostgreSQL",
             "healthy": healthy,
@@ -749,9 +751,14 @@ def prepare_backlog_item_endpoint(
     """Prepare canonical execution artifacts (GitHub Issue, Project Item, OpenSpec change)."""
     try:
         from minime.services.recovery_convergence_service import RecoveryConvergenceService
-        rec_svc = RecoveryConvergenceService(intake_service.uow, project_root=intake_service.project_root)
+
+        rec_svc = RecoveryConvergenceService(
+            intake_service.uow, project_root=intake_service.project_root
+        )
         claim_ctx = rec_svc.acquire_claim(f"intake:{project_id}:{item_key}")
-        return intake_service.prepare_work_item(project_id, item_key, operator_email="operator", claim_context=claim_ctx)
+        return intake_service.prepare_work_item(
+            project_id, item_key, operator_email="operator", claim_context=claim_ctx
+        )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
@@ -1710,9 +1717,14 @@ def get_validation_scenarios_endpoint(
 @app.post("/api/v1/validations/submit", tags=["validations"])
 def submit_validation(
     req: ValidationSubmitRequest,
+    request: Request,
     uow: Annotated[PersistenceUnitOfWork, Depends(get_uow)],
 ) -> dict[str, Any]:
     verdict = ValidationVerdict.PASS if req.verdict.upper() == "PASS" else ValidationVerdict.FAIL
+    authenticated_operator = getattr(request.state, "operator", None)
+    # The request body is client-controlled and is never an identity authority.
+    # Auth-disabled local environments get an explicit non-identity marker.
+    actor_identity = getattr(authenticated_operator, "email", None) or "unauthenticated"
     val_svc = ValidationAuthorityService(uow)
     validation = val_svc.record_validation(
         project_id=req.project_id,
@@ -1726,7 +1738,7 @@ def submit_validation(
         preview_id=req.preview_id,
         generation=req.candidate_generation,
         notes=req.notes,
-        operator=req.operator,
+        operator=actor_identity,
     )
     return {
         "validation_id": validation.validation_id,

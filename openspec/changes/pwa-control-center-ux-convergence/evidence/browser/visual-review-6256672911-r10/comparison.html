@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Comparativa visual — Control Center</title>
+  <style>
+    :root { color-scheme: dark; font: 15px/1.4 system-ui, sans-serif; }
+    body { margin: 0; padding: 24px; background: #0b1020; color: #e8edf7; }
+    h1 { margin: 0 0 8px; font-size: 24px; }
+    .meta { color: #9ba9c0; margin: 0 0 24px; }
+    section { margin: 0 0 24px; padding: 16px; border: 1px solid #344055; border-radius: 10px; background: #111827; }
+    h2 { margin: 0 0 12px; font-size: 18px; }
+    .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    figure { margin: 0; min-width: 0; }
+    figcaption { color: #9ba9c0; margin-bottom: 6px; }
+    img { display: block; width: 100%; height: 320px; object-fit: contain; background: #090d15; border: 1px solid #293345; border-radius: 6px; }
+    footer { color: #9ba9c0; padding: 8px 2px 24px; }
+    @media (max-width: 760px) { body { padding: 12px; } .pair { grid-template-columns: 1fr; } img { height: 260px; } }
+  </style>
+</head>
+<body>
+  <h1>Control Center — referencia aprobada / implementación actual</h1>
+  <p class="meta">Comparación para aceptación humana · referencias Stitch aprobadas a la izquierda · capturas Chrome con backend y PostgreSQL desechables a la derecha.</p>
+  <section><h2>01 · Desktop — centro de control activo</h2><div class="pair">
+    <figure><figcaption>Referencia 01</figcaption><img src="../../../../../../docs/design/01-desktop-active-control-center.png"></figure>
+    <figure><figcaption>Implementación · 1440×900</figcaption><img src="visual-review-active-desktop-1440x900-landing.png"></figure>
+  </div></section>
+  <section><h2>03 · Desktop — drawer de Run</h2><div class="pair">
+    <figure><figcaption>Referencia 03</figcaption><img src="../../../../../../docs/design/03-desktop-running-run-drawer.png"></figure>
+    <figure><figcaption>Implementación · 1440×900</figcaption><img src="visual-review-active-desktop-1440x900-drawer.png"></figure>
+  </div></section>
+  <section><h2>05 · Tablet — master/detail</h2><div class="pair">
+    <figure><figcaption>Referencia 05</figcaption><img src="../../../../../../docs/design/05-tablet-active-master-detail.png"></figure>
+    <figure><figcaption>Implementación · 1024×768</figcaption><img src="visual-review-active-tablet-1024x768.png"></figure>
+  </div></section>
+  <section><h2>07 · Mobile — supervisión activa</h2><div class="pair">
+    <figure><figcaption>Referencia 07</figcaption><img src="../../../../../../docs/design/07-mobile-active-supervision.png"></figure>
+    <figure><figcaption>Implementación · 390×844</figcaption><img src="visual-review-active-mobile-390x844.png"></figure>
+  </div></section>
+  <section><h2>Estado terminal · cancelación y notificación</h2><div class="pair">
+    <figure><figcaption>Run CANCELLED con etiqueta íntegra</figcaption><img src="visual-review-cancelled-mobile-390x844.png"></figure>
+    <figure><figcaption>Toast sin cubrir navegación inferior</figcaption><img src="visual-review-cancelled-mobile-390x844-toast.png"></figure>
+  </div></section>
+  <footer>Datos sintéticos QA con identidades desechables. No representa estado operativo, cuota, scheduler ni ejecución de producción. El estado CANCELLED fue persistido por la acción gobernada del Control Plane en PostgreSQL desechable. Esta comparativa no sustituye la aprobación visual humana.</footer>
+</body>
+</html>

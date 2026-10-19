@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from minime.domain.enums import (
     AuditRiskLevel,
     AuditStatus,
     ChangeStatus,
+    ExecutionOutcome,
     HumanGate,
     JobStatus,
     OrchestrationStage,
     OrchestrationStopOutcome,
+    PreviewStatus,
     ProjectStatus,
     ReadinessState,
     ReviewVerdict,
@@ -21,11 +25,21 @@ from minime.domain.models import (
     CheckResult,
     Job,
     OrchestrationRun,
+    PreviewSession,
     Project,
     ProjectBinding,
     Review,
 )
 from minime.services.dashboard_service import OperationsDashboardService
+from minime.services.systemd_scheduler_observer import SchedulerServiceObservation
+
+
+class StaticSchedulerObserver:
+    def __init__(self, observation: SchedulerServiceObservation) -> None:
+        self.observation = observation
+
+    def observe(self) -> SchedulerServiceObservation:
+        return self.observation
 
 
 def test_dashboard_overview_empty_state(in_memory_uow: PersistenceUnitOfWork) -> None:
@@ -33,12 +47,38 @@ def test_dashboard_overview_empty_state(in_memory_uow: PersistenceUnitOfWork) ->
 
     overview = service.get_overview()
     assert overview.system_status.healthy is True
+    assert overview.system_status.database_healthy is None
     assert overview.system_status.active_runs_count == 0
+    assert overview.system_status.recent_completions_count == 0
     assert overview.system_status.total_changes_count == 0
     assert overview.system_status.attention_runs_count == 0
     assert overview.attention_items == []
     assert overview.active_executions == []
     assert overview.changes == []
+
+
+def test_scheduler_service_projection_is_independent_of_logical_mode(
+    in_memory_uow: PersistenceUnitOfWork,
+) -> None:
+    observation = SchedulerServiceObservation(
+        active_state="INACTIVE",
+        sub_state="dead",
+        enabled_state="DISABLED",
+        observed_at=datetime.now(UTC),
+        age_seconds=0.1,
+        freshness="FRESH",
+        reason="observed",
+    )
+    overview = OperationsDashboardService(
+        in_memory_uow, scheduler_observer=StaticSchedulerObserver(observation)
+    ).get_overview()
+
+    projected = overview.system_status.scheduler_service
+    assert projected.active_state == "INACTIVE"
+    assert projected.sub_state == "dead"
+    assert projected.enabled_state == "DISABLED"
+    assert projected.freshness == "FRESH"
+    assert overview.system_status.scheduler_mode == "RUN"
 
 
 def test_dashboard_overview_with_runs_and_attention(
@@ -120,6 +160,104 @@ def test_dashboard_overview_with_runs_and_attention(
     assert overview.attention_items[0].run_id == "run-blocked-2"
     assert overview.attention_items[0].human_gate == "NEEDS_HUMAN"
     assert "test_safety" in overview.attention_items[0].reason
+
+
+def test_dashboard_status_projection_preserves_durable_state_and_unknown(
+    in_memory_uow: PersistenceUnitOfWork,
+) -> None:
+    service = OperationsDashboardService(in_memory_uow)
+    in_memory_uow.projects.save(
+        Project(
+            project_id="state-proj",
+            display_name="State projection",
+            repository="owner/state-proj",
+            base_branch="main",
+            openspec_path="openspec",
+        )
+    )
+    cases = (
+        ("running", True, None, JobStatus.RUNNING, None, "RUNNING"),
+        (
+            "capacity",
+            True,
+            OrchestrationStopOutcome.WAITING_CAPACITY,
+            JobStatus.WAITING_CAPACITY,
+            None,
+            "WAITING_CAPACITY",
+        ),
+        (
+            "human",
+            False,
+            OrchestrationStopOutcome.NEEDS_HUMAN,
+            JobStatus.NEEDS_HUMAN,
+            None,
+            "NEEDS_HUMAN",
+        ),
+        (
+            "recovery",
+            False,
+            OrchestrationStopOutcome.NEEDS_HUMAN,
+            JobStatus.RECOVERY_BLOCKED,
+            None,
+            "RECOVERY",
+        ),
+        (
+            "auth",
+            False,
+            OrchestrationStopOutcome.NEEDS_HUMAN,
+            JobStatus.FAILED,
+            ExecutionOutcome.AUTH_REQUIRED,
+            "AUTH_REQUIRED",
+        ),
+        (
+            "human-merge",
+            False,
+            OrchestrationStopOutcome.READY_FOR_HUMAN_MERGE,
+            JobStatus.READY_TO_MERGE,
+            None,
+            "READY_FOR_HUMAN_MERGE",
+        ),
+        ("failed", False, OrchestrationStopOutcome.FAILED, JobStatus.FAILED, None, "FAILED"),
+        ("missing-authority", False, None, JobStatus.RUNNING, None, "UNKNOWN"),
+    )
+    expected: dict[str, str] = {}
+    for suffix, active, outcome, job_status, latest_outcome, expected_status in cases:
+        change_name = f"change-{suffix}"
+        change = Change(
+            project_id="state-proj",
+            name=change_name,
+            status=ChangeStatus.IN_PROGRESS,
+            last_readiness_status=ReadinessState.READY,
+        )
+        job = Job(
+            job_id=f"job-{suffix}",
+            project_id="state-proj",
+            change_name=change_name,
+            implementer_role="codex",
+            status=job_status,
+            latest_outcome=latest_outcome,
+        )
+        run = OrchestrationRun(
+            run_id=f"run-{suffix}",
+            project_id="state-proj",
+            change_name=change_name,
+            active_job_id=job.job_id,
+            current_stage=OrchestrationStage.IMPLEMENTING,
+            stop_outcome=outcome,
+            is_active=active,
+            base_sha="base-state",
+        )
+        in_memory_uow.changes.save(change)
+        in_memory_uow.jobs.save(job)
+        in_memory_uow.orchestration_runs.save(run)
+        expected[change_name] = expected_status
+
+    projected = {item.change_name: item.status for item in service.get_overview().changes}
+    for change_name, status in expected.items():
+        assert projected[change_name] == status
+
+    # No orchestration model or outcome is an authority for an intentional pause today.
+    assert "PAUSED" not in projected.values()
 
 
 def test_dashboard_change_detail_pipeline_phases(
@@ -211,6 +349,19 @@ def test_dashboard_change_detail_pipeline_phases(
     )
     in_memory_uow.audits.save(aud)
 
+    preview_session = PreviewSession(
+        preview_id="preview-run-3",
+        project_id="test-proj",
+        change_name="003-audited-feature",
+        run_id="run-3",
+        candidate_generation=3,
+        head_sha="cand123456",
+        base_sha="base123456",
+        image_digest="sha256:preview-image",
+        status=PreviewStatus.READY,
+    )
+    in_memory_uow.preview_sessions.save(preview_session)
+
     # Binding
     binding = ProjectBinding(
         project_id="test-proj",
@@ -224,7 +375,7 @@ def test_dashboard_change_detail_pipeline_phases(
 
     detail = service.get_change_detail("test-proj", "003-audited-feature")
 
-    assert detail.status == "COMPLETED"
+    assert detail.status == "READY_FOR_HUMAN_MERGE"
     assert detail.run_id == "run-3"
     assert len(detail.pipeline) == 6
 
@@ -241,6 +392,11 @@ def test_dashboard_change_detail_pipeline_phases(
     assert detail.checks[0].status == "PASS"
 
     assert detail.review.verdict == "READY_TO_MERGE"
+    assert detail.preview_validation.preview_session.candidate_generation == 3
+    assert (
+        detail.preview_validation.preview_session.head_sha
+        == detail.candidate_authority.candidate_sha
+    )
     assert detail.review.is_stale_to_current_candidate is False
 
     assert detail.audit.status == "AUDIT_COMPLETED"

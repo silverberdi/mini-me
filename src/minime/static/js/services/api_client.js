@@ -1,14 +1,29 @@
 export const json = async (url, options = {}) => {
+  const method = String(options.method || "GET").toUpperCase();
+  if (method !== "GET" && typeof navigator !== "undefined" && navigator.onLine === false) {
+    throw Object.assign(new Error("Sin conexión; no se envió la acción."), { status: 503 });
+  }
   const response = await fetch(url, {
     ...options,
+    cache: "no-store",
+    credentials: "same-origin",
     headers: { Accept: "application/json", ...(options.headers || {}) },
   });
-  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    const detail = payload.detail || payload.error_message || payload.message;
+    const error = new Error(detail || `${response.status} ${response.statusText}`);
+    error.status = response.status;
+    error.payload = payload;
+    throw error;
+  }
   return response.json();
 };
 
 export const api = {
+  health: () => json("/health"),
   overview: () => json("/api/v1/dashboard/overview"),
+  events: () => json("/api/v1/dashboard/events?limit=8"),
   queue: () => json("/api/v1/queue"),
   scheduler: () => json("/api/v1/scheduler/status"),
   runs: () => json("/api/v1/orchestration/runs"),

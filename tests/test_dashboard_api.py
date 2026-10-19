@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from fastapi.testclient import TestClient
 
 from minime.api.app import app, get_uow
@@ -16,7 +18,64 @@ from minime.domain.models import (
     OrchestrationRun,
     OrchestrationStageEvent,
     Project,
+    ProjectBinding,
 )
+
+
+def test_openapi_read_models_expose_observed_control_center_fields() -> None:
+    schema = app.openapi()["components"]["schemas"]
+    system = schema["SystemStatusDTO"]["properties"]
+    assert {
+        "scheduler_mode",
+        "scheduler_service",
+        "active_runs_count",
+        "attention_runs_count",
+        "recent_completions_count",
+    }.issubset(system)
+    assert system["database_healthy"]["anyOf"] == [{"type": "boolean"}, {"type": "null"}]
+    scheduler = schema["SchedulerServiceStatusDTO"]["properties"]
+    assert {
+        "active_state",
+        "sub_state",
+        "enabled_state",
+        "source",
+        "observed_at",
+        "age_seconds",
+        "freshness",
+        "reason",
+    }.issubset(scheduler)
+    queue = schema["WorkQueueItem"]["properties"]
+    assert {
+        "readiness_state",
+        "unmet_readiness_reasons",
+        "blocked_reason",
+        "admission_eligible",
+        "priority_score",
+    }.issubset(queue)
+    detail = schema["DashboardChangeDetailResponse"]["properties"]
+    assert {
+        "project_id",
+        "change_name",
+        "repository_identity",
+        "repository_binding_state",
+        "run_id",
+        "job_id",
+        "candidate_authority",
+        "checks",
+        "review",
+        "timeline",
+        "blocker_details",
+    }.issubset(detail)
+    overview = schema["DashboardOverviewResponse"]["properties"]
+    assert "observed_at" in overview
+
+
+def test_health_includes_backend_observation_time(monkeypatch) -> None:
+    monkeypatch.setattr("minime.api.app.db_manager.check_health", lambda: (True, "ok"))
+    response = TestClient(app).get("/health")
+    assert response.status_code == 200
+    observed_at = datetime.fromisoformat(response.json()["observed_at"])
+    assert observed_at.tzinfo == UTC
 
 
 def test_api_dashboard_overview_empty(in_memory_uow: PersistenceUnitOfWork) -> None:
@@ -26,8 +85,11 @@ def test_api_dashboard_overview_empty(in_memory_uow: PersistenceUnitOfWork) -> N
     resp = client.get("/api/v1/dashboard/overview")
     assert resp.status_code == 200
     data = resp.json()
+    assert datetime.fromisoformat(data["observed_at"]).tzinfo is not None
     assert data["system_status"]["healthy"] is True
     assert data["system_status"]["active_runs_count"] == 0
+    assert data["system_status"]["recent_completions_count"] == 0
+    assert data["system_status"]["scheduler_service"]["freshness"] in {"FRESH", "UNKNOWN"}
     assert data["attention_items"] == []
     assert data["changes"] == []
 
@@ -75,6 +137,7 @@ def test_api_dashboard_overview_with_data(
     assert data["active_executions"][0]["change_name"] == "012-execution-operations-dashboard"
     assert len(data["changes"]) == 1
     assert data["changes"][0]["status"] == "RUNNING"
+    assert datetime.fromisoformat(data["observed_at"]).tzinfo is not None
 
 
 def test_api_dashboard_change_detail(
@@ -95,6 +158,13 @@ def test_api_dashboard_change_detail(
         last_readiness_status=ReadinessState.READY,
     )
     in_memory_uow.changes.save(change)
+    in_memory_uow.bindings.save(
+        ProjectBinding(
+            project_id="mini-me",
+            repository="silverberdi/mini-me",
+            openspec_change_name="012-execution-operations-dashboard",
+        )
+    )
 
     run = OrchestrationRun(
         run_id="run-012",
@@ -116,9 +186,34 @@ def test_api_dashboard_change_detail(
     data = resp.json()
     assert data["project_id"] == "mini-me"
     assert data["change_name"] == "012-execution-operations-dashboard"
+    assert data["repository_identity"] == "silverberdi/mini-me"
+    assert data["repository_binding_state"] == "VALID"
     assert data["status"] == "RUNNING"
     assert len(data["pipeline"]) == 6
     assert data["candidate_authority"]["candidate_sha"] == "abc1234567890"
+
+
+def test_api_dashboard_detail_hides_invalid_repository_identity(
+    in_memory_uow: PersistenceUnitOfWork,
+) -> None:
+    in_memory_uow.projects.save(
+        Project(project_id="mini-me", display_name="mini me", repository="silverberdi/other")
+    )
+    in_memory_uow.changes.save(Change(project_id="mini-me", name="013-invalid-binding"))
+    in_memory_uow.bindings.save(
+        ProjectBinding(
+            project_id="mini-me",
+            repository="silverberdi/untrusted",
+            openspec_change_name="013-invalid-binding",
+            is_valid=False,
+            mismatch_reasons=["repository mismatch"],
+        )
+    )
+    app.dependency_overrides[get_uow] = lambda: in_memory_uow
+    response = TestClient(app).get("/api/v1/dashboard/changes/mini-me/013-invalid-binding")
+    assert response.status_code == 200
+    assert response.json()["repository_identity"] is None
+    assert response.json()["repository_binding_state"] == "INVALID"
 
 
 def test_api_dashboard_run_detail(
@@ -194,7 +289,8 @@ def test_api_dashboard_static_and_html(in_memory_uow: PersistenceUnitOfWork) -> 
 
     resp_dashboard = client.get("/dashboard")
     assert resp_dashboard.status_code == 200
-    assert "Operations Dashboard" in resp_dashboard.text
+    assert 'lang="es"' in resp_dashboard.text
+    assert "Centro de Control" in resp_dashboard.text
 
     resp_css = client.get("/static/css/dashboard.css")
     assert resp_css.status_code == 200

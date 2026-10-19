@@ -45,7 +45,14 @@ class SystemHealthCard(Widget):
         table.add_column("Value", style="white")
 
         # Database
-        db_badge = get_status_text("HEALTHY" if val.database_healthy else "FAILED")
+        db_status = (
+            "HEALTHY"
+            if val.database_healthy is True
+            else "FAILED"
+            if val.database_healthy is False
+            else "UNKNOWN"
+        )
+        db_badge = get_status_text(db_status)
         table.add_row(
             "Database Engine",
             Text.assemble(db_badge, f"  {val.database_engine} ({val.database_message})"),
