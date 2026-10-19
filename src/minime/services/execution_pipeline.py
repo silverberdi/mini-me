@@ -702,8 +702,9 @@ class ExecutionPipelineService:
             )
 
         # POST-CHECKS FENCE REVALIDATION: verify claim is still valid before writing ANY results
+        # Acquire short row lock on recovery claim to serialize evidence publication through commit
         try:
-            validate_claim_context_authoritative(self.uow, claim_context)
+            validate_claim_context_authoritative(self.uow, claim_context, for_update=True)
         except Exception as fence_exc:
             self.uow.rollback()
             raise StaleClaimError(

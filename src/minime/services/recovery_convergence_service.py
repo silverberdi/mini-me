@@ -1022,6 +1022,7 @@ class RecoveryConvergenceService:
                 "Run continuation fence lost during recover_checks_only for '%s': %s",
                 run.run_id,
                 exc,
+                exc_info=True,
             )
             self.uow.rollback()
             decision.status = RecoveryDecisionStatus.BLOCKED

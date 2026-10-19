@@ -1612,8 +1612,6 @@ class OrchestrationService:
                         f"Heartbeat renewal failed for claim '{claim_context.claim_key if claim_context else 'unknown'}'; aborting without database mutation."
                     )
 
-                validate_claim_context_authoritative(self.uow, claim_context)
-
                 raw_run = self.uow.orchestration_runs.get_for_update(run_id)
                 if not isinstance(raw_run, OrchestrationRun):
                     raw_run = self.uow.orchestration_runs.get_by_id(run_id)
@@ -1625,6 +1623,8 @@ class OrchestrationService:
                     or run.stop_outcome is not None
                 ):
                     break
+
+                validate_claim_context_authoritative(self.uow, claim_context)
 
                 stage = run.current_stage
                 logger.info(f"COORDINATOR STAGE: {stage.value}")

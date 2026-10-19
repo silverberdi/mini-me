@@ -2447,6 +2447,7 @@ class InMemoryRecoveryClaimRepository(RecoveryClaimRepositoryInterface):
         claim_key: str,
         owner_instance_id: str,
         fence_token: int,
+        for_update: bool = False,
     ) -> bool:
         now = utc_now()
         existing = self._claims.get(claim_key)

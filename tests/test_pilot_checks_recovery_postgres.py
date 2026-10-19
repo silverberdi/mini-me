@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import subprocess
+import threading
+import time
 import uuid
 from datetime import timedelta
 from pathlib import Path
@@ -20,6 +22,7 @@ from minime.db.repository import PostgresPersistenceUnitOfWork
 from minime.db.session import EXPECTED_ALEMBIC_HEAD
 from minime.domain.enums import (
     ChangeStatus,
+    EventType,
     EvidenceDiagnosticStatus,
     HumanGate,
     JobStatus,
@@ -910,14 +913,9 @@ def test_fenced_persistence_supersession_right_before_commit_rolls_back_all(
         ),
     ]
 
-    # Hook manifest generation (which occurs after checks and right before CHECKS_PASSED transition/commit)
-    # to simulate Worker 2 superseding the fence token in PostgreSQL
-    from minime.services.candidate_manifest import CandidateManifestService
-
-    orig_generate_manifest = CandidateManifestService.generate_manifest
-
-    def supersede_fence_during_manifest(self, *args, **kwargs):
+    async def checks_run_and_supersede(*args, **kwargs):
         # Worker 2 increments fence_token and takes claim ownership in a distinct session
+        # right before Worker 1 attempts evidence publication and claim row locking
         session2 = pg_session_factory()
         session2.execute(
             text(
@@ -927,21 +925,11 @@ def test_fenced_persistence_supersession_right_before_commit_rolls_back_all(
         )
         session2.commit()
         session2.close()
-        return orig_generate_manifest(self, *args, **kwargs)
+        return ChecksRunResult(passed=True, results=mock_passing_results, diagnostics=[])
 
-    with (
-        patch(
-            "minime.services.checks_runner.ChecksRunner.run",
-            new=AsyncMock(
-                return_value=ChecksRunResult(
-                    passed=True, results=mock_passing_results, diagnostics=[]
-                )
-            ),
-        ),
-        patch(
-            "minime.services.candidate_manifest.CandidateManifestService.generate_manifest",
-            supersede_fence_during_manifest,
-        ),
+    with patch(
+        "minime.services.checks_runner.ChecksRunner.run",
+        new=checks_run_and_supersede,
     ):
         decision = rec_svc1.recover_checks_only(run.run_id, project_root=repo_dir)
 
@@ -975,6 +963,163 @@ def test_fenced_persistence_supersession_right_before_commit_rolls_back_all(
         {"p": job.project_id},
     ).fetchall()
     assert len(metrics) == 0
+
+    session3.close()
+
+
+def test_fenced_persistence_concurrent_supersession_after_cas_before_commit_is_serialized(
+    pg_session_factory: sessionmaker[Session], tmp_path: Path
+):
+    """Verify that if Worker B attempts to supersede the claim AFTER Worker A has executed
+    its CAS Job transition but BEFORE Worker A commits, Worker B's UPDATE on recovery_claims
+    is blocked by PostgreSQL's row lock on recovery_claims held by Worker A, serializing
+    Worker B strictly until after Worker A's transaction commits.
+    """
+    session1 = pg_session_factory()
+    repo_dir, wt_dir, base_sha, candidate_sha, test_id = _setup_repo_and_worktree(tmp_path)
+    _project, run, job = _seed_pilot_state(
+        session1, repo_dir, wt_dir, base_sha, candidate_sha, test_id
+    )
+
+    uow1 = PostgresPersistenceUnitOfWork(session1)
+    rec_svc1 = RecoveryConvergenceService(uow1, project_root=repo_dir, owner_instance_id="worker-1")
+
+    mock_passing_results = [
+        CheckResult(
+            job_id=job.job_id,
+            check_name="pytest",
+            command="pytest tests/ -v",
+            exit_code=0,
+            duration_ms=100,
+            output_snippet="Passed",
+            candidate_sha=candidate_sha,
+            candidate_generation=1,
+        ),
+        CheckResult(
+            job_id=job.job_id,
+            check_name="ruff",
+            command="ruff check .",
+            exit_code=0,
+            duration_ms=50,
+            output_snippet="Passed",
+            candidate_sha=candidate_sha,
+            candidate_generation=1,
+        ),
+    ]
+
+    worker_b_blocked_verified = threading.Event()
+    worker_b_finished = threading.Event()
+    worker_b_unblocked = threading.Event()
+    worker_b_error = []
+    worker_a_committed = threading.Event()
+
+    def worker_b_concurrent_supersede():
+        # Worker B opens a distinct PostgreSQL session and attempts an exclusive update on recovery_claims.
+        # Worker A holds FOR UPDATE on this exact claim row. Worker B will be BLOCKED by PostgreSQL until Worker A commits.
+        session2 = pg_session_factory()
+        try:
+            worker_b_blocked_verified.set()
+            # This query will block until Worker A's transaction commits!
+            session2.execute(
+                text(
+                    "UPDATE recovery_claims SET fence_token = fence_token + 1, owner_instance_id = 'worker-2' WHERE claim_key = :k"
+                ),
+                {"k": f"run:{run.run_id}"},
+            )
+            worker_b_unblocked.set()
+            # Assert that Worker B was unblocked ONLY after Worker A committed!
+            assert worker_a_committed.is_set(), (
+                "Worker B unblocked BEFORE Worker A committed! Row lock was not held on recovery_claims."
+            )
+            session2.commit()
+        except Exception as e:
+            worker_b_error.append(e)
+        finally:
+            session2.close()
+            worker_b_finished.set()
+
+    # Hook right after jobs.transition (inside pipeline._save_event for CHECKS_PASSED transition)
+    # when Worker A holds FOR UPDATE on the recovery_claims row but has not yet called uow.commit().
+    from minime.services.orchestration_service import OrchestrationService
+
+    root = Path(repo_dir).resolve()
+    orchestration_svc = OrchestrationService(uow1, project_root=root)
+    rec_svc1.orchestration_service = orchestration_svc
+
+    orig_save_event = orchestration_svc.pipeline._save_event
+    orig_commit = uow1.commit
+
+    def hooked_commit():
+        # Signal that Worker A is committing its transaction
+        worker_a_committed.set()
+        return orig_commit()
+
+    def save_event_hook(event_type, job_arg, payload):
+        orig_save_event(event_type, job_arg, payload)
+        if event_type == EventType.JOB_CHECKS_PASSED:
+            # Worker A has executed jobs.transition under FOR UPDATE lock, but has NOT called uow.commit() yet!
+            t = threading.Thread(target=worker_b_concurrent_supersede)
+            t.daemon = True
+            t.start()
+            assert worker_b_blocked_verified.wait(timeout=5)
+            # Give Worker B thread time to reach and block on the UPDATE query in PostgreSQL
+            time.sleep(0.3)
+            # Worker B MUST be blocked on the recovery_claims row lock and not finished/unblocked!
+            assert not worker_b_unblocked.is_set(), (
+                "Worker B unblocked before Worker A committed! Row lock was not held on recovery_claims."
+            )
+            assert not worker_b_finished.is_set()
+
+    with (
+        patch(
+            "minime.services.checks_runner.ChecksRunner.run",
+            new=AsyncMock(
+                return_value=ChecksRunResult(
+                    passed=True, results=mock_passing_results, diagnostics=[]
+                )
+            ),
+        ),
+        patch.object(
+            orchestration_svc.pipeline,
+            "_save_event",
+            side_effect=save_event_hook,
+        ),
+        patch.object(
+            uow1,
+            "commit",
+            side_effect=hooked_commit,
+        ),
+    ):
+        decision = rec_svc1.recover_checks_only(run.run_id, project_root=repo_dir)
+
+    assert decision is not None
+
+    # Worker B thread has now unblocked and finished cleanly
+    assert worker_b_finished.wait(timeout=5)
+    assert len(worker_b_error) == 0
+
+    # Verify in a fresh session that Worker A's results committed cleanly, and Worker B's supersession took effect afterwards
+    session3 = pg_session_factory()
+    uow3 = PostgresPersistenceUnitOfWork(session3)
+
+    refreshed_job = uow3.jobs.get_by_id(job.job_id)
+    assert refreshed_job is not None
+    assert refreshed_job.status == JobStatus.CHECKS_PASSED
+
+    # Manifest was safely committed
+    manifest = uow3.candidate_manifests.get_by_candidate_sha(job.job_id, candidate_sha)
+    assert manifest is not None
+
+    # Check results were safely committed
+    crs = uow3.check_results.list_by_job(job.job_id)
+    passing_crs = [cr for cr in crs if cr.exit_code == 0]
+    assert len(passing_crs) == 2
+
+    # Claim in database now reflects Worker B's supersession (serialized to AFTER Worker A committed)
+    claim3 = uow3.claims.get_by_key(f"run:{run.run_id}")
+    assert claim3 is not None
+    assert claim3.fence_token == 2
+    assert claim3.owner_instance_id == "worker-2"
 
     session3.close()
 
